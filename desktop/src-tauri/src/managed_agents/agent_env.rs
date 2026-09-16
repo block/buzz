@@ -8,6 +8,25 @@ use std::collections::BTreeMap;
 
 use base64::Engine as _;
 
+/// Seconds a woken lazy harness stays warm before it releases its worker
+/// subprocesses back to the empty-slot state (via `BUZZ_ACP_IDLE_POOL_SLEEP`).
+/// The next accepted event re-wakes it through the same lazy path. Matches the
+/// harness's own 15-minute per-turn idle window so a warm pool survives a
+/// normal back-and-forth but a truly quiet harness stops paying for workers.
+const IDLE_POOL_SLEEP_SECS: &str = "900";
+
+/// Value for `BUZZ_ACP_IDLE_POOL_SLEEP`. Idle re-sleep is only meaningful for
+/// lazy harnesses (the harness ignores it otherwise); gate to `lazy` here so
+/// the env reads inert (`"0"` = disabled) for eager harnesses. This is a
+/// desktop-owned lifetime policy (reserved key), not user-tunable.
+pub(super) fn idle_pool_sleep_env(lazy: bool) -> &'static str {
+    if lazy {
+        IDLE_POOL_SLEEP_SECS
+    } else {
+        "0"
+    }
+}
+
 /// Return the baked-in build-time env pairs as a map.
 ///
 /// Internal builds (buzz-releases) bake provider/model defaults and arbitrary
@@ -58,6 +77,19 @@ fn build_env_map(
             }
         }
     }
+    // Defense in depth. `build.rs` already refuses to bake a reserved key, so
+    // reaching this filter means the binary was produced by a build that
+    // skipped that check. Drop the key rather than let it override the access
+    // gate: the baked map is written into the spawned agent's environment last
+    // (see `managed_agents/runtime.rs`), so a baked `BUZZ_ACP_RESPOND_TO` would
+    // otherwise win over the gate Desktop just set.
+    map.retain(|key, _| {
+        if super::env_vars::is_reserved_env_key(key) {
+            eprintln!("buzz-desktop: ignoring reserved env var `{key}` from the baked build env");
+            return false;
+        }
+        true
+    });
     map
 }
 
@@ -355,5 +387,67 @@ mod tests {
             Some("other"),
             "unrelated merged_env keys must pass through unchanged"
         );
+    }
+
+    // ── baked reserved-key filtering ──────────────────────────────────────
+    //
+    // The baked map is written into a spawned agent's environment LAST (see
+    // `managed_agents/runtime.rs`), after Buzz sets the access gates. If a
+    // baked reserved key survived here, an internal build packaged with
+    // `BUZZ_ACP_RESPOND_TO=anyone` would answer anyone while the UI shows
+    // "Only me". `build.rs` rejects such a key at build time; these tests pin
+    // the runtime backstop for a binary built without that check.
+
+    #[test]
+    fn build_env_map_drops_baked_access_gate_keys() {
+        use base64::Engine as _;
+        let raw = "BUZZ_ACP_RESPOND_TO=anyone\nBUZZ_ACP_ALLOWED_RESPOND_TO=anyone\nBUZZ_ACP_RESPOND_TO_ALLOWLIST=deadbeef\nDATABRICKS_MODEL=goose-claude-opus-4-8";
+        let blob = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
+        let map = build_env_map(None, None, Some(&blob));
+        for key in [
+            "BUZZ_ACP_RESPOND_TO",
+            "BUZZ_ACP_ALLOWED_RESPOND_TO",
+            "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+        ] {
+            assert!(
+                !map.contains_key(key),
+                "baked `{key}` must not reach the spawned agent env"
+            );
+        }
+        assert_eq!(
+            map.get("DATABRICKS_MODEL").map(String::as_str),
+            Some("goose-claude-opus-4-8"),
+            "non-reserved baked keys must still pass through"
+        );
+    }
+
+    #[test]
+    fn build_env_map_drops_baked_reserved_keys_case_insensitively() {
+        use base64::Engine as _;
+        // `is_reserved_env_key` compares case-insensitively, and so must the
+        // baked filter: env lookup is case-sensitive on Unix, but a lowercase
+        // spelling would still be a reserved key smuggled past a case-sensitive
+        // check on Windows.
+        let raw = "buzz_acp_respond_to=anyone\nBuzz_Private_Key=nsec1fake";
+        let blob = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
+        let map = build_env_map(None, None, Some(&blob));
+        assert!(
+            map.is_empty(),
+            "reserved keys in any casing must be dropped from the baked env: {map:?}"
+        );
+    }
+
+    #[test]
+    fn build_env_map_drops_every_reserved_key() {
+        use base64::Engine as _;
+        for key in super::super::env_vars::RESERVED_ENV_KEYS {
+            let raw = format!("{key}=baked-value");
+            let blob = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
+            let map = build_env_map(None, None, Some(&blob));
+            assert!(
+                map.is_empty(),
+                "baked reserved key `{key}` must be dropped, got {map:?}"
+            );
+        }
     }
 }

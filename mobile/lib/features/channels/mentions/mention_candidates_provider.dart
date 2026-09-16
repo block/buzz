@@ -3,8 +3,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../../shared/crypto/nip_oa.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
-import '../../profile/user_cache_provider.dart';
-import '../../profile/user_profile.dart';
+import '../../../shared/profile/user_cache_provider.dart';
+import '../../../shared/profile/user_profile.dart';
 import '../channel.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
@@ -73,15 +73,24 @@ final mentionCandidatesProvider = Provider.family
       ref,
       args,
     ) {
-      final members =
-          ref.watch(channelMembersProvider(args.channelId)).asData?.value ??
-          const <ChannelMember>[];
+      final channelsAsync = ref.watch(channelsProvider);
+      final membersAsync = ref.watch(channelMembersProvider(args.channelId));
+      final sessionStatus = ref.watch(relaySessionProvider).status;
+      final cachedMembers = channelsAsync.asData == null
+          ? const <ChannelMember>[]
+          : ref
+                .read(channelsProvider.notifier)
+                .cachedMembersForChannel(args.channelId);
+      final members = channelMembersForAutocomplete(
+        membersAsync: membersAsync,
+        sessionStatus: sessionStatus,
+        cachedMembers: cachedMembers,
+      );
       final relayAgents =
           ref.watch(agentDirectoryProvider).asData?.value ??
           const <AgentDirectoryEntry>[];
       final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
-      final channels =
-          ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
+      final channels = channelsAsync.asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
       final currentPubkey = ref.watch(currentPubkeyProvider);
       final searchResults =

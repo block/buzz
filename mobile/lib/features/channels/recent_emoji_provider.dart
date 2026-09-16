@@ -17,13 +17,14 @@ import '../../shared/theme/theme_provider.dart';
 /// leak across an in-place community or account switch.
 const _recentEmojiPrefsKey = 'buzz.quick-reaction-emojis.v1';
 
-/// Desktop's `DEFAULT_QUICK_REACTIONS`, used until the user has reacted enough
-/// to fill the row.
+/// Desktop's `DEFAULT_QUICK_REACTIONS`, plus one mobile-only slot that fits in
+/// the compact action sheet, used until the user has reacted enough to fill it.
 const defaultQuickEmojis = <String>[
   '\u{1F44D}',
   '\u{2764}\u{FE0F}',
   '\u{1F602}',
   '\u{1F389}',
+  '\u{1F525}',
 ];
 
 /// Desktop's `MAX_STORED_REACTIONS`.
@@ -167,7 +168,7 @@ final recentEmojiProvider =
 List<String> quickReactionEmoji(
   List<RecentEmojiEntry> entries, {
   required Set<String> customShortcodes,
-  int limit = 4,
+  int limit = 5,
 }) {
   final result = <String>[];
   void add(String emoji) {

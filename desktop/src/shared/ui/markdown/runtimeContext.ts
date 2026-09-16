@@ -15,7 +15,9 @@ import type { MarkdownRuntime } from "./types";
 const INERT_MARKDOWN_RUNTIME: MarkdownRuntime = {
   channels: [],
   onOpenChannel: () => {},
+  onOpenEntityLink: () => {},
   onOpenMessageLink: () => {},
+  relayOrigin: null,
 };
 
 export const MarkdownRuntimeContext = React.createContext<MarkdownRuntime>(

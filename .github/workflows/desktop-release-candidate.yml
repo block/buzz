@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   validate:
@@ -20,6 +21,7 @@ jobs:
       - name: Validate immutable desktop candidate
         if: startsWith(github.event.pull_request.head.ref, 'version-bump/')
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ github.event.pull_request.head.ref }}
         run: |
           VERSION="${VERSION#version-bump/}"

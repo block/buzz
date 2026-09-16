@@ -102,25 +102,155 @@ fn managed_node_failed_step(stderr: String) -> InstallStepResult {
     }
 }
 
-fn managed_node_runtime_ready() -> bool {
+pub(super) fn managed_node_runtime_ready() -> bool {
     let Some(node) = crate::managed_agents::buzz_managed_node_bin_path() else {
         return false;
     };
     if !node.is_file() {
         return false;
     }
-    let mut cmd = std::process::Command::new(&node);
+    probe_node(&node, MANAGED_NODE_VERSION, Duration::from_secs(3))
+}
+
+/// Run `executable --version` with a bounded deadline and return `true` only
+/// when it exits 0 and its trimmed stdout equals `expected_version`.
+///
+/// Transport: stdout is redirected to a temp file so no exit path can block on
+/// an inherited handle (a descendant retaining a pipe write-end would otherwise
+/// prevent EOF indefinitely).
+///
+/// Cleanup: the child runs in its own process group on Unix (`process_group(0)`)
+/// so an unconditional group SIGKILL on every exit path terminates all
+/// descendants.  On Windows, `terminate_process` issues `taskkill /T /F` for
+/// tree-wide cleanup.  SIGKILL to an already-dead group returns ESRCH (no-op).
+pub(super) fn probe_node(
+    executable: &std::path::Path,
+    expected_version: &str,
+    timeout: Duration,
+) -> bool {
+    let tmp = match tempfile::NamedTempFile::new() {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let out_file = match tmp.reopen() {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let mut cmd = std::process::Command::new(executable);
     cmd.arg("--version")
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(out_file))
         .stderr(std::process::Stdio::null());
     crate::util::configure_no_window(&mut cmd);
-    let output = cmd.output();
-    output
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim() == MANAGED_NODE_VERSION)
-        .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+
+    let deadline = std::time::Instant::now() + timeout;
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    kill_probe_group(child.id());
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                kill_probe_group(child.id());
+                let _ = child.wait();
+                return false;
+            }
+        }
+    };
+
+    // Group-kill unconditionally: SIGKILL to a dead group is ESRCH (no-op).
+    kill_probe_group(child.id());
+
+    if !exit_status.success() {
+        return false;
+    }
+
+    let mut output = String::new();
+    if std::io::Read::read_to_string(&mut tmp.as_file(), &mut output).is_err() {
+        return false;
+    }
+    output.trim() == expected_version
+}
+
+/// Kill the probe's process group/tree unconditionally (no TERM grace — this
+/// is a probe, not an agent session).  ESRCH on a dead group is fine.
+fn kill_probe_group(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    {
+        let _ = crate::managed_agents::terminate_process(pid);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+    }
+}
+
+/// Returns `true` when the managed Node runtime is absent or no longer executes —
+/// meaning any existing npm adapter shims are broken and must be reinstalled.
+///
+/// This fires when the pinned Node version changes (e.g. v24.11.0 → v24.18.0):
+/// the old dir stays on disk, shims appear installed, but they fail at run time
+/// because the Node binary they reference is gone.  Treating the adapter as
+/// missing forces `ensure_managed_node_runtime_blocking` to re-download Node and
+/// npm to reinstall the shims.
+pub(super) fn managed_node_orphaned() -> bool {
+    managed_node_runtime_supported() && !managed_node_runtime_ready()
+}
+
+/// Returns `true` when an adapter at `resolved` should be invalidated.
+///
+/// Only a Buzz-managed shim (path under `managed_prefix`) with an orphaned
+/// runtime is invalidated; external adapters are always preserved.
+pub(super) fn should_invalidate_adapter(
+    resolved: &std::path::Path,
+    managed_prefix: &std::path::Path,
+    orphaned: bool,
+) -> bool {
+    orphaned && resolved.starts_with(managed_prefix)
+}
+
+/// Resolve the adapter binary path, accounting for the Node-orphan case.
+/// Resolves first; invalidates only managed-prefix shims when Node is orphaned.
+pub(super) fn resolve_adapter_path(
+    commands: &[&str],
+    adapter_install_commands: &[&str],
+) -> Option<std::path::PathBuf> {
+    let resolved = commands
+        .iter()
+        .find_map(|cmd| crate::managed_agents::resolve_command(cmd));
+
+    let needs_managed_npm = adapter_install_commands
+        .iter()
+        .any(|cmd| is_npm_global_install(cmd));
+    if needs_managed_npm {
+        if let (Some(ref path), Some(ref managed_bin)) =
+            (&resolved, crate::managed_agents::buzz_managed_npm_bin_dir())
+        {
+            if should_invalidate_adapter(path, managed_bin, managed_node_orphaned()) {
+                return None;
+            }
+        }
+    }
+
+    resolved
 }
 
 fn managed_node_install_lock() -> &'static Mutex<()> {
@@ -538,211 +668,5 @@ pub(super) fn npm_eacces_hint(stderr: &str, _command: &str) -> Option<String> {
 // ── end managed npm adapter installs ──────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_npm_eacces_hint_guidance_mentions_buzz_private_dir() {
-        let hint = npm_eacces_hint("EACCES: permission denied", "npm install -g foo").unwrap();
-        assert!(
-            hint.contains("Buzz's private Node tools directory"),
-            "hint: {hint}"
-        );
-    }
-
-    #[test]
-    fn test_rewrite_npm_install_uses_private_prefix() {
-        assert_eq!(
-            rewrite_npm_global_install(
-                "npm install -g @agentclientprotocol/codex-acp",
-                "'/tmp/Buzz Node'"
-            ),
-            "npm install --global --prefix '/tmp/Buzz Node' @agentclientprotocol/codex-acp"
-        );
-    }
-
-    #[test]
-    fn test_rewrite_npm_i_uses_private_prefix() {
-        assert_eq!(
-            rewrite_npm_global_install("npm i -g some-package", "'/tmp/buzz'"),
-            "npm i --global --prefix '/tmp/buzz' some-package"
-        );
-    }
-
-    #[test]
-    fn test_rewrite_npm_uninstall_uses_private_prefix() {
-        assert_eq!(
-            rewrite_npm_global_install("npm uninstall -g @zed-industries/codex-acp", "'/tmp/buzz'"),
-            "npm uninstall --global --prefix '/tmp/buzz' @zed-industries/codex-acp"
-        );
-    }
-
-    #[test]
-    fn test_rewrite_ignores_non_global_command() {
-        assert_eq!(
-            rewrite_npm_global_install("npm install foo", "'/tmp/buzz'"),
-            "npm install foo"
-        );
-    }
-
-    #[test]
-    fn test_shell_quote_escapes_single_quotes() {
-        assert_eq!(
-            shell_quote(std::path::Path::new("/tmp/Buzz's Node")),
-            "'/tmp/Buzz'\\''s Node'"
-        );
-    }
-
-    // ── zip validation tests ──────────────────────────────────────────────────
-
-    /// Build an in-memory zip archive with the supplied entry names and return
-    /// a temporary file containing it (zip::ZipArchive requires Seek).
-    fn make_zip_with_entries(entry_names: &[&str]) -> tempfile::NamedTempFile {
-        let mut buf: Vec<u8> = Vec::new();
-        {
-            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-            let opts = zip::write::SimpleFileOptions::default();
-            for name in entry_names {
-                writer.start_file(*name, opts).unwrap();
-            }
-            writer.finish().unwrap();
-        }
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        std::io::Write::write_all(&mut tmp, &buf).unwrap();
-        tmp
-    }
-
-    #[test]
-    fn test_validate_zip_accepts_normal_entries() {
-        let tmp = make_zip_with_entries(&[
-            "node-v24.18.0-win-x64/node.exe",
-            "node-v24.18.0-win-x64/npm.cmd",
-            "node-v24.18.0-win-x64/npm",
-        ]);
-        let file = std::fs::File::open(tmp.path()).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        assert!(validate_managed_node_zip_entries(&archive).is_ok());
-    }
-
-    #[test]
-    fn test_validate_zip_rejects_absolute_path() {
-        let tmp = make_zip_with_entries(&["/etc/passwd"]);
-        let file = std::fs::File::open(tmp.path()).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
-        assert!(
-            err.contains("absolute path"),
-            "expected 'absolute path' in: {err}"
-        );
-    }
-
-    #[test]
-    fn test_validate_zip_rejects_path_traversal() {
-        let tmp = make_zip_with_entries(&["../../../etc/passwd"]);
-        let file = std::fs::File::open(tmp.path()).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
-        assert!(
-            err.contains("path traversal"),
-            "expected 'path traversal' in: {err}"
-        );
-    }
-
-    #[test]
-    fn test_validate_zip_rejects_backslash_rooted() {
-        // Windows-style absolute path using backslash — must reject on every host.
-        let tmp = make_zip_with_entries(&["\\Windows\\system32\\evil.dll"]);
-        let file = std::fs::File::open(tmp.path()).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
-        assert!(
-            err.contains("absolute path"),
-            "expected 'absolute path' in: {err}"
-        );
-    }
-
-    #[test]
-    fn test_validate_zip_rejects_drive_prefix() {
-        // Windows drive-letter absolute path — must reject on every host.
-        let tmp = make_zip_with_entries(&["C:\\evil\\payload.exe"]);
-        let file = std::fs::File::open(tmp.path()).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
-        assert!(
-            err.contains("absolute path"),
-            "expected 'absolute path' in: {err}"
-        );
-    }
-
-    #[test]
-    fn test_validate_zip_rejects_backslash_traversal() {
-        // Path traversal using Windows separator — must reject on every host.
-        let tmp = make_zip_with_entries(&["node-v24.18.0-win-x64\\..\\..\\evil"]);
-        let file = std::fs::File::open(tmp.path()).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
-        assert!(
-            err.contains("path traversal"),
-            "expected 'path traversal' in: {err}"
-        );
-    }
-
-    // ── verify_node_tree layout tests ─────────────────────────────────────────
-
-    #[test]
-    fn test_verify_node_tree_unix_layout_passes() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("node"), b"").unwrap();
-        std::fs::write(bin.join("npm"), b"").unwrap();
-        // On non-Windows the unix branch is active — this must pass.
-        #[cfg(not(windows))]
-        assert!(verify_node_tree(tmp.path()).is_ok());
-        // On Windows the windows branch is active — unix layout must fail.
-        #[cfg(windows)]
-        assert!(verify_node_tree(tmp.path()).is_err());
-    }
-
-    #[test]
-    fn test_verify_node_tree_unix_layout_missing_npm_fails() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("node"), b"").unwrap();
-        // npm intentionally absent
-        #[cfg(not(windows))]
-        {
-            let err = verify_node_tree(tmp.path()).unwrap_err();
-            assert!(err.contains("bin/npm"), "err: {err}");
-        }
-    }
-
-    #[test]
-    fn test_verify_node_tree_windows_layout_passes() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("node.exe"), b"").unwrap();
-        std::fs::write(tmp.path().join("npm.cmd"), b"").unwrap();
-        std::fs::write(tmp.path().join("npm"), b"").unwrap();
-        // On Windows the windows branch is active — this must pass.
-        #[cfg(windows)]
-        assert!(verify_node_tree(tmp.path()).is_ok());
-        // On non-Windows the unix branch is active — windows-layout root files
-        // don't satisfy bin/node + bin/npm, so this must fail.
-        #[cfg(not(windows))]
-        assert!(verify_node_tree(tmp.path()).is_err());
-    }
-
-    #[test]
-    fn test_verify_node_tree_windows_layout_missing_npm_shim_fails() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("node.exe"), b"").unwrap();
-        std::fs::write(tmp.path().join("npm.cmd"), b"").unwrap();
-        // npm POSIX shim intentionally absent
-        #[cfg(windows)]
-        {
-            let err = verify_node_tree(tmp.path()).unwrap_err();
-            assert!(err.contains("npm"), "err: {err}");
-        }
-    }
-}
+#[path = "managed_node_tests.rs"]
+mod tests;

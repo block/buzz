@@ -106,11 +106,11 @@ test("timelineRowReserveStyle: message item yields containIntrinsicSize", () => 
   assert.match(String(style.containIntrinsicSize), /^auto \d+px$/);
 });
 
-test("timelineRowReserveStyle: divider is short fixed height", () => {
+test("timelineRowReserveStyle: divider reserves its visual breathing room", () => {
   const style = timelineRowReserveStyle({
     kind: "day-divider",
     key: "k",
     headingTimestamp: 0,
   });
-  assert.equal(style.containIntrinsicSize, "auto 32px");
+  assert.equal(style.containIntrinsicSize, "auto 56px");
 });

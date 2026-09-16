@@ -6,6 +6,7 @@
 //! `validate_video_file()`) and to produce a JPEG poster frame.
 
 use crate::managed_agents::resolve_command;
+use tokio_util::sync::CancellationToken;
 
 /// Build an ffmpeg command without inheriting user-controlled process knobs.
 ///
@@ -121,7 +122,7 @@ pub(super) fn has_heic_extension(path: &std::path::Path) -> bool {
 /// blocking a Tokio worker thread indefinitely.
 const FFMPEG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Run an ffmpeg command with a wall-clock timeout.
+/// Run an ffmpeg command with a wall-clock timeout and optional cancellation.
 ///
 /// Spawns the child process, polls `try_wait()` every 500ms, and kills it
 /// if the deadline is exceeded. Returns the same `Output` as `Command::output()`.
@@ -131,10 +132,14 @@ const FFMPEG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 /// enough progress/diagnostic output to fill the OS pipe buffer (~64 KiB),
 /// the child blocks on write() and never exits — causing a false timeout.
 /// `-loglevel error` suppresses progress spam, keeping stderr small.
-pub(super) fn run_ffmpeg_with_timeout(
+fn run_ffmpeg_with_cancellation(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<std::process::Output, String> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err("upload cancelled".to_string());
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
@@ -162,6 +167,11 @@ pub(super) fn run_ffmpeg_with_timeout(
             }
             Ok(None) => {
                 // Still running — check deadline.
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("upload cancelled".to_string());
+                }
                 if std::time::Instant::now() > deadline {
                     let _ = child.kill();
                     let _ = child.wait(); // reap zombie
@@ -181,14 +191,15 @@ pub(super) fn run_ffmpeg_with_timeout(
 /// relay's `validate_video_file()`.
 ///
 /// Returns the path to a temp file. Caller must clean up.
-pub(super) fn transcode_to_mp4(
+fn transcode_to_mp4_with_cancellation(
     source: &std::path::Path,
     ffmpeg: &std::path::Path,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<std::path::PathBuf, String> {
     // UUID-based temp path — unique across concurrent uploads.
     let output = std::env::temp_dir().join(format!("buzz-transcode-{}.mp4", uuid::Uuid::new_v4()));
 
-    let result = run_ffmpeg_with_timeout(
+    let result = run_ffmpeg_with_cancellation(
         ffmpeg_command(ffmpeg)
             .args([
                 "-y",
@@ -240,7 +251,11 @@ pub(super) fn transcode_to_mp4(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()),
         FFMPEG_TIMEOUT,
-    )?;
+        cancellation,
+    )
+    .inspect_err(|_| {
+        let _ = std::fs::remove_file(&output);
+    })?;
 
     if !result.status.success() {
         let _ = std::fs::remove_file(&output);
@@ -256,6 +271,91 @@ pub(super) fn transcode_to_mp4(
     Ok(output)
 }
 
+/// Package a voice-note audio file in the relay's existing canonical video
+/// envelope. The tiny H.264 track satisfies the deployed video validator while
+/// the AAC track remains the only user-facing content in the voice-note player.
+///
+/// Returns the path to a temp MP4. Caller must clean up.
+pub(super) fn transcode_voice_note_to_mp4_with_cancellation(
+    source: &std::path::Path,
+    cancellation: Option<&CancellationToken>,
+) -> Result<std::path::PathBuf, String> {
+    let ffmpeg = find_ffmpeg()?;
+    let output = std::env::temp_dir().join(format!("buzz-voice-note-{}.mp4", uuid::Uuid::new_v4()));
+
+    let result = run_ffmpeg_with_cancellation(
+        ffmpeg_command(&ffmpeg)
+            .args([
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:r=1",
+            ])
+            .arg("-i")
+            .arg(source)
+            .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-shortest",
+                "-map_metadata",
+                "-1",
+                "-map_chapters",
+                "-1",
+                "-sn",
+                "-dn",
+                "-fflags",
+                "+bitexact",
+                "-flags:v",
+                "+bitexact",
+                "-flags:a",
+                "+bitexact",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "stillimage",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "96k",
+                "-movflags",
+                "+faststart",
+                "-metadata",
+                "encoder=",
+            ])
+            .arg(&output)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped()),
+        FFMPEG_TIMEOUT,
+        cancellation,
+    )
+    .inspect_err(|_| {
+        let _ = std::fs::remove_file(&output);
+    })?;
+
+    if !result.status.success() {
+        let _ = std::fs::remove_file(&output);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|line| !line.is_empty() && !line.starts_with("  "))
+            .unwrap_or("unknown error");
+        return Err(format!("Voice note conversion failed: {detail}"));
+    }
+
+    Ok(output)
+}
+
 /// Transcode a HEIC/HEIF still image to JPEG via ffmpeg.
 ///
 /// The Tauri webview / Chromium cannot decode HEIC, so iPhone photos uploaded
@@ -265,9 +365,10 @@ pub(super) fn transcode_to_mp4(
 /// Uses `-frames:v 1` so multi-image HEIF containers (Live Photos, bursts)
 /// yield a single still, and `-q:v 2` for high JPEG quality. Returns the path
 /// to a temp file. Caller must clean up.
-pub(super) fn transcode_heic_to_jpeg(
+fn transcode_heic_to_jpeg(
     source: &std::path::Path,
     ffmpeg: &std::path::Path,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<std::path::PathBuf, String> {
     // UUID-based temp path — unique across concurrent uploads.
     let output = std::env::temp_dir().join(format!("buzz-heic-{}.jpg", uuid::Uuid::new_v4()));
@@ -275,7 +376,7 @@ pub(super) fn transcode_heic_to_jpeg(
     // Single-frame image decode — 60s is generous even for large HEICs.
     let heic_timeout = std::time::Duration::from_secs(60);
 
-    let result = run_ffmpeg_with_timeout(
+    let result = run_ffmpeg_with_cancellation(
         ffmpeg_command(ffmpeg)
             .args([
                 "-y",
@@ -301,7 +402,11 @@ pub(super) fn transcode_heic_to_jpeg(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()),
         heic_timeout,
-    )?;
+        cancellation,
+    )
+    .inspect_err(|_| {
+        let _ = std::fs::remove_file(&output);
+    })?;
 
     if !result.status.success() {
         let _ = std::fs::remove_file(&output);
@@ -324,8 +429,15 @@ pub(super) fn transcode_heic_to_jpeg(
 pub(super) fn transcode_heic_path_to_jpeg_bytes(
     source: &std::path::Path,
 ) -> Result<Vec<u8>, String> {
+    transcode_heic_path_to_jpeg_bytes_with_cancellation(source, None)
+}
+
+pub(super) fn transcode_heic_path_to_jpeg_bytes_with_cancellation(
+    source: &std::path::Path,
+    cancellation: Option<&CancellationToken>,
+) -> Result<Vec<u8>, String> {
     let ffmpeg_path = find_ffmpeg()?;
-    let jpeg_path = transcode_heic_to_jpeg(source, &ffmpeg_path)?;
+    let jpeg_path = transcode_heic_to_jpeg(source, &ffmpeg_path, cancellation)?;
     let bytes =
         std::fs::read(&jpeg_path).map_err(|e| format!("failed to read transcoded HEIC: {e}"));
     let _ = std::fs::remove_file(&jpeg_path);
@@ -340,9 +452,10 @@ pub(super) fn transcode_heic_path_to_jpeg_bytes(
 ///
 /// Best-effort: returns `Err` on failure — callers should log and continue
 /// without a poster rather than failing the entire video upload.
-pub(super) fn extract_poster_frame(
+fn extract_poster_frame_with_cancellation(
     mp4_path: &std::path::Path,
     ffmpeg: &std::path::Path,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<std::path::PathBuf, String> {
     let output = std::env::temp_dir().join(format!("buzz-poster-{}.jpg", uuid::Uuid::new_v4()));
 
@@ -350,7 +463,7 @@ pub(super) fn extract_poster_frame(
     let poster_timeout = std::time::Duration::from_secs(30);
 
     // Try seeking to 1s first (avoids black first frames from fade-ins).
-    let result = run_ffmpeg_with_timeout(
+    let result = run_ffmpeg_with_cancellation(
         ffmpeg_command(ffmpeg)
             .args([
                 "-y",
@@ -369,6 +482,7 @@ pub(super) fn extract_poster_frame(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()),
         poster_timeout,
+        cancellation,
     )?;
 
     // If seek to 1s failed (video shorter than 1s), retry from first frame.
@@ -381,7 +495,7 @@ pub(super) fn extract_poster_frame(
             eprintln!("buzz-desktop: poster seek-to-1s failed, trying first frame: {stderr}");
         }
         let _ = std::fs::remove_file(&output);
-        let fallback = run_ffmpeg_with_timeout(
+        let fallback = run_ffmpeg_with_cancellation(
             ffmpeg_command(ffmpeg)
                 .args([
                     "-y",
@@ -398,6 +512,7 @@ pub(super) fn extract_poster_frame(
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped()),
             poster_timeout,
+            cancellation,
         )?;
 
         if !fallback.status.success() || !output.exists() {
@@ -418,21 +533,34 @@ pub(super) fn extract_poster_frame(
 pub(super) fn transcode_and_extract_poster(
     source: &std::path::Path,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+    transcode_and_extract_poster_with_cancellation(source, None)
+}
+
+pub(super) fn transcode_and_extract_poster_with_cancellation(
+    source: &std::path::Path,
+    cancellation: Option<&CancellationToken>,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
     let ffmpeg_path = find_ffmpeg()?;
-    let transcoded = transcode_to_mp4(source, &ffmpeg_path)?;
+    let transcoded = transcode_to_mp4_with_cancellation(source, &ffmpeg_path, cancellation)?;
 
     // Extract poster from the transcoded file (not the original — guarantees decodability).
-    let poster_bytes = match extract_poster_frame(&transcoded, &ffmpeg_path) {
-        Ok(poster_path) => {
-            let bytes = std::fs::read(&poster_path).ok();
-            let _ = std::fs::remove_file(&poster_path);
-            bytes
-        }
-        Err(e) => {
-            eprintln!("buzz-desktop: poster extraction failed (non-fatal): {e}");
-            None
-        }
-    };
+    let poster_bytes =
+        match extract_poster_frame_with_cancellation(&transcoded, &ffmpeg_path, cancellation) {
+            Ok(poster_path) => {
+                let bytes = std::fs::read(&poster_path).ok();
+                let _ = std::fs::remove_file(&poster_path);
+                bytes
+            }
+            Err(e) => {
+                eprintln!("buzz-desktop: poster extraction failed (non-fatal): {e}");
+                None
+            }
+        };
+
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        let _ = std::fs::remove_file(&transcoded);
+        return Err("upload cancelled".to_string());
+    }
 
     let video_bytes =
         std::fs::read(&transcoded).map_err(|e| format!("failed to read transcoded file: {e}"));
@@ -599,7 +727,8 @@ mod tests {
             return;
         }
 
-        let output = transcode_to_mp4(&source, &ffmpeg).expect("transcode fixture");
+        let output =
+            transcode_to_mp4_with_cancellation(&source, &ffmpeg, None).expect("transcode fixture");
         let bytes = std::fs::read(&output).expect("read transcoded video");
         let _ = std::fs::remove_file(&source);
         let _ = std::fs::remove_file(&output);
@@ -609,6 +738,67 @@ mod tests {
                 "source metadata survived transcode"
             );
         }
+    }
+
+    #[test]
+    fn test_voice_note_envelope_passes_relay_video_validation() {
+        if find_ffmpeg().is_err() {
+            eprintln!("skipping voice-note round-trip: ffmpeg not found");
+            return;
+        }
+
+        let source =
+            std::env::temp_dir().join(format!("buzz-voice-test-{}.wav", uuid::Uuid::new_v4()));
+        let sample_rate = 24_000u32;
+        let sample_bytes = sample_rate as usize * 2;
+        let mut wav = Vec::with_capacity(44 + sample_bytes);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + sample_bytes as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(sample_bytes as u32).to_le_bytes());
+        wav.resize(44 + sample_bytes, 0);
+        std::fs::write(&source, wav).expect("write voice-note fixture");
+
+        let output = match transcode_voice_note_to_mp4_with_cancellation(&source, None) {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("skipping voice-note round-trip: {error}");
+                let _ = std::fs::remove_file(&source);
+                return;
+            }
+        };
+        let relay_config = buzz_media_pkg::MediaConfig {
+            s3_endpoint: String::new(),
+            s3_access_key: String::new(),
+            s3_secret_key: String::new(),
+            s3_bucket: String::new(),
+            s3_region: "us-east-1".to_string(),
+            s3_addressing_style: buzz_media_pkg::S3AddressingStyle::Path,
+            max_image_bytes: 50 * 1024 * 1024,
+            max_gif_bytes: 10 * 1024 * 1024,
+            max_video_bytes: 524_288_000,
+            max_file_bytes: 104_857_600,
+            public_base_url: String::new(),
+            upload_records_enabled: false,
+            upload_ip_header: None,
+            upload_port_header: None,
+        };
+        let metadata = buzz_media_pkg::validation::validate_video_file(&output, &relay_config)
+            .expect("relay rejected the canonical voice-note envelope");
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&output);
+
+        assert!(metadata.has_audio);
+        assert_eq!((metadata.width, metadata.height), (16, 16));
+        assert!(metadata.duration_secs > 0.0);
     }
 
     /// Round-trip transcode test, gated on ffmpeg being present so CI without

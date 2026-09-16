@@ -2,9 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  addedByActionPrefix,
   describeChannelTextFieldChange,
   toInlineName,
 } from "./systemEventCopy.ts";
+
+test("an add to the reader uses passive wording", () => {
+  assert.equal(addedByActionPrefix(true), "were added by");
+  assert.equal(addedByActionPrefix(false), "added by");
+});
 
 test("a set topic is quoted verbatim", () => {
   assert.equal(

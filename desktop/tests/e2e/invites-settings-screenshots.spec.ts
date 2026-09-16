@@ -104,15 +104,19 @@ test("capture: share-style community invite dialog", async ({ page }) => {
   await expect(
     dialog.getByRole("heading", { name: "Add someone", exact: true }),
   ).toHaveCount(0);
+  await expect(dialog.getByTestId("invite-options-divider")).toBeVisible();
   await expect(
-    dialog.getByText("Or share a link", { exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    dialog.getByText("Link settings", { exact: true }),
+    dialog.getByText("Or, copy a link", { exact: true }),
   ).toBeVisible();
+  await expect(dialog.getByText("Link settings", { exact: true })).toHaveCount(
+    0,
+  );
   await expect(page.getByTestId("member-pubkey-input")).toBeVisible();
   await expect(page.getByTestId("member-role")).toHaveCount(0);
   await expect(page.getByTestId("confirm-add-member")).toHaveCount(0);
+  await expect(page.getByTestId("invite-link-url")).toHaveValue(
+    "https://alpha.example.com/invite/community-email-test",
+  );
   await expect(page.getByTestId("copy-invite-link")).toHaveText("Copy link");
   await expect(page.getByTestId("invite-link-ttl-trigger")).toHaveText(
     "3 days",

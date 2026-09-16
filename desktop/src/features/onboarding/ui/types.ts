@@ -1,4 +1,8 @@
-import type { AcpRuntimeCatalogEntry, Profile } from "@/shared/api/types";
+import type {
+  AcpRuntimeCatalogEntry,
+  GlobalAgentConfig,
+  Profile,
+} from "@/shared/api/types";
 
 export type OnboardingPage =
   | "profile"
@@ -38,6 +42,7 @@ export type ProfileStepAvatarState = {
 
 export type ProfileStepState = {
   avatar: ProfileStepAvatarState;
+  isReadyToSubmit: boolean;
   isUploadingAvatar: boolean;
   isSaving: boolean;
   name: ProfileStepNameState;
@@ -58,17 +63,30 @@ export type ProfileStepActions = {
 
 export type SetupStepActions = {
   back: () => void;
-  next: (readyRuntimeIds: readonly string[]) => void;
-  navigateToAgentSettings?: () => void;
+  next: (
+    readyRuntimeIds: readonly string[],
+    configBackTarget?: "method" | "list",
+  ) => void;
+};
+
+export type DefaultConfigDraft = {
+  config: GlobalAgentConfig;
+  isCustomModelEditing: boolean;
+  isCustomProvider: boolean;
+  isDirty: boolean;
 };
 
 export type DefaultConfigStepActions = {
   back: () => void;
   complete: () => void;
+  discardDraft: () => void;
+  updateDraft: (draft: DefaultConfigDraft) => void;
+  useDifferentHarness?: () => void;
 };
 
 export type SetupStepRuntimeState = {
   errorMessage: string | null;
+  hasForcedCheckStarted: boolean;
   isChecking: boolean;
   items: AcpRuntimeCatalogEntry[];
 };

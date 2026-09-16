@@ -69,6 +69,39 @@ test("scoreUserCandidate supports agent labels and empty-query defaults", () => 
   );
 });
 
+test("scoreUserCandidate tolerates one name typo as a lower-ranked fallback", () => {
+  const user = makeUser({
+    displayName: "Alice Johnson",
+    nip05Handle: "alice@example.com",
+  });
+
+  assert.equal(
+    scoreUserCandidate({ label: "Alice Johnson", query: "alcie", user }),
+    5,
+  );
+  assert.equal(
+    scoreUserCandidate({ label: "Alice Johnson", query: "alc", user }),
+    null,
+  );
+});
+
+test("rankUserCandidatesBySearch keeps exact matches ahead of typo matches", () => {
+  const candidates = [
+    makeUser({ displayName: "Ailce", pubkey: "2000" }),
+    makeUser({ displayName: "Alice", pubkey: "1000" }),
+  ];
+
+  assert.deepEqual(
+    rankUserCandidatesBySearch({
+      candidates,
+      getLabel: (user) => user.displayName ?? user.pubkey,
+      limit: 2,
+      query: "alice",
+    }).map((user) => user.displayName),
+    ["Alice", "Ailce"],
+  );
+});
+
 test("rankUserCandidatesBySearch applies score, label, and stable order sorting", () => {
   const candidates = [
     makeUser({ displayName: "Charlie", pubkey: "3000" }),

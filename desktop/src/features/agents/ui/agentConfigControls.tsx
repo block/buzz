@@ -339,7 +339,6 @@ export function AgentModelField({
   allowDefaultModel = true,
   defaultModelLabel,
   disableSelectDuringDiscovery = true,
-  keepSelectedModelValueLabel = false,
   id = "agent-model",
   isCustomModelEditing,
   isRequired,
@@ -371,8 +370,6 @@ export function AgentModelField({
   defaultModelLabel?: string;
   /** Disable the trigger while live model discovery refreshes the option list. */
   disableSelectDuringDiscovery?: boolean;
-  /** Keep the closed trigger from swapping to discovered display labels. */
-  keepSelectedModelValueLabel?: boolean;
   /** DOM id for the model select. Defaults to `"agent-model"`. Override in
    *  contexts where multiple instances coexist on the same page (e.g. the
    *  global-config settings card) to avoid duplicate DOM ids. */
@@ -513,12 +510,6 @@ export function AgentModelField({
   // yields an empty list and discovery has finished, add a disabled sentinel
   // row so the user sees "No models found" instead of a bare white bar.
   appendNoModelsSentinel(modelOptions, modelDiscoveryLoading);
-  const stableSelectedModelLabel =
-    keepSelectedModelValueLabel &&
-    modelSelectValue === trimmedModel &&
-    trimmedModel.length > 0
-      ? trimmedModel
-      : undefined;
   // While discovery is in flight with nothing selected, the closed field
   // reads "Loading models…" instead of a select-prompt — the field isn't
   // waiting on the user, it's waiting on the harness.
@@ -547,7 +538,6 @@ export function AgentModelField({
       placeholder={restingPlaceholder}
       placeholderClassName={placeholderClassName}
       searchable
-      selectedLabel={stableSelectedModelLabel}
       testId={testId ?? id}
       value={modelSelectValue}
     />

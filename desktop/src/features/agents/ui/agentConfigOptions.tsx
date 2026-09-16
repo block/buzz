@@ -30,6 +30,12 @@ export const PERSONA_FIELD_CONTROL_CLASS =
 export const PERSONA_LABEL_OPTIONAL_CLASS =
   "ml-1 text-xs font-normal text-muted-foreground/50";
 
+/** Shared advanced-fields expand/collapse easing for the agent dialogs. */
+export const ADVANCED_FIELDS_MOTION_TRANSITION = {
+  duration: 0.18,
+  ease: [0.23, 1, 0.32, 1],
+} as const;
+
 export const AUTO_MODEL_DROPDOWN_VALUE = "__auto_model__";
 export const CUSTOM_MODEL_DROPDOWN_VALUE = "__custom_model__";
 export const AUTO_PROVIDER_DROPDOWN_VALUE = "__auto_provider__";
@@ -63,19 +69,30 @@ export type PersonaDropdownOption = {
  *
  * `requiredEnvKeys`: keys that must be present in the agent's effective env for
  *   the provider to work (surfaced as amber required rows in EnvVarsEditor).
- * `secretEnvVar`: the one env key that holds a user-typed secret (API key).
- *   Only set for providers where the credential is a plaintext secret the user
- *   pastes in. Cleared automatically when the user switches away from the
- *   provider. Databricks uses OAuth PKCE (no typed secret), so it has no
- *   secretEnvVar.
+ * `secretEnvVar` + `apiKeyLabel`: paired — either both are present or neither
+ *   is. `secretEnvVar` is the env key holding the user-typed secret; clearing
+ *   it when the user switches providers ensures no orphaned credentials remain.
+ *   Databricks uses OAuth PKCE (no typed secret), so it carries neither field.
+ *   `apiKeyLabel` is the human-readable label shown in the credential field;
+ *   derived by `getProviderApiKeyLabel` — single source of truth for all UI
+ *   surfaces so they never drift.
  *
  * Mirrors the Rust `readiness::buzz_agent_requirements` /
  * `readiness::goose_requirements` logic — keep in sync.
  */
-export type ProviderCredentialConfig = {
-  requiredEnvKeys: readonly string[];
-  secretEnvVar?: string;
-};
+export type ProviderCredentialConfig =
+  | {
+      requiredEnvKeys: readonly string[];
+      secretEnvVar?: undefined;
+      apiKeyLabel?: undefined;
+    }
+  | {
+      requiredEnvKeys: readonly string[];
+      /** The env key holding the user-typed API secret. */
+      secretEnvVar: string;
+      /** Display label for the credential input field, e.g. "Anthropic API Key". */
+      apiKeyLabel: string;
+    };
 
 /**
  * Unified provider credential config table.  Single source of truth for both
@@ -87,20 +104,23 @@ const PROVIDER_CREDENTIAL_CONFIG: Partial<
   anthropic: {
     requiredEnvKeys: ["ANTHROPIC_API_KEY"],
     secretEnvVar: "ANTHROPIC_API_KEY",
+    apiKeyLabel: "Anthropic API Key",
   },
   openai: {
     requiredEnvKeys: ["OPENAI_COMPAT_API_KEY"],
     secretEnvVar: "OPENAI_COMPAT_API_KEY",
+    apiKeyLabel: "OpenAI Runtime API Key",
   },
   "openai-compat": {
     requiredEnvKeys: ["OPENAI_COMPAT_API_KEY"],
     secretEnvVar: "OPENAI_COMPAT_API_KEY",
+    apiKeyLabel: "OpenAI-compatible Runtime API Key",
   },
   databricks: {
     // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
     requiredEnvKeys: ["DATABRICKS_HOST"],
-    // No secretEnvVar: DATABRICKS_HOST is a URL, not a secret credential, and
-    // is not cleared on provider switch (unlike API keys).
+    // No secretEnvVar / apiKeyLabel: DATABRICKS_HOST is a URL, not a secret
+    // credential, and is not cleared on provider switch (unlike API keys).
   },
   databricks_v2: {
     // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
@@ -113,6 +133,7 @@ const PROVIDER_CREDENTIAL_CONFIG: Partial<
   openrouter: {
     requiredEnvKeys: ["OPENROUTER_API_KEY"],
     secretEnvVar: "OPENROUTER_API_KEY",
+    apiKeyLabel: "OpenRouter API Key",
   },
 };
 
@@ -401,6 +422,31 @@ export function getProviderApiKeyEnvVar(providerId: string): string | null {
     null
   );
 }
+
+/**
+ * Returns the display label for the provider's API key field, if any.
+ * Derived from PROVIDER_CREDENTIAL_CONFIG.apiKeyLabel — single source of truth
+ * for all credential field labels so every surface stays in sync.
+ *
+ * Returns null when the provider has no typed-secret credential (e.g.,
+ * Databricks, which uses OAuth PKCE).
+ */
+export function getProviderApiKeyLabel(providerId: string): string | null {
+  return (
+    PROVIDER_CREDENTIAL_CONFIG[providerId.trim().toLowerCase()]?.apiKeyLabel ??
+    null
+  );
+}
+
+/**
+ * Muted contextual hint for the `OPENAI_API_KEY` row in env editors.
+ * Pass as `keyAnnotations` to every `EnvVarsEditor` that may surface this key
+ * (Agent Defaults, agent edit dialog, persona definition dialog).  Exported
+ * so the constant is defined once and never duplicated across surfaces.
+ */
+export const CARD_MINT_KEY_ANNOTATIONS: Readonly<Record<string, string>> = {
+  OPENAI_API_KEY: "Used for minting agent trading cards",
+};
 
 export function shouldClearKnownModelForSelectionScope({
   model,

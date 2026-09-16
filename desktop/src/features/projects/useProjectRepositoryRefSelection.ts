@@ -5,14 +5,34 @@ export function useProjectRepositoryRefSelection(input: {
   defaultBranch: string | null;
   projectAvailable: boolean;
   projectPending: boolean;
+  /** Identity of the repository the options describe. A switch to a
+   * different repository resets the selection even when the new repository
+   * happens to have a branch or tag with the same name — carrying `release`
+   * from repo A into repo B would silently retarget files, actions, and
+   * agent context at a ref the user never chose. */
+  repositoryId: string | null;
   tags: Array<{ name: string }>;
 }) {
   const [selectedBranch, setSelectedBranch] = React.useState<string | null>(
     null,
   );
   const [selectedTag, setSelectedTag] = React.useState<string | null>(null);
+  const [selectionRepositoryId, setSelectionRepositoryId] = React.useState(
+    input.repositoryId,
+  );
+  // Reset during render (not in an effect) so a repository switch can never
+  // paint one frame with the previous repository's same-named selection.
+  if (selectionRepositoryId !== input.repositoryId) {
+    setSelectionRepositoryId(input.repositoryId);
+    setSelectedBranch(null);
+    setSelectedTag(null);
+  }
+  const staleSelection = selectionRepositoryId !== input.repositoryId;
   const activeBranch =
-    selectedBranch ?? input.defaultBranch ?? input.branchOptions[0] ?? null;
+    (staleSelection ? null : selectedBranch) ??
+    input.defaultBranch ??
+    input.branchOptions[0] ??
+    null;
 
   React.useEffect(() => {
     if (!input.projectAvailable) {
@@ -52,7 +72,7 @@ export function useProjectRepositoryRefSelection(input: {
   return {
     activeBranch,
     selectBranch,
-    selectedTag,
+    selectedTag: staleSelection ? null : selectedTag,
     selectTag,
   };
 }

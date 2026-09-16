@@ -11,17 +11,44 @@ use crate::{
     relay::{self, relay_api_base_url_with_override, relay_ws_url_with_override},
 };
 
-/// Encode `pubkey` as npub bech32 and truncate it for display: first 10 chars
-/// + "…" + last 4 chars. Returns the full bech32 when it is 16 chars or fewer.
+/// Encode `pubkey` as npub bech32 and truncate it for display: first 8
+/// chars, an ellipsis, then the last 4 chars, mirroring the frontend
+/// `truncateNpub` compact policy (`first8…last4` of the whole npub string).
+/// Returns the full bech32 when it is 12 chars or fewer, mirroring
+/// `truncatePubkey`'s short-string threshold.
 fn truncated_display_name(pubkey: &PublicKey) -> Result<String, String> {
     let bech32 = pubkey
         .to_bech32()
         .map_err(|error| format!("bech32 encode failed: {error}"))?;
-    Ok(if bech32.len() > 16 {
-        format!("{}…{}", &bech32[..10], &bech32[bech32.len() - 4..])
+    Ok(if bech32.len() > 12 {
+        format!("{}…{}", &bech32[..8], &bech32[bech32.len() - 4..])
     } else {
         bech32
     })
+}
+
+#[cfg(test)]
+mod truncated_display_name_tests {
+    use super::truncated_display_name;
+    use nostr::{PublicKey, ToBech32};
+
+    #[test]
+    fn compacts_to_first_8_and_last_4_of_the_npub() {
+        // Vector shared with the frontend `truncateNpub` tests; the expected
+        // form is derived from the encoded npub, not hardcoded, so the test
+        // asserts the compaction policy rather than one key's string.
+        let hex = "ea9b4d7a7a78a3e3729e5568b14d764d4962be0e1f20f749bcf8d9dbbf9a9328";
+        let pubkey = PublicKey::from_hex(hex).unwrap();
+        let npub = pubkey.to_bech32().unwrap();
+        let expected = format!("{}…{}", &npub[..8], &npub[npub.len() - 4..]);
+        assert_eq!(truncated_display_name(&pubkey).unwrap(), expected);
+        // 13 characters, matching the frontend compact form (the ellipsis is
+        // one char but three UTF-8 bytes, so count chars, not bytes).
+        assert_eq!(expected.chars().count(), 13);
+        assert!(expected.starts_with("npub1"));
+        // The compact form must not carry the raw hex key.
+        assert!(!expected.contains(hex));
+    }
 }
 
 #[tauri::command]
@@ -297,9 +324,10 @@ pub async fn verify_ncryptsec_backup(
 /// Save a portable copy of an `ncryptsec1…` backup to a user-chosen path.
 ///
 /// The input must parse as a structurally valid NIP-49 payload. The dialog is
-/// selection-only; the write uses secret-file semantics (atomic + 0o600).
-/// Never mutates canonical app state. Returns the chosen path, or `None` when
-/// the user cancelled.
+/// selection-only; the write uses the exact save-panel-authorized path with
+/// owner-only permissions, sync, and reread verification. Existing files are
+/// preserved rather than truncated. Never mutates canonical app state. Returns
+/// the chosen path, or `None` when the user cancelled.
 #[tauri::command]
 pub async fn save_ncryptsec_copy(
     ncryptsec: String,
@@ -324,7 +352,7 @@ pub async fn save_ncryptsec_copy(
 
     let dest_for_write = dest.clone();
     tokio::task::spawn_blocking(move || {
-        crate::key_backup::write_backup_file(&dest_for_write, &normalized)
+        crate::key_backup::write_portable_backup_file(&dest_for_write, &normalized)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
@@ -403,7 +431,7 @@ pub async fn import_identity(
 ///    as a command `Err` would claim a half-applied import that actually
 ///    succeeded. The leftover blob is still passphrase-encrypted and is
 ///    replaced by the next backup creation; we log and move on.
-fn commit_imported_identity(
+pub(crate) fn commit_imported_identity(
     state: &AppState,
     data_dir: &std::path::Path,
     keys: nostr::Keys,

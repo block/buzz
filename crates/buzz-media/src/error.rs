@@ -54,6 +54,10 @@ pub enum MediaError {
     InsufficientScope,
     #[error("relay membership required")]
     RelayMembershipRequired,
+    #[error("community writes are fenced")]
+    CommunityWriteFenced,
+    #[error("media service temporarily unavailable")]
+    ServiceUnavailable,
     #[error("token revoked")]
     TokenRevoked,
     #[error("pubkey mismatch")]
@@ -68,8 +72,10 @@ pub enum MediaError {
     /// Video duration exceeds the 600-second limit.
     #[error("video too long: duration exceeds 600 seconds")]
     DurationTooLong,
-    /// Video resolution exceeds 3840×2160.
-    #[error("video resolution too high: maximum is 3840x2160")]
+    /// Video resolution exceeds the 2160 short-edge / 3840 long-edge envelope.
+    #[error(
+        "video resolution too high: maximum is 2160 on the short edge and 3840 on the long edge"
+    )]
     ResolutionTooHigh,
     /// MP4 moov atom appears after mdat — not fast-start.
     #[error("moov atom not at front of file (not fast-start)")]
@@ -138,7 +144,10 @@ impl IntoResponse for MediaError {
                 )
             }
             Self::InsufficientScope => (StatusCode::FORBIDDEN, self.to_string()),
-            Self::RelayMembershipRequired => (StatusCode::FORBIDDEN, self.to_string()),
+            Self::RelayMembershipRequired | Self::CommunityWriteFenced => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
+            Self::ServiceUnavailable => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
             Self::UploadRateLimitExceeded | Self::UploadConcurrencyLimitReached => {
                 (StatusCode::TOO_MANY_REQUESTS, self.to_string())
             }
@@ -163,6 +172,21 @@ impl IntoResponse for MediaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serving_backend_failures_map_to_5xx_but_fences_remain_403() {
+        for error in [
+            MediaError::ServiceUnavailable,
+            MediaError::Internal,
+            MediaError::StorageError("backend".to_string()),
+        ] {
+            assert!(error.into_response().status().is_server_error());
+        }
+        assert_eq!(
+            MediaError::CommunityWriteFenced.into_response().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
 
     #[test]
     fn unsupported_media_maps_to_415() {

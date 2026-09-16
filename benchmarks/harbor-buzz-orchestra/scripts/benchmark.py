@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """One-command benchmark: bring up the Buzz stack in Docker and run it.
 
-``just benchmark`` wraps this script. Defaults are leaderboard-eligible out
-of the box (Terminal-Bench 2.1, 5 attempts per problem, the Sonnet+Haiku
-team); every ``run_leaderboard.py`` selector passes through unchanged. The
-script owns everything around the run:
+``just benchmark`` wraps this script. Terminal-Bench defaults remain
+leaderboard-eligible (2.1, 5 attempts per problem, the Sonnet+Haiku team).
+Buzz-native tasks use their ``evaluation_layer`` metadata: regression runs
+default to 1 attempt and workflow runs default to 3. The script owns
+everything around the run:
 
 - A dedicated ``buzz-benchmark`` compose project reusing the production
   bundle (``deploy/compose/compose.yml``) plus the benchmark port overlay,
@@ -26,6 +27,8 @@ Run inside the testbed environment (the just recipe does this):
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import fnmatch
 import importlib.util
 import json
 import os
@@ -34,6 +37,8 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
@@ -52,6 +57,9 @@ GUI_BUNDLE_IDENTIFIER = "xyz.block.buzz.app.benchmark"
 
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
 DEFAULT_ATTEMPTS = 5
+BUZZ_DATASET_ROOT = REPO_ROOT / "benchmarks" / "buzz-dataset"
+EVALUATION_LAYERS = ("regression", "workflow")
+LAYER_DEFAULT_ATTEMPTS = {"regression": 1, "workflow": 3}
 DEFAULT_MANIFEST = PACKAGE_ROOT / "manifests" / "tb-cobol-sonnet-haiku.yaml"
 DEFAULT_ENDPOINTS = PACKAGE_ROOT / "testbed" / "endpoints" / "anthropic-live.json"
 SCHEMA_SQL = PACKAGE_ROOT / "testbed" / "sql" / "benchmark_schema.sql"
@@ -68,6 +76,16 @@ FORWARDER_SOURCE = PACKAGE_ROOT / "forwarder" / "relay_forwarder.rs"
 FORWARDER_BINARY = "relay-forwarder"
 LINUX_TARGET_DIR = STATE_DIR / "linux-target"
 RUST_IMAGE = "rust:1.95-alpine"
+
+
+@dataclass(frozen=True)
+class BuzzTask:
+    """The identity and evaluation layer declared by one Buzz task."""
+
+    name: str
+    layer: str
+    path: Path
+
 
 _spec = importlib.util.spec_from_file_location(
     "run_leaderboard", Path(__file__).resolve().parent / "run_leaderboard.py"
@@ -107,11 +125,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Task name to exclude (glob, repeatable)",
     )
     parser.add_argument(
+        "--layer",
+        choices=EVALUATION_LAYERS,
+        help="Buzz evaluation layer to run (selected from task metadata)",
+    )
+    parser.add_argument(
         "--attempts",
         "-k",
         type=int,
-        default=DEFAULT_ATTEMPTS,
-        help=f"Runs per problem (default: {DEFAULT_ATTEMPTS}, the leaderboard requirement)",
+        default=None,
+        help="Runs per problem (default: Terminal-Bench 5, Buzz regression 1, "
+        "Buzz workflow 3)",
     )
     parser.add_argument(
         "--manifest",
@@ -156,6 +180,159 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Print the underlying harbor command and exit (no stack bring-up)",
     )
     return parser.parse_args(argv)
+
+
+def _read_buzz_task(task_toml: Path) -> BuzzTask:
+    """Read and validate the evaluation metadata used by the wrapper."""
+    try:
+        config = tomllib.loads(task_toml.read_text())
+        name = config["task"]["name"]
+        layer = config["metadata"]["evaluation_layer"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
+        raise SystemExit(
+            f"invalid Buzz task metadata in {task_toml}: {error}"
+        ) from error
+    if not isinstance(name, str) or not name:
+        raise SystemExit(f"invalid Buzz task name in {task_toml}: expected a string")
+    if layer not in EVALUATION_LAYERS:
+        allowed = ", ".join(EVALUATION_LAYERS)
+        raise SystemExit(
+            f"invalid evaluation_layer in {task_toml}: {layer!r}; expected {allowed}"
+        )
+    return BuzzTask(name=name, layer=layer, path=task_toml.parent)
+
+
+def buzz_tasks_for_path(path: Path | None) -> tuple[BuzzTask, ...] | None:
+    """Return validated Buzz tasks, or ``None`` for an unrelated problem set."""
+    if path is None:
+        return None
+    root = BUZZ_DATASET_ROOT.resolve()
+    selected_path = path.resolve()
+    if not selected_path.is_relative_to(root):
+        return None
+    direct_task = selected_path / "task.toml"
+    task_files = (
+        [direct_task]
+        if direct_task.is_file()
+        else sorted(selected_path.glob("*/task.toml"))
+    )
+    if not task_files:
+        raise SystemExit(f"no Buzz tasks found under {path}")
+    tasks = tuple(_read_buzz_task(task_file) for task_file in task_files)
+    names = [task.name for task in tasks]
+    if len(names) != len(set(names)):
+        raise SystemExit(f"duplicate Buzz task names found under {path}")
+    return tasks
+
+
+def _matches_task(task: BuzzTask, pattern: str) -> bool:
+    return fnmatch.fnmatchcase(task.name, pattern) or fnmatch.fnmatchcase(
+        task.path.name, pattern
+    )
+
+
+def select_buzz_tasks(
+    tasks: tuple[BuzzTask, ...],
+    *,
+    layer: str | None,
+    include: list[str],
+    exclude: list[str],
+) -> tuple[BuzzTask, ...]:
+    """Apply layer metadata and the wrapper's existing name selectors."""
+    selected = tuple(task for task in tasks if layer is None or task.layer == layer)
+    if include:
+        selected = tuple(
+            task
+            for task in selected
+            if any(_matches_task(task, pattern) for pattern in include)
+        )
+    if exclude:
+        selected = tuple(
+            task
+            for task in selected
+            if not any(_matches_task(task, pattern) for pattern in exclude)
+        )
+    if not selected:
+        detail = f" for layer {layer!r}" if layer else ""
+        raise SystemExit(f"no Buzz tasks selected{detail}")
+    return selected
+
+
+def _copy_run_args(
+    args: argparse.Namespace,
+    *,
+    tasks: tuple[BuzzTask, ...] | None,
+    attempts: int,
+    job_name: str | None = None,
+) -> argparse.Namespace:
+    run_args = argparse.Namespace(**vars(args))
+    run_args.attempts = attempts
+    run_args.job_name = args.job_name if job_name is None else job_name
+    if tasks is not None:
+        # Harbor filters local-path datasets by directory basename. Keep the
+        # canonical task.toml identity for metadata, but pass Harbor its key.
+        run_args.include_task = [task.path.name for task in tasks]
+        run_args.exclude_task = []
+    return run_args
+
+
+def plan_benchmark_runs(
+    args: argparse.Namespace, *, stamp: str | None = None
+) -> tuple[argparse.Namespace, ...]:
+    """Resolve selectors and per-layer attempts into one or more Harbor jobs."""
+    tasks = buzz_tasks_for_path(args.path)
+    if args.layer and tasks is None:
+        raise SystemExit(
+            "--layer is only valid with --path under benchmarks/buzz-dataset"
+        )
+    if tasks is None:
+        return (
+            _copy_run_args(
+                args,
+                tasks=None,
+                attempts=(
+                    args.attempts if args.attempts is not None else DEFAULT_ATTEMPTS
+                ),
+            ),
+        )
+
+    selected = select_buzz_tasks(
+        tasks,
+        layer=args.layer,
+        include=args.include_task,
+        exclude=args.exclude_task,
+    )
+    if args.attempts is not None:
+        return (_copy_run_args(args, tasks=selected, attempts=args.attempts),)
+
+    layers = (args.layer,) if args.layer else EVALUATION_LAYERS
+    groups = tuple(
+        (layer, tuple(task for task in selected if task.layer == layer))
+        for layer in layers
+    )
+    groups = tuple((layer, group) for layer, group in groups if group)
+    if len(groups) == 1:
+        layer, group = groups[0]
+        return (
+            _copy_run_args(args, tasks=group, attempts=LAYER_DEFAULT_ATTEMPTS[layer]),
+        )
+
+    if stamp is None:
+        stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    if args.job_name:
+        base_job_name = args.job_name
+    else:
+        manifest = run_leaderboard.yaml.safe_load(args.manifest.read_text())
+        base_job_name = f"lb-{manifest.get('condition', 'team')}-{stamp}"
+    return tuple(
+        _copy_run_args(
+            args,
+            tasks=group,
+            attempts=LAYER_DEFAULT_ATTEMPTS[layer],
+            job_name=f"{base_job_name}-{layer}",
+        )
+        for layer, group in groups
+    )
 
 
 # -- state: secrets and identities, generated once --------------------------
@@ -582,6 +759,7 @@ def leaderboard_argv(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    runs = plan_benchmark_runs(args)
     state = load_state()
     print_user_identity(state)
     write_env_file(state)
@@ -598,9 +776,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.gui:
             launch_gui(state)
 
-    return run_leaderboard.main(
-        leaderboard_argv(args, provisioner_config, agent_bin_dir)
-    )
+    for run_args in runs:
+        result = run_leaderboard.main(
+            leaderboard_argv(run_args, provisioner_config, agent_bin_dir)
+        )
+        if result != 0:
+            return result
+    return 0
 
 
 if __name__ == "__main__":

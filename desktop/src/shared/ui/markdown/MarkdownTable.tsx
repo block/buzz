@@ -12,7 +12,9 @@ export function MarkdownTable({ children }: { children?: React.ReactNode }) {
       className="overflow-x-auto rounded-2xl border border-border/70"
       data-table-block=""
     >
-      <table className="w-max min-w-full border-collapse text-left text-sm">
+      {/* Inherit message wrap-anywhere for long tokens. The cells' minimum
+          widths keep short labels readable; many-column tables scroll locally. */}
+      <table className="w-full border-collapse text-left text-sm">
         {children}
       </table>
     </div>

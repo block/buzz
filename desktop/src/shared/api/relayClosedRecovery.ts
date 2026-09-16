@@ -8,6 +8,7 @@ import {
   sortEvents,
   type RelaySubscription,
   type RelaySubscriptionFilter,
+  type SubscriptionEventBufferItem,
 } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 
@@ -27,23 +28,72 @@ export function handleRelayClosed({
   subId,
   message,
   sendReq,
+  closeSubscription,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   subId: string;
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
+  closeSubscription?: (subId: string) => Promise<void>;
 }) {
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode !== "live") {
-    // Classify before rejecting so a `rate-limited:` history CLOSED arms the
-    // gate for concurrent ops. A history sub can't be retried (the caller holds
-    // the promise), so we still reject immediately after arming.
+    // Classify before acting so a `rate-limited:` CLOSED arms the gate for
+    // concurrent ops regardless of whether this specific sub can be retried.
     const closedClass = classifyRelayClosed(message);
     if (closedClass === "rate-limited") {
       const hintSeconds = parseRateLimitHint(message);
       activateRateLimit(hintSeconds);
+
+      // History subs hold a promise the caller is awaiting. Rather than
+      // rejecting immediately, defer and re-issue the REQ after the
+      // rate-limit window so the caller transparently receives their result.
+      // Bounded to 3 attempts — if the relay keeps refusing, fall through
+      // to the permanent reject so the caller's promise resolves with an error
+      // rather than waiting forever.
+      if (subscription.mode === "history") {
+        const attempt = subscription.closedRetryAttempt ?? 0;
+        if (attempt < 3) {
+          subscription.closedRetryAttempt = attempt + 1;
+          // Clear the existing op-timeout so it doesn't fire while waiting for
+          // the rate-limit window. The setTimeout delay covers this interval.
+          window.clearTimeout(subscription.timeout);
+          const hintMs = (hintSeconds ?? 10) * 1_000;
+          const delayMs = Math.max(rateLimitRemainingMs() || hintMs, hintMs);
+          // Re-register under a new id so the old subId can be evicted cleanly.
+          // Accumulated events are preserved on the subscription object.
+          const newSubId = `history-${crypto.randomUUID()}`;
+          subscriptions.delete(subId);
+          subscriptions.set(newSubId, subscription);
+          // Use the rate-limit delay as the new timeout budget so the
+          // subscription is not left open indefinitely while waiting.
+          subscription.timeout = window.setTimeout(() => {
+            if (!subscriptions.has(newSubId)) return; // cancelled while waiting
+            void sendReq(newSubId, subscription.filter).catch(() => {
+              subscriptions.delete(newSubId);
+              subscription.reject(
+                new Error(message || "Relay closed the history subscription."),
+              );
+            });
+            // Set a new op-timeout for the retry REQ so the subscription
+            // cannot hang indefinitely if the relay stops responding.
+            subscription.timeout = window.setTimeout(() => {
+              subscriptions.delete(newSubId);
+              // History promise is already being rejected below; swallow any
+              // IPC/socket error from the CLOSE send so it does not surface as
+              // an unhandled rejection on a path that has no live error handler.
+              closeSubscription?.(newSubId)?.catch(() => {});
+              subscription.reject(
+                new Error("Relay closed the history subscription."),
+              );
+            }, subscription.timeoutMs);
+          }, delayMs);
+          return;
+        }
+      }
     }
+
     window.clearTimeout(subscription.timeout);
     subscriptions.delete(subId);
     subscription.reject(
@@ -73,7 +123,7 @@ function recoverLiveSubscriptionFromClosed({
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
 }) {
-  subscription.resolveReady?.();
+  subscription.resolveReady?.("closed");
   subscription.resolveReady = undefined;
 
   const closedClass = classifyRelayClosed(message);
@@ -145,19 +195,70 @@ export function prepareSubscriptionEvent(
   return true;
 }
 
+export function shouldDispatchSubscriptionEvent(
+  subscription: Extract<RelaySubscription, { mode: "live" }>,
+  event: RelayEvent,
+) {
+  const replay = subscription.reconnectReplay;
+  if (replay?.seenEventIds.has(event.id)) return false;
+  replay?.seenEventIds.add(event.id);
+  return true;
+}
+
+export function flushEvents(
+  buffer: SubscriptionEventBufferItem[],
+  subscriptions: Map<string, RelaySubscription>,
+  generation: number,
+) {
+  for (const item of buffer) {
+    const subscription = subscriptions.get(item.subId);
+    if (
+      subscription?.mode === "live" &&
+      item.generation === generation &&
+      shouldDispatchSubscriptionEvent(subscription, item.event)
+    ) {
+      subscription.onEvent(item.event);
+    }
+  }
+}
+
+export function markReconnectLiveEose(
+  subscription: Extract<RelaySubscription, { mode: "live" }>,
+  generation: number,
+) {
+  const replay = subscription.reconnectReplay;
+  if (!replay || replay.generation !== generation) return;
+  replay.liveEose = true;
+  if (replay.repairDone) subscription.reconnectReplay = undefined;
+}
+
+export function markReconnectRepairDone(
+  subscription: Extract<RelaySubscription, { mode: "live" }>,
+  generation: number,
+) {
+  const replay = subscription.reconnectReplay;
+  if (!replay || replay.generation !== generation) return;
+  replay.repairDone = true;
+  if (replay.liveEose) subscription.reconnectReplay = undefined;
+}
+
 export function handleSubscriptionEose({
   subscriptions,
   subId,
   closeSubscription,
+  generation,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   subId: string;
   closeSubscription: (subId: string) => Promise<void>;
+  generation?: number;
 }) {
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode === "live") {
-    subscription.resolveReady?.();
+    if (generation !== undefined)
+      markReconnectLiveEose(subscription, generation);
+    subscription.resolveReady?.("eose");
     subscription.resolveReady = undefined;
     subscription.closedRetryAttempt = 0;
     clearClosedRetry(subscription);

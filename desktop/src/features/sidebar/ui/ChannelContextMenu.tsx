@@ -15,6 +15,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
+import { useAppShell } from "@/app/AppShellContext";
 import {
   useArchiveChannelMutation,
   useChannelMembersQuery,
@@ -178,6 +179,22 @@ export function ChannelContextMenuItems({
   onDeleteChannel?: (channel: Channel) => void;
   onLeaveChannel?: (channel: Channel) => void;
 }) {
+  const {
+    feedItemState,
+    hasSidebarUnreadProjections,
+    locallyUnreadFeedItems,
+    unreadThreadChannelIds,
+  } = useAppShell();
+  const channelUnreadOverrideIds = locallyUnreadFeedItems.flatMap((item) =>
+    item.channelId === channel.id && feedItemState.unreadSet.has(item.id)
+      ? [item.id]
+      : [],
+  );
+  const hasProjectedUnread =
+    hasUnread ||
+    (channel.channelType !== "dm" &&
+      hasSidebarUnreadProjections &&
+      unreadThreadChannelIds.has(channel.id));
   const canLoadOwnerActions =
     channel.channelType !== "dm" && Boolean(onDeleteChannel);
   const membersQuery = useChannelMembersQuery(channel.id, canLoadOwnerActions);
@@ -204,7 +221,7 @@ export function ChannelContextMenuItems({
       canDeleteChannel,
   );
   const showStar = Boolean(onStarChannel && onUnstarChannel);
-  const showReadToggle = hasUnread
+  const showReadToggle = hasProjectedUnread
     ? Boolean(onMarkChannelRead)
     : Boolean(onMarkChannelUnread);
   const showMuteToggle = Boolean(onMuteChannel && onUnmuteChannel);
@@ -230,12 +247,15 @@ export function ChannelContextMenuItems({
         />
       ) : null}
       {showReadToggle ? <ContextMenuSeparator /> : null}
-      {hasUnread && onMarkChannelRead ? (
+      {hasProjectedUnread && onMarkChannelRead ? (
         <ContextMenuItem
           onSelect={() =>
-            deferMenuAction(() =>
-              onMarkChannelRead(channel.id, channel.lastMessageAt),
-            )
+            deferMenuAction(() => {
+              for (const itemId of channelUnreadOverrideIds) {
+                feedItemState.undoUnread(itemId);
+              }
+              onMarkChannelRead(channel.id, channel.lastMessageAt);
+            })
           }
         >
           <ContextMenuIconSlot>
@@ -243,7 +263,7 @@ export function ChannelContextMenuItems({
           </ContextMenuIconSlot>
           <span>Mark as read</span>
         </ContextMenuItem>
-      ) : !hasUnread && onMarkChannelUnread ? (
+      ) : !hasProjectedUnread && onMarkChannelUnread ? (
         <ContextMenuItem
           onSelect={() =>
             deferMenuAction(() => onMarkChannelUnread(channel.id))

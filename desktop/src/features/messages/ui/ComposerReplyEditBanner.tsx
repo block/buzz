@@ -14,11 +14,13 @@ const BANNER_CLASS =
  */
 export function ComposerReplyEditBanner({
   isEditing,
+  isEditCancelDisabled = false,
   replyTarget,
   onCancelEdit,
   onCancelReply,
 }: {
   isEditing: boolean;
+  isEditCancelDisabled?: boolean;
   replyTarget?: { author: string; body: string; id: string } | null;
   onCancelEdit?: () => void;
   onCancelReply?: () => void;
@@ -39,6 +41,7 @@ export function ComposerReplyEditBanner({
           <Button
             aria-label="Cancel edit"
             className="-mr-1 h-7 w-7 shrink-0 px-0 text-muted-foreground hover:text-foreground"
+            disabled={isEditCancelDisabled}
             onClick={onCancelEdit}
             size="icon"
             type="button"

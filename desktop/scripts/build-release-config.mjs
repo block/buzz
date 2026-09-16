@@ -52,6 +52,15 @@ const releaseConfig = {
   },
 };
 
+// Tauri applies --config after platform-specific config using RFC 7396.
+// Any externalBin value here would therefore replace the platform sidecar list,
+// while null would silently delete it. This delta must never own that key.
+if (Object.hasOwn(releaseConfig.bundle, "externalBin")) {
+  throw new Error(
+    "Release config must not define bundle.externalBin; sidecars are platform-specific",
+  );
+}
+
 console.log(`Updater enabled -> ${updaterEndpoint}`);
 
 writeFileSync(outputConfigPath, `${JSON.stringify(releaseConfig, null, 2)}\n`);

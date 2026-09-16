@@ -176,6 +176,11 @@ export function useMachineOnboardingState({
         completionKey(MACHINE_ONBOARDING_COMPLETION_STORAGE_KEY, pubkey),
         "true",
       );
+      // Clear the "continuing" marker so completion actually settles the flow.
+      // Imported/recovered identities set continuingPubkeyRef to pin the stage
+      // to "onboarding" until setup finishes; leaving it set after complete()
+      // keeps the stage pinned forever, so Skip/Next appear to do nothing.
+      continuingPubkeyRef.current = null;
       setCompletedPubkey(pubkey);
     },
     [currentPubkey],
@@ -183,6 +188,12 @@ export function useMachineOnboardingState({
 
   const continueWithIdentity = React.useCallback((pubkey: string) => {
     continuingPubkeyRef.current = pubkey;
+  }, []);
+
+  const continueWithRecoveredIdentity = React.useCallback((pubkey: string) => {
+    continuingPubkeyRef.current = pubkey;
+    setBootedLost(false);
+    setBootedLocked(false);
   }, []);
 
   const reopen = React.useCallback(() => {
@@ -224,7 +235,11 @@ export function useMachineOnboardingState({
       continuingPubkeyRef.current !== currentPubkey)
   ) {
     stage = "blocking";
-  } else if (identityLost || !hasCompletedCurrentPubkey) {
+  } else if (
+    identityLost ||
+    continuingPubkeyRef.current === currentPubkey ||
+    !hasCompletedCurrentPubkey
+  ) {
     stage = "onboarding";
   } else {
     stage = "ready";
@@ -233,6 +248,7 @@ export function useMachineOnboardingState({
   return {
     complete,
     continueWithIdentity,
+    continueWithRecoveredIdentity,
     currentPubkey,
     identityLost,
     queryClient,
