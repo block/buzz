@@ -35,4 +35,5 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tracing = { workspace = true }
 sqlx = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true }
 clap = { version = "4", features = ["derive"] }

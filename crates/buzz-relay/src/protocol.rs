@@ -22,6 +22,8 @@ pub enum ClientMessage {
         sub_id: String,
         /// The filters that determine which events are delivered.
         filters: Vec<Filter>,
+        /// Optional per-filter composite cursor tiebreaks from raw extension fields.
+        before_ids: Vec<Option<Vec<u8>>>,
     },
     /// A CLOSE message cancelling an active subscription.
     Close(String),
@@ -103,7 +105,40 @@ impl ClientMessage {
                             .map_err(|e| RelayError::InvalidMessage(format!("invalid filter: {e}")))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                Ok(ClientMessage::Req { sub_id, filters })
+                let before_ids = filter_values
+                    .iter()
+                    .map(|value| {
+                        let Some(raw) = value.get("before_id") else {
+                            return Ok(None);
+                        };
+                        if value.get("until").is_none() {
+                            return Err(RelayError::InvalidMessage(
+                                "before_id requires until to be set".to_string(),
+                            ));
+                        }
+                        let Some(hex) = raw.as_str() else {
+                            return Err(RelayError::InvalidMessage(
+                                "before_id must be a 64-char hex event id".to_string(),
+                            ));
+                        };
+                        let bytes = hex::decode(hex).map_err(|_| {
+                            RelayError::InvalidMessage(
+                                "before_id must be a 64-char hex event id".to_string(),
+                            )
+                        })?;
+                        if bytes.len() != 32 {
+                            return Err(RelayError::InvalidMessage(
+                                "before_id must be a 64-char hex event id".to_string(),
+                            ));
+                        }
+                        Ok(Some(bytes))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(ClientMessage::Req {
+                    sub_id,
+                    filters,
+                    before_ids,
+                })
             }
             "COUNT" => {
                 if arr.len() < 2 {
@@ -252,7 +287,9 @@ mod tests {
                 &serde_json::json!(["REQ", "sub1", serde_json::to_value(&filter).unwrap()])
                     .to_string(),
                 Box::new(|m| match m {
-                    ClientMessage::Req { sub_id, filters } => {
+                    ClientMessage::Req {
+                        sub_id, filters, ..
+                    } => {
                         assert_eq!(sub_id, "sub1");
                         assert_eq!(filters.len(), 1);
                     }
@@ -294,11 +331,56 @@ mod tests {
         ])
         .to_string();
         match ClientMessage::parse(&raw).unwrap() {
-            ClientMessage::Req { sub_id, filters } => {
+            ClientMessage::Req {
+                sub_id, filters, ..
+            } => {
                 assert_eq!(sub_id, "sub2");
                 assert_eq!(filters.len(), 2);
             }
             _ => panic!("expected Req"),
+        }
+    }
+
+    #[test]
+    fn parse_req_composite_cursor_preserves_filter_alignment() {
+        let raw = serde_json::json!([
+            "REQ",
+            "sub-cursor",
+            { "kinds": [9] },
+            {
+                "kinds": [48100],
+                "until": 1_000,
+                "before_id": "ab".repeat(32),
+            }
+        ])
+        .to_string();
+
+        match ClientMessage::parse(&raw).unwrap() {
+            ClientMessage::Req {
+                filters,
+                before_ids,
+                ..
+            } => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(before_ids, vec![None, Some(vec![0xab; 32])]);
+            }
+            _ => panic!("expected Req"),
+        }
+    }
+
+    #[test]
+    fn parse_req_composite_cursor_rejects_invalid_pairs() {
+        for raw in [
+            serde_json::json!(["REQ", "sub", { "before_id": "ab".repeat(32) }]),
+            serde_json::json!(["REQ", "sub", {
+                "until": 1_000,
+                "before_id": "short",
+            }]),
+        ] {
+            assert!(matches!(
+                ClientMessage::parse(&raw.to_string()),
+                Err(RelayError::InvalidMessage(_))
+            ));
         }
     }
 

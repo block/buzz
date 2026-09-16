@@ -1,12 +1,20 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
+import { ChevronLeft } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { ONBOARDING_CARD_SECONDARY_CTA_CLASS } from "./onboardingCardStyles";
 
-const OnboardingFooterTargetContext = React.createContext<HTMLElement | null>(
-  null,
-);
+type OnboardingFooterPlacement = "card" | "viewport";
+
+type OnboardingFooterTarget = {
+  element: HTMLElement | null;
+  placement: OnboardingFooterPlacement;
+};
+
+const OnboardingFooterTargetContext =
+  React.createContext<OnboardingFooterTarget | null>(null);
 
 /** Configuration for the provider-rendered, bottom-docked Back button. */
 export type OnboardingBackAction = {
@@ -32,14 +40,60 @@ export type OnboardingBackAction = {
 export function OnboardingFooterProvider({
   backAction,
   children,
+  contentClassName,
+  placement = "viewport",
 }: {
   backAction?: OnboardingBackAction;
   children: React.ReactNode;
+  contentClassName?: string;
+  placement?: OnboardingFooterPlacement;
 }) {
   const [target, setTarget] = React.useState<HTMLElement | null>(null);
 
+  if (placement === "card") {
+    return (
+      <OnboardingFooterTargetContext.Provider
+        value={{ element: target, placement }}
+      >
+        {children}
+        <div
+          className={cn(
+            "mt-6 flex h-[3.25rem] min-h-[3.25rem] w-full shrink-0 items-center justify-between gap-4",
+            contentClassName,
+          )}
+        >
+          <div className="flex min-w-0 flex-1 justify-start">
+            {backAction ? (
+              <Button
+                aria-label={backAction.label ?? "Back"}
+                className={cn(
+                  "size-[3.25rem] rounded-full p-0 [&_svg]:size-6",
+                  ONBOARDING_CARD_SECONDARY_CTA_CLASS,
+                )}
+                data-testid={backAction.testId ?? "onboarding-back"}
+                disabled={backAction.disabled}
+                onClick={backAction.onClick}
+                type="button"
+                variant="ghost"
+              >
+                <ChevronLeft aria-hidden />
+              </Button>
+            ) : null}
+          </div>
+          <div
+            className="flex min-w-0 flex-1 justify-end"
+            data-testid="onboarding-footer-slot"
+            ref={setTarget}
+          />
+        </div>
+      </OnboardingFooterTargetContext.Provider>
+    );
+  }
+
   return (
-    <OnboardingFooterTargetContext.Provider value={target}>
+    <OnboardingFooterTargetContext.Provider
+      value={{ element: target, placement }}
+    >
       {children}
       {/* Scrim: on pages taller than the viewport, content scrolls under the
           docked CTA. This bottom-anchored fade to the shell's bottom color
@@ -85,11 +139,15 @@ export function OnboardingFooter({
   children: React.ReactNode;
   className?: string;
 }) {
-  const target = React.useContext(OnboardingFooterTargetContext);
+  const targetContext = React.useContext(OnboardingFooterTargetContext);
+  const target = targetContext?.element ?? null;
+  const placement = targetContext?.placement ?? "viewport";
   const group = (
     <div
       className={cn(
-        "flex w-full max-w-[500px] flex-col items-center gap-3",
+        placement === "card"
+          ? "flex w-auto max-w-full flex-row flex-wrap items-center justify-end gap-3 [&_button]:h-[3.25rem]"
+          : "flex w-full max-w-[500px] flex-col items-center gap-3",
         // The docked slot is click-through (`pointer-events-none`); re-enable
         // pointer events on the CTA group itself. Inline (no slot) needs no
         // override since it sits in normal flow.

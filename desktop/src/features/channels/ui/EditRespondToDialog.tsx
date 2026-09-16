@@ -3,6 +3,7 @@ import * as React from "react";
 import { useUpdateManagedAgentMutation } from "@/features/agents/hooks";
 import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { runLocationForBackend } from "@/features/agents/lib/agentAccessWarning";
+import { showAgentProfileSyncWarning } from "@/features/agents/ui/agentProfileSyncWarning";
 import {
   CreateAgentRespondToField,
   OWNER_ONLY_ACCESS_DISABLED_REASON,
@@ -50,12 +51,13 @@ export function EditRespondToDialog({
 
   async function handleSave() {
     if (!agent) return;
-    await updateMutation.mutateAsync({
+    const result = await updateMutation.mutateAsync({
       pubkey: agent.pubkey,
       respondTo,
       respondToAllowlist:
         respondTo === "allowlist" ? respondToAllowlist : undefined,
     });
+    showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
     onOpenChange(false);
   }
 

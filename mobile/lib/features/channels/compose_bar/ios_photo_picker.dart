@@ -138,25 +138,14 @@ class _IOSInlinePhotoPicker extends HookWidget {
             bottom: Grid.twelve,
             child: SafeArea(
               top: false,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.62),
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.28),
-                  ),
-                ),
-                child: IconButton(
-                  key: const ValueKey('ios-inline-photo-picker-back'),
-                  onPressed: isProcessing.value
-                      ? null
-                      : () => _runComposerAction(onBack),
-                  tooltip: 'Back to attachment options',
-                  icon: const Icon(
-                    LucideIcons.chevronLeft,
-                    color: Colors.white,
-                  ),
-                ),
+              child: IosGlassNavigationButton(
+                key: const ValueKey('ios-inline-photo-picker-back'),
+                icon: IosGlassNavigationIcon.back,
+                semanticLabel: 'Back to attachment options',
+                onPressed: isProcessing.value
+                    ? null
+                    : () => _runComposerAction(onBack),
+                foregroundColor: Colors.white,
               ),
             ),
           ),

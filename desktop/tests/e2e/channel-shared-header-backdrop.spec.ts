@@ -41,7 +41,7 @@ async function waitForMockLiveSubscription(
 test.describe("channel shared header backdrop", () => {
   test.use({ viewport: { width: 1280, height: 720 } });
 
-  test("spans channel and split auxiliary columns with one backdrop", async ({
+  test("backs a scrolled split auxiliary header above the shared channel backdrop", async ({
     page,
   }) => {
     await installMockBridge(page);
@@ -82,6 +82,43 @@ test.describe("channel shared header backdrop", () => {
     await replyButton.click({ force: true });
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 
+    await page.evaluate(
+      ({ channelName, parentEventId, pubkey }) => {
+        for (let index = 0; index < 24; index += 1) {
+          (window as MockMessageWindow).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+            channelName,
+            content: `Scrollable thread reply ${index + 1}. `.repeat(4),
+            parentEventId,
+            pubkey,
+          });
+        }
+      },
+      {
+        channelName: CHANNEL_NAME,
+        parentEventId: rootId,
+        pubkey: ALICE_PUBKEY,
+      },
+    );
+
+    const threadBody = page.getByTestId("message-thread-body");
+    await expect
+      .poll(() =>
+        threadBody.evaluate(
+          (element) => element.scrollHeight > element.clientHeight,
+        ),
+      )
+      .toBe(true);
+    await threadBody.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect
+      .poll(() => threadBody.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+
+    const paneBackdrop = page.getByTestId("auxiliary-panel-header-backdrop");
+    await expect(paneBackdrop).toHaveCount(1);
+
     const sharedBackdrop = page.getByTestId("channel-shared-header-backdrop");
     await expect(sharedBackdrop).toHaveCount(1);
 
@@ -93,6 +130,9 @@ test.describe("channel shared header backdrop", () => {
     const [
       hostBox,
       backdropBox,
+      paneBackdropBox,
+      paneBackdropBackground,
+      paneBackdropFilter,
       backdropFilter,
       backdropZIndex,
       headerZIndex,
@@ -101,6 +141,13 @@ test.describe("channel shared header backdrop", () => {
     ] = await Promise.all([
       page.getByTestId("channel-drop-zone").locator("..").boundingBox(),
       sharedBackdrop.boundingBox(),
+      paneBackdrop.boundingBox(),
+      paneBackdrop.evaluate(
+        (element) => getComputedStyle(element).backgroundColor,
+      ),
+      paneBackdrop.evaluate(
+        (element) => getComputedStyle(element).backdropFilter,
+      ),
       sharedBackdrop.evaluate(
         (element) => getComputedStyle(element).backdropFilter,
       ),
@@ -120,6 +167,13 @@ test.describe("channel shared header backdrop", () => {
 
     expect(hostBox).not.toBeNull();
     expect(backdropBox).not.toBeNull();
+    expect(paneBackdropBox).not.toBeNull();
+    expect(Math.round(paneBackdropBox?.y ?? 0)).toBe(
+      Math.round(backdropBox?.y ?? 0),
+    );
+    expect(Math.round(paneBackdropBox?.height ?? 0)).toBe(52);
+    expect(paneBackdropBackground).not.toBe("rgba(0, 0, 0, 0)");
+    expect(paneBackdropFilter).not.toBe("none");
     expect(Math.round(backdropBox?.x ?? 0)).toBe(Math.round(hostBox?.x ?? 0));
     expect(Math.round(backdropBox?.width ?? 0)).toBe(
       Math.round(hostBox?.width ?? 0),

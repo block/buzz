@@ -45,7 +45,7 @@
     color: hsl(var(--muted-foreground));
     display: flex;
     font: inherit;
-    font-size: 0.75rem;
+    font-size: calc(var(--buzz-type-rem) * 0.75);
     font-weight: 500;
     gap: 6px;
     height: 30px;
@@ -130,7 +130,7 @@
   .buzz-terminal-designator {
     align-items: center;
     display: inline-flex;
-    font-size: 0.75rem;
+    font-size: calc(var(--buzz-type-rem) * 0.75);
     gap: 2px;
     letter-spacing: 0;
   }

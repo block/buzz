@@ -160,15 +160,27 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
             height: 40,
             child: Row(
               children: [
-                IconButton(
-                  key: const ValueKey('photo-gallery-back'),
-                  onPressed: isResolving.value
-                      ? null
-                      : () => _runComposerAction(onBack),
-                  tooltip: 'Back to attachment options',
-                  visualDensity: VisualDensity.compact,
-                  icon: const Icon(LucideIcons.arrowLeft, size: 20),
-                ),
+                if (Theme.of(context).platform == TargetPlatform.iOS)
+                  IosGlassNavigationButton(
+                    key: const ValueKey('photo-gallery-back'),
+                    icon: IosGlassNavigationIcon.back,
+                    semanticLabel: 'Back to attachment options',
+                    onPressed: isResolving.value
+                        ? null
+                        : () => _runComposerAction(onBack),
+                    width: 40,
+                    height: 40,
+                  )
+                else
+                  IconButton(
+                    key: const ValueKey('photo-gallery-back'),
+                    onPressed: isResolving.value
+                        ? null
+                        : () => _runComposerAction(onBack),
+                    tooltip: 'Back to attachment options',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(LucideIcons.arrowLeft, size: 20),
+                  ),
                 const SizedBox(width: Grid.quarter),
                 Expanded(
                   child: Text(

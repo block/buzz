@@ -45,6 +45,7 @@ export function ProfileIdentityButton({
         avatarUrl={avatarUrl}
         className={avatarClassName}
         displayName={label}
+        shape={isAgent ? "squircle" : "circle"}
         size={avatarSize}
       />
       {showLabel ? (
@@ -79,7 +80,11 @@ export function ProfileIdentityButton({
 
   return (
     <UserProfilePopover pubkey={pubkey} triggerElement="span">
-      <button className={className} type="button">
+      <button
+        aria-label={showLabel ? undefined : label}
+        className={className}
+        type="button"
+      >
         {inner}
       </button>
     </UserProfilePopover>

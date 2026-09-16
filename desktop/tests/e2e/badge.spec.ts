@@ -84,6 +84,25 @@ function withDotOnlyBadge(baseline: { state: string; count: number }) {
   return baseline.count > 0 ? baseline : { state: "dot", count: 0 };
 }
 
+async function getUnreadPillComposition(
+  pill: import("@playwright/test").Locator,
+) {
+  return pill.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const icon = element.querySelector("svg")?.getBoundingClientRect();
+    return {
+      fontSize: style.fontSize,
+      gap: style.gap,
+      height: element.getBoundingClientRect().height,
+      iconHeight: icon?.height,
+      iconWidth: icon?.width,
+      letterSpacing: style.letterSpacing,
+      paddingBlock: `${style.paddingTop} ${style.paddingBottom}`,
+      paddingInline: `${style.paddingLeft} ${style.paddingRight}`,
+    };
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -103,6 +122,40 @@ test("selected Inbox and Agents rows keep their highlight without bold text", as
   await agents.click();
   await expect(agents).toHaveAttribute("data-active", "true");
   await expect(agents).toHaveCSS("font-weight", "400");
+});
+
+test("primary navigation rows share the same inactive emphasis", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const primaryMenu = page.getByTestId("sidebar-primary-menu");
+  const inactiveRows = [
+    primaryMenu.getByRole("button", { name: "Inbox", exact: true }),
+    page.getByTestId("open-pulse-view"),
+    page.getByTestId("open-projects-view"),
+    page.getByTestId("open-agents-view"),
+    page.getByTestId("open-workflows-view"),
+  ];
+
+  for (const row of inactiveRows) {
+    await expect(row).toHaveAttribute("data-active", "false");
+    await expect(row.locator("[data-sidebar=menu-label]")).toHaveCSS(
+      "opacity",
+      "0.8",
+    );
+    await expect(row.locator("svg")).toHaveCSS("opacity", "0.8");
+  }
+
+  const pulse = page.getByTestId("open-pulse-view");
+  await pulse.click();
+  await expect(pulse).toHaveAttribute("data-active", "true");
+  await expect(pulse.locator("[data-sidebar=menu-label]")).toHaveCSS(
+    "opacity",
+    "1",
+  );
+  await expect(pulse.locator("svg")).toHaveCSS("opacity", "1");
 });
 
 test("hovering a channel keeps its text color", async ({ page }) => {
@@ -245,7 +298,7 @@ test("dark mode keeps selected labels regular and channel-level unread labels bo
   });
 });
 
-test("offscreen top-level unread shows the primary sidebar arrow", async ({
+test("offscreen unread counts destinations and promotes without incrementing", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 360 });
@@ -285,7 +338,45 @@ test("offscreen top-level unread shows the primary sidebar arrow", async ({
 
   const activityArrow = page.getByTestId("sidebar-more-unread-above");
   await expect(activityArrow).toBeVisible();
+  await expect(activityArrow).toContainText("1 unread");
+  await expect(activityArrow).not.toHaveClass(/bg-primary/);
+  await expect(activityArrow).toHaveCSS("font-size", "12px");
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/sidebar-unread-overflow-default.png`,
+    clip: { x: 0, y: 0, width: 320, height: 360 },
+  });
+
+  const defaultComposition = await getUnreadPillComposition(activityArrow);
+
+  await page.evaluate(
+    ({ pubkey, mentionPubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: "A priority mention for @tyler",
+        kind: 40002,
+        pubkey,
+        mentionPubkeys: [mentionPubkey],
+      });
+    },
+    {
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      mentionPubkey: DEFAULT_MOCK_PUBKEY,
+    },
+  );
+
+  // A second message in the same destination promotes the pill but does not
+  // increase the number of places awaiting review.
+  await expect(activityArrow).toContainText("1 unread");
   await expect(activityArrow).toHaveClass(/bg-primary/);
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/sidebar-unread-overflow-primary.png`,
+    clip: { x: 0, y: 0, width: 320, height: 360 },
+  });
+  const primaryComposition = await getUnreadPillComposition(activityArrow);
+  expect(primaryComposition).toEqual(defaultComposition);
+
   await activityArrow.click();
   await expect(page.getByTestId("channel-random")).toBeInViewport();
   await waitForAnimations(page);
@@ -323,7 +414,102 @@ test("offscreen unread DM shows the primary sidebar arrow", async ({
 
   const activityArrow = page.getByTestId("sidebar-more-unread-below");
   await expect(activityArrow).toBeVisible();
+  await expect(activityArrow).toContainText("1 unread");
   await expect(activityArrow).toHaveClass(/bg-primary/);
+});
+
+test("thread-only activity in an offscreen DM stays primary", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await waitForMockLiveSubscription(page, "alice-tyler");
+  await page.setViewportSize({ width: 1280, height: 360 });
+
+  const sidebarScroller = page
+    .getByTestId("app-sidebar")
+    .locator('[data-sidebar="content"]');
+  await sidebarScroller.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect(page.getByTestId("channel-alice-tyler")).not.toBeInViewport();
+
+  const initialReplyAt = Math.floor(Date.now() / 1000) - 10;
+  const rootEventId = await page.evaluate((pubkey) => {
+    const root = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "alice-tyler",
+      content: "A DM thread I started",
+      kind: 40002,
+      pubkey,
+    });
+    return root?.id;
+  }, DEFAULT_MOCK_PUBKEY);
+  if (!rootEventId) throw new Error("Mock message emitter is unavailable");
+
+  await page.evaluate(
+    ({ createdAt, parentEventId, pubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "alice-tyler",
+        content: "Initial DM thread reply",
+        createdAt,
+        kind: 40002,
+        parentEventId,
+        pubkey,
+      });
+    },
+    {
+      createdAt: initialReplyAt,
+      parentEventId: rootEventId,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const threadSummary = page.getByTestId("message-thread-summary").first();
+  await expect(threadSummary).toBeVisible();
+  await threadSummary.click();
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+  await page.getByTestId("auxiliary-panel-close").click();
+  const threadReadSecond = await page.evaluate(() =>
+    Math.floor(Date.now() / 1000),
+  );
+  await expect
+    .poll(() => page.evaluate(() => Math.floor(Date.now() / 1000)))
+    .toBeGreaterThan(threadReadSecond);
+
+  await page.evaluate(
+    ({ parentEventId, pubkey }) => {
+      const reply = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "alice-tyler",
+        content: "A non-mention reply in the active DM thread",
+        kind: 40002,
+        parentEventId,
+        pubkey,
+      });
+      if (!reply) throw new Error("Mock message emitter is unavailable");
+      window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?.({
+        category: "activity",
+        channel_id: "f48efb06-0c93-5025-aac9-2e646bb6bfa8",
+        channel_name: "alice-tyler",
+        channel_type: "dm",
+        content: reply.content,
+        created_at: reply.created_at,
+        id: reply.id,
+        kind: reply.kind,
+        pubkey: reply.pubkey,
+        tags: reply.tags,
+      });
+    },
+    { parentEventId: rootEventId, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+
+  const activityArrow = page.getByTestId("sidebar-more-unread-below");
+  await expect(activityArrow).toBeVisible();
+  await expect(activityArrow).toContainText("1 unread");
+  await expect(activityArrow).toHaveClass(/bg-primary/);
+  await waitForAnimations(page);
+  await activityArrow.screenshot({
+    path: `${SHOTS}/sidebar-dm-thread-overflow-primary.png`,
+  });
 });
 
 test("regular message bolds inactive channel without numeric badge", async ({
@@ -368,7 +554,7 @@ test("regular message bolds inactive channel without numeric badge", async ({
   );
 });
 
-test("top-level @mention bolds the channel without a row badge", async ({
+test("top-level @mention bolds its channel without a trailing numeral", async ({
   page,
 }) => {
   await page.goto("/");
@@ -379,13 +565,18 @@ test("top-level @mention bolds the channel without a row badge", async ({
 
   await page.evaluate(
     ({ pubkey, mentionPubkey }) => {
-      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "random",
-        content: "Hey @tyler check this out",
-        kind: 40002,
-        pubkey,
-        mentionPubkeys: [mentionPubkey],
-      });
+      for (const content of [
+        "Hey @tyler check this out",
+        "One more for @tyler",
+      ]) {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "random",
+          content,
+          kind: 40002,
+          pubkey,
+          mentionPubkeys: [mentionPubkey],
+        });
+      }
     },
     {
       pubkey: TEST_IDENTITIES.alice.pubkey,
@@ -399,7 +590,60 @@ test("top-level @mention bolds the channel without a row badge", async ({
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
   await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);
-  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
+  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 2));
+});
+
+test("@mention inside a thread bolds the room and keeps hover-to-preview", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "random");
+
+  const rootEventId = await page.evaluate(() => {
+    const root = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "random",
+      content: "Thread root from someone else",
+      kind: 40002,
+      pubkey: "deadbeef".repeat(8),
+    });
+    return root?.id;
+  });
+
+  await page.evaluate(
+    ({ parentEventId, pubkey, mentionPubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: "In-thread ping for @tyler",
+        kind: 40002,
+        parentEventId,
+        pubkey,
+        mentionPubkeys: [mentionPubkey],
+      });
+    },
+    {
+      parentEventId: rootEventId,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      mentionPubkey: DEFAULT_MOCK_PUBKEY,
+    },
+  );
+
+  await expect(page.getByTestId("channel-random")).toHaveCSS(
+    "font-weight",
+    "700",
+  );
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+  await expect(page.getByTestId("channel-unread-dot-random")).toBeVisible();
+
+  // Hover-to-preview is owned by the thread dot, not a trailing numeral.
+  await page.getByTestId("channel-random").hover();
+  const popover = page.getByTestId("channel-activity-popover-random");
+  await expect(popover).toBeVisible();
+  await expect(
+    popover.getByTestId(`channel-activity-item-${rootEventId}`),
+  ).toBeVisible();
+  await expect(popover).toContainText("In-thread ping for");
 });
 
 test("numeric badge increments for DM message", async ({ page }) => {
@@ -462,7 +706,7 @@ test("interested thread reply shows the channel preview dot without incrementing
   await waitForBadgeState(page, baselineBadge);
 });
 
-test("broadcast reply bolds the channel without a thread dot", async ({
+test("broadcast reply bolds its channel without a trailing numeral", async ({
   page,
 }) => {
   await page.goto("/");
@@ -492,7 +736,6 @@ test("broadcast reply bolds the channel without a thread dot", async ({
     "700",
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
-  await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 

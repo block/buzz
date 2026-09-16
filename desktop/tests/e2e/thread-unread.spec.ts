@@ -778,6 +778,13 @@ test.describe("thread unread indicator", () => {
       mentionPubkeys: [SELF_PUBKEY],
       createdAt: unreadTimestamp(),
     });
+    // A thread reply keeps the channel bold and retains the thread-activity dot;
+    // the room itself does not show a numeric badge.
+    await expect(page.getByTestId("channel-all-replies")).toHaveCSS(
+      "font-weight",
+      "700",
+    );
+    await expect(page.getByTestId("channel-unread-all-replies")).toHaveCount(0);
     await expect(
       page.getByTestId("channel-unread-dot-all-replies"),
     ).toBeVisible();
@@ -787,9 +794,13 @@ test.describe("thread unread indicator", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("all-replies");
 
     // The crux: leave the channel. Its unopened thread reply should still keep
-    // a channel sidebar dot until the thread itself is read.
+    // a channel sidebar unread indicator until the thread itself is read.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(page.getByTestId("channel-all-replies")).toHaveCSS(
+      "font-weight",
+      "700",
+    );
     await expect(
       page.getByTestId("channel-unread-dot-all-replies"),
     ).toBeVisible();

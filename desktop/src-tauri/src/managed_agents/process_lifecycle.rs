@@ -45,20 +45,19 @@ impl Drop for JobHandle {
 /// the caller can fall back to `Child::kill()` — a degraded teardown beats a
 /// failed spawn.
 ///
-/// Assignment happens immediately after spawn, on the same parent thread. The
-/// child (buzz-acp) does spawn its 24 workers before it connects to the relay,
-/// so the window between our spawn and our assignment is NOT structurally empty.
-/// What closes it is assign-latency: `OpenProcess` + `AssignProcessToJobObject`
-/// are a few synchronous Win32 calls (microseconds), while buzz-acp must init
-/// tokio, parse its config, and spawn 24 children (tens-to-hundreds of ms), so
-/// the assign reliably wins before any worker exists. Once assigned, Windows
-/// places every subsequently-spawned descendant in the job automatically.
+/// For the harness spawn path ([`finish_spawn`]) assignment happens immediately
+/// after a normal spawn. The child (buzz-acp) must init tokio, parse its config,
+/// and spawn 24 children (tens-to-hundreds of ms) before any descendant exists,
+/// so the microsecond `OpenProcess` + `AssignProcessToJobObject` reliably wins
+/// that race. Once assigned, Windows places every subsequently-spawned
+/// descendant in the job automatically.
 ///
-/// `CREATE_SUSPENDED` -> assign -> `ResumeThread` would make the window airtight
-/// regardless of child timing, but it requires raw `CreateProcessW`/`ResumeThread`
-/// (materially more unsafe Win32) to close a microsecond race, so it is
-/// deliberately not used here.
-fn create_job_for_child(pid: u32) -> Option<JobHandle> {
+/// The discovery path (`bounded_command`) runs arbitrary probe commands that
+/// can background a descendant and exit in the same tick, so it cannot rely on
+/// assign-latency. It spawns with `CREATE_SUSPENDED`, assigns the frozen child
+/// here, then calls [`resume_process`] — no descendant can exist until the job
+/// owns the root, closing the race by construction.
+pub(crate) fn create_job_for_child(pid: u32) -> Option<JobHandle> {
     use std::ptr::null;
     use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
     use windows_sys::Win32::System::JobObjects::{
@@ -102,6 +101,56 @@ fn create_job_for_child(pid: u32) -> Option<JobHandle> {
         }
 
         Some(JobHandle(job))
+    }
+}
+
+/// Resume a process spawned with `CREATE_SUSPENDED` by resuming every thread it
+/// owns. A fresh `CREATE_SUSPENDED` process has exactly one thread suspended at
+/// its entry point; resuming it lets the process run. We enumerate via a
+/// ToolHelp thread snapshot filtered to `pid` rather than tracking the initial
+/// thread id (`std::process::Command` does not expose it), and resume each so
+/// the walk is correct even in the pathological multi-thread case.
+///
+/// Returns `true` only if at least one owned thread was resumed. `false` means
+/// no thread could be resumed — the caller must treat the child as unusable and
+/// tear it down, since a still-suspended root would otherwise hang to the
+/// deadline.
+pub(crate) fn resume_process(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return false;
+        }
+
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+
+        let mut resumed_any = false;
+        let mut has_entry = Thread32First(snapshot, &mut entry);
+        while has_entry != 0 {
+            if entry.th32OwnerProcessID == pid {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                if !thread.is_null() {
+                    // ResumeThread returns u32::MAX on failure; any other value
+                    // is the thread's previous suspend count.
+                    if ResumeThread(thread) != u32::MAX {
+                        resumed_any = true;
+                    }
+                    CloseHandle(thread);
+                }
+            }
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            has_entry = Thread32Next(snapshot, &mut entry);
+        }
+
+        CloseHandle(snapshot);
+        resumed_any
     }
 }
 

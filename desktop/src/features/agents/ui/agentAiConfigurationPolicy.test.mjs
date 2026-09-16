@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   agentAiConfigurationModeSatisfied,
   agentAiConfigurationPairForMode,
+  agentAiConfigurationSubmitBlockReason,
   initialAgentAiConfigurationMode,
 } from "./agentAiConfigurationPolicy.ts";
 
@@ -47,6 +48,38 @@ test("Customize requires a complete explicit pair", () => {
       model: "claude-opus",
     }),
     true,
+  );
+});
+
+test("incomplete Customize explains why Save remains disabled", () => {
+  assert.equal(
+    agentAiConfigurationSubmitBlockReason("custom", {
+      provider: "",
+      model: "",
+    }),
+    "Choose a provider to save custom AI configuration.",
+  );
+  assert.equal(
+    agentAiConfigurationSubmitBlockReason("custom", {
+      provider: "anthropic",
+      model: "",
+    }),
+    "Choose a model to save custom AI configuration.",
+  );
+  assert.equal(
+    agentAiConfigurationSubmitBlockReason(
+      "custom",
+      { provider: "", model: "" },
+      false,
+    ),
+    "Choose a model to save custom AI configuration.",
+  );
+  assert.equal(
+    agentAiConfigurationSubmitBlockReason("defaults", {
+      provider: "",
+      model: "",
+    }),
+    null,
   );
 });
 

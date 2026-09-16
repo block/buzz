@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::http::header;
+use axum::http::HeaderValue;
 use axum::{
     extract::{FromRequestParts, Path, State},
     http::{request::Parts, HeaderMap, StatusCode},
@@ -207,12 +208,13 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         // storage and of `require_auth_token` (which governs the REST API, not
         // media). On open relays (membership disabled) any valid Blossom signer
         // may upload, matching the WS door's admission policy.
-        let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+        let auth_tag = crate::api::relay_members::extract_auth_tag_header(headers);
         crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),
             auth_event.pubkey.as_bytes(),
             auth_tag,
+            Some(auth_event.created_at.as_secs()),
         )
         .await
         .map_err(|_| MediaError::RelayMembershipRequired)?;
@@ -533,12 +535,13 @@ async fn authenticate_media_read(
     let sha256 = sha256_ext.split('.').next().unwrap_or(sha256_ext);
     buzz_media::auth::verify_blossom_get_auth(&auth_event, sha256, Some(tenant.host()), 3600)?;
 
-    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let auth_tag = crate::api::relay_members::extract_auth_tag_header(headers);
     crate::api::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         auth_event.pubkey.as_bytes(),
         auth_tag,
+        Some(auth_event.created_at.as_secs()),
     )
     .await
     .map_err(|_| MediaError::RelayMembershipRequired)?;
@@ -779,6 +782,77 @@ pub(crate) async fn serve_blob_for_tenant(
     }
 }
 
+/// Passive raster image formats safe to render inline in a browser, keyed by
+/// content sniff of the stored bytes. SVG is intentionally excluded: it is an
+/// active document that can execute script.
+fn verified_inline_image_type(bytes: &[u8]) -> Option<&'static str> {
+    match infer::get(bytes).map(|kind| kind.mime_type()) {
+        Some("image/png") => Some("image/png"),
+        Some("image/jpeg") => Some("image/jpeg"),
+        Some("image/gif") => Some("image/gif"),
+        Some("image/webp") => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// The browser-facing response policy for a feedback attachment, derived solely
+/// from a content sniff of the stored `prefix` bytes — never the reporter's
+/// `imeta` MIME. Returns the served `Content-Type` and `Content-Disposition`:
+/// verified passive raster renders `inline` with its sniffed type; every other
+/// payload is forced to `application/octet-stream` + `attachment` so the browser
+/// downloads it instead of running it. `X-Content-Type-Options: nosniff` is
+/// always applied by the caller so a forced attachment can never be sniffed back
+/// into an executable type. This is the load-bearing security seam.
+fn feedback_attachment_response_policy(prefix: &[u8]) -> (&'static str, &'static str) {
+    match verified_inline_image_type(prefix) {
+        Some(mime) => (mime, "inline"),
+        None => ("application/octet-stream", "attachment"),
+    }
+}
+
+/// Serve a feedback attachment to an admin operator without ever letting an
+/// attacker-controlled payload execute as a typed document.
+///
+/// Feedback attachment bytes, their `imeta` MIME, and filename are all supplied
+/// by untrusted reporters. The normal media route trusts the stored sidecar
+/// MIME to choose an inline disposition, so a hash-valid HTML or SVG payload
+/// mislabelled `image/*` would open as an executable document on the admin
+/// origin. This wrapper re-derives the served type from a content sniff of the
+/// stored bytes: only verified passive raster images render inline; every other
+/// payload is forced to `application/octet-stream` + `Content-Disposition:
+/// attachment` so the browser downloads it instead of running it. The normal
+/// `/media` route is unchanged.
+pub(crate) async fn serve_feedback_attachment(
+    state: &AppState,
+    tenant: &TenantContext,
+    sha256: &str,
+    req_headers: &HeaderMap,
+) -> Result<Response, MediaError> {
+    // infer needs only the leading magic bytes (webp reads through byte 11).
+    const SNIFF_PREFIX_LEN: u64 = 32;
+    let key = resolve_s3_key(&state.media_storage, tenant, sha256).await?;
+    let prefix = state
+        .media_storage
+        .get_range(&key, 0, SNIFF_PREFIX_LEN - 1)
+        .await
+        .unwrap_or_default();
+    let (content_type, disposition) = feedback_attachment_response_policy(&prefix);
+
+    let mut response = serve_blob_for_tenant(state, tenant, sha256, req_headers).await?;
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static(disposition),
+    );
+    // A forced attachment must never be sniffed back into an executable type.
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
 /// Parse a `Range: bytes=START-END` header value.
 ///
 /// Returns `Some((start, end))` for a valid absolute or suffix range.
@@ -961,6 +1035,76 @@ mod tests {
             serving_write_error(backend),
             MediaError::ServiceUnavailable
         ));
+    }
+
+    #[test]
+    fn feedback_inline_allows_only_sniffed_passive_raster_images() {
+        // Real magic bytes for the four verified passive raster formats.
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'];
+        let gif = *b"GIF89a";
+        let mut webp = Vec::from(*b"RIFF");
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBP");
+        assert_eq!(verified_inline_image_type(&png), Some("image/png"));
+        assert_eq!(verified_inline_image_type(&jpeg), Some("image/jpeg"));
+        assert_eq!(verified_inline_image_type(&gif), Some("image/gif"));
+        assert_eq!(verified_inline_image_type(&webp), Some("image/webp"));
+
+        // Active documents and non-raster payloads never render inline — a
+        // reporter cannot smuggle script past the sniff, regardless of the
+        // imeta MIME they supplied.
+        assert_eq!(
+            verified_inline_image_type(b"<svg xmlns=\"...\"></svg>"),
+            None
+        );
+        assert_eq!(
+            verified_inline_image_type(b"<!DOCTYPE html><script>alert(1)</script>"),
+            None
+        );
+        assert_eq!(verified_inline_image_type(b"%PDF-1.7"), None);
+        assert_eq!(verified_inline_image_type(b""), None);
+    }
+
+    #[test]
+    fn feedback_attachment_response_policy_pins_browser_facing_contract() {
+        // Verified passive raster is the ONLY payload that serves inline, and it
+        // serves as its sniffed type — never a reporter-controlled MIME.
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'];
+        let gif = *b"GIF89a";
+        let mut webp = Vec::from(*b"RIFF");
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBP");
+        for (bytes, mime) in [
+            (&png[..], "image/png"),
+            (&jpeg[..], "image/jpeg"),
+            (&gif[..], "image/gif"),
+            (&webp[..], "image/webp"),
+        ] {
+            assert_eq!(
+                feedback_attachment_response_policy(bytes),
+                (mime, "inline"),
+                "verified raster must serve inline as its sniffed type"
+            );
+        }
+
+        // Every hostile or unrecognized payload is forced to a non-navigable
+        // download. This is the seam that keeps a hash-valid HTML/SVG feedback
+        // attachment from opening as an executing document on the admin origin.
+        for hostile in [
+            &b"<!DOCTYPE html><script>alert(1)</script>"[..],
+            &b"<svg xmlns=\"...\"><script>alert(1)</script></svg>"[..],
+            &b"%PDF-1.7"[..],
+            &b""[..],       // failed/empty sniff prefix — fail closed to download
+            &b"\x89PN"[..], // short/truncated prefix — not enough to verify
+        ] {
+            assert_eq!(
+                feedback_attachment_response_policy(hostile),
+                ("application/octet-stream", "attachment"),
+                "hostile/unrecognized bytes must force a download, never inline"
+            );
+        }
     }
 
     #[test]

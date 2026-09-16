@@ -32,13 +32,8 @@ test("identity key help explains the first-run choice", async ({ page }) => {
   await expect(
     dialog.getByRole("heading", { name: "What’s an identity key?" }),
   ).toBeVisible();
-  await expect(dialog).toHaveClass(/shadow-none/);
-  await expect(page.getByTestId("dialog-overlay")).toHaveCSS(
-    "background-color",
-    "rgba(0, 0, 0, 0)",
-  );
-  const dialogWrapper = dialog.locator("..");
-  await expect(dialogWrapper).toHaveCSS("overflow-x", "hidden");
+  await expect(dialog).toHaveClass(/w-full/);
+  await expect(page.getByTestId("dialog-overlay")).toHaveCount(0);
   const dialogBounds = await dialog.boundingBox();
   expect(dialogBounds).not.toBeNull();
   expect(dialogBounds?.x).toBeGreaterThanOrEqual(0);
@@ -46,7 +41,7 @@ test("identity key help explains the first-run choice", async ({ page }) => {
     (dialogBounds?.x ?? 0) + (dialogBounds?.width ?? 0),
   ).toBeLessThanOrEqual(720);
 
-  await page.keyboard.press("Escape");
+  await page.getByTestId("onboarding-back").click();
   await expect(dialog).not.toBeVisible();
   await expect(trigger).toHaveCSS("opacity", "1");
 

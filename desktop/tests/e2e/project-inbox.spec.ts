@@ -21,17 +21,24 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
   await page.getByRole("button", { name: "Repositories", exact: true }).click();
-  await page
-    .locator(
-      '[data-testid="repository-card-buzz"], [data-testid="repository-row-buzz"]',
-    )
-    .first()
-    .click();
-  await page.getByRole("tab", { name: "Pull Request" }).click();
+  const repositoryCardBody = page
+    .getByTestId("repository-card-buzz")
+    .getByTestId("projects-grid-card-body");
+  const repositoryCardBodyBounds = await repositoryCardBody.boundingBox();
+  expect(repositoryCardBodyBounds).not.toBeNull();
+  await page.mouse.click(
+    (repositoryCardBodyBounds?.x ?? 0) +
+      (repositoryCardBodyBounds?.width ?? 0) / 2,
+    (repositoryCardBodyBounds?.y ?? 0) +
+      (repositoryCardBodyBounds?.height ?? 0) / 2,
+  );
+  await page.getByRole("tab", { name: "Review" }).click();
 
   const alicePullRequest = page
     .getByTestId("project-pull-request-row")
-    .filter({ hasText: "alice" })
+    .filter({
+      has: page.getByRole("button", { name: "alice", exact: true }),
+    })
     .first();
   await expect(alicePullRequest).toBeVisible({ timeout: 10_000 });
   const pullRequestId = await alicePullRequest.getAttribute(
@@ -110,7 +117,7 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
   ).toBeVisible();
   await expect(
     detail.getByRole("heading", {
-      name: "alice sent you a pull request",
+      name: "alice sent you a review",
       exact: true,
     }),
   ).toBeVisible();
@@ -142,5 +149,42 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
   await waitForAnimations(page);
   await detail.screenshot({
     path: "test-results/project-inbox/01-pull-request-detail.png",
+  });
+
+  // Metadata phrases may wrap between items but must never compress
+  // individual phrases into word-wide columns.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect
+    .poll(() =>
+      layout.evaluate(
+        (element) =>
+          getComputedStyle(element)
+            .gridTemplateColumns.split(" ")
+            .filter(Boolean).length,
+      ),
+    )
+    .toBe(1);
+  await expect(
+    detail.getByRole("button", {
+      name: "Open author-claimed origin channel #general",
+    }),
+  ).toBeVisible();
+  const metadataPhrases = detail.locator("[data-project-metadata-phrase]");
+  await expect(metadataPhrases).not.toHaveCount(0);
+  const phraseLayouts = await metadataPhrases.evaluateAll((phrases) =>
+    phrases.map((phrase) => {
+      const style = getComputedStyle(phrase);
+      return {
+        height: phrase.getBoundingClientRect().height,
+        lineHeight: Number.parseFloat(style.lineHeight),
+      };
+    }),
+  );
+  for (const phrase of phraseLayouts) {
+    expect(phrase.height).toBeLessThanOrEqual(phrase.lineHeight * 1.5);
+  }
+  await waitForAnimations(page);
+  await detail.screenshot({
+    path: "test-results/project-inbox/02-pull-request-detail-wide.png",
   });
 });

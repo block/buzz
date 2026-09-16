@@ -332,6 +332,7 @@ mod tests {
             format: FORMAT_DISCRIMINATOR.to_string(),
             version: FORMAT_VERSION,
             definition: AgentSnapshotDefinition {
+                session_policy: Default::default(),
                 name: "Locked Test".to_string(),
                 system_prompt: Some("You are a locked test agent.".to_string()),
                 runtime: None,
@@ -366,6 +367,8 @@ mod tests {
     /// pubkey/nsec pair matters here.
     fn record_with_keys(pubkey: String, private_key_nsec: String) -> ManagedAgentRecord {
         ManagedAgentRecord {
+            session_policy: Default::default(),
+            description: None,
             pubkey,
             name: "Locked Test".to_string(),
             persona_id: None,
@@ -389,6 +392,7 @@ mod tests {
             runtime_pid: None,
             backend: crate::managed_agents::types::BackendKind::Local,
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,
@@ -416,9 +420,11 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            effort_level: None,
             agent_command_override: None,
             persona_source_version: None,
             provider: None,
+            team_catalog_source: None,
         }
     }
 

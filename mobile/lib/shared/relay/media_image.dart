@@ -38,6 +38,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   final double scale;
   final MediaGetAuthService auth;
 
+  /// Optional observer for bytes already fetched by the foreground image path.
+  /// Excluded from equality because it is a side effect, not cache identity.
+  final ValueChanged<Uint8List>? onBytesLoaded;
+
   /// Excluded from equality: transport, not identity.
   final http.Client client;
 
@@ -45,6 +49,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     required this.url,
     required this.auth,
     required this.client,
+    this.onBytesLoaded,
     this.scale = 1.0,
   });
 
@@ -109,6 +114,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
         _cooldownUntil[url] = debugNow().add(_defaultCooldown);
         throw NetworkImageLoadException(statusCode: 200, uri: uri);
       }
+      onBytesLoaded?.call(bytes);
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
       return decode(buffer);
     } catch (_) {
@@ -177,9 +183,11 @@ class MediaImage extends ConsumerWidget {
   final double? height;
   final String? semanticLabel;
   final ImageErrorWidgetBuilder? errorBuilder;
+  final ImageFrameBuilder? frameBuilder;
   final FilterQuality filterQuality;
   final double? decodeWidth;
   final bool boundDecodeToLayout;
+  final ValueChanged<Uint8List>? onBytesLoaded;
 
   const MediaImage({
     super.key,
@@ -189,9 +197,11 @@ class MediaImage extends ConsumerWidget {
     this.height,
     this.semanticLabel,
     this.errorBuilder,
+    this.frameBuilder,
     this.filterQuality = FilterQuality.medium,
     this.decodeWidth,
     this.boundDecodeToLayout = true,
+    this.onBytesLoaded,
   });
 
   @override
@@ -200,6 +210,7 @@ class MediaImage extends ConsumerWidget {
       url: url,
       auth: ref.watch(mediaGetAuthServiceProvider),
       client: ref.watch(mediaHttpClientProvider),
+      onBytesLoaded: onBytesLoaded,
     );
 
     if (decodeWidth != null) {
@@ -231,6 +242,7 @@ class MediaImage extends ConsumerWidget {
       height: height,
       semanticLabel: semanticLabel,
       errorBuilder: errorBuilder,
+      frameBuilder: frameBuilder,
       filterQuality: filterQuality,
       gaplessPlayback: true,
     );

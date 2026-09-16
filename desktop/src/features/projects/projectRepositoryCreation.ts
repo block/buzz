@@ -18,6 +18,8 @@ function repositoryDtagFromName(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+export { repositoryDtagFromName };
+
 /**
  * Creates a project-replacement event template from a live, signed raw head
  * (fetched immediately before the mutation). Only the `a` membership tags are
@@ -132,6 +134,13 @@ export type AddedRepositoryEventTemplatesFromHead = {
   repository: ProjectEventTemplate;
   repositoryAddress: string;
   repositoryDtag: string;
+  /**
+   * True when the live head already references the coordinate but the caller
+   * indicated no repository head exists there (a dangling member from an
+   * earlier partial publish). The project head is already correct — publish
+   * only the repository event to heal.
+   */
+  resume: boolean;
 };
 
 /**
@@ -152,6 +161,7 @@ export function buildAddedRepositoryEventTemplatesFromHead({
   liveHead,
   name,
   ownerPubkey,
+  repositoryHeadExists = true,
   webUrl,
 }: {
   accessChannelId?: string;
@@ -161,6 +171,14 @@ export function buildAddedRepositoryEventTemplatesFromHead({
   liveHead: RelayEvent;
   name: string;
   ownerPubkey: string;
+  /**
+   * Whether a kind-30617 head already exists at the new coordinate. When the
+   * live project head references the coordinate but no repository head exists
+   * there, an earlier add-repository publish failed between its two events —
+   * return resume templates instead of throwing so retry can heal the
+   * dangling member.
+   */
+  repositoryHeadExists?: boolean;
   webUrl?: string;
 }): AddedRepositoryEventTemplatesFromHead {
   const normalizedOwner = ownerPubkey.trim().toLowerCase();
@@ -179,9 +197,13 @@ export function buildAddedRepositoryEventTemplatesFromHead({
     .filter((tag) => tag[0] === "a" && tag[1])
     .map((tag) => tag[1] as string);
 
-  // If the repo is already in the live head (race: another session added it),
-  // surface that to the caller.
-  if (liveAddresses.includes(repositoryAddress)) {
+  // If the repo is already in the live head with a live repository head at
+  // the coordinate (race: another session added it), surface that to the
+  // caller. Without a repository head the membership is a dangling member
+  // from a partial publish — resume by publishing only the repository event.
+  const resume =
+    liveAddresses.includes(repositoryAddress) && !repositoryHeadExists;
+  if (liveAddresses.includes(repositoryAddress) && repositoryHeadExists) {
     throw new Error(
       `This project already contains "${repositoryDtag}" (it was added by another session).`,
     );
@@ -216,9 +238,12 @@ export function buildAddedRepositoryEventTemplatesFromHead({
   const normalizedWebUrl = webUrl?.trim();
   if (normalizedWebUrl) repositoryTags.push(["web", normalizedWebUrl]);
 
-  const newAddresses = isUnavailableMember
-    ? [...liveAddresses]
-    : [...liveAddresses, repositoryAddress];
+  // In resume mode the live head already lists the coordinate; the project
+  // template is a no-op republish guard and must not double-add the address.
+  const newAddresses =
+    isUnavailableMember || resume
+      ? [...liveAddresses]
+      : [...liveAddresses, repositoryAddress];
 
   const projectTemplate = buildProjectPatchTemplate({
     liveHead,
@@ -235,5 +260,6 @@ export function buildAddedRepositoryEventTemplatesFromHead({
     },
     repositoryAddress,
     repositoryDtag,
+    resume,
   };
 }

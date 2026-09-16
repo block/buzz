@@ -1,27 +1,38 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
-import 'channel_mutes/channel_mutes_provider.dart';
 
 class ManageChannelSheet extends HookConsumerWidget {
-  final Channel channel;
+  const ManageChannelSheet({
+    super.key,
+    required this.channel,
+    this.canEditDetails = true,
+    this.onChannelUpdated,
+  });
 
-  const ManageChannelSheet({super.key, required this.channel});
+  final Channel channel;
+  final bool canEditDetails;
+  final ValueChanged<Channel>? onChannelUpdated;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final canvasAsync = ref.watch(channelCanvasProvider(channel.id));
+    final nameController = useTextEditingController(text: channel.name);
+    final descriptionController = useTextEditingController(
+      text: channel.description,
+    );
+    useListenable(nameController);
+    useListenable(descriptionController);
+    final canvasController = useTextEditingController();
     final isEditingCanvas = useState(false);
     final isSavingCanvas = useState(false);
-    final isBusy = useState(false);
+    final isSavingDetails = useState(false);
     final actionError = useState<String?>(null);
-    final canvasController = useTextEditingController();
 
     useEffect(() {
       final canvas = canvasAsync.asData?.value;
@@ -31,53 +42,47 @@ class ManageChannelSheet extends HookConsumerWidget {
       return null;
     }, [canvasAsync.asData?.value.content, isEditingCanvas.value]);
 
-    final mutesState = ref.watch(channelMutesProvider);
-    final isMuted = mutesState.store.channels[channel.id]?.muted == true;
-
-    final canJoin =
-        channel.visibility == 'open' &&
-        !channel.isArchived &&
-        !channel.isMember &&
-        !channel.isDm;
-    final canLeave = channel.isMember && !channel.isArchived && !channel.isDm;
+    final canonicalName = nameController.text
+        .trim()
+        .replaceFirst(RegExp(r'^#+'), '')
+        .trim();
+    final description = descriptionController.text.trim();
+    final nameDirty = canonicalName != channel.name.trim();
+    final descriptionDirty = description != channel.description.trim();
+    final canSaveDetails =
+        canEditDetails &&
+        canonicalName.isNotEmpty &&
+        (nameDirty || descriptionDirty) &&
+        !isSavingDetails.value;
     final canEditCanvas = channel.isMember && !channel.isArchived;
 
-    Future<void> joinChannel() async {
-      if (isBusy.value) return;
-      isBusy.value = true;
+    Future<void> saveDetails() async {
+      if (!canSaveDetails) return;
+      isSavingDetails.value = true;
       actionError.value = null;
       try {
-        await ref.read(channelActionsProvider).joinChannel(channel.id);
-        if (context.mounted) {
-          Navigator.of(context).pop(false);
-        }
+        await ref
+            .read(channelActionsProvider)
+            .updateChannel(
+              channelId: channel.id,
+              name: nameDirty ? canonicalName : null,
+              description: descriptionDirty ? description : null,
+            );
+        final updated = channel.copyWith(
+          name: canonicalName,
+          description: description,
+        );
+        onChannelUpdated?.call(updated);
+        if (context.mounted) Navigator.of(context).pop(false);
       } catch (error) {
         actionError.value = error.toString();
       } finally {
-        isBusy.value = false;
-      }
-    }
-
-    Future<void> leaveChannel() async {
-      if (isBusy.value) return;
-      isBusy.value = true;
-      actionError.value = null;
-      try {
-        await ref.read(channelActionsProvider).leaveChannel(channel.id);
-        if (context.mounted) {
-          Navigator.of(context).pop(true);
-        }
-      } catch (error) {
-        actionError.value = error.toString();
-      } finally {
-        isBusy.value = false;
+        isSavingDetails.value = false;
       }
     }
 
     Future<void> saveCanvas() async {
-      if (isSavingCanvas.value) {
-        return;
-      }
+      if (isSavingCanvas.value) return;
       isSavingCanvas.value = true;
       actionError.value = null;
       try {
@@ -87,9 +92,7 @@ class ManageChannelSheet extends HookConsumerWidget {
               channelId: channel.id,
               content: canvasController.text.trim(),
             );
-        if (context.mounted) {
-          isEditingCanvas.value = false;
-        }
+        if (context.mounted) isEditingCanvas.value = false;
       } catch (error) {
         actionError.value = error.toString();
       } finally {
@@ -109,101 +112,59 @@ class ManageChannelSheet extends HookConsumerWidget {
         child: ListView(
           shrinkWrap: true,
           children: [
-            Text('Manage channel', style: context.textTheme.titleMedium),
-            const SizedBox(height: Grid.xxs),
-            Text(
-              'Basic management for ${channel.name}.',
-              style: context.textTheme.bodySmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
+            _ManageChannelTextField(
+              fieldKey: const ValueKey('manage-channel-name'),
+              outlineKey: const ValueKey('manage-channel-name-outline'),
+              controller: nameController,
+              enabled: canEditDetails && !isSavingDetails.value,
+              hintText: 'Channel name',
+              textInputAction: TextInputAction.next,
             ),
-            if (actionError.value case final error?) ...[
-              const SizedBox(height: Grid.xs),
+            const SizedBox(height: Grid.xs),
+            _ManageChannelTextField(
+              fieldKey: const ValueKey('manage-channel-description'),
+              outlineKey: const ValueKey('manage-channel-description-outline'),
+              controller: descriptionController,
+              enabled: canEditDetails && !isSavingDetails.value,
+              hintText: 'Description',
+              minLines: 2,
+              maxLines: 4,
+              textInputAction: TextInputAction.newline,
+            ),
+            if (canonicalName.isEmpty) ...[
+              const SizedBox(height: Grid.half),
               Text(
-                error,
+                'Channel name is required.',
                 style: context.textTheme.bodySmall?.copyWith(
                   color: context.colors.error,
                 ),
               ),
             ],
             const SizedBox(height: Grid.xs),
-            SwitchListTile(
-              title: const Text('Mute channel'),
-              subtitle: const Text('Suppress notifications and unread badges'),
-              secondary: const Icon(LucideIcons.bellOff),
-              contentPadding: EdgeInsets.zero,
-              value: isMuted,
-              onChanged: (value) {
-                if (value) {
-                  ref
-                      .read(channelMutesProvider.notifier)
-                      .muteChannel(channel.id);
-                } else {
-                  ref
-                      .read(channelMutesProvider.notifier)
-                      .unmuteChannel(channel.id);
-                }
-              },
-            ),
-            if (canJoin || canLeave) ...[
-              const SizedBox(height: Grid.xs),
-              Wrap(
-                spacing: Grid.xxs,
-                children: [
-                  if (canJoin)
-                    FilledButton.tonal(
-                      onPressed: isBusy.value ? null : joinChannel,
-                      child: Text(
-                        isBusy.value ? 'Joining\u2026' : 'Join channel',
-                      ),
-                    ),
-                  if (canLeave)
-                    OutlinedButton(
-                      onPressed: isBusy.value ? null : leaveChannel,
-                      child: Text(
-                        isBusy.value ? 'Leaving\u2026' : 'Leave channel',
-                      ),
-                    ),
-                ],
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton(
+                key: const ValueKey('manage-channel-save-details'),
+                onPressed: canSaveDetails ? saveDetails : null,
+                child: Text(isSavingDetails.value ? 'Saving…' : 'Save changes'),
               ),
-            ],
+            ),
             const SizedBox(height: Grid.sm),
-            Text('Context', style: context.textTheme.labelLarge),
-            const SizedBox(height: Grid.xxs),
-            _ContextCard(
-              label: 'Description',
-              value: channel.description,
-              emptyLabel: 'No description set',
-            ),
-            const SizedBox(height: Grid.xxs),
-            _ContextCard(
-              label: 'Topic',
-              value: channel.topic,
-              emptyLabel: 'No topic set',
-            ),
-            const SizedBox(height: Grid.xxs),
-            _ContextCard(
-              label: 'Purpose',
-              value: channel.purpose,
-              emptyLabel: 'No purpose set',
-            ),
-            if (!channel.isDm) ...[
-              const SizedBox(height: Grid.sm),
-              Text('Canvas', style: context.textTheme.labelLarge),
-              const SizedBox(height: Grid.xxs),
-              canvasAsync.when(
+            _ManageChannelSection(
+              label: 'Canvas',
+              child: canvasAsync.when(
                 data: (canvas) {
                   if (isEditingCanvas.value) {
                     return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         TextField(
+                          key: const ValueKey('manage-channel-canvas'),
                           controller: canvasController,
                           maxLines: 8,
                           minLines: 6,
                           decoration: const InputDecoration(
-                            hintText:
-                                'Write your canvas content in Markdown\u2026',
+                            hintText: 'Write your canvas content in Markdown…',
                           ),
                         ),
                         const SizedBox(height: Grid.xxs),
@@ -227,7 +188,7 @@ class ManageChannelSheet extends HookConsumerWidget {
                                   : saveCanvas,
                               child: Text(
                                 isSavingCanvas.value
-                                    ? 'Saving\u2026'
+                                    ? 'Saving…'
                                     : 'Save canvas',
                               ),
                             ),
@@ -238,22 +199,14 @@ class ManageChannelSheet extends HookConsumerWidget {
                   }
 
                   return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(Grid.xs),
-                        decoration: BoxDecoration(
-                          color: context.colors.surfaceContainerHighest,
-                          borderRadius: BorderRadius.circular(Radii.md),
-                        ),
-                        child: Text(
-                          canvas.content?.trim().isNotEmpty == true
-                              ? canvas.content!
-                              : 'No canvas set for this channel.',
-                          style: context.textTheme.bodyMedium?.copyWith(
-                            color: context.colors.onSurfaceVariant,
-                          ),
+                      Text(
+                        canvas.content?.trim().isNotEmpty == true
+                            ? canvas.content!
+                            : 'No canvas set for this channel.',
+                        style: context.textTheme.bodyMedium?.copyWith(
+                          color: context.colors.onSurfaceVariant,
                         ),
                       ),
                       const SizedBox(height: Grid.xxs),
@@ -276,14 +229,23 @@ class ManageChannelSheet extends HookConsumerWidget {
                 loading: () => const Center(
                   child: BuzzLoadingIndicator(
                     size: 40,
-                    semanticLabel: 'Loading channel details',
+                    semanticLabel: 'Loading channel canvas',
                   ),
                 ),
                 error: (error, _) => Text(
-                  error.toString(),
+                  'Couldn’t load the channel canvas.',
                   style: context.textTheme.bodySmall?.copyWith(
                     color: context.colors.error,
                   ),
+                ),
+              ),
+            ),
+            if (actionError.value case final error?) ...[
+              const SizedBox(height: Grid.xxs),
+              Text(
+                error,
+                style: context.textTheme.bodySmall?.copyWith(
+                  color: context.colors.error,
                 ),
               ),
             ],
@@ -294,45 +256,94 @@ class ManageChannelSheet extends HookConsumerWidget {
   }
 }
 
-class _ContextCard extends StatelessWidget {
-  final String label;
-  final String? value;
-  final String emptyLabel;
-
-  const _ContextCard({
-    required this.label,
-    required this.value,
-    required this.emptyLabel,
+class _ManageChannelTextField extends StatelessWidget {
+  const _ManageChannelTextField({
+    required this.fieldKey,
+    required this.outlineKey,
+    required this.controller,
+    required this.enabled,
+    required this.hintText,
+    required this.textInputAction,
+    this.minLines = 1,
+    this.maxLines = 1,
   });
+
+  final Key fieldKey;
+  final Key outlineKey;
+  final TextEditingController controller;
+  final bool enabled;
+  final String hintText;
+  final TextInputAction textInputAction;
+  final int minLines;
+  final int maxLines;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(Grid.xs),
+    return DecoratedBox(
+      key: outlineKey,
       decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(Radii.md),
+        border: Border.all(
+          color: context.colors.outlineVariant.withValues(alpha: 0.8),
+        ),
+        borderRadius: BorderRadius.circular(Radii.card),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: context.textTheme.labelSmall?.copyWith(
+      child: Semantics(
+        label: hintText,
+        textField: true,
+        child: TextField(
+          key: fieldKey,
+          controller: controller,
+          enabled: enabled,
+          minLines: minLines,
+          maxLines: maxLines,
+          style: context.textTheme.bodyLarge,
+          decoration: InputDecoration(
+            hintText: hintText,
+            hintStyle: context.textTheme.bodyLarge?.copyWith(
               color: context.colors.onSurfaceVariant,
-              fontWeight: FontWeight.w600,
+            ),
+            border: InputBorder.none,
+            enabledBorder: InputBorder.none,
+            focusedBorder: InputBorder.none,
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: Grid.xs,
+              vertical: Grid.twelve,
             ),
           ),
-          const SizedBox(height: Grid.half),
-          Text(
-            value?.trim().isNotEmpty == true ? value!.trim() : emptyLabel,
-            style: context.textTheme.bodyMedium?.copyWith(
-              color: context.colors.onSurfaceVariant,
-            ),
-          ),
-        ],
+          textInputAction: textInputAction,
+        ),
       ),
     );
   }
+}
+
+class _ManageChannelSection extends StatelessWidget {
+  const _ManageChannelSection({required this.label, required this.child});
+
+  final String label;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Padding(
+        padding: const EdgeInsets.only(left: Grid.half, bottom: Grid.xxs),
+        child: Text(
+          label,
+          style: context.textTheme.labelMedium?.copyWith(
+            color: context.colors.onSurfaceVariant,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+      Material(
+        color: context.colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(Radii.card),
+        clipBehavior: Clip.antiAlias,
+        child: Padding(padding: const EdgeInsets.all(Grid.xs), child: child),
+      ),
+    ],
+  );
 }

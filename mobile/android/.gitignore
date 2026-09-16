@@ -7,6 +7,7 @@ gradle-wrapper.jar
 GeneratedPluginRegistrant.java
 .cxx/
 /worktree.properties
+/AppOverrides.properties
 
 # Remember to never publicly share your keystore.
 # See https://flutter.dev/to/reference-keystore
