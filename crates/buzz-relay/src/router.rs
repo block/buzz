@@ -24,7 +24,7 @@ use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
-use crate::readiness::{self, DependencyReport, ReadinessReason};
+use crate::readiness::{self, DependencySnapshot, ReadinessReason};
 use crate::state::AppState;
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
@@ -465,29 +465,43 @@ fn status_payload(uptime_secs: u64) -> serde_json::Value {
     })
 }
 
-/// The dependency fields the readiness body used to carry, now diagnostic only.
-fn dependency_diagnostics_payload(report: &DependencyReport) -> serde_json::Value {
-    json!({
-        "postgres": report.postgres_ready(),
-        "redis": report.redis_ready(),
-        "deletion_catalog": report.deletion_catalog_ready(),
-        "reason": report.reason.label(),
-    })
+/// The dependency fields the readiness body used to carry, now a diagnostic
+/// read of the sampler's cache.
+///
+/// `sample` is always present so a reader can never mistake a cached verdict
+/// for a current one: `not_yet_sampled` before the sampler's first evaluation
+/// completes, then `fresh` or `stale` alongside the report's own age.
+fn dependency_diagnostics_payload(snapshot: DependencySnapshot) -> serde_json::Value {
+    let interval_seconds = readiness::DEPENDENCY_SAMPLE_INTERVAL.as_secs();
+    match snapshot {
+        DependencySnapshot::NotYetSampled => json!({
+            "sample": "not_yet_sampled",
+            "sample_interval_seconds": interval_seconds,
+        }),
+        DependencySnapshot::Sampled { report, age, stale } => json!({
+            "sample": if stale { "stale" } else { "fresh" },
+            "sample_interval_seconds": interval_seconds,
+            "sample_age_seconds": age.as_secs(),
+            "postgres": report.postgres_ready(),
+            "redis": report.redis_ready(),
+            "deletion_catalog": report.deletion_catalog_ready(),
+            "reason": report.reason.label(),
+        }),
+    }
 }
 
 /// Status endpoint — service name, version, uptime, intrinsic build identity,
-/// and shared-dependency diagnostics.
+/// and the cached shared-dependency diagnostics.
 ///
 /// Health-listener only, and never wired to a Kubernetes probe: this is where
 /// an operator looks to tell "the pod is fine, Postgres is not" apart from "the
-/// pod is broken". It is the only endpoint that touches the shared pools.
+/// pod is broken". It reads only what
+/// [`readiness::run_dependency_sampler`] has already cached, so however often
+/// it is polled it adds no load to the shared pools.
 async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let report = state
-        .dependency_diagnostics
-        .evaluate(&state.db, &state.redis_pool)
-        .await;
     let mut payload = status_payload(state.started_at.elapsed().as_secs());
-    payload["dependencies"] = dependency_diagnostics_payload(&report);
+    payload["dependencies"] =
+        dependency_diagnostics_payload(state.dependency_diagnostics.snapshot());
     Json(payload)
 }
 
@@ -547,15 +561,18 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+    use crate::readiness::DependencyReport;
 
     struct ScriptedDependencyEvaluator {
         evaluations: Mutex<VecDeque<DependencyReport>>,
+        evaluations_started: std::sync::atomic::AtomicUsize,
     }
 
     impl ScriptedDependencyEvaluator {
         fn new(evaluations: impl IntoIterator<Item = DependencyReport>) -> Self {
             Self {
                 evaluations: Mutex::new(evaluations.into_iter().collect()),
+                evaluations_started: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
@@ -564,6 +581,11 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push_back(evaluation);
+        }
+
+        /// How many times a caller actually reached the shared dependencies.
+        fn evaluations_started(&self) -> usize {
+            self.evaluations_started.load(Ordering::SeqCst)
         }
     }
 
@@ -574,6 +596,7 @@ mod tests {
             _db: &buzz_db::Db,
             _redis_pool: &deadpool_redis::Pool,
         ) -> DependencyReport {
+            self.evaluations_started.fetch_add(1, Ordering::SeqCst);
             self.evaluations
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -797,7 +820,9 @@ mod tests {
     }
 
     /// Dependency health did not disappear with the probe — it moved to the
-    /// diagnostic endpoint, which is never wired to a Kubernetes probe.
+    /// diagnostic endpoint, which is never wired to a Kubernetes probe. The
+    /// fields the readiness body used to carry are still there, now qualified
+    /// by how old the sample behind them is.
     #[tokio::test]
     async fn status_retains_dependency_diagnostics_off_the_probe_path() {
         let evaluator = Arc::new(ScriptedDependencyEvaluator::new([dependency_report(
@@ -806,6 +831,10 @@ mod tests {
             readiness::DeletionCatalogOutcome::Success,
         )]));
         let state = readiness_state(evaluator).await;
+        state
+            .dependency_diagnostics
+            .sample(&state.db, &state.redis_pool)
+            .await;
 
         let (status, payload) = status_request(build_health_router(state)).await;
 
@@ -814,12 +843,220 @@ mod tests {
         assert_eq!(
             payload["dependencies"],
             json!({
+                "sample": "fresh",
+                "sample_interval_seconds": 30,
+                "sample_age_seconds": 0,
                 "postgres": true,
                 "redis": false,
                 "deletion_catalog": true,
                 "reason": "redis_pool_timeout"
             })
         );
+    }
+
+    /// `/_status` is an operator diagnostic, not a dependency driver. Evaluating
+    /// per request let operator curiosity — and anything that polls the
+    /// endpoint — add Postgres, Redis, and deletion-catalog work to a shared
+    /// dependency that is already under pressure, with no bound on how many
+    /// evaluations could be in flight at once. The endpoint reads the cached
+    /// report the per-pod sampler owns and starts nothing.
+    #[tokio::test]
+    async fn status_reads_the_cached_report_and_never_starts_a_dependency_check() {
+        let evaluator = Arc::new(ScriptedDependencyEvaluator::new([ready_report()]));
+        let state = readiness_state(evaluator.clone()).await;
+        let health = build_health_router(state.clone());
+
+        for _ in 0..3 {
+            let (status, payload) = status_request(health.clone()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                payload["dependencies"],
+                json!({
+                    "sample": "not_yet_sampled",
+                    "sample_interval_seconds": 30,
+                }),
+                "before the first sample completes there is no report to serve"
+            );
+        }
+
+        assert_eq!(
+            evaluator.evaluations_started(),
+            0,
+            "a status request must never reach the shared dependencies"
+        );
+
+        // Once the sampler has a report, and only then, the endpoint serves it.
+        state
+            .dependency_diagnostics
+            .sample(&state.db, &state.redis_pool)
+            .await;
+        let (status, payload) = status_request(health).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["dependencies"]["sample"], json!("fresh"));
+        assert_eq!(payload["dependencies"]["reason"], json!("ready"));
+        assert_eq!(
+            evaluator.evaluations_started(),
+            1,
+            "the sampler is the only caller that evaluates"
+        );
+    }
+
+    /// Always answers, recording how many evaluations started and the peak
+    /// number in flight, so a loop test can assert cadence and single-flight
+    /// without a scripted queue to exhaust.
+    struct ObservedDependencyEvaluator {
+        report: DependencyReport,
+        duration: Duration,
+        started: std::sync::atomic::AtomicUsize,
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ObservedDependencyEvaluator {
+        fn new(report: DependencyReport, duration: Duration) -> Self {
+            Self {
+                report,
+                duration,
+                started: std::sync::atomic::AtomicUsize::new(0),
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                peak_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn started(&self) -> usize {
+            self.started.load(Ordering::SeqCst)
+        }
+
+        fn peak_in_flight(&self) -> usize {
+            self.peak_in_flight.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl readiness::DependencyEvaluator for ObservedDependencyEvaluator {
+        async fn evaluate(
+            &self,
+            _db: &buzz_db::Db,
+            _redis_pool: &deadpool_redis::Pool,
+        ) -> DependencyReport {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+            if !self.duration.is_zero() {
+                tokio::time::sleep(self.duration).await;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            self.report
+        }
+    }
+
+    /// Runs the production sampler on a paused clock for `window`, then cancels
+    /// it and returns the evaluator's observations.
+    async fn run_sampler_for(
+        evaluator: Arc<ObservedDependencyEvaluator>,
+        window: Duration,
+    ) -> Arc<ObservedDependencyEvaluator> {
+        let state = readiness_state(evaluator.clone()).await;
+        let cancel = state.dependency_sampler_cancel.clone();
+        let sampler = tokio::spawn(readiness::run_dependency_sampler(
+            state.clone(),
+            cancel.clone(),
+        ));
+        tokio::time::sleep(window).await;
+        cancel.cancel();
+        sampler.await.expect("sampler task");
+        evaluator
+    }
+
+    /// Dependency telemetry must keep describing the shared dependencies whether
+    /// or not anyone reads `/_status`. Request-driven evaluation meant a quiet
+    /// endpoint produced a flat dashboard during the exact outage it existed to
+    /// explain.
+    #[test]
+    fn the_dependency_sampler_emits_telemetry_without_any_request() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused current-thread runtime");
+        let (recorder, handle) = crate::metrics::readiness_test_recorder();
+
+        metrics::with_local_recorder(&recorder, || {
+            crate::metrics::describe_readiness_metrics();
+            runtime.block_on(async {
+                // The first tick fires immediately, then one per cadence.
+                let evaluator = run_sampler_for(
+                    Arc::new(ObservedDependencyEvaluator::new(
+                        ready_report(),
+                        Duration::ZERO,
+                    )),
+                    readiness::DEPENDENCY_SAMPLE_INTERVAL * 3 + Duration::from_secs(1),
+                )
+                .await;
+
+                assert_eq!(evaluator.started(), 4);
+                let rendered = handle.render();
+                assert_eq!(
+                    metric_value(
+                        &rendered,
+                        "buzz_readiness_dependency_checks_total{dependency=\"postgres\",outcome=\"success\"}"
+                    ),
+                    4.0,
+                    "every sampling cycle must publish its dependency outcomes"
+                );
+                assert_eq!(
+                    metric_value(
+                        &rendered,
+                        "buzz_readiness_check_duration_seconds_count{check=\"overall\"}"
+                    ),
+                    4.0
+                );
+                assert!(
+                    !rendered.contains("buzz_readiness_checks_total{"),
+                    "sampling is not a readiness probe and must not move probe telemetry"
+                );
+            });
+        });
+    }
+
+    /// The bound that replaces the request-driven design's lack of one. The
+    /// sampler awaits each evaluation before taking the next tick, so a
+    /// dependency slower than the cadence lowers the sampling rate instead of
+    /// stacking probes on top of the slowness that caused it.
+    #[test]
+    fn the_dependency_sampler_never_runs_two_evaluations_at_once() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused current-thread runtime");
+
+        runtime.block_on(async {
+            let slow = readiness::DEPENDENCY_SAMPLE_INTERVAL * 2 + Duration::from_secs(1);
+            let window = readiness::DEPENDENCY_SAMPLE_INTERVAL * 10;
+            let evaluator = run_sampler_for(
+                Arc::new(ObservedDependencyEvaluator::new(ready_report(), slow)),
+                window,
+            )
+            .await;
+
+            assert_eq!(
+                evaluator.peak_in_flight(),
+                1,
+                "the sampler must own the only in-flight evaluation"
+            );
+            // 61-second evaluations run back to back from t=0 in a 300-second
+            // window: five, not the ten ticks the cadence offered. An
+            // evaluation started per tick regardless of the last one would
+            // have started ten and held several open at once.
+            assert_eq!(evaluator.started(), 5);
+            assert!(
+                evaluator.started()
+                    < (window.as_secs() / readiness::DEPENDENCY_SAMPLE_INTERVAL.as_secs()) as usize,
+                "a slow dependency must throttle sampling, not be sampled on every tick"
+            );
+        });
     }
 
     fn readiness_metric_lines(rendered: &str) -> Vec<&str> {
@@ -845,17 +1082,17 @@ mod tests {
     /// Readiness is lifecycle-only: its counter carries exactly two reasons and
     /// its gauge is the latest private readiness-probe observation, never a
     /// dependency or a transition-owned lifecycle mirror. Dependency families
-    /// are still exported, but only by the diagnostic `/_status` endpoint, and
-    /// public-listener traffic moves nothing.
+    /// are still exported, but only by the per-pod sampler, and neither
+    /// public-listener traffic nor an `/_status` request moves anything.
     #[test]
     fn production_health_routes_export_the_frozen_telemetry_contract() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("current-thread runtime");
-        // Seeded with the first `/_status` evaluation only; the coverage loop
-        // below pushes the rest, one per request, so the evaluator never
-        // serves a report the assertions did not choose.
+        // Seeded with the first sampling cycle only; the coverage loop below
+        // pushes the rest, one per cycle, so the evaluator never serves a
+        // report the assertions did not choose.
         let evaluator = Arc::new(ScriptedDependencyEvaluator::new([ready_report()]));
         let (recorder, handle) = crate::metrics::readiness_test_recorder();
 
@@ -902,9 +1139,15 @@ mod tests {
                     "the probe must not record a dependency latency sample"
                 );
 
-                // Dependency telemetry now belongs to the diagnostic endpoint.
+                // Dependency telemetry now belongs to the sampler; the
+                // endpoint only reads what the sampler cached.
+                state
+                    .dependency_diagnostics
+                    .sample(&state.db, &state.redis_pool)
+                    .await;
                 let (status, payload) = status_request(health.clone()).await;
                 assert_eq!(status, StatusCode::OK);
+                assert_eq!(payload["dependencies"]["sample"], json!("fresh"));
                 assert_eq!(payload["dependencies"]["reason"], json!("ready"));
                 let after_status = handle.render();
                 assert!(
@@ -968,12 +1211,19 @@ mod tests {
                     coverage.into_iter().enumerate()
                 {
                     evaluator.push(dependency_report(postgres, redis, deletion_catalog));
+                    state
+                        .dependency_diagnostics
+                        .sample(&state.db, &state.redis_pool)
+                        .await;
                     let (status, degraded) = status_request(health.clone()).await;
                     assert_eq!(status, StatusCode::OK);
                     if index == 0 {
                         assert_eq!(
                             degraded["dependencies"],
                             json!({
+                                "sample": "fresh",
+                                "sample_interval_seconds": 30,
+                                "sample_age_seconds": 0,
                                 "postgres": false,
                                 "redis": false,
                                 "deletion_catalog": false,
@@ -1041,6 +1291,19 @@ mod tests {
                     0.0
                 );
                 assert!(!final_scrape.contains("sensitive-sql-or-url"));
+                // Freshness is part of the frozen contract: one unlabelled
+                // gauge, published from the second cycle on, so a stalled
+                // sampler is visible from a scrape alone.
+                assert!(final_scrape
+                    .contains("# TYPE buzz_readiness_dependency_sample_age_seconds gauge"));
+                assert_eq!(
+                    final_scrape
+                        .lines()
+                        .filter(|line| line
+                            .starts_with("buzz_readiness_dependency_sample_age_seconds"))
+                        .count(),
+                    1
+                );
 
                 let exported_reasons = final_scrape
                     .lines()
@@ -1050,7 +1313,7 @@ mod tests {
                 assert_eq!(
                     readiness_metric_lines(&final_scrape).len(),
                     readiness::READINESS_RAW_SERIES_PER_POD,
-                    "readiness series contract must stay at or below its 86-series cap"
+                    "readiness series contract must stay at or below its 87-series cap"
                 );
             });
         });

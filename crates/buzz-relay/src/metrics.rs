@@ -310,9 +310,10 @@ pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
 /// Register the frozen readiness and dependency-diagnostic metric descriptions.
 ///
 /// The two `buzz_readiness_*` probe families describe local process lifecycle.
-/// The two dependency families keep their names for dashboard continuity but
-/// are sampled by the diagnostic `/_status` endpoint, not by the Kubernetes
-/// probe — a shared-dependency failure no longer deroutes the pod.
+/// The dependency families keep their names for dashboard continuity but are
+/// published by the per-pod dependency sampler, not by the Kubernetes probe or
+/// by an `/_status` request — a shared-dependency failure no longer deroutes
+/// the pod, and nobody has to read the endpoint for the metrics to move.
 pub(crate) fn describe_readiness_metrics() {
     metrics::describe_counter!(
         "buzz_readiness_checks_total",
@@ -320,16 +321,21 @@ pub(crate) fn describe_readiness_metrics() {
     );
     metrics::describe_counter!(
         "buzz_readiness_dependency_checks_total",
-        "Completed /_status dependency attempts by dependency and bounded outcome"
+        "Completed dependency-sampler attempts by dependency and bounded outcome"
     );
     metrics::describe_histogram!(
         "buzz_readiness_check_duration_seconds",
         metrics::Unit::Seconds,
-        "Completed /_status dependency check duration without outcome label multiplication"
+        "Completed dependency-sampler check duration without outcome label multiplication"
     );
     metrics::describe_gauge!(
         "buzz_readiness_state",
         "Latest private readiness-probe observation, where 1 is ready and 0 is shutting down"
+    );
+    metrics::describe_gauge!(
+        "buzz_readiness_dependency_sample_age_seconds",
+        metrics::Unit::Seconds,
+        "Age of the cached /_status dependency report, absent until the first sample completes"
     );
 }
 

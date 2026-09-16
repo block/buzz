@@ -828,9 +828,12 @@ pub struct AppState {
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
     pub shutting_down: Arc<AtomicBool>,
-    /// Shared-dependency evaluation behind the diagnostic `/_status` endpoint.
-    /// Never consulted by a Kubernetes probe.
+    /// Cached shared-dependency evaluation behind the diagnostic `/_status`
+    /// endpoint, owned by [`crate::readiness::run_dependency_sampler`]. Never
+    /// consulted by a Kubernetes probe, and never evaluated by a request.
     pub(crate) dependency_diagnostics: Arc<crate::readiness::DependencyDiagnostics>,
+    /// Stops only the periodic dependency sampler during graceful shutdown.
+    pub dependency_sampler_cancel: CancellationToken,
     /// Process start time — used by `/_status` endpoint.
     pub started_at: Instant,
     /// Shared, community-scoped NIP-98 replay prevention.
@@ -1034,6 +1037,7 @@ impl AppState {
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             dependency_diagnostics: Arc::new(crate::readiness::DependencyDiagnostics::default()),
+            dependency_sampler_cancel: CancellationToken::new(),
             started_at: Instant::now(),
             nip98_replay,
             gif_http_client,

@@ -1049,6 +1049,19 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         ));
     }
 
+    // Per-pod dependency sampler: the single owner of Postgres/Redis/deletion-
+    // catalog evaluation. It publishes the dependency metrics and caches the
+    // report `/_status` serves, so neither operator polling nor a quiet endpoint
+    // changes how often a shared dependency is probed.
+    {
+        let sampler_state = Arc::clone(&state);
+        let cancel = sampler_state.dependency_sampler_cancel.clone();
+        tokio::spawn(buzz_relay::readiness::run_dependency_sampler(
+            sampler_state,
+            cancel,
+        ));
+    }
+
     // Cross-pod connection-control consumer: receive disconnect commands from
     // Redis pub/sub (published by the pod that recorded a ban) and close any
     // matching local sockets. A member's live connections may land on any pod,
@@ -1222,6 +1235,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 
     serve(router, health_router, Arc::clone(&state)).await?;
     state.community_revalidator_cancel.cancel();
+    state.dependency_sampler_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
     // exit. Uses a CancellationToken so it works regardless of how many

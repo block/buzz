@@ -37,7 +37,8 @@ pub mod nip11;
 pub mod protocol;
 /// Durable NIP-PL matcher and delivery worker.
 pub mod push_runtime;
-mod readiness;
+/// Readiness-probe telemetry and the per-pod dependency sampler behind `/_status`.
+pub mod readiness;
 /// Axum router construction.
 pub mod router;
 /// Shared application state.
