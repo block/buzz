@@ -163,6 +163,9 @@ Widget _composerSuggestionPanel({
   required bool isDmChannel,
   required ValueChanged<Channel> onChannelSelect,
   required ValueChanged<MentionCandidate> onMentionSelect,
+  required bool showMentionOptions,
+  required bool automaticallyMentionAgents,
+  required ValueChanged<bool> onAutomaticallyMentionAgentsChanged,
 }) => channelSuggestions.isNotEmpty
     ? KeyedSubtree(
         key: const ValueKey('channel-suggestions'),
@@ -171,7 +174,7 @@ Widget _composerSuggestionPanel({
           onSelect: onChannelSelect,
         ),
       )
-    : mentionSuggestions.isNotEmpty
+    : showMentionOptions
     ? KeyedSubtree(
         key: const ValueKey('mention-suggestions'),
         child: _MentionSuggestions(
@@ -180,6 +183,9 @@ Widget _composerSuggestionPanel({
           currentPubkey: currentPubkey,
           isDmChannel: isDmChannel,
           onSelect: onMentionSelect,
+          automaticallyMentionAgents: automaticallyMentionAgents,
+          onAutomaticallyMentionAgentsChanged:
+              onAutomaticallyMentionAgentsChanged,
         ),
       )
     : const SizedBox.shrink(key: ValueKey('no-suggestions'));

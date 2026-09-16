@@ -14,6 +14,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
@@ -25,6 +26,7 @@ import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/mentions/auto_mention_preference.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -36,6 +38,7 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/exact_mention_tests.dart';
+part 'compose_bar_test/auto_mention_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -197,6 +200,8 @@ Widget _buildComposeBar({
   ValueChanged<VoidCallback>? onFocusRestorerChanged,
   AppLifecycleNotifier Function()? appLifecycle,
   String composeBarKey = 'compose-bar',
+  String? threadHeadId,
+  List<String> initialAgentMentionPubkeys = const [],
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
 }) {
@@ -260,6 +265,8 @@ Widget _buildComposeBar({
                 final composeBar = ComposeBar(
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
+                  threadHeadId: threadHeadId,
+                  initialAgentMentionPubkeys: initialAgentMentionPubkeys,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
                   onFocusRequested: onFocusRequested,
@@ -649,6 +656,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 
 void main() {
   exactMentionTests();
+  autoMentionTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {

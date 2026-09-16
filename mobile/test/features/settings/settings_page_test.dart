@@ -2,6 +2,7 @@ import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/mentions/auto_mention_preference.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
@@ -14,6 +15,44 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  testWidgets('persists the automatic agent mention setting', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            invitePageBuilder: (_) => const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('settings-automatic-agent-mentions'));
+    final toggle = find.byKey(
+      const ValueKey('settings-automatic-agent-mentions-switch'),
+    );
+    expect(row, findsOneWidget);
+    expect(find.text('Automatically mention agents'), findsOneWidget);
+    expect(
+      find.text('Address selected agents in thread replies'),
+      findsOneWidget,
+    );
+    expect(tester.widget<Switch>(toggle).value, isFalse);
+
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<Switch>(toggle).value, isTrue);
+    expect(prefs.getBool(automaticallyMentionAgentsKey), isTrue);
+  });
+
   testWidgets('shows the persisted per-community push opt-in on iOS', (
     tester,
   ) async {
@@ -52,7 +91,17 @@ void main() {
       find.byKey(const ValueKey('push-notifications-enabled')),
       findsOneWidget,
     );
-    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    expect(
+      tester
+          .widget<Switch>(
+            find.descendant(
+              of: find.byKey(const ValueKey('push-notifications-enabled')),
+              matching: find.byType(Switch),
+            ),
+          )
+          .value,
+      isTrue,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -97,7 +146,17 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    expect(
+      tester
+          .widget<Switch>(
+            find.descendant(
+              of: find.byKey(const ValueKey('push-notifications-enabled')),
+              matching: find.byType(Switch),
+            ),
+          )
+          .value,
+      isTrue,
+    );
     expect(
       find.text('Enabled in Buzz, but disabled in iOS Settings'),
       findsOneWidget,

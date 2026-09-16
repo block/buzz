@@ -107,7 +107,10 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.text('Unavailable in this build'), findsOneWidget);
-        expect(find.byType(Switch), findsNothing);
+        expect(
+          find.byKey(const ValueKey('push-notifications-enabled')),
+          findsNothing,
+        );
         expect(tester.takeException(), isNull);
         debugDefaultTargetPlatformOverride = null;
       },
