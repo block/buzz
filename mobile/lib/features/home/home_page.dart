@@ -15,6 +15,7 @@ import '../activity/activity_page.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channels_page.dart';
+import '../channels/thread_detail_page.dart';
 import '../channels/thread_detail_target.dart';
 import '../search/search_page.dart';
 

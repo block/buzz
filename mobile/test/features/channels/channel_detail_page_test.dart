@@ -3820,7 +3820,7 @@ void main() {
           messages: [root, reply],
           home: ThreadDetailPaneScope(
             onOpenThread: (target) => selectedThread = target,
-            child: const ChannelDetailPage(channel: _testChannel),
+            child: ChannelDetailPage(channel: _testChannel),
           ),
         ),
       );
