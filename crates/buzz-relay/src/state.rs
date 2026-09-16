@@ -778,6 +778,20 @@ pub struct AppState {
     /// byte-identically to a relay without the mesh. Access via
     /// [`AppState::mesh`].
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
+
+    /// NIP-FI federated-identity assertion verifier.
+    ///
+    /// `None` when `config.nip_fi.mode` is `Off`. When present, the verifier
+    /// is shared across all connections and is the single authority for
+    /// assertion validation at WebSocket upgrade. The backing `ProductionJwksSource`
+    /// is also shared and performs bounded periodic JWKS refresh internally.
+    pub nip_fi_verifier:
+        Option<Arc<buzz_auth::FederatedAssertionVerifier<Arc<buzz_auth::ProductionJwksSource>>>>,
+
+    /// The shared JWKS source backing `nip_fi_verifier`, exposed so `main.rs`
+    /// can warm it at startup and drive the background refresh loop.
+    /// `None` iff `nip_fi_verifier` is `None`.
+    pub nip_fi_jwks_source: Option<Arc<buzz_auth::ProductionJwksSource>>,
 }
 
 impl AppState {
@@ -866,6 +880,8 @@ impl AppState {
         let gif_http_client = crate::api::gifs::build_gif_http_client();
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
+        // Build NIP-FI components before moving config into the state Arc.
+        let (nip_fi_verifier, nip_fi_jwks_source) = build_nip_fi_components(&config);
         let state = Self {
             config: Arc::new(config),
             db,
@@ -955,6 +971,8 @@ impl AppState {
             // `crates/buzz-test-client` once those land).
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
+            nip_fi_verifier,
+            nip_fi_jwks_source,
         };
         (
             state,
@@ -1369,6 +1387,64 @@ impl AuditShutdownHandle {
     }
 }
 
+/// Construct the NIP-FI assertion verifier + JWKS source from `config.nip_fi`.
+///
+/// Returns `(None, None)` when the mode is `Off`. In `Enforce` or
+/// `DenyProtected` mode, constructs a `ProductionJwksSource` (shared via `Arc`)
+/// and a `FederatedAssertionVerifier` over a clone of that `Arc`. Both are
+/// returned so `main.rs` can warm and periodically refresh the source while the
+/// relay uses the verifier for every WebSocket upgrade check.
+///
+/// Named return type for [`build_nip_fi_components`].
+///
+/// Using a type alias avoids the `clippy::type_complexity` lint and names
+/// the NIP-FI component pair as a first-class concept.
+type NipFiComponents = (
+    Option<Arc<buzz_auth::FederatedAssertionVerifier<Arc<buzz_auth::ProductionJwksSource>>>>,
+    Option<Arc<buzz_auth::ProductionJwksSource>>,
+);
+
+/// The source starts empty; admission returns `authorization_unavailable`
+/// (503) until the startup warm in `main.rs` succeeds for at least one issuer.
+/// This is intentional: config validity must not be hostage to IdP availability
+/// at boot. [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
+fn build_nip_fi_components(config: &crate::config::Config) -> NipFiComponents {
+    use buzz_auth::{FederatedAssertionVerifier, HttpJwksFetcher, NipFiMode, ProductionJwksSource};
+
+    if matches!(
+        config.nip_fi.mode,
+        NipFiMode::Off | NipFiMode::DenyProtected
+    ) {
+        // Off and DenyProtected carry no JWKS config; no verifier needed.
+        // DenyProtected always returns 503 at the gate — the verifier is never
+        // consulted — so constructing one would be both wasteful and noisy.
+        return (None, None);
+    }
+
+    let source =
+        match ProductionJwksSource::new(config.nip_fi.jwks_configs.clone(), HttpJwksFetcher::new())
+        {
+            Some(s) => Arc::new(s),
+            None => {
+                // Configs were validated at startup; None here means the issuer
+                // list was empty, which validate_nip_fi_config would have caught.
+                // Treat as unrecoverable mis-state.
+                tracing::error!(
+                    "nip-fi: ProductionJwksSource construction returned None despite \
+                 passing startup validation — enforcement unavailable"
+                );
+                return (None, None);
+            }
+        };
+
+    let verifier = Arc::new(FederatedAssertionVerifier::new(
+        config.nip_fi.registry.clone(),
+        Arc::clone(&source),
+    ));
+
+    (Some(verifier), Some(source))
+}
+
 /// Log a single audit entry with metrics. Extracted so the normal loop
 /// and the post-cancel drain share the same logic.
 async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::NewAuditEntry) {
@@ -1678,6 +1754,7 @@ pub(crate) mod tests {
         let conn_id = Uuid::new_v4();
         let (tx, _rx) = mpsc::channel(1);
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
 
@@ -1692,9 +1769,13 @@ pub(crate) mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx: tx.clone(),
             ctrl_tx,
+            terminal_ctrl_tx,
             cancel: cancel.clone(),
             backpressure_count: Arc::clone(&bp),
             grace_limit: 3,
+            nip_fi_assertion: None,
+            session_deadline: None,
+            nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
         };
 
         let mgr = ConnectionManager::new();
