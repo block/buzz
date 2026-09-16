@@ -18,6 +18,10 @@ class ComposeBar extends HookConsumerWidget {
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
   final String? rootId;
+
+  /// Signed thread-head recipients; only currently recognized member agents
+  /// may seed an opted-in, empty reply draft.
+  final List<String> initialAgentMentionPubkeys;
   const ComposeBar({
     super.key,
     required this.channelId,
@@ -25,6 +29,7 @@ class ComposeBar extends HookConsumerWidget {
     this.hintText,
     this.threadHeadId,
     this.rootId,
+    this.initialAgentMentionPubkeys = const [],
     this.focusNode,
     this.onFocusRestorerChanged,
     this.onFocusRequested,
@@ -87,6 +92,15 @@ class ComposeBar extends HookConsumerWidget {
     );
     final voiceNoteRef = useRef(voiceNote)..value = voiceNote;
     final mentionMap = useRef(<String, MentionCandidate>{});
+    final automaticallyMentionAgents = ref.watch(autoMentionAgentsProvider);
+    final automaticPrefix = useRef('');
+    final automaticMentions = useMemoized(_AutomaticAgentMentions.new);
+    final isModifyingText = useRef(false);
+    useEffect(() {
+      automaticPrefix.value = '';
+      automaticMentions.seed('', const []);
+      return null;
+    }, [draftIdentity, draftKey]);
     _useComposeDraftLifecycle(
       mentionMap: mentionMap,
       ref: ref,
@@ -245,6 +259,19 @@ class ComposeBar extends HookConsumerWidget {
     // owners so @mention suggestions show names ("managed by …" included).
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
+    _useInitialAgentMentions(
+      controller: controller,
+      mentionMap: mentionMap,
+      automaticPrefix: automaticPrefix,
+      automaticMentions: automaticMentions,
+      isModifyingText: isModifyingText,
+      identity: '$draftIdentity:$draftKey',
+      enabled: automaticallyMentionAgents && threadHeadId != null,
+      pubkeys: initialAgentMentionPubkeys,
+      members: membersAsync.asData?.value,
+      userCache: userCache,
+      owners: agentOwners ?? const {},
+    );
     final agentMentionLabels = _agentMentionLabels(bindings: mentionMap.value);
     final agentMentionLabelsKey = (agentMentionLabels.toList()..sort()).join(
       '\u0000',
@@ -285,8 +312,22 @@ class ComposeBar extends HookConsumerWidget {
 
     // Typing indicator broadcast — throttled to one event per 3 seconds.
     final lastTypingSentMs = useRef(0);
-    final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
+    useEffect(() {
+      void observe() => automaticMentions.observe(controller.text);
+      controller.addListener(observe);
+      return () => controller.removeListener(observe);
+    }, [controller, automaticMentions]);
+    ref.listen(autoMentionAgentsProvider, (previous, enabled) {
+      if (enabled || automaticPrefix.value.isEmpty) return;
+      automaticPrefix.value = '';
+      isModifyingText.value = true;
+      try {
+        controller.value = automaticMentions.removeFrom(controller.value);
+      } finally {
+        isModifyingText.value = false;
+      }
+    });
 
     // Detect @mention query and broadcast typing on text / selection change.
     useEffect(() {
@@ -446,11 +487,26 @@ class ComposeBar extends HookConsumerWidget {
       focusNode.requestFocus();
     }
 
-    void clearComposer() {
+    void clearComposer({
+      Map<String, MentionCandidate> retainedAgents = const {},
+    }) {
       draftRevision.value += 1;
-      controller.clear();
       attachments.value = [];
-      mentionMap.value.clear();
+      mentionMap.value
+        ..clear()
+        ..addAll(retainedAgents);
+      final prefix = retainedAgents.keys.map((label) => '@$label ').join();
+      automaticPrefix.value = prefix;
+      automaticMentions.seed(prefix, retainedAgents.keys);
+      isModifyingText.value = true;
+      try {
+        controller.value = TextEditingValue(
+          text: prefix,
+          selection: TextSelection.collapsed(offset: prefix.length),
+        );
+      } finally {
+        isModifyingText.value = false;
+      }
       mentionQuery.value = null;
       channelQuery.value = null;
       attachmentSurface.value = _AttachmentSurface.closed;
@@ -466,7 +522,8 @@ class ComposeBar extends HookConsumerWidget {
     // Send the message.
     Future<void> send() async {
       final text = controller.text.trim();
-      if ((text.isEmpty && !hasAttachments) ||
+      if (((text.isEmpty || text == automaticPrefix.value.trim()) &&
+              !hasAttachments) ||
           isSending.value ||
           uploadingCount.value > 0) {
         return;
@@ -517,6 +574,42 @@ class ComposeBar extends HookConsumerWidget {
         return;
       }
       final outgoing = _OutgoingMentions(selectedMentions);
+      // Retain visible, exact-key bindings only. Deleting a mention opts that
+      // agent out; humans and stale/non-notifying recipients never carry over.
+      final retainedAgentBindings = <String, MentionCandidate>{};
+      final selectedByKey = {for (final c in selectedMentions) c.pubkey: c};
+      for (final occurrence in mentionOccurrences(
+        text,
+        mentionMap.value.keys,
+      )) {
+        final binding = mentionMap.value.entries
+            .where(
+              (entry) =>
+                  entry.key.toLowerCase() == occurrence.label.toLowerCase(),
+            )
+            .firstOrNull;
+        final candidate = selectedByKey[binding?.value.pubkey];
+        if (binding != null && candidate != null && candidate.isAgent) {
+          retainedAgentBindings[binding.key] = candidate;
+        }
+      }
+      void clearSubmittedComposer() => clearComposer(
+        retainedAgents:
+            threadHeadId != null && ref.read(autoMentionAgentsProvider)
+            ? {
+                for (final entry in retainedAgentBindings.entries)
+                  if (outgoing.pubkeys.contains(entry.value.pubkey))
+                    entry.key: entry.value,
+              }
+            : const {},
+      );
+      void preserveRestoredDraft() {
+        // A failed send restores the submitted draft, not the generated next
+        // reply. Keep that retry text intact when the preference changes.
+        automaticPrefix.value = '';
+        automaticMentions.seed('', const []);
+      }
+
       final scan = await _scanNonMemberMentions(
         ref,
         channelId: channelId,
@@ -560,7 +653,8 @@ class ComposeBar extends HookConsumerWidget {
             draftRevision: draftRevision,
             submittedDraftRevision: submittedDraftRevision,
             focusNode: focusNode,
-            clearComposer: clearComposer,
+            clearComposer: clearSubmittedComposer,
+            onDraftRestored: preserveRestoredDraft,
             addMentionedNonMembers: addMentionedNonMembers,
             payload: _ComposeDraftPayload.fromDraft(
               text: text,
@@ -579,7 +673,7 @@ class ComposeBar extends HookConsumerWidget {
         final draftMentions = Map<String, MentionCandidate>.of(
           mentionMap.value,
         );
-        clearComposer();
+        clearSubmittedComposer();
         final clearedDraftRevision = draftRevision.value;
         uploadingCount.value += 1;
         uploadProgress.value = 0;
@@ -637,6 +731,7 @@ class ComposeBar extends HookConsumerWidget {
                 ..clear()
                 ..addAll(draftMentions);
               controller.value = draftText;
+              preserveRestoredDraft();
               focusNode.requestFocus();
             }
           } finally {
@@ -915,6 +1010,21 @@ class ComposeBar extends HookConsumerWidget {
       isDmChannel: isDmChannel,
       onChannelSelect: insertChannel,
       onMentionSelect: insertMention,
+      showMentionOptions: mentionQuery.value != null,
+      automaticallyMentionAgents: automaticallyMentionAgents,
+      onAutomaticallyMentionAgentsChanged: (enabled) async {
+        try {
+          await ref
+              .read(autoMentionAgentsProvider.notifier)
+              .setEnabled(enabled);
+        } catch (error) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(_composeSendErrorMessage(error))),
+            );
+          }
+        }
+      },
     );
     Widget buildOverlayPanel(_AttachmentSurface surface) {
       return _composerAttachmentPanel(
@@ -1027,7 +1137,10 @@ class ComposeBar extends HookConsumerWidget {
                 showFormatting.value = true;
               },
               hasPendingUploads: hasPendingUploads,
-              canSend: composerText.trim().isNotEmpty || hasAttachments,
+              canSend:
+                  (composerText.trim().isNotEmpty &&
+                      composerText.trim() != automaticPrefix.value.trim()) ||
+                  hasAttachments,
               isSending: isSending.value,
             ),
           ),

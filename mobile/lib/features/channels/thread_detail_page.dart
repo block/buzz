@@ -943,6 +943,10 @@ class ThreadDetailPage extends HookConsumerWidget {
                         hintText: 'Reply in thread\u2026',
                         threadHeadId: threadHead.id,
                         rootId: effectiveRootId,
+                        initialAgentMentionPubkeys: [
+                          for (final tag in threadHead.tags)
+                            if (tag.length > 1 && tag[0] == 'p') tag[1],
+                        ],
                         onFocusRequested: followThreadTailFromComposer,
                         onSend:
                             (

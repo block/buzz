@@ -8,6 +8,7 @@ Future<void> _sendTextOnlyDraft({
   required int submittedDraftRevision,
   required FocusNode focusNode,
   required VoidCallback clearComposer,
+  required VoidCallback onDraftRestored,
   required Future<void> Function() addMentionedNonMembers,
   required _ComposeDraftPayload payload,
   required _OutgoingMentions outgoing,
@@ -30,6 +31,7 @@ Future<void> _sendTextOnlyDraft({
       ..clear()
       ..addAll(clearedDraftMentions);
     controller.value = clearedDraftText;
+    onDraftRestored();
     focusNode.requestFocus();
   }
 
@@ -126,6 +128,9 @@ void _useComposeDraftLifecycle({
       for (final e in mentionMap.value.entries) e.key: e.value.pubkey,
     };
     void persistDraft() {
+      // Hydrating another scope can notify the previous scope's listener
+      // before its effect cleanup runs. Never save that new text as this draft.
+      if (lastDraftIdentity.value != identity) return;
       final text = controller.text;
       if (text != lastPersistedText) {
         // Prune before the atomic snapshot, not in a later editor listener.

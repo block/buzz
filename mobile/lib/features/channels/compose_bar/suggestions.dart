@@ -6,6 +6,8 @@ class _MentionSuggestions extends StatelessWidget {
   final String? currentPubkey;
   final bool isDmChannel;
   final void Function(MentionCandidate) onSelect;
+  final bool automaticallyMentionAgents;
+  final ValueChanged<bool> onAutomaticallyMentionAgentsChanged;
 
   const _MentionSuggestions({
     required this.suggestions,
@@ -13,6 +15,8 @@ class _MentionSuggestions extends StatelessWidget {
     required this.currentPubkey,
     required this.isDmChannel,
     required this.onSelect,
+    required this.automaticallyMentionAgents,
+    required this.onAutomaticallyMentionAgentsChanged,
   });
 
   @override
@@ -31,10 +35,20 @@ class _MentionSuggestions extends StatelessWidget {
         child: ListView.separated(
           shrinkWrap: true,
           padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-          itemCount: suggestions.length,
+          itemCount: suggestions.length + 1,
           separatorBuilder: (_, _) => const SizedBox.shrink(),
           itemBuilder: (context, index) {
-            final candidate = suggestions[index];
+            if (index == 0) {
+              return SwitchListTile.adaptive(
+                key: const ValueKey('automatically-mention-agents'),
+                title: const Text('Automatically mention agents'),
+                subtitle: const Text('Keep selected agents in your next reply'),
+                value: automaticallyMentionAgents,
+                onChanged: onAutomaticallyMentionAgentsChanged,
+                dense: true,
+              );
+            }
+            final candidate = suggestions[index - 1];
             final name = candidate.label;
             final avatarUrl =
                 candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
