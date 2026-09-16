@@ -247,7 +247,7 @@ fn has_all_starter_channels(channels: &[ChannelInfo]) -> bool {
 
 async fn ensure_starter_channel_memberships(
     state: &AppState,
-    keys: &nostr::Keys,
+    keys: &crate::enterprise_identity::SigningIdentity,
     channels: &mut [ChannelInfo],
 ) -> Result<(), String> {
     for spec in STARTER_CHANNELS {
@@ -329,7 +329,7 @@ pub async fn create_channel(
     // whoever `state.keys` holds once the network round-trip completes. An
     // in-process identity swap while the request is in flight must not be
     // able to retarget the mark onto the new identity.
-    let creator_keys = state.signing_keys()?;
+    let creator_keys = state.signing_identity()?;
     let creator_pubkey = creator_keys.public_key().to_hex();
     submit_event_with_keys(builder, &state, &creator_keys, None).await?;
 
@@ -367,7 +367,7 @@ pub async fn ensure_starter_channels(
     let mut existing_channels =
         fetch_channels(&state, DirectoryScope::IncludeOpenDirectory).await?;
     let relay_scope = relay_api_base_url_with_override(&state);
-    let creator_keys = state.signing_keys()?;
+    let creator_keys = state.signing_identity()?;
     let creator_pubkey = creator_keys.public_key().to_hex();
     let mut starter_ids = Vec::with_capacity(STARTER_CHANNELS.len());
     let mut created_ids = std::collections::HashSet::new();
@@ -545,7 +545,7 @@ pub async fn add_channel_members(
     let uuid = parse_channel_uuid(&channel_id)?;
     let relay_base = relay_api_base_url_with_override(&state);
     assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
-    let signing_keys = state.signing_keys()?;
+    let signing_keys = state.signing_identity()?;
     assert_expected_signer(
         expected_signer_pubkey.as_deref(),
         &signing_keys.public_key().to_hex(),

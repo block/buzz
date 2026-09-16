@@ -108,7 +108,7 @@ fn run_batch_sync_with_keys(
         plan.pre_dropped,
         identity_pk,
         relay_url,
-        owner_keys,
+        Some(owner_keys),
         0,
         conn,
     )
@@ -772,7 +772,7 @@ mod real_relay {
             plan.pre_dropped,
             &identity_pk,
             &relay_url,
-            &owner_keys,
+            Some(&owner_keys),
             0,
             &conn,
         )

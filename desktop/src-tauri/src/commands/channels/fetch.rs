@@ -198,10 +198,7 @@ pub(super) async fn fetch_channels(
     #[cfg(debug_assertions)]
     let _profile_start = std::time::Instant::now();
 
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = { state.public_key()?.to_hex() };
 
     // Channels this identity created whose kind:39002 membership hasn't yet
     // propagated. Under member-only scope they are the only non-member

@@ -107,11 +107,11 @@ pub struct ActiveWorkspaceInfo {
 /// Returns the current active workspace info (relay URL + pubkey).
 #[tauri::command]
 pub fn get_active_workspace(state: State<'_, AppState>) -> Result<ActiveWorkspaceInfo, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
+    let pubkey = state.public_key()?;
     let relay_url = relay::relay_ws_url_with_override(&state);
     Ok(ActiveWorkspaceInfo {
         relay_url,
-        pubkey: keys.public_key().to_hex(),
+        pubkey: pubkey.to_hex(),
     })
 }
 
@@ -158,6 +158,21 @@ pub async fn apply_workspace(
     app: AppHandle,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
+    if crate::enterprise_identity::enabled() {
+        let identity = state.signing_identity()?;
+        let crate::enterprise_identity::SigningIdentity::Corporate(_) = identity else {
+            return Err("Corporate login required".into());
+        };
+        let current = crate::relay::relay_ws_url_with_override(&state);
+        if nsec.is_some() || relay_url.trim_end_matches('/') != current.trim_end_matches('/') {
+            return Err(
+                "This enterprise build uses its corporate community and cannot import local keys"
+                    .into(),
+            );
+        }
+        return Ok(());
+    }
+
     // Take the generation only after entering the serialized transaction. An
     // apply that is already running remains authoritative until it releases
     // the lock; the next apply then advances the generation. This keeps every

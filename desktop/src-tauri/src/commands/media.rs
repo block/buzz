@@ -342,7 +342,16 @@ pub(crate) fn sign_blossom_get_auth_header(
 /// Safety contract: callers must only attach the returned header to URLs
 /// constructed from (or validated against) the app's own relay base URL —
 /// never to third-party origins, where the bearer token would leak.
-pub(crate) fn mint_media_get_auth(state: &AppState, base_url: &str) -> Option<String> {
+pub(crate) async fn mint_media_get_auth(state: &AppState, base_url: &str) -> Option<String> {
+    if crate::enterprise_identity::enabled() {
+        return state
+            .signing_identity()
+            .ok()?
+            .media_read(base_url)
+            .await
+            .ok();
+    }
+
     let keys = match state.signing_keys() {
         Ok(k) => k,
         Err(e) => {
@@ -423,7 +432,25 @@ async fn do_upload(
         300
     };
     let base_url = relay_api_base_url_with_override(state);
-    let auth_event = {
+    let auth_event = if crate::enterprise_identity::enabled() {
+        let now = Timestamp::now().as_secs();
+        let server = extract_server_authority(&base_url).ok_or("Invalid relay authority")?;
+        let tags = vec![
+            vec!["t".to_owned(), "upload".into()],
+            vec!["x".into(), sha256.clone()],
+            vec!["server".into(), server],
+            vec!["expiration".into(), (now + 300).to_string()],
+        ];
+        let tags = tags
+            .into_iter()
+            .map(Tag::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        state
+            .signing_identity()?
+            .sign(EventBuilder::new(Kind::from(24242), "Upload buzz-media").tags(tags))
+            .await?
+    } else {
         let keys = state.signing_keys()?;
         sign_blossom_upload_auth(&keys, &sha256, expiry_secs, &base_url)?
     };

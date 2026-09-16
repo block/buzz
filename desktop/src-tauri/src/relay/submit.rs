@@ -17,8 +17,9 @@ pub async fn submit_signed_event_at_with_keys(
     event: &nostr::Event,
     state: &AppState,
     api_base_url: &str,
-    keys: &nostr::Keys,
+    keys: impl Into<crate::enterprise_identity::SigningIdentity>,
 ) -> Result<SubmitEventResponse, String> {
+    let keys = keys.into();
     if event.pubkey != keys.public_key() {
         return Err("signed event does not match the publishing identity".to_string());
     }
@@ -26,7 +27,7 @@ pub async fn submit_signed_event_at_with_keys(
     let url = format!("{}/events", api_base_url.trim_end_matches('/'));
     let body_bytes = event.as_json().into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "relay event submit")?;
-    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    let auth_header = keys.nip98(&Method::POST, &url, &body_bytes).await?;
 
     let response = state
         .http_client
@@ -59,12 +60,11 @@ pub async fn submit_event_at_with_keys(
     builder: nostr::EventBuilder,
     state: &AppState,
     api_base_url: &str,
-    keys: &nostr::Keys,
+    keys: impl Into<crate::enterprise_identity::SigningIdentity>,
 ) -> Result<SubmitEventResponse, String> {
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| format!("failed to sign event: {e}"))?;
-    submit_signed_event_at_with_keys(&event, state, api_base_url, keys).await
+    let keys = keys.into();
+    let event = keys.sign(builder).await?;
+    submit_signed_event_at_with_keys(&event, state, api_base_url, &keys).await
 }
 
 /// Build and submit an event to the currently active workspace relay.
@@ -73,7 +73,7 @@ pub async fn submit_event(
     state: &AppState,
 ) -> Result<SubmitEventResponse, String> {
     let api_base_url = relay_api_base_url_with_override(state);
-    let keys = state.signing_keys()?;
+    let keys = state.signing_identity()?;
     submit_event_at_with_keys(builder, state, &api_base_url, &keys).await
 }
 
@@ -98,13 +98,12 @@ pub async fn submit_event_at_created_at(
     builder: nostr::EventBuilder,
     state: &AppState,
     api_base_url: &str,
-    keys: &nostr::Keys,
+    keys: impl Into<crate::enterprise_identity::SigningIdentity>,
 ) -> Result<(SubmitEventResponse, i64), String> {
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| format!("failed to sign event: {e}"))?;
+    let keys = keys.into();
+    let event = keys.sign(builder).await?;
     let created_at = event.created_at.as_secs() as i64;
-    let result = submit_signed_event_at_with_keys(&event, state, api_base_url, keys).await?;
+    let result = submit_signed_event_at_with_keys(&event, state, api_base_url, &keys).await?;
     Ok((result, created_at))
 }
 

@@ -36,6 +36,23 @@ export class Nip07UnavailableError extends Error {
 }
 
 let ephemeralSecretKey: Uint8Array | null = null;
+let enterpriseSigner: Pick<Nip07Provider, "signEvent"> | null = null;
+let signerGeneration = 0;
+
+/** Install before connecting. Null explicitly selects self-custody, not enterprise logout. Stores no credentials. */
+export function configureEnterpriseSigner(
+  signer: Pick<Nip07Provider, "signEvent"> | null,
+): void {
+  signerGeneration++;
+  enterpriseSigner = signer;
+  ephemeralSecretKey?.fill(0);
+  ephemeralSecretKey = null;
+}
+
+/** Durable membership may use either corporate custody or a user-owned NIP-07 identity. */
+export function hasDurableSigner(): boolean {
+  return enterpriseSigner !== null || hasNip07Provider();
+}
 
 function getEphemeralSecretKey(): Uint8Array {
   if (!ephemeralSecretKey) {
@@ -78,6 +95,15 @@ export async function signNostrEvent(
     created_at: template.created_at ?? Math.floor(Date.now() / 1000),
   };
   const provider = typeof window === "undefined" ? undefined : window.nostr;
+
+  if (enterpriseSigner) {
+    const generation = signerGeneration;
+    const signed = await enterpriseSigner.signEvent(unsigned);
+    if (generation !== signerGeneration) {
+      throw new Error("Enterprise identity changed while signing.");
+    }
+    return signed;
+  }
 
   if (provider) {
     const expectedPubkey = await provider.getPublicKey();

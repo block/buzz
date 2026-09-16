@@ -1,3 +1,4 @@
+import '../../shared/auth/enterprise_identity.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -332,7 +333,7 @@ abstract class VoiceNotePlayerController extends ChangeNotifier {
 
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   });
 
@@ -468,7 +469,8 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
        _client = client,
        _temporaryDirectory = temporaryDirectory ?? getTemporaryDirectory,
        _requiresAuthenticatedLocalFile =
-           requiresAuthenticatedLocalFile ?? Platform.isIOS,
+           requiresAuthenticatedLocalFile ??
+           (Platform.isIOS || enterpriseEnabled),
        _downloadTimeout = downloadTimeout,
        _maxDownloadBytes = maxDownloadBytes,
        _player = player ?? _DeviceVoiceNoteAudioPlayerBackend() {
@@ -524,7 +526,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
   VoiceNotePlaybackState _state = const VoiceNotePlaybackState();
   ({
     String url,
-    Map<String, String> Function() headers,
+    FutureOr<Map<String, String>> Function() headers,
     Duration fallbackDuration,
   })?
   _pendingRemote;
@@ -560,7 +562,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) {
     _replaceSource();
@@ -604,11 +606,14 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
         if (!requestAbort.isCompleted) requestAbort.complete();
         return null;
       }
-      final request = http.AbortableStreamedRequest(
-        'GET',
-        uri,
-        abortTrigger: requestAbort.future,
-      )..headers.addAll(remote.headers());
+      final request =
+          http.AbortableStreamedRequest(
+              'GET',
+              uri,
+              abortTrigger: requestAbort.future,
+            )
+            ..followRedirects = false
+            ..headers.addAll(await remote.headers());
       final response = await _client
           .send(request)
           .timeout(
@@ -838,7 +843,8 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
           }
         } else {
           await _load(
-            () => _player.setUrl(remote.url, headers: remote.headers()),
+            () async =>
+                _player.setUrl(remote.url, headers: await remote.headers()),
             fallbackDuration: remote.fallbackDuration,
             sourceGeneration: sourceGeneration,
             playbackOperationGeneration: playbackOperationGeneration,

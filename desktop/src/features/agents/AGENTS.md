@@ -389,3 +389,12 @@ matches the code is worse than no rule; a new pattern that isn't written down
 here will be broken by the next agent that never learns it existed. Reviewers:
 treat a config-behavior diff without a matching AGENTS.md diff (or an explicit
 "no rules changed" note) as incomplete.
+
+## Enterprise identity builds
+
+`Identity.storage === "enterprise"` identifies a release-selected corporate signer.
+The first enterprise build does not export or delegate its private key: local
+managed-agent creation/start and runtime-start commands fail before side effects,
+launch restore is disabled, and Agents shows that limitation instead of local
+management controls. Independently operated relay agents remain usable through
+normal community permissions; do not apply an owner-only clamp to mentions.

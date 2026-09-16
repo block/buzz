@@ -561,7 +561,7 @@ pub async fn start_archive_sync(
     epoch: u64,
     lease: u64,
 ) -> Result<(), String> {
-    let keys = state.signing_keys()?;
+    let keys = state.signing_identity()?;
     let relay_url = crate::relay::relay_ws_url_with_override(&state);
     let scope = (keys.public_key().to_hex(), relay_url.clone());
 

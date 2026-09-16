@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../relay/nostr_models.dart';
+import '../auth/enterprise_identity.dart';
 import 'huddle_wire.dart';
 
 /// Immutable connection inputs for one Huddle audio WebSocket.
@@ -37,7 +38,7 @@ final class HuddleConnectionParameters {
     }
     _validateUuid(parentChannelId, 'parentChannelId');
     _validateUuid(ephemeralChannelId, 'ephemeralChannelId');
-    if (nsec.trim().isEmpty) {
+    if (!enterpriseEnabled && nsec.trim().isEmpty) {
       throw ArgumentError.value(nsec, 'nsec', 'must not be empty');
     }
   }
@@ -56,6 +57,36 @@ final class HuddleConnectionParameters {
 
 /// Fixed NIP-42 + Huddle auth envelope used after the audio relay challenge.
 abstract final class HuddleAuthV2 {
+  static Future<Map<String, dynamic>> buildMessageAsync({
+    required HuddleConnectionParameters parameters,
+    required String challenge,
+    int? createdAt,
+  }) async {
+    if (!enterpriseEnabled) {
+      return buildMessage(
+        parameters: parameters,
+        challenge: challenge,
+        createdAt: createdAt,
+      );
+    }
+    final event = await signClientEvent(
+      nsec: null,
+      kind: 22242,
+      content: '',
+      createdAt: createdAt,
+      tags: [
+        ['relay', parameters.relayWebSocketUrl],
+        ['challenge', challenge],
+      ],
+    );
+    return {
+      'type': 'auth',
+      'event': event.toMap(),
+      'parent_channel_id': parameters.parentChannelId,
+      'protocol_version': HuddleWireV2.protocolVersion,
+    };
+  }
+
   static Map<String, dynamic> buildMessage({
     required HuddleConnectionParameters parameters,
     required String challenge,
