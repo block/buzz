@@ -796,6 +796,8 @@ pub fn run() {
             close_huddle_companion,
             open_huddle_window,
             popout_window::open_popout_window,
+            popout_window::list_popout_windows,
+            popout_window::focus_popout_window,
             pin_webview::pin_webview_show,
             pin_webview::pin_webview_hide,
             pin_webview::pin_webview_hide_all,
@@ -922,6 +924,14 @@ pub fn run() {
                     eprintln!("buzz-desktop: failed to hide main window: {error}");
                 }
             }
+        }
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Destroyed,
+            ..
+        } if label.starts_with("popout-") => {
+            playground_webview::close_playgrounds_for_window(app_handle, &label);
+            popout_window::emit_popout_windows_changed(app_handle);
         }
         RunEvent::WindowEvent {
             label,

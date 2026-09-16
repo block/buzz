@@ -18,6 +18,7 @@ import {
 } from "@/features/channels/readState/readStateFormat";
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
+import { usePopoutThreadOnlyLayout } from "@/features/popout/lib/popoutLayout";
 import { WelcomeAgentCreateDialog } from "@/features/channels/ui/WelcomeAgentCreateDialog";
 import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
@@ -693,10 +694,12 @@ export function ChannelScreen({
   const isNarrowPanelViewport =
     channelContentWidthPx > 0 &&
     channelContentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
+  const isPopoutThreadOnly = usePopoutThreadOnlyLayout();
   const isSinglePanelView =
-    isNarrowPanelViewport &&
-    activeChannel?.channelType !== "forum" &&
-    hasAuxiliaryPanel;
+    isPopoutThreadOnly ||
+    (isNarrowPanelViewport &&
+      activeChannel?.channelType !== "forum" &&
+      hasAuxiliaryPanel);
   const shouldCompactHeaderActions =
     hasAuxiliaryPanel &&
     channelContentWidthPx > 0 &&

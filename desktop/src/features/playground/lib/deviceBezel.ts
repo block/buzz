@@ -250,16 +250,31 @@ export function playgroundDeviceNubGutter(
  * Native WKWebView bounds come from the inner screen host, never the outer
  * bezel box. `viewport` is the published CSS size when the host may not have
  * finished layout.
+ *
+ * Native WKWebView always paints on top of HTML. Clamp y to the bottom of
+ * playground chrome so Desktop/Responsive/Mobile cannot sit under the page.
+ * Desktop fills the remaining host; mobile/responsive keep published viewport.
  */
 export function readPlaygroundStageBounds(
   el: HTMLElement,
   viewport?: { width: number; height: number },
+  chrome?: Element | null,
 ): { x: number; y: number; width: number; height: number } {
   const rect = el.getBoundingClientRect();
+  const chromeEl =
+    chrome ??
+    el
+      .closest?.('[data-testid="playground-overlay"]')
+      ?.querySelector('[data-testid="playground-chrome"]');
+  const chromeBottom = chromeEl?.getBoundingClientRect().bottom;
+  const y =
+    typeof chromeBottom === "number" ? Math.max(rect.y, chromeBottom) : rect.y;
+  const bottom =
+    typeof rect.bottom === "number" ? rect.bottom : rect.y + rect.height;
   return {
     x: rect.x,
-    y: rect.y,
+    y,
     width: viewport?.width ?? rect.width,
-    height: viewport?.height ?? rect.height,
+    height: viewport?.height ?? Math.max(0, bottom - y),
   };
 }

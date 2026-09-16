@@ -331,7 +331,7 @@ export function AuxiliaryPanelHeaderActions({
 function AuxiliaryPanelHeaderCloseAction() {
   const panelContext = React.useContext(AuxiliaryPanelContext);
 
-  if (!panelContext?.onClose) {
+  if (!panelContext?.onClose || panelContext.allowClose === false) {
     return null;
   }
 

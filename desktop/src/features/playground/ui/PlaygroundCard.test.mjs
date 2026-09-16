@@ -28,6 +28,7 @@ before(() => {
       observe() {}
       disconnect() {}
     },
+    self: dom.window,
     window: dom.window,
   });
   installLocalStorage(dom.window.localStorage);
@@ -52,32 +53,65 @@ afterEach(async () => {
 
 after(() => dom.window.close());
 
-async function renderCard() {
+async function renderCard(cardData = card) {
   const { createElement } = await import("react");
   const { render, screen } = await import("@testing-library/react");
   const { PlaygroundCard } = await import("./PlaygroundCard.tsx");
+  const {
+    Outlet,
+    RouterProvider,
+    createMemoryHistory,
+    createRootRoute,
+    createRoute,
+    createRouter,
+  } = await import("@tanstack/react-router");
   const { configurePlaygroundScope } = await import("../lib/sessions.ts");
   configurePlaygroundScope("pub", "wss://relay.example.com");
-  render(createElement(PlaygroundCard, { card }));
+  const rootRoute = createRootRoute({
+    component: Outlet,
+  });
+  const indexRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/",
+    component: () => createElement(PlaygroundCard, { card: cardData }),
+  });
+  const router = createRouter({
+    defaultPendingMs: 0,
+    routeTree: rootRoute.addChildren([indexRoute]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await router.load();
+  render(createElement(RouterProvider, { router }));
   return screen;
 }
 
-test("Open sits to the right of the body, not as a footer-only action", async () => {
+test("Pin / Open / Open as Split sit below the text and right-justify", async () => {
   const screen = await renderCard();
   const cardEl = screen.getByTestId("playground-card");
   assert.equal(cardEl.getAttribute("data-orientation"), "horizontal");
+  assert.match(cardEl.className, /items-start/);
+  const name = screen.getByTestId("playground-card-name");
+  const url = screen.getByTestId("playground-card-url");
+  const pin = screen.getByTestId("playground-card-pin-action");
   const open = screen.getByTestId("playground-card-open");
+  const split = screen.getByTestId("playground-card-open-split");
   assert.equal(open.textContent, "Open");
-  const body = screen
-    .getByTestId("playground-card-name")
-    .closest("[data-slot='attachment-content']");
+  assert.equal(pin.textContent, "Pin");
+  assert.equal(split.textContent, "Open as Split");
+  assert.equal(split.disabled, true);
+  const body = name.closest("[data-slot='attachment-content']");
   const actions = open.closest("[data-slot='attachment-actions']");
   assert.ok(body);
   assert.ok(actions);
-  assert.equal(body.parentElement, cardEl);
-  assert.equal(actions.parentElement, cardEl);
-  const children = [...cardEl.children];
-  assert.ok(children.indexOf(actions) > children.indexOf(body));
+  assert.ok(body.contains(url));
+  assert.ok(actions.contains(pin));
+  assert.ok(actions.contains(open));
+  assert.ok(actions.contains(split));
+  assert.match(actions.className, /justify-end/);
+  assert.equal(body.parentElement, actions.parentElement);
+  assert.notEqual(actions.parentElement, cardEl);
+  assert.match(actions.parentElement.className, /flex-col/);
+  assert.ok(body.compareDocumentPosition(actions) & 4);
 });
 
 test("Open probes first: down means toast and no ghost row", async () => {
@@ -104,7 +138,7 @@ test("Open probes first: down means toast and no ghost row", async () => {
   );
 });
 
-test("Open on a new sid probes and creates a session", async () => {
+test("Pin on a new sid probes and creates a session", async () => {
   const { fireEvent, waitFor } = await import("@testing-library/react");
   const { listPlaygroundSessions } = await import("../lib/sessions.ts");
   const screen = await renderCard();
@@ -114,12 +148,12 @@ test("Open on a new sid probes and creates a session", async () => {
     return { up: true, status: 200 };
   };
 
-  await fireEvent.click(screen.getByTestId("playground-card-open"));
+  await fireEvent.click(screen.getByTestId("playground-card-pin-action"));
   await waitFor(() => assert.equal(listPlaygroundSessions().length, 1));
   assert.equal(probed, 1);
 });
 
-test("Open on an existing sid shows it and does not probe again", async () => {
+test("Pin on an existing sid shows it and does not probe again", async () => {
   const { fireEvent, waitFor } = await import("@testing-library/react");
   const {
     addPlaygroundSession,
@@ -140,7 +174,7 @@ test("Open on an existing sid shows it and does not probe again", async () => {
     return { up: true, status: 200 };
   };
 
-  await fireEvent.click(screen.getByTestId("playground-card-open"));
+  await fireEvent.click(screen.getByTestId("playground-card-pin-action"));
   await waitFor(() => assert.equal(getActivePlaygroundSid(), "demo-1"));
   assert.equal(listPlaygroundSessions().length, 1);
   assert.equal(probed, 0);
@@ -191,13 +225,8 @@ test("PIN copy button writes the pin, not the URL", async () => {
 });
 
 test("PIN is hidden when omitted and Open still works", async () => {
-  const { createElement } = await import("react");
-  const { render, screen } = await import("@testing-library/react");
-  const { PlaygroundCard } = await import("./PlaygroundCard.tsx");
-  const { configurePlaygroundScope } = await import("../lib/sessions.ts");
-  configurePlaygroundScope("pub", "wss://relay.example.com");
   const { pin: _pin, ...withoutPin } = card;
-  render(createElement(PlaygroundCard, { card: withoutPin }));
+  const screen = await renderCard(withoutPin);
   assert.equal(screen.queryByTestId("playground-card-pin"), null);
   assert.equal(screen.queryByTestId("playground-card-copy-pin"), null);
   assert.equal(screen.getByTestId("playground-card-open").textContent, "Open");

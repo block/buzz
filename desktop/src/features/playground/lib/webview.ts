@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
   MIN_PLAYGROUND_WEBVIEW_EDGE,
@@ -22,6 +23,21 @@ function isNativePlaygroundRuntime(): boolean {
   return isTauri() || import.meta.env.MODE === "e2e";
 }
 
+function currentWindowLabel(): string {
+  if (!isTauri()) return "main";
+  try {
+    return getCurrentWindow().label || "main";
+  } catch {
+    return "main";
+  }
+}
+
+function withWindowLabel(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...args, windowLabel: currentWindowLabel() };
+}
+
 async function invokePlayground<T>(
   command: string,
   args: Record<string, unknown>,
@@ -30,11 +46,32 @@ async function invokePlayground<T>(
   if (!isNativePlaygroundRuntime()) {
     return fallback;
   }
-  return invoke<T>(command, args);
+  return invoke<T>(command, withWindowLabel(args));
 }
 
 export function playgroundWebviewId(sid: string): string {
   return `${PLAYGROUND_WEBVIEW_PREFIX}${sid}`;
+}
+
+/**
+ * Native child label for a playground on a specific window.
+ * Main stays `playground-{sid}`; other windows use `playground-{sid}--{window}`.
+ */
+export function playgroundWebviewLabelForWindow(
+  sid: string,
+  windowLabel = "main",
+): string {
+  const cleaned = windowLabel.trim() || "main";
+  if (cleaned === "main") return playgroundWebviewId(sid);
+  return `${PLAYGROUND_WEBVIEW_PREFIX}${sid}--${cleaned}`;
+}
+
+/** True when this hide/close invoke targets the caller's current window. */
+export function playgroundHideCloseIsWindowScoped(
+  args: Record<string, unknown>,
+  windowLabel: string,
+): boolean {
+  return args.windowLabel === windowLabel;
 }
 
 export function isPlaygroundInspectTarget(webviewId: string): boolean {
@@ -79,7 +116,7 @@ export async function hidePlaygroundWebview(sid: string): Promise<void> {
 
 export async function hideAllPlaygroundWebviews(): Promise<void> {
   if (!isNativePlaygroundRuntime()) return;
-  await invoke("playground_webview_hide_all");
+  await invoke("playground_webview_hide_all", withWindowLabel({}));
 }
 
 export async function setPlaygroundWebviewBounds(
@@ -96,12 +133,12 @@ export async function setPlaygroundWebviewBounds(
 
 export async function closePlaygroundWebview(sid: string): Promise<void> {
   if (!isNativePlaygroundRuntime()) return;
-  await invoke("playground_webview_close", { sid });
+  await invoke("playground_webview_close", withWindowLabel({ sid }));
 }
 
 export async function closeAllPlaygroundWebviews(): Promise<void> {
   if (!isNativePlaygroundRuntime()) return;
-  await invoke("playground_webview_close_all");
+  await invoke("playground_webview_close_all", withWindowLabel({}));
 }
 
 export async function inspectPlaygroundWebview(

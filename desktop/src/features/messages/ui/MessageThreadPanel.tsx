@@ -1,6 +1,7 @@
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
+import { usePopoutThreadOnlyLayout } from "@/features/popout/lib/popoutLayout";
 import { ConversationPopoutMenu } from "@/features/popout/ui/ConversationPopoutMenu";
 
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
@@ -225,9 +226,12 @@ export function MessageThreadPanel({
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
   const threadHeadId = threadHead?.id ?? null;
+  const isPopoutThreadOnly = usePopoutThreadOnlyLayout();
   useEscapeKey(
     onClose,
-    !isHuddleTranscript && (isOverlay || isSinglePanelView || isFocusMode),
+    !isHuddleTranscript &&
+      !isPopoutThreadOnly &&
+      (isOverlay || isSinglePanelView || isFocusMode),
   );
   const hasConstrainedColumn = columnMaxWidthPx != null;
   // Whether the composer dock trades its quiet-state spacer for the
@@ -908,7 +912,7 @@ export function MessageThreadPanel({
         enterMotion={enterMotion ?? !isFocusMode}
         footer={threadFooter}
         header={
-          isHuddleTranscript ? undefined : (
+          isHuddleTranscript || isPopoutThreadOnly ? undefined : (
             <MessageThreadPanelHeader
               headerLeading={headerLeading}
               headerTitle={headerTitle}
@@ -929,6 +933,7 @@ export function MessageThreadPanel({
             />
           )
         }
+        allowClose={!isPopoutThreadOnly}
         isSinglePanelView={isSinglePanelView}
         layout={layout}
         onClose={onClose}

@@ -4,6 +4,7 @@ export type AuxiliaryPanelMode = "docked" | "panel" | "single-panel";
 export type AuxiliaryPanelLayout = "standalone" | "split";
 
 export type AuxiliaryPanelContextValue = {
+  allowClose?: boolean;
   isFloatingOverlay: boolean;
   isOverlay: boolean;
   isSinglePanelView: boolean;

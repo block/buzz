@@ -56,6 +56,7 @@ import {
   withAccentPreviewVars,
 } from "@/shared/theme/useThemePreviewVars";
 import { appearanceCommunityLabel } from "../lib/appearanceScopeCopy";
+import { WindowsSettings } from "@/features/popout/ui/WindowsSettings";
 import {
   AccentPickerContent,
   ConversationDisplaySettings,
@@ -811,6 +812,13 @@ function ThemeSettingsCard() {
           <ConversationDisplaySettings />
           <LinkPreviewStyleSetting />
           <ThreadLayoutSetting />
+        </SettingsOptionGroup>
+
+        <SettingsOptionGroup
+          data-testid="windows-settings-card"
+          title="Windows"
+        >
+          <WindowsSettings />
         </SettingsOptionGroup>
       </SettingsOptionGroupList>
     </section>

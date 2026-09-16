@@ -1,5 +1,10 @@
 import { getStorageItem, setStorageItem } from "@/shared/lib/safeStorage";
 import { hideAllPinWebviews } from "@/features/pinned-sites/lib/pinWebview";
+import {
+  dismissEmbeddedWindow,
+  getActiveEmbeddedWindow,
+  registerEmbedOpenHandler,
+} from "@/features/popout/lib/embeddedWindows";
 import type { PlaygroundCard } from "./types";
 import { playgroundSessionsMatchingCard } from "./updates";
 import {
@@ -130,6 +135,7 @@ export function addPlaygroundSession(card: PlaygroundCard): PlaygroundSession {
   store.overlaySid = session.sid;
   persist();
   emit();
+  dismissEmbeddedWindow();
   void hideAllPinWebviews();
   return session;
 }
@@ -148,6 +154,7 @@ export function showPlaygroundSession(sid: string) {
   store.overlaySid = sid;
   persist();
   emit();
+  dismissEmbeddedWindow();
   void hideAllPinWebviews();
 }
 
@@ -170,32 +177,82 @@ export function notePlaygroundCard(card: PlaygroundCard) {
 }
 
 /**
- * Park the overlay, then run a left-nav destination. Safe when no overlay
- * is open. Does not dispose the session row.
+ * Park overlay and in-main embed, then run a left-nav destination. Safe
+ * when nothing is showing. Does not dispose the session row.
  */
 export function parkPlaygroundThen(select: () => void): () => void {
   return () => {
-    dismissPlayground();
+    parkPlaygroundHost();
     select();
   };
 }
 
+/**
+ * Park whatever is hosting a playground in the main window: overlay and/or
+ * active embed. Always hides the native webview for the parked sid so
+ * navigate-away cannot leave an orphan WKWebView when overlaySid was already
+ * null (embed-only / split-embed path).
+ */
+export function parkPlaygroundHost(): void {
+  const overlaySid = store.overlaySid;
+  const embed = getActiveEmbeddedWindowSafe();
+  const embedSid = embed?.payload.playground?.sid ?? null;
+  if (store.overlaySid != null) {
+    store.overlaySid = null;
+    persist();
+    emit();
+  }
+  dismissEmbeddedWindow();
+  const sid = overlaySid ?? embedSid;
+  // Prefer the known sid, then hide every playground on this window so an
+  // in-flight show that races dismiss cannot leave an orphan topmost WKWebView.
+  if (sid) void hidePlaygroundWebview(sid);
+  void hideAllPlaygroundWebviews();
+  void hideAllPinWebviews();
+  notifyPinRestore();
+}
+
+/**
+ * Dismiss the visible playground host (overlay and/or in-main embed).
+ * Same teardown as navigate-away park — chrome X must not clear React state
+ * while leaving a native child painted.
+ */
 export function dismissPlayground() {
+  parkPlaygroundHost();
+}
+
+/** Clear only the overlay sid — used when opening an embed so we do not
+ * immediately park the embed we just activated. */
+export function dismissOverlayPlayground() {
   const sid = store.overlaySid;
+  if (sid == null) return;
   store.overlaySid = null;
   persist();
   emit();
-  if (sid) void hidePlaygroundWebview(sid);
+  void hidePlaygroundWebview(sid);
   notifyPinRestore();
 }
 
 export function disposePlayground(sid: string) {
+  const embed = getActiveEmbeddedWindowSafe();
+  if (embed?.payload.playground?.sid === sid) {
+    dismissEmbeddedWindow();
+  }
   store.sessions.delete(sid);
   if (store.overlaySid === sid) store.overlaySid = null;
   persist();
   emit();
   void closePlaygroundWebview(sid);
+  void hideAllPinWebviews();
   notifyPinRestore();
+}
+
+function getActiveEmbeddedWindowSafe() {
+  try {
+    return getActiveEmbeddedWindow();
+  } catch {
+    return null;
+  }
 }
 
 function notifyPinRestore() {
@@ -226,8 +283,10 @@ if (import.meta.env.MODE === "test") {
     addPlaygroundSession,
     hasPlaygroundSession,
     parkPlaygroundThen,
+    parkPlaygroundHost,
     showPlaygroundSession,
     dismissPlayground,
+    dismissOverlayPlayground,
     disposePlayground,
     listPlaygroundSessions,
     getActivePlaygroundSid,
@@ -238,3 +297,5 @@ if (import.meta.env.MODE === "test") {
     notePlaygroundCard,
   };
 }
+
+registerEmbedOpenHandler(dismissOverlayPlayground);

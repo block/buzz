@@ -2,7 +2,8 @@
 //! Linux CI cannot compile AppKit; keep presentation policy tests host-free.
 
 use super::{
-    apply_bounds, playground_label, PlaygroundBounds, PlaygroundWebviewManager, APP_WEBVIEW_LABEL,
+    apply_bounds, playground_webview_label, PlaygroundBounds, PlaygroundWebviewManager,
+    APP_WEBVIEW_LABEL,
 };
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Webview};
@@ -123,7 +124,7 @@ pub fn unlock_main_window_size(app: &AppHandle) {
     let _ = window.set_max_size(None::<tauri::LogicalSize<f64>>);
 }
 
-fn reapply_last_bounds(app: &AppHandle, sid: &str) {
+fn reapply_last_bounds(app: &AppHandle, sid: &str, window_label: &str) {
     let Some(manager) = app.try_state::<PlaygroundWebviewManager>() else {
         return;
     };
@@ -134,11 +135,11 @@ fn reapply_last_bounds(app: &AppHandle, sid: &str) {
     });
     if let Some(bounds) = bounds.as_ref() {
         let keep = clamp_webview_bounds_to_stage(bounds, bounds);
-        let _ = apply_bounds(app, sid, &keep);
+        let _ = apply_bounds(app, sid, window_label, &keep);
     }
 }
 
-pub fn schedule_inspect_stage_restore(app: AppHandle, sid: String) {
+pub fn schedule_inspect_stage_restore(app: AppHandle, sid: String, window_label: String) {
     tauri::async_runtime::spawn(async move {
         // show() creates the frontend asynchronously. detach() is a no-op
         // until that page exists, so re-detach during the open settle, then
@@ -147,14 +148,14 @@ pub fn schedule_inspect_stage_restore(app: AppHandle, sid: String) {
         // main window; the frame was locked before show.
         for delay_ms in [16_u64, 50, 200, 500] {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            reapply_last_bounds(&app, &sid);
-            redetach_macos_inspector(&app, &sid);
+            reapply_last_bounds(&app, &sid, &window_label);
+            redetach_macos_inspector(&app, &sid, &window_label);
         }
         loop {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            reapply_last_bounds(&app, &sid);
-            if !playground_inspector_is_visible(&app, &sid) {
-                reapply_last_bounds(&app, &sid);
+            reapply_last_bounds(&app, &sid, &window_label);
+            if !playground_inspector_is_visible(&app, &sid, &window_label) {
+                reapply_last_bounds(&app, &sid, &window_label);
                 unlock_main_window_size(&app);
                 break;
             }
@@ -162,8 +163,8 @@ pub fn schedule_inspect_stage_restore(app: AppHandle, sid: String) {
     });
 }
 
-pub fn playground_inspector_is_visible(app: &AppHandle, sid: &str) -> bool {
-    let Some(webview) = app.get_webview(&playground_label(sid)) else {
+pub fn playground_inspector_is_visible(app: &AppHandle, sid: &str, window_label: &str) -> bool {
+    let Some(webview) = app.get_webview(&playground_webview_label(sid, window_label)) else {
         return false;
     };
     inspector_is_visible(&webview)
@@ -181,10 +182,10 @@ fn inspector_is_visible(webview: &Webview) -> bool {
     }
 }
 
-fn redetach_macos_inspector(app: &AppHandle, sid: &str) {
+fn redetach_macos_inspector(app: &AppHandle, sid: &str, window_label: &str) {
     #[cfg(target_os = "macos")]
     {
-        let Some(webview) = app.get_webview(&playground_label(sid)) else {
+        let Some(webview) = app.get_webview(&playground_webview_label(sid, window_label)) else {
             return;
         };
         let _ = webview.with_webview(|platform| {
@@ -205,7 +206,7 @@ fn redetach_macos_inspector(app: &AppHandle, sid: &str) {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, sid);
+        let _ = (app, sid, window_label);
     }
 }
 

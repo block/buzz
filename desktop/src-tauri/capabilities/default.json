@@ -3,7 +3,7 @@
   "identifier": "default",
   "description": "Capability for the main window, huddle companions, and pop-out windows",
   "windows": ["huddle-*", "popout-*"],
-  "webviews": ["main"],
+  "webviews": ["main", "playground-*"],
   "permissions": [
     "core:default",
     "core:webview:allow-set-webview-zoom",

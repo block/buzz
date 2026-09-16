@@ -8,6 +8,7 @@ import {
   PLAYGROUND_OPAQUE_FILL_STYLE,
   PLAYGROUND_OVERLAY_SURFACE_CLASS,
   PLAYGROUND_DOCKED_OVERLAY_CLASS,
+  PLAYGROUND_SPLIT_PANE_OVERLAY_CLASS,
   PLAYGROUND_DOCK_RESIZE_HANDLE_CLASS,
   PLAYGROUND_RESIZE_HANDLE_CLASS,
   PLAYGROUND_RESIZE_HANDLE_GUTTER_CLASS,
@@ -18,9 +19,20 @@ import {
   playgroundFullscreenTitlebarGapClass,
   playgroundOverlayPlacementClass,
   playgroundOverlaySurfaceIsOpaque,
+  playgroundChromeLayoutFlags,
   playgroundResizeHandleSitsOutsideHost,
+  playgroundShowsTitlebarGap,
   playgroundStageLayoutKey,
 } from "./overlayLayout.ts";
+
+test("titlebar gap shows only for fullscreen, not locked pop-outs", () => {
+  assert.equal(playgroundShowsTitlebarGap(false), false);
+  assert.equal(playgroundShowsTitlebarGap(false, null), false);
+  assert.equal(playgroundShowsTitlebarGap(true), true);
+  assert.equal(playgroundShowsTitlebarGap(false, "window"), false);
+  assert.equal(playgroundShowsTitlebarGap(false, "dock"), false);
+  assert.equal(playgroundShowsTitlebarGap(true, "dock"), true);
+});
 
 test("fullscreen titlebar gap matches the app chrome strip", () => {
   assert.equal(
@@ -54,6 +66,14 @@ test("overlay surface is fully opaque", () => {
     PLAYGROUND_DOCKED_OVERLAY_CLASS,
   );
   assert.equal(
+    playgroundOverlayPlacementClass("dock", true),
+    PLAYGROUND_SPLIT_PANE_OVERLAY_CLASS,
+  );
+  assert.doesNotMatch(PLAYGROUND_SPLIT_PANE_OVERLAY_CLASS, /absolute/);
+  assert.match(PLAYGROUND_SPLIT_PANE_OVERLAY_CLASS, /relative/);
+  assert.match(PLAYGROUND_SPLIT_PANE_OVERLAY_CLASS, /shrink-0/);
+  assert.match(PLAYGROUND_SPLIT_PANE_OVERLAY_CLASS, /pr-2/);
+  assert.equal(
     playgroundOverlayPlacementClass("window"),
     PLAYGROUND_WINDOWED_OVERLAY_CLASS,
   );
@@ -62,6 +82,10 @@ test("overlay surface is fully opaque", () => {
     true,
   );
   assert.equal(playgroundOverlaySurfaceIsOpaque(PLAYGROUND_CHROME_CLASS), true);
+  assert.match(PLAYGROUND_CHROME_CLASS, /flex-col/);
+  assert.match(PLAYGROUND_CHROME_CLASS, /shrink-0/);
+  assert.match(PLAYGROUND_CHROME_CLASS, /overflow-visible/);
+  assert.doesNotMatch(PLAYGROUND_CHROME_CLASS, /overflow-hidden/);
   assert.doesNotMatch(PLAYGROUND_CHROME_CLASS, /backdrop-blur|\/\d+/);
   assert.equal(
     playgroundOverlaySurfaceIsOpaque("absolute inset-0 z-30 bg-background/95"),
@@ -150,4 +174,37 @@ test("stage layout key changes when fullscreen or dock toggles", () => {
     playgroundStageLayoutKey(true, 0),
     playgroundStageLayoutKey(true, 1),
   );
+});
+
+test("locked chrome hides dispose/dock; OS pop-out hides dismiss; embed keeps it", () => {
+  assert.deepEqual(playgroundChromeLayoutFlags(), {
+    hideDispose: false,
+    hideDock: false,
+    hideDismiss: false,
+    showFullscreen: true,
+  });
+  assert.deepEqual(playgroundChromeLayoutFlags("window"), {
+    hideDispose: true,
+    hideDock: true,
+    hideDismiss: false,
+    showFullscreen: false,
+  });
+  assert.deepEqual(playgroundChromeLayoutFlags("window", { isOsPopout: true }), {
+    hideDispose: true,
+    hideDock: true,
+    hideDismiss: true,
+    showFullscreen: false,
+  });
+  assert.deepEqual(playgroundChromeLayoutFlags("dock"), {
+    hideDispose: true,
+    hideDock: true,
+    hideDismiss: false,
+    showFullscreen: true,
+  });
+  assert.deepEqual(playgroundChromeLayoutFlags("dock", { isOsPopout: true }), {
+    hideDispose: true,
+    hideDock: true,
+    hideDismiss: true,
+    showFullscreen: true,
+  });
 });

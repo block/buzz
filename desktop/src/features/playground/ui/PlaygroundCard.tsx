@@ -5,8 +5,14 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { deriveShellRoute } from "@/app/AppShell.helpers";
-import { openPopoutWindow } from "@/features/popout/lib/popoutWindow";
-import { playgroundConversationFromRoute } from "@/features/playground/lib/conversation";
+import {
+  openPopoutWindow,
+  popoutErrorMessage,
+} from "@/features/popout/lib/popoutWindow";
+import {
+  playgroundConversationFromRoute,
+  playgroundConversationHasOpenThread,
+} from "@/features/playground/lib/conversation";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import {
@@ -103,9 +109,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
         if (!(await ensureUp())) return;
         addPlaygroundSession(card);
       } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Playground is down.",
-        );
+        toast.error(popoutErrorMessage(error, "Playground is down."));
       } finally {
         setBusy(false);
       }
@@ -128,27 +132,28 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
           playground: card,
         });
       } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Could not open playground.",
-        );
+        toast.error(popoutErrorMessage(error, "Could not open playground."));
       } finally {
         setBusy(false);
       }
     })();
   }
 
+  const isThreadConversation =
+    playgroundConversationHasOpenThread(conversation);
+
   function handleOpenAsSplit() {
-    if (!conversation) {
-      toast.error("Open a channel or thread first.");
+    const threadId = conversation?.draftKey.startsWith("thread:")
+      ? conversation.draftKey.slice("thread:".length)
+      : undefined;
+    if (!conversation || !threadId) {
+      toast.error("Open a thread first.");
       return;
     }
     if (!host) {
       void openPlaygroundInBrowser(card.url);
       return;
     }
-    const threadId = conversation.draftKey.startsWith("thread:")
-      ? conversation.draftKey.slice("thread:".length)
-      : undefined;
     setBusy(true);
     void (async () => {
       try {
@@ -156,15 +161,13 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
         await openPopoutWindow({
           kind: "split",
           title: card.name,
-          seed: `${card.sid}-${conversation.channelId}`,
+          seed: `${card.sid}-${conversation.channelId}-${threadId}`,
           channelId: conversation.channelId,
-          ...(threadId ? { threadId } : {}),
+          threadId,
           playground: card,
         });
       } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Could not open split.",
-        );
+        toast.error(popoutErrorMessage(error, "Could not open split."));
       } finally {
         setBusy(false);
       }
@@ -185,94 +188,99 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
   }
 
   return (
-    <Attachment className="my-2 max-w-md" data-testid="playground-card">
+    <Attachment
+      className="my-2 max-w-md items-start"
+      data-testid="playground-card"
+    >
       <AttachmentMedia>
         <AppWindow />
       </AttachmentMedia>
-      <AttachmentContent>
-        <AttachmentTitle data-testid="playground-card-name">
-          {card.name}
-        </AttachmentTitle>
-        <a
-          className="block truncate text-xs leading-4 text-muted-foreground hover:text-foreground hover:underline"
-          data-testid="playground-card-url"
-          href={card.url}
-          onClick={handleUrlClick}
-          rel="noopener noreferrer"
-        >
-          {card.url}
-        </a>
-        {pin || card.stack ? (
-          <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
-            {pin ? (
-              <>
-                PIN{" "}
-                <span
-                  className="font-mono text-foreground"
-                  data-testid="playground-card-pin"
-                >
-                  {pin}
-                </span>
-                <button
-                  aria-label="Copy PIN"
-                  className="inline-flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-                  data-testid="playground-card-copy-pin"
-                  onClick={handleCopyPin}
-                  type="button"
-                >
-                  <Copy className="h-3 w-3" />
-                </button>
-              </>
-            ) : null}
-            {card.stack ? (
-              <>
-                {pin ? " " : null}·{" "}
-                <span data-testid="playground-card-stack">{card.stack}</span>
-              </>
-            ) : null}
-          </p>
-        ) : null}
-      </AttachmentContent>
-      <AttachmentActions className="flex-wrap justify-end">
-        <Button
-          data-testid="playground-card-pin-action"
-          disabled={busy}
-          onClick={(event) => {
-            event.stopPropagation();
-            handlePin();
-          }}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          Pin
-        </Button>
-        <Button
-          data-testid="playground-card-open"
-          disabled={busy}
-          onClick={(event) => {
-            event.stopPropagation();
-            handleOpen();
-          }}
-          size="sm"
-          type="button"
-        >
-          Open
-        </Button>
-        <Button
-          data-testid="playground-card-open-split"
-          disabled={busy || !conversation}
-          onClick={(event) => {
-            event.stopPropagation();
-            handleOpenAsSplit();
-          }}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          Open as Split
-        </Button>
-      </AttachmentActions>
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <AttachmentContent>
+          <AttachmentTitle data-testid="playground-card-name">
+            {card.name}
+          </AttachmentTitle>
+          <a
+            className="block truncate text-xs leading-4 text-muted-foreground hover:text-foreground hover:underline"
+            data-testid="playground-card-url"
+            href={card.url}
+            onClick={handleUrlClick}
+            rel="noopener noreferrer"
+          >
+            {card.url}
+          </a>
+          {pin || card.stack ? (
+            <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+              {pin ? (
+                <>
+                  PIN{" "}
+                  <span
+                    className="font-mono text-foreground"
+                    data-testid="playground-card-pin"
+                  >
+                    {pin}
+                  </span>
+                  <button
+                    aria-label="Copy PIN"
+                    className="inline-flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                    data-testid="playground-card-copy-pin"
+                    onClick={handleCopyPin}
+                    type="button"
+                  >
+                    <Copy className="h-3 w-3" />
+                  </button>
+                </>
+              ) : null}
+              {card.stack ? (
+                <>
+                  {pin ? " " : null}·{" "}
+                  <span data-testid="playground-card-stack">{card.stack}</span>
+                </>
+              ) : null}
+            </p>
+          ) : null}
+        </AttachmentContent>
+        <AttachmentActions className="w-full flex-wrap justify-end">
+          <Button
+            data-testid="playground-card-pin-action"
+            disabled={busy}
+            onClick={(event) => {
+              event.stopPropagation();
+              handlePin();
+            }}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            Pin
+          </Button>
+          <Button
+            data-testid="playground-card-open"
+            disabled={busy}
+            onClick={(event) => {
+              event.stopPropagation();
+              handleOpen();
+            }}
+            size="sm"
+            type="button"
+          >
+            Open
+          </Button>
+          <Button
+            data-testid="playground-card-open-split"
+            disabled={busy || !isThreadConversation}
+            onClick={(event) => {
+              event.stopPropagation();
+              handleOpenAsSplit();
+            }}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            Open as Split
+          </Button>
+        </AttachmentActions>
+      </div>
     </Attachment>
   );
 }

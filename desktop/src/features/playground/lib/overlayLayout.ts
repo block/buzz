@@ -32,6 +32,13 @@ export const PLAYGROUND_DOCKED_OVERLAY_CLASS =
   "absolute inset-y-0 left-0 z-30 overflow-visible border-r border-border pr-2";
 
 /**
+ * In-flow left pane for split pop-outs. Never `absolute` — the thread is
+ * the other flex child and must reflow, not sit underneath.
+ */
+export const PLAYGROUND_SPLIT_PANE_OVERLAY_CLASS =
+  "relative z-30 flex h-full min-h-0 shrink-0 flex-col overflow-visible border-r border-border pr-2";
+
+/**
  * Shared 8px thickness for playground edge handles. Native WKWebView eats
  * clicks, so the hit target must be a real gutter *outside* the host — a
  * 1px border under the webview can hover (CSS) and still miss pointerdown.
@@ -55,7 +62,16 @@ export const PLAYGROUND_DOCK_RESIZE_HANDLE_TEST_ID = "playground-dock-resize";
  */
 export const playgroundFullscreenTitlebarGapClass = `${topChromeBackdrop.height} ${PLAYGROUND_OVERLAY_SURFACE_CLASS}`;
 
-export const PLAYGROUND_CHROME_CLASS = `relative z-20 flex shrink-0 flex-col gap-1 border-b border-border pointer-events-auto px-2 py-1 ${PLAYGROUND_OVERLAY_SURFACE_CLASS}`;
+/**
+ * 40px overlay gap so traffic lights stay clickable. Only fullscreen — the
+ * portaled overlay leaves SidebarInset. Pop-outs use a window-level strip in
+ * AppShellChannelSurface instead; stacking both would give the left pane 80px.
+ */
+export function playgroundShowsTitlebarGap(fullscreen: boolean): boolean {
+  return fullscreen;
+}
+
+export const PLAYGROUND_CHROME_CLASS = `relative z-20 flex shrink-0 flex-col gap-1 overflow-visible border-b border-border pointer-events-auto px-2 py-1 ${PLAYGROUND_OVERLAY_SURFACE_CLASS}`;
 
 /**
  * Force alpha 1 so macOS titlebar vibrancy cannot blend through `--background`
@@ -113,12 +129,15 @@ export function playgroundResizeHandleSitsOutsideHost(
 
 export function playgroundOverlayPlacementClass(
   placement: PlaygroundOverlayPlacement,
+  inFlowSplit = false,
 ): string {
   switch (placement) {
     case "fullscreen":
       return PLAYGROUND_FULLSCREEN_OVERLAY_CLASS;
     case "dock":
-      return PLAYGROUND_DOCKED_OVERLAY_CLASS;
+      return inFlowSplit
+        ? PLAYGROUND_SPLIT_PANE_OVERLAY_CLASS
+        : PLAYGROUND_DOCKED_OVERLAY_CLASS;
     default:
       return PLAYGROUND_WINDOWED_OVERLAY_CLASS;
   }
@@ -130,4 +149,37 @@ export function playgroundStageLayoutKey(
   docked = false,
 ): string {
   return `${playgroundOverlayPlacement(fullscreen, docked)}:${epoch}`;
+}
+
+export type PlaygroundChromeLayoutFlags = {
+  hideDispose: boolean;
+  hideDock: boolean;
+  hideDismiss: boolean;
+  showFullscreen: boolean;
+};
+
+/**
+ * Locked placement (split/window) hides dispose and dock.
+ * OS pop-outs also hide dismiss (close the OS window instead). In-main embeds
+ * keep dismiss so chrome X can park React state and the native WKWebView.
+ * Split still exposes fullscreen so the playground can cover both panes.
+ */
+export function playgroundChromeLayoutFlags(
+  lockPlacement?: "window" | "dock",
+  options?: { isOsPopout?: boolean },
+): PlaygroundChromeLayoutFlags {
+  if (lockPlacement == null) {
+    return {
+      hideDispose: false,
+      hideDock: false,
+      hideDismiss: false,
+      showFullscreen: true,
+    };
+  }
+  return {
+    hideDispose: true,
+    hideDock: true,
+    hideDismiss: options?.isOsPopout === true,
+    showFullscreen: lockPlacement === "dock",
+  };
 }

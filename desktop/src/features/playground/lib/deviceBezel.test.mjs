@@ -103,3 +103,33 @@ test("native stage bounds come from the inner screen, not the bezel box", () => 
     readPlaygroundStageBounds(frame),
   );
 });
+
+test("native stage bounds never overlap playground chrome", () => {
+  const host = {
+    getBoundingClientRect: () => ({
+      x: 0,
+      y: 40,
+      width: 400,
+      height: 360,
+      bottom: 400,
+    }),
+  };
+  const overlapping = { getBoundingClientRect: () => ({ bottom: 72 }) };
+  assert.deepEqual(readPlaygroundStageBounds(host, undefined, overlapping), {
+    x: 0,
+    y: 72,
+    width: 400,
+    height: 328,
+  });
+  assert.deepEqual(
+    readPlaygroundStageBounds(host, { width: 393, height: 852 }, overlapping),
+    { x: 0, y: 72, width: 393, height: 852 },
+  );
+  const flush = { getBoundingClientRect: () => ({ bottom: 40 }) };
+  assert.deepEqual(readPlaygroundStageBounds(host, undefined, flush), {
+    x: 0,
+    y: 40,
+    width: 400,
+    height: 360,
+  });
+});

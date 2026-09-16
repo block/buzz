@@ -22,6 +22,7 @@ export type {
 export { useAuxiliaryPanel } from "@/shared/layout/auxiliaryPanelContext";
 
 type AuxiliaryPanelProps = {
+  allowClose?: boolean;
   canResetWidth?: boolean;
   children: React.ReactNode;
   className?: string;
@@ -51,6 +52,7 @@ type AuxiliaryPanelProps = {
 
 /** Right-side auxiliary panel shell for split and standalone overlay layouts. */
 export function AuxiliaryPanel({
+  allowClose = true,
   canResetWidth,
   children,
   className,
@@ -77,6 +79,7 @@ export function AuxiliaryPanel({
 
   const contextValue = React.useMemo(
     () => ({
+      allowClose,
       isFloatingOverlay,
       isOverlay,
       isSinglePanelView,
@@ -88,6 +91,7 @@ export function AuxiliaryPanel({
       widthPx,
     }),
     [
+      allowClose,
       isFloatingOverlay,
       isOverlay,
       isSinglePanelView,

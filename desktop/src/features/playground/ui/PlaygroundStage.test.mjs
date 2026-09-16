@@ -55,6 +55,10 @@ afterEach(async () => {
   cleanup();
   const { resetPlaygroundState } = await import("../lib/sessions.ts");
   resetPlaygroundState();
+  delete globalThis.isTauri;
+  delete window.isTauri;
+  delete globalThis.__TAURI_INTERNALS__;
+  delete window.__TAURI_INTERNALS__;
 });
 
 after(() => dom.window.close());
@@ -196,4 +200,62 @@ test("desktop and responsive stages stay unbezeled rectangles", async () => {
   assert.ok(responsive.getByTestId("playground-responsive-page"));
   assert.equal(responsive.queryByTestId("playground-device-frame"), null);
   assert.ok(responsive.getByTestId("playground-stage-resize"));
+});
+
+test("clamp native bounds below playground chrome", async () => {
+  const { readPlaygroundStageBounds } = await import("../lib/deviceBezel.ts");
+  const host = {
+    getBoundingClientRect: () => ({
+      x: 8,
+      y: 48,
+      width: 640,
+      height: 400,
+      bottom: 448,
+    }),
+  };
+  const chrome = {
+    getBoundingClientRect: () => ({ bottom: 80 }),
+  };
+  assert.deepEqual(readPlaygroundStageBounds(host, undefined, chrome), {
+    x: 8,
+    y: 80,
+    width: 640,
+    height: 368,
+  });
+});
+
+test("unmounting the stage hides the window-scoped webview", async () => {
+  const invokes = [];
+  const internals = {
+    invoke(cmd, args) {
+      invokes.push({ cmd, args });
+      return Promise.resolve({
+        sid: args?.sid,
+        canGoBack: false,
+        canGoForward: false,
+        currentUrl: "",
+      });
+    },
+  };
+  globalThis.isTauri = true;
+  window.isTauri = true;
+  globalThis.__TAURI_INTERNALS__ = internals;
+  window.__TAURI_INTERNALS__ = internals;
+  const { createElement } = await import("react");
+  const { render, cleanup } = await import("@testing-library/react");
+  const { PlaygroundStage } = await import("./PlaygroundStage.tsx");
+  const { addPlaygroundSession, configurePlaygroundScope } = await import(
+    "../lib/sessions.ts"
+  );
+  configurePlaygroundScope("pub", "wss://relay.example.com");
+  const session = addPlaygroundSession(card);
+  render(createElement(PlaygroundStage, { mode: "desktop", session }));
+  cleanup();
+  await Promise.resolve();
+  const hide = invokes.find((row) => row.cmd === "playground_webview_hide");
+  assert.ok(hide);
+  assert.equal(hide.args.sid, "demo-stage");
+  assert.equal(hide.args.windowLabel, "main");
+  delete globalThis.isTauri;
+  delete globalThis.__TAURI_INTERNALS__;
 });

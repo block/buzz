@@ -17,6 +17,7 @@ import { DEFAULT_RESPONSIVE_VIEWPORT } from "../lib/types";
 import { PLAYGROUND_DOM_PROBE_SCRIPT } from "../lib/updates";
 import {
   evalPlaygroundWebview,
+  hidePlaygroundWebview,
   playgroundWebviewBoundsAreUsable,
   setPlaygroundWebviewBounds,
   showPlaygroundWebview,
@@ -322,6 +323,17 @@ function NativeStageHost({
   const viewportWidth = viewport?.width;
   const viewportHeight = viewport?.height;
 
+  React.useEffect(() => {
+    const sid = session.sid;
+    return () => {
+      // React unmount (navigate away, leave split, deactivate embed) must
+      // hide the window-scoped native child. Overlay teardown alone is not
+      // enough — WKWebView stays painted after the host DOM is gone.
+      // Kept off the layoutKey effect so fullscreen/dock resyncs do not hide.
+      void hidePlaygroundWebview(sid);
+    };
+  }, [session.sid]);
+
   React.useLayoutEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -331,6 +343,14 @@ function NativeStageHost({
     // moves that keep the same size (fullscreen toggle, inspect restore).
     void layoutKey;
 
+    // Chrome is shrink-0 above the stage. Observe it so WKWebView bounds
+    // follow both chrome rows, not just host size (ResizeObserver ignores
+    // a host that only *moves* when the mode row appears). Look it up
+    // before the first sync so the native rect never covers the mode row.
+    const chrome = host
+      .closest('[data-testid="playground-overlay"]')
+      ?.querySelector('[data-testid="playground-chrome"]');
+
     const sync = () => {
       if (cancelled || !hostRef.current) return;
       const bounds = readPlaygroundStageBounds(
@@ -338,26 +358,38 @@ function NativeStageHost({
         viewportWidth != null && viewportHeight != null
           ? { width: viewportWidth, height: viewportHeight }
           : undefined,
+        chrome,
       );
       if (!playgroundWebviewBoundsAreUsable(bounds)) return;
       if (!opened) {
         opened = true;
+        const sid = session.sid;
         void showPlaygroundWebview({
-          sid: session.sid,
+          sid,
           url: session.url,
           bounds,
           userAgent,
-        }).then(() =>
-          evalPlaygroundWebview(session.sid, PLAYGROUND_DOM_PROBE_SCRIPT),
-        );
+        }).then(() => {
+          // Dismiss/unmount may have won the race while show was in flight.
+          // Re-hide so the WKWebView cannot sit orphaned above the shell.
+          if (cancelled) {
+            void hidePlaygroundWebview(sid);
+            return;
+          }
+          return evalPlaygroundWebview(sid, PLAYGROUND_DOM_PROBE_SCRIPT);
+        });
         return;
       }
+      if (cancelled) return;
       void setPlaygroundWebviewBounds(session.sid, bounds, userAgent);
     };
 
     sync();
     const observer = new ResizeObserver(sync);
     observer.observe(host);
+    if (chrome) {
+      observer.observe(chrome);
+    }
     window.addEventListener("resize", sync);
     const visualViewport = window.visualViewport;
     visualViewport?.addEventListener("resize", sync);
@@ -390,7 +422,7 @@ function NativeStageHost({
 
   return (
     <div
-      className={cn("h-full min-h-[12rem] w-full bg-background")}
+      className={cn("h-full min-h-0 w-full bg-background")}
       data-layout-key={layoutKey}
       data-testid="playground-webview-host"
       data-user-agent={userAgent}

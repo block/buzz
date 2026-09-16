@@ -23,7 +23,19 @@ import {
   nextPlaygroundDomUpdate,
 } from "./updates.ts";
 import {
+  getActiveEmbeddedWindow,
+  subscribeEmbeddedWindows,
+  getEmbeddedWindowsStore,
+} from "@/features/popout/lib/embeddedWindows";
+import { currentPopoutPayload } from "@/features/popout/lib/popoutWindow";
+import {
+  getPopoutWindows,
+  playgroundSidsHostedInOsPopouts,
+  subscribePopoutWindows,
+} from "@/features/popout/lib/popoutWindows";
+import {
   evalPlaygroundWebview,
+  hidePlaygroundWebview,
   playgroundWebviewDomHash,
   pollPlaygroundWebview,
   showPlaygroundWebview,
@@ -77,16 +89,45 @@ function usePlaygroundFenceWatcher() {
   }, []);
 }
 
+function activeEmbedPlaygroundSid(): string | null {
+  return getActiveEmbeddedWindow()?.payload.playground?.sid ?? null;
+}
+
 function usePlaygroundWebviewKeeper() {
   const { sessions, overlaySid } = React.useSyncExternalStore(
     subscribePlayground,
     getPlaygroundStore,
     getPlaygroundStore,
   );
+  React.useSyncExternalStore(
+    subscribeEmbeddedWindows,
+    getEmbeddedWindowsStore,
+    getEmbeddedWindowsStore,
+  );
+  React.useSyncExternalStore(
+    subscribePopoutWindows,
+    getPopoutWindows,
+    getPopoutWindows,
+  );
+  const popout = currentPopoutPayload();
+  const embedSid = activeEmbedPlaygroundSid();
+  const osHostedKey = [...playgroundSidsHostedInOsPopouts(getPopoutWindows())]
+    .sort()
+    .join(",");
 
   React.useEffect(() => {
+    // Pop-out windows do not run the main-window keeper.
+    if (popout) return;
+    const osHosted = new Set(osHostedKey ? osHostedKey.split(",") : []);
     for (const session of sessions.values()) {
       if (overlaySid === session.sid) continue;
+      if (embedSid === session.sid) continue;
+      // OS split/playground owns a window-scoped child. Do not remount the
+      // main-window playground-{sid} label underneath — hide leftovers.
+      if (osHosted.has(session.sid)) {
+        void hidePlaygroundWebview(session.sid);
+        continue;
+      }
       void showPlaygroundWebview({
         sid: session.sid,
         url: session.url,
@@ -96,17 +137,19 @@ function usePlaygroundWebviewKeeper() {
         evalPlaygroundWebview(session.sid, PLAYGROUND_DOM_PROBE_SCRIPT),
       );
     }
-  }, [sessions, overlaySid]);
+  }, [sessions, overlaySid, popout, embedSid, osHostedKey]);
 }
 
 function usePlaygroundUpdatePolling() {
   React.useEffect(() => {
+    if (currentPopoutPayload()) return;
     let cancelled = false;
     const poll = async () => {
       if (cancelled) return;
       const { overlaySid } = getPlaygroundStore();
       for (const session of listPlaygroundSessions()) {
         if (overlaySid === session.sid) continue;
+        if (activeEmbedPlaygroundSid() === session.sid) continue;
         try {
           await evalPlaygroundWebview(session.sid, PLAYGROUND_DOM_PROBE_SCRIPT);
           const raw = await playgroundWebviewDomHash(session.sid, session.url);
@@ -126,6 +169,7 @@ function usePlaygroundUpdatePolling() {
       const { overlaySid } = getPlaygroundStore();
       for (const session of listPlaygroundSessions()) {
         if (overlaySid === session.sid) continue;
+        if (activeEmbedPlaygroundSid() === session.sid) continue;
         try {
           const http = await pollPlaygroundWebview(session.sid, session.url);
           if (http.changed) markPlaygroundUpdate(session.sid);
