@@ -279,6 +279,32 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
 
             info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
+
+            // Detect concurrent sessions for the same identity (e.g. the same
+            // agent key running on a laptop and a VPS). Both harnesses would
+            // otherwise subscribe to the same mentions and reply twice.
+            let other_sessions = state
+                .conn_manager
+                .connection_ids_for_pubkey_in_community(
+                    conn.tenant.community(),
+                    pubkey.to_bytes().as_slice(),
+                )
+                .iter()
+                .filter(|id| **id != conn_id)
+                .count();
+            if other_sessions > 0 {
+                warn!(
+                    conn_id = %conn_id,
+                    pubkey = %pubkey.to_hex(),
+                    other_sessions,
+                    "duplicate authenticated session for identity — concurrent agent harnesses may both reply to mentions"
+                );
+                conn.send(RelayMessage::notice(
+                    "Another session is already connected as this identity. \
+                     If this is an agent, running the same key in two places can cause duplicate replies.",
+                ));
+            }
+
             *conn.auth_state.write().await = AuthState::Authenticated(auth_ctx);
             state
                 .conn_manager
