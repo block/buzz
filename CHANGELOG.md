@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Desktop and shared changes
+
+- Follow delivered channel messages before their first reply.
+
 ## v0.5.24
 
 ### Desktop and shared changes
