@@ -52,6 +52,16 @@ void main() {
           .width,
       300,
     );
+    final workspaceRect = tester.getRect(
+      find.byKey(const ValueKey('tablet-workspace')),
+    );
+    final contentRect = tester.getRect(
+      find.byKey(const ValueKey('tablet-workspace-content-surface')),
+    );
+    expect(contentRect.left, 300);
+    expect(contentRect.top, workspaceRect.top);
+    expect(contentRect.right, workspaceRect.right);
+    expect(contentRect.bottom, workspaceRect.bottom);
     expect(
       find.byKey(const ValueKey('split-activity-inbox-list')),
       findsOneWidget,

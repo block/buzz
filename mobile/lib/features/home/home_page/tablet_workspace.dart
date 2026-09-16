@@ -1,7 +1,8 @@
 part of '../home_page.dart';
 
 const double _tabletSidebarWidth = 300;
-const double _tabletContentInset = Grid.half + Grid.quarter;
+const double _tabletThreadPaneWidth = 380;
+const double _tabletThreePaneMinWidth = 900;
 
 class _TabletWorkspace extends StatelessWidget {
   const _TabletWorkspace({
@@ -9,9 +10,12 @@ class _TabletWorkspace extends StatelessWidget {
     required this.hasUnreadInbox,
     required this.selectedDestination,
     required this.selectedChannel,
+    required this.selectedThread,
     required this.settingsTransitionProgress,
     required this.onDestinationSelected,
     required this.onChannelSelected,
+    required this.onThreadSelected,
+    required this.onThreadClosed,
     required this.onCommunityChanged,
     required this.onSelectedChannelUnavailable,
   });
@@ -20,16 +24,19 @@ class _TabletWorkspace extends StatelessWidget {
   final bool hasUnreadInbox;
   final int selectedDestination;
   final Channel? selectedChannel;
+  final ThreadDetailTarget? selectedThread;
   final ValueNotifier<double> settingsTransitionProgress;
   final ValueChanged<int> onDestinationSelected;
   final ValueChanged<Channel> onChannelSelected;
+  final ValueChanged<ThreadDetailTarget> onThreadSelected;
+  final VoidCallback onThreadClosed;
   final ValueChanged<String?> onCommunityChanged;
   final VoidCallback onSelectedChannelUnavailable;
 
   @override
   Widget build(BuildContext context) {
     final gradient = context.appColors.topSectionGradient;
-    final content = switch (selectedDestination) {
+    final baseContent = switch (selectedDestination) {
       0 when selectedChannel != null => ChannelDetailPage(
         key: ValueKey('tablet-channel-${selectedChannel!.id}'),
         channel: selectedChannel!,
@@ -37,6 +44,14 @@ class _TabletWorkspace extends StatelessWidget {
       2 => const SearchPage(),
       _ => const ActivityPage(splitView: true),
     };
+    final showsThreadPane =
+        MediaQuery.sizeOf(context).width >= _tabletThreePaneMinWidth;
+    final content = showsThreadPane
+        ? ThreadDetailPaneScope(
+            onOpenThread: onThreadSelected,
+            child: baseContent,
+          )
+        : baseContent;
 
     return Scaffold(
       key: const ValueKey('tablet-workspace'),
@@ -75,47 +90,43 @@ class _TabletWorkspace extends StatelessWidget {
               ),
             ),
             Expanded(
-              child: Padding(
-                key: const ValueKey('tablet-workspace-content-inset'),
-                padding: const EdgeInsets.only(
-                  top: _tabletContentInset,
-                  right: _tabletContentInset,
-                  bottom: _tabletContentInset,
-                ),
-                child: DecoratedBox(
-                  key: const ValueKey('tablet-workspace-content-surface'),
-                  decoration: BoxDecoration(
-                    color: context.colors.surface,
-                    borderRadius: BorderRadius.circular(Radii.dialog),
-                    boxShadow: context.theme.brightness == Brightness.light
-                        ? [
-                            BoxShadow(
-                              color: context.colors.outlineVariant.withValues(
-                                alpha: 0.45,
-                              ),
-                              offset: const Offset(-1, -1),
-                            ),
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.07),
-                              blurRadius: 4,
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(Radii.dialog),
-                    child: MediaQuery(
-                      data: MediaQuery.of(context).copyWith(
-                        padding: MediaQuery.paddingOf(context).copyWith(
-                          top:
-                              (MediaQuery.paddingOf(context).top -
-                                      _tabletContentInset)
-                                  .clamp(0, double.infinity),
-                        ),
+              child: DecoratedBox(
+                key: const ValueKey('tablet-workspace-content-surface'),
+                decoration: BoxDecoration(
+                  color: context.colors.surface,
+                  border: Border(
+                    left: BorderSide(
+                      color: context.colors.outlineVariant.withValues(
+                        alpha: 0.45,
                       ),
-                      child: content,
                     ),
                   ),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(child: content),
+                    if (showsThreadPane && selectedThread != null) ...[
+                      VerticalDivider(
+                        key: const ValueKey('tablet-thread-divider'),
+                        width: 1,
+                        thickness: 1,
+                        color: context.colors.outlineVariant.withValues(
+                          alpha: 0.45,
+                        ),
+                      ),
+                      SizedBox(
+                        key: const ValueKey('tablet-thread-pane'),
+                        width: _tabletThreadPaneWidth,
+                        child: ThreadDetailPage.fromTarget(
+                          selectedThread!,
+                          key: ValueKey(
+                            'tablet-thread-${selectedThread!.threadHead.id}',
+                          ),
+                          onClose: onThreadClosed,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
             ),

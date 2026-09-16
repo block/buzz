@@ -166,6 +166,8 @@ class ChannelsPage extends HookConsumerWidget {
     required this.onSettingsTransitionProgress,
     this.tabReselection,
     this.onChannelSelected,
+    this.onCompactChannelSelected,
+    this.onCompactChannelDismissed,
     this.selectedChannelId,
     this.workspaceHeader,
     this.onCommunityChanged,
@@ -185,6 +187,13 @@ class ChannelsPage extends HookConsumerWidget {
   /// Selects a channel in an enclosing persistent workspace instead of
   /// pushing the phone detail route.
   final ValueChanged<Channel>? onChannelSelected;
+
+  /// Remembers a phone-route selection so an enclosing adaptive workspace can
+  /// take it over if the window grows to tablet size while that route is open.
+  final ValueChanged<Channel>? onCompactChannelSelected;
+
+  /// Clears the remembered phone-route selection after an ordinary Back.
+  final VoidCallback? onCompactChannelDismissed;
 
   /// Channel currently shown by an enclosing persistent workspace.
   final String? selectedChannelId;
@@ -304,12 +313,22 @@ class ChannelsPage extends HookConsumerWidget {
         onChannelSelected(channel);
         return;
       }
+      onCompactChannelSelected?.call(channel);
       if (!context.mounted) return;
-      await Navigator.of(context).push(
+      var yieldedToTabletWorkspace = false;
+      await Navigator.of(context).push<void>(
         MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(channel: channel),
+          builder: (_) => ChannelDetailPage(
+            channel: channel,
+            onTabletWorkspaceActivated: onCompactChannelSelected == null
+                ? null
+                : () => yieldedToTabletWorkspace = true,
+          ),
         ),
       );
+      if (!yieldedToTabletWorkspace) {
+        onCompactChannelDismissed?.call();
+      }
     }
 
     // Only surface fetch errors while the relay is stably connected. During a

@@ -566,17 +566,14 @@ class _ThreadSummaryRow extends ConsumerWidget {
 
     return GestureDetector(
       onTap: () {
-        Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => ThreadDetailPage(
-              threadHead: message,
-              allMessages: allMessages,
-              channelId: channelId,
-              currentPubkey: currentPubkey,
-              isMember: isMember,
-              isArchived: isArchived,
-            ),
-          ),
+        openThreadDetail(
+          context,
+          threadHead: message,
+          allMessages: allMessages,
+          channelId: channelId,
+          currentPubkey: currentPubkey,
+          isMember: isMember,
+          isArchived: isArchived,
         );
       },
       child: Padding(

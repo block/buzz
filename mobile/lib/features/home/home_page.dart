@@ -15,6 +15,7 @@ import '../activity/activity_page.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channels_page.dart';
+import '../channels/thread_detail_target.dart';
 import '../search/search_page.dart';
 
 part 'home_page/tablet_workspace.dart';
@@ -84,6 +85,7 @@ class HomePage extends HookConsumerWidget {
     final settingsTransitionProgress = useValueNotifier(0.0);
     final workspaceDestination = useState(1);
     final workspaceChannel = useState<Channel?>(null);
+    final workspaceThread = useState<ThreadDetailTarget?>(null);
     final workspaceCommunityId = useRef<String?>(null);
     final reducedMotion = MediaQuery.of(context).disableAnimations;
     final tabContentTransitionProgress = reducedMotion
@@ -103,6 +105,16 @@ class HomePage extends HookConsumerWidget {
           if (settingsTransitionProgress.value != progress) {
             settingsTransitionProgress.value = progress;
           }
+        },
+        onCompactChannelSelected: (channel) {
+          workspaceChannel.value = channel;
+          workspaceThread.value = null;
+          workspaceDestination.value = 0;
+        },
+        onCompactChannelDismissed: () {
+          workspaceChannel.value = null;
+          workspaceThread.value = null;
+          workspaceDestination.value = 1;
         },
       ),
       if (visitedTabs.value.contains(1))
@@ -129,6 +141,7 @@ class HomePage extends HookConsumerWidget {
         hasUnreadInbox: hasUnreadInbox,
         selectedDestination: workspaceDestination.value,
         selectedChannel: workspaceChannel.value,
+        selectedThread: workspaceThread.value,
         settingsTransitionProgress: settingsTransitionProgress,
         onDestinationSelected: (index) {
           if (workspaceDestination.value == index &&
@@ -137,6 +150,7 @@ class HomePage extends HookConsumerWidget {
           }
           unawaited(HapticFeedback.selectionClick());
           workspaceChannel.value = null;
+          workspaceThread.value = null;
           workspaceDestination.value = index;
         },
         onChannelSelected: (channel) {
@@ -144,16 +158,21 @@ class HomePage extends HookConsumerWidget {
             unawaited(HapticFeedback.selectionClick());
           }
           workspaceChannel.value = channel;
+          workspaceThread.value = null;
           workspaceDestination.value = 0;
         },
+        onThreadSelected: (thread) => workspaceThread.value = thread,
+        onThreadClosed: () => workspaceThread.value = null,
         onCommunityChanged: (communityId) {
           if (workspaceCommunityId.value == communityId) return;
           workspaceCommunityId.value = communityId;
           workspaceChannel.value = null;
+          workspaceThread.value = null;
           workspaceDestination.value = 1;
         },
         onSelectedChannelUnavailable: () {
           workspaceChannel.value = null;
+          workspaceThread.value = null;
           workspaceDestination.value = 1;
         },
       );
