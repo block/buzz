@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   revalidateAgentMentionPubkeys,
+  rosterAppliesToScope,
   AgentMentionAuthorizationError,
 } from "./agentMentionRevalidation.ts";
 
@@ -215,5 +216,33 @@ test("publication cannot authorize a DM that still has no destination", async ()
       ],
     }),
     AgentMentionAuthorizationError,
+  );
+});
+
+test("rosterAppliesToScope: only the channel the roster describes counts", () => {
+  const roster = "general";
+
+  assert.equal(
+    rosterAppliesToScope({ type: "channel", channelId: "general" }, roster),
+    true,
+  );
+  // Publication retargeted a new DM: this roster says nothing about it.
+  assert.equal(
+    rosterAppliesToScope({ type: "channel", channelId: "new-dm" }, roster),
+    false,
+  );
+  assert.equal(
+    rosterAppliesToScope({ type: "owned", channelId: "general" }, roster),
+    true,
+  );
+  assert.equal(
+    rosterAppliesToScope({ type: "owned", channelId: null }, roster),
+    false,
+  );
+  assert.equal(rosterAppliesToScope({ type: "community" }, roster), false);
+  assert.equal(rosterAppliesToScope({ type: "managed-only" }, roster), false);
+  assert.equal(
+    rosterAppliesToScope({ type: "channel", channelId: "general" }, null),
+    false,
   );
 });
