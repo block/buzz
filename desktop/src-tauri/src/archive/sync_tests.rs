@@ -139,7 +139,7 @@ fn spawn_sync(
     mpsc::Sender<MatchedEvent>,
     Arc<Notify>,
     CancellationToken,
-    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<Vec<ArchiveCandidate>>,
 ) {
     let (tx, rx) = mpsc::channel(64);
     let reload = Arc::new(Notify::new());
@@ -153,7 +153,7 @@ fn spawn_sync(
     (tx, reload, cancel, handle)
 }
 
-async fn stop(cancel: CancellationToken, handle: tokio::task::JoinHandle<()>) {
+async fn stop(cancel: CancellationToken, handle: tokio::task::JoinHandle<Vec<ArchiveCandidate>>) {
     cancel.cancel();
     handle.await.expect("sync task panicked");
 }
@@ -444,8 +444,8 @@ async fn does_not_notify_when_nothing_was_persisted() {
     stop(cancel, handle).await;
 }
 
-#[tokio::test]
-async fn a_failed_archive_call_does_not_notify_or_stop_the_loop() {
+#[tokio::test(start_paused = true)]
+async fn a_failed_archive_call_retains_and_backs_off_without_notifying() {
     let io = Arc::new(FakeIo::with_listings(vec![vec![saved(
         "channel_h",
         "channel-a",
@@ -459,7 +459,13 @@ async fn a_failed_archive_call_does_not_notify_or_stop_the_loop() {
     for _ in 0..(FLUSH_BATCH_SIZE * 2) {
         tx.send(matched(&id)).await.unwrap();
     }
-    wait_for("second flush", || io.archived().len() >= 2).await;
+    // Two fresh batches must proceed immediately even when both fail. The old
+    // single-queue runner blocked the second batch behind the first retry.
+    wait_for("both fresh flushes", || io.archived().len() == 2).await;
+    tokio::time::advance(Duration::from_millis(999)).await;
+    assert_eq!(io.archived().len(), 2);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    wait_for("scheduled retry", || io.archived().len() > 2).await;
     assert_eq!(*io.metrics_notifications.lock().unwrap(), 0);
     stop(cancel, handle).await;
 }

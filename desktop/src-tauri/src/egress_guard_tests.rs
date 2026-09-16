@@ -79,18 +79,18 @@ fn error_names_the_boundary_context() {
 //   - commands/team_snapshot/tests.rs::egress_guard_boundary
 //   - commands/personas/snapshot/import.rs::egress_guard_tests
 
-/// Boundary 1: `relay/submit.rs` `submit_event_at_with_keys` (the funnel for
+/// Boundary 1: `relay/submit.rs` `submit_event_at` (the funnel for
 /// all `submit_event*` variants).
 #[tokio::test]
-async fn boundary_submit_event_at_with_keys_blocks_ncryptsec() {
+async fn boundary_submit_event_at_blocks_ncryptsec() {
     let state = crate::app_state::build_app_state();
     let keys = nostr::Keys::generate();
     let builder = nostr::EventBuilder::new(nostr::Kind::Custom(9), NCRYPTSEC);
-    let err = crate::relay::submit_event_at_with_keys(
+    let err = crate::relay::submit_event_at(
         builder,
         &state,
         "http://127.0.0.1:9", // discard port — must never be reached
-        &keys,
+        &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
     )
     .await
     .unwrap_err();
@@ -116,45 +116,51 @@ async fn boundary_sync_managed_agent_profile_blocks_ncryptsec() {
     assert_guard_error(&err);
 }
 
-/// Boundary 3: `relay/submit.rs` `submit_signed_event_at_with_keys` — the
+/// Boundary 3: `relay/submit.rs` `submit_signed_event_at_with_signer` — the
 /// pre-signed entry into the boundary-1 funnel (main's submit refactor
 /// replaced `relay.rs` `submit_signed_event` with this scoped form).
 #[tokio::test]
-async fn boundary_submit_signed_event_at_with_keys_blocks_ncryptsec() {
+async fn boundary_submit_signed_event_at_with_signer_blocks_ncryptsec() {
     let state = crate::app_state::build_app_state();
     let keys = nostr::Keys::generate();
     let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), NCRYPTSEC)
         .sign_with_keys(&keys)
         .unwrap();
-    let err = crate::relay::submit_signed_event_at_with_keys(
+    let err = crate::relay::submit_signed_event_at_with_signer(
         &event,
         &state,
         "http://127.0.0.1:9", // discard port — must never be reached
-        &keys,
+        &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
     )
     .await
     .unwrap_err();
     assert_guard_error(&err);
 }
 
-/// Boundary 4: `relay.rs` `submit_signed_event_with_keys`.
+/// Boundary 4: `relay.rs` `submit_signed_event_at_with_auth`.
 #[tokio::test]
-async fn boundary_submit_signed_event_with_keys_blocks_ncryptsec() {
+async fn boundary_submit_signed_event_at_with_auth_blocks_ncryptsec() {
     let state = crate::app_state::build_app_state();
     *state.relay_url_override.lock().unwrap() = Some("ws://127.0.0.1:9".to_string());
     let keys = nostr::Keys::generate();
     let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), NCRYPTSEC)
         .sign_with_keys(&keys)
         .unwrap();
-    let err = crate::relay::submit_signed_event_with_keys(&event, &state, &keys, None)
-        .await
-        .unwrap_err();
+    let err = crate::relay::submit_signed_event_at_with_auth(
+        &event,
+        &state,
+        "http://127.0.0.1:9",
+        &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
+        None,
+    )
+    .await
+    .unwrap_err();
     assert_guard_error(&err);
 }
 
 /// Boundary 5: huddle STT publisher (`huddle/pipeline.rs`).
-#[test]
-fn boundary_huddle_stt_blocks_ncryptsec() {
+#[tokio::test]
+async fn boundary_huddle_stt_blocks_ncryptsec() {
     let keys = nostr::Keys::generate();
     let channel = uuid::Uuid::new_v4();
     let builder = crate::events::build_message(
@@ -170,7 +176,12 @@ fn boundary_huddle_stt_blocks_ncryptsec() {
         &crate::relay::relay_api_base_url(),
     )
     .unwrap();
-    let err = crate::huddle::pipeline::sign_and_guard_stt_body(builder, &keys).unwrap_err();
+    let err = crate::huddle::pipeline::sign_and_guard_stt_body(
+        builder,
+        &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
+    )
+    .await
+    .unwrap_err();
     assert_guard_error(&err);
 
     // Clean transcripts pass through the same seam.
@@ -187,7 +198,12 @@ fn boundary_huddle_stt_blocks_ncryptsec() {
         &crate::relay::relay_api_base_url(),
     )
     .unwrap();
-    assert!(crate::huddle::pipeline::sign_and_guard_stt_body(builder, &keys).is_ok());
+    assert!(crate::huddle::pipeline::sign_and_guard_stt_body(
+        builder,
+        &crate::active_user_signer::ActiveUserSigner::local(keys.clone())
+    )
+    .await
+    .is_ok());
 }
 
 /// Boundary 8: native websocket send loop — the single choke point for all
@@ -270,13 +286,23 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/commands/personas/snapshot/import.rs", 2, 1), // boundary 7 + its in-file injection-test fixture URL
     ("src/native_websocket.rs", 0, 2),                  // boundary 8 (WS frames; no events URL)
     // Test-only fixtures — no production egress, no guard:
+    ("src/commands/live_signer_tests.rs", 3, 0),
+    ("src/commands/agents_profile_destination_tests.rs", 1, 0),
+    ("src/commands/project_git_signer_tests.rs", 2, 0),
+    ("src/mesh_llm/coordinator_signer_tests.rs", 2, 0),
     ("src/relay_admission.rs", 1, 0),
+    ("src/relay/signer_tests.rs", 1, 0),
     ("src/native_relay_client_transport_tests.rs", 1, 0),
     ("src/archive/mod_tests.rs", 1, 0),
     ("src/managed_agents/persona_events/tests.rs", 1, 0),
+    (
+        "src/managed_agents/persona_events/signer_flush_tests.rs",
+        2,
+        0,
+    ),
     ("src/commands/team_snapshot/tests.rs", 1, 0),
     // Mock-relay route in its in-file tests; production publish goes through
-    // the guarded boundary-1 funnel (`submit_signed_event_at_with_keys`).
+    // the guarded boundary-1 funnel (`submit_signed_event_at_with_signer`).
     ("src/commands/personas/sharing.rs", 1, 0),
     // Loopback submit relay in `identity_archive.rs`'s in-file regen tests;
     // production archive/unarchive publish through the guarded boundary-1

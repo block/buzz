@@ -885,8 +885,8 @@ fn test_real_builtin_without_avatar_mutation_projects_successfully() {
     );
 }
 
-#[test]
-fn test_tombstone_transaction_rolls_back_delete_when_insert_fails() {
+#[tokio::test]
+async fn test_tombstone_transaction_rolls_back_delete_when_insert_fails() {
     // Use a BEFORE INSERT trigger to force the INSERT step to fail; verify DELETE is rolled back.
     use crate::managed_agents::retention::{
         get_retained_event, open_retention_db, retain_event, scoped_retention_db_path,
@@ -931,7 +931,7 @@ fn test_tombstone_transaction_rolls_back_delete_when_insert_fails() {
     .unwrap();
     drop(conn);
 
-    let result = tombstone_team_catalog_coordinate(&db_path, &keys, "team-abc");
+    let result = tombstone_team_catalog_for_test(&db_path, &keys, "team-abc").await;
     assert!(result.is_err(), "tombstone with INSERT trigger must fail");
     let err = result.unwrap_err();
     let blocked = err.contains("insert blocked by test trigger") || err.contains("blocked");

@@ -6,7 +6,10 @@ use crate::app_state::AppState;
 
 /// Close the companion belonging to an ended huddle. The native lifecycle is
 /// authoritative here because a webview can be suspended while it is closing.
-pub(super) fn close_huddle_window(app: &tauri::AppHandle, ephemeral_channel_id: &str) {
+pub(super) fn close_huddle_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    ephemeral_channel_id: &str,
+) {
     if ephemeral_channel_id.is_empty() {
         return;
     }

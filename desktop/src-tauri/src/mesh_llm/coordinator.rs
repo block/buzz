@@ -44,7 +44,7 @@ pub struct MeshCoordinator {
 pub async fn start_coordinator(app: AppHandle) {
     {
         let state = app.state::<AppState>();
-        if state.mesh_coordinator.lock().await.is_some() {
+        if state.is_remote_identity() || state.mesh_coordinator.lock().await.is_some() {
             return;
         }
     }
@@ -405,8 +405,9 @@ async fn publish_current_status_for_state(state: &AppState) -> Result<(), String
             ),
         }
     };
-    bind_payload_to_member(state, &identity, &mut payload)?;
-    publish_status_report_at(state, &relay_url, payload).await
+    let signer = state.active_signer()?;
+    bind_payload_to_member(&signer, &identity, &mut payload)?;
+    publish_status_report_at(state, &relay_url, payload, &signer).await
 }
 
 async fn publish_stopped_status_for_state(
@@ -416,11 +417,12 @@ async fn publish_stopped_status_for_state(
     let identity = super::ensure_owner_identity()
         .map_err(|error| format!("failed to load mesh owner identity: {error}"))?;
     let mut payload = stopped_status_payload(&identity);
-    bind_payload_to_member(state, &identity, &mut payload)?;
+    let signer = state.active_signer()?;
+    bind_payload_to_member(&signer, &identity, &mut payload)?;
     let relay_url = relay_url
         .map(str::to_owned)
         .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(state));
-    publish_status_report_at(state, &relay_url, payload).await
+    publish_status_report_at(state, &relay_url, payload, &signer).await
 }
 
 fn stopped_status_payload(identity: &super::identity::OwnerIdentity) -> serde_json::Value {
@@ -433,11 +435,11 @@ fn stopped_status_payload(identity: &super::identity::OwnerIdentity) -> serde_js
 }
 
 fn bind_payload_to_member(
-    state: &AppState,
+    signer: &crate::active_user_signer::ActiveUserSigner,
     identity: &super::identity::OwnerIdentity,
     payload: &mut serde_json::Value,
 ) -> Result<(), String> {
-    let member_pubkey = state.signing_keys()?.public_key().to_hex();
+    let member_pubkey = signer.public_key().to_hex();
     let endpoint_tokens = super::identity::advertised_endpoint_tokens(payload)
         .ok_or_else(|| "mesh discovery status has malformed serveTargets".to_string())?;
     payload["ownerId"] = serde_json::Value::String(identity.owner_id.clone());
@@ -478,14 +480,14 @@ async fn publish_status_report_at(
     state: &AppState,
     relay_url: &str,
     payload: serde_json::Value,
+    signer: &crate::active_user_signer::ActiveUserSigner,
 ) -> Result<(), String> {
     let api_base_url = crate::relay::relay_http_base_url(relay_url);
-    let keys = state.signing_keys()?;
-    crate::relay::submit_event_at_with_keys(
+    crate::relay::submit_event_at(
         build_status_report_event(payload)?,
         state,
         &api_base_url,
-        &keys,
+        signer,
     )
     .await
     .map(|_| ())
@@ -670,3 +672,7 @@ mod tests {
             .contains(&format!("{STATUS_D_TAG_PREFIX}:owner")));
     }
 }
+
+#[cfg(test)]
+#[path = "coordinator_signer_tests.rs"]
+mod signer_tests;

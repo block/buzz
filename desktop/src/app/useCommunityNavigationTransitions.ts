@@ -1,3 +1,4 @@
+import { isRemoteIdentity } from "@/shared/api/nativeIdentitySession";
 import { useRouter } from "@tanstack/react-router";
 import * as React from "react";
 
@@ -49,6 +50,10 @@ export function useCommunityNavigationTransitions({
     async (id: string) => {
       const activeCommunityId = communities.activeCommunity?.id;
       if (id === activeCommunityId) return;
+      if (isRemoteIdentity())
+        throw new Error(
+          "Sign out before changing workspace in the remote preview",
+        );
       if (!activeCommunityId) {
         communities.switchCommunity(id);
         return;
@@ -73,6 +78,10 @@ export function useCommunityNavigationTransitions({
 
   const removeCommunity = React.useCallback(
     async (id: string) => {
+      if (isRemoteIdentity())
+        throw new Error(
+          "Leaving a workspace is disabled in the remote preview",
+        );
       const target = communities.communities.find(
         (community) => community.id === id,
       );

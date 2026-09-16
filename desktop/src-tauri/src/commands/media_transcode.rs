@@ -425,13 +425,7 @@ fn transcode_heic_to_jpeg(
 /// Transcode a HEIC/HEIF still image (from a path) to JPEG bytes.
 ///
 /// Resolves ffmpeg, transcodes, reads the JPEG bytes, and cleans up the temp
-/// file. Mirrors `transcode_and_extract_poster` but for images (no poster).
-pub(super) fn transcode_heic_path_to_jpeg_bytes(
-    source: &std::path::Path,
-) -> Result<Vec<u8>, String> {
-    transcode_heic_path_to_jpeg_bytes_with_cancellation(source, None)
-}
-
+/// file. Mirrors `transcode_and_extract_poster_with_cancellation` but for images (no poster).
 pub(super) fn transcode_heic_path_to_jpeg_bytes_with_cancellation(
     source: &std::path::Path,
     cancellation: Option<&CancellationToken>,
@@ -530,12 +524,6 @@ fn extract_poster_frame_with_cancellation(
 ///
 /// Poster extraction is best-effort — if it fails, returns `None` for the poster
 /// and the video bytes are still valid. All temp files are cleaned up.
-pub(super) fn transcode_and_extract_poster(
-    source: &std::path::Path,
-) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
-    transcode_and_extract_poster_with_cancellation(source, None)
-}
-
 pub(super) fn transcode_and_extract_poster_with_cancellation(
     source: &std::path::Path,
     cancellation: Option<&CancellationToken>,
@@ -840,7 +828,8 @@ mod tests {
         );
 
         // Transcode to JPEG bytes and verify the JPEG magic.
-        let jpeg = transcode_heic_path_to_jpeg_bytes(&heic_path).expect("transcode to jpeg");
+        let jpeg = transcode_heic_path_to_jpeg_bytes_with_cancellation(&heic_path, None)
+            .expect("transcode to jpeg");
         let _ = std::fs::remove_file(&heic_path);
         assert!(jpeg.len() > 2, "empty jpeg output");
         assert_eq!(&jpeg[0..2], &[0xFF, 0xD8], "output is not a JPEG");

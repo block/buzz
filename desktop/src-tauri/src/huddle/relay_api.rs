@@ -10,6 +10,8 @@
 //!   → recv loop: WS binary frame → Opus decode (per-peer) → rodio playback
 //! ```
 
+use crate::active_user_signer::ActiveUserSigner;
+
 use futures_util::{SinkExt, StreamExt};
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMsg};
@@ -41,8 +43,8 @@ pub(crate) fn parse_channel_uuid(channel_id: &str) -> Result<Uuid, String> {
 /// Handshake timeout — matches the server's AUTH_TIMEOUT (5 s).
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn build_audio_auth_event(
-    keys: &nostr::Keys,
+async fn build_audio_auth_event(
+    signer: &ActiveUserSigner,
     relay_url: &str,
     challenge: &str,
     auth_tag_json: Option<&str>,
@@ -52,7 +54,7 @@ fn build_audio_auth_event(
         nostr::Tag::parse(["challenge", challenge]).map_err(|e| format!("tag challenge: {e}"))?,
     ];
     if let Some(auth_tag_json) = auth_tag_json {
-        let compat_pubkey = nostr::PublicKey::from_hex(&keys.public_key().to_hex())
+        let compat_pubkey = nostr::PublicKey::from_hex(&signer.public_key().to_hex())
             .map_err(|e| format!("agent pubkey conversion failed: {e}"))?;
         buzz_sdk_pkg::nip_oa::verify_auth_tag(auth_tag_json, &compat_pubkey)
             .map_err(|e| format!("agent auth tag verification failed: {e}"))?;
@@ -63,9 +65,9 @@ fn build_audio_auth_event(
                 .map_err(|e| format!("agent auth tag conversion failed: {e}"))?,
         );
     }
-    nostr::EventBuilder::new(nostr::Kind::Custom(22242), "")
-        .tags(tags)
-        .sign_with_keys(keys)
+    signer
+        .sign_event(nostr::EventBuilder::new(nostr::Kind::Custom(22242), "").tags(tags))
+        .await
         .map_err(|e| format!("sign: {e}"))
 }
 
@@ -73,7 +75,7 @@ async fn connect_authenticated_audio_socket(
     channel_id: &str,
     parent_channel_id: Option<&str>,
     relay_url: &str,
-    keys: &nostr::Keys,
+    signer: &ActiveUserSigner,
     auth_tag_json: Option<&str>,
 ) -> Result<(WsSink, WsReceiver, u8, Vec<(u8, String, u8)>), String> {
     use nostr::JsonUtil;
@@ -107,7 +109,7 @@ async fn connect_authenticated_audio_socket(
     .await
     .map_err(|_| "timeout waiting for challenge from relay".to_string())??;
 
-    let event = build_audio_auth_event(keys, relay_url, &challenge, auth_tag_json)?;
+    let event = build_audio_auth_event(signer, relay_url, &challenge, auth_tag_json).await?;
     let event_json: serde_json::Value = serde_json::from_str(&event.as_json())
         .map_err(|e| format!("failed to serialize auth event: {e}"))?;
     let auth_msg = serde_json::json!({
@@ -183,8 +185,9 @@ pub(crate) async fn connect_audio_relay(
     parent_channel_id: Option<&str>,
     state: &AppState,
 ) -> Result<(CancellationToken, tokio::sync::mpsc::Sender<Vec<u8>>), String> {
+    super::require_owned_human_audio(state)?;
     let relay_url = crate::relay::relay_ws_url_with_override(state);
-    let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+    let signer = state.legacy_local_signer()?;
 
     // TTS interrupt flags — recv task cancels TTS when remote humans speak.
     let (
@@ -208,9 +211,14 @@ pub(crate) async fn connect_audio_relay(
 
     let app_handle = state.app_handle.lock().ok().and_then(|g| g.clone());
 
-    let (ws_tx, ws_rx, _peer_index, initial_peers) =
-        connect_authenticated_audio_socket(channel_id, parent_channel_id, &relay_url, &keys, None)
-            .await?;
+    let (ws_tx, ws_rx, _peer_index, initial_peers) = connect_authenticated_audio_socket(
+        channel_id,
+        parent_channel_id,
+        &relay_url,
+        &signer,
+        None,
+    )
+    .await?;
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
@@ -322,11 +330,12 @@ pub(crate) async fn connect_tts_audio_publisher(
     local_tts_publishers: super::tts::LocalTtsPublishers,
 ) -> Result<super::tts::TtsAudioPublisher, String> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
+    let signer = ActiveUserSigner::local(keys.clone());
     let (ws_tx, ws_rx, peer_index, _) = connect_authenticated_audio_socket(
         channel_id,
         parent_channel_id,
         &relay_url,
-        keys,
+        &signer,
         auth_tag_json,
     )
     .await?;
@@ -709,5 +718,63 @@ mod tests {
             7,
         );
         assert_eq!(queue.len(), 1, "cancelled epoch must not enqueue");
+    }
+}
+
+#[cfg(test)]
+mod signer_tests {
+    use super::*;
+    use crate::active_user_signer::tests::ControlledSigner;
+
+    #[tokio::test]
+    async fn audio_auth_awaits_user_signer_and_keeps_agent_authorship() {
+        let controlled = ControlledSigner::new(false);
+        let user = ActiveUserSigner::new(controlled.clone()).await.unwrap();
+        let task = tokio::spawn(async move {
+            build_audio_auth_event(&user, "wss://relay.example", "challenge", None).await
+        });
+        controlled.wait_entered().await;
+        assert!(!task.is_finished());
+        controlled.release.notify_one();
+        let event = task.await.unwrap().unwrap();
+        assert_eq!(event.pubkey, controlled.keys.public_key());
+        assert_eq!(event.kind.as_u16(), 22242);
+        assert!(event.content.is_empty());
+        assert_eq!(
+            event.tags.clone().to_vec(),
+            vec![
+                nostr::Tag::parse(["relay", "wss://relay.example"]).unwrap(),
+                nostr::Tag::parse(["challenge", "challenge"]).unwrap()
+            ]
+        );
+        event.verify().unwrap();
+
+        let agent_keys = nostr::Keys::generate();
+        let auth_tag =
+            buzz_sdk_pkg::nip_oa::compute_auth_tag(&controlled.keys, &agent_keys.public_key(), "")
+                .unwrap();
+        let agent = ActiveUserSigner::local(agent_keys.clone());
+        let event =
+            build_audio_auth_event(&agent, "wss://relay.example", "challenge", Some(&auth_tag))
+                .await
+                .unwrap();
+        assert_eq!(event.pubkey, agent_keys.public_key());
+        assert_ne!(event.pubkey, controlled.keys.public_key());
+        assert_eq!(event.tags.len(), 3);
+        assert_eq!(
+            event.tags.last().unwrap(),
+            &buzz_sdk_pkg::nip_oa::parse_auth_tag(&auth_tag).unwrap()
+        );
+        event.verify().unwrap();
+        let wrong = ActiveUserSigner::local(nostr::Keys::generate());
+        assert!(build_audio_auth_event(
+            &wrong,
+            "wss://relay.example",
+            "challenge",
+            Some(&auth_tag)
+        )
+        .await
+        .unwrap_err()
+        .contains("agent auth tag verification failed"));
     }
 }

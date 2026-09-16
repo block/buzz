@@ -7,7 +7,7 @@ use tauri::{
 use crate::app_state::AppState;
 
 use super::{
-    media::{upload_media_bytes_inner, BlobDescriptor},
+    media::{upload_media_bytes_in_scope, BlobDescriptor, MediaUploadScope},
     media_upload_progress::{
         begin_media_upload, cancel_media_upload as cancel_registered_media_upload,
         finish_media_upload,
@@ -26,15 +26,16 @@ pub async fn upload_media_bytes(
     progress_id: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    upload: MediaUploadScope,
 ) -> Result<BlobDescriptor, String> {
     let cancellation = begin_media_upload(progress_id.as_deref());
-    let result = upload_media_bytes_inner(
+    let result = upload_media_bytes_in_scope(
         data,
         filename,
         progress_id.clone(),
         app,
         state,
-        cancellation.as_ref(),
+        upload.with_parent(cancellation.as_ref()),
     )
     .await;
     finish_media_upload(progress_id.as_deref());
@@ -75,10 +76,11 @@ pub fn release_media_upload(progress_id: String) {
 
 /// Upload raw IPC bytes without expanding a large browser File into JSON.
 #[tauri::command]
-pub async fn upload_media_bytes_raw(
+pub async fn upload_media_bytes_raw<R: tauri::Runtime>(
     request: Request<'_>,
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
+    upload: MediaUploadScope,
 ) -> Result<BlobDescriptor, String> {
     let data = match request.body() {
         InvokeBody::Raw(data) => data.clone(),
@@ -88,13 +90,13 @@ pub async fn upload_media_bytes_raw(
     let progress_id = optional_raw_upload_header(&request, "x-buzz-progress-id")?;
 
     let cancellation = begin_media_upload(progress_id.as_deref());
-    let result = upload_media_bytes_inner(
+    let result = upload_media_bytes_in_scope(
         data,
         filename,
         progress_id.clone(),
         app,
         state,
-        cancellation.as_ref(),
+        upload.with_parent(cancellation.as_ref()),
     )
     .await;
     finish_media_upload(progress_id.as_deref());

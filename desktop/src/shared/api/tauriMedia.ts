@@ -1,5 +1,6 @@
 import { invoke as invokeTauriRaw, isTauri } from "@tauri-apps/api/core";
 import { type BlobDescriptor, invokeTauri } from "./tauri";
+import { nativeGeneration } from "./nativeIdentitySession";
 
 function encodeRawIpcHeader(value: string): string {
   const bytes = new TextEncoder().encode(value);
@@ -22,6 +23,10 @@ export async function uploadMediaFile(
   const headers: Record<string, string> = {
     "x-buzz-filename": encodeRawIpcHeader(file.name),
   };
+  const generation = nativeGeneration();
+  if (generation !== undefined) {
+    headers["x-buzz-identity-generation"] = String(generation);
+  }
   if (progressId) {
     headers["x-buzz-progress-id"] = encodeRawIpcHeader(progressId);
   }

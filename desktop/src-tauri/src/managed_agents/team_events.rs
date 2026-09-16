@@ -269,3 +269,5 @@ mod tests {
             .all(|t| t.as_slice().first().map(String::as_str) != Some("e")));
     }
 }
+
+pub(crate) mod publication;

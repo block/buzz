@@ -76,6 +76,7 @@ pub async fn set_team_shared(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
+    let prepared = super::pending::finish_team_publication(&app, prepared).await?;
     let state = app.state::<AppState>();
     publish_prepared_team(&state, prepared).await
 }
@@ -117,7 +118,7 @@ async fn publish_prepared_team(
         &scope.db_path,
         state,
         &scope.relay_url,
-        &scope.owner_keys,
+        &scope.owner_signer(),
     )
     .await;
 

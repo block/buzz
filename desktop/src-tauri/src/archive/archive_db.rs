@@ -160,7 +160,7 @@ impl ArchiveDb {
 impl ArchiveDb {
     /// Build an adapter bound to a fixed DB path (no nest required), so the
     /// barrier and guard-lifetime contracts can be exercised in isolation.
-    fn with_test_path(path: PathBuf) -> Self {
+    pub(crate) fn with_test_path(path: PathBuf) -> Self {
         Self {
             init: OnceCell::new(),
             maintenance: RwLock::new(()),
@@ -189,7 +189,7 @@ impl ArchiveDb {
     /// `with_conn` connection holds the read guard, so this returns `false`
     /// while any ordinary connection is open and `true` once all have dropped —
     /// exactly the signal the Phase-4 sole-connection VACUUM will gate on.
-    fn maintenance_write_available(&self) -> bool {
+    pub(crate) fn maintenance_write_available(&self) -> bool {
         self.maintenance.try_write().is_ok()
     }
 }

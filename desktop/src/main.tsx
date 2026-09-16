@@ -1,3 +1,9 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import {
+  bindNativeIdentity,
+  isRemoteIdentity,
+  type NativeIdentityStatus,
+} from "@/shared/api/nativeIdentitySession";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
@@ -88,7 +94,7 @@ function renderApp() {
         <AvatarClipPaths />
         <CommunitiesProvider>
           <CommunityOnboardingProvider
-            enabled={huddleWindowChannelId() === null}
+            enabled={!isRemoteIdentity() && huddleWindowChannelId() === null}
           >
             <ThemeProvider defaultTheme="buzz">
               <TooltipProvider>
@@ -132,7 +138,12 @@ async function bootstrap() {
   initializeFontSizePreference();
   startLocalStorageSweep();
   await installE2eBridgeIfConfigured();
-  await migrateLegacyCommunityStorageBeforeRender();
+  if (isTauri() && !(window as E2eWindow).__BUZZ_E2E__) {
+    bindNativeIdentity(
+      await invoke<NativeIdentityStatus>("get_native_identity_status"),
+    );
+  }
+  if (!isRemoteIdentity()) await migrateLegacyCommunityStorageBeforeRender();
   renderApp();
 }
 

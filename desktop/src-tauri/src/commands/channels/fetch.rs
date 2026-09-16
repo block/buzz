@@ -6,7 +6,9 @@
 //! the not-modified hash, and the member-count collection. The Tauri commands
 //! and channel writes stay in `channels.rs`.
 
-use crate::{app_state::AppState, models::ChannelInfo, nostr_convert, relay::query_relay};
+use crate::{
+    active_user_signer::ActiveUserSigner, app_state::AppState, models::ChannelInfo, nostr_convert,
+};
 
 pub(super) const DIRECTORY_PAGE_SIZE: usize = 500;
 // Keep this aligned with the relay's aggregate explicit-`#h` request bound.
@@ -29,13 +31,15 @@ pub(super) fn advance_directory_cursor(filter: &mut serde_json::Value, page: &[n
 /// than one page of events shares the same second.
 async fn query_relay_all(
     state: &AppState,
+    relay_base: &str,
+    signer: &ActiveUserSigner,
     mut filter: serde_json::Value,
 ) -> Result<Vec<nostr::Event>, String> {
     filter["limit"] = serde_json::json!(DIRECTORY_PAGE_SIZE);
     let mut all = Vec::new();
 
     loop {
-        let page = query_relay(state, &[filter.clone()]).await?;
+        let page = query_relay(state, relay_base, signer, &[filter.clone()]).await?;
         let done = page.len() < DIRECTORY_PAGE_SIZE;
 
         if !done {
@@ -153,11 +157,13 @@ pub(super) fn last_message_filter_batches(
 
 async fn query_last_messages(
     state: &AppState,
+    relay_base: &str,
+    signer: &ActiveUserSigner,
     filters: &[serde_json::Value],
 ) -> Result<Vec<nostr::Event>, String> {
     let mut messages = Vec::with_capacity(filters.len());
     for batch in last_message_filter_batches(filters) {
-        messages.extend(query_relay(state, batch).await?);
+        messages.extend(query_relay(state, relay_base, signer, batch).await?);
     }
     Ok(messages)
 }
@@ -195,13 +201,20 @@ pub(super) async fn fetch_channels(
     state: &AppState,
     scope: DirectoryScope,
 ) -> Result<Vec<ChannelInfo>, String> {
+    let signer = state.legacy_local_signer()?;
+    let relay_base = crate::relay::relay_api_base_url_with_override(state);
+    fetch_channels_in_scope(state, scope, &relay_base, &signer).await
+}
+
+pub(super) async fn fetch_channels_in_scope(
+    state: &AppState,
+    scope: DirectoryScope,
+    relay_base: &str,
+    signer: &ActiveUserSigner,
+) -> Result<Vec<ChannelInfo>, String> {
     #[cfg(debug_assertions)]
     let _profile_start = std::time::Instant::now();
-
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = signer.public_key().to_hex();
 
     // Channels this identity created whose kind:39002 membership hasn't yet
     // propagated. Under member-only scope they are the only non-member
@@ -219,6 +232,8 @@ pub(super) async fn fetch_channels(
             // Step 1: kind:39002 events listing my pubkey as a member.
             let member_events = query_relay_all(
                 state,
+                relay_base,
+                signer,
                 serde_json::json!({"kinds": [39002], "#p": [&my_pubkey]}),
             )
             .await?;
@@ -252,6 +267,8 @@ pub(super) async fn fetch_channels(
             let meta_events = if !member_channel_ids.is_empty() {
                 query_relay(
                     state,
+                    relay_base,
+                    signer,
                     &[serde_json::json!({
                         "kinds": [39000],
                         "#d": &member_channel_ids,
@@ -273,11 +290,19 @@ pub(super) async fn fetch_channels(
         async {
             match scope {
                 DirectoryScope::IncludeOpenDirectory => {
-                    query_relay_all(state, serde_json::json!({"kinds": [39000]})).await
+                    query_relay_all(
+                        state,
+                        relay_base,
+                        signer,
+                        serde_json::json!({"kinds": [39000]}),
+                    )
+                    .await
                 }
                 DirectoryScope::MemberOnly if !pending_owned_ids.is_empty() => {
                     query_relay(
                         state,
+                        relay_base,
+                        signer,
                         &[serde_json::json!({
                             "kinds": [39000],
                             "#d": &pending_owned_ids,
@@ -294,6 +319,8 @@ pub(super) async fn fetch_channels(
         async {
             let events = query_relay(
                 state,
+                relay_base,
+                signer,
                 &[serde_json::json!({
                     "kinds": [buzz_core_pkg::kind::KIND_DM_VISIBILITY],
                     "#p": [&my_pubkey],
@@ -399,12 +426,12 @@ pub(super) async fn fetch_channels(
                 if missing_member_ids.is_empty() {
                     Ok(Vec::new())
                 } else {
-                    query_relay(state, &member_count_filters).await
+                    query_relay(state, relay_base, signer, &member_count_filters).await
                 }
             },
             // Step 5: preserve one indexed filter per channel while keeping
             // every relay request within its aggregate explicit-channel cap.
-            query_last_messages(state, &last_msg_filters),
+            query_last_messages(state, relay_base, signer, &last_msg_filters),
         );
         // Message timestamps drive the user-selected Recent ordering. Unlike
         // member counts, a failed query must not masquerade as an authoritative
@@ -505,3 +532,12 @@ pub(super) fn collect_members_by_channel(
 #[cfg(test)]
 #[path = "fetch_tests.rs"]
 mod tests;
+
+async fn query_relay(
+    state: &AppState,
+    relay_base: &str,
+    signer: &ActiveUserSigner,
+    filters: &[serde_json::Value],
+) -> Result<Vec<nostr::Event>, String> {
+    crate::relay::query_relay_at_with_signer(state, relay_base, filters, signer, None).await
+}

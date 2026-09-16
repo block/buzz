@@ -1,4 +1,4 @@
-use nostr::{Event, EventBuilder, Keys, RelayUrl, Tag};
+use nostr::{Event, EventBuilder, Keys, NostrSigner, RelayUrl, Tag};
 use serde_json::Value;
 
 use crate::error::WsClientError;
@@ -177,6 +177,34 @@ pub fn build_auth_event(
     keys: &Keys,
     auth_tag: Option<&Tag>,
 ) -> Result<Event, WsClientError> {
+    auth_event_builder(challenge, relay_url, auth_tag)?
+        .sign_with_keys(keys)
+        .map_err(|e| WsClientError::EventBuilder(e.to_string()))
+}
+
+/// Build NIP-42 AUTH through an asynchronous rust-nostr signer.
+pub async fn build_auth_event_with_signer(
+    challenge: &str,
+    relay_url: &str,
+    signer: &dyn NostrSigner,
+    auth_tag: Option<&Tag>,
+) -> Result<Event, WsClientError> {
+    let builder = auth_event_builder(challenge, relay_url, auth_tag)?;
+    let public_key = signer
+        .get_public_key()
+        .await
+        .map_err(|e| WsClientError::EventBuilder(e.to_string()))?;
+    signer
+        .sign_event(builder.build(public_key))
+        .await
+        .map_err(|e| WsClientError::EventBuilder(e.to_string()))
+}
+
+fn auth_event_builder(
+    challenge: &str,
+    relay_url: &str,
+    auth_tag: Option<&Tag>,
+) -> Result<EventBuilder, WsClientError> {
     let url = RelayUrl::parse(relay_url).map_err(|e| WsClientError::Url(e.to_string()))?;
     let builder = EventBuilder::auth(challenge, url);
     let builder = if let Some(tag) = auth_tag {
@@ -184,7 +212,5 @@ pub fn build_auth_event(
     } else {
         builder
     };
-    builder
-        .sign_with_keys(keys)
-        .map_err(|e| WsClientError::EventBuilder(e.to_string()))
+    Ok(builder)
 }

@@ -198,7 +198,10 @@ pub fn load_global_agent_config<R: tauri::Runtime>(
 /// Strips empty env values and normalizes blank provider/model to `None`
 /// before writing (empty = "inherit" semantics).
 /// Written `0o600` — same protection as `managed-agents.json`.
-pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> Result<(), String> {
+pub fn save_global_agent_config<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    config: &GlobalAgentConfig,
+) -> Result<(), String> {
     let mut config = config.clone();
     strip_empty_env_vars(&mut config);
     normalize_global_config_fields(&mut config);

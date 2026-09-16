@@ -57,8 +57,8 @@ fn seed_team_head(db_path: &Path, keys: &nostr::Keys, created_at: i64) {
     .unwrap();
 }
 
-#[test]
-fn test_team_tombstone_created_at_strictly_dominates_a_future_dated_head() {
+#[tokio::test]
+async fn test_team_tombstone_created_at_strictly_dominates_a_future_dated_head() {
     // 30176 analog of the 30178 defect (Wes P1): retain_team_pending signs the
     // team head with monotonic_created_at, so it can be future-dated. The kind:5
     // must dominate it or the relay's created_at <= gate leaves the head live.
@@ -70,7 +70,18 @@ fn test_team_tombstone_created_at_strictly_dominates_a_future_dated_head() {
     let future = nostr::Timestamp::now().as_secs() as i64 + 86_400;
     seed_team_head(&db_path, &keys, future);
 
-    tombstone_team_at(&db_path, &keys, "team-abc").unwrap();
+    tombstone_team_at(
+        &db_path,
+        &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
+        "team-abc",
+    )
+    .unwrap()
+    .sign(&crate::active_user_signer::ActiveUserSigner::local(
+        keys.clone(),
+    ))
+    .await
+    .commit()
+    .unwrap();
 
     let conn = open_retention_db(&db_path).unwrap();
     assert!(
@@ -95,15 +106,26 @@ fn test_team_tombstone_created_at_strictly_dominates_a_future_dated_head() {
     );
 }
 
-#[test]
-fn test_team_tombstone_with_no_head_falls_back_to_wall_clock() {
+#[tokio::test]
+async fn test_team_tombstone_with_no_head_falls_back_to_wall_clock() {
     let dir = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
     let owner = keys.public_key().to_hex();
     let db_path = scoped_db(dir.path(), "wss://a.example", &owner);
 
     let before = nostr::Timestamp::now().as_secs() as i64;
-    tombstone_team_at(&db_path, &keys, "team-abc").unwrap();
+    tombstone_team_at(
+        &db_path,
+        &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
+        "team-abc",
+    )
+    .unwrap()
+    .sign(&crate::active_user_signer::ActiveUserSigner::local(
+        keys.clone(),
+    ))
+    .await
+    .commit()
+    .unwrap();
     let after = nostr::Timestamp::now().as_secs() as i64;
 
     let conn = open_retention_db(&db_path).unwrap();
@@ -121,8 +143,8 @@ fn test_team_tombstone_with_no_head_falls_back_to_wall_clock() {
     assert!(monotonic_created_at(None).as_secs() as i64 >= before);
 }
 
-#[test]
-fn test_team_tombstone_rolls_back_head_purge_when_enqueue_fails() {
+#[tokio::test]
+async fn test_team_tombstone_rolls_back_head_purge_when_enqueue_fails() {
     // P1-2: the head purge and the kind:5 enqueue run in one `BEGIN IMMEDIATE`
     // transaction. A crash/failure between them must not leave the 30176 head
     // gone with no local retry witness. A `BEFORE INSERT` trigger blocks the
@@ -146,7 +168,17 @@ fn test_team_tombstone_rolls_back_head_purge_when_enqueue_fails() {
     .unwrap();
     drop(conn);
 
-    let result = tombstone_team_at(&db_path, &keys, "team-abc");
+    let result = tombstone_team_at(
+        &db_path,
+        &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
+        "team-abc",
+    )
+    .unwrap()
+    .sign(&crate::active_user_signer::ActiveUserSigner::local(
+        keys.clone(),
+    ))
+    .await
+    .commit();
     assert!(result.is_err(), "tombstone with INSERT trigger must fail");
     let err = result.unwrap_err();
     assert!(

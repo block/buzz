@@ -1,9 +1,10 @@
-use nostr::{EventId, Keys};
+use crate::active_user_signer::ActiveUserSigner;
+use nostr::EventId;
 
 use crate::{
     app_state::AppState,
     events,
-    relay::{query_relay_at, query_relay_at_with_keys},
+    relay::{query_relay_at, query_relay_at_with_signer},
 };
 
 /// Build a thread reference from a renderer-supplied root and parent.
@@ -30,7 +31,7 @@ pub(super) async fn thread_ref(
     root_event_id: Option<&str>,
     state: &AppState,
     api_base_url: &str,
-    signing_keys: Option<&Keys>,
+    signing_keys: Option<&ActiveUserSigner>,
 ) -> Result<events::ThreadRef, String> {
     match root_event_id {
         Some(root_event_id) => provided_thread_ref(root_event_id, parent_event_id),
@@ -50,7 +51,7 @@ pub(super) async fn resolve_thread_ref(
     parent_event_id: &str,
     state: &AppState,
     api_base_url: &str,
-    keys: Option<&nostr::Keys>,
+    keys: Option<&ActiveUserSigner>,
 ) -> Result<events::ThreadRef, String> {
     let parent_eid =
         EventId::from_hex(parent_event_id).map_err(|e| format!("invalid parent event ID: {e}"))?;
@@ -61,7 +62,7 @@ pub(super) async fn resolve_thread_ref(
         "limit": 1
     })];
     let evs = match keys {
-        Some(keys) => query_relay_at_with_keys(state, api_base_url, &filters, keys, None).await?,
+        Some(keys) => query_relay_at_with_signer(state, api_base_url, &filters, keys, None).await?,
         None => query_relay_at(state, api_base_url, &filters).await?,
     };
 

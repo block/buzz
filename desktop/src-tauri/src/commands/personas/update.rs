@@ -2,6 +2,16 @@
 //! and the `update_persona_with` seam that `update_persona_and_publish` reuses
 //! to await relay acceptance for the same save.
 
+type PreparedPersonaUpdate = (
+    AgentDefinition,
+    pending::PersonaRetentionWork,
+    bool,
+    bool,
+    bool,
+    String,
+    Option<String>,
+);
+
 use tauri::AppHandle;
 
 use crate::{
@@ -126,36 +136,38 @@ pub async fn update_persona(
     input: UpdatePersonaRequest,
     app: AppHandle,
 ) -> Result<UpdatePersonaResult, String> {
-    let (persona, ()) = update_persona_with(input, app, |app, state, persona| {
-        retain_persona_pending(app, state, persona);
-        // F2: immediately refresh any shared 30178 heads that include this
-        // persona as a member. Best-effort inside retain so a hiccup cannot
-        // fail the persona edit itself.
-        crate::commands::refresh_team_catalog_heads_for_persona(app, state, &persona.id);
-        Ok(())
-    })
-    .await?;
+    let (persona, _) = update_persona_with(input, app, false).await?;
     Ok(UpdatePersonaResult { persona })
 }
 
-/// Save an edited persona, hand the saved record to `retain` while the store
-/// lock is still held, then sync the relay profiles of linked agent instances.
+/// Save an edited persona, sign/retain without the store lock, then update
+/// linked records and sync their relay profiles. Strict signing failure precedes
+/// all linked-record and catalog mutations, matching the synchronous baseline.
 ///
-/// `retain` is the only difference between the two update commands:
+/// Retention error policy is the only difference between the two commands:
 /// [`update_persona`] enqueues best-effort, while
 /// [`sharing::update_persona_and_publish`] prepares a strict publication and
 /// returns the event so the caller can await relay acceptance.
-pub(super) async fn update_persona_with<R: Send + 'static>(
+pub(super) async fn update_persona_with<R: tauri::Runtime>(
     input: UpdatePersonaRequest,
-    app: AppHandle,
-    retain: impl FnOnce(&AppHandle, &AppState, &AgentDefinition) -> Result<R, String> + Send + 'static,
-) -> Result<(AgentDefinition, R), String> {
+    app: AppHandle<R>,
+    strict_publication: bool,
+) -> Result<(AgentDefinition, Option<pending::PreparedPersonaPublication>), String> {
     use tauri::Manager;
 
-    // Phase 1: synchronous save (persona record + linked agent avatar updates)
-    let (result, retained, profile_sync_params) = tokio::task::spawn_blocking({
+    // Save and retain the persona before mutating linked records. In particular,
+    // strict signing failure must return before any linked/catalog side effects.
+    let (
+        result,
+        retained,
+        avatar_changed,
+        name_changed,
+        about_changed,
+        old_display_name,
+        new_about,
+    ) = tokio::task::spawn_blocking({
         let app = app.clone();
-        move || -> Result<(AgentDefinition, R, ProfileSyncParams), String> {
+        move || -> Result<PreparedPersonaUpdate, String> {
             let state = app.state::<AppState>();
             let display_name = trim_required(&input.display_name, "Display name")?;
             let system_prompt = input.system_prompt.clone();
@@ -212,90 +224,150 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let result = persona.clone();
             save_personas(&app, &personas)?;
 
-            let retained = retain(&app, &state, &result)?;
-            try_regenerate_nest(&app);
-
-            // If the avatar, display_name, or effective description changed,
-            // propagate to linked agent records and collect relay profile sync
-            // params for the async phase. An about-only change touches no
-            // record bytes but still republishes each linked kind:0 profile.
-            let sync_params: ProfileSyncParams = if avatar_changed || name_changed || about_changed
-            {
-                let mut records = load_managed_agents(&app)?;
-                let mut params: ProfileSyncParams = Vec::new();
-                let mut agents_modified = false;
-                let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
-
-                // Propagate the display_name rename to instances that still
-                // carry the old definition display_name (pool-named instances
-                // keep their individualised name) in one pass; the loop below
-                // only decides which records need a relay profile sync.
-                let renamed: Vec<String> = if name_changed {
-                    propagate_persona_name_rename(
-                        &mut records,
-                        &result.id,
-                        &old_display_name,
-                        &result.display_name,
-                    )
-                } else {
-                    Vec::new()
-                };
-
-                for record in records.iter_mut() {
-                    if record.persona_id.as_deref() != Some(&result.id) {
-                        continue;
-                    }
-                    let was_renamed = renamed.contains(&record.pubkey);
-                    let update = prepare_linked_profile_update(
-                        record,
-                        &result,
-                        was_renamed,
-                        avatar_changed,
-                        about_changed,
-                    );
-
-                    agents_modified = agents_modified || update.record_changed;
-                    if update.profile_sync_required {
-                        if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
-                            let relay_url = crate::relay::effective_agent_relay_url(
-                                &record.relay_url,
-                                &workspace_relay,
-                            );
-                            params.push((
-                                agent_keys,
-                                relay_url,
-                                record.name.clone(),
-                                update.profile_avatar,
-                                new_about.clone(),
-                                record.auth_tag.clone(),
-                            ));
-                        }
-                    }
+            let retained = retain_persona_pending(&app, &state, &result);
+            if strict_publication {
+                if let Err(error) = &retained {
+                    return Err(error.clone());
                 }
-
-                if agents_modified {
-                    save_managed_agents(&app, &records)?;
-                    // Keep retained kind:30177 identity records in lockstep with
-                    // the rename (#2423): `record.name` is part of the published
-                    // identity projection, so skipping this strands the relay on
-                    // the stale name→pubkey binding until the next boot reconcile.
-                    // Avatar-only edits are excluded — the avatar is not in the
-                    // projection, so retaining would be a guaranteed no-op.
-                    for record in records.iter().filter(|r| renamed.contains(&r.pubkey)) {
-                        crate::commands::agents::retain_managed_agent_pending(&app, &state, record);
-                    }
-                }
-
-                params
-            } else {
-                Vec::new()
-            };
-
-            Ok((result, retained, sync_params))
+            }
+            Ok((
+                result,
+                retained,
+                avatar_changed,
+                name_changed,
+                about_changed,
+                old_display_name,
+                new_about,
+            ))
         }
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+
+    let signed = pending::sign_persona_publication(retained).await;
+    if strict_publication {
+        if let Err(error) = &signed {
+            return Err(error.clone());
+        }
+    }
+
+    let (retained, profile_sync_params, catalog_work, agent_retention) =
+        tokio::task::spawn_blocking({
+            let app = app.clone();
+            let result = result.clone();
+            move || {
+                let state = app.state::<AppState>();
+                let _store_guard = state
+                    .managed_agents_store_lock
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                let retained = signed.and_then(|signed| signed.commit(&load_personas(&app)?));
+                let retained = match retained {
+                    Ok(publication) => Some(publication),
+                    Err(error) if strict_publication => return Err(error),
+                    Err(error) => {
+                        eprintln!("buzz-desktop: persona-retain: {error}");
+                        None
+                    }
+                };
+                let catalog_work = crate::commands::refresh_team_catalog_heads_for_persona(
+                    &app, &state, &result.id,
+                );
+                try_regenerate_nest(&app);
+
+                // If the avatar, display_name, or effective description changed,
+                // propagate to linked agent records and collect relay profile sync
+                // params for the async phase. An about-only change touches no
+                // record bytes but still republishes each linked kind:0 profile.
+                let mut agent_retention = Vec::new();
+                let sync_params: ProfileSyncParams =
+                    if avatar_changed || name_changed || about_changed {
+                        let mut records = load_managed_agents(&app)?;
+                        let mut params: ProfileSyncParams = Vec::new();
+                        let mut agents_modified = false;
+                        let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
+
+                        // Propagate the display_name rename to instances that still
+                        // carry the old definition display_name (pool-named instances
+                        // keep their individualised name) in one pass; the loop below
+                        // only decides which records need a relay profile sync.
+                        let renamed: Vec<String> = if name_changed {
+                            propagate_persona_name_rename(
+                                &mut records,
+                                &result.id,
+                                &old_display_name,
+                                &result.display_name,
+                            )
+                        } else {
+                            Vec::new()
+                        };
+
+                        for record in records.iter_mut() {
+                            if record.persona_id.as_deref() != Some(&result.id) {
+                                continue;
+                            }
+                            let was_renamed = renamed.contains(&record.pubkey);
+                            let update = prepare_linked_profile_update(
+                                record,
+                                &result,
+                                was_renamed,
+                                avatar_changed,
+                                about_changed,
+                            );
+
+                            agents_modified = agents_modified || update.record_changed;
+                            if update.profile_sync_required {
+                                if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec)
+                                {
+                                    let relay_url = crate::relay::effective_agent_relay_url(
+                                        &record.relay_url,
+                                        &workspace_relay,
+                                    );
+                                    params.push((
+                                        agent_keys,
+                                        relay_url,
+                                        record.name.clone(),
+                                        update.profile_avatar,
+                                        new_about.clone(),
+                                        record.auth_tag.clone(),
+                                    ));
+                                }
+                            }
+                        }
+
+                        if agents_modified {
+                            save_managed_agents(&app, &records)?;
+                            // Keep retained kind:30177 identity records in lockstep with
+                            // the rename (#2423): `record.name` is part of the published
+                            // identity projection, so skipping this strands the relay on
+                            // the stale name→pubkey binding until the next boot reconcile.
+                            // Avatar-only edits are excluded — the avatar is not in the
+                            // projection, so retaining would be a guaranteed no-op.
+                            for record in records.iter().filter(|r| renamed.contains(&r.pubkey)) {
+                                agent_retention.push(
+                                    crate::commands::agents::prepare_managed_agent_pending(
+                                        &app, &state, record,
+                                    ),
+                                );
+                            }
+                        }
+
+                        params
+                    } else {
+                        Vec::new()
+                    };
+
+                Ok::<_, String>((retained, sync_params, catalog_work, agent_retention))
+            }
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+
+    for work in agent_retention {
+        crate::commands::agents::finish_managed_agent_pending(&app, &app.state::<AppState>(), work)
+            .await;
+    }
+    crate::managed_agents::team_catalog::finish_catalog_retractions(&app, catalog_work).await;
 
     // Phase 2: await relay profile sync for linked agents whose avatar,
     // display_name, or effective description (kind:0 about) was just

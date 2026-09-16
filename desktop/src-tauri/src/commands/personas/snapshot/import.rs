@@ -6,7 +6,6 @@
 //! registered in `lib.rs` through the same `personas::` path as the export
 //! commands.
 
-use nostr::ToBech32;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -15,13 +14,13 @@ use crate::{
     managed_agents::{
         agent_snapshot::{extract_chunk_payload_png, AgentSnapshot, MemoryLevel},
         agent_snapshot_envelope::{
-            decrypt_envelope, parse_chunk_payload, resolve_unlock_secret, ChunkPayload,
-            LOCKED_CARD_REFUSAL,
+            decrypt_envelope, decrypt_envelope_with_signer, parse_chunk_payload,
+            resolve_unlock_secret, ChunkPayload, LOCKED_CARD_REFUSAL,
         },
         load_managed_agents, load_personas, save_managed_agents, save_personas, AgentDefinition,
         ManagedAgentRecord, RespondTo,
     },
-    relay::{effective_agent_relay_url, relay_ws_url_with_override},
+    relay::effective_agent_relay_url,
     util::now_iso,
 };
 
@@ -314,22 +313,59 @@ pub(crate) fn decode_snapshot_from_bytes(
 ///
 /// Returns the decoded manifest and whether it came from a locked envelope.
 /// When neither endpoint exists, fails closed with the locked-card refusal —
-/// never partial plaintext, never crypto details.
-pub(crate) fn decode_snapshot_for_import(
+/// never partial plaintext. Remote authentication/transport/response failures
+/// propagate rather than pretending that an unavailable backend is a bad card.
+pub(crate) async fn decode_snapshot_for_import(
     file_bytes: &[u8],
-    owner_keys: Option<&nostr::Keys>,
+    owner: Option<&crate::owner_authorization::OwnerAuthorizationScope>,
     records: &[ManagedAgentRecord],
-) -> Result<(crate::managed_agents::agent_snapshot::AgentSnapshot, bool), String> {
-    match parse_snapshot_payload_from_bytes(file_bytes)? {
-        ChunkPayload::Plain(snapshot) => Ok((*snapshot, false)),
-        ChunkPayload::Locked(envelope) => {
-            let secret = resolve_unlock_secret(&envelope, owner_keys, records)
-                .ok_or_else(|| LOCKED_CARD_REFUSAL.to_string())?;
-            let snapshot = decrypt_envelope(&envelope, &secret)?;
-            enforce_memory_consistency(&snapshot)?;
-            Ok((snapshot, true))
-        }
+    state: &AppState,
+) -> Result<(AgentSnapshot, bool), String> {
+    if let Some(owner) = owner {
+        owner.check_current(state)?;
+    } else if state.is_remote_identity() {
+        // Missing remote authentication is never the local recovery exception.
+        return Err("native owner authentication is required".into());
     }
+    // Preserve off-executor PNG/JSON decode for preview; no store guards cross
+    // either this await or remote decryption. Keep outer caps before the copy.
+    let max_bytes = if file_bytes.starts_with(&PNG_MAGIC) {
+        MAX_SNAPSHOT_PNG_BYTES
+    } else {
+        MAX_SNAPSHOT_JSON_BYTES
+    };
+    if file_bytes.len() > max_bytes {
+        // Reuse the established outer-file error messages.
+        parse_snapshot_payload_from_bytes(file_bytes)?;
+    }
+    let file_bytes = file_bytes.to_vec();
+    let payload =
+        tokio::task::spawn_blocking(move || parse_snapshot_payload_from_bytes(&file_bytes))
+            .await
+            .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+    if let Some(owner) = owner {
+        owner.check_current(state)?;
+    }
+    let decoded = match payload {
+        ChunkPayload::Plain(snapshot) => (*snapshot, false),
+        ChunkPayload::Locked(envelope) => {
+            let snapshot = if let Some(owner) =
+                owner.filter(|o| o.signer.public_key().to_hex() == envelope.encryption.owner_pubkey)
+            {
+                decrypt_envelope_with_signer(&envelope, &owner.signer).await?
+            } else {
+                let secret = resolve_unlock_secret(&envelope, None, records)
+                    .ok_or_else(|| LOCKED_CARD_REFUSAL.to_string())?;
+                decrypt_envelope(&envelope, &secret)?
+            };
+            enforce_memory_consistency(&snapshot)?;
+            (snapshot, true)
+        }
+    };
+    if let Some(owner) = owner {
+        owner.check_current(state)?;
+    }
+    Ok(decoded)
 }
 
 async fn materialize_import_avatar<F, Fut>(
@@ -375,9 +411,9 @@ pub async fn preview_agent_snapshot_import(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentSnapshotImportPreview, String> {
-    // Key material + records are gathered up front (cheap, lock-scoped) so
-    // the blocking decode below owns plain data.
-    let owner_keys = state.signing_keys().ok();
+    crate::owner_authorization::require_owned_workspace(&state)?;
+    // Preserve local recovery: only the independent agent record may unlock.
+    let owner = crate::owner_authorization::OwnerAuthorizationScope::capture(&state).ok();
     let records = {
         let _store_guard = state
             .managed_agents_store_lock
@@ -385,15 +421,10 @@ pub async fn preview_agent_snapshot_import(
             .map_err(|e| e.to_string())?;
         load_managed_agents(&app)?
     };
-    tokio::task::spawn_blocking(move || {
-        reject_legacy_persona_filename(&file_name)?;
-        let (snapshot, locked) =
-            decode_snapshot_for_import(&file_bytes, owner_keys.as_ref(), &records)?;
-
-        build_agent_snapshot_import_preview(&snapshot, locked)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    reject_legacy_persona_filename(&file_name)?;
+    let (snapshot, locked) =
+        decode_snapshot_for_import(&file_bytes, owner.as_ref(), &records, &state).await?;
+    build_agent_snapshot_import_preview(&snapshot, locked)
 }
 
 pub(crate) fn build_agent_snapshot_import_preview(
@@ -458,11 +489,12 @@ pub async fn confirm_agent_snapshot_import(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentSnapshotImportResult, String> {
+    crate::owner_authorization::require_owned_workspace(&state)?;
+    let owner = crate::owner_authorization::OwnerAuthorizationScope::capture(&state)?;
     // ── Phase 1: validate (no writes) ────────────────────────────────────────
     // Locked cards unlock only via this machine's exact key endpoints;
     // anything else fails closed here, before key generation.
     let snapshot = {
-        let owner_keys = state.signing_keys().ok();
         let records = {
             let _store_guard = state
                 .managed_agents_store_lock
@@ -470,7 +502,9 @@ pub async fn confirm_agent_snapshot_import(
                 .map_err(|e| e.to_string())?;
             load_managed_agents(&app)?
         };
-        decode_snapshot_for_import(&input.file_bytes, owner_keys.as_ref(), &records)?.0
+        decode_snapshot_for_import(&input.file_bytes, Some(&owner), &records, &state)
+            .await?
+            .0
     };
 
     let display_name = snapshot.profile.display_name.trim().to_string();
@@ -486,6 +520,14 @@ pub async fn confirm_agent_snapshot_import(
         input.keep_allowlist,
     )?;
     let minted_parallelism = minted.parallelism;
+
+    let crate::owner_authorization::AuthorizedAgent {
+        keys: agent_keys,
+        private_key_nsec,
+        pubkey,
+        auth_tag,
+    } = crate::owner_authorization::prepare_agent(&owner.signer).await?;
+    owner.check_current(&state)?;
 
     // Profile metadata must contain a hosted URL. Inline avatar data can be far
     // larger than the relay's kind:0 content limit, so upload imported pixels
@@ -511,42 +553,14 @@ pub async fn confirm_agent_snapshot_import(
         None
     };
 
-    // ── Phase 2: mint keys + auth tag (sync, outside lock) ───────────────────
-    let (agent_keys, private_key_nsec, pubkey, auth_tag, owner_pubkey_hex) = {
-        let owner_keys = state.signing_keys()?;
-        let agent_keys = nostr::Keys::generate();
-        let pubkey = agent_keys.public_key().to_hex();
-        let private_key_nsec = agent_keys
-            .secret_key()
-            .to_bech32()
-            .map_err(|e| format!("failed to encode agent private key: {e}"))?;
-
-        // NIP-OA auth tag: bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
-        let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
-            .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
-        let compat_agent = nostr::PublicKey::from_hex(&pubkey)
-            .map_err(|e| format!("failed to bridge agent pubkey: {e}"))?;
-        let auth_tag = Some(
-            buzz_sdk_pkg::nip_oa::compute_auth_tag(&compat_owner, &compat_agent, "")
-                .map_err(|e| format!("failed to compute NIP-OA auth tag: {e}"))?,
-        );
-        let owner_pubkey_hex = owner_keys.public_key().to_hex();
-        (
-            agent_keys,
-            private_key_nsec,
-            pubkey,
-            auth_tag,
-            owner_pubkey_hex,
-        )
-    };
-
     // ── Phase 3a: create AgentDefinition + ManagedAgentRecord (sync lock) ──────
-    let (persona, record) = {
+    let (persona, record, agent_retention, persona_retention) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|e| e.to_string())?;
 
+        let _admission = owner.admit(&state)?;
         let mut personas = load_personas(&app)?;
         let mut records = load_managed_agents(&app)?;
 
@@ -594,7 +608,8 @@ pub async fn confirm_agent_snapshot_import(
         save_personas(&app, &personas)?;
 
         // Enqueue the kind:30175 persona event via the retention path.
-        super::super::pending::retain_persona_pending(&app, &state, &persona);
+        let persona_retention =
+            super::super::pending::retain_persona_pending(&app, &state, &persona);
         // Build the managed agent record — no machine-local commands, no
         // secrets, no lineage from the snapshot.
         let record = ManagedAgentRecord {
@@ -673,7 +688,8 @@ pub async fn confirm_agent_snapshot_import(
         // Enqueue the kind:30177 managed-agent event via retention.
         // (Uses the same pattern as agents.rs::retain_managed_agent_pending
         // inlined here to avoid cross-module private-fn access.)
-        retain_agent_pending(&app, &state, &record);
+        let agent_retention =
+            crate::commands::agents::prepare_managed_agent_pending(&app, &state, &record);
 
         crate::managed_agents::try_regenerate_nest(&app);
 
@@ -681,15 +697,20 @@ pub async fn confirm_agent_snapshot_import(
         // matching the contract used by other local managed-agent mutations.
         let _ = app.emit("agents-data-changed", ());
 
-        (persona, record)
+        (persona, record, agent_retention, persona_retention)
     };
+    super::super::pending::finish_persona_pending(&app, persona_retention).await;
+    crate::commands::agents::finish_managed_agent_pending(&app, &state, agent_retention).await;
 
+    // Creation is committed. Complete independent-agent work at the captured
+    // destination even if the human switches workspace/identity during retention
+    // or publication. Return the committed identity with explicit partial errors;
+    // re-admitting here would discard it and encourage a duplicate import.
     // ── Phase 3b: publish kind:0 profile (async, outside lock) ───────────────
-    let relay_url =
-        effective_agent_relay_url(&record.relay_url, &relay_ws_url_with_override(&state));
+    let relay_url = effective_agent_relay_url(&record.relay_url, &owner.relay_base);
     let profile_sync_error = crate::commands::agents::publish_persona_profile(
         &state,
-        &record.relay_url,
+        &relay_url,
         &agent_keys,
         &display_name,
         effective_avatar.as_deref(),
@@ -704,8 +725,7 @@ pub async fn confirm_agent_snapshot_import(
     let mut memory_errors: Vec<String> = Vec::new();
 
     if memory_total > 0 {
-        let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)
-            .map_err(|e| format!("failed to parse owner pubkey: {e}"))?;
+        let owner_pubkey = owner.signer.public_key();
 
         // Monotonic timestamp seed: use current time, bumped by 1 per entry
         // so no two events land at the same second.
@@ -760,57 +780,7 @@ pub async fn confirm_agent_snapshot_import(
     })
 }
 
-/// Inline retention for the managed-agent kind:30177 event — mirrors
-/// `agents::retain_managed_agent_pending` without requiring cross-module
-/// private function access.
-fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgentRecord) {
-    use crate::managed_agents::{
-        agent_events::{agent_event_content, build_agent_event},
-        persona_events::monotonic_created_at,
-        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
-    };
-    use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
-    use nostr::JsonUtil;
-
-    let result = (|| -> Result<(), String> {
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        let conn = open_retention_db(&scope.db_path)?;
-        let content = serde_json::to_string(&agent_event_content(record))
-            .map_err(|e| format!("failed to serialize agent content: {e}"))?;
-        let (owner_pubkey, event) = {
-            let keys = &scope.owner_keys;
-            let owner_pubkey = keys.public_key().to_hex();
-            let existing =
-                get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
-            if existing.as_ref().is_some_and(|row| row.content == content) {
-                return Ok(());
-            }
-            let event = build_agent_event(record)?
-                .custom_created_at(monotonic_created_at(existing.map(|row| row.created_at)))
-                .sign_with_keys(keys)
-                .map_err(|e| format!("failed to sign agent event: {e}"))?;
-            (owner_pubkey, event)
-        };
-        retain_event(
-            &conn,
-            &RetainedEvent {
-                kind: KIND_MANAGED_AGENT,
-                pubkey: owner_pubkey,
-                d_tag: record.pubkey.clone(),
-                content: event.content.to_string(),
-                created_at: event.created_at.as_secs() as i64,
-                raw_event: event.as_json(),
-                pending_sync: true,
-            },
-        )
-    })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: snapshot-import retain-agent: {e}");
-    }
-}
-
-/// POST a pre-built signed engram event to the relay, authenticating as the
-/// new agent.
+/// POST a pre-built engram as the independently owned imported agent.
 pub(crate) async fn submit_engram_event(
     state: &AppState,
     agent_keys: &nostr::Keys,

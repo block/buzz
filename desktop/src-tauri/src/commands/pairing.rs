@@ -113,6 +113,7 @@ async fn start_pairing_session(
     pairing: State<'_, PairingHandle>,
     mode: PairingMode,
 ) -> Result<String, String> {
+    state.require_local_identity()?;
     let _start_guard = pairing.start_lock.lock().await;
     let task_generation =
         invalidate_pairing_generation(&pairing.generation, &pairing.generation_fence)?;
@@ -466,6 +467,7 @@ async fn import_recovered_identity(
     generation_fence: &Arc<std::sync::Mutex<()>>,
     task_generation: u64,
 ) -> Result<(), String> {
+    app.state::<AppState>().require_local_identity()?;
     let app = app.clone();
     let generation = Arc::clone(generation);
     let generation_fence = Arc::clone(generation_fence);

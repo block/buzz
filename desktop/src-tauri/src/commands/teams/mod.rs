@@ -4,9 +4,8 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        delete_team_with_cascade, ensure_persona_ids_are_active, load_managed_agents,
-        load_personas, load_teams, save_managed_agents, save_teams, try_regenerate_nest,
-        AgentDefinition, CreateTeamRequest, TeamRecord, UpdateTeamRequest,
+        ensure_persona_ids_are_active, load_managed_agents, load_personas, load_teams,
+        save_managed_agents, save_teams, CreateTeamRequest, TeamRecord, UpdateTeamRequest,
     },
     util::now_iso,
 };
@@ -196,6 +195,11 @@ fn apply_team_membership_delta(
 
 mod adopt;
 mod pending;
+use crate::managed_agents::team_catalog::{finish_catalog_retractions, CatalogRetraction};
+pub(crate) use pending::{
+    prepare_catalog_delete_in_scope, prepare_catalog_persona_refresh_in_scope,
+    prepare_catalog_refresh_in_scope,
+};
 mod sharing;
 pub use adopt::add_team_from_catalog;
 pub use sharing::set_team_shared;
@@ -204,44 +208,15 @@ pub use sharing::set_team_shared;
 /// `persona_id` as a member, after a successful persona edit.
 ///
 /// `pub(crate)` so persona-edit commands can trigger a catalog refresh without
-/// crossing into the `commands::teams` private module. Best-effort: failures
-/// are logged, not returned.
+/// crossing into the `commands::teams` private module. Called under the store
+/// lock; the caller MUST carry returned retractions out and await completion.
+/// Best-effort failures are logged, not returned.
 pub(crate) fn refresh_team_catalog_heads_for_persona<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     persona_id: &str,
-) {
-    pending::refresh_shared_team_catalog_heads_for_persona(app, state, persona_id);
-}
-
-/// Refresh (or retract) one team's shared 30178 catalog head after an inbound
-/// 30176 team edit landed on this device.
-///
-/// `pub(crate)` so the inbound reconcile can converge the catalog without
-/// reaching into the private `commands::teams` module. Best-effort: failures
-/// are logged, not returned. The idempotency skip inside the refresh makes this
-/// a no-op when the editing device already published the identical head.
-pub(crate) fn refresh_team_catalog_head<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    state: &AppState,
-    team: &TeamRecord,
-    personas: &[AgentDefinition],
-) {
-    pending::refresh_shared_team_catalog_head_resolving(app, state, team, personas);
-}
-
-/// Purge and tombstone a team's 30178 catalog coordinate after an inbound
-/// 30176 team tombstone removed the team on this device.
-///
-/// `pub(crate)` for the inbound reconcile. Best-effort: the catalog head is a
-/// separate coordinate from the 30176 team head, so a team tombstone does not
-/// retract it — this closes that gap on the receiving device.
-pub(crate) fn tombstone_team_catalog_head<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    state: &AppState,
-    d_tag: &str,
-) {
-    pending::tombstone_team_catalog_pending(app, state, d_tag);
+) -> Vec<CatalogRetraction> {
+    pending::refresh_shared_team_catalog_heads_for_persona(app, state, persona_id)
 }
 
 /// Retain a freshly authored team event in the local store, flagged for relay
@@ -256,152 +231,70 @@ pub(crate) fn tombstone_team_catalog_head<R: tauri::Runtime>(
 /// Unlike `retain_managed_agent_pending`, no projection-equality short-circuit:
 /// teams have no start/stop runtime churn, so a republish only happens on an
 /// actual user edit.
-pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
-    let result = (|| -> Result<(), String> {
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        retain_team_pending_at(&scope, team)
-    })();
+pub(super) fn retain_team_pending<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    team: &TeamRecord,
+) -> TeamRetentionWork {
+    let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    retain_team_pending_at(&scope, team)
+}
+
+pub(super) type TeamRetentionWork =
+    Result<crate::managed_agents::team_events::publication::PreparedTeamHead, String>;
+
+/// Capture the owner and exact retained head under the caller's store lock.
+/// Every caller must carry the plan out and await `finish_team_pending`.
+pub(super) fn retain_team_pending_at(
+    scope: &crate::managed_agents::retention::RetentionScope,
+    team: &TeamRecord,
+) -> TeamRetentionWork {
+    crate::managed_agents::team_events::publication::prepare_team_head(
+        &scope.db_path,
+        &scope.owner_signer(),
+        team,
+    )
+}
+
+pub(super) async fn finish_team_pending<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    work: TeamRetentionWork,
+) {
+    use tauri::Manager;
+    let result = async {
+        let signed = work?.sign().await?;
+        let state = app.state::<AppState>();
+        let _guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        signed.commit(&load_teams(app)?)
+    }
+    .await;
     if let Err(e) = result {
         eprintln!("buzz-desktop: team-retain: {e}");
     }
 }
 
-/// Scope-level team retention: sign and durably enqueue a team head in an
-/// already-resolved retention scope. Team adoption resolves the scope once for
-/// its batch and calls this alongside [`personas::retain_persona_pending_at`];
-/// [`retain_team_pending`] is the `AppHandle` wrapper for single writes.
-pub(super) fn retain_team_pending_at(
-    scope: &crate::managed_agents::retention::RetentionScope,
-    team: &TeamRecord,
-) -> Result<(), String> {
-    use crate::managed_agents::{
-        persona_events::monotonic_created_at,
-        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
-        team_events::build_team_event,
-    };
-    use buzz_core_pkg::kind::KIND_TEAM;
-    use nostr::JsonUtil;
-
-    let conn = open_retention_db(&scope.db_path)?;
-    let pubkey = scope.owner_keys.public_key().to_hex();
-    // Monotonic created_at: bump past the retained head (NIP-AP step 3).
-    let prior = get_retained_event(&conn, KIND_TEAM, &pubkey, &team.id)?.map(|row| row.created_at);
-    let event = build_team_event(team)?
-        .custom_created_at(monotonic_created_at(prior))
-        .sign_with_keys(&scope.owner_keys)
-        .map_err(|e| format!("failed to sign team event: {e}"))?;
-    retain_event(
-        &conn,
-        &RetainedEvent {
-            kind: KIND_TEAM,
-            pubkey,
-            d_tag: team.id.clone(),
-            content: event.content.to_string(),
-            created_at: event.created_at.as_secs() as i64,
-            raw_event: event.as_json(),
-            pending_sync: true,
-        },
+/// Prepare a team-coordinate deletion under the caller's store lock.
+pub(crate) fn tombstone_team_at(
+    db_path: &std::path::Path,
+    signer: &crate::active_user_signer::ActiveUserSigner,
+    d_tag: &str,
+) -> Result<super::agents::deletion_witness::AgentTombstone, String> {
+    super::agents::deletion_witness::prepare_definition_tombstone(
+        db_path,
+        signer,
+        buzz_core_pkg::kind::KIND_TEAM,
+        d_tag,
     )
 }
 
-/// Purge a deleted team's pending row and enqueue a NIP-09 tombstone, both
-/// inside the `managed_agents_store_lock`-held delete body.
-///
-/// Mirrors `commands::personas::tombstone_persona_pending`: the team row is
-/// purged first so an unpublished edit can never resurrect it after the
-/// tombstone publishes, then the kind:5 tombstone is retained at its own
-/// `(5, pubkey, d_tag)` coordinate with `pending_sync = 1`. Best-effort: a
-/// failure is logged and swallowed so a retention hiccup never blocks the
-/// disk-authoritative delete.
-///
-/// Timestamp-domination invariant: the retained 30176 head may be future-dated
-/// (`retain_team_pending` signs it with `monotonic_created_at`), and the relay
-/// only soft-deletes coordinate versions with `created_at <=` the tombstone's.
-/// So the kind:5 is signed with `monotonic_created_at(Some(head.created_at))` —
-/// the head's `created_at` read before the purge — so a future-dated head cannot
-/// survive its own tombstone. Without a head, fall back to
-/// `monotonic_created_at(None)`.
-fn tombstone_team_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
-    let result = (|| -> Result<(), String> {
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        tombstone_team_at(&scope.db_path, &scope.owner_keys, d_tag)
-    })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: team-tombstone: {e}");
-    }
-}
-
-/// Scope-free core of [`tombstone_team_pending`], so the purge and enqueue can
-/// be asserted directly against a retention database (mirrors
-/// `pending::tombstone_team_catalog_at` for the 30178 coordinate).
-pub(crate) fn tombstone_team_at(
-    db_path: &std::path::Path,
-    keys: &nostr::Keys,
-    d_tag: &str,
-) -> Result<(), String> {
-    use crate::managed_agents::{
-        persona_events::monotonic_created_at,
-        retention::{
-            delete_retained_event, get_retained_event, open_retention_db, retain_event,
-            tombstone_retention_d_tag, RetainedEvent,
-        },
-        team_events::build_team_delete,
-    };
-    use buzz_core_pkg::kind::KIND_TEAM;
-    use nostr::JsonUtil;
-
-    const KIND_DELETE: u32 = 5;
-
-    let pubkey = keys.public_key().to_hex();
-    let conn = open_retention_db(db_path)?;
-    // Single transaction: a kill between the head purge and the tombstone
-    // enqueue would otherwise leave the 30176 head shared with no local retry
-    // witness. Reading the head's `created_at` inside the same `BEGIN
-    // IMMEDIATE` also closes the read-then-sign race — no concurrent writer can
-    // bump the head between the read and the purge. Mirrors
-    // `team_catalog::tombstone_team_catalog_coordinate` for the 30178
-    // coordinate; the two cannot share one helper because they target distinct
-    // kinds and builders.
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|e| format!("failed to begin team tombstone transaction: {e}"))?;
-    let result = (|| -> Result<(), String> {
-        // Read the retained head's created_at inside the transaction, then sign
-        // the kind:5 strictly past it so the relay cannot reject the deletion.
-        let prior_head =
-            get_retained_event(&conn, KIND_TEAM, &pubkey, d_tag)?.map(|row| row.created_at);
-        let event = build_team_delete(d_tag, &pubkey)?
-            .custom_created_at(monotonic_created_at(prior_head))
-            .sign_with_keys(keys)
-            .map_err(|e| format!("failed to sign team tombstone: {e}"))?;
-        delete_retained_event(&conn, KIND_TEAM, &pubkey, d_tag)?;
-        retain_event(
-            &conn,
-            &RetainedEvent {
-                kind: KIND_DELETE,
-                pubkey: pubkey.clone(),
-                // Key by the target coordinate so cross-kind d-tag tombstones
-                // occupy distinct rows (F2c).
-                d_tag: tombstone_retention_d_tag(KIND_TEAM, d_tag),
-                content: event.content.to_string(),
-                created_at: event.created_at.as_secs() as i64,
-                raw_event: event.as_json(),
-                pending_sync: true,
-            },
-        )
-    })();
-    match result {
-        Ok(()) => conn
-            .execute_batch("COMMIT")
-            .map_err(|e| format!("failed to commit team tombstone transaction: {e}")),
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
-    }
-}
-
 #[tauri::command]
-pub async fn list_teams(app: AppHandle) -> Result<Vec<TeamRecord>, String> {
+pub async fn list_teams<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    operation: crate::user_operation::UserOperationScope,
+) -> Result<Vec<TeamRecord>, String> {
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -409,6 +302,7 @@ pub async fn list_teams(app: AppHandle) -> Result<Vec<TeamRecord>, String> {
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
+        let _admission = operation.admit(&state)?;
         let mut teams = load_teams(&app)?;
         pending::project_active_team_sharing(&app, &state, &mut teams);
         Ok(teams)
@@ -420,7 +314,9 @@ pub async fn list_teams(app: AppHandle) -> Result<Vec<TeamRecord>, String> {
 #[tauri::command]
 pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<TeamRecord, String> {
     use tauri::Manager;
-    tokio::task::spawn_blocking(move || {
+    let blocking_app = app.clone();
+    let (team, work) = tokio::task::spawn_blocking(move || {
+        let app = blocking_app;
         let state = app.state::<AppState>();
         let name = trim_required(&input.name, "Team name")?;
         let description = trim_optional(input.description);
@@ -460,17 +356,28 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
             |records| save_managed_agents(&app, records),
         )?;
         // Created teams are always non-builtin; publish to the relay.
-        retain_team_pending(&app, &state, &team);
-        Ok(team)
+        let work = retain_team_pending(&app, &state, &team);
+        Ok::<_, String>((team, work))
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+    finish_team_pending(&app, work).await;
+    Ok(team)
 }
 
 #[tauri::command]
 pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<TeamRecord, String> {
+    update_team_with(input, app).await
+}
+
+pub(crate) async fn update_team_with<R: tauri::Runtime>(
+    input: UpdateTeamRequest,
+    app: AppHandle<R>,
+) -> Result<TeamRecord, String> {
     use tauri::Manager;
-    tokio::task::spawn_blocking(move || {
+    let blocking_app = app.clone();
+    let (result, work, team_work) = tokio::task::spawn_blocking(move || {
+        let app = blocking_app;
         let state = app.state::<AppState>();
         let name = trim_required(&input.name, "Team name")?;
         let description = trim_optional(input.description);
@@ -497,51 +404,37 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
             |records| save_managed_agents(&app, records),
         )?;
         // Built-in teams are not owner-authored — never publish them.
-        if !updated.is_builtin {
-            retain_team_pending(&app, &state, &updated);
+        let team_work = (!updated.is_builtin).then(|| retain_team_pending(&app, &state, &updated));
+        let work = if !updated.is_builtin {
             // Reproject the shared 30178 head immediately so the catalog
             // reflects the edit. Resolution failure (a member was deleted
             // mid-edit) is treated as a projection failure — the shared head
             // is tombstoned and the owner is notified via a typed notice.
             // Best-effort: a retention hiccup never blocks the team edit.
-            pending::refresh_shared_team_catalog_head_resolving(&app, &state, &updated, &personas);
-        }
-        Ok(updated)
+            pending::refresh_shared_team_catalog_head_resolving(&app, &state, &updated, &personas)
+        } else {
+            Vec::new()
+        };
+        Ok::<_, String>((updated, work, team_work))
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+    if let Some(work) = team_work {
+        finish_team_pending(&app, work).await;
+    }
+    finish_catalog_retractions(&app, work).await;
+    Ok(result)
 }
 
 #[tauri::command]
-pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
-    use tauri::Manager;
-    tokio::task::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|error| error.to_string())?;
-        let cascaded_persona_d_tags = delete_team_with_cascade(&app, &id)?;
-        // delete_team_with_cascade rejects built-in teams via validate_team_deletion,
-        // so reaching here means this team was owner-published — tombstone it. The
-        // d_tag is the team id, captured before the record left the store.
-        tombstone_team_pending(&app, &state, &id);
-        // The catalog projection is a separate coordinate with its own
-        // retained head, so the 30176 tombstone above does not retract it.
-        // Without this, deleting a shared team would leave a live catalog
-        // entry the owner can no longer see or unshare.
-        pending::tombstone_team_catalog_pending(&app, &state, &id);
-        // Tombstone the cascaded personas too, so their orphaned kind:30175 heads
-        // don't linger on the relay (F4). Each d-tag was captured pre-removal.
-        for persona_d_tag in &cascaded_persona_d_tags {
-            super::personas::tombstone_persona_pending(&app, &state, persona_d_tag);
-        }
-        try_regenerate_nest(&app);
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+pub async fn delete_team<R: tauri::Runtime>(id: String, app: AppHandle<R>) -> Result<(), String> {
+    deletion::delete_team_with(id, app).await
 }
+
+mod deletion;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod signer_tests;

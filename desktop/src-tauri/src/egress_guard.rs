@@ -6,7 +6,7 @@
 //!
 //! | # | Boundary | Site |
 //! |---|----------|------|
-//! | 1 | `submit_signed_event_at_with_keys` (funnel for `submit_event*`) | `relay/submit.rs` |
+//! | 1 | `submit_signed_event_at_with_signer` (funnel for `submit_event*`) | `relay/submit.rs` |
 //! | 2 | `sync_managed_agent_profile` | `relay.rs` |
 //! | 3 | pre-signed path into the boundary-1 funnel | `relay/submit.rs` |
 //! | 4 | `submit_signed_event_with_keys` | `relay.rs` |

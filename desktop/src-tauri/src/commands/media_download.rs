@@ -5,8 +5,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app_state::AppState;
 use crate::commands::clipboard::with_clipboard;
-use crate::commands::export_util::save_bytes_with_dialog;
-use crate::commands::media::{detect_and_validate_mime, mint_media_get_auth};
+use crate::commands::export_util::pick_save_path;
+use crate::commands::media::detect_and_validate_mime;
 use crate::commands::media_filename::sanitize_filename;
 use crate::commands::{
     personas::{
@@ -17,6 +17,7 @@ use crate::commands::{
         decode_team_snapshot_from_bytes, MAX_TEAM_SNAPSHOT_JSON_BYTES, MAX_TEAM_SNAPSHOT_PNG_BYTES,
     },
 };
+use crate::media_read::MediaReadScope;
 use crate::relay::{classify_request_error, relay_api_base_url_with_override, relay_error_message};
 
 /// Maximum download size: 50 MiB. Prevents OOM from oversized responses.
@@ -67,10 +68,11 @@ pub async fn download_image(
     url: String,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    scope: MediaReadScope,
 ) -> Result<bool, String> {
     // SSRF protection: only allow downloads from the relay's /media/ path.
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let relay_base = &scope.base;
+    validate_download_url(&url, relay_base)?;
 
     // Infer filename from the URL path (e.g. "abcdef123.jpg" from a Blossom URL).
     let filename = url::Url::parse(&url)
@@ -90,12 +92,18 @@ pub async fn download_image(
         .unwrap_or("png")
         .to_string();
 
-    let bytes = fetch_blob_bytes(&url, &state).await?;
+    let bytes = fetch_blob_bytes_in_scope(&url, &state, MAX_DOWNLOAD_BYTES, None, &scope).await?;
 
     // Validate the downloaded content is actually a supported media type.
     detect_and_validate_mime(&bytes)?;
 
-    save_bytes_with_dialog(&app, &filename, "Images", &[&ext], &bytes).await
+    save_download(
+        &scope,
+        &state,
+        pick_save_path(&app, &filename, "Images", &[&ext]),
+        &bytes,
+    )
+    .await
 }
 
 /// Download an arbitrary file attachment from a relay `/media/` URL and save it
@@ -114,10 +122,11 @@ pub async fn download_file(
     filename: String,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    scope: MediaReadScope,
 ) -> Result<bool, String> {
     // SSRF protection: only allow downloads from the relay's /media/ path.
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let relay_base = &scope.base;
+    validate_download_url(&url, relay_base)?;
 
     // The imeta filename is the only human-readable name we have; sanitize it
     // so directory traversal / control characters can never reach the dialog.
@@ -129,7 +138,7 @@ pub async fn download_file(
         .and_then(|e| e.to_str())
         .map(|e| e.to_string());
 
-    let bytes = fetch_blob_bytes(&url, &state).await?;
+    let bytes = fetch_blob_bytes_in_scope(&url, &state, MAX_DOWNLOAD_BYTES, None, &scope).await?;
 
     // Reuse the upload-side allow/deny policy: rejects executables, HTML, and
     // other types the relay would never have accepted, while permitting the
@@ -138,7 +147,13 @@ pub async fn download_file(
 
     // Generic filter: an arbitrary attachment is not necessarily an image.
     let extensions: Vec<&str> = ext.as_deref().into_iter().collect();
-    save_bytes_with_dialog(&app, &filename, "All Files", &extensions, &bytes).await
+    save_download(
+        &scope,
+        &state,
+        pick_save_path(&app, &filename, "All Files", &extensions),
+        &bytes,
+    )
+    .await
 }
 
 /// Copy an image from a relay media URL directly to the system clipboard.
@@ -155,11 +170,12 @@ pub async fn copy_image_to_clipboard(
     url: String,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    scope: MediaReadScope,
 ) -> Result<(), String> {
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let relay_base = &scope.base;
+    validate_download_url(&url, relay_base)?;
 
-    let bytes = fetch_blob_bytes(&url, &state).await?;
+    let bytes = fetch_blob_bytes_in_scope(&url, &state, MAX_DOWNLOAD_BYTES, None, &scope).await?;
     detect_and_validate_mime(&bytes)?;
 
     let img =
@@ -176,26 +192,16 @@ pub async fn copy_image_to_clipboard(
     let (width, height) = (rgba.width() as usize, rgba.height() as usize);
     let raw = rgba.into_raw();
 
-    // arboard requires main-thread access on macOS. Use a sync channel so the
-    // async command can await the result.
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
-    let clipboard_app = app.clone();
-    app.run_on_main_thread(move || {
-        let result = with_clipboard(&clipboard_app, |clipboard| {
+    dispatch_media_effect(app, scope, move |clipboard_app| {
+        with_clipboard(clipboard_app, |clipboard| {
             clipboard.set_image(arboard::ImageData {
                 width,
                 height,
                 bytes: std::borrow::Cow::Owned(raw),
             })
-        });
-        // Ignore send errors — the receiver dropped only if the command was
-        // cancelled, in which case nobody is waiting for the result.
-        let _ = tx.send(result);
+        })
     })
-    .map_err(|e| format!("main thread dispatch failed: {e}"))?;
-
-    rx.recv()
-        .map_err(|_| "clipboard result channel closed unexpectedly".to_string())?
+    .await
 }
 
 /// Write text to the system clipboard through the native shell.
@@ -208,30 +214,70 @@ pub async fn copy_text_to_clipboard(
     text: String,
     html: Option<String>,
     app: tauri::AppHandle,
+    scope: MediaReadScope,
 ) -> Result<(), String> {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
-    let clipboard_app = app.clone();
-    app.run_on_main_thread(move || {
-        let result = with_clipboard(&clipboard_app, |clipboard| {
+    dispatch_media_effect(app, scope, move |clipboard_app| {
+        with_clipboard(clipboard_app, |clipboard| {
             if let Some(html) = html {
                 clipboard.set_html(html, Some(text))
             } else {
                 clipboard.set_text(text)
             }
-        });
-        let _ = tx.send(result);
+        })
     })
-    .map_err(|e| format!("main thread dispatch failed: {e}"))?;
-
-    rx.recv()
-        .map_err(|_| "clipboard result channel closed unexpectedly".to_string())?
+    .await
 }
 
-/// Fetch blob bytes from a (pre-validated) relay media URL through the app's
-/// HTTP client, enforcing the download size cap. The caller is responsible for
-/// validating the URL origin and for any content-type checks on the result.
-async fn fetch_blob_bytes(url: &str, state: &State<'_, AppState>) -> Result<Vec<u8>, String> {
-    fetch_blob_bytes_with_cap(url, state, MAX_DOWNLOAD_BYTES, None).await
+/// Queue a capability-bound effect; native execution revalidates after waiting
+/// for the main thread, not just when the command enqueues its closure.
+pub(crate) fn admitted_media_effect<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    scope: MediaReadScope,
+    effect: impl FnOnce(&tauri::AppHandle<R>) -> Result<(), String> + Send + 'static,
+) -> (
+    impl FnOnce() + Send + 'static,
+    tokio::sync::oneshot::Receiver<Result<(), String>>,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let work = move || {
+        let state = tauri::Manager::state::<AppState>(&app);
+        let result = scope.commit(&state, || effect(&app));
+        let _ = tx.send(result);
+    };
+    (work, rx)
+}
+
+async fn dispatch_media_effect(
+    app: tauri::AppHandle,
+    scope: MediaReadScope,
+    effect: impl FnOnce(&tauri::AppHandle) -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    let (work, rx) = admitted_media_effect(app.clone(), scope.clone(), effect);
+    app.run_on_main_thread(work)
+        .map_err(|e| format!("main thread dispatch failed: {e}"))?;
+    scope
+        .run(async {
+            rx.await
+                .map_err(|_| "clipboard result channel closed unexpectedly".to_string())?
+        })
+        .await
+}
+
+/// The selected destination remains inert until admission, even when the native
+/// dialog completes after logout. Dialog cancellation does not write anything.
+pub(crate) async fn save_download(
+    scope: &MediaReadScope,
+    state: &AppState,
+    selection: impl std::future::Future<Output = Result<Option<std::path::PathBuf>, String>>,
+    bytes: &[u8],
+) -> Result<bool, String> {
+    let Some(path) = scope.run(selection).await? else {
+        return Ok(false);
+    };
+    scope.commit(state, || {
+        std::fs::write(path, bytes).map_err(|e| format!("Failed to write file: {e}"))?;
+        Ok(true)
+    })
 }
 
 /// The command-facing error for a media-fetch response status, or `None` if
@@ -259,17 +305,55 @@ pub(super) async fn fetch_blob_bytes_with_cap(
     cap: u64,
     cancellation: Option<&CancellationToken>,
 ) -> Result<Vec<u8>, String> {
+    let scope = MediaReadScope::capture_command(state)?;
+    fetch_blob_bytes_in_scope(url, state, cap, cancellation, &scope).await
+}
+
+pub(super) async fn fetch_blob_bytes_in_scope(
+    url: &str,
+    state: &State<'_, AppState>,
+    cap: u64,
+    cancellation: Option<&CancellationToken>,
+    scope: &MediaReadScope,
+) -> Result<Vec<u8>, String> {
+    // Validate again at the captured capability boundary. A caller's earlier
+    // validation must never authorize a token minted for a replacement relay.
+    validate_download_url(url, &scope.base)?;
+    let work = scope.run(fetch_blob_bytes_captured(
+        url,
+        state,
+        cap,
+        cancellation,
+        scope,
+    ));
+    if let Some(cancellation) = cancellation {
+        tokio::select! { biased;
+            _ = cancellation.cancelled() => Err("media fetch cancelled".into()),
+            result = work => result,
+        }
+    } else {
+        work.await
+    }
+}
+
+async fn fetch_blob_bytes_captured(
+    url: &str,
+    state: &State<'_, AppState>,
+    cap: u64,
+    cancellation: Option<&CancellationToken>,
+    scope: &MediaReadScope,
+) -> Result<Vec<u8>, String> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err("media fetch cancelled".into());
+    }
     // Fetch bytes via the no-redirect media client (goes through the VPN tunnel).
     // A no-redirect client keeps the minted media auth token from being
     // forwarded across origins by a relay-issued 3xx (redirect-hop SSRF); a
     // 3xx is returned verbatim and rejected by the `is_success` check below.
     let mut req = state.media_fetch_client.get(url).timeout(DOWNLOAD_TIMEOUT);
 
-    // Every caller pre-validates `url` against the relay origin via
-    // `validate_download_url`, satisfying the mint_media_get_auth safety
-    // contract (the token never leaves the relay origin).
-    let relay_base = relay_api_base_url_with_override(state);
-    if let Some(auth) = mint_media_get_auth(state, &relay_base) {
+    // URL and authorization belong to the same captured relay.
+    if let Some(auth) = scope.authorization().await? {
         req = req.header("authorization", auth);
     }
 

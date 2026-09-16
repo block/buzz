@@ -11,9 +11,10 @@ use super::project_repo_paths::{
     canonical_repos_roots, canonicalize_repos_root, default_repos_root_candidates,
     find_local_repo_dir, local_repo_candidates,
 };
+use crate::active_user_signer::ActiveUserSigner;
 use crate::app_state::AppState;
 use crate::managed_agents::{load_managed_agents, spawn_key_refusal};
-use crate::relay::submit_signed_event_with_keys;
+use crate::relay::{relay_api_base_url_with_override, submit_signed_event_at_with_auth};
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -109,19 +110,32 @@ pub(crate) fn normalize_event_id(value: &str) -> Option<String> {
 }
 
 pub(crate) struct ProjectOwnerIdentity {
-    pub(crate) keys: Keys,
+    pub(crate) signer: ActiveUserSigner,
+    pub(crate) relay_base: String,
+    credential_keys: Option<Keys>,
     pub(crate) auth_tag: Option<String>,
 }
 
-pub(crate) fn project_owner_identity(
-    app: &AppHandle,
+pub(crate) fn project_owner_identity<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     target_owner: &str,
 ) -> Result<ProjectOwnerIdentity, String> {
-    let viewer_keys = state.signing_keys()?;
+    project_owner_identity_with(state, target_owner, || load_managed_agents(app))
+}
+
+fn project_owner_identity_with(
+    state: &AppState,
+    target_owner: &str,
+    load_records: impl FnOnce() -> Result<Vec<crate::managed_agents::ManagedAgentRecord>, String>,
+) -> Result<ProjectOwnerIdentity, String> {
+    let viewer_keys = state.active_signer()?;
+    let relay_base = relay_api_base_url_with_override(state);
     if viewer_keys.public_key().to_hex() == target_owner {
         return Ok(ProjectOwnerIdentity {
-            keys: viewer_keys,
+            signer: viewer_keys,
+            relay_base,
+            credential_keys: None,
             auth_tag: None,
         });
     }
@@ -130,7 +144,7 @@ pub(crate) fn project_owner_identity(
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    let records = load_managed_agents(app)?;
+    let records = load_records()?;
     let record = records
         .iter()
         .find(|record| record.pubkey.eq_ignore_ascii_case(target_owner))
@@ -147,7 +161,9 @@ pub(crate) fn project_owner_identity(
         return Err("Managed agent key does not match the repository owner.".to_string());
     }
     Ok(ProjectOwnerIdentity {
-        keys,
+        signer: ActiveUserSigner::local(keys.clone()),
+        relay_base,
+        credential_keys: Some(keys),
         auth_tag: record.auth_tag.clone(),
     })
 }
@@ -198,6 +214,14 @@ pub async fn publish_project_owner_announcement(
         return Err("Invalid project owner.".to_string());
     }
     let identity = project_owner_identity(&app, &state, &target_owner)?;
+    publish_owner_announcement_in_scope(input, &state, identity).await
+}
+
+async fn publish_owner_announcement_in_scope(
+    input: ProjectOwnerAnnouncementInput,
+    state: &AppState,
+    identity: ProjectOwnerIdentity,
+) -> Result<ProjectOwnerAnnouncementResult, String> {
     let nostr_tags = input
         .tags
         .into_iter()
@@ -207,13 +231,20 @@ pub async fn publish_project_owner_announcement(
     if let Some(created_at) = input.created_at {
         builder = builder.custom_created_at(Timestamp::from(created_at));
     }
-    let event = builder
-        .sign_with_keys(&identity.keys)
+    let event = identity
+        .signer
+        .sign_event(builder)
+        .await
         .map_err(|error| format!("sign failed: {error}"))?;
-    let publication_error =
-        submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-            .await
-            .err();
+    let publication_error = submit_signed_event_at_with_auth(
+        &event,
+        state,
+        &identity.relay_base,
+        &identity.signer,
+        identity.auth_tag.as_deref(),
+    )
+    .await
+    .err();
 
     Ok(ProjectOwnerAnnouncementResult {
         event: event.as_json(),
@@ -235,8 +266,8 @@ fn validate_merge_status_metadata(
     Ok((pull_request_id, pull_request_author))
 }
 
-fn build_merged_status_event(
-    keys: &Keys,
+async fn build_merged_status_event(
+    keys: &ActiveUserSigner,
     repo_address: &str,
     pull_request_id: &str,
     pull_request_author: &str,
@@ -267,16 +298,18 @@ fn build_merged_status_event(
         .map(Tag::parse)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("build merged status tags: {error}"))?;
-    EventBuilder::new(Kind::Custom(1631), "")
-        .tags(tags)
-        .custom_created_at(Timestamp::from(created_at))
-        .sign_with_keys(keys)
-        .map(|event| event.as_json())
-        .map_err(|error| format!("sign merged pull request status: {error}"))
+    keys.sign_event(
+        EventBuilder::new(Kind::Custom(1631), "")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created_at)),
+    )
+    .await
+    .map(|event| event.as_json())
+    .map_err(|error| format!("sign merged pull request status: {error}"))
 }
 
-fn build_pull_request_status_event(
-    keys: &Keys,
+async fn build_pull_request_status_event(
+    keys: &ActiveUserSigner,
     repo_address: &str,
     pull_request_id: &str,
     pull_request_author: &str,
@@ -305,12 +338,14 @@ fn build_pull_request_status_event(
         .map(Tag::parse)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("build pull request status tags: {error}"))?;
-    EventBuilder::new(kind, "")
-        .tags(tags)
-        .custom_created_at(Timestamp::from(created_at.max(Timestamp::now().as_secs())))
-        .sign_with_keys(keys)
-        .map(|event| event.as_json())
-        .map_err(|error| format!("sign pull request status: {error}"))
+    keys.sign_event(
+        EventBuilder::new(kind, "")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created_at.max(Timestamp::now().as_secs()))),
+    )
+    .await
+    .map(|event| event.as_json())
+    .map_err(|error| format!("sign pull request status: {error}"))
 }
 
 fn same_repository(left: &str, right: &str) -> bool {
@@ -451,17 +486,26 @@ pub async fn sign_project_pull_request_status(
         return Err("Invalid target repository owner.".to_string());
     }
     let identity = project_owner_identity(&app, &state, &target_owner)?;
-    let event = Event::from_json(build_pull_request_status_event(
-        &identity.keys,
-        &input.repo_address,
-        &input.pull_request_id,
-        &input.pull_request_author,
-        &input.status,
-        input.created_at,
-    )?)
+    let event = Event::from_json(
+        build_pull_request_status_event(
+            &identity.signer,
+            &input.repo_address,
+            &input.pull_request_id,
+            &input.pull_request_author,
+            &input.status,
+            input.created_at,
+        )
+        .await?,
+    )
     .map_err(|error| format!("parse signed pull request status: {error}"))?;
-    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-        .await?;
+    submit_signed_event_at_with_auth(
+        &event,
+        &state,
+        &identity.relay_base,
+        &identity.signer,
+        identity.auth_tag.as_deref(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -484,8 +528,14 @@ pub async fn publish_project_pull_request_merged_status(
         return Err("Invalid merged pull request status event.".to_string());
     }
     let identity = project_owner_identity(&app, &state, &target_owner)?;
-    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-        .await?;
+    submit_signed_event_at_with_auth(
+        &event,
+        &state,
+        &identity.relay_base,
+        &identity.signer,
+        identity.auth_tag.as_deref(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -519,7 +569,7 @@ pub async fn merge_project_pull_request(
             .into());
     }
     let owner_identity = project_owner_identity(&app, &state, &target_owner)?;
-    let merger_pubkey = owner_identity.keys.public_key().to_hex();
+    let merger_pubkey = owner_identity.signer.public_key().to_hex();
     let target_branch = normalize_branch_option(Some(&target_branch))
         .ok_or_else(|| "Invalid target branch.".to_string())?;
     let source_branch = normalize_branch_option(Some(&source_branch))
@@ -537,7 +587,20 @@ pub async fn merge_project_pull_request(
         &pull_request_id,
         &pull_request_author,
     )?;
-    let auth = build_git_auth_config_for_keys(&owner_identity.keys)?;
+    // External git-credential-nostr still requires local nsec custody. Event-only
+    // operations never request it. Fence a direct user's separate credential read.
+    let credential_keys = match owner_identity.credential_keys.as_ref() {
+        Some(keys) => keys.clone(),
+        None => state.signing_keys()?,
+    };
+    if credential_keys.public_key() != owner_identity.signer.public_key() {
+        return Err(
+            "Repository owner identity changed before Git credentials were captured."
+                .to_string()
+                .into(),
+        );
+    }
+    let auth = build_git_auth_config_for_keys(&credential_keys)?;
 
     let git_result = tauri::async_runtime::spawn_blocking(
         move || -> Result<ProjectRepoMergeGitResult, ProjectPullRequestMergeError> {
@@ -643,19 +706,21 @@ pub async fn merge_project_pull_request(
         )
     })??;
     let status_event = build_merged_status_event(
-        &owner_identity.keys,
+        &owner_identity.signer,
         &repo_address,
         &pull_request_id,
         &pull_request_author,
         &git_result.merge_commit,
         status_created_at,
-    )?;
+    )
+    .await?;
     let signed_status = Event::from_json(&status_event)
         .map_err(|error| format!("parse signed merged status: {error}"))?;
-    let status_publication_error = submit_signed_event_with_keys(
+    let status_publication_error = submit_signed_event_at_with_auth(
         &signed_status,
         &state,
-        &owner_identity.keys,
+        &owner_identity.relay_base,
+        &owner_identity.signer,
         owner_identity.auth_tag.as_deref(),
     )
     .await
@@ -774,8 +839,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn merged_status_is_signed_by_repository_owner() {
+    #[tokio::test]
+    async fn merged_status_is_signed_by_repository_owner() {
         let keys = Keys::generate();
         let owner = keys.public_key().to_hex();
         let pull_request_id = "d".repeat(64);
@@ -785,13 +850,14 @@ mod tests {
         let before = Timestamp::now().as_secs();
         let event = Event::from_json(
             build_merged_status_event(
-                &keys,
+                &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
                 &repo_address,
                 &pull_request_id,
                 &pull_request_author,
                 &merge_commit,
                 123,
             )
+            .await
             .unwrap(),
         )
         .unwrap();
@@ -806,20 +872,21 @@ mod tests {
         assert!(event.verify().is_ok());
     }
 
-    #[test]
-    fn merged_status_preserves_a_newer_requested_timestamp() {
+    #[tokio::test]
+    async fn merged_status_preserves_a_newer_requested_timestamp() {
         let keys = Keys::generate();
         let owner = keys.public_key().to_hex();
         let requested = Timestamp::now().as_secs() + 10;
         let event = Event::from_json(
             build_merged_status_event(
-                &keys,
+                &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
                 &format!("30617:{owner}:buzz"),
                 &"d".repeat(64),
                 &"b".repeat(64),
                 &"e".repeat(40),
                 requested,
             )
+            .await
             .unwrap(),
         )
         .unwrap();
@@ -853,20 +920,21 @@ mod tests {
         .is_err());
     }
 
-    #[test]
-    fn lifecycle_status_is_signed_by_repository_owner() {
+    #[tokio::test]
+    async fn lifecycle_status_is_signed_by_repository_owner() {
         let keys = Keys::generate();
         let owner = keys.public_key().to_hex();
         let author = "b".repeat(64);
         let event = Event::from_json(
             build_pull_request_status_event(
-                &keys,
+                &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
                 &format!("30617:{owner}:buzz"),
                 &"d".repeat(64),
                 &author,
                 "closed",
                 Timestamp::now().as_secs(),
             )
+            .await
             .unwrap(),
         )
         .unwrap();
@@ -880,19 +948,24 @@ mod tests {
         assert!(event.verify().is_ok());
     }
 
-    #[test]
-    fn lifecycle_status_rejects_merged_alias() {
+    #[tokio::test]
+    async fn lifecycle_status_rejects_merged_alias() {
         let keys = Keys::generate();
         let owner = keys.public_key().to_hex();
 
         assert!(build_pull_request_status_event(
-            &keys,
+            &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
             &format!("30617:{owner}:buzz"),
             &"d".repeat(64),
             &"b".repeat(64),
             "merged",
             Timestamp::now().as_secs(),
         )
+        .await
         .is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "project_git_signer_tests.rs"]
+mod signer_tests;

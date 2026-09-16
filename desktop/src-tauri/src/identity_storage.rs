@@ -10,6 +10,8 @@ pub(crate) enum IdentityStorage {
     SystemKeyring = 1,
     LocalFile = 2,
     Environment = 3,
+    /// No local user identity exists in a remote build.
+    Absent = 4,
 }
 
 impl IdentityStorage {
@@ -19,6 +21,7 @@ impl IdentityStorage {
             Self::SystemKeyring => "system-keyring",
             Self::LocalFile => "local-file",
             Self::Environment => "environment",
+            Self::Absent => "absent",
         }
     }
 
@@ -27,6 +30,7 @@ impl IdentityStorage {
             1 => Self::SystemKeyring,
             2 => Self::LocalFile,
             3 => Self::Environment,
+            4 => Self::Absent,
             _ => Self::Ephemeral,
         }
     }
@@ -59,4 +63,13 @@ pub(crate) struct ResolvedIdentity {
     pub(crate) keys: Keys,
     pub(crate) recovery: RecoveryState,
     pub(crate) storage: IdentityStorage,
+}
+
+/// Public-only snapshot read while the local key lock is held.
+pub(crate) struct LocalIdentitySnapshot {
+    pub(crate) pubkey: nostr::PublicKey,
+    pub(crate) storage: IdentityStorage,
+    pub(crate) lost: bool,
+    pub(crate) locked: bool,
+    pub(crate) reset_failed: bool,
 }

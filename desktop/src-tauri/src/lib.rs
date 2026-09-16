@@ -1,4 +1,5 @@
 #![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
+mod active_user_signer;
 mod app_menu;
 mod app_state;
 mod archive;
@@ -13,6 +14,7 @@ mod events;
 mod huddle;
 mod identity_storage;
 mod initial_window;
+mod invocation_authority;
 mod key_backup;
 mod link_preview_tags;
 mod linux_media;
@@ -20,6 +22,7 @@ mod linux_media;
 mod macos_notifications;
 mod managed_agents;
 mod media_proxy;
+mod media_read;
 #[cfg(feature = "mesh-llm")]
 mod mesh_llm;
 #[cfg(not(feature = "mesh-llm"))]
@@ -28,20 +31,24 @@ mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
+mod native_identity;
 mod native_relay_client;
 mod native_websocket;
 mod native_websocket_batch;
 mod nostr_bind;
 pub mod nostr_convert;
 mod observed_unread;
+mod owner_authorization;
 mod persona_catalog;
 mod prevent_sleep;
 mod ptt_shortcut;
 mod relay;
 mod relay_admission;
+pub mod remote_signer;
 mod reset;
 mod secret_store;
 mod shutdown;
+pub mod signer_config;
 mod team_catalog;
 mod templates;
 mod terminal_runtime;
@@ -50,6 +57,7 @@ mod terminal_transport;
 #[cfg(target_os = "macos")]
 mod tray_menu;
 mod unread_catch_up;
+mod user_operation;
 mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
@@ -213,6 +221,8 @@ pub fn run() {
     } else {
         builder.plugin(tauri_plugin_updater::Builder::new().build())
     };
+    let app_state = build_app_state();
+    let native_auth = app_state.native_auth.clone();
     let app = app_menu::install(builder)
         .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -221,13 +231,12 @@ pub fn run() {
                 responder.respond(response);
             });
         })
-        .manage(build_app_state())
+        .manage(app_state)
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
         .manage(PendingNavigationDeepLinks::default())
         .manage(PendingEntityDeepLinks::default())
-        .manage(BuilderlabSession::default())
-        .manage(BuilderlabLogin::default())
+        .manage(native_auth)
         .manage(commands::pairing::PairingHandle::new())
         .manage(terminal_runtime::TerminalSessions::default())
         .manage(archive::sync::ArchiveSyncState::default())
@@ -255,7 +264,13 @@ pub fn run() {
                     .map(crate::migration::is_dev_data_dir_name)
                     .unwrap_or(false);
                 crate::managed_agents::init_nest_dir(is_dev_for_reset);
-                crate::reset::run_boot_reset(&data_dir)
+                if native_identity::SignerMode::compiled().is_remote() {
+                    // A local reset sentinel must not touch user-key custody in
+                    // a keyless build. Leave it for a future local launch.
+                    crate::reset::ResetOutcome::default()
+                } else {
+                    crate::reset::run_boot_reset(&data_dir)
+                }
             } else {
                 crate::reset::ResetOutcome::default()
             };
@@ -283,9 +298,11 @@ pub fn run() {
             // that will be lost on restart, as that silently breaks channel
             // memberships, DMs, and relay identity.
             let state = app_handle.state::<AppState>();
-            if let Err(e) = resolve_persisted_identity(&app_handle, &state) {
-                eprintln!("buzz-desktop: fatal: identity resolution failed: {e}");
-                std::process::exit(1);
+            if !state.is_remote_identity() {
+                if let Err(e) = resolve_persisted_identity(&app_handle, &state) {
+                    eprintln!("buzz-desktop: fatal: identity resolution failed: {e}");
+                    std::process::exit(1);
+                }
             }
 
             // When the identity is in recovery mode (lost = keyring empty after
@@ -351,16 +368,19 @@ pub fn run() {
                 // Route mesh-llm's download progress (model weights, runtime)
                 // onto Tauri events so the UI can render real progress.
                 crate::mesh_llm::install_progress_sink(&app_handle);
-                tauri::async_runtime::spawn(crate::mesh_llm::start_coordinator(app_handle.clone()));
+                if !state.is_remote_identity() {
+                    tauri::async_runtime::spawn(crate::mesh_llm::start_coordinator(
+                        app_handle.clone(),
+                    ));
+                }
             }
 
             // Start the localhost media streaming proxy. Uses the shared HTTP
             // client so VPN tunnelling applies. The port is stored in AppState
             // and exposed to the frontend via the `get_media_proxy_port` command.
-            let proxy_client = state.http_client.clone();
             let proxy_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                let port = media_proxy::spawn_media_proxy(proxy_client, proxy_handle.clone()).await;
+                let port = media_proxy::spawn_media_proxy(proxy_handle.clone()).await;
                 let state = proxy_handle.state::<AppState>();
                 state
                     .media_proxy_port
@@ -447,7 +467,7 @@ pub fn run() {
             // has no relay override to the localhost fallback. Preserve the
             // boot-time repos and identity recovery safety gates by only marking
             // restoration pending when both allow it.
-            if restore_agents && !recovery_mode {
+            if restore_agents && !recovery_mode && !state.is_remote_identity() {
                 state
                     .managed_agent_restore_pending
                     .store(true, Ordering::Release);
@@ -499,7 +519,7 @@ pub fn run() {
             // the next sweep.
             // Skipped in recovery mode — flushing under an ephemeral key would
             // publish events attributed to an identity the user doesn't own.
-            if !recovery_mode {
+            if !recovery_mode && !state.is_remote_identity() {
                 let flush_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     use std::time::Duration;
@@ -520,7 +540,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(native_identity::preview_dispatch(tauri::generate_handler![
             terminal_runtime::terminal_attach,
             terminal_runtime::terminal_detach,
             terminal_runtime::terminal_close,
@@ -552,6 +572,8 @@ pub fn run() {
             transfer_builderlab_community,
             title_bar_double_click,
             get_identity,
+            native_identity::get_native_identity_status,
+            commands::activate_remote_workspace,
             get_nsec,
             generate_backup_passphrase,
             create_ncryptsec_backup,
@@ -871,7 +893,7 @@ pub fn run() {
             tray_menu::take_tray_actions,
             #[cfg(target_os = "macos")]
             tray_menu::update_tray_agent_activity,
-        ])
+        ]))
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
     let shutdown_done = Arc::new(AtomicBool::new(false));

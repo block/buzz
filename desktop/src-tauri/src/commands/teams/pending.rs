@@ -18,7 +18,17 @@ use crate::managed_agents::{
     AgentDefinition, TeamRecord,
 };
 
+#[cfg(test)]
+use crate::active_user_signer::ActiveUserSigner;
+use crate::managed_agents::team_catalog::publication::{
+    prepare_catalog_head, prepare_catalog_head_from_builder, CatalogPlan, PreparedCatalogHead,
+};
+use crate::managed_agents::team_catalog::{
+    prepare_team_catalog_tombstone, prepare_team_catalog_tombstone_from_head, CatalogInputs,
+    CatalogRetraction,
+};
 use buzz_core_pkg::kind::KIND_TEAM_CATALOG;
+type PreparedRefresh = (RefreshOrRetractOutcome, Option<CatalogPlan>);
 
 /// A signed catalog head, retained and awaiting relay acceptance.
 ///
@@ -32,18 +42,20 @@ pub(super) struct PreparedTeamPublication {
     pub team: TeamRecord,
 }
 
-/// Outcome of a single refresh-or-retract operation.
+/// Outcome of a refresh, or the prospective outcome of a prepared retraction.
 ///
-/// Carried through every wrapper so each site can emit the right queue-accurate
-/// notice. "Removal" means a tombstone has been *enqueued* for the flush loop —
-/// the relay head may still be live until the flush succeeds.
+/// PREPARE returns the removal outcome alongside an inert plan. It becomes
+/// queue-accurate only after that plan commits: production carries the notice
+/// in `CatalogRetraction` and never emits it during PREPARE. The relay head may
+/// still be live until the serialized publisher flushes the committed witness.
 #[derive(Debug, PartialEq)]
 pub(super) enum RefreshOrRetractOutcome {
     /// No retained shared head — the operation is a no-op.
     Noop,
     /// The shared head was rebuilt and the newer version is now retained.
     Refreshed,
-    /// The shared head could not be rebuilt; a tombstone was enqueued.
+    /// The shared head could not be rebuilt; committing its accompanying plan
+    /// enqueues a tombstone.
     RemovalQueued { reason: String },
 }
 
@@ -69,8 +81,8 @@ fn retained_team_is_shared(row: Option<&RetainedEvent>) -> bool {
 /// creating, and editing EVERY team. Share state is a view projection, so an
 /// unresolvable scope degrades to "not shared" — it can under-report
 /// visibility but never present an unshared team as published.
-pub(super) fn project_active_team_sharing(
-    app: &AppHandle,
+pub(super) fn project_active_team_sharing<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     teams: &mut [TeamRecord],
 ) {
@@ -82,7 +94,7 @@ fn project_scoped_team_sharing(scope: Result<RetentionScope, String>, teams: &mu
     let projected = scope.and_then(|scope| {
         project_team_sharing_at(
             &scope.db_path,
-            &scope.owner_keys.public_key().to_hex(),
+            &scope.owner_signer().public_key().to_hex(),
             teams,
         )
     });
@@ -123,153 +135,165 @@ fn project_team_sharing_at(
 /// preserves whatever the scoped head already says. That is what makes an
 /// ordinary team edit unable to silently unshare — belt-and-braces here, since
 /// share state lives on 30178 and an edit republishes 30176.
-pub(super) fn prepare_team_publication(
-    app: &AppHandle,
+pub(super) struct UnsignedTeamPublication {
+    scope: RetentionScope,
+    head: PreparedCatalogHead,
+    team: TeamRecord,
+    inputs: CatalogInputs,
+}
+
+pub(super) fn prepare_team_publication<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     team: &TeamRecord,
     members: &[AgentDefinition],
     shared_override: Option<bool>,
-) -> Result<PreparedTeamPublication, String> {
+) -> Result<UnsignedTeamPublication, String> {
     let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-    let (_event, retained, team) = prepare_team_publication_at(
+    let inputs = CatalogInputs::capture(&team.id, std::slice::from_ref(team), members)?;
+    let (head, team) = prepare_catalog_head(
         &scope.db_path,
-        &scope.owner_keys,
+        &scope.owner_signer().public_key().to_hex(),
         team,
         members,
         shared_override,
     )?;
-    Ok(PreparedTeamPublication {
+    Ok(UnsignedTeamPublication {
         scope,
-        retained,
+        head,
         team,
+        inputs,
     })
 }
 
-pub(super) fn prepare_team_publication_at(
+pub(super) async fn finish_team_publication<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    work: UnsignedTeamPublication,
+) -> Result<PreparedTeamPublication, String> {
+    use tauri::Manager;
+    let signed = work.head.sign(&work.scope.owner_signer()).await?;
+    let state = app.state::<AppState>();
+    let _guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let teams = crate::managed_agents::load_teams(app)?;
+    let personas = crate::managed_agents::load_personas(app)?;
+    if CatalogInputs::capture(&work.team.id, &teams, &personas)? != work.inputs {
+        return Err("catalog publication conflict: disk inputs changed".into());
+    }
+    let (_, retained) = signed.commit()?;
+    Ok(PreparedTeamPublication {
+        scope: work.scope,
+        team: work.team,
+        retained,
+    })
+}
+
+#[cfg(test)]
+pub(super) async fn prepare_team_publication_at(
     db_path: &std::path::Path,
     keys: &nostr::Keys,
     team: &TeamRecord,
     members: &[AgentDefinition],
     shared_override: Option<bool>,
 ) -> Result<(nostr::Event, RetainedEvent, TeamRecord), String> {
-    use crate::managed_agents::{
-        persona_events::monotonic_created_at,
-        retention::{get_retained_event, open_retention_db, retain_event},
-        team_catalog::build_team_catalog_event,
-    };
-    use nostr::JsonUtil;
-
-    let pubkey = keys.public_key().to_hex();
-    let conn = open_retention_db(db_path)?;
-    let existing = get_retained_event(&conn, KIND_TEAM_CATALOG, &pubkey, &team.id)?;
-    let mut scoped_team = team.clone();
-    scoped_team.shared =
-        shared_override.unwrap_or_else(|| retained_team_is_shared(existing.as_ref()));
-    // The size contract runs inside the builder, BEFORE signing, so an
-    // oversized team fails here with a named field instead of enqueuing an
-    // event the relay would permanently refuse.
-    let event = build_team_catalog_event(&scoped_team, members, scoped_team.shared)?
-        .custom_created_at(monotonic_created_at(
-            existing.as_ref().map(|row| row.created_at),
-        ))
-        .sign_with_keys(keys)
-        .map_err(|e| format!("failed to sign team catalog event: {e}"))?;
-    let retained = RetainedEvent {
-        kind: KIND_TEAM_CATALOG,
-        pubkey,
-        d_tag: team.id.clone(),
-        content: event.content.to_string(),
-        created_at: event.created_at.as_secs() as i64,
-        raw_event: event.as_json(),
-        pending_sync: true,
-    };
-    retain_event(&conn, &retained)?;
-    Ok((event, retained, scoped_team))
+    let (head, team) = prepare_catalog_head(
+        db_path,
+        &keys.public_key().to_hex(),
+        team,
+        members,
+        shared_override,
+    )?;
+    let (event, retained) = head
+        .sign(&ActiveUserSigner::local(keys.clone()))
+        .await?
+        .commit()?;
+    Ok((event, retained, team))
 }
 
-/// Purge a deleted team's retained catalog head and enqueue a NIP-09
-/// tombstone for its 30178 coordinate.
-///
-/// The 30176 team head has its own tombstone (`tombstone_team_pending`); this
-/// is the catalog counterpart and both run on delete, because the two kinds
-/// are separate coordinates. Same purge-then-tombstone ordering as personas:
-/// removing the 30178 row first under the store lock stops an unpublished
-/// re-share from resurrecting the entry after the tombstone lands. Best-effort
-/// — a failure is logged and swallowed so a retention hiccup never blocks the
-/// disk-authoritative delete.
-pub(super) fn tombstone_team_catalog_pending<R: tauri::Runtime>(
+/// Caller holds the store lock; scope may be the captured inbound arrival scope.
+pub(crate) fn prepare_catalog_delete_in_scope<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    state: &AppState,
+    scope: &RetentionScope,
     d_tag: &str,
-) {
-    let result = (|| -> Result<(), String> {
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        tombstone_team_catalog_at(&scope.db_path, &scope.owner_keys, d_tag)
-    })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: team-catalog-tombstone: {e}");
-    }
+) -> Result<CatalogRetraction, String> {
+    let signer = scope.owner_signer();
+    let teams = crate::managed_agents::load_teams(app)?;
+    let personas = crate::managed_agents::load_personas(app)?;
+    let inputs = CatalogInputs::capture(d_tag, &teams, &personas)?;
+    let plan =
+        prepare_team_catalog_tombstone(&scope.db_path, &signer.public_key().to_hex(), d_tag)?;
+    Ok(CatalogRetraction {
+        plan: plan.into(),
+        inputs,
+        signer,
+        boot_inputs: false,
+        notice: None,
+    })
 }
 
-/// Scope-free core of [`tombstone_team_catalog_pending`], so the purge and
-/// enqueue can be asserted directly against a retention database.
-pub(super) fn tombstone_team_catalog_at(
-    db_path: &std::path::Path,
-    keys: &nostr::Keys,
-    d_tag: &str,
-) -> Result<(), String> {
-    crate::managed_agents::team_catalog::tombstone_team_catalog_coordinate(db_path, keys, d_tag)
-}
-
-/// Refresh or retract the shared 30178 head for `team` after a team edit,
-/// resolving members from `personas` first.
-///
-/// Resolution failure (a member was deleted) is treated as a projection
-/// failure: the shared head is tombstoned and the owner is notified via the
-/// typed `team-catalog-auto-retracted` Tauri event. Best-effort: a retention
-/// hiccup never blocks the team edit from returning.
 pub(super) fn refresh_shared_team_catalog_head_resolving<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     team: &TeamRecord,
     personas: &[AgentDefinition],
-) {
-    let result = (|| -> Result<RefreshOrRetractOutcome, String> {
+) -> Vec<CatalogRetraction> {
+    let result = (|| {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        resolve_and_refresh_or_retract_at(&scope.db_path, &scope.owner_keys, team, personas)
+        prepare_catalog_refresh_in_scope(&scope, team, personas)
     })();
     match result {
-        Ok(RefreshOrRetractOutcome::RemovalQueued { ref reason }) => {
-            eprintln!(
-                "buzz-desktop: team-catalog-refresh: retracting '{}' — {reason}",
-                team.name
-            );
-            emit_team_catalog_auto_retracted(app, &team.name, reason);
+        Ok(work) => work.into_iter().collect(),
+        Err(e) => {
+            eprintln!("buzz-desktop: team-catalog-refresh: {e}");
+            Vec::new()
         }
-        Err(ref e) => {
-            eprintln!("buzz-desktop: team-catalog-refresh: '{}' — {e}", team.name);
-        }
-        _ => {}
     }
+}
+
+pub(crate) fn prepare_catalog_refresh_in_scope(
+    scope: &RetentionScope,
+    team: &TeamRecord,
+    personas: &[AgentDefinition],
+) -> Result<Option<CatalogRetraction>, String> {
+    let signer = scope.owner_signer();
+    let inputs = CatalogInputs::capture(&team.id, std::slice::from_ref(team), personas)?;
+    let (outcome, plan) = prepare_resolve_and_refresh_or_retract_at(
+        &scope.db_path,
+        &scope.owner_signer().public_key().to_hex(),
+        team,
+        personas,
+    )?;
+    Ok(plan.map(|plan| CatalogRetraction {
+        plan,
+        inputs,
+        signer,
+        boot_inputs: false,
+        notice: match outcome {
+            RefreshOrRetractOutcome::RemovalQueued { reason } => Some((team.name.clone(), reason)),
+            _ => None,
+        },
+    }))
 }
 
 /// Scope-free single-team core: resolve `team`'s members from `personas`,
 /// then run the refresh-or-retract state machine.
 ///
 /// On resolution failure the head may already be shared; the function checks
-/// and tombstones if so, returning `RemovalQueued`. This is the ONLY place the
+/// and prepares a tombstone if so. This is the ONLY place the
 /// "resolution failure → tombstone-if-shared" logic lives — both production
 /// and the `#[cfg(test)]` file-based seam call it, so there is no divergence.
-pub(super) fn resolve_and_refresh_or_retract_at(
+pub(super) fn prepare_resolve_and_refresh_or_retract_at(
     db_path: &std::path::Path,
-    keys: &nostr::Keys,
+    pubkey: &str,
     team: &TeamRecord,
     personas: &[AgentDefinition],
-) -> Result<RefreshOrRetractOutcome, String> {
+) -> Result<PreparedRefresh, String> {
     use crate::managed_agents::team_catalog::resolve_team_members;
 
     match resolve_team_members(team, personas) {
-        Ok(members) => refresh_or_retract_shared_head_at(db_path, keys, team, &members),
+        Ok(members) => prepare_refresh_or_retract_shared_head_at(db_path, pubkey, team, &members),
         Err(reason) => {
             // Resolution failed (a required member is missing). Treat this
             // like a projection build failure: tombstone the shared head if
@@ -280,101 +304,101 @@ pub(super) fn resolve_and_refresh_or_retract_at(
             use buzz_core_pkg::kind::{event_is_shared, KIND_TEAM_CATALOG};
             use nostr::JsonUtil;
 
-            let pubkey = keys.public_key().to_hex();
             let conn = open_retention_db(db_path)?;
-            let Some(existing) = get_retained_event(&conn, KIND_TEAM_CATALOG, &pubkey, &team.id)?
+            let Some(existing) = get_retained_event(&conn, KIND_TEAM_CATALOG, pubkey, &team.id)?
             else {
-                return Ok(RefreshOrRetractOutcome::Noop);
+                return Ok((RefreshOrRetractOutcome::Noop, None));
             };
             let head_event = nostr::Event::from_json(&existing.raw_event)
                 .map_err(|e| format!("failed to parse retained head: {e}"))?;
             if !event_is_shared(&head_event) {
-                return Ok(RefreshOrRetractOutcome::Noop);
+                return Ok((RefreshOrRetractOutcome::Noop, None));
             }
             // Shared head exists but team is now unresolvable — tombstone it.
             drop(conn);
-            crate::managed_agents::team_catalog::tombstone_team_catalog_coordinate(
-                db_path, keys, &team.id,
+            let plan = prepare_team_catalog_tombstone_from_head(
+                db_path,
+                pubkey,
+                &team.id,
+                Some(&existing),
             )?;
-            Ok(RefreshOrRetractOutcome::RemovalQueued { reason })
+            Ok((
+                RefreshOrRetractOutcome::RemovalQueued { reason },
+                Some(plan.into()),
+            ))
         }
     }
 }
 
 /// Core of [`refresh_shared_team_catalog_head_resolving`], scope-free so it is
 /// testable without a Tauri `AppHandle`.
-pub(super) fn refresh_or_retract_shared_head_at(
+pub(super) fn prepare_refresh_or_retract_shared_head_at(
     db_path: &std::path::Path,
-    keys: &nostr::Keys,
+    pubkey: &str,
     team: &TeamRecord,
     members: &[AgentDefinition],
-) -> Result<RefreshOrRetractOutcome, String> {
+) -> Result<PreparedRefresh, String> {
     use crate::managed_agents::{
-        persona_events::monotonic_created_at,
-        retention::{get_retained_event, open_retention_db, retain_event},
+        retention::{get_retained_event, open_retention_db},
         team_catalog::build_team_catalog_event,
     };
     use buzz_core_pkg::kind::{event_is_shared, KIND_TEAM_CATALOG};
     use nostr::JsonUtil;
 
-    let pubkey = keys.public_key().to_hex();
     let conn = open_retention_db(db_path)?;
 
     // Guard: only act when a retained shared head exists — a never-shared team
     // must never produce a 30178 row.
-    let Some(existing) = get_retained_event(&conn, KIND_TEAM_CATALOG, &pubkey, &team.id)? else {
-        return Ok(RefreshOrRetractOutcome::Noop);
+    let Some(existing) = get_retained_event(&conn, KIND_TEAM_CATALOG, pubkey, &team.id)? else {
+        return Ok((RefreshOrRetractOutcome::Noop, None));
     };
     let head_event = nostr::Event::from_json(&existing.raw_event)
         .map_err(|e| format!("failed to parse retained head: {e}"))?;
     if !event_is_shared(&head_event) {
-        return Ok(RefreshOrRetractOutcome::Noop);
+        return Ok((RefreshOrRetractOutcome::Noop, None));
     }
 
-    // Rebuild; on failure, purge + tombstone immediately so the stale shared
-    // head is not left public.
+    // Rebuild; on failure, prepare a retraction. The async caller signs outside
+    // all storage locks, then revalidates this head and its disk inputs.
     let rebuilt = build_team_catalog_event(team, members, true);
     let builder = match rebuilt {
         Ok(b) => b,
         Err(reason) => {
             // Close the read connection before the tombstone opens a write one.
             drop(conn);
-            crate::managed_agents::team_catalog::tombstone_team_catalog_coordinate(
-                db_path, keys, &team.id,
+            let plan = prepare_team_catalog_tombstone_from_head(
+                db_path,
+                pubkey,
+                &team.id,
+                Some(&existing),
             )?;
-            return Ok(RefreshOrRetractOutcome::RemovalQueued { reason });
+            return Ok((
+                RefreshOrRetractOutcome::RemovalQueued { reason },
+                Some(plan.into()),
+            ));
         }
     };
 
     let event = builder
-        .custom_created_at(monotonic_created_at(Some(existing.created_at)))
-        .sign_with_keys(keys)
-        .map_err(|e| format!("failed to sign team catalog head: {e}"))?;
+        .clone()
+        .build(nostr::PublicKey::from_hex(pubkey).map_err(|e| e.to_string())?);
 
     // Idempotency across devices: skip the publish when the rebuilt projection
     // is byte-identical to the retained head and still shared. Without this, an
     // owner's edit on device A refreshes A's head AND is re-applied inbound on
     // device B — where B would rebuild the same content and republish, so the
-    // two devices churn identical heads at each other. The tag check guards the
-    // unshare replay (see the boot reconcile) even though this fn only rebuilds
-    // shared heads.
-    if existing.content == event.content && event_is_shared(&event) {
-        return Ok(RefreshOrRetractOutcome::Noop);
+    // two devices churn identical heads at each other. The retained-head gate
+    // above requires a shared event, and this builder explicitly uses shared=true.
+    if existing.content == event.content {
+        return Ok((RefreshOrRetractOutcome::Noop, None));
     }
 
-    retain_event(
-        &conn,
-        &crate::managed_agents::retention::RetainedEvent {
-            kind: KIND_TEAM_CATALOG,
-            pubkey,
-            d_tag: team.id.clone(),
-            content: event.content.to_string(),
-            created_at: event.created_at.as_secs() as i64,
-            raw_event: event.as_json(),
-            pending_sync: true,
-        },
-    )?;
-    Ok(RefreshOrRetractOutcome::Refreshed)
+    let plan =
+        prepare_catalog_head_from_builder(db_path, pubkey, &team.id, Some(&existing), builder);
+    Ok((
+        RefreshOrRetractOutcome::Refreshed,
+        Some(CatalogPlan::Refresh(plan)),
+    ))
 }
 
 /// Refresh or retract the shared 30178 heads of every team that includes
@@ -393,48 +417,39 @@ pub(super) fn refresh_shared_team_catalog_heads_for_persona<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     persona_id: &str,
-) {
-    let result = (|| -> Result<(), String> {
-        use crate::managed_agents::{load_personas, load_teams};
-
-        let teams = load_teams(app)?;
-        let personas = load_personas(app)?;
+) -> Vec<CatalogRetraction> {
+    let result = (|| {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-
-        for team in &teams {
-            if team.is_builtin || !team.persona_ids.iter().any(|id| id == persona_id) {
-                continue;
-            }
-            // Unified core so resolution-failure → tombstone semantics are
-            // identical in production and tests.
-            let outcome = resolve_and_refresh_or_retract_at(
-                &scope.db_path,
-                &scope.owner_keys,
-                team,
-                &personas,
-            );
-            match outcome {
-                Ok(RefreshOrRetractOutcome::RemovalQueued { ref reason }) => {
-                    eprintln!(
-                        "buzz-desktop: team-catalog-refresh: retracting '{}' after persona edit — {reason}",
-                        team.name
-                    );
-                    emit_team_catalog_auto_retracted(app, &team.name, reason);
-                }
-                Err(ref e) => {
-                    eprintln!(
-                        "buzz-desktop: team-catalog-refresh: '{}' after persona edit — {e}",
-                        team.name
-                    );
-                }
-                _ => {}
-            }
-        }
-        Ok(())
+        prepare_catalog_persona_refresh_in_scope(app, &scope, persona_id)
     })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: team-catalog-refresh-for-persona: {e}");
+    match result {
+        Ok(work) => work,
+        Err(e) => {
+            eprintln!("buzz-desktop: team-catalog-refresh-for-persona: {e}");
+            Vec::new()
+        }
     }
+}
+
+pub(crate) fn prepare_catalog_persona_refresh_in_scope<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    scope: &RetentionScope,
+    persona_id: &str,
+) -> Result<Vec<CatalogRetraction>, String> {
+    let teams = crate::managed_agents::load_teams(app)?;
+    let personas = crate::managed_agents::load_personas(app)?;
+    let mut work = Vec::new();
+    for team in &teams {
+        if team.is_builtin || !team.persona_ids.iter().any(|id| id == persona_id) {
+            continue;
+        }
+        match prepare_catalog_refresh_in_scope(scope, team, &personas) {
+            Ok(Some(job)) => work.push(job),
+            Ok(None) => {}
+            Err(e) => eprintln!("buzz-desktop: team-catalog-refresh-for-persona: {e}"),
+        }
+    }
+    Ok(work)
 }
 
 /// Testable seam for [`refresh_shared_team_catalog_heads_for_persona`].
@@ -444,7 +459,7 @@ pub(super) fn refresh_shared_team_catalog_heads_for_persona<R: tauri::Runtime>(
 /// that production uses — the seam is a thin file-loading shim with no
 /// independent logic. Tests therefore exercise the exact production code path.
 #[cfg(test)]
-pub(super) fn refresh_for_persona_at(
+pub(super) async fn refresh_for_persona_at(
     base_dir: &std::path::Path,
     keys: &nostr::Keys,
     db_path: &std::path::Path,
@@ -462,38 +477,75 @@ pub(super) fn refresh_for_persona_at(
             continue;
         }
         // Identical call to production — no parallel implementation.
-        let _ = resolve_and_refresh_or_retract_at(db_path, keys, team, &personas);
+        let _ = resolve_and_refresh_or_retract_at(db_path, keys, team, &personas).await;
     }
     Ok(())
 }
 
-/// Emit a typed Tauri event so the frontend can notify the owner when a shared
-/// team is automatically retracted due to a projection failure.
-///
-/// "Removal queued" is accurate: the tombstone has been enqueued for the flush
-/// loop, but the relay head may still be live until the flush succeeds.
-/// Best-effort: a failed emit is logged but does not block the operation.
-fn emit_team_catalog_auto_retracted<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    team_name: &str,
-    reason: &str,
-) {
-    use serde::Serialize;
-    use tauri::Emitter;
+// Test adapters drive the production prepare/sign/commit phases without Tauri.
+// File-backed disk revalidation is covered by the production retraction tests.
+#[cfg(test)]
+pub(super) async fn tombstone_team_catalog_at(
+    db_path: &std::path::Path,
+    keys: &nostr::Keys,
+    d_tag: &str,
+) -> Result<(), String> {
+    prepare_team_catalog_tombstone(db_path, &keys.public_key().to_hex(), d_tag)?
+        .sign(&ActiveUserSigner::local(keys.clone()))
+        .await?
+        .commit()
+}
 
-    #[derive(Clone, Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct TeamCatalogAutoRetractedPayload<'a> {
-        team_name: &'a str,
-        reason: &'a str,
+#[cfg(test)]
+async fn finish_test_refresh(
+    prepared: PreparedRefresh,
+    keys: &nostr::Keys,
+) -> Result<RefreshOrRetractOutcome, String> {
+    let (outcome, plan) = prepared;
+    if let Some(plan) = plan {
+        plan.sign(&ActiveUserSigner::local(keys.clone()))
+            .await?
+            .commit()?;
     }
+    Ok(outcome)
+}
 
-    if let Err(e) = app.emit(
-        "team-catalog-auto-retracted",
-        TeamCatalogAutoRetractedPayload { team_name, reason },
-    ) {
-        eprintln!("buzz-desktop: team-catalog-auto-retracted: failed to emit notice: {e}");
-    }
+#[cfg(test)]
+pub(super) async fn resolve_and_refresh_or_retract_at(
+    db_path: &std::path::Path,
+    keys: &nostr::Keys,
+    team: &TeamRecord,
+    personas: &[AgentDefinition],
+) -> Result<RefreshOrRetractOutcome, String> {
+    finish_test_refresh(
+        prepare_resolve_and_refresh_or_retract_at(
+            db_path,
+            &keys.public_key().to_hex(),
+            team,
+            personas,
+        )?,
+        keys,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(super) async fn refresh_or_retract_shared_head_at(
+    db_path: &std::path::Path,
+    keys: &nostr::Keys,
+    team: &TeamRecord,
+    members: &[AgentDefinition],
+) -> Result<RefreshOrRetractOutcome, String> {
+    finish_test_refresh(
+        prepare_refresh_or_retract_shared_head_at(
+            db_path,
+            &keys.public_key().to_hex(),
+            team,
+            members,
+        )?,
+        keys,
+    )
+    .await
 }
 
 #[cfg(test)]

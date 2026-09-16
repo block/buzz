@@ -1,3 +1,4 @@
+import { toast } from "sonner";
 import * as React from "react";
 import {
   useMutation,
@@ -895,6 +896,11 @@ export function useJoinChannelMutation(channelId: string | null) {
       }
 
       await joinChannel(channelId);
+    },
+    onError: (cause) => {
+      toast.error("Couldn’t join channel", {
+        description: cause instanceof Error ? cause.message : String(cause),
+      });
     },
     onSettled: async () => {
       await invalidateChannelState(queryClient, channelId);

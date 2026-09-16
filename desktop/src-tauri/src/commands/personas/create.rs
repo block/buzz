@@ -21,7 +21,9 @@ pub async fn create_persona(
     app: AppHandle,
 ) -> Result<AgentDefinition, String> {
     use tauri::Manager;
-    tokio::task::spawn_blocking(move || {
+    let app_for_save = app.clone();
+    let (persona, work) = tokio::task::spawn_blocking(move || {
+        let app = app_for_save;
         let state = app.state::<AppState>();
         let display_name = trim_required(&input.display_name, "Display name")?;
         // System prompt optional: core memory is auto-injected. Empty is valid.
@@ -85,10 +87,12 @@ pub async fn create_persona(
         apply_persona_behavior(&mut persona, input.behavior)?;
         personas.push(persona.clone());
         save_personas(&app, &personas)?;
-        retain_persona_pending(&app, &state, &persona);
+        let work = retain_persona_pending(&app, &state, &persona);
         try_regenerate_nest(&app);
-        Ok(persona)
+        Ok::<_, String>((persona, work))
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+    pending::finish_persona_pending(&app, work).await;
+    Ok(persona)
 }

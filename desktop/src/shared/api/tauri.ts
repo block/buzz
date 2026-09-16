@@ -1,3 +1,7 @@
+import {
+  nativeGeneration,
+  isRemoteIdentity,
+} from "@/shared/api/nativeIdentitySession";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
   fromRawInstallRuntimeResult,
@@ -282,7 +286,12 @@ export async function invokeTauri<T>(
   args?: Record<string, unknown>,
 ): Promise<T> {
   try {
-    return await tauriInvoke<T>(command, args);
+    return await tauriInvoke<T>(
+      command,
+      isRemoteIdentity()
+        ? { ...args, expectedGeneration: nativeGeneration() }
+        : args,
+    );
   } catch (error) {
     // HTTP backoff lives in Rust. Do not apply its separate ApiCalls quota
     // to the WebSocket gate, but preserve the failure for the caller.

@@ -13,41 +13,47 @@ pub struct SubmitEventResponse {
 /// Deferred/scoped publication uses this form so a workspace or identity
 /// switch cannot retarget either the event or its NIP-98 authentication after
 /// the operation captured its `(relay, owner)` scope.
-pub async fn submit_signed_event_at_with_keys(
+pub(crate) async fn submit_signed_event_at_with_signer(
     event: &nostr::Event,
     state: &AppState,
     api_base_url: &str,
-    keys: &nostr::Keys,
+    signer: &ActiveUserSigner,
 ) -> Result<SubmitEventResponse, String> {
-    if event.pubkey != keys.public_key() {
-        return Err("signed event does not match the publishing identity".to_string());
-    }
-    crate::relay_admission::wait_for_rate_limit().await;
-    let url = format!("{}/events", api_base_url.trim_end_matches('/'));
-    let body_bytes = event.as_json().into_bytes();
-    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "relay event submit")?;
-    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    signer
+        .run(async {
+            if event.pubkey != signer.public_key() {
+                return Err("signed event does not match the publishing identity".to_string());
+            }
+            crate::relay_admission::wait_for_rate_limit().await;
+            let url = format!("{}/events", api_base_url.trim_end_matches('/'));
+            let body_bytes = event.as_json().into_bytes();
+            crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "relay event submit")?;
+            let auth_header =
+                build_nip98_auth_header_for_signer(signer, &Method::POST, &url, &body_bytes)
+                    .await?;
 
-    let response = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth_header)
-        .header("Content-Type", "application/json")
-        .body(body_bytes)
-        .send()
+            let response = state
+                .http_client
+                .post(&url)
+                .header("Authorization", auth_header)
+                .header("Content-Type", "application/json")
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(|e| classify_request_error(&e))?;
+
+            if !response.status().is_success() {
+                return Err(relay_error_message(response).await);
+            }
+
+            let result: SubmitEventResponse = parse_json_response(response).await?;
+            if !result.accepted {
+                return Err(format!("relay rejected event: {}", result.message));
+            }
+
+            Ok(result)
+        })
         .await
-        .map_err(|e| classify_request_error(&e))?;
-
-    if !response.status().is_success() {
-        return Err(relay_error_message(response).await);
-    }
-
-    let result: SubmitEventResponse = parse_json_response(response).await?;
-    if !result.accepted {
-        return Err(format!("relay rejected event: {}", result.message));
-    }
-
-    Ok(result)
 }
 
 /// Sign with an explicit identity and POST the event to an explicit relay.
@@ -55,16 +61,17 @@ pub async fn submit_signed_event_at_with_keys(
 /// The caller owns the signer lifetime. This is important for deferred work:
 /// an in-process identity swap cannot retarget the event or its NIP-98 auth
 /// after the caller has validated which identity the operation belongs to.
-pub async fn submit_event_at_with_keys(
+pub(crate) async fn submit_event_at_with_signer(
     builder: nostr::EventBuilder,
     state: &AppState,
     api_base_url: &str,
-    keys: &nostr::Keys,
+    signer: &ActiveUserSigner,
 ) -> Result<SubmitEventResponse, String> {
-    let event = builder
-        .sign_with_keys(keys)
+    let event = signer
+        .sign_event(builder)
+        .await
         .map_err(|e| format!("failed to sign event: {e}"))?;
-    submit_signed_event_at_with_keys(&event, state, api_base_url, keys).await
+    submit_signed_event_at_with_signer(&event, state, api_base_url, signer).await
 }
 
 /// Build and submit an event to the currently active workspace relay.
@@ -73,8 +80,8 @@ pub async fn submit_event(
     state: &AppState,
 ) -> Result<SubmitEventResponse, String> {
     let api_base_url = relay_api_base_url_with_override(state);
-    let keys = state.signing_keys()?;
-    submit_event_at_with_keys(builder, state, &api_base_url, &keys).await
+    let signer = state.active_signer()?;
+    submit_event_at_with_signer(builder, state, &api_base_url, &signer).await
 }
 
 /// Sign with an explicit identity, submit to an explicit HTTP API base URL,
@@ -98,28 +105,36 @@ pub async fn submit_event_at_created_at(
     builder: nostr::EventBuilder,
     state: &AppState,
     api_base_url: &str,
-    keys: &nostr::Keys,
+    signer: &ActiveUserSigner,
 ) -> Result<(SubmitEventResponse, i64), String> {
-    let event = builder
-        .sign_with_keys(keys)
+    let event = signer
+        .sign_event(builder)
+        .await
         .map_err(|e| format!("failed to sign event: {e}"))?;
     let created_at = event.created_at.as_secs() as i64;
-    let result = submit_signed_event_at_with_keys(&event, state, api_base_url, keys).await?;
+    let result = submit_signed_event_at_with_signer(&event, state, api_base_url, signer).await?;
     Ok((result, created_at))
 }
 
-/// Like `submit_event_with_keys`, but also returns the signed event's
+/// Submit an independently selected signer and return the signed event's
 /// `created_at` — same cursor rationale as [`submit_event_at_created_at`].
-pub async fn submit_event_with_keys_created_at(
+pub async fn submit_event_with_signer_created_at(
     builder: nostr::EventBuilder,
     state: &AppState,
-    keys: &nostr::Keys,
+    relay_base: &str,
+    signer: &ActiveUserSigner,
     auth_tag: Option<&str>,
 ) -> Result<(SubmitEventResponse, i64), String> {
-    let event = builder
-        .sign_with_keys(keys)
+    let event = signer
+        .sign_event(builder)
+        .await
         .map_err(|e| format!("failed to sign event: {e}"))?;
     let created_at = event.created_at.as_secs() as i64;
-    let result = super::submit_signed_event_with_keys(&event, state, keys, auth_tag).await?;
+    let result =
+        super::submit_signed_event_at_with_auth(&event, state, relay_base, signer, auth_tag)
+            .await?;
     Ok((result, created_at))
 }
+
+// Identical captured-owner policy for live and generic event callers.
+pub(crate) use submit_event_at_with_signer as submit_event_at;

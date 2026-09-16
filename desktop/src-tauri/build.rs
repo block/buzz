@@ -1,3 +1,6 @@
+#[path = "src/signer_config.rs"]
+mod signer_config;
+
 // Shared schema, included from the same source the runtime command parses with,
 // so the build-time validation below and the runtime parse cannot drift.
 include!("src/commands/reconnect_hook_config.rs");
@@ -8,6 +11,28 @@ include!("src/managed_agents/reserved_env_keys.rs");
 use base64::Engine as _;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_SIGNER_MODE");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_SIGNER_API_BASE");
+    let build_setting = |name| match std::env::var(name) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => panic!("{name} must be valid UTF-8"),
+    };
+    let mode = build_setting("BUZZ_BUILD_SIGNER_MODE");
+    let api_base = build_setting("BUZZ_BUILD_SIGNER_API_BASE");
+    let config = signer_config::SignerConfig::parse(mode.as_deref(), api_base.as_deref())
+        .unwrap_or_else(|error| panic!("invalid BUZZ_BUILD_SIGNER configuration: {error}"));
+    match config {
+        signer_config::SignerConfig::Local => {
+            println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_SIGNER_MODE=local");
+            println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_SIGNER_API_BASE=");
+        }
+        signer_config::SignerConfig::Remote { api_base } => {
+            println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_SIGNER_MODE=remote");
+            println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_SIGNER_API_BASE={api_base}");
+        }
+    }
+
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_URL");
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_HTTP");
     println!("cargo:rerun-if-env-changed=BUZZ_UPDATER_PUBLIC_KEY");

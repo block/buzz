@@ -24,8 +24,8 @@ fn one_persona() -> serde_json::Value {
     }])
 }
 
-#[test]
-fn migrate_personas_writes_signed_retention_rows() {
+#[tokio::test]
+async fn migrate_personas_writes_signed_retention_rows() {
     use crate::managed_agents::retention::{get_retained_personas, open_retention_db};
 
     let base = tempfile::tempdir().unwrap();
@@ -33,7 +33,7 @@ fn migrate_personas_writes_signed_retention_rows() {
     let keys = nostr::Keys::generate();
     let pubkey = keys.public_key().to_hex();
 
-    let migrated = migrate_personas_in_dir(base.path(), &keys).unwrap();
+    let migrated = migrate_personas_in_dir(base.path(), &keys).await.unwrap();
     assert_eq!(migrated, 1);
 
     let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
@@ -46,8 +46,8 @@ fn migrate_personas_writes_signed_retention_rows() {
     assert!(rows[0].pending_sync);
 }
 
-#[test]
-fn migrate_personas_skips_builtins() {
+#[tokio::test]
+async fn migrate_personas_skips_builtins() {
     use crate::managed_agents::retention::{get_retained_personas, open_retention_db};
 
     let base = tempfile::tempdir().unwrap();
@@ -67,7 +67,7 @@ fn migrate_personas_skips_builtins() {
     );
     let keys = nostr::Keys::generate();
 
-    let migrated = migrate_personas_in_dir(base.path(), &keys).unwrap();
+    let migrated = migrate_personas_in_dir(base.path(), &keys).await.unwrap();
     assert_eq!(migrated, 0);
 
     let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
@@ -75,8 +75,8 @@ fn migrate_personas_skips_builtins() {
     assert!(rows.is_empty());
 }
 
-#[test]
-fn migrate_personas_unchanged_second_run_is_noop() {
+#[tokio::test]
+async fn migrate_personas_unchanged_second_run_is_noop() {
     let base = tempfile::tempdir().unwrap();
     write_base_personas(base.path(), &one_persona());
     let keys = nostr::Keys::generate();
@@ -84,13 +84,19 @@ fn migrate_personas_unchanged_second_run_is_noop() {
     // First run retains; second run with identical personas re-retains
     // nothing — the per-coordinate content matches, so `pending_sync` is
     // not churned.
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 0);
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        1
+    );
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        0
+    );
     assert!(!base.path().join("migration_state.json").exists());
 }
 
-#[test]
-fn migrate_personas_new_persona_after_first_run_gets_retained() {
+#[tokio::test]
+async fn migrate_personas_new_persona_after_first_run_gets_retained() {
     use crate::managed_agents::retention::{get_retained_personas, open_retention_db};
 
     let base = tempfile::tempdir().unwrap();
@@ -98,7 +104,10 @@ fn migrate_personas_new_persona_after_first_run_gets_retained() {
     let keys = nostr::Keys::generate();
     let pubkey = keys.public_key().to_hex();
 
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        1
+    );
 
     // A persona added to personas.json after the first reconcile must be
     // picked up — the whole-store sentinel that previously short-circuited
@@ -117,15 +126,18 @@ fn migrate_personas_new_persona_after_first_run_gets_retained() {
     }));
     write_base_personas(base.path(), &two);
 
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        1
+    );
 
     let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
     let rows = get_retained_personas(&conn, &pubkey).unwrap();
     assert_eq!(rows.len(), 2);
 }
 
-#[test]
-fn migrate_personas_edited_persona_re_retains_pending() {
+#[tokio::test]
+async fn migrate_personas_edited_persona_re_retains_pending() {
     use crate::managed_agents::retention::{get_retained_event, mark_synced, open_retention_db};
     use buzz_core_pkg::kind::KIND_PERSONA;
 
@@ -134,7 +146,10 @@ fn migrate_personas_edited_persona_re_retains_pending() {
     let keys = nostr::Keys::generate();
     let pubkey = keys.public_key().to_hex();
 
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        1
+    );
 
     // Simulate the flush loop confirming the first publish.
     let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
@@ -159,7 +174,10 @@ fn migrate_personas_edited_persona_re_retains_pending() {
         serde_json::json!("You review code carefully.");
     write_base_personas(base.path(), &edited);
 
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        1
+    );
 
     let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
     let row = get_retained_event(&conn, KIND_PERSONA, &pubkey, "code-reviewer")
@@ -169,11 +187,14 @@ fn migrate_personas_edited_persona_re_retains_pending() {
     assert!(row.content.contains("carefully"));
 }
 
-#[test]
-fn migrate_personas_no_file_is_noop() {
+#[tokio::test]
+async fn migrate_personas_no_file_is_noop() {
     let base = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 0);
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        0
+    );
 }
 
 /// F8: a future-dated retained head must be SUPERSEDED on a changed-content
@@ -181,8 +202,8 @@ fn migrate_personas_no_file_is_noop() {
 /// monotonic `created_at` bump the rebuilt event lands at `now <= head`, the
 /// upsert's `WHERE excluded.created_at >= ...` drops the UPDATE, and `migrated`
 /// over-reports. The bump (max(now, head+1)) guarantees supersession.
-#[test]
-fn migrate_personas_supersedes_future_dated_head() {
+#[tokio::test]
+async fn migrate_personas_supersedes_future_dated_head() {
     use crate::managed_agents::retention::{
         get_retained_event, open_retention_db, retain_event, RetainedEvent,
     };
@@ -194,7 +215,10 @@ fn migrate_personas_supersedes_future_dated_head() {
     let pubkey = keys.public_key().to_hex();
 
     // First migrate retains the persona at ~now.
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        1
+    );
 
     // Force the retained head far into the future, simulating a clock-skewed or
     // same-second `max(now, head+1)` interactive bump.
@@ -220,7 +244,7 @@ fn migrate_personas_supersedes_future_dated_head() {
     write_base_personas(base.path(), &edited);
 
     assert_eq!(
-        migrate_personas_in_dir(base.path(), &keys).unwrap(),
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
         1,
         "changed content over a future-dated head must report a real migration"
     );
@@ -248,8 +272,8 @@ fn write_base_teams(base_dir: &Path, records: &serde_json::Value) {
 }
 
 /// F8 for the team migration site — same supersede guarantee as personas.
-#[test]
-fn migrate_teams_supersedes_future_dated_head() {
+#[tokio::test]
+async fn migrate_teams_supersedes_future_dated_head() {
     use crate::managed_agents::retention::{
         get_retained_event, open_retention_db, retain_event, RetainedEvent,
     };
@@ -269,7 +293,7 @@ fn migrate_teams_supersedes_future_dated_head() {
     let keys = nostr::Keys::generate();
     let pubkey = keys.public_key().to_hex();
 
-    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).await.unwrap(), 1);
 
     let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
     let head = get_retained_event(&conn, KIND_TEAM, &pubkey, "my-team")
@@ -290,7 +314,7 @@ fn migrate_teams_supersedes_future_dated_head() {
     edited.as_array_mut().unwrap()[0]["description"] = serde_json::json!("second");
     write_base_teams(base.path(), &edited);
 
-    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).await.unwrap(), 1);
 
     let row = get_retained_event(&conn, KIND_TEAM, &pubkey, "my-team")
         .unwrap()
@@ -304,8 +328,8 @@ fn migrate_teams_supersedes_future_dated_head() {
 /// atomic purge+enqueue rolled back) is an orphan: boot's positive legs
 /// enumerate disk records and never revisit it, so only the deletion sweep can
 /// retract it. The sweep must enqueue a kind:5 tombstone and purge the head.
-#[test]
-fn deletion_reconcile_tombstones_orphan_persona_head() {
+#[tokio::test]
+async fn deletion_reconcile_tombstones_orphan_persona_head() {
     use crate::managed_agents::retention::{get_retained_event, open_retention_db};
     use buzz_core_pkg::kind::{KIND_DELETION, KIND_PERSONA};
 
@@ -316,11 +340,16 @@ fn deletion_reconcile_tombstones_orphan_persona_head() {
     let db_path = base.path().join("retention.db");
 
     // Positive leg retains the head, then the disk record is deleted.
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        1
+    );
     write_base_personas(base.path(), &serde_json::json!([]));
 
     assert_eq!(
-        reconcile_deleted_heads_at(base.path(), &keys, &db_path).unwrap(),
+        reconcile_deleted_heads_at(base.path(), &keys, &db_path)
+            .await
+            .unwrap(),
         1
     );
 
@@ -346,8 +375,8 @@ fn deletion_reconcile_tombstones_orphan_persona_head() {
 /// A head whose disk record still exists is NOT an orphan: the sweep must leave
 /// it alone. This is the guard that keeps the negative leg from retracting live
 /// state right after the positive leg retained it.
-#[test]
-fn deletion_reconcile_leaves_live_head_untouched() {
+#[tokio::test]
+async fn deletion_reconcile_leaves_live_head_untouched() {
     use crate::managed_agents::retention::{get_retained_event, open_retention_db};
     use buzz_core_pkg::kind::{KIND_DELETION, KIND_PERSONA};
 
@@ -357,11 +386,16 @@ fn deletion_reconcile_leaves_live_head_untouched() {
     let pubkey = keys.public_key().to_hex();
     let db_path = base.path().join("retention.db");
 
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        1
+    );
 
     // The disk record is still present, so nothing is orphaned.
     assert_eq!(
-        reconcile_deleted_heads_at(base.path(), &keys, &db_path).unwrap(),
+        reconcile_deleted_heads_at(base.path(), &keys, &db_path)
+            .await
+            .unwrap(),
         0
     );
 
@@ -385,8 +419,8 @@ fn deletion_reconcile_leaves_live_head_untouched() {
 /// A malformed `managed-agents.json` must fail loud (and be preserved as
 /// `.invalid`) — never read as empty and orphan every persona and agent head.
 /// This is the hard rider: a truncated file must never trigger tombstones.
-#[test]
-fn deletion_reconcile_malformed_store_fails_loud_without_tombstoning() {
+#[tokio::test]
+async fn deletion_reconcile_malformed_store_fails_loud_without_tombstoning() {
     use crate::managed_agents::retention::{get_retained_event, open_retention_db};
     use buzz_core_pkg::kind::{KIND_DELETION, KIND_PERSONA};
 
@@ -396,11 +430,15 @@ fn deletion_reconcile_malformed_store_fails_loud_without_tombstoning() {
     let pubkey = keys.public_key().to_hex();
     let db_path = base.path().join("retention.db");
 
-    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).await.unwrap(),
+        1
+    );
     // Truncate managed-agents.json to invalid JSON AFTER the head is retained.
     std::fs::write(base.path().join("managed-agents.json"), b"{ truncated").unwrap();
 
     let err = reconcile_deleted_heads_at(base.path(), &keys, &db_path)
+        .await
         .expect_err("a malformed store must fail loud");
     assert!(
         err.contains("managed-agents.json"),
@@ -434,8 +472,8 @@ fn deletion_reconcile_malformed_store_fails_loud_without_tombstoning() {
 /// that can't come from a relay event. The deletion sweep must therefore leave
 /// it untouched: no kind:5 tombstone, no kind:9035 archive, and the head
 /// survives. Sweeping it would delete every device-A agent at device B's boot.
-#[test]
-fn deletion_reconcile_leaves_managed_agent_head_untouched() {
+#[tokio::test]
+async fn deletion_reconcile_leaves_managed_agent_head_untouched() {
     use crate::managed_agents::retention::{
         get_retained_event, open_retention_db, retain_event, RetainedEvent,
     };
@@ -469,7 +507,9 @@ fn deletion_reconcile_leaves_managed_agent_head_untouched() {
 
     // No persona/team records either, so the sweep tombstones nothing.
     assert_eq!(
-        reconcile_deleted_heads_at(base.path(), &keys, &db_path).unwrap(),
+        reconcile_deleted_heads_at(base.path(), &keys, &db_path)
+            .await
+            .unwrap(),
         0
     );
 

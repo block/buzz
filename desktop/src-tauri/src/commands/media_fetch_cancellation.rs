@@ -8,9 +8,9 @@ use tokio_util::sync::CancellationToken;
 use crate::app_state::AppState;
 use crate::commands::media::detect_and_validate_mime;
 use crate::commands::media_download::{
-    fetch_blob_bytes_with_cap, validate_download_url, MAX_DOWNLOAD_BYTES,
+    fetch_blob_bytes_in_scope, validate_download_url, MAX_DOWNLOAD_BYTES,
 };
-use crate::relay::relay_api_base_url_with_override;
+use crate::media_read::MediaReadScope;
 
 #[derive(Default)]
 struct MediaFetchCancellations {
@@ -79,14 +79,20 @@ pub async fn fetch_media_bytes(
     url: String,
     request_id: Option<String>,
     state: tauri::State<'_, AppState>,
+    scope: MediaReadScope,
 ) -> Result<tauri::ipc::Response, String> {
     let cancellation = begin_media_fetch(request_id.as_deref());
     let result = async {
-        let relay_base = relay_api_base_url_with_override(&state);
-        validate_download_url(&url, &relay_base)?;
-        let bytes =
-            fetch_blob_bytes_with_cap(&url, &state, MAX_DOWNLOAD_BYTES, cancellation.as_ref())
-                .await?;
+        let relay_base = &scope.base;
+        validate_download_url(&url, relay_base)?;
+        let bytes = fetch_blob_bytes_in_scope(
+            &url,
+            &state,
+            MAX_DOWNLOAD_BYTES,
+            cancellation.as_ref(),
+            &scope,
+        )
+        .await?;
         detect_and_validate_mime(&bytes)?;
         Ok(tauri::ipc::Response::new(bytes))
     }

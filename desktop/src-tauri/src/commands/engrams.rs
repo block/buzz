@@ -25,11 +25,13 @@ use nostr::PublicKey;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use buzz_core_pkg::engram::{self, extract_refs, select_head, validate_and_decrypt, Body};
+use buzz_core_pkg::engram::{self, extract_refs, select_head, Body};
 use buzz_core_pkg::kind::KIND_AGENT_ENGRAM;
 
-use crate::commands::identity_archive::{extract_oa_owner, fetch_kind0};
-use crate::{app_state::AppState, managed_agents::load_managed_agents, relay::query_relay};
+use crate::commands::identity_archive::{capture_relay_target, extract_oa_owner};
+use crate::{
+    app_state::AppState, managed_agents::load_managed_agents, relay::query_relay_at_with_signer,
+};
 
 /// Hard cap on engrams returned per (agent, owner) pair. Matches the CLI
 /// `mem ls` reference. If the relay returns this many we set
@@ -137,10 +139,12 @@ pub async fn get_agent_memory(
     let agent = PublicKey::from_hex(&agent_pubkey)
         .map_err(|e| format!("agent pubkey must be 64-hex: {e}"))?;
 
-    let viewer_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    // Preserve the historical read/recovery behavior, but capture identity and
+    // relay once for ownership, transport, and all memory cryptography.
+    let signer = state.legacy_local_signer()?;
+    let target = capture_relay_target(&state);
+    let owner_pubkey = signer.public_key();
+    let viewer_pubkey = owner_pubkey.to_hex();
 
     let managed = load_managed_agents(&app)?;
     let is_managed = managed.iter().any(|m| m.pubkey == agent_pubkey);
@@ -148,8 +152,15 @@ pub async fn get_agent_memory(
         false // already authorized; skip the relay roundtrip
     } else {
         // Verify the agent's live `kind:0` declares the viewer as owner.
-        let kind0 = fetch_kind0(&state, &agent_pubkey).await?;
-        kind0_declares_viewer_owner(kind0.as_ref(), &viewer_pubkey)
+        let events = query_relay_at_with_signer(
+            &state,
+            &target.api_base_url,
+            &[serde_json::json!({"kinds": [0], "authors": [agent.to_hex()], "limit": 1})],
+            &signer,
+            None,
+        )
+        .await?;
+        kind0_declares_viewer_owner(events.first(), &viewer_pubkey)
     };
 
     if !is_managed && !is_declared_owner {
@@ -158,14 +169,6 @@ pub async fn get_agent_memory(
              and no verified NIP-OA owner declaration)"
         ));
     }
-
-    // ── Resolve owner key material ──────────────────────────────────────
-    // Owner = viewer. Clone the secret key out of the lock immediately so
-    // we don't hold the mutex across the relay round trip.
-    let (owner_pubkey, owner_seckey) = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        (keys.public_key(), keys.secret_key().clone())
-    };
 
     // ── Relay query ─────────────────────────────────────────────────────
     // Mirrors the CLI `mem ls` filter: kind 30174, authored by the agent,
@@ -176,7 +179,8 @@ pub async fn get_agent_memory(
         "#p": [owner_pubkey.to_hex()],
         "limit": ENGRAM_FETCH_LIMIT,
     });
-    let events = query_relay(&state, &[filter]).await?;
+    let events =
+        query_relay_at_with_signer(&state, &target.api_base_url, &[filter], &signer, None).await?;
     // `>=` is intentional and accepts a false-positive at exactly
     // ENGRAM_FETCH_LIMIT events: if the relay returned the cap, we can't
     // distinguish "exactly cap" from "cap because clipped". The banner copy
@@ -202,15 +206,8 @@ pub async fn get_agent_memory(
         else {
             continue;
         };
-        let body = match validate_and_decrypt(
-            &ev,
-            &agent,
-            &owner_pubkey,
-            &owner_seckey,
-            &agent, // viewer (owner) decrypts with agent as the conversation peer
-        ) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let Some(body) = signer.read_agent_memory(&ev, &agent).await? else {
+            continue;
         };
         groups.entry(d_value).or_default().push((ev, body));
     }

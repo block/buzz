@@ -202,26 +202,34 @@ fn stored_managed_agent_auth_tag_trims_blank_values() {
     assert_eq!(stored_managed_agent_auth_tag(None), None);
 }
 
-#[test]
-fn legacy_managed_agent_auth_tag_verifies_for_agent_pubkey() {
+#[tokio::test]
+async fn legacy_managed_agent_auth_tag_verifies_for_agent_pubkey() {
     let owner_keys = Keys::generate();
     let agent_keys = Keys::generate();
 
-    let tag = legacy_managed_agent_auth_tag(&owner_keys, &agent_keys.public_key())
-        .expect("legacy auth tag should compute")
-        .expect("legacy auth tag should be present");
+    let tag = legacy_managed_agent_auth_tag(
+        &crate::active_user_signer::ActiveUserSigner::local(owner_keys.clone()),
+        &agent_keys.public_key(),
+    )
+    .await
+    .expect("legacy auth tag should compute")
+    .expect("legacy auth tag should be present");
 
     let owner = buzz_sdk_pkg::nip_oa::verify_auth_tag(&tag, &agent_keys.public_key())
         .expect("legacy auth tag should verify");
     assert_eq!(owner, owner_keys.public_key());
 }
 
-#[test]
-fn legacy_managed_agent_auth_tag_skips_self_attestation() {
+#[tokio::test]
+async fn legacy_managed_agent_auth_tag_skips_self_attestation() {
     let owner_keys = Keys::generate();
 
-    let tag = legacy_managed_agent_auth_tag(&owner_keys, &owner_keys.public_key())
-        .expect("self-attestation should be skipped");
+    let tag = legacy_managed_agent_auth_tag(
+        &crate::active_user_signer::ActiveUserSigner::local(owner_keys.clone()),
+        &owner_keys.public_key(),
+    )
+    .await
+    .expect("self-attestation should be skipped");
 
     assert_eq!(tag, None);
 }

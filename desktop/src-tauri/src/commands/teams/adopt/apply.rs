@@ -96,12 +96,18 @@ pub(super) fn commit_stores(
     )
 }
 
+#[derive(Default)]
+pub(super) struct AdoptionRetentionWork {
+    pub personas: Vec<crate::commands::personas::PersonaRetentionWork>,
+    pub team: Option<crate::commands::teams::TeamRetentionWork>,
+}
+
 pub(super) fn add_verified_team(
     app: &AppHandle,
     scope: crate::managed_agents::retention::RetentionScope,
     source: &TeamCatalogSource,
     content: &TeamCatalogContent,
-) -> Result<AddTeamFromCatalogResult, String> {
+) -> Result<(AddTeamFromCatalogResult, AdoptionRetentionWork), String> {
     let state = app.state::<AppState>();
     // Held across load, plan, and save: the replay check is only meaningful if
     // no concurrent add of the same coordinate can interleave.
@@ -120,7 +126,7 @@ pub(super) fn add_verified_team(
     assert_adoption_scope_unchanged(
         &scope,
         &crate::relay::relay_api_base_url_with_override(&state),
-        &state.signing_keys()?.public_key().to_hex(),
+        &state.active_signer()?.public_key().to_hex(),
     )?;
 
     let personas_path = managed_agents_store_path(app)?;
@@ -144,7 +150,7 @@ pub(super) fn add_verified_team(
     // rollback inside the commit closure is byte-exact even for a reactivated
     // member copy whose logical undo is a field revert. Retention enqueues into
     // the CAPTURED scope (fenced above), never a re-resolved live one.
-    let result = commit_and_enqueue(
+    let (result, work) = commit_and_enqueue(
         plan,
         |personas, teams| {
             commit_stores_with_snaps(
@@ -162,7 +168,7 @@ pub(super) fn add_verified_team(
     if !result.already_present {
         try_regenerate_nest(app);
     }
-    Ok(result)
+    Ok((result, work))
 }
 
 /// Fail closed when the workspace switched relay or identity between capturing
@@ -179,7 +185,7 @@ pub(super) fn assert_adoption_scope_unchanged(
 ) -> Result<(), String> {
     crate::relay::assert_expected_relay_scope(Some(&scope.relay_url), live_api_base_url)?;
     crate::relay::assert_expected_signer(
-        Some(&scope.owner_keys.public_key().to_hex()),
+        Some(&scope.owner_signer().public_key().to_hex()),
         live_signer_hex,
     )
 }
@@ -200,12 +206,15 @@ pub(super) fn commit_and_enqueue(
     plan: AddPlan,
     commit: impl FnOnce(&[AgentDefinition], &[TeamRecord]) -> Result<(), String>,
     resolve_scope: impl FnOnce() -> Result<crate::managed_agents::retention::RetentionScope, String>,
-) -> Result<AddTeamFromCatalogResult, String> {
+) -> Result<(AddTeamFromCatalogResult, AdoptionRetentionWork), String> {
     let Some((personas, teams)) = plan.stores else {
-        return Ok(AddTeamFromCatalogResult {
-            team: plan.team,
-            already_present: true,
-        });
+        return Ok((
+            AddTeamFromCatalogResult {
+                team: plan.team,
+                already_present: true,
+            },
+            AdoptionRetentionWork::default(),
+        ));
     };
 
     commit(&personas, &teams)?;
@@ -213,15 +222,21 @@ pub(super) fn commit_and_enqueue(
     // The commit is durable; enqueue retention heads so a crash before the next
     // boot reconcile cannot lose the only adopted copy. Resolving the scope
     // needs signable owner keys — the same precondition every retain path has.
-    match resolve_scope() {
+    let work = match resolve_scope() {
         Ok(scope) => enqueue_adoption_retention(&scope, &plan.retain_personas, &plan.team),
-        Err(e) => eprintln!("buzz-desktop: adopt-retain scope unavailable: {e}"),
-    }
+        Err(e) => {
+            eprintln!("buzz-desktop: adopt-retain scope unavailable: {e}");
+            AdoptionRetentionWork::default()
+        }
+    };
 
-    Ok(AddTeamFromCatalogResult {
-        team: plan.team,
-        already_present: false,
-    })
+    Ok((
+        AddTeamFromCatalogResult {
+            team: plan.team,
+            already_present: false,
+        },
+        work,
+    ))
 }
 
 /// Enqueue a pending retention head for every member copy the add wrote and for
@@ -233,14 +248,14 @@ pub(super) fn enqueue_adoption_retention(
     scope: &crate::managed_agents::retention::RetentionScope,
     retain_personas: &[AgentDefinition],
     team: &TeamRecord,
-) {
-    for persona in retain_personas {
-        if let Err(e) = crate::commands::personas::retain_persona_pending_at(scope, persona) {
-            eprintln!("buzz-desktop: adopt persona-retain: {e}");
-        }
-    }
-    if let Err(e) = crate::commands::teams::retain_team_pending_at(scope, team) {
-        eprintln!("buzz-desktop: adopt team-retain: {e}");
+) -> AdoptionRetentionWork {
+    let work = retain_personas
+        .iter()
+        .map(|persona| crate::commands::personas::retain_persona_pending_at(scope, persona))
+        .collect();
+    AdoptionRetentionWork {
+        personas: work,
+        team: Some(crate::commands::teams::retain_team_pending_at(scope, team)),
     }
 }
 

@@ -1,6 +1,5 @@
-use nostr::{
-    nips::nip44, Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32,
-};
+use crate::active_user_signer::ActiveUserSigner;
+use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32};
 use tauri::Manager;
 use tauri::State;
 
@@ -53,27 +52,16 @@ mod truncated_display_name_tests {
 
 #[tauri::command]
 pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
-    let pubkey = keys.public_key();
-    let pubkey_hex = pubkey.to_hex();
-    let display_name = truncated_display_name(&pubkey)?;
-    let lost = state
-        .identity_lost
-        .load(std::sync::atomic::Ordering::Acquire);
-    let locked = state
-        .keyring_locked
-        .load(std::sync::atomic::Ordering::Acquire);
-    let reset_failed = state
-        .reset_failed
-        .load(std::sync::atomic::Ordering::Acquire);
-
+    // This legacy IPC retains its local contract. Remote callers use the
+    // optional identity in get_native_identity_status instead.
+    let snapshot = state.local_identity_snapshot()?;
     Ok(IdentityInfo {
-        pubkey: pubkey_hex,
-        display_name,
-        storage: state.identity_storage().as_str().to_string(),
-        lost,
-        locked,
-        reset_failed,
+        pubkey: snapshot.pubkey.to_hex(),
+        display_name: truncated_display_name(&snapshot.pubkey)?,
+        storage: snapshot.storage.as_str().to_string(),
+        lost: snapshot.lost,
+        locked: snapshot.locked,
+        reset_failed: snapshot.reset_failed,
     })
 }
 
@@ -105,6 +93,9 @@ mod auto_connect_default_relay_tests {
 
 #[tauri::command]
 pub fn is_shared_identity() -> bool {
+    if crate::native_identity::SignerMode::compiled().is_remote() {
+        return false;
+    }
     std::env::var("BUZZ_SHARE_IDENTITY")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -138,69 +129,123 @@ pub async fn sign_event(
     created_at: Option<u64>,
     tags: Vec<Vec<String>>,
     state: State<'_, AppState>,
+    expected_generation: Option<u64>,
 ) -> Result<String, String> {
-    let keys = state.signing_keys()?;
+    let signer = crate::native_identity::renderer_signer(&state, expected_generation)?;
+    sign_renderer_event(&signer, kind, content, created_at, tags).await
+}
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let nostr_tags = tags
-            .into_iter()
-            .map(|tag| Tag::parse(tag).map_err(|error| format!("invalid tag: {error}")))
-            .collect::<Result<Vec<_>, _>>()?;
+/// Sign the renderer event template without altering its fields.
+pub(crate) async fn sign_renderer_event(
+    signer: &ActiveUserSigner,
+    kind: u16,
+    content: String,
+    created_at: Option<u64>,
+    tags: Vec<Vec<String>>,
+) -> Result<String, String> {
+    let nostr_tags = tags
+        .into_iter()
+        .map(|tag| Tag::parse(tag).map_err(|error| format!("invalid tag: {error}")))
+        .collect::<Result<Vec<_>, _>>()?;
 
-        let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
-        if let Some(created_at) = created_at {
-            builder = builder.custom_created_at(Timestamp::from(created_at));
-        }
+    let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
+    if let Some(created_at) = created_at {
+        builder = builder.custom_created_at(Timestamp::from(created_at));
+    }
 
-        let event = builder
-            .sign_with_keys(&keys)
-            .map_err(|error| format!("sign failed: {error}"))?;
+    let event = signer
+        .sign_event(builder)
+        .await
+        .map_err(|error| format!("sign failed: {error}"))?;
 
-        Ok(event.as_json())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    signer.check_valid()?;
+    Ok(event.as_json())
 }
 
 #[tauri::command]
 pub async fn decrypt_observer_event(
     event_json: String,
     state: State<'_, AppState>,
+    expected_generation: Option<u64>,
 ) -> Result<serde_json::Value, String> {
-    let keys = state.signing_keys()?;
+    let signer = crate::native_identity::renderer_signer(&state, expected_generation)?;
+    decrypt_observer_event_with_signer(&signer, &event_json).await
+}
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let event =
-            Event::from_json(event_json).map_err(|error| format!("invalid event: {error}"))?;
+async fn decrypt_observer_event_with_signer(
+    signer: &ActiveUserSigner,
+    event_json: &str,
+) -> Result<serde_json::Value, String> {
+    let event = Event::from_json(event_json).map_err(|error| format!("invalid event: {error}"))?;
+    if !event.verify_id() {
+        return Err("observer event has invalid ID".into());
+    }
+    if !event.verify_signature() {
+        return Err("observer event has invalid signature".into());
+    }
+    use buzz_core_pkg::observer::{content_looks_like_nip44, ObserverPayloadError};
+    if !content_looks_like_nip44(&event.content) {
+        return Err(format!(
+            "decrypt observer event failed: {}",
+            ObserverPayloadError::InvalidCiphertextLength(event.content.len())
+        ));
+    }
+    // Keep decrypted bytes zeroized on both validation and JSON parsing errors.
+    let plaintext = zeroize::Zeroizing::new(
+        signer
+            .signer()
+            .nip44_decrypt(&event.pubkey, &event.content)
+            .await
+            .map_err(|error| format!("decrypt observer event failed: NIP-44 error: {error}"))?,
+    );
+    check_observer_plaintext(&plaintext)
+        .map_err(|error| format!("decrypt observer event failed: {error}"))?;
+    serde_json::from_str(&plaintext)
+        .map_err(|error| format!("decrypt observer event failed: JSON error: {error}"))
+}
 
-        // Defense-in-depth: verify event ID and signature before decrypting.
-        if !event.verify_id() {
-            return Err("observer event has invalid ID".into());
+fn check_observer_plaintext(plaintext: &str) -> Result<(), String> {
+    use buzz_core_pkg::observer::{ObserverPayloadError, OBSERVER_MAX_PLAINTEXT_LEN};
+    if plaintext.len() > OBSERVER_MAX_PLAINTEXT_LEN {
+        return Err(ObserverPayloadError::PlaintextTooLarge {
+            max: OBSERVER_MAX_PLAINTEXT_LEN,
+            got: plaintext.len(),
         }
-        if !event.verify_signature() {
-            return Err("observer event has invalid signature".into());
-        }
-
-        buzz_core_pkg::observer::decrypt_observer_payload(&keys, &event)
-            .map_err(|error| format!("decrypt observer event failed: {error}"))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+        .to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
-pub fn build_observer_control_event(
+pub async fn build_observer_control_event(
     agent_pubkey: String,
     payload: serde_json::Value,
     state: State<'_, AppState>,
+    expected_generation: Option<u64>,
 ) -> Result<String, String> {
-    let keys = state.signing_keys()?;
+    let signer = crate::native_identity::renderer_signer(&state, expected_generation)?;
+    build_observer_control_with_signer(&signer, &agent_pubkey, &payload).await
+}
+
+async fn build_observer_control_with_signer(
+    signer: &ActiveUserSigner,
+    agent_pubkey: &str,
+    payload: &serde_json::Value,
+) -> Result<String, String> {
     let agent_pubkey = PublicKey::from_hex(agent_pubkey.trim())
         .map_err(|error| format!("invalid agent pubkey: {error}"))?;
     let agent_pubkey_hex = agent_pubkey.to_hex();
-    let encrypted =
-        buzz_core_pkg::observer::encrypt_observer_payload(&keys, &agent_pubkey, &payload)
-            .map_err(|error| format!("encrypt observer control failed: {error}"))?;
+    let plaintext = zeroize::Zeroizing::new(
+        serde_json::to_string(payload)
+            .map_err(|e| format!("encrypt observer control failed: {e}"))?,
+    );
+    check_observer_plaintext(&plaintext)
+        .map_err(|e| format!("encrypt observer control failed: {e}"))?;
+    let encrypted = signer
+        .signer()
+        .nip44_encrypt(&agent_pubkey, &plaintext)
+        .await
+        .map_err(|e| format!("encrypt observer control failed: {e}"))?;
     let builder = buzz_sdk_pkg::build_agent_observer_frame(
         &agent_pubkey_hex,
         &agent_pubkey_hex,
@@ -208,9 +253,11 @@ pub fn build_observer_control_event(
         &encrypted,
     )
     .map_err(|error| format!("build observer control failed: {error}"))?;
-    let event = builder
-        .sign_with_keys(&keys)
+    let event = signer
+        .sign_event(builder)
+        .await
         .map_err(|error| format!("sign observer control failed: {error}"))?;
+    signer.check_valid()?;
     Ok(event.as_json())
 }
 
@@ -293,6 +340,7 @@ fn verify_ncryptsec_backup_inner(
     ncryptsec: &str,
     password: &str,
 ) -> Result<BackupVerification, String> {
+    state.require_local_identity()?;
     let keys = crate::key_backup::decrypt_ncryptsec(ncryptsec, password)?;
     let pubkey = keys.public_key();
     let current = state.signing_keys()?.public_key();
@@ -333,6 +381,7 @@ pub async fn save_ncryptsec_copy(
     ncryptsec: String,
     app_handle: tauri::AppHandle,
 ) -> Result<Option<String>, String> {
+    app_handle.state::<AppState>().require_local_identity()?;
     // Reject anything that is not a valid encrypted-key blob — this command
     // must not become a generic file writer.
     crate::key_backup::parse_ncryptsec(&ncryptsec)?;
@@ -366,6 +415,7 @@ pub async fn import_identity(
     password: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<IdentityInfo, String> {
+    app_handle.state::<AppState>().require_local_identity()?;
     tokio::task::spawn_blocking(move || {
         // NIP-49 backups require a passphrase and decrypt entirely in Rust.
         // Raw nsec/hex input follows the existing parser path unchanged.
@@ -437,8 +487,9 @@ pub(crate) fn commit_imported_identity(
     keys: nostr::Keys,
     persist: impl FnOnce(&nostr::Keys) -> Result<crate::app_state::IdentityStorage, String>,
 ) -> Result<(nostr::PublicKey, crate::app_state::IdentityStorage), String> {
+    state.require_local_identity()?;
     // Capture the previous pubkey up front for post-commit cleanup.
-    let previous_pubkey = state.keys.lock().map_err(|e| e.to_string())?.public_key();
+    let previous_pubkey = state.identity_public_key()?;
 
     let storage = persist(&keys)?;
 
@@ -446,11 +497,7 @@ pub(crate) fn commit_imported_identity(
     // stores below pair with Acquire loads in get_identity: a reader
     // observing false is guaranteed to see the updated keys.
     let pubkey = keys.public_key();
-    {
-        let mut active_keys = state.keys.lock().map_err(|e| e.to_string())?;
-        *active_keys = keys;
-        state.set_identity_storage(storage);
-    }
+    state.install_local_identity(keys, storage)?;
 
     // Clear both recovery flags — an import is valid in either lost or
     // keyring-locked state and resolves both. In the locked case the
@@ -497,6 +544,7 @@ pub async fn persist_current_identity(
     tokio::task::spawn_blocking(move || {
         let state = app_handle.state::<AppState>();
 
+        state.require_local_identity()?;
         // Acquire mutation lock before reading identity_lost so that a
         // concurrent import_identity cannot complete between our check and
         // our persist, which would let the stale ephemeral key overwrite the
@@ -511,7 +559,7 @@ pub async fn persist_current_identity(
         }
 
         // Clone current keys without holding the mutex across keyring I/O.
-        let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+        let keys = state.local_identity_keys()?;
 
         let data_dir = app_handle
             .path()
@@ -562,6 +610,7 @@ pub async fn persist_current_identity(
 /// would be confusing.
 #[tauri::command]
 pub async fn sign_out(app: tauri::AppHandle) -> Result<(), String> {
+    app.state::<AppState>().require_local_identity()?;
     if is_shared_identity() {
         return Err(
             "Sign out isn't available while BUZZ_SHARE_IDENTITY provides your identity. Unset BUZZ_SHARE_IDENTITY and BUZZ_PRIVATE_KEY, then relaunch to sign out."
@@ -592,8 +641,8 @@ fn nostr_bind_tag(name: &str, value: &str) -> Result<Tag, String> {
     Tag::parse(vec![name, value]).map_err(|error| format!("{name} tag failed: {error}"))
 }
 
-pub(crate) fn build_nostr_identity_binding_event(
-    keys: &Keys,
+pub(crate) async fn build_nostr_identity_binding_event(
+    signer: &ActiveUserSigner,
     challenge_id: &str,
     nonce: &str,
     verification_code: &str,
@@ -620,9 +669,11 @@ pub(crate) fn build_nostr_identity_binding_event(
         nostr_bind_tag("expires_at", expires_at)?,
     ];
 
-    EventBuilder::new(Kind::Custom(nostr_bind::KIND), nostr_bind::CONTENT)
-        .tags(tags)
-        .sign_with_keys(keys)
+    signer
+        .sign_event(
+            EventBuilder::new(Kind::Custom(nostr_bind::KIND), nostr_bind::CONTENT).tags(tags),
+        )
+        .await
         .map_err(|error| format!("sign failed: {error}"))
 }
 
@@ -643,26 +694,18 @@ pub async fn sign_nostr_identity_binding(
         &expires_at,
     )?;
 
-    let keys = state
-        .keys
-        .lock()
-        .map_err(|error| error.to_string())?
-        .clone();
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let event = build_nostr_identity_binding_event(
-            &keys,
-            &challenge_id,
-            &nonce,
-            &verification_code,
-            &origin,
-            &expires_at,
-        )?;
-
-        Ok(event.as_json())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    let signer = state.legacy_local_signer()?;
+    let event = build_nostr_identity_binding_event(
+        &signer,
+        &challenge_id,
+        &nonce,
+        &verification_code,
+        &origin,
+        &expires_at,
+    )
+    .await?;
+    signer.check_valid()?;
+    Ok(event.as_json())
 }
 
 #[tauri::command]
@@ -670,66 +713,103 @@ pub async fn create_auth_event(
     challenge: String,
     relay_url: String,
     state: State<'_, AppState>,
+    expected_generation: Option<u64>,
 ) -> Result<String, String> {
-    let keys = state.signing_keys()?;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let tags = vec![
-            Tag::parse(vec!["relay", &relay_url])
-                .map_err(|error| format!("relay tag failed: {error}"))?,
-            Tag::parse(vec!["challenge", &challenge])
-                .map_err(|error| format!("challenge tag failed: {error}"))?,
-        ];
-
-        let event = EventBuilder::new(Kind::Custom(22242), "")
-            .tags(tags)
-            .sign_with_keys(&keys)
-            .map_err(|error| format!("sign failed: {error}"))?;
-
-        Ok(event.as_json())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    let signer = crate::native_identity::renderer_signer(&state, expected_generation)?;
+    sign_renderer_auth(&signer, &challenge, &relay_url).await
 }
 
+/// Sign the renderer NIP-42 template, retaining its literal relay tag.
+pub(crate) async fn sign_renderer_auth(
+    signer: &ActiveUserSigner,
+    challenge: &str,
+    relay_url: &str,
+) -> Result<String, String> {
+    let tags = vec![
+        Tag::parse(vec!["relay", relay_url])
+            .map_err(|error| format!("relay tag failed: {error}"))?,
+        Tag::parse(vec!["challenge", challenge])
+            .map_err(|error| format!("challenge tag failed: {error}"))?,
+    ];
+
+    let event = signer
+        .sign_event(EventBuilder::new(Kind::Custom(22242), "").tags(tags))
+        .await
+        .map_err(|error| format!("sign failed: {error}"))?;
+
+    signer.check_valid()?;
+    Ok(event.as_json())
+}
+
+/// Encrypt with one captured self identity. Remote callers must bind the native
+/// generation; the existing generationless renderer call remains local-only.
 #[tauri::command]
 pub async fn nip44_encrypt_to_self(
     plaintext: String,
+    expected_generation: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state.signing_keys()?;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        nip44::encrypt(
-            keys.secret_key(),
-            &keys.public_key(),
-            &plaintext,
-            nip44::Version::V2,
-        )
-        .map_err(|e| format!("nip44 encrypt failed: {e}"))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    let signer = capture_self_crypto_signer(&state, expected_generation)?;
+    self_crypto(signer, plaintext, true).await
 }
 
+/// Decrypt with the same captured identity used for the self peer and result fence.
 #[tauri::command]
 pub async fn nip44_decrypt_from_self(
     ciphertext: String,
+    expected_generation: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state.signing_keys()?;
+    let signer = capture_self_crypto_signer(&state, expected_generation)?;
+    self_crypto(signer, ciphertext, false).await
+}
 
-    tauri::async_runtime::spawn_blocking(move || {
-        nip44::decrypt(keys.secret_key(), &keys.public_key(), &ciphertext)
-            .map_err(|e| format!("nip44 decrypt failed: {e}"))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+fn capture_self_crypto_signer(
+    state: &AppState,
+    expected_generation: Option<u64>,
+) -> Result<ActiveUserSigner, String> {
+    // Both commands historically used signing_keys(), including decrypt. Keep
+    // that local recovery guard; pure remote crypto needs no active workspace.
+    let signer = state.active_signer()?;
+    if signer.generation().is_some() && signer.generation() != expected_generation {
+        return Err("remote self crypto requires the current native identity generation".into());
+    }
+    signer.check_valid()?;
+    Ok(signer)
+}
+
+async fn self_crypto(
+    signer: ActiveUserSigner,
+    content: String,
+    encrypt: bool,
+) -> Result<String, String> {
+    let remote = signer.generation().is_some();
+    let work = async move {
+        let peer = signer.public_key();
+        let result = if encrypt {
+            signer.signer().nip44_encrypt(&peer, &content).await
+        } else {
+            signer.signer().nip44_decrypt(&peer, &content).await
+        };
+        // No fresh credential/public-key lookup at the result boundary.
+        signer.check_valid()?;
+        let operation = if encrypt { "encrypt" } else { "decrypt" };
+        result.map_err(|e| format!("nip44 {operation} failed: {e}"))
+    };
+    if remote {
+        work.await
+    } else {
+        // Retain local CPU offloading and the historical join-error shape.
+        tauri::async_runtime::spawn_blocking(move || tauri::async_runtime::block_on(work))
+            .await
+            .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    }
 }
 
 #[cfg(test)]
 mod nostr_identity_binding_tests {
     use super::build_nostr_identity_binding_event;
+    use crate::active_user_signer::ActiveUserSigner;
     use crate::nostr_bind;
     use nostr::{JsonUtil, Keys};
 
@@ -741,17 +821,18 @@ mod nostr_identity_binding_tests {
             .collect()
     }
 
-    #[test]
-    fn build_nostr_identity_binding_event_signs_exact_shape() {
+    #[tokio::test]
+    async fn build_nostr_identity_binding_event_signs_exact_shape() {
         let keys = Keys::generate();
         let event = build_nostr_identity_binding_event(
-            &keys,
+            &ActiveUserSigner::local(keys.clone()),
             "550e8400-e29b-41d4-a716-446655440000",
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
             "123456",
             "https://example.com",
             "2999-01-01T00:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(event.kind.as_u16(), nostr_bind::KIND);
@@ -779,33 +860,35 @@ mod nostr_identity_binding_tests {
         assert!(tags.contains(&vec!["expires_at".into(), "2999-01-01T00:00:00Z".into(),]));
     }
 
-    #[test]
-    fn build_nostr_identity_binding_event_rejects_malformed_verification_code() {
+    #[tokio::test]
+    async fn build_nostr_identity_binding_event_rejects_malformed_verification_code() {
         let keys = Keys::generate();
         let error = build_nostr_identity_binding_event(
-            &keys,
+            &ActiveUserSigner::local(keys.clone()),
             "550e8400-e29b-41d4-a716-446655440000",
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
             "12345a",
             "https://example.com",
             "2999-01-01T00:00:00Z",
         )
+        .await
         .unwrap_err();
 
         assert_eq!(error, "verification_code must be exactly 6 digits");
     }
 
-    #[test]
-    fn build_nostr_identity_binding_event_rejects_expired_link() {
+    #[tokio::test]
+    async fn build_nostr_identity_binding_event_rejects_expired_link() {
         let keys = Keys::generate();
         let error = build_nostr_identity_binding_event(
-            &keys,
+            &ActiveUserSigner::local(keys.clone()),
             "550e8400-e29b-41d4-a716-446655440000",
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
             "123456",
             "https://example.com",
             "2000-01-01T00:00:00Z",
         )
+        .await
         .unwrap_err();
 
         assert_eq!(error, "expires_at is expired");
@@ -815,3 +898,7 @@ mod nostr_identity_binding_tests {
 #[cfg(test)]
 #[path = "identity_key_backup_tests.rs"]
 mod identity_key_backup_tests;
+
+#[cfg(test)]
+#[path = "identity_signer_tests.rs"]
+mod identity_signer_tests;

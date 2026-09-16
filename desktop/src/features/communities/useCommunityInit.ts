@@ -56,7 +56,7 @@ import type { Community } from "./types";
  * destroyed via effect cleanup and do not need entries here.
  * See AGENTS.md "Community Switching" for the full contract.
  */
-async function resetCommunityState({
+export async function resetCommunityState({
   resetAvatarState,
 }: {
   resetAvatarState: boolean;

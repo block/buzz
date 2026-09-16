@@ -1,3 +1,5 @@
+import { isRemoteIdentity } from "@/shared/api/nativeIdentitySession";
+import { remoteSettingsSectionAvailable } from "../lib/remoteSettings";
 import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
@@ -803,6 +805,17 @@ export function renderSettingsSection(
   section: SettingsSection,
   props: SettingsPanelProps,
 ): React.ReactNode {
+  // Guard rendering too: a saved section/deep link can bypass sidebar filtering.
+  if (isRemoteIdentity()) {
+    if (!remoteSettingsSectionAvailable(section)) {
+      return (
+        <p role="status">
+          Mobile pairing transfers your private key. Sign in on the other device
+          instead when using remote custody.
+        </p>
+      );
+    }
+  }
   switch (section) {
     case "profile":
       return (

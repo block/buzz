@@ -21,17 +21,20 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Durat
 use nostr::JsonUtil;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::{
-    sync::{mpsc, Mutex, Notify},
-    time::Instant,
-};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use super::{
     store::SaveSubscription, ArchiveBatchResult, ArchiveCandidate, MatchedScope, ScopeType,
 };
 use crate::app_state::AppState;
+#[path = "sync_ingress.rs"]
+mod ingress;
+use ingress::{archive_scoped, SyncAdmission, SyncOutcome, SyncScope};
+#[path = "sync_runner.rs"]
+mod runner;
 use crate::native_relay_client::{MatchedEvent, NativeRelayClient, RelaySession, Subscription};
+use runner::*;
 
 /// Flush once this many events are buffered. Parity with the renderer manager.
 const FLUSH_BATCH_SIZE: usize = 25;
@@ -63,6 +66,24 @@ pub(crate) trait ArchiveSyncIo: Send + Sync + 'static {
         &self,
         candidates: Vec<ArchiveCandidate>,
     ) -> BoxFuture<'_, Result<ArchiveBatchResult, String>>;
+    fn archive_retry(&self, candidates: Vec<ArchiveCandidate>) -> BoxFuture<'_, SyncOutcome> {
+        Box::pin(async move {
+            let retry = candidates.clone();
+            match self.archive(candidates).await {
+                Ok(committed) => SyncOutcome {
+                    committed,
+                    retry: Vec::new(),
+                },
+                Err(_) => SyncOutcome::retry(retry),
+            }
+        })
+    }
+    fn invalidated(&self) -> BoxFuture<'_, ()> {
+        Box::pin(std::future::pending())
+    }
+    fn report_degraded(&self, reason: &'static str, count: usize) {
+        eprintln!("buzz-desktop: archive degraded: {reason} ({count})");
+    }
     fn notify_agent_metrics_changed(&self);
 }
 
@@ -144,142 +165,19 @@ fn subscription_id(scope_type: &ScopeType, scope_value: &str, kinds: &[u64]) -> 
     format!("archive:{}:{scope_value}:{kinds}", scope_type.as_str())
 }
 
-// ── Batching ─────────────────────────────────────────────────────────────────
-
-/// Buffered candidates plus the deadline of the oldest one.
-#[derive(Default)]
-struct PendingBatch {
-    candidates: Vec<ArchiveCandidate>,
-    /// Set when the buffer goes from empty to non-empty, cleared on take. The
-    /// deadline belongs to the oldest buffered event, so a steady trickle of
-    /// arrivals cannot postpone its flush indefinitely.
-    deadline: Option<Instant>,
-}
-
-impl PendingBatch {
-    fn push(&mut self, candidate: ArchiveCandidate) {
-        if self.candidates.is_empty() {
-            self.deadline = Some(Instant::now() + FLUSH_DEADLINE);
-        }
-        self.candidates.push(candidate);
-    }
-
-    fn is_full(&self) -> bool {
-        self.candidates.len() >= FLUSH_BATCH_SIZE
-    }
-
-    fn take(&mut self) -> Vec<ArchiveCandidate> {
-        self.deadline = None;
-        std::mem::take(&mut self.candidates)
-    }
-}
-
-// ── Sync loop ────────────────────────────────────────────────────────────────
-
-/// Drives one archive sync session until `cancel` fires.
-///
-/// Reload requests coalesce: `Notify::notify_one` stores at most one permit, so
-/// any number of subscription changes arriving during a reload produce exactly
-/// one follow-up pass — the same guarantee the renderer's single-flight
-/// `reloadPending` loop provided, without the bookkeeping.
-async fn run_sync<I: ArchiveSyncIo + ?Sized>(
-    io: &I,
-    reload: Arc<Notify>,
-    mut events: mpsc::Receiver<MatchedEvent>,
-    cancel: CancellationToken,
-) {
-    let mut scopes: HashMap<String, MatchedScope> = HashMap::new();
-    let mut pending = PendingBatch::default();
-
-    reconcile(io, &mut scopes).await;
-
-    loop {
-        // `Instant::far_future()` is not public; a long sleep stands in for
-        // "no deadline" so the select arm can be unconditional.
-        let deadline = pending
-            .deadline
-            .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
-
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            _ = reload.notified() => {
-                reconcile(io, &mut scopes).await;
-            }
-            _ = tokio::time::sleep_until(deadline), if pending.deadline.is_some() => {
-                flush(io, pending.take()).await;
-            }
-            received = events.recv() => {
-                let Some(event) = received else { break };
-                // A subscription we already closed can still have events in
-                // flight; without its scope we cannot assert a match, and the
-                // backend re-verifies scope claims anyway, so drop it.
-                let Some(scope) = scopes.get(&event.subscription_id) else { continue };
-                pending.push(ArchiveCandidate {
-                    raw_event_json: event.event.as_json(),
-                    matched_scope: MatchedScope {
-                        scope_type: scope.scope_type.clone(),
-                        scope_value: scope.scope_value.clone(),
-                    },
-                });
-                if pending.is_full() {
-                    flush(io, pending.take()).await;
-                }
-            }
-        }
-    }
-
-    // Buffered events are already off the relay; dropping them on shutdown
-    // would lose them permanently for the ephemeral scope.
-    flush(io, pending.take()).await;
-}
-
-/// Reloads the saved subscriptions and applies them to the session.
-///
-/// A failed load leaves the previous set live rather than tearing everything
-/// down: a transient SQLite error must not silently stop archiving.
-async fn reconcile<I: ArchiveSyncIo + ?Sized>(io: &I, scopes: &mut HashMap<String, MatchedScope>) {
-    let subscriptions = match io.list_subscriptions().await {
-        Ok(subscriptions) => subscriptions,
-        Err(error) => {
-            eprintln!("buzz-desktop: archive sync: list_save_subscriptions failed: {error}");
-            return;
-        }
-    };
-    let (planned, next_scopes) = plan_subscriptions(&subscriptions);
-    io.set_subscriptions(planned).await;
-    *scopes = next_scopes;
-}
-
-/// Awaited rather than spawned: back-pressure through the session's bounded
-/// event channel is what keeps a catch-up storm from queueing unbounded
-/// archive work. The renderer's fire-and-forget was a property of living in
-/// an event loop it could not block, not a behavior worth porting.
-async fn flush<I: ArchiveSyncIo + ?Sized>(io: &I, candidates: Vec<ArchiveCandidate>) {
-    if candidates.is_empty() {
-        return;
-    }
-    match io.archive(candidates).await {
-        // The backend is authoritative: a duplicate-only batch or one with no
-        // kind-44200 events must not invalidate usage queries.
-        Ok(result) if result.persisted_agent_metrics > 0 => io.notify_agent_metrics_changed(),
-        Ok(_) => {}
-        Err(error) => eprintln!("buzz-desktop: archive sync: archive_events failed: {error}"),
-    }
-}
-
 // ── Production wiring ────────────────────────────────────────────────────────
 
 struct AppIo {
     app: AppHandle,
     session: Arc<RelaySession>,
+    scope: Arc<SyncScope>,
 }
 
 impl ArchiveSyncIo for AppIo {
     fn list_subscriptions(&self) -> BoxFuture<'_, Result<Vec<SaveSubscription>, String>> {
         Box::pin(async move {
             let state: State<'_, AppState> = self.app.state();
-            let identity_pk = super::identity_pubkey(&state)?;
-            let relay_url = crate::relay::relay_ws_url_with_override(&state);
+            let (identity_pk, relay_url) = self.scope.data_scope();
             state
                 .archive_db
                 .with_conn(move |conn| {
@@ -298,13 +196,41 @@ impl ArchiveSyncIo for AppIo {
         candidates: Vec<ArchiveCandidate>,
     ) -> BoxFuture<'_, Result<ArchiveBatchResult, String>> {
         Box::pin(async move {
-            let state: State<'_, AppState> = self.app.state();
-            super::archive_candidates(&state, candidates).await
+            let outcome = self.archive_retry(candidates).await;
+            if outcome.retry.is_empty() {
+                Ok(outcome.committed)
+            } else {
+                Err("archive requires retry".into())
+            }
         })
     }
 
+    fn archive_retry(&self, candidates: Vec<ArchiveCandidate>) -> BoxFuture<'_, SyncOutcome> {
+        Box::pin(archive_scoped(&self.app, self.scope.clone(), candidates))
+    }
+    fn invalidated(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {
+            let _ = self
+                .scope
+                .signer
+                .run(std::future::pending::<Result<(), String>>())
+                .await;
+        })
+    }
+    fn report_degraded(&self, reason: &'static str, count: usize) {
+        self.scope
+            .notify_current(&self.app.state::<AppState>(), || {
+                let _ = self.app.emit(
+                    "archive-sync-degraded",
+                    json!({"reason": reason, "count": count}),
+                );
+            });
+    }
     fn notify_agent_metrics_changed(&self) {
-        let _ = self.app.emit(AGENT_METRICS_CHANGED_EVENT, ());
+        self.scope
+            .notify_current(&self.app.state::<AppState>(), || {
+                let _ = self.app.emit(AGENT_METRICS_CHANGED_EVENT, ());
+            });
     }
 }
 
@@ -312,6 +238,7 @@ impl ArchiveSyncIo for AppIo {
 #[derive(Default)]
 pub struct ArchiveSyncState {
     running: Mutex<Option<RunningSync>>,
+    parked: Mutex<Option<ParkedSync>>,
     /// Highest `(epoch, lease)` this process has seen from either command.
     ///
     /// The renderer allocates leases synchronously in effect order, so they are
@@ -353,8 +280,17 @@ struct RunningSync {
     /// Identity + relay this task is bound to. A start request for the same
     /// scope is a no-op, so a renderer remount does not churn the socket.
     scope: (String, String),
+    generation: Option<u64>,
+    signer: Option<crate::active_user_signer::ActiveUserSigner>,
+    admission: Arc<SyncAdmission>,
+    task: Option<tokio::task::JoinHandle<Vec<ArchiveCandidate>>>,
     cancel: CancellationToken,
     reload: Arc<Notify>,
+}
+
+struct ParkedSync {
+    scope: (String, String),
+    candidates: Vec<ArchiveCandidate>,
 }
 
 /// Proof that the holder is the current archive-sync owner, and the lock that
@@ -400,11 +336,42 @@ struct RunningSync {
 /// Dropping the token releases ownership, which is why the command holds it
 /// until the sync task is spawned.
 pub(crate) struct ArchiveOwnership<'a> {
+    cleanup_uninstalled: bool,
     /// Field order is the lock order `begin` and `end` both take: `latest`,
     /// then `running`. Rust drops fields in declaration order, so releasing
     /// mirrors acquiring and the two halves can never interleave.
     _latest: tokio::sync::MutexGuard<'a, (u64, u64)>,
     _running: tokio::sync::MutexGuard<'a, Option<RunningSync>>,
+}
+
+// An installation owns cleanup until the runner is installed. This also covers
+// canceled IPC futures and every `?` after ownership was reserved.
+impl Drop for ArchiveOwnership<'_> {
+    fn drop(&mut self) {
+        if self.cleanup_uninstalled
+            && self
+                ._running
+                .as_ref()
+                .is_some_and(|running| running.task.is_none())
+        {
+            if let Some(running) = self._running.take() {
+                running.admission.revoke();
+                running.cancel.cancel();
+            }
+        }
+    }
+}
+
+impl ArchiveOwnership<'_> {
+    /// Call after waiting for ownership, before any destructive relay operation.
+    /// The closure captures current workspace authority, not replacement authority
+    /// for the operation itself. A failure is cleaned up by this token's Drop.
+    fn validate_install<T>(
+        &self,
+        validate: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        validate()
+    }
 }
 
 impl ArchiveSyncState {
@@ -468,10 +435,23 @@ impl ArchiveSyncState {
     /// Acquiring the shared session is therefore inside this critical section
     /// rather than after it — see [`ArchiveOwnership`] for why "revalidate the
     /// mark afterwards" cannot work here.
+    #[cfg(test)]
     async fn begin(
         &self,
         mark: (u64, u64),
         scope: (String, String),
+        cancel: CancellationToken,
+        reload: Arc<Notify>,
+    ) -> Option<ArchiveOwnership<'_>> {
+        self.begin_generation(mark, scope, None, cancel, reload)
+            .await
+    }
+
+    async fn begin_generation(
+        &self,
+        mark: (u64, u64),
+        scope: (String, String),
+        generation: Option<u64>,
         cancel: CancellationToken,
         reload: Arc<Notify>,
     ) -> Option<ArchiveOwnership<'_>> {
@@ -484,24 +464,86 @@ impl ArchiveSyncState {
         let mut running = self.running.lock().await;
         // A same-scope remount keeps its socket: reinstalling would tear down a
         // healthy relay session to replace it with an identical one.
-        if running
-            .as_ref()
-            .is_some_and(|current| current.scope == scope)
-        {
+        if running.as_ref().is_some_and(|current| {
+            current.scope == scope
+                && current.generation == generation
+                && !current.cancel.is_cancelled()
+                && current.task.as_ref().is_none_or(|task| !task.is_finished())
+        }) {
             return None;
         }
         if let Some(previous) = running.take() {
-            previous.cancel.cancel();
+            self.join_and_park(previous).await;
         }
         *running = Some(RunningSync {
             scope,
+            generation,
+            signer: None,
+            admission: Arc::new(SyncAdmission::default()),
+            task: None,
             cancel,
             reload,
         });
         Some(ArchiveOwnership {
+            cleanup_uninstalled: false,
             _latest: latest,
             _running: running,
         })
+    }
+
+    async fn take_parked(&self, scope: &(String, String)) -> Vec<ArchiveCandidate> {
+        self.parked
+            .lock()
+            .await
+            .take()
+            .filter(|p| &p.scope == scope)
+            .map_or_else(Vec::new, |p| p.candidates)
+    }
+
+    // latest/running serialize handoff; the runner never needs either lock.
+    // No auth/workspace/DB/run-admission guard survives this join.
+    async fn join_and_park(&self, mut running: RunningSync) {
+        running.admission.revoke();
+        running.cancel.cancel();
+        let candidates = match running.task.take() {
+            Some(task) => match task.await {
+                Ok(pending) => pending,
+                Err(error) => {
+                    eprintln!("buzz-desktop: archive runner failed: {error}");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        *self.parked.lock().await = Some(ParkedSync {
+            scope: running.scope,
+            candidates,
+        });
+    }
+
+    /// Workspace replacement invalidates and joins before changing relay/keys.
+    /// The workspace lock may be held: runner admission uses try_lock, never waits.
+    pub(crate) async fn stop_for_workspace(&self) {
+        let _latest = self.latest.lock().await;
+        if let Some(old) = self.running.lock().await.take() {
+            self.join_and_park(old).await;
+        }
+    }
+
+    /// Auth invalidation precedes this call. Join only revoked generations;
+    /// a concurrently installed healthy generation must not be torn down.
+    pub(crate) async fn stop_invalidated(&self) {
+        let _latest = self.latest.lock().await;
+        let mut running = self.running.lock().await;
+        if running.as_ref().is_some_and(|r| {
+            r.signer.as_ref().is_some_and(|s| s.check_valid().is_err())
+                || r.cancel.is_cancelled()
+                || r.task.as_ref().is_some_and(|t| t.is_finished())
+        }) {
+            if let Some(old) = running.take() {
+                self.join_and_park(old).await;
+            }
+        }
     }
 
     /// Releases ownership for a stop under `(epoch, lease)`, cancelling the
@@ -526,7 +568,7 @@ impl ArchiveSyncState {
         *latest = mark;
 
         if let Some(running) = self.running.lock().await.take() {
-            running.cancel.cancel();
+            self.join_and_park(running).await;
         }
     }
 }
@@ -560,8 +602,9 @@ pub async fn start_archive_sync(
     relay_client: State<'_, NativeRelayClient>,
     epoch: u64,
     lease: u64,
+    expected_generation: Option<u64>,
 ) -> Result<(), String> {
-    let keys = state.signing_keys()?;
+    let keys = crate::native_identity::renderer_signer(&state, expected_generation)?;
     let relay_url = crate::relay::relay_ws_url_with_override(&state);
     let scope = (keys.public_key().to_hex(), relay_url.clone());
 
@@ -569,31 +612,69 @@ pub async fn start_archive_sync(
     // same-scope remount, must not open a relay socket just to drop it again.
     let cancel = CancellationToken::new();
     let reload = Arc::new(Notify::new());
-    let Some(ownership) = sync_state
-        .begin((epoch, lease), scope, cancel.clone(), Arc::clone(&reload))
+    let Some(mut ownership) = sync_state
+        .begin_generation(
+            (epoch, lease),
+            scope.clone(),
+            keys.generation(),
+            cancel.clone(),
+            Arc::clone(&reload),
+        )
         .await
     else {
         return Ok(());
     };
 
-    // No NIP-OA auth tag: this is the owner's own session, authenticated as
-    // the identity itself, exactly like the renderer's relay client.
-    //
-    // Inside the ownership critical section, holding `ownership`: acquiring the
-    // shared session is destructive to whatever scope holds it, so a superseded
-    // start must not be able to reach this line at all. See [`ArchiveOwnership`].
+    ownership.cleanup_uninstalled = true;
+    // Ownership acquisition may have waited across logout/relogin. Validate
+    // the ORIGINAL signer and workspace before touching the shared session.
+    let captured = ownership.validate_install(|| {
+        keys.check_valid()?;
+        let current = crate::native_identity::renderer_signer(&state, expected_generation)?;
+        if current.public_key() != keys.public_key() || current.generation() != keys.generation() {
+            return Err("archive scope changed during start".into());
+        }
+        let running = ownership
+            ._running
+            .as_ref()
+            .ok_or("archive ownership missing")?;
+        let captured = Arc::new(SyncScope::capture(
+            &state,
+            cancel.clone(),
+            running.admission.clone(),
+        )?);
+        if captured.signer.public_key() != keys.public_key()
+            || captured.signer.generation() != keys.generation()
+            || captured.data_scope() != scope
+        {
+            return Err("archive scope changed during start".into());
+        }
+        Ok(captured)
+    })?;
+    // No auth/SQLite guard crosses relay mutex acquisition. NativeRelayClient
+    // also checks signer validity under its session-slot lock.
     let (session, events) = relay_client
-        .archive_session(relay_url, keys, &ownership)
+        .archive_session(relay_url, keys.clone(), &ownership)
         .await;
-
+    // Auth can invalidate during relay mutex waits as well. Never install a
+    // runner with revoked authority; token Drop cancels every failed install.
+    keys.check_valid()?;
+    let running = ownership
+        ._running
+        .as_mut()
+        .ok_or("archive ownership missing")?;
+    running.signer = Some(keys);
+    let initial = sync_state.take_parked(&scope).await;
     let io = AppIo {
         app: app.clone(),
         session: Arc::clone(&session),
+        scope: captured,
     };
-    tauri::async_runtime::spawn(async move {
-        run_sync(&io, reload, events, cancel).await;
+    running.task = Some(tokio::spawn(async move {
+        let pending = run_sync_pending(&io, reload, events, cancel, initial).await;
         session.set_subscriptions(Vec::new()).await;
-    });
+        pending
+    }));
     Ok(())
 }
 
@@ -611,6 +692,10 @@ pub async fn stop_archive_sync(
     sync_state.end((epoch, lease)).await;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "sync_start_tests.rs"]
+mod sync_start_tests;
 
 #[cfg(test)]
 #[path = "sync_tests.rs"]

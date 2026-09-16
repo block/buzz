@@ -29,7 +29,7 @@ fn scope(dir: &std::path::Path) -> RetentionScope {
     RetentionScope {
         db_path,
         relay_url: RELAY.to_string(),
-        owner_keys: keys,
+        signer: crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
     }
 }
 
@@ -37,7 +37,7 @@ fn clone_scope(scope: &RetentionScope) -> RetentionScope {
     RetentionScope {
         db_path: scope.db_path.clone(),
         relay_url: scope.relay_url.clone(),
-        owner_keys: scope.owner_keys.clone(),
+        signer: scope.owner_signer(),
     }
 }
 
@@ -49,13 +49,15 @@ fn pending(scope: &RetentionScope) -> Vec<RetainedEvent> {
 /// Drive `commit_and_enqueue` with a spy commit that always succeeds and a
 /// scope resolver that hands back `scope`. Returns the pending rows plus
 /// whether the commit ran — the full command sequencing minus the AppHandle.
-fn run_adoption(
+async fn run_adoption(
     plan: super::super::apply::AddPlan,
     scope: &RetentionScope,
 ) -> (Vec<RetainedEvent>, bool) {
     let committed = Cell::new(false);
     let resolved = clone_scope(scope);
-    commit_and_enqueue(
+    let personas = plan.retain_personas.clone();
+    let teams = vec![plan.team.clone()];
+    let (_, work) = commit_and_enqueue(
         plan,
         |_personas, _teams| {
             committed.set(true);
@@ -64,13 +66,23 @@ fn run_adoption(
         || Ok(resolved),
     )
     .unwrap();
+    for work in work.personas.into_iter().flatten() {
+        let _ = work
+            .head
+            .sign()
+            .await
+            .and_then(|signed| signed.commit(&personas));
+    }
+    if let Some(Ok(work)) = work.team {
+        work.sign().await.unwrap().commit(&teams).unwrap();
+    }
     (pending(scope), committed.get())
 }
 
 /// A successful adoption of a two-member team commits, then enqueues a pending
 /// 30175 for each minted member copy and a pending 30176 for the team.
-#[test]
-fn adoption_commits_then_enqueues_persona_and_team_rows() {
+#[tokio::test]
+async fn adoption_commits_then_enqueues_persona_and_team_rows() {
     let dir = tempfile::tempdir().unwrap();
     let scope = scope(dir.path());
 
@@ -90,7 +102,7 @@ fn adoption_commits_then_enqueues_persona_and_team_rows() {
     let expected_d_tags: Vec<String> = personas.iter().map(persona_d_tag).collect();
     let team_id = plan.team.id.clone();
 
-    let (rows, committed) = run_adoption(plan, &scope);
+    let (rows, committed) = run_adoption(plan, &scope).await;
     assert!(committed, "a fresh add commits the stores");
 
     let persona_rows: Vec<_> = rows.iter().filter(|r| r.kind == KIND_PERSONA).collect();
@@ -124,8 +136,8 @@ fn adoption_commits_then_enqueues_persona_and_team_rows() {
 /// durable commit, so a failed adoption leaves no pending rows to publish under
 /// the adopter's identity. Only reachable through the seam — the isolated
 /// helper test could not express this ordering.
-#[test]
-fn commit_failure_enqueues_nothing() {
+#[tokio::test]
+async fn commit_failure_enqueues_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let scope = scope(dir.path());
 
@@ -144,7 +156,11 @@ fn commit_failure_enqueues_nothing() {
         },
     );
 
-    assert_eq!(result.unwrap_err(), "disk full", "commit error propagates");
+    assert_eq!(
+        result.err().unwrap(),
+        "disk full",
+        "commit error propagates"
+    );
     assert!(
         !resolver_ran.get(),
         "a failed commit never resolves the scope or enqueues"
@@ -157,8 +173,8 @@ fn commit_failure_enqueues_nothing() {
 
 /// Idempotent replay: a plan with no stores skips the commit entirely and
 /// enqueues nothing, so no duplicate or bumped rows appear on a second add.
-#[test]
-fn replay_skips_commit_and_enqueue() {
+#[tokio::test]
+async fn replay_skips_commit_and_enqueue() {
     let dir = tempfile::tempdir().unwrap();
     let scope = scope(dir.path());
 
@@ -168,7 +184,7 @@ fn replay_skips_commit_and_enqueue() {
     // First add: mint + commit + enqueue.
     let first = plan_add(&[], &[], &source, &body, NOW).unwrap();
     let (personas, teams) = first.stores.clone().expect("first add writes stores");
-    let (after_first, first_committed) = run_adoption(first, &scope);
+    let (after_first, first_committed) = run_adoption(first, &scope).await;
     assert!(first_committed, "the first add commits");
     assert_eq!(after_first.len(), 2, "one persona + one team pending");
 
@@ -179,7 +195,7 @@ fn replay_skips_commit_and_enqueue() {
         replay.retain_personas.is_empty(),
         "a replay retains nothing — nothing was written"
     );
-    let (after_replay, replay_committed) = run_adoption(replay, &scope);
+    let (after_replay, replay_committed) = run_adoption(replay, &scope).await;
     assert!(
         !replay_committed,
         "a replay must not commit — nothing changed on disk"
@@ -199,8 +215,8 @@ fn replay_skips_commit_and_enqueue() {
 
 /// A reused local built-in is an untouched local record, so the add must NOT
 /// enqueue a persona head for it — only the team is retained.
-#[test]
-fn reused_builtin_is_not_retained() {
+#[tokio::test]
+async fn reused_builtin_is_not_retained() {
     let dir = tempfile::tempdir().unwrap();
     let scope = scope(dir.path());
 
@@ -222,7 +238,7 @@ fn reused_builtin_is_not_retained() {
         "a reused built-in is untouched and must not be re-published under the adopter"
     );
 
-    let (rows, committed) = run_adoption(plan, &scope);
+    let (rows, committed) = run_adoption(plan, &scope).await;
     assert!(committed, "the add still commits the new team record");
     assert!(
         !rows.iter().any(|r| r.kind == KIND_PERSONA),
@@ -237,8 +253,8 @@ fn reused_builtin_is_not_retained() {
 
 /// A reactivated existing copy (revived from an earlier team delete) flips a
 /// persisted field, so it must be re-retained.
-#[test]
-fn reactivated_copy_is_retained() {
+#[tokio::test]
+async fn reactivated_copy_is_retained() {
     let dir = tempfile::tempdir().unwrap();
     let scope = scope(dir.path());
 
@@ -263,7 +279,7 @@ fn reactivated_copy_is_retained() {
         "the retained row reflects the reactivation"
     );
 
-    let (rows, committed) = run_adoption(plan, &scope);
+    let (rows, committed) = run_adoption(plan, &scope).await;
     assert!(committed, "reactivation writes the flipped field");
     assert_eq!(
         rows.iter().filter(|r| r.kind == KIND_PERSONA).count(),
@@ -283,8 +299,8 @@ fn reactivated_copy_is_retained() {
 /// member copy never got its 30175. This drives the seam end-to-end: seed only
 /// the active persona (no team, no retention row), retry through
 /// `commit_and_enqueue`, and assert both pending heads appear.
-#[test]
-fn partial_commit_retry_enqueues_the_orphaned_member_head() {
+#[tokio::test]
+async fn partial_commit_retry_enqueues_the_orphaned_member_head() {
     let dir = tempfile::tempdir().unwrap();
     let scope = scope(dir.path());
 
@@ -322,7 +338,7 @@ fn partial_commit_retry_enqueues_the_orphaned_member_head() {
     let member_d_tag = persona_d_tag(&plan.retain_personas[0]);
     let team_id = plan.team.id.clone();
 
-    let (rows, committed) = run_adoption(plan, &scope);
+    let (rows, committed) = run_adoption(plan, &scope).await;
     assert!(committed, "the recovery retry writes the missing team row");
 
     let persona_rows: Vec<_> = rows.iter().filter(|r| r.kind == KIND_PERSONA).collect();
