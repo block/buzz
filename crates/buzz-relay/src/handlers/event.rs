@@ -1523,7 +1523,7 @@ mod tests {
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
-                auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
                     buzz_auth::AuthContext {
                         pubkey: keys.public_key(),
                         scopes: vec![],
@@ -1668,7 +1668,7 @@ mod tests {
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
-                auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
                     buzz_auth::AuthContext {
                         pubkey: keys.public_key(),
                         scopes: vec![],
