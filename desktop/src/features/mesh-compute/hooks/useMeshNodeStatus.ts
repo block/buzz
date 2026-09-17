@@ -17,42 +17,54 @@ export function useMeshNodeStatus(): {
   status: MeshNodeStatus | null;
   error: string | null;
   refresh: () => void;
+  update: (status: MeshNodeStatus) => void;
 } {
   const [status, setStatus] = React.useState<MeshNodeStatus | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
+  const requestSequence = React.useRef(0);
   const fetchOnce = React.useCallback(() => {
-    let cancelled = false;
-    (async () => {
+    const sequence = ++requestSequence.current;
+    void (async () => {
       try {
         const value = await meshNodeStatus();
-        if (!cancelled) {
+        if (sequence === requestSequence.current) {
           setStatus(value);
           setError(null);
         }
       } catch (err) {
-        if (!cancelled) {
+        if (sequence === requestSequence.current) {
           setError(err instanceof Error ? err.message : String(err));
         }
       }
     })();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
-  React.useEffect(() => fetchOnce(), [fetchOnce]);
+  const update = React.useCallback((value: MeshNodeStatus) => {
+    // Invalidate any slower request started before this authoritative command
+    // result so it cannot restore the preceding lifecycle state.
+    requestSequence.current += 1;
+    setStatus(value);
+    setError(null);
+  }, []);
+
+  React.useEffect(() => {
+    fetchOnce();
+  }, [fetchOnce]);
 
   // Fast poll while in a transitioning state; slow poll while steady or off.
   React.useEffect(() => {
     const transitioning =
       status?.state === "starting" || status?.state === "stopping";
-    const interval = transitioning ? 750 : 4000;
+    // Keep reconciling aggressively while a start command is still waiting on
+    // model readiness. The command can take minutes and its eventual response
+    // is not the only signal that the runtime crossed to running.
+    const interval = transitioning ? 500 : 4000;
     const handle = window.setInterval(() => {
       fetchOnce();
     }, interval);
     return () => window.clearInterval(handle);
   }, [status?.state, fetchOnce]);
 
-  return { status, error, refresh: fetchOnce };
+  return { status, error, refresh: fetchOnce, update };
 }
