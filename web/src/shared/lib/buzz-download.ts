@@ -1,11 +1,20 @@
 export const BUZZ_RELEASES_URL = "https://github.com/block/buzz/releases";
+export const BUZZ_IOS_APP_STORE_URL = "https://apps.apple.com/app/id6779728271";
+export const BUZZ_ANDROID_PLAY_STORE_URL =
+  "https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile";
 const BUZZ_RELEASES_API_URL =
   "https://api.github.com/repos/block/buzz/releases?per_page=10";
 const CACHE_KEY = "buzz.latestDownload.v1";
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 export type BuzzDownloadPlatform = {
-  operatingSystem: "linux" | "macos" | "windows" | "unknown";
+  operatingSystem:
+    | "linux"
+    | "macos"
+    | "windows"
+    | "ios"
+    | "android"
+    | "unknown";
   architecture: "arm64" | "x64" | "unknown";
 };
 
@@ -36,13 +45,15 @@ function normalizeOperatingSystem(
 
   // Compatibility tokens are treacherous: iPadOS can report MacIntel and a
   // Macintosh UA, while Android and ChromeOS expose Linux platform strings.
-  // Reject non-desktop devices before admitting desktop-looking signals.
+  // Classify mobile devices before admitting desktop-looking signals.
   const isIPadDesktopMode =
     platform === "macintel" && navigatorValue.maxTouchPoints > 1;
+  if (isIPadDesktopMode || /iphone|ipad|ipod/.test(userAgent)) return "ios";
+  if (/android/.test(userAgent) || platform === "android") return "android";
+
   const isUnsupportedDevice =
     userAgentData?.mobile === true ||
-    isIPadDesktopMode ||
-    /android|iphone|ipad|ipod|mobile|tablet|windows phone|iemobile|opera mini|opera mobi|webos|blackberry|bb10|kindle|silk|kaios|cros/.test(
+    /mobile|tablet|windows phone|iemobile|opera mini|opera mobi|webos|blackberry|bb10|kindle|silk|kaios|cros/.test(
       userAgent,
     );
   if (isUnsupportedDevice) return "unknown";
@@ -142,6 +153,10 @@ export function selectBuzzDownloadUrl(
 export async function resolveBuzzDownloadUrlForPlatform(
   platform: BuzzDownloadPlatform,
 ): Promise<string> {
+  if (platform.operatingSystem === "ios") return BUZZ_IOS_APP_STORE_URL;
+  if (platform.operatingSystem === "android")
+    return BUZZ_ANDROID_PLAY_STORE_URL;
+
   try {
     const cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) ?? "null") as {
       expiresAt: number;
