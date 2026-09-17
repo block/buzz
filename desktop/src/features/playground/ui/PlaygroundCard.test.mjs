@@ -44,6 +44,10 @@ afterEach(async () => {
   cleanup();
   const { resetPlaygroundState } = await import("../lib/sessions.ts");
   resetPlaygroundState();
+  const { resetLinkSidePanelStore } = await import(
+    "@/features/link-panel/lib/linkSidePanelStore.ts"
+  );
+  resetLinkSidePanelStore();
   globalThis.localStorage?.clear();
   delete globalThis.__BUZZ_PLAYGROUND_PROBE__;
   delete globalThis.__BUZZ_PLAYGROUND_OPEN_URL__;
@@ -180,9 +184,12 @@ test("Pin on an existing sid shows it and does not probe again", async () => {
   assert.equal(probed, 0);
 });
 
-test("URL is an anchor that opens the browser and does not add a session", async () => {
+test("URL opens the Projects link slide-out and does not add a session", async () => {
   const { fireEvent } = await import("@testing-library/react");
   const { listPlaygroundSessions } = await import("../lib/sessions.ts");
+  const { getLinkSidePanel } = await import(
+    "@/features/link-panel/lib/linkSidePanelStore.ts"
+  );
   const screen = await renderCard();
   let probed = 0;
   globalThis.__BUZZ_PLAYGROUND_PROBE__ = () => {
@@ -200,7 +207,35 @@ test("URL is an anchor that opens the browser and does not add a session", async
   await fireEvent.click(url);
   assert.equal(probed, 0);
   assert.equal(listPlaygroundSessions().length, 0);
-  assert.deepEqual(opened, ["https://app.example.com"]);
+  assert.deepEqual(opened, []);
+  assert.equal(getLinkSidePanel()?.url, "https://app.example.com");
+});
+
+
+test("Open probes then opens the Projects link slide-out", async () => {
+  const { fireEvent, waitFor } = await import("@testing-library/react");
+  const { listPlaygroundSessions } = await import("../lib/sessions.ts");
+  const { getLinkSidePanel } = await import(
+    "@/features/link-panel/lib/linkSidePanelStore.ts"
+  );
+  const screen = await renderCard();
+  let probed = 0;
+  globalThis.__BUZZ_PLAYGROUND_PROBE__ = () => {
+    probed += 1;
+    return { up: true, status: 200 };
+  };
+  const opened = [];
+  globalThis.__BUZZ_PLAYGROUND_OPEN_URL__ = (url) => {
+    opened.push(url);
+  };
+
+  await fireEvent.click(screen.getByTestId("playground-card-open"));
+  await waitFor(() =>
+    assert.equal(getLinkSidePanel()?.url, "https://app.example.com"),
+  );
+  assert.equal(probed, 1);
+  assert.equal(listPlaygroundSessions().length, 0);
+  assert.deepEqual(opened, []);
 });
 
 test("PIN copy button writes the pin, not the URL", async () => {

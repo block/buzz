@@ -5,6 +5,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { deriveShellRoute } from "@/app/AppShell.helpers";
+import { openLinkSidePanel } from "@/features/link-panel/lib/linkSidePanelStore";
 import {
   openPopoutWindow,
   popoutErrorMessage,
@@ -125,12 +126,11 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
     void (async () => {
       try {
         if (!(await ensureUp())) return;
-        await openPopoutWindow({
-          kind: "playground",
-          title: card.name,
-          seed: card.sid,
-          playground: card,
-        });
+        // Prefer the Projects-style right slide-out over a separate pop-out
+        // window so the channel stays visible beside the playground URL.
+        if (!openLinkSidePanel(card.url)) {
+          void openPlaygroundInBrowser(card.url);
+        }
       } catch (error) {
         toast.error(popoutErrorMessage(error, "Could not open playground."));
       } finally {
@@ -177,6 +177,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
   function handleUrlClick(event: React.MouseEvent<HTMLAnchorElement>) {
     event.preventDefault();
     event.stopPropagation();
+    if (openLinkSidePanel(card.url)) return;
     void openPlaygroundInBrowser(card.url);
   }
 
@@ -189,7 +190,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
 
   return (
     <Attachment
-      className="my-2 max-w-md items-start"
+      className="my-2 max-w-md items-start overflow-visible"
       data-testid="playground-card"
     >
       <AttachmentMedia>
@@ -240,7 +241,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
             </p>
           ) : null}
         </AttachmentContent>
-        <AttachmentActions className="w-full flex-wrap justify-end">
+        <AttachmentActions className="relative z-20 w-full flex-wrap justify-end">
           <Button
             data-testid="playground-card-pin-action"
             disabled={busy}

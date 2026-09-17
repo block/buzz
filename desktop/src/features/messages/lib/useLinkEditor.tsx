@@ -1,5 +1,7 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+
+import { openLinkSidePanel } from "@/features/link-panel/lib/linkSidePanelStore";
 import { Pencil, Unlink } from "lucide-react";
 
 import {
@@ -228,7 +230,9 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
       if (!href) return;
       event.preventDefault();
       openPopoverLink(href, {
-        openExternal: (url) => void openUrl(url),
+        openExternal: (url) => {
+          if (!openLinkSidePanel(url)) void openUrl(url);
+        },
         openMessageLink: (link) =>
           void goChannel(link.channelId, {
             messageId: link.messageId,

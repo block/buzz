@@ -23,6 +23,7 @@ import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
 import { createMarkdownMention } from "./markdown/MarkdownMention";
+import { openLinkSidePanel } from "@/features/link-panel/lib/linkSidePanelStore";
 import { LinkPreviewList } from "@/shared/ui/link-preview-list";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import {
@@ -1726,6 +1727,17 @@ function MarkdownInner({
     linkPreviewsSuppressed,
     relayOrigin,
   });
+
+  const linkPreviewOpenByHref = React.useMemo(() => {
+    if (resolvedLinkPreviews.length === 0) return undefined;
+    const map = new Map<string, () => void>();
+    for (const preview of resolvedLinkPreviews) {
+      map.set(preview.href, () => {
+        openLinkSidePanel(preview.href);
+      });
+    }
+    return map;
+  }, [resolvedLinkPreviews]);
   const configNudge = React.useMemo(
     () => computeConfigNudge(content, interactive, configNudgeAuthorPubkey),
     [content, interactive, configNudgeAuthorPubkey],
@@ -1842,6 +1854,7 @@ function MarkdownInner({
           <LinkPreviewList
             ImageLightbox={LinkPreviewImageLightbox}
             key={messageId}
+            onOpenByHref={linkPreviewOpenByHref}
             onRemoveForEveryone={onRemoveLinkPreviewsForEveryone}
             previews={resolvedLinkPreviews}
           />

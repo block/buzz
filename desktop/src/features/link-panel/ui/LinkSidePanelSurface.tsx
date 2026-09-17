@@ -1,0 +1,143 @@
+import { isTauri } from "@tauri-apps/api/core";
+import * as React from "react";
+
+import {
+  closePinWebview,
+  hidePinWebview,
+  PIN_WEBVIEW_RESTORE_EVENT,
+  pinWebviewBoundsAreUsable,
+  setPinWebviewBounds,
+  showPinWebview,
+  subscribePinWebviewLoad,
+  type PinWebviewBounds,
+} from "@/features/pinned-sites/lib/pinWebview";
+import { Button } from "@/shared/ui/button";
+
+import { LINK_SIDE_PANEL_PIN_ID } from "../lib/linkSidePanelStore";
+
+function readBounds(element: HTMLElement): PinWebviewBounds {
+  const rect = element.getBoundingClientRect();
+  return {
+    x: Math.round(rect.left),
+    y: Math.round(rect.top),
+    width: Math.max(1, Math.round(rect.width)),
+    height: Math.max(1, Math.round(rect.height)),
+  };
+}
+
+/**
+ * Hosts the native pin webview inside the Projects-style idle auxiliary panel.
+ * Mirrors {@link PinnedSiteSurface} show/hide + late-show re-hide so dismiss
+ * cannot leave a stranded WKWebView over the channel (PRs #53/#54 patterns).
+ */
+export function LinkSidePanelSurface({ url }: { url: string }) {
+  const hostRef = React.useRef<HTMLDivElement | null>(null);
+  const native = isTauri() || import.meta.env.MODE === "e2e";
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!native) return;
+    const host = hostRef.current;
+    if (!host) return;
+    let cancelled = false;
+    let opened = false;
+    const pinId = LINK_SIDE_PANEL_PIN_ID;
+
+    const openOrResize = () => {
+      if (cancelled || !hostRef.current) return;
+      const bounds = readBounds(hostRef.current);
+      if (!opened) {
+        if (!pinWebviewBoundsAreUsable(bounds)) return;
+        opened = true;
+        void showPinWebview({
+          pinId,
+          startUrl: url,
+          bounds,
+        })
+          .then(() => {
+            if (cancelled) {
+              void hidePinWebview(pinId);
+            }
+          })
+          .catch((error) => {
+            console.error("Failed to open link side panel", error);
+            if (!cancelled) {
+              setLoadError(
+                error instanceof Error
+                  ? error.message
+                  : "Failed to open link.",
+              );
+            }
+          });
+        return;
+      }
+      void setPinWebviewBounds(pinId, bounds);
+    };
+
+    openOrResize();
+    const observer = new ResizeObserver(openOrResize);
+    observer.observe(host);
+    const restore = () => {
+      opened = false;
+      openOrResize();
+    };
+    window.addEventListener(PIN_WEBVIEW_RESTORE_EVENT, restore);
+
+    const unlistenLoad = subscribePinWebviewLoad((payload) => {
+      if (payload.pinId !== pinId) return;
+      setLoadError(
+        payload.ok ? null : (payload.message ?? "This page failed to load."),
+      );
+    });
+
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      window.removeEventListener(PIN_WEBVIEW_RESTORE_EVENT, restore);
+      void unlistenLoad.then((stop) => stop());
+      // Destroy on unmount — hide alone can leave a parked child that a late
+      // show resurrects over the channel thread.
+      void closePinWebview(pinId);
+    };
+  }, [native, url]);
+
+  return (
+    <div
+      className="-mx-4 -mb-8 flex min-h-[min(70vh,40rem)] flex-1 flex-col"
+      data-testid="link-side-panel-surface"
+    >
+      <div
+        className="relative min-h-0 min-w-0 flex-1 bg-background"
+        ref={hostRef}
+      >
+        {native ? (
+          loadError ? (
+            <div
+              className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center"
+              data-testid="link-side-panel-load-error"
+            >
+              <p className="text-sm text-destructive">{loadError}</p>
+              <Button
+                data-testid="link-side-panel-load-error-retry"
+                onClick={() => {
+                  setLoadError(null);
+                  window.dispatchEvent(new Event(PIN_WEBVIEW_RESTORE_EVENT));
+                }}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                Try again
+              </Button>
+            </div>
+          ) : null
+        ) : (
+          <div className="flex h-full items-center justify-center px-8 text-center text-sm text-muted-foreground">
+            Open this link in the Hula Buzz desktop app to view it beside the
+            conversation.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

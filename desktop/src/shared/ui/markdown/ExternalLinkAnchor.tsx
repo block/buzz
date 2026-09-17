@@ -1,5 +1,7 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+
+import { openLinkSidePanel } from "@/features/link-panel/lib/linkSidePanelStore";
 import { toast } from "sonner";
 
 import { cn } from "@/shared/lib/cn";
@@ -17,8 +19,8 @@ import {
  *
  * Buzz renders inside a native webview whose default context menu has no
  * useful link actions, so a plain right-click on a link is a no-op. This adds
- * an in-app menu with "Open link" (via the OS opener, matching the anchor's
- * left-click `target="_blank"` behavior) and "Copy link" (the real href, not
+ * an in-app menu with "Open link" (Projects-style right slide-out),
+ * "Open in browser", and "Copy link" (the real href, not
  * the masked display text).
  */
 export function ExternalLinkAnchor({
@@ -38,6 +40,15 @@ export function ExternalLinkAnchor({
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissMediaContextMenu(Boolean(menu), closeMenu);
 
+  const openInSidePanel = React.useCallback(() => {
+    if (!href) return;
+    if (!openLinkSidePanel(href)) {
+      void openUrl(href).catch(() => {
+        toast.error("Failed to open link");
+      });
+    }
+  }, [href]);
+
   const anchor = (
     <a
       {...anchorProps}
@@ -46,6 +57,15 @@ export function ExternalLinkAnchor({
         isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
       )}
       href={href}
+      onClick={(event) => {
+        if (!href) return;
+        // Keep modified clicks (new tab / window) on the OS opener path.
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+          return;
+        }
+        event.preventDefault();
+        openInSidePanel();
+      }}
       onContextMenuCapture={(event) => {
         if (!href) return;
         event.preventDefault();
@@ -69,6 +89,13 @@ export function ExternalLinkAnchor({
           items={[
             {
               label: "Open link",
+              onSelect: () => {
+                closeMenu();
+                openInSidePanel();
+              },
+            },
+            {
+              label: "Open in browser",
               onSelect: () => {
                 closeMenu();
                 void openUrl(href).catch(() => {
