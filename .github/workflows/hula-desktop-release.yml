@@ -134,9 +134,20 @@ jobs:
       - name: Generate release config
         run: |
           set -euo pipefail
-          export BUZZ_UPDATER_PUBLIC_KEY
+          # build.rs only enables cfg(buzz_updater_enabled) when BOTH are set at
+          # cargo build time. Export for this step AND subsequent job steps via
+          # GITHUB_ENV so the Tauri build actually compiles in the updater plugin.
           BUZZ_UPDATER_PUBLIC_KEY=$(python3 -c 'import json; print(json.load(open("desktop/src-tauri/tauri.conf.json"))["plugins"]["updater"]["pubkey"])')
-          export BUZZ_UPDATER_ENDPOINT="$HULA_UPDATER_ENDPOINT"
+          BUZZ_UPDATER_ENDPOINT="$HULA_UPDATER_ENDPOINT"
+          if [[ -z "${BUZZ_UPDATER_PUBLIC_KEY}" || -z "${BUZZ_UPDATER_ENDPOINT}" ]]; then
+            echo "::error::BUZZ_UPDATER_PUBLIC_KEY and BUZZ_UPDATER_ENDPOINT must both be set (required at compile time for buzz_updater_enabled)"
+            exit 1
+          fi
+          {
+            echo "BUZZ_UPDATER_PUBLIC_KEY=${BUZZ_UPDATER_PUBLIC_KEY}"
+            echo "BUZZ_UPDATER_ENDPOINT=${BUZZ_UPDATER_ENDPOINT}"
+          } >> "$GITHUB_ENV"
+          export BUZZ_UPDATER_PUBLIC_KEY BUZZ_UPDATER_ENDPOINT
           # build-release-config.mjs writes relative to cwd (desktop/)
           (
             cd desktop
@@ -197,11 +208,30 @@ jobs:
           path: ${{ github.workspace }}/.cache/mesh-llama
           key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
 
+      - name: Guard updater compile-time env
+        # build.rs sets cfg(buzz_updater_enabled) only when both are present.
+        # Without this, release DMGs ship without tauri_plugin_updater.
+        run: |
+          set -euo pipefail
+          if [[ -z "${BUZZ_UPDATER_PUBLIC_KEY:-}" || -z "${BUZZ_UPDATER_ENDPOINT:-}" ]]; then
+            echo "::error::BUZZ_UPDATER_PUBLIC_KEY and BUZZ_UPDATER_ENDPOINT must both be set at cargo build time for the updater plugin"
+            exit 1
+          fi
+          echo "Updater compile-time env OK (endpoint=${BUZZ_UPDATER_ENDPOINT})"
+
       - name: Build unsigned Tauri app (updater-signed)
         # --no-sign skips Apple codesign AND Tauri updater .sig generation.
         # createUpdaterArtifacts still emits .app.tar.gz; we sign it next.
+        # BUZZ_UPDATER_* must be present here: lib.rs registers the updater
+        # plugin only under #[cfg(buzz_updater_enabled)] (not in debug /
+        # desktop-standalone local builds — intentional).
         run: cd desktop && pnpm tauri build --verbose --no-sign --features mesh-llm --config src-tauri/tauri.release.conf.json
         env:
+          # Restate explicitly so this step cannot silently regress.
+          # Pubkey comes from Generate release config via GITHUB_ENV;
+          # endpoint is the workflow-level HULA_UPDATER_ENDPOINT.
+          BUZZ_UPDATER_PUBLIC_KEY: ${{ env.BUZZ_UPDATER_PUBLIC_KEY }}
+          BUZZ_UPDATER_ENDPOINT: ${{ env.HULA_UPDATER_ENDPOINT }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
