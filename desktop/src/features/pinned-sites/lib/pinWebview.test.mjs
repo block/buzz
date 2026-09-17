@@ -4,7 +4,9 @@ import { JSDOM } from "jsdom";
 
 import {
   MIN_PIN_WEBVIEW_EDGE,
+  pinHideCloseIsWindowScoped,
   pinWebviewBoundsAreUsable,
+  pinWebviewLabelForWindow,
 } from "./pinWebview.ts";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -220,4 +222,66 @@ test("first-open remount: late cancelled show does not blank the new show", asyn
     calls.filter((row) => row.cmd === "pin_webview_show").length,
     2,
   );
+});
+
+test("window-scoped labels stay pin-id on main and suffix elsewhere", () => {
+  assert.equal(pinWebviewLabelForWindow("hula-link-side-panel"), "pin-hula-link-side-panel");
+  assert.equal(
+    pinWebviewLabelForWindow("hula-link-side-panel", "main"),
+    "pin-hula-link-side-panel",
+  );
+  assert.equal(
+    pinWebviewLabelForWindow("playground-pin-demo-1", "popout-thread-abc"),
+    "pin-playground-pin-demo-1--popout-thread-abc",
+  );
+  assert.equal(
+    pinHideCloseIsWindowScoped(
+      { pinId: "hula-link-side-panel", windowLabel: "main" },
+      "main",
+    ),
+    true,
+  );
+  assert.equal(
+    pinHideCloseIsWindowScoped(
+      { pinId: "hula-link-side-panel", windowLabel: "main" },
+      "popout-thread-abc",
+    ),
+    false,
+  );
+});
+
+test("show/hide/close pin invokes pass current windowLabel", async () => {
+  const calls = [];
+  installTauriInvoke((cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd === "pin_webview_show") {
+      return Promise.resolve({
+        canGoBack: false,
+        canGoForward: false,
+        currentUrl: args.startUrl,
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+
+  const { closePinWebview, hideAllPinWebviews, hidePinWebview, showPinWebview } =
+    await import("./pinWebview.ts");
+
+  await showPinWebview({
+    pinId: "hula-link-side-panel",
+    startUrl: "https://example.com",
+    bounds: { x: 10, y: 40, width: 800, height: 600 },
+  });
+  await hidePinWebview("hula-link-side-panel");
+  await hideAllPinWebviews();
+  await closePinWebview("hula-link-side-panel");
+
+  const show = calls.find((row) => row.cmd === "pin_webview_show");
+  const hide = calls.find((row) => row.cmd === "pin_webview_hide");
+  const hideAll = calls.find((row) => row.cmd === "pin_webview_hide_all");
+  const close = calls.find((row) => row.cmd === "pin_webview_close");
+  assert.equal(show?.args.windowLabel, "main");
+  assert.equal(hide?.args.windowLabel, "main");
+  assert.equal(hideAll?.args.windowLabel, "main");
+  assert.equal(close?.args.windowLabel, "main");
 });

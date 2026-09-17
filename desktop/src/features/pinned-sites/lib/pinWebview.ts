@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export type PinWebviewBounds = {
   x: number;
@@ -49,6 +50,42 @@ function isNativePinRuntime(): boolean {
   return isTauri() || import.meta.env.MODE === "e2e";
 }
 
+function currentWindowLabel(): string {
+  if (!isTauri()) return "main";
+  try {
+    return getCurrentWindow().label || "main";
+  } catch {
+    return "main";
+  }
+}
+
+function withWindowLabel(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...args, windowLabel: currentWindowLabel() };
+}
+
+/**
+ * Native child label for a pin on a specific window.
+ * Main stays `pin-{id}`; other windows use `pin-{id}--{window}`.
+ */
+export function pinWebviewLabelForWindow(
+  pinId: string,
+  windowLabel = "main",
+): string {
+  const cleaned = windowLabel.trim() || "main";
+  if (cleaned === "main") return `pin-${pinId}`;
+  return `pin-${pinId}--${cleaned}`;
+}
+
+/** True when this hide/close invoke targets the caller's current window. */
+export function pinHideCloseIsWindowScoped(
+  args: Record<string, unknown>,
+  windowLabel: string,
+): boolean {
+  return args.windowLabel === windowLabel;
+}
+
 async function invokePin<T>(
   command: string,
   args: Record<string, unknown>,
@@ -57,7 +94,7 @@ async function invokePin<T>(
   if (!isNativePinRuntime()) {
     return fallback;
   }
-  return invoke<T>(command, args);
+  return invoke<T>(command, withWindowLabel(args));
 }
 
 /**
@@ -141,7 +178,7 @@ export async function hidePinWebview(pinId: string): Promise<void> {
 export async function hideAllPinWebviews(): Promise<void> {
   bumpPinHideEpoch();
   if (!isNativePinRuntime()) return;
-  await invoke("pin_webview_hide_all");
+  await invoke("pin_webview_hide_all", withWindowLabel({}));
 }
 
 export async function setPinWebviewBounds(
@@ -187,7 +224,7 @@ export async function pollPinWebview(
 export async function closePinWebview(pinId: string): Promise<void> {
   bumpPinHideEpoch();
   if (!isNativePinRuntime()) return;
-  await invoke("pin_webview_close", { pinId });
+  await invoke("pin_webview_close", withWindowLabel({ pinId }));
 }
 
 export function subscribePinWebviewNav(

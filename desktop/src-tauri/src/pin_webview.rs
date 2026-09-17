@@ -21,6 +21,7 @@ use policy::{
 };
 
 const PIN_LABEL_PREFIX: &str = "pin-";
+const APP_WEBVIEW_LABEL: &str = "main";
 const SESSION_FILE: &str = "session.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +186,107 @@ fn pin_label(pin_id: &str) -> String {
     format!("{PIN_LABEL_PREFIX}{pin_id}")
 }
 
+fn sanitize_window_label(label: &str) -> String {
+    let cleaned: String = label
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('-');
+    if cleaned.is_empty() {
+        APP_WEBVIEW_LABEL.to_string()
+    } else {
+        cleaned.chars().take(80).collect()
+    }
+}
+
+fn normalize_window_label(window_label: Option<&str>) -> String {
+    let raw = window_label
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(APP_WEBVIEW_LABEL);
+    sanitize_window_label(raw)
+}
+
+/// Main-window labels stay `pin-{id}` so existing pins keep working.
+/// Other parents use `pin-{id}--{window}` so the same pin can exist on main
+/// and a thread/split pop-out without reparenting WKWebView.
+fn pin_webview_label(pin_id: &str, window_label: &str) -> String {
+    let window_label = normalize_window_label(Some(window_label));
+    if window_label == APP_WEBVIEW_LABEL {
+        pin_label(pin_id)
+    } else {
+        format!("{PIN_LABEL_PREFIX}{pin_id}--{window_label}")
+    }
+}
+
+fn pin_parent_window_label(webview: &Webview) -> String {
+    webview.window().label().to_string()
+}
+
+/// Logical offset of the HTML content view inside the native window frame.
+/// `getBoundingClientRect()` is content-relative; `add_child` / `set_position`
+/// are frame-relative. Decorated pop-outs have a titlebar (~28px on macOS);
+/// overlay titlebars report inner == outer so this is (0, 0).
+fn window_content_origin(window: &tauri::Window) -> LogicalPosition<f64> {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let Ok(outer) = window.outer_position() else {
+        return LogicalPosition::new(0.0, 0.0);
+    };
+    let Ok(inner) = window.inner_position() else {
+        return LogicalPosition::new(0.0, 0.0);
+    };
+    content_origin_from_inner_outer(inner.x, inner.y, outer.x, outer.y, scale)
+}
+
+fn content_origin_from_inner_outer(
+    inner_x: i32,
+    inner_y: i32,
+    outer_x: i32,
+    outer_y: i32,
+    scale: f64,
+) -> LogicalPosition<f64> {
+    LogicalPosition::new(
+        (inner_x - outer_x) as f64 / scale,
+        (inner_y - outer_y) as f64 / scale,
+    )
+}
+
+fn pin_webview_position(
+    bounds: &PinBounds,
+    origin: LogicalPosition<f64>,
+) -> LogicalPosition<f64> {
+    LogicalPosition::new(bounds.x + origin.x, bounds.y + origin.y)
+}
+
+/// Close pin child webviews parented to `window_label` (pop-out teardown).
+pub fn close_pins_for_window(app: &AppHandle, window_label: &str) {
+    let window_label = normalize_window_label(Some(window_label));
+    for webview in app.webviews().into_values() {
+        if !webview.label().starts_with(PIN_LABEL_PREFIX) {
+            continue;
+        }
+        if pin_parent_window_label(&webview) != window_label {
+            continue;
+        }
+        let _ = webview.close();
+    }
+}
+
+fn pin_still_open_anywhere(app: &AppHandle, pin_id: &str) -> bool {
+    let main_label = pin_label(pin_id);
+    let prefix = format!("{PIN_LABEL_PREFIX}{pin_id}--");
+    app.webviews().into_values().any(|webview| {
+        let label = webview.label();
+        label == main_label || label.starts_with(&prefix)
+    })
+}
+
 fn pin_profile_dir(app: &AppHandle, pin_id: &str) -> Result<PathBuf, String> {
     Ok(app
         .path()
@@ -303,8 +405,13 @@ fn mark_load_failed(
             session.last_load_failed = true;
         }
     }
-    if let Some(webview) = app.get_webview(&pin_label(pin_id)) {
-        let _ = webview.hide();
+    let main_label = pin_label(pin_id);
+    let prefix = format!("{PIN_LABEL_PREFIX}{pin_id}--");
+    for webview in app.webviews().into_values() {
+        let label = webview.label();
+        if label == main_label || label.starts_with(&prefix) {
+            let _ = webview.hide();
+        }
     }
     emit_load(
         app,
@@ -355,12 +462,21 @@ fn navigate_pin_webview(
     }
 }
 
-fn apply_bounds(app: &AppHandle, pin_id: &str, bounds: &PinBounds) -> Result<(), String> {
-    let Some(webview) = app.get_webview(&pin_label(pin_id)) else {
+fn apply_bounds(
+    app: &AppHandle,
+    pin_id: &str,
+    window_label: &str,
+    bounds: &PinBounds,
+) -> Result<(), String> {
+    let Some(webview) = app.get_webview(&pin_webview_label(pin_id, window_label)) else {
         return Ok(());
     };
+    let origin = app
+        .get_window(window_label)
+        .map(|window| window_content_origin(&window))
+        .unwrap_or(LogicalPosition::new(0.0, 0.0));
     webview
-        .set_position(LogicalPosition::new(bounds.x, bounds.y))
+        .set_position(pin_webview_position(bounds, origin))
         .map_err(|error| error.to_string())?;
     webview
         .set_size(LogicalSize::new(
@@ -394,13 +510,14 @@ fn reuse_existing_webview(
     app: &AppHandle,
     manager: &PinWebviewManager,
     pin_id: &str,
+    window_label: &str,
     start_url: &Url,
     previous_start: Option<&Url>,
     session: &mut PinSession,
     webview: &Webview,
     bounds: &PinBounds,
 ) -> Result<PinNavState, String> {
-    apply_bounds(app, pin_id, bounds)?;
+    apply_bounds(app, pin_id, window_label, bounds)?;
     let current = webview.url().ok();
     if should_navigate_existing(
         current.as_ref(),
@@ -425,9 +542,11 @@ pub async fn pin_webview_show(
     pin_id: String,
     start_url: String,
     bounds: PinBounds,
+    window_label: Option<String>,
 ) -> Result<PinNavState, String> {
     let pin_id = sanitize_pin_id(&pin_id)?;
     let start_url = parse_https_url(&start_url)?;
+    let window_label = normalize_window_label(window_label.as_deref());
     let profile_dir = pin_profile_dir(&app, &pin_id)?;
     std::fs::create_dir_all(&profile_dir).map_err(|error| error.to_string())?;
     let persisted = read_persisted(&profile_dir.join(SESSION_FILE));
@@ -436,7 +555,7 @@ pub async fn pin_webview_show(
     remember_session_flags(&mut session, last_load_failed);
     let initial_url = session.current_url().clone();
 
-    let label = pin_label(&pin_id);
+    let label = pin_webview_label(&pin_id, &window_label);
     if let Some(webview) = app.get_webview(&label) {
         // Never close() + add_child on the show path. A tiny first layout only
         // gets set_size here; creation waits for a usable host below.
@@ -444,6 +563,7 @@ pub async fn pin_webview_show(
             &app,
             &manager,
             &pin_id,
+            &window_label,
             &start_url,
             previous_start.as_ref(),
             &mut session,
@@ -462,8 +582,8 @@ pub async fn pin_webview_show(
     }
 
     let window = app
-        .get_window("main")
-        .ok_or_else(|| "main window is not available".to_string())?;
+        .get_window(&window_label)
+        .ok_or_else(|| format!("{window_label} window is not available"))?;
     let nav_app = app.clone();
     let nav_pin = pin_id.clone();
     let load_app = app.clone();
@@ -498,10 +618,11 @@ pub async fn pin_webview_show(
             }
         });
 
+    let origin = window_content_origin(&window);
     window
         .add_child(
             builder,
-            LogicalPosition::new(bounds.x, bounds.y),
+            pin_webview_position(&bounds, origin),
             LogicalSize::new(bounds.width.max(1.0), bounds.height.max(1.0)),
         )
         .map_err(|error| error.to_string())?;
@@ -514,20 +635,33 @@ pub async fn pin_webview_show(
 }
 
 #[tauri::command]
-pub async fn pin_webview_hide(app: AppHandle, pin_id: String) -> Result<(), String> {
+pub async fn pin_webview_hide(
+    app: AppHandle,
+    pin_id: String,
+    window_label: Option<String>,
+) -> Result<(), String> {
     let pin_id = sanitize_pin_id(&pin_id)?;
-    if let Some(webview) = app.get_webview(&pin_label(&pin_id)) {
+    let window_label = normalize_window_label(window_label.as_deref());
+    if let Some(webview) = app.get_webview(&pin_webview_label(&pin_id, &window_label)) {
         webview.hide().map_err(|error| error.to_string())?;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn pin_webview_hide_all(app: AppHandle) -> Result<(), String> {
+pub async fn pin_webview_hide_all(
+    app: AppHandle,
+    window_label: Option<String>,
+) -> Result<(), String> {
+    let window_label = normalize_window_label(window_label.as_deref());
     for webview in app.webviews().into_values() {
-        if webview.label().starts_with(PIN_LABEL_PREFIX) {
-            let _ = webview.hide();
+        if !webview.label().starts_with(PIN_LABEL_PREFIX) {
+            continue;
         }
+        if pin_parent_window_label(&webview) != window_label {
+            continue;
+        }
+        let _ = webview.hide();
     }
     Ok(())
 }
@@ -537,9 +671,11 @@ pub async fn pin_webview_set_bounds(
     app: AppHandle,
     pin_id: String,
     bounds: PinBounds,
+    window_label: Option<String>,
 ) -> Result<(), String> {
     let pin_id = sanitize_pin_id(&pin_id)?;
-    apply_bounds(&app, &pin_id, &bounds)
+    let window_label = normalize_window_label(window_label.as_deref());
+    apply_bounds(&app, &pin_id, &window_label, &bounds)
 }
 
 #[tauri::command]
@@ -547,8 +683,9 @@ pub async fn pin_webview_go_back(
     app: AppHandle,
     manager: State<'_, PinWebviewManager>,
     pin_id: String,
+    window_label: Option<String>,
 ) -> Result<PinNavState, String> {
-    navigate_history(&app, &manager, &pin_id, true)
+    navigate_history(&app, &manager, &pin_id, window_label.as_deref(), true)
 }
 
 #[tauri::command]
@@ -556,17 +693,20 @@ pub async fn pin_webview_go_forward(
     app: AppHandle,
     manager: State<'_, PinWebviewManager>,
     pin_id: String,
+    window_label: Option<String>,
 ) -> Result<PinNavState, String> {
-    navigate_history(&app, &manager, &pin_id, false)
+    navigate_history(&app, &manager, &pin_id, window_label.as_deref(), false)
 }
 
 fn navigate_history(
     app: &AppHandle,
     manager: &PinWebviewManager,
     pin_id: &str,
+    window_label: Option<&str>,
     back: bool,
 ) -> Result<PinNavState, String> {
     let pin_id = sanitize_pin_id(pin_id)?;
+    let window_label = normalize_window_label(window_label);
     let target = {
         let mut sessions = manager
             .sessions
@@ -588,7 +728,7 @@ fn navigate_history(
         (url, nav)
     };
     if let Some(url) = target.0 {
-        if let Some(webview) = app.get_webview(&pin_label(&pin_id)) {
+        if let Some(webview) = app.get_webview(&pin_webview_label(&pin_id, &window_label)) {
             navigate_pin_webview(app, manager, &pin_id, &webview, url)?;
         }
     }
@@ -601,15 +741,18 @@ pub async fn pin_webview_reload(
     app: AppHandle,
     manager: State<'_, PinWebviewManager>,
     pin_id: String,
+    window_label: Option<String>,
 ) -> Result<(), String> {
     let pin_id = sanitize_pin_id(&pin_id)?;
+    let window_label = normalize_window_label(window_label.as_deref());
+    let label = pin_webview_label(&pin_id, &window_label);
     let start_url = {
         let mut sessions = manager
             .sessions
             .lock()
             .map_err(|_| "pinned site session lock poisoned".to_string())?;
         let Some(session) = sessions.get_mut(&pin_id) else {
-            if let Some(webview) = app.get_webview(&pin_label(&pin_id)) {
+            if let Some(webview) = app.get_webview(&label) {
                 webview.reload().map_err(|error| error.to_string())?;
             }
             return Ok(());
@@ -619,7 +762,7 @@ pub async fn pin_webview_reload(
         persist_session(&app, &pin_id, session);
         session.start_url.clone()
     };
-    if let Some(webview) = app.get_webview(&pin_label(&pin_id)) {
+    if let Some(webview) = app.get_webview(&label) {
         webview.show().map_err(|error| error.to_string())?;
         navigate_pin_webview(&app, &manager, &pin_id, &webview, start_url)?;
     }
@@ -652,16 +795,20 @@ pub async fn pin_webview_close(
     app: AppHandle,
     manager: State<'_, PinWebviewManager>,
     pin_id: String,
+    window_label: Option<String>,
 ) -> Result<(), String> {
     let pin_id = sanitize_pin_id(&pin_id)?;
-    if let Some(webview) = app.get_webview(&pin_label(&pin_id)) {
+    let window_label = normalize_window_label(window_label.as_deref());
+    if let Some(webview) = app.get_webview(&pin_webview_label(&pin_id, &window_label)) {
         webview.close().map_err(|error| error.to_string())?;
     }
-    if let Ok(mut sessions) = manager.sessions.lock() {
-        sessions.remove(&pin_id);
-    }
-    if let Ok(dir) = pin_profile_dir(&app, &pin_id) {
-        let _ = std::fs::remove_dir_all(dir);
+    if !pin_still_open_anywhere(&app, &pin_id) {
+        if let Ok(mut sessions) = manager.sessions.lock() {
+            sessions.remove(&pin_id);
+        }
+        if let Ok(dir) = pin_profile_dir(&app, &pin_id) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
     Ok(())
 }
@@ -672,10 +819,12 @@ pub async fn pin_webview_poll(
     manager: State<'_, PinWebviewManager>,
     pin_id: String,
     start_url: String,
+    window_label: Option<String>,
 ) -> Result<PinPollResult, String> {
     let pin_id = sanitize_pin_id(&pin_id)?;
     let start_url = parse_https_url(&start_url)?;
-    let Some(webview) = app.get_webview(&pin_label(&pin_id)) else {
+    let window_label = normalize_window_label(window_label.as_deref());
+    let Some(webview) = app.get_webview(&pin_webview_label(&pin_id, &window_label)) else {
         return Ok(PinPollResult { changed: false });
     };
     let cookie_url = start_url.clone();
@@ -771,6 +920,52 @@ mod tests {
         assert!(sanitize_pin_id("playground-pin-demo-1").is_ok());
         assert!(sanitize_pin_id("playground-pin:demo-1").is_err());
         assert!(sanitize_pin_id("hula-link-side-panel").is_ok());
+    }
+
+    #[test]
+    fn window_scoped_labels_stay_pin_id_on_main_and_suffix_elsewhere() {
+        assert_eq!(
+            pin_webview_label("hula-link-side-panel", "main"),
+            "pin-hula-link-side-panel"
+        );
+        assert_eq!(
+            pin_webview_label("playground-pin-demo-1", "main"),
+            "pin-playground-pin-demo-1"
+        );
+        assert_eq!(
+            pin_webview_label("hula-link-side-panel", "popout-thread-abc"),
+            "pin-hula-link-side-panel--popout-thread-abc"
+        );
+        assert_eq!(
+            normalize_window_label(None),
+            "main"
+        );
+        assert_eq!(
+            normalize_window_label(Some("  popout-split-1  ")),
+            "popout-split-1"
+        );
+    }
+
+    #[test]
+    fn content_origin_offsets_decorated_titlebar_and_is_zero_for_overlay() {
+        let decorated = content_origin_from_inner_outer(0, 28, 0, 0, 1.0);
+        assert_eq!(decorated.x, 0.0);
+        assert_eq!(decorated.y, 28.0);
+        let retina = content_origin_from_inner_outer(0, 56, 0, 0, 2.0);
+        assert_eq!(retina.x, 0.0);
+        assert_eq!(retina.y, 28.0);
+        let overlay = content_origin_from_inner_outer(100, 200, 100, 200, 2.0);
+        assert_eq!(overlay.x, 0.0);
+        assert_eq!(overlay.y, 0.0);
+        let bounds = PinBounds {
+            x: 12.0,
+            y: 40.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let positioned = pin_webview_position(&bounds, decorated);
+        assert_eq!(positioned.x, 12.0);
+        assert_eq!(positioned.y, 68.0);
     }
 
     #[test]

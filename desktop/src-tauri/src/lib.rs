@@ -931,6 +931,7 @@ pub fn run() {
             ..
         } if label.starts_with("popout-") => {
             playground_webview::close_playgrounds_for_window(app_handle, &label);
+            pin_webview::close_pins_for_window(app_handle, &label);
             popout_window::emit_popout_windows_changed(app_handle);
         }
         RunEvent::WindowEvent {
