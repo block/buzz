@@ -6,7 +6,10 @@ import { toast } from "sonner";
 
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { openLinkSidePanel } from "@/features/link-panel/lib/linkSidePanelStore";
-import { usePopoutSplitLayout } from "@/features/popout/lib/popoutLayout";
+import {
+  usePopoutSplitLayout,
+  usePopoutThreadOnlyLayout,
+} from "@/features/popout/lib/popoutLayout";
 import {
   openPopoutWindow,
   popoutErrorMessage,
@@ -70,6 +73,9 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
   const host = canHostPlayground();
   // Split pop-out already shows the playground pane; card actions are inert.
   const actionsDisabled = usePopoutSplitLayout();
+  // Thread-only (and split) windowed pop-outs: Open as Split is unavailable.
+  const isThreadOnlyLayout = usePopoutThreadOnlyLayout();
+  const openAsSplitDisabled = actionsDisabled || isThreadOnlyLayout;
   const pin = playgroundPin(card);
   const location = useLocation();
   const conversation = React.useMemo(() => {
@@ -157,7 +163,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
     playgroundConversationHasOpenThread(conversation);
 
   function handleOpenAsSplit() {
-    if (actionsDisabled) return;
+    if (openAsSplitDisabled) return;
     const threadId = conversation?.draftKey.startsWith("thread:")
       ? conversation.draftKey.slice("thread:".length)
       : undefined;
@@ -292,7 +298,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
           </Button>
           <Button
             data-testid="playground-card-open-split"
-            disabled={busy || actionsDisabled || !isThreadConversation}
+            disabled={busy || openAsSplitDisabled || !isThreadConversation}
             onClick={(event) => {
               event.stopPropagation();
               handleOpenAsSplit();

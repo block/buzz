@@ -61,7 +61,10 @@ afterEach(async () => {
 
 after(() => dom.window.close());
 
-async function renderCard(cardData = card, { popoutPayload = null } = {}) {
+async function renderCard(
+  cardData = card,
+  { popoutPayload = null, path = "/channels/chan-1" } = {},
+) {
   const { createElement } = await import("react");
   const { render, screen } = await import("@testing-library/react");
   const { PlaygroundCard } = await import("./PlaygroundCard.tsx");
@@ -84,6 +87,13 @@ async function renderCard(cardData = card, { popoutPayload = null } = {}) {
   const channelRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/channels/$channelId",
+    validateSearch: (search) => ({
+      thread: typeof search.thread === "string" ? search.thread : undefined,
+      threadRootId:
+        typeof search.threadRootId === "string"
+          ? search.threadRootId
+          : undefined,
+    }),
     component: () =>
       createElement(
         PopoutLayoutProvider,
@@ -94,7 +104,7 @@ async function renderCard(cardData = card, { popoutPayload = null } = {}) {
   const router = createRouter({
     defaultPendingMs: 0,
     routeTree: rootRoute.addChildren([channelRoute]),
-    history: createMemoryHistory({ initialEntries: ["/channels/chan-1"] }),
+    history: createMemoryHistory({ initialEntries: [path] }),
   });
   await router.load();
   render(createElement(RouterProvider, { router }));
@@ -339,12 +349,16 @@ test("split pop-out disables Open, Pin, Open as Split, and URL clicks", async ()
   assert.equal(getLinkSidePanel(), null);
 });
 
-test("thread-only pop-out keeps card Open / Pin / URL active", async () => {
+test("thread-only pop-out keeps Open / Pin / URL; disables Open as Split", async () => {
   const { fireEvent, waitFor } = await import("@testing-library/react");
   const { getLinkSidePanel } = await import(
     "@/features/link-panel/lib/linkSidePanelStore.ts"
   );
+  const { listConversationPlaygroundPins } = await import(
+    "../lib/conversationPins.ts"
+  );
   const screen = await renderCard(card, {
+    path: "/channels/chan-1?thread=thread-1",
     popoutPayload: {
       kind: "thread",
       channelId: "chan-1",
@@ -354,13 +368,50 @@ test("thread-only pop-out keeps card Open / Pin / URL active", async () => {
 
   const cardEl = screen.getByTestId("playground-card");
   assert.equal(cardEl.getAttribute("data-playground-card-actions"), "enabled");
-  assert.equal(screen.getByTestId("playground-card-open").disabled, false);
-  assert.equal(screen.getByTestId("playground-card-pin-action").disabled, false);
+  const pin = screen.getByTestId("playground-card-pin-action");
+  const open = screen.getByTestId("playground-card-open");
+  const split = screen.getByTestId("playground-card-open-split");
+  assert.equal(open.disabled, false);
+  assert.equal(pin.disabled, false);
+  // Thread is open so Split would normally be available — layout greys it.
+  assert.equal(split.disabled, true);
 
-  globalThis.__BUZZ_PLAYGROUND_PROBE__ = () => ({ up: true, status: 200 });
-  await fireEvent.click(screen.getByTestId("playground-card-open"));
+  let probed = 0;
+  globalThis.__BUZZ_PLAYGROUND_PROBE__ = () => {
+    probed += 1;
+    return { up: true, status: 200 };
+  };
+
+  await fireEvent.click(open);
   await waitFor(() =>
     assert.equal(getLinkSidePanel()?.url, "https://app.example.com"),
   );
+  assert.equal(probed, 1);
+
+  await fireEvent.click(pin);
+  await waitFor(() =>
+    assert.equal(listConversationPlaygroundPins("thread:thread-1").length, 1),
+  );
+  assert.equal(probed, 2);
+
+  // Disabled Split must not probe / open another window.
+  const probedBeforeSplit = probed;
+  await fireEvent.click(split);
+  assert.equal(probed, probedBeforeSplit);
+});
+
+test("main window with open thread keeps Open as Split enabled", async () => {
+  const screen = await renderCard(card, {
+    path: "/channels/chan-1?thread=thread-1",
+  });
+  assert.equal(
+    screen.getByTestId("playground-card").getAttribute(
+      "data-playground-card-actions",
+    ),
+    "enabled",
+  );
+  assert.equal(screen.getByTestId("playground-card-open").disabled, false);
+  assert.equal(screen.getByTestId("playground-card-pin-action").disabled, false);
+  assert.equal(screen.getByTestId("playground-card-open-split").disabled, false);
 });
 
