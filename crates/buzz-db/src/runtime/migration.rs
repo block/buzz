@@ -1282,6 +1282,10 @@ mod postgres_tests {
         // The restored exclusion function must NOT list any NIP-FI relation.
         assert!(!ledger_removal.contains("'authorization_operation_receipts'"));
         assert!(!ledger_removal.contains("'identity_bindings'"));
+        assert_eq!(migrations[44].version, 45);
+        let workflow_schedule_scan = migrations[44].sql.as_str();
+        assert!(workflow_schedule_scan.contains("CREATE INDEX idx_workflows_schedule_scan"));
+        assert!(desired_schema.contains("CREATE INDEX idx_workflows_schedule_scan"));
         // schema.sql exclusion list must match the restored (pre-0041) body.
         assert!(
             desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
