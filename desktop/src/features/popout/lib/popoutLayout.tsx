@@ -2,6 +2,7 @@ import * as React from "react";
 
 import {
   currentPopoutPayload,
+  isPopoutSplitLayout,
   isPopoutThreadOnlyLayout,
   type PopoutPayload,
 } from "./popoutWindow";
@@ -30,3 +31,8 @@ export function usePopoutLayoutPayload(): PopoutPayload | null {
 export function usePopoutThreadOnlyLayout(): boolean {
   return isPopoutThreadOnlyLayout(usePopoutLayoutPayload());
 }
+
+export function usePopoutSplitLayout(): boolean {
+  return isPopoutSplitLayout(usePopoutLayoutPayload());
+}
+

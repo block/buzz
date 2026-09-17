@@ -61,10 +61,13 @@ afterEach(async () => {
 
 after(() => dom.window.close());
 
-async function renderCard(cardData = card) {
+async function renderCard(cardData = card, { popoutPayload = null } = {}) {
   const { createElement } = await import("react");
   const { render, screen } = await import("@testing-library/react");
   const { PlaygroundCard } = await import("./PlaygroundCard.tsx");
+  const { PopoutLayoutProvider } = await import(
+    "@/features/popout/lib/popoutLayout.tsx"
+  );
   const {
     Outlet,
     RouterProvider,
@@ -81,7 +84,12 @@ async function renderCard(cardData = card) {
   const channelRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/channels/$channelId",
-    component: () => createElement(PlaygroundCard, { card: cardData }),
+    component: () =>
+      createElement(
+        PopoutLayoutProvider,
+        { payload: popoutPayload },
+        createElement(PlaygroundCard, { card: cardData }),
+      ),
   });
   const router = createRouter({
     defaultPendingMs: 0,
@@ -284,3 +292,75 @@ test("PIN is hidden when omitted and Open still works", async () => {
   assert.equal(screen.queryByTestId("playground-card-copy-pin"), null);
   assert.equal(screen.getByTestId("playground-card-open").textContent, "Open");
 });
+
+
+test("split pop-out disables Open, Pin, Open as Split, and URL clicks", async () => {
+  const { fireEvent } = await import("@testing-library/react");
+  const { listConversationPlaygroundPins } = await import(
+    "../lib/conversationPins.ts"
+  );
+  const { getLinkSidePanel } = await import(
+    "@/features/link-panel/lib/linkSidePanelStore.ts"
+  );
+  const screen = await renderCard(card, {
+    popoutPayload: {
+      kind: "split",
+      channelId: "chan-1",
+      threadId: "thread-1",
+      playground: card,
+    },
+  });
+
+  const cardEl = screen.getByTestId("playground-card");
+  assert.equal(cardEl.getAttribute("data-playground-card-actions"), "disabled");
+  const pin = screen.getByTestId("playground-card-pin-action");
+  const open = screen.getByTestId("playground-card-open");
+  const split = screen.getByTestId("playground-card-open-split");
+  const url = screen.getByTestId("playground-card-url");
+  assert.equal(pin.disabled, true);
+  assert.equal(open.disabled, true);
+  assert.equal(split.disabled, true);
+  assert.equal(url.getAttribute("aria-disabled"), "true");
+  assert.match(url.className, /opacity-50/);
+  assert.match(url.className, /pointer-events-none/);
+
+  let probed = 0;
+  globalThis.__BUZZ_PLAYGROUND_PROBE__ = () => {
+    probed += 1;
+    return { up: true, status: 200 };
+  };
+
+  await fireEvent.click(pin);
+  await fireEvent.click(open);
+  await fireEvent.click(split);
+  await fireEvent.click(url);
+  assert.equal(probed, 0);
+  assert.equal(listConversationPlaygroundPins("channel:chan-1").length, 0);
+  assert.equal(getLinkSidePanel(), null);
+});
+
+test("thread-only pop-out keeps card Open / Pin / URL active", async () => {
+  const { fireEvent, waitFor } = await import("@testing-library/react");
+  const { getLinkSidePanel } = await import(
+    "@/features/link-panel/lib/linkSidePanelStore.ts"
+  );
+  const screen = await renderCard(card, {
+    popoutPayload: {
+      kind: "thread",
+      channelId: "chan-1",
+      threadId: "thread-1",
+    },
+  });
+
+  const cardEl = screen.getByTestId("playground-card");
+  assert.equal(cardEl.getAttribute("data-playground-card-actions"), "enabled");
+  assert.equal(screen.getByTestId("playground-card-open").disabled, false);
+  assert.equal(screen.getByTestId("playground-card-pin-action").disabled, false);
+
+  globalThis.__BUZZ_PLAYGROUND_PROBE__ = () => ({ up: true, status: 200 });
+  await fireEvent.click(screen.getByTestId("playground-card-open"));
+  await waitFor(() =>
+    assert.equal(getLinkSidePanel()?.url, "https://app.example.com"),
+  );
+});
+

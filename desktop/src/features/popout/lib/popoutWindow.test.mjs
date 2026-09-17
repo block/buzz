@@ -147,3 +147,42 @@ test("OS split parks the main overlay playground", async () => {
   embedded.resetEmbeddedWindowsForTests();
   sessions.resetPlaygroundState();
 });
+
+
+test("isPopoutSplitLayout is true only for kind split", async () => {
+  const { isPopoutSplitLayout, isPopoutThreadOnlyLayout } = await import(
+    "./popoutWindow.ts"
+  );
+  assert.equal(isPopoutSplitLayout(null), false);
+  assert.equal(
+    isPopoutSplitLayout({ kind: "thread", threadId: "t", channelId: "c" }),
+    false,
+  );
+  assert.equal(
+    isPopoutSplitLayout({
+      kind: "playground",
+      playground: {
+        hula: "playground",
+        v: 1,
+        name: "Demo",
+        url: "https://app.example.com",
+        sid: "demo-1",
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    isPopoutSplitLayout({ kind: "split", threadId: "t", channelId: "c" }),
+    true,
+  );
+  // Thread-only still covers both thread and split; split is the narrower gate.
+  assert.equal(
+    isPopoutThreadOnlyLayout({ kind: "thread", threadId: "t" }),
+    true,
+  );
+  assert.equal(
+    isPopoutThreadOnlyLayout({ kind: "split", threadId: "t" }),
+    true,
+  );
+  assert.equal(isPopoutThreadOnlyLayout({ kind: "split" }), false);
+});

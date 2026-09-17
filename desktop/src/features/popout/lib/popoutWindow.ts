@@ -124,6 +124,13 @@ export function isPopoutThreadOnlyLayout(
   return payload.kind === "thread" || payload.kind === "split";
 }
 
+/** Split OS/embedded pop-outs already host the playground pane beside the thread. */
+export function isPopoutSplitLayout(
+  payload: PopoutPayload | null = currentPopoutPayload(),
+): boolean {
+  return payload?.kind === "split";
+}
+
 export function popoutPayloadFromInput(input: {
   kind: PopoutKind;
   title: string;

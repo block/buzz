@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { openLinkSidePanel } from "@/features/link-panel/lib/linkSidePanelStore";
+import { usePopoutSplitLayout } from "@/features/popout/lib/popoutLayout";
 import {
   openPopoutWindow,
   popoutErrorMessage,
@@ -67,6 +68,8 @@ async function openPlaygroundInBrowser(url: string) {
 export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
   const [busy, setBusy] = React.useState(false);
   const host = canHostPlayground();
+  // Split pop-out already shows the playground pane; card actions are inert.
+  const actionsDisabled = usePopoutSplitLayout();
   const pin = playgroundPin(card);
   const location = useLocation();
   const conversation = React.useMemo(() => {
@@ -97,6 +100,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
   }
 
   function handlePin() {
+    if (actionsDisabled) return;
     if (!host) {
       void openPlaygroundInBrowser(card.url);
       return;
@@ -127,6 +131,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
   }
 
   function handleOpen() {
+    if (actionsDisabled) return;
     if (!host) {
       void openPlaygroundInBrowser(card.url);
       return;
@@ -152,6 +157,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
     playgroundConversationHasOpenThread(conversation);
 
   function handleOpenAsSplit() {
+    if (actionsDisabled) return;
     const threadId = conversation?.draftKey.startsWith("thread:")
       ? conversation.draftKey.slice("thread:".length)
       : undefined;
@@ -186,6 +192,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
   function handleUrlClick(event: React.MouseEvent<HTMLAnchorElement>) {
     event.preventDefault();
     event.stopPropagation();
+    if (actionsDisabled) return;
     if (openLinkSidePanel(card.url)) return;
     void openPlaygroundInBrowser(card.url);
   }
@@ -200,6 +207,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
   return (
     <Attachment
       className="my-2 max-w-md items-start overflow-visible"
+      data-playground-card-actions={actionsDisabled ? "disabled" : "enabled"}
       data-testid="playground-card"
     >
       <AttachmentMedia>
@@ -211,11 +219,17 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
             {card.name}
           </AttachmentTitle>
           <a
-            className="block truncate text-xs leading-4 text-muted-foreground hover:text-foreground hover:underline"
+            aria-disabled={actionsDisabled || undefined}
+            className={
+              actionsDisabled
+                ? "block truncate text-xs leading-4 text-muted-foreground opacity-50 pointer-events-none"
+                : "block truncate text-xs leading-4 text-muted-foreground hover:text-foreground hover:underline"
+            }
             data-testid="playground-card-url"
             href={card.url}
             onClick={handleUrlClick}
             rel="noopener noreferrer"
+            tabIndex={actionsDisabled ? -1 : undefined}
           >
             {card.url}
           </a>
@@ -253,7 +267,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
         <AttachmentActions className="relative z-20 w-full flex-wrap justify-end">
           <Button
             data-testid="playground-card-pin-action"
-            disabled={busy}
+            disabled={busy || actionsDisabled}
             onClick={(event) => {
               event.stopPropagation();
               handlePin();
@@ -266,7 +280,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
           </Button>
           <Button
             data-testid="playground-card-open"
-            disabled={busy}
+            disabled={busy || actionsDisabled}
             onClick={(event) => {
               event.stopPropagation();
               handleOpen();
@@ -278,7 +292,7 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
           </Button>
           <Button
             data-testid="playground-card-open-split"
-            disabled={busy || !isThreadConversation}
+            disabled={busy || actionsDisabled || !isThreadConversation}
             onClick={(event) => {
               event.stopPropagation();
               handleOpenAsSplit();
