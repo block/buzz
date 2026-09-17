@@ -49,6 +49,8 @@ export type ChannelPaneProps = {
   idleAuxiliaryHeaderActions?: IdleAuxiliaryHeaderControls;
   /** Show the idle auxiliary surface ahead of an already-open thread. */
   idleAuxiliaryOverridesThread?: boolean;
+  /** When false, idle auxiliary is a side panel; true/omitted uses focus drawer when eligible. */
+  idleAuxiliaryExpanded?: boolean;
   idleAuxiliaryTitle?: string;
   hasOlderMessages?: boolean;
   /** True when the loaded window provably starts at the channel's beginning. */

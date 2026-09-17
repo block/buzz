@@ -115,3 +115,22 @@ test("idle auxiliary priority does not depend on thread layout mode", () => {
   assert.equal(shouldPrioritizeIdleAuxiliary(true, false), false);
   assert.equal(shouldPrioritizeIdleAuxiliary(false, true), false);
 });
+
+test("link slide-out expand gates focus drawer; collapsed stays a side panel", () => {
+  const base = {
+    channelManagementOpen: false,
+    hasAgentSession: false,
+    hasIdleAuxiliaryPanel: true,
+    hasIdlePanelCloseHandler: true,
+    hasProfilePanel: false,
+    hasThreadSurface: true,
+    overrideThread: true,
+    useSplitAuxiliaryPane: true,
+  };
+  // Default / expanded → focus drawer covering the conversation.
+  assert.equal(shouldUseFocusIdleDrawer(base), true);
+  assert.equal(shouldUseFocusIdleDrawer({ ...base, expanded: true }), true);
+  // Collapsed → normal-width side panel (still overrides thread slot via
+  // shouldPrioritizeIdleAuxiliary + replaceThreadWithIdleAuxiliary).
+  assert.equal(shouldUseFocusIdleDrawer({ ...base, expanded: false }), false);
+});

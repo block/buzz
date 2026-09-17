@@ -22,6 +22,8 @@ export type ChannelScreenProps = {
   idleAuxiliaryPanel?: ReactNode;
   idleAuxiliaryHeaderActions?: IdleAuxiliaryHeaderControls;
   idleAuxiliaryOverridesThread?: boolean;
+  /** When false, idle auxiliary is a side panel; true/omitted uses focus drawer when eligible. */
+  idleAuxiliaryExpanded?: boolean;
   idleAuxiliaryTitle?: string;
   headerEndActions?: ReactNode;
   onAddFiles?: () => void;

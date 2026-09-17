@@ -13,7 +13,10 @@ import {
 import { isNativeWebviewModalParked } from "@/shared/lib/nativeWebviewModalPark";
 import { Button } from "@/shared/ui/button";
 
-import { LINK_SIDE_PANEL_PIN_ID } from "../lib/linkSidePanelStore";
+import {
+  LINK_SIDE_PANEL_PIN_ID,
+  type LinkSidePanelViewportMode,
+} from "../lib/linkSidePanelStore";
 
 function readBounds(element: HTMLElement): PinWebviewBounds {
   const rect = element.getBoundingClientRect();
@@ -35,10 +38,12 @@ export function LinkSidePanelSurface({
   keepAlive = false,
   pinId = LINK_SIDE_PANEL_PIN_ID,
   url,
+  viewportMode = "desktop",
 }: {
   keepAlive?: boolean;
   pinId?: string;
   url: string;
+  viewportMode?: LinkSidePanelViewportMode;
 }) {
   const hostRef = React.useRef<HTMLDivElement | null>(null);
   const native = isTauri() || import.meta.env.MODE === "e2e";
@@ -101,13 +106,21 @@ export function LinkSidePanelSurface({
     };
   }, [keepAlive, native, pinId, url]);
 
+  const frameClass =
+    viewportMode === "mobile"
+      ? "mx-auto w-[min(100%,24rem)]"
+      : viewportMode === "responsive"
+        ? "mx-auto w-[min(100%,48rem)]"
+        : "w-full";
+
   return (
     <div
       className="-mx-4 -mb-8 flex min-h-[min(70vh,40rem)] flex-1 flex-col"
       data-testid="link-side-panel-surface"
+      data-viewport-mode={viewportMode}
     >
       <div
-        className="relative min-h-0 min-w-0 flex-1 bg-background"
+        className={`relative min-h-0 min-w-0 flex-1 bg-background ${frameClass}`}
         ref={hostRef}
       >
         {native ? (

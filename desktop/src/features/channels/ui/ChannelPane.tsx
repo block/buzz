@@ -92,6 +92,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   idleAuxiliaryPanel = null,
   idleAuxiliaryHeaderActions,
   idleAuxiliaryOverridesThread = false,
+  idleAuxiliaryExpanded,
   idleAuxiliaryTitle = "",
   hasOlderMessages,
   historyExhausted,
@@ -444,10 +445,9 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const overlayIdleAuxiliaryOverThread =
     priorityIdleAuxiliary && hasThreadSurface && !isOverlay;
-  const replaceThreadWithIdleAuxiliary =
-    priorityIdleAuxiliary && hasThreadSurface && isOverlay;
   const useFocusIdleDrawer = shouldUseFocusIdleDrawer({
     channelManagementOpen,
+    expanded: idleAuxiliaryExpanded,
     hasAgentSession: Boolean(activeChannel && selectedAgent),
     hasIdleAuxiliaryPanel: Boolean(idleAuxiliaryPanel),
     hasIdlePanelCloseHandler: Boolean(onCloseIdleAuxiliaryPanel),
@@ -456,6 +456,12 @@ export const ChannelPane = React.memo(function ChannelPane({
     overrideThread: overlayIdleAuxiliaryOverThread,
     useSplitAuxiliaryPane,
   });
+  // When the idle sheet overrides a thread but is not expanded, replace the
+  // thread slot with a normal-width side panel (link slide-out collapsed).
+  const replaceThreadWithIdleAuxiliary =
+    priorityIdleAuxiliary &&
+    hasThreadSurface &&
+    (isOverlay || !useFocusIdleDrawer);
   const showIdleAuxiliaryOverThread =
     overlayIdleAuxiliaryOverThread && useFocusIdleDrawer;
   const { channelIsCovered, markExitComplete } = useFocusDrawerPresence(

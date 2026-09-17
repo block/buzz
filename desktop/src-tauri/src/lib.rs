@@ -808,6 +808,8 @@ pub fn run() {
             pin_webview::pin_webview_nav_state,
             pin_webview::pin_webview_close,
             pin_webview::pin_webview_poll,
+            pin_webview::pin_webview_inspect,
+            pin_webview::pin_webview_screenshot,
             playground_webview::playground_probe,
             playground_webview::playground_webview_show,
             playground_webview::playground_webview_hide,

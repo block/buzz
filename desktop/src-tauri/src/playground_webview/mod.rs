@@ -1,7 +1,7 @@
 //! Playground overlay webviews. Inspect targets `playground-{sid}` only.
 
-mod capture;
-mod inspect;
+pub(crate) mod capture;
+pub(crate) mod inspect;
 
 use std::collections::HashMap;
 use std::sync::Mutex;

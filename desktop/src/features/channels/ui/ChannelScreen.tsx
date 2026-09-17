@@ -96,7 +96,7 @@ export function ChannelScreen({
   currentProfile,
   headerEndActions, idleAuxiliaryPanel,
   idleAuxiliaryHeaderActions, idleAuxiliaryOverridesThread,
-  idleAuxiliaryTitle,
+  idleAuxiliaryExpanded, idleAuxiliaryTitle,
   onAddFiles, onCloseIdleAuxiliaryPanel,
   onCloseForumPost, onSelectForumPost,
   selectedForumPostId, targetForumReplyId,
@@ -110,6 +110,8 @@ export function ChannelScreen({
     linkSidePanel?.idleAuxiliaryHeaderActions ?? idleAuxiliaryHeaderActions;
   const resolvedIdleAuxiliaryOverridesThread =
     linkSidePanel?.idleAuxiliaryOverridesThread ?? idleAuxiliaryOverridesThread ?? false;
+  const resolvedIdleAuxiliaryExpanded =
+    linkSidePanel?.idleAuxiliaryExpanded ?? idleAuxiliaryExpanded;
   const resolvedIdleAuxiliaryTitle =
     linkSidePanel?.idleAuxiliaryTitle ?? idleAuxiliaryTitle ?? "";
   const resolvedOnCloseIdleAuxiliaryPanel =
@@ -866,7 +868,7 @@ export function ChannelScreen({
                   canResetThreadPanelWidth={canResetThreadPanelWidth}
                   fetchOlder={fetchOlder}
                   header={channelHeader}
-                  {...{ idleAuxiliaryHeaderActions: resolvedIdleAuxiliaryHeaderActions, idleAuxiliaryOverridesThread: resolvedIdleAuxiliaryOverridesThread, idleAuxiliaryPanel: resolvedIdleAuxiliaryPanel, idleAuxiliaryTitle: resolvedIdleAuxiliaryTitle, hasOlderMessages, historyExhausted }}
+                  {...{ idleAuxiliaryHeaderActions: resolvedIdleAuxiliaryHeaderActions, idleAuxiliaryOverridesThread: resolvedIdleAuxiliaryOverridesThread, idleAuxiliaryExpanded: resolvedIdleAuxiliaryExpanded, idleAuxiliaryPanel: resolvedIdleAuxiliaryPanel, idleAuxiliaryTitle: resolvedIdleAuxiliaryTitle, hasOlderMessages, historyExhausted }}
                   {...{ onAddFiles }}
                   onAddAgent={handleOpenAddBot}
                   onBrowseChannels={openBrowseChannels}

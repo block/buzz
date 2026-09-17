@@ -7,10 +7,13 @@ import {
 /** Stable pin-webview id for the channel/thread link slide-out. */
 export const LINK_SIDE_PANEL_PIN_ID = "hula-link-side-panel";
 
+export type LinkSidePanelViewportMode = "desktop" | "responsive" | "mobile";
+
 export type LinkSidePanelState = {
   expanded: boolean;
   title: string;
   url: string;
+  viewportMode: LinkSidePanelViewportMode;
   /** Native pin webview id. Defaults to {@link LINK_SIDE_PANEL_PIN_ID}. */
   pinId: string;
   /**
@@ -125,6 +128,7 @@ export function openLinkSidePanel(
     url: trimmed,
     pinId: nextPinId,
     keepAlive: nextKeepAlive,
+    viewportMode: previous?.viewportMode ?? "desktop",
   };
   emit();
   return true;
@@ -140,6 +144,15 @@ export function setLinkSidePanelExpanded(expanded: boolean): void {
 export function toggleLinkSidePanelExpanded(): void {
   if (!store.panel) return;
   setLinkSidePanelExpanded(!store.panel.expanded);
+}
+
+export function setLinkSidePanelViewportMode(
+  viewportMode: LinkSidePanelViewportMode,
+): void {
+  if (!store.panel) return;
+  if (store.panel.viewportMode === viewportMode) return;
+  store.panel = { ...store.panel, viewportMode };
+  emit();
 }
 
 /**

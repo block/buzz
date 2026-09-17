@@ -1,19 +1,17 @@
-import { Maximize2, Minimize2 } from "lucide-react";
 import * as React from "react";
 
 import type { IdleAuxiliaryHeaderControls } from "@/features/channels/ui/IdleAuxiliaryPanel";
-import { Button } from "@/shared/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 import {
   closeLinkSidePanel,
   getLinkSidePanelStore,
   subscribeLinkSidePanel,
-  toggleLinkSidePanelExpanded,
 } from "../lib/linkSidePanelStore";
+import { LinkSidePanelChrome } from "./LinkSidePanelChrome";
 import { LinkSidePanelSurface } from "./LinkSidePanelSurface";
 
 export type ChannelLinkSidePanelChrome = {
+  idleAuxiliaryExpanded: boolean;
   idleAuxiliaryHeaderActions: IdleAuxiliaryHeaderControls;
   idleAuxiliaryOverridesThread: boolean;
   idleAuxiliaryPanel: React.ReactNode;
@@ -25,6 +23,7 @@ export type ChannelLinkSidePanelChrome = {
 /**
  * Projects Tasks / Reviews sheet chrome reused for http(s) link opens:
  * right-hand idle auxiliary panel with independent expand + close.
+ * Expand covers the conversation (focus drawer); collapsed is a side panel.
  */
 export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
   const store = React.useSyncExternalStore(
@@ -36,28 +35,14 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
 
   const headerActions = React.useMemo(() => {
     if (!panel) return undefined;
-    const expandLabel = panel.expanded
-      ? "Exit full screen"
-      : "Expand link panel";
     return {
       actions: (
-        <Tooltip disableHoverableContent>
-          <TooltipTrigger asChild>
-            <Button
-              aria-label={expandLabel}
-              className="shrink-0"
-              data-testid="link-side-panel-expand"
-              onClick={() => toggleLinkSidePanelExpanded()}
-              size="icon"
-              title={expandLabel}
-              type="button"
-              variant="ghost"
-            >
-              {panel.expanded ? <Minimize2 /> : <Maximize2 />}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{expandLabel}</TooltipContent>
-        </Tooltip>
+        <LinkSidePanelChrome
+          expanded={panel.expanded}
+          pinId={panel.pinId}
+          url={panel.url}
+          viewportMode={panel.viewportMode}
+        />
       ),
     } satisfies IdleAuxiliaryHeaderControls;
   }, [panel]);
@@ -65,16 +50,17 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
   if (!panel || !headerActions) return null;
 
   return {
+    idleAuxiliaryExpanded: panel.expanded,
     idleAuxiliaryHeaderActions: headerActions,
     // Match Project workspace sheets: any open link panel covers the
-    // thread, not only the expanded/fullscreen state. Otherwise Open /
-    // pin / link clicks update the store while the thread keeps the slot.
+    // thread slot, not only the expanded/fullscreen state.
     idleAuxiliaryOverridesThread: true,
     idleAuxiliaryPanel: (
       <LinkSidePanelSurface
         keepAlive={panel.keepAlive}
         pinId={panel.pinId}
         url={panel.url}
+        viewportMode={panel.viewportMode}
       />
     ),
     idleAuxiliaryTitle: panel.title,

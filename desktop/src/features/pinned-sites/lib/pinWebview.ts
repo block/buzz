@@ -19,6 +19,16 @@ export type PinWebviewPollResult = {
   changed: boolean;
 };
 
+
+export type PinWebviewInspectResult = {
+  webviewId: string;
+};
+
+export type PinWebviewScreenshotResult = {
+  bytes: number[];
+  mime: string;
+  filename: string;
+};
 export type PinWebviewLoadState = {
   pinId: string;
   url: string;
@@ -225,6 +235,27 @@ export async function closePinWebview(pinId: string): Promise<void> {
   bumpPinHideEpoch();
   if (!isNativePinRuntime()) return;
   await invoke("pin_webview_close", withWindowLabel({ pinId }));
+}
+
+
+export async function inspectPinWebview(
+  pinId: string,
+): Promise<PinWebviewInspectResult> {
+  return invokePin(
+    "pin_webview_inspect",
+    { pinId },
+    { webviewId: `pin-${pinId}` },
+  );
+}
+
+export async function screenshotPinWebview(
+  pinId: string,
+): Promise<PinWebviewScreenshotResult> {
+  return invokePin(
+    "pin_webview_screenshot",
+    { pinId },
+    { bytes: [], mime: "image/png", filename: `pin-${pinId}.png` },
+  );
 }
 
 export function subscribePinWebviewNav(

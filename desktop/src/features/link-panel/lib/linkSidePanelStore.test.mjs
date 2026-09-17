@@ -30,6 +30,7 @@ test("openLinkSidePanel accepts http(s) and rejects other schemes", async () => 
   assert.equal(panel.url, "https://www.example.com/docs");
   assert.equal(panel.title, "example.com");
   assert.equal(panel.expanded, false);
+  assert.equal(panel.viewportMode, "desktop");
 
   assert.equal(openLinkSidePanel("hulabuzz://x"), false);
 });
@@ -87,4 +88,27 @@ test("openLinkSidePanel keepAlive uses a dedicated pinId and survives close via 
   });
   destroyLinkSidePanelIfPin("playground-pin-demo-1");
   assert.equal(getLinkSidePanel(), null);
+});
+
+test("viewport mode updates independently of expand", async () => {
+  const {
+    closeLinkSidePanel,
+    getLinkSidePanel,
+    openLinkSidePanel,
+    setLinkSidePanelViewportMode,
+    toggleLinkSidePanelExpanded,
+  } = await import("./linkSidePanelStore.ts");
+
+  openLinkSidePanel("https://example.com");
+  setLinkSidePanelViewportMode("mobile");
+  assert.equal(getLinkSidePanel()?.viewportMode, "mobile");
+  toggleLinkSidePanelExpanded();
+  assert.equal(getLinkSidePanel()?.expanded, true);
+  assert.equal(getLinkSidePanel()?.viewportMode, "mobile");
+  // Replacing the URL while open keeps the chosen viewport chrome mode.
+  openLinkSidePanel("https://other.example/");
+  assert.equal(getLinkSidePanel()?.viewportMode, "mobile");
+  closeLinkSidePanel();
+  openLinkSidePanel("https://fresh.example/");
+  assert.equal(getLinkSidePanel()?.viewportMode, "desktop");
 });

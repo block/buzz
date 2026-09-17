@@ -285,3 +285,27 @@ test("show/hide/close pin invokes pass current windowLabel", async () => {
   assert.equal(hideAll?.args.windowLabel, "main");
   assert.equal(close?.args.windowLabel, "main");
 });
+
+test("inspect and screenshot invoke pin-scoped commands with window label", async () => {
+  const calls = [];
+  installTauriInvoke((cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd === "pin_webview_inspect") {
+      return { webviewId: "pin-demo" };
+    }
+    if (cmd === "pin_webview_screenshot") {
+      return { bytes: [1, 2, 3], mime: "image/png", filename: "pin-demo.png" };
+    }
+    return undefined;
+  });
+  const {
+    inspectPinWebview,
+    screenshotPinWebview,
+  } = await import("./pinWebview.ts");
+  await inspectPinWebview("demo");
+  await screenshotPinWebview("demo");
+  assert.equal(calls[0].cmd, "pin_webview_inspect");
+  assert.equal(calls[0].args.pinId, "demo");
+  assert.ok("windowLabel" in calls[0].args);
+  assert.equal(calls[1].cmd, "pin_webview_screenshot");
+});

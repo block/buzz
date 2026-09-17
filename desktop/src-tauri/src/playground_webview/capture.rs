@@ -45,6 +45,10 @@ pub fn capture_playground_png(
     })
 }
 
+pub fn snapshot_child_webview_png(webview: &Webview) -> Result<Vec<u8>, String> {
+    snapshot_playground_webview(webview)
+}
+
 fn snapshot_playground_webview(webview: &Webview) -> Result<Vec<u8>, String> {
     #[cfg(target_os = "macos")]
     {

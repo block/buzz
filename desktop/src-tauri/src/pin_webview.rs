@@ -50,6 +50,20 @@ pub struct PinPollResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PinInspectResult {
+    webview_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinScreenshotResult {
+    bytes: Vec<u8>,
+    mime: String,
+    filename: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PinLoadState {
     pin_id: String,
     url: String,
@@ -216,6 +230,10 @@ fn normalize_window_label(window_label: Option<&str>) -> String {
 /// Main-window labels stay `pin-{id}` so existing pins keep working.
 /// Other parents use `pin-{id}--{window}` so the same pin can exist on main
 /// and a thread/split pop-out without reparenting WKWebView.
+fn pin_inspect_target_is_safe(webview_id: &str) -> bool {
+    webview_id.starts_with(PIN_LABEL_PREFIX) && webview_id != APP_WEBVIEW_LABEL
+}
+
 fn pin_webview_label(pin_id: &str, window_label: &str) -> String {
     let window_label = normalize_window_label(Some(window_label));
     if window_label == APP_WEBVIEW_LABEL {
@@ -885,6 +903,63 @@ pub async fn pin_webview_poll(
     Ok(PinPollResult { changed })
 }
 
+
+#[tauri::command]
+pub async fn pin_webview_inspect(
+    app: AppHandle,
+    pin_id: String,
+    window_label: Option<String>,
+) -> Result<PinInspectResult, String> {
+    let pin_id = sanitize_pin_id(&pin_id)?;
+    let window_label = normalize_window_label(window_label.as_deref());
+    let webview_id = pin_webview_label(&pin_id, &window_label);
+    if !pin_inspect_target_is_safe(&webview_id) {
+        return Err("inspect must target a pin webview".into());
+    }
+    let webview = app
+        .get_webview(&webview_id)
+        .ok_or_else(|| "pin webview is not open".to_string())?;
+    let window_size = app.get_window(&window_label).and_then(|window| {
+        window
+            .inner_size()
+            .ok()
+            .map(|size| (size.width, size.height))
+    });
+    // Same window-lock posture as playground Inspect so the inspector cannot
+    // grow the Buzz frame and hide the left nav.
+    crate::playground_webview::inspect::lock_main_window_size(&app, window_size);
+    if let Err(error) = crate::playground_webview::inspect::open_playground_inspector(&webview) {
+        crate::playground_webview::inspect::unlock_main_window_size(&app);
+        return Err(error);
+    }
+    crate::playground_webview::inspect::unlock_main_window_size(&app);
+    Ok(PinInspectResult { webview_id })
+}
+
+#[tauri::command]
+pub async fn pin_webview_screenshot(
+    app: AppHandle,
+    pin_id: String,
+    window_label: Option<String>,
+) -> Result<PinScreenshotResult, String> {
+    let pin_id = sanitize_pin_id(&pin_id)?;
+    let window_label = normalize_window_label(window_label.as_deref());
+    let webview_id = pin_webview_label(&pin_id, &window_label);
+    if !pin_inspect_target_is_safe(&webview_id) {
+        return Err("screenshot must target a pin webview".into());
+    }
+    let webview = app
+        .get_webview(&webview_id)
+        .ok_or_else(|| "pin webview is not open".to_string())?;
+    let bytes = crate::playground_webview::capture::snapshot_child_webview_png(&webview)?;
+    let safe_name = pin_id.replace(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-', "_");
+    Ok(PinScreenshotResult {
+        bytes,
+        mime: "image/png".into(),
+        filename: format!("pin-{safe_name}.png"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -997,5 +1072,13 @@ mod tests {
         assert_eq!(session.history.len(), 1);
         assert_eq!(session.current_url().as_str(), "https://new.example/");
         assert!(!session.can_go_back());
+    }
+
+    #[test]
+    fn pin_inspect_rejects_app_webview_and_accepts_pin_labels() {
+        assert!(pin_inspect_target_is_safe("pin-hula-link-side-panel"));
+        assert!(pin_inspect_target_is_safe("pin-demo--popout-thread-1"));
+        assert!(!pin_inspect_target_is_safe("main"));
+        assert!(!pin_inspect_target_is_safe("playground-abc"));
     }
 }
