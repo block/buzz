@@ -17,10 +17,10 @@ function fenceText(node: React.ReactNode) {
   return getReactNodeText(node).replace(/\n$/, "");
 }
 
-function playgroundFromCode(language: string, code: string) {
-  if (language !== "playground") return undefined;
+function playgroundFromCode(_language: string, code: string) {
   const card = parsePlaygroundCard(code);
-  // Invalid playground JSON falls through to a visible code block.
+  // Valid playground JSON renders as the card regardless of fence language
+  // (`playground`, `json`, unlabeled, etc.). Invalid JSON falls through.
   return card ? <PlaygroundCard card={card} /> : undefined;
 }
 
@@ -74,9 +74,11 @@ export function MarkdownFencedCode({
 export function MarkdownFencedPre({
   children,
   interactive,
+  blockCode = false,
 }: {
   children?: React.ReactNode;
   interactive: boolean;
+  blockCode?: boolean;
 }) {
   let language = "";
   React.Children.forEach(children, (child) => {
@@ -92,6 +94,9 @@ export function MarkdownFencedPre({
   const playground = playgroundFromCode(language, fenceText(children));
   if (playground !== undefined) {
     return playground;
+  }
+  if (!interactive && !blockCode) {
+    return <span>{children}</span>;
   }
   if (!interactive) {
     // Keep a real <pre>. A <span> unwrap makes

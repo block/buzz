@@ -14,6 +14,8 @@ import {
   type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
 import { renderAudioMessageAttachment } from "@/features/messages/ui/AudioMessageAttachment";
+import { parsePlaygroundCard } from "@/features/playground/lib/card";
+import { PlaygroundCard } from "@/features/playground/ui/PlaygroundCard";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
 import { parseEntityLink } from "@/shared/lib/entityLink";
@@ -31,10 +33,7 @@ import {
   selectNudgeLeadingContent,
   selectProseOrNudge,
 } from "@/shared/lib/computeConfigNudge";
-import {
-  INLINE_CODE_CHIP_CLASS,
-  MESSAGE_MARKDOWN_CLASS,
-} from "@/shared/ui/mentionChip";
+import { MESSAGE_MARKDOWN_CLASS } from "@/shared/ui/mentionChip";
 
 import {
   classifyChildren,
@@ -46,12 +45,7 @@ import { ImageMosaic } from "./markdown/ImageMosaic";
 import { copyImageToClipboard, downloadImage } from "./markdown/imageActions";
 import { ImageGalleryStatus } from "./markdown/ImageGalleryStatus";
 import { ImageLightboxZoomControls } from "./markdown/ImageLightboxZoomControls";
-import {
-  CODE_BLOCK_CLASS,
-  extractLanguage,
-  MarkdownCodeBlock,
-  SyntaxHighlightedCode,
-} from "./markdown/CodeBlock";
+import { MarkdownFencedCode, MarkdownFencedPre } from "./markdown/fencedBlocks";
 import { EntityLinkAnchor, useOpenEntityLink } from "./markdown/entityLinks";
 import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
@@ -1407,40 +1401,7 @@ export function createMarkdownComponents(
       </blockquote>
     ),
     br: () => <br />,
-    code: ({ children, className, ...props }: React.ComponentProps<"code">) => {
-      const rawCode = String(children);
-      const code = rawCode.replace(/\n$/, "");
-      const isFencedCodeBlock =
-        typeof className === "string" && className.includes("language-");
-
-      if (isFencedCodeBlock || rawCode.endsWith("\n") || code.includes("\n")) {
-        const language = extractLanguage(className);
-
-        if (language) {
-          return (
-            <SyntaxHighlightedCode code={code} language={language} {...props} />
-          );
-        }
-
-        const lines = code.split("\n");
-        return (
-          <code {...props} className={CODE_BLOCK_CLASS}>
-            {lines.map((line, i) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: lines are positional
-              <span key={i} data-line="">
-                {line}
-              </span>
-            ))}
-          </code>
-        );
-      }
-
-      return (
-        <code {...props} className={cn(INLINE_CODE_CHIP_CLASS, className)}>
-          {children}
-        </code>
-      );
-    },
+    code: MarkdownFencedCode,
     h1: ({ children }) => (
       <h1 className="text-xl font-semibold leading-8 tracking-tight">
         {children}
@@ -1544,21 +1505,11 @@ export function createMarkdownComponents(
 
       return <p>{children}</p>;
     },
-    pre: ({ children }) => {
-      if (!interactive && !blockCode) return <span>{children}</span>;
-      let language = "";
-      React.Children.forEach(children, (child) => {
-        if (
-          React.isValidElement<Record<string, unknown>>(child) &&
-          typeof child.props?.className === "string"
-        ) {
-          language = extractLanguage(child.props.className);
-        }
-      });
-      return (
-        <MarkdownCodeBlock language={language}>{children}</MarkdownCodeBlock>
-      );
-    },
+    pre: ({ children }) => (
+      <MarkdownFencedPre blockCode={blockCode} interactive={interactive}>
+        {children}
+      </MarkdownFencedPre>
+    ),
     strong: ({ children }) => (
       <strong className="font-semibold">{children}</strong>
     ),
@@ -1644,7 +1595,7 @@ export function createMarkdownComponents(
  * sixteen instances ever exist. Module-stable maps mean cached markdown
  * element trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
  */
-const MARKDOWN_COMPONENT_SCHEMA_VERSION = "8";
+const MARKDOWN_COMPONENT_SCHEMA_VERSION = "9";
 const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 
 type MarkdownComponentSet = { components: Components; variant: string };
@@ -1779,6 +1730,13 @@ function MarkdownInner({
     ],
   );
 
+  // Whole-message bare playground JSON (no fence) renders as the card UI
+  // instead of literal text. Fenced payloads still go through MarkdownFenced*.
+  const barePlaygroundCard = React.useMemo(
+    () => parsePlaygroundCard(content),
+    [content],
+  );
+
   let processedContent = content;
 
   // Note: stripping the sentinel here is intentionally omitted. When
@@ -1804,7 +1762,7 @@ function MarkdownInner({
     blockCode,
   );
   const markdownNode =
-    configNudge === null
+    barePlaygroundCard == null && configNudge === null
       ? renderCachedMarkdown({
           channelNames,
           components: componentSet.components,
@@ -1841,8 +1799,12 @@ function MarkdownInner({
     >
       <MarkdownRuntimeContext.Provider value={runtime}>
         <VideoReviewMarkdownContext.Provider value={videoReviewContext}>
-          {selectProseOrNudge(configNudge, markdownNode)}
-          {configNudge !== null ? (
+          {barePlaygroundCard ? (
+            <PlaygroundCard card={barePlaygroundCard} />
+          ) : (
+            selectProseOrNudge(configNudge, markdownNode)
+          )}
+          {barePlaygroundCard == null && configNudge !== null ? (
             <AttachmentGroup
               className="max-w-full flex-wrap overflow-visible pb-0"
               data-config-nudge=""
@@ -1856,7 +1818,7 @@ function MarkdownInner({
             key={messageId}
             onOpenByHref={linkPreviewOpenByHref}
             onRemoveForEveryone={onRemoveLinkPreviewsForEveryone}
-            previews={resolvedLinkPreviews}
+            previews={barePlaygroundCard ? [] : resolvedLinkPreviews}
           />
         </VideoReviewMarkdownContext.Provider>
       </MarkdownRuntimeContext.Provider>

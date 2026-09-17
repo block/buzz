@@ -6,7 +6,9 @@ import {
 } from "./types.ts";
 import { isAllowedPlaygroundUrl } from "./url.ts";
 
-const FENCE_RE = /```playground(?:[^\n]*)\n([\s\S]*?)```/g;
+const PLAYGROUND_FENCE_RE = /```playground(?:[^\n]*)\n([\s\S]*?)```/g;
+/** Any markdown fence; used to catch `json` / unlabeled playground payloads. */
+const ANY_FENCE_RE = /```(?:[^\n]*)\n([\s\S]*?)```/g;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -99,12 +101,22 @@ export function extractPlaygroundCard(content: string): PlaygroundCard | null {
   if (standalone) {
     return standalone;
   }
-  FENCE_RE.lastIndex = 0;
-  const match = FENCE_RE.exec(content);
-  if (!match?.[1]) {
-    return null;
+  PLAYGROUND_FENCE_RE.lastIndex = 0;
+  const playgroundFence = PLAYGROUND_FENCE_RE.exec(content);
+  if (playgroundFence?.[1]) {
+    const card = parsePlaygroundCard(playgroundFence[1]);
+    if (card) {
+      return card;
+    }
   }
-  return parsePlaygroundCard(match[1]);
+  ANY_FENCE_RE.lastIndex = 0;
+  for (const match of content.matchAll(ANY_FENCE_RE)) {
+    const card = parsePlaygroundCard(match[1] ?? "");
+    if (card) {
+      return card;
+    }
+  }
+  return null;
 }
 
 export function extractPlaygroundCards(content: string): PlaygroundCard[] {
@@ -121,8 +133,12 @@ export function extractPlaygroundCards(content: string): PlaygroundCard[] {
     cards.push(card);
   };
 
-  FENCE_RE.lastIndex = 0;
-  for (const match of content.matchAll(FENCE_RE)) {
+  PLAYGROUND_FENCE_RE.lastIndex = 0;
+  for (const match of content.matchAll(PLAYGROUND_FENCE_RE)) {
+    push(parsePlaygroundCard(match[1] ?? ""));
+  }
+  ANY_FENCE_RE.lastIndex = 0;
+  for (const match of content.matchAll(ANY_FENCE_RE)) {
     push(parsePlaygroundCard(match[1] ?? ""));
   }
   if (cards.length === 0) {

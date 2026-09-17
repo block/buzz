@@ -73,3 +73,28 @@ test("extracts a fenced playground card from a message", () => {
   assert.deepEqual(card, valid);
   assert.equal(extractPlaygroundCard("```playground\nnot-json\n```"), null);
 });
+
+const HULA_PORT_HOLE = {
+  hula: "playground",
+  v: 1,
+  name: "hula-port-hole",
+  url: "https://hula-port-hole.hulapreview.com",
+  sid: "oc-preview-hula-port-hole",
+  stack: "main",
+  expires: 1787564786,
+};
+
+test("parses the hula-port-hole custom-card payload (v:1, stack, expires)", () => {
+  const raw = JSON.stringify(HULA_PORT_HOLE);
+  assert.deepEqual(parsePlaygroundCard(raw), HULA_PORT_HOLE);
+  assert.deepEqual(extractPlaygroundCard(raw), HULA_PORT_HOLE);
+  assert.deepEqual(
+    extractPlaygroundCard(`\`\`\`playground\n${raw}\n\`\`\``),
+    HULA_PORT_HOLE,
+  );
+  assert.deepEqual(
+    extractPlaygroundCard(`\`\`\`json\n${raw}\n\`\`\``),
+    HULA_PORT_HOLE,
+  );
+});
+
