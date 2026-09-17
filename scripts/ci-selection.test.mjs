@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -52,26 +53,30 @@ const filters = workflow
   .split("\n")
   .map((line) => line.slice(12))
   .join("\n");
-let actionPath;
-async function select(paths) {
-  if (!actionPath) {
-    // Exercise the exact bundled matcher CI executes, including negation and
-    // dotfile semantics, instead of maintaining an approximation of picomatch.
-    actionPath = join(scratch, "paths-filter.cjs");
-    execFileSync("curl", [
-      "--fail",
-      "--silent",
-      "--show-error",
-      "--max-time",
-      "30",
-      "-o",
-      actionPath,
-      `https://raw.githubusercontent.com/dorny/paths-filter/${actionSha}/dist/index.js`,
-    ]);
-  }
+// GitHub-hosted runners prepare pinned actions beside RUNNER_TEMP before any
+// steps run. Reuse that bundle, without another download in the selection gate.
+// Locally, point PATHS_FILTER_ACTION at dist/index.js from the pinned action.
+const actionPath =
+  process.env.PATHS_FILTER_ACTION ||
+  (process.env.RUNNER_TEMP &&
+    join(
+      process.env.RUNNER_TEMP,
+      "..",
+      "_actions",
+      "dorny",
+      "paths-filter",
+      actionSha,
+      "dist",
+      "index.js",
+    ));
+assert.ok(
+  actionPath && existsSync(actionPath),
+  `Set PATHS_FILTER_ACTION to the local dist/index.js from dorny/paths-filter@${actionSha}`,
+);
+function select(paths) {
   const repo = mkdtempSync(join(scratch, "repo-"));
   const git = (...args) =>
-    execFileSync("git", args, { cwd: repo, stdio: "pipe" });
+    execFileSync("git", args, { cwd: repo, stdio: "pipe", timeout: 10000 });
   git("init", "-q");
   // Fixture repositories must not inherit developer machine hooks.
   mkdirSync(join(repo, "empty-hooks"));
