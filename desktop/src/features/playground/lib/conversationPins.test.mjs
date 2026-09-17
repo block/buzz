@@ -68,3 +68,27 @@ test("requestOpenConversationPlaygroundPinsMenu bumps a per-scope nonce", async 
   assert.equal(second?.scopeKey, "channel:chan-a");
   assert.notEqual(first?.nonce, second?.nonce);
 });
+
+test("listConversationPlaygroundPins returns stable refs across alternating scopes", async () => {
+  // Regression: channel header + thread panel both mount ConversationPlaygroundPinsMenu.
+  // A single global snapshot cache thrashing between scopes made useSyncExternalStore
+  // see a new array every getSnapshot → Maximum update depth exceeded.
+  const {
+    listConversationPlaygroundPins,
+    pinPlaygroundToConversation,
+  } = await import("./conversationPins.ts");
+
+  pinPlaygroundToConversation("channel:chan-a", card);
+
+  const channelA = listConversationPlaygroundPins("channel:chan-a");
+  const threadEmpty = listConversationPlaygroundPins("thread:root-1");
+  const channelB = listConversationPlaygroundPins("channel:chan-a");
+  const threadEmptyAgain = listConversationPlaygroundPins("thread:root-1");
+  const otherEmpty = listConversationPlaygroundPins("channel:chan-b");
+
+  assert.equal(channelA, channelB);
+  assert.equal(threadEmpty, threadEmptyAgain);
+  assert.equal(threadEmpty, otherEmpty);
+  assert.equal(channelA.length, 1);
+  assert.equal(threadEmpty.length, 0);
+});

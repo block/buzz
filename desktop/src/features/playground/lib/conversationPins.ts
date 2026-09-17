@@ -19,11 +19,13 @@ let menuOpenRequest: MenuOpenRequest | null = null;
 let menuOpenNonce = 0;
 const menuOpenListeners = new Set<() => void>();
 
-let cachedPinsSnapshot: ConversationPlaygroundPin[] = [];
-let cachedPinsScope: string | null = null;
+/** Shared empty snapshot — stable Object.is for useSyncExternalStore. */
+const EMPTY_PINS: ConversationPlaygroundPin[] = [];
+/** Per-scope list snapshots so channel + thread menus can subscribe together. */
+const pinsSnapshotByScope = new Map<string, ConversationPlaygroundPin[]>();
 
 function emitPins() {
-  cachedPinsScope = null;
+  pinsSnapshotByScope.clear();
   for (const listener of listeners) listener();
 }
 
@@ -59,11 +61,13 @@ export function subscribeConversationPlaygroundPins(
 export function listConversationPlaygroundPins(
   scopeKey: string,
 ): ConversationPlaygroundPin[] {
-  if (cachedPinsScope === scopeKey) return cachedPinsSnapshot;
+  const cached = pinsSnapshotByScope.get(scopeKey);
+  if (cached) return cached;
   const scope = pinsByScope.get(scopeKey);
-  cachedPinsSnapshot = scope ? [...scope.values()] : [];
-  cachedPinsScope = scopeKey;
-  return cachedPinsSnapshot;
+  const snapshot =
+    scope && scope.size > 0 ? [...scope.values()] : EMPTY_PINS;
+  pinsSnapshotByScope.set(scopeKey, snapshot);
+  return snapshot;
 }
 
 export function hasConversationPlaygroundPin(
@@ -134,8 +138,7 @@ export function getConversationPlaygroundPinsMenuOpenRequest(): MenuOpenRequest 
 /** Test helper — wipe in-memory pins and menu-open requests. */
 export function resetConversationPlaygroundPins(): void {
   pinsByScope.clear();
-  cachedPinsSnapshot = [];
-  cachedPinsScope = null;
+  pinsSnapshotByScope.clear();
   menuOpenRequest = null;
   emitPins();
   emitMenuOpen();
