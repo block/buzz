@@ -1,12 +1,31 @@
 export const BUZZ_RELEASES_URL = "https://github.com/block/buzz/releases";
+export const BUZZ_IOS_APP_STORE_URL =
+  "https://apps.apple.com/us/app/buzz-chat-with-your-hive/id6779728271";
+export const BUZZ_ANDROID_PLAY_STORE_URL =
+  "https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile";
 const BUZZ_RELEASES_API_URL =
   "https://api.github.com/repos/block/buzz/releases?per_page=10";
 const CACHE_KEY = "buzz.latestDownload.v1";
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 export type BuzzDownloadPlatform = {
-  operatingSystem: "linux" | "macos" | "windows" | "unknown";
+  operatingSystem:
+    | "linux"
+    | "macos"
+    | "windows"
+    | "ios"
+    | "android"
+    | "unknown";
   architecture: "arm64" | "x64" | "unknown";
+};
+
+// iOS and Android are supported platforms that take a store listing instead of
+// a GitHub release asset, so they resolve before the release lookup runs.
+const STORE_URLS: Partial<
+  Record<BuzzDownloadPlatform["operatingSystem"], string>
+> = {
+  ios: BUZZ_IOS_APP_STORE_URL,
+  android: BUZZ_ANDROID_PLAY_STORE_URL,
 };
 
 type GitHubRelease = {
@@ -39,6 +58,24 @@ function normalizeOperatingSystem(
   // Reject non-desktop devices before admitting desktop-looking signals.
   const isIPadDesktopMode =
     platform === "macintel" && navigatorValue.maxTouchPoints > 1;
+
+  // Phones and tablets get a store listing, so classify the two platforms the
+  // mobile app actually ships on before the catch-all below folds every
+  // non-desktop device into `unknown`. Fire tablets (kindle/silk) and ChromeOS
+  // stay `unknown` on purpose: neither is served by the Play Store listing.
+  if (!/kindle|silk|cros/.test(userAgent)) {
+    if (
+      isIPadDesktopMode ||
+      platform === "ios" ||
+      /iphone|ipad|ipod/.test(userAgent)
+    ) {
+      return "ios";
+    }
+    if (platform === "android" || /android/.test(userAgent)) {
+      return "android";
+    }
+  }
+
   const isUnsupportedDevice =
     userAgentData?.mobile === true ||
     isIPadDesktopMode ||
@@ -142,6 +179,11 @@ export function selectBuzzDownloadUrl(
 export async function resolveBuzzDownloadUrlForPlatform(
   platform: BuzzDownloadPlatform,
 ): Promise<string> {
+  const storeUrl = STORE_URLS[platform.operatingSystem];
+  if (storeUrl) {
+    return storeUrl;
+  }
+
   try {
     const cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) ?? "null") as {
       expiresAt: number;
