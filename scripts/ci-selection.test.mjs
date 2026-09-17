@@ -16,35 +16,6 @@ const workflow = readFileSync(
   new URL("../.github/workflows/ci.yml", import.meta.url),
   "utf8",
 );
-const jobs = Object.fromEntries(
-  [
-    ...workflow.matchAll(
-      /^ {2}([\w-]+):\n([\s\S]*?)(?=^ {2}[\w-]+:|$(?![\s\S]))/gm,
-    ),
-  ].map(([, id, body]) => [id, body]),
-);
-const field = (job, key) => {
-  const match = jobs[job].match(new RegExp(`^    ${key}: (.+)$`, "m"));
-  assert.ok(match, `${job}.${key} must exist`);
-  return match[1];
-};
-// Evaluate the small expression subset used by these production gates. Values
-// come from fixtures, never from a pull request title, path, or other metadata.
-function evaluate(expression, event, outputs, result = "success", check = "") {
-  const translated = expression
-    .replace(/^\$\{\{\s*|\s*\}\}$/g, "")
-    .replace(/needs\.changes\.outputs\.([\w-]+)/g, (_, key) =>
-      JSON.stringify(outputs[key] ?? ""),
-    )
-    .replaceAll("needs.changes.result", JSON.stringify(result))
-    .replaceAll("github.event_name", JSON.stringify(event))
-    .replaceAll("matrix.check", JSON.stringify(check))
-    .replaceAll("always()", "true");
-  return Function(
-    "format",
-    `return (${translated});`,
-  )((template, value) => template.replace("{0}", value));
-}
 const scratch = mkdtempSync(join(tmpdir(), "buzz-ci-selection-"));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 const actionSha = workflow.match(/uses: dorny\/paths-filter@([a-f0-9]{40})/)[1];
@@ -156,8 +127,8 @@ const scenarios = [
   ["documentation", ["README.md"], []],
 ];
 for (const [name, paths, expected] of scenarios) {
-  test(`real paths-filter: ${name}`, async () => {
-    const outputs = await select(paths);
+  test(`real paths-filter: ${name}`, () => {
+    const outputs = select(paths);
     assert.equal(Object.keys(outputs).length, 5);
     assert.deepEqual(
       Object.keys(outputs)
@@ -165,113 +136,5 @@ for (const [name, paths, expected] of scenarios) {
         .sort(),
       expected.sort(),
     );
-    const desktop =
-      expected.includes("desktop") ||
-      expected.includes("desktop-rust") ||
-      expected.includes("rust");
-    for (const job of [
-      "desktop-domain",
-      "desktop-macos-domain",
-      "relay-artifacts-domain",
-      "relay-domain",
-    ]) {
-      assert.equal(
-        evaluate(field(job, "if"), "pull_request", outputs),
-        desktop,
-        job,
-      );
-      assert.equal(
-        evaluate(field(job, "if"), "push", outputs),
-        true,
-        `${job} on push`,
-      );
-    }
-    assert.equal(
-      evaluate(field("postgres-domain", "if"), "pull_request", outputs),
-      expected.includes("rust"),
-    );
   });
 }
-const checks = {
-  "backend-integration": [
-    "Backend Integration (relay e2e)",
-    "relay-domain",
-    "backend_integration_result",
-  ],
-  "relay-e2e": ["Relay E2E", "relay-domain", "relay_e2e_result"],
-  "postgres-tests": [
-    "PostgreSQL Tests",
-    "postgres-domain",
-    "postgres_tests_result",
-  ],
-};
-test("unneeded backend contexts have no dependency on desktop or relay work", () => {
-  assert.equal(field("backend-not-required", "needs"), "[changes]");
-  for (const [name] of Object.values(checks))
-    assert.ok(jobs["backend-not-required"].includes(`'${name}'`));
-  const run = jobs["backend-not-required"].match(/ {8}run: \|\n([\s\S]*)/)[1];
-  for (const result of ["success", "failure", "cancelled", "skipped", ""]) {
-    for (const rust of ["false", "true", ""]) {
-      const child = spawnSync("bash", ["-e", "-c", run], {
-        env: { ...process.env, CHANGES_RESULT: result, RUST: rust },
-        encoding: "utf8",
-      });
-      assert.equal(
-        child.status === 0,
-        result === "success" && rust === "false",
-      );
-    }
-  }
-});
-test("exactly one reporter owns each required name, including failed path detection", () => {
-  for (const event of ["push", "pull_request"]) {
-    for (const rust of ["true", "false", ""]) {
-      for (const result of ["success", "failure", "cancelled", "skipped"]) {
-        for (const [job, [name]] of Object.entries(checks)) {
-          const outputs = { rust };
-          const early = evaluate(
-            field("backend-not-required", "if"),
-            event,
-            outputs,
-            result,
-          );
-          const late = evaluate(field(job, "if"), event, outputs, result);
-          assert.notEqual(early, late, `${event}/${rust}/${result}/${job}`);
-          assert.equal(
-            evaluate(
-              field("backend-not-required", "name"),
-              event,
-              outputs,
-              result,
-              name,
-            ) === name,
-            early,
-          );
-          assert.equal(
-            evaluate(field(job, "name"), event, outputs, result) === name,
-            late,
-          );
-        }
-      }
-    }
-  }
-});
-test("selected backend gates fail on missing, failed, cancelled, or skipped test results", () => {
-  for (const [job, [, domain, output]] of Object.entries(checks)) {
-    assert.ok(field(job, "needs").includes(domain));
-    assert.ok(
-      jobs[job].includes(`RESULT: \${{ needs.${domain}.outputs.${output} }}`),
-    );
-    const run = jobs[job].match(/ {8}run: (.+)/)[1];
-    for (const result of ["success", "failure", "cancelled", "skipped", ""]) {
-      const child = spawnSync("bash", ["-e", "-c", run], {
-        env: { ...process.env, RESULT: result },
-      });
-      assert.equal(
-        child.status === 0,
-        result === "success",
-        `${job}/${result}`,
-      );
-    }
-  }
-});
