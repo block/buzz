@@ -210,25 +210,20 @@ function PinnedSiteSurface({
           pinId: id,
           startUrl,
           bounds,
-        })
-          .then(() => {
-            // Navigate-away / AppShell hide-all may win while show is in
-            // flight. Re-hide so a late show cannot leave an orphan WKWebView
-            // painted over the channel thread (same race as NativeStageHost).
-            if (cancelled) {
-              void hidePinWebview(id);
-            }
-          })
-          .catch((error) => {
-            console.error("Failed to open pinned site", error);
-            if (!cancelled) {
-              setLoadError(
-                error instanceof Error
-                  ? error.message
-                  : "Failed to open pinned site.",
-              );
-            }
-          });
+        }).catch((error) => {
+          console.error("Failed to open pinned site", error);
+          if (!cancelled) {
+            setLoadError(
+              error instanceof Error
+                ? error.message
+                : "Failed to open pinned site.",
+            );
+          }
+        });
+        // Late dismiss / hide-all while show is in flight is cancelled inside
+        // showPinWebview (hide-epoch + per-pin show generation). Do not
+        // hide+bump here — that races remount first-open and blanks until
+        // a second click.
         return;
       }
       void setPinWebviewBounds(pinId, bounds);

@@ -121,7 +121,9 @@ test("stale show re-hide does not invalidate a remounted pin show", async () => 
     return Promise.resolve(undefined);
   });
 
-  const { hidePinWebview, showPinWebview } = await import("./pinWebview.ts");
+  const { getPinShowGeneration, hidePinWebview, showPinWebview } = await import(
+    "./pinWebview.ts"
+  );
 
   const first = showPinWebview({
     pinId: "pin-remount",
@@ -135,12 +137,87 @@ test("stale show re-hide does not invalidate a remounted pin show", async () => 
     bounds: { x: 0, y: 40, width: 800, height: 600 },
   });
 
-  resolveOld();
-  await first;
+  // Newer show finishes first (typical when reuse_existing is fast), then the
+  // stale show resolves — must NOT re-hide the remounted paint.
   resolveNew();
   await second;
+  const hidesAfterNew = calls.filter((row) => row.cmd === "pin_webview_hide")
+    .length;
+
+  resolveOld();
+  await first;
 
   const hides = calls.filter((row) => row.cmd === "pin_webview_hide");
-  assert.equal(hides.length, 2);
+  // Only the explicit remount hide — stale show must skip epoch re-hide.
+  assert.equal(hides.length, hidesAfterNew);
+  assert.equal(hides.length, 1);
   assert.equal(calls.filter((row) => row.cmd === "pin_webview_show").length, 2);
+  assert.equal(getPinShowGeneration("pin-remount"), 2);
+});
+
+test("first-open remount: late cancelled show does not blank the new show", async () => {
+  const calls = [];
+  let resolveFirst;
+  let resolveSecond;
+  const firstGate = new Promise((resolve) => {
+    resolveFirst = resolve;
+  });
+  const secondGate = new Promise((resolve) => {
+    resolveSecond = resolve;
+  });
+  let showCount = 0;
+  installTauriInvoke((cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd === "pin_webview_show") {
+      showCount += 1;
+      const gate = showCount === 1 ? firstGate : secondGate;
+      return gate.then(() => ({
+        canGoBack: false,
+        canGoForward: false,
+        currentUrl: args.startUrl,
+      }));
+    }
+    return Promise.resolve(undefined);
+  });
+
+  const {
+    closePinWebview,
+    getPinHideEpoch,
+    getPinShowGeneration,
+    showPinWebview,
+  } = await import("./pinWebview.ts");
+
+  const pinId = "hula-link-side-panel";
+  const first = showPinWebview({
+    pinId,
+    startUrl: "https://wayfinder.example",
+    bounds: { x: 0, y: 40, width: 800, height: 600 },
+  });
+  // Strict Mode / url-effect cleanup: destroy + bump (same as LinkSidePanelSurface).
+  const epochBeforeClose = getPinHideEpoch();
+  await closePinWebview(pinId);
+  assert.equal(getPinHideEpoch(), epochBeforeClose + 1);
+
+  const second = showPinWebview({
+    pinId,
+    startUrl: "https://wayfinder.example",
+    bounds: { x: 0, y: 40, width: 800, height: 600 },
+  });
+
+  resolveSecond();
+  await second;
+  resolveFirst();
+  await first;
+
+  const hides = calls.filter((row) => row.cmd === "pin_webview_hide");
+  assert.equal(
+    hides.length,
+    0,
+    `stale show must not re-hide remounted first open; hides=${JSON.stringify(hides)} calls=${JSON.stringify(calls)}`,
+  );
+  assert.equal(getPinShowGeneration(pinId), 2);
+  assert.equal(
+    calls.filter((row) => row.cmd === "pin_webview_show").length,
+    2,
+  );
 });

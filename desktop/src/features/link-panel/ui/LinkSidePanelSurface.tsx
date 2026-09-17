@@ -3,7 +3,6 @@ import * as React from "react";
 
 import {
   closePinWebview,
-  hidePinWebview,
   PIN_WEBVIEW_RESTORE_EVENT,
   pinWebviewBoundsAreUsable,
   setPinWebviewBounds,
@@ -27,8 +26,9 @@ function readBounds(element: HTMLElement): PinWebviewBounds {
 
 /**
  * Hosts the native pin webview inside the Projects-style idle auxiliary panel.
- * Mirrors {@link PinnedSiteSurface} show/hide + late-show re-hide so dismiss
- * cannot leave a stranded WKWebView over the channel (PRs #53/#54 patterns).
+ * Mirrors {@link PinnedSiteSurface} show/hide. Late dismiss is cancelled inside
+ * showPinWebview (hide-epoch + per-pin show generation) so remounts do not
+ * blank the first open (PRs #53/#54 patterns).
  */
 export function LinkSidePanelSurface({ url }: { url: string }) {
   const hostRef = React.useRef<HTMLDivElement | null>(null);
@@ -53,22 +53,18 @@ export function LinkSidePanelSurface({ url }: { url: string }) {
           pinId,
           startUrl: url,
           bounds,
-        })
-          .then(() => {
-            if (cancelled) {
-              void hidePinWebview(pinId);
-            }
-          })
-          .catch((error) => {
-            console.error("Failed to open link side panel", error);
-            if (!cancelled) {
-              setLoadError(
-                error instanceof Error
-                  ? error.message
-                  : "Failed to open link.",
-              );
-            }
-          });
+        }).catch((error) => {
+          console.error("Failed to open link side panel", error);
+          if (!cancelled) {
+            setLoadError(
+              error instanceof Error
+                ? error.message
+                : "Failed to open link.",
+            );
+          }
+        });
+        // Late dismiss is handled inside showPinWebview (epoch + generation).
+        // Do not hide+bump on cancel — that blanks remounted first opens.
         return;
       }
       void setPinWebviewBounds(pinId, bounds);

@@ -95,12 +95,12 @@ test("unmount hide and late show re-hide the pin webview", async () => {
           if (!pinWebviewBoundsAreUsable(bounds)) return;
           opened = true;
           const id = "pin-late";
+          // Mirrors PinnedSiteSurface: late dismiss is handled inside
+          // showPinWebview (epoch + generation), not via a bumping .then hide.
           void showPinWebview({
             pinId: id,
             startUrl: "https://late.test",
             bounds,
-          }).then(() => {
-            if (cancelled) void hidePinWebview(id);
           });
         }
       };

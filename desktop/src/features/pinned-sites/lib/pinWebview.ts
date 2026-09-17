@@ -69,6 +69,14 @@ async function invokePin<T>(
  */
 let pinHideEpoch = 0;
 
+/**
+ * Per-pin show generation. A remount (Strict Mode, url change, restore)
+ * starts a newer show while an older one is still in flight. The older
+ * show must not re-hide after the newer show has already painted — that
+ * left the first open blank until a second click.
+ */
+const pinShowGeneration = new Map<string, number>();
+
 export function bumpPinHideEpoch(): void {
   pinHideEpoch += 1;
 }
@@ -76,6 +84,21 @@ export function bumpPinHideEpoch(): void {
 /** Test helper. */
 export function getPinHideEpoch(): number {
   return pinHideEpoch;
+}
+
+/** Test helper. */
+export function getPinShowGeneration(pinId: string): number {
+  return pinShowGeneration.get(pinId) ?? 0;
+}
+
+function nextPinShowGeneration(pinId: string): number {
+  const next = (pinShowGeneration.get(pinId) ?? 0) + 1;
+  pinShowGeneration.set(pinId, next);
+  return next;
+}
+
+function isCurrentPinShow(pinId: string, generation: number): boolean {
+  return pinShowGeneration.get(pinId) === generation;
 }
 
 async function invokeHidePinWebview(pinId: string): Promise<void> {
@@ -88,6 +111,7 @@ export async function showPinWebview(input: {
   bounds: PinWebviewBounds;
 }): Promise<PinWebviewNavState> {
   const epoch = pinHideEpoch;
+  const generation = nextPinShowGeneration(input.pinId);
   const nav = await invokePin(
     "pin_webview_show",
     {
@@ -100,7 +124,10 @@ export async function showPinWebview(input: {
       currentUrl: input.startUrl,
     },
   );
-  if (epoch !== pinHideEpoch) {
+  // Dismiss won while we were in flight, and no newer show for this pin
+  // took over — re-hide so we cannot orphan a topmost WKWebView. If a
+  // remount already started another show, leave that paint alone.
+  if (epoch !== pinHideEpoch && isCurrentPinShow(input.pinId, generation)) {
     await invokeHidePinWebview(input.pinId);
   }
   return nav;
