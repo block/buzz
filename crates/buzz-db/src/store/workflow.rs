@@ -559,6 +559,85 @@ pub async fn latest_scheduled_workflow_fire(
     row.try_get("scheduled_for").map_err(Into::into)
 }
 
+/// Read the durable evaluated-through cursor for a scheduled workflow.
+///
+/// If the cursor is unexpectedly absent, seed it at `now` and return `None` so
+/// the caller skips historical replay on this tick. Normal creation, update,
+/// enablement, and status transitions maintain this row with a database trigger.
+pub async fn get_or_seed_workflow_schedule_cursor(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO workflow_schedule_cursors
+            (community_id, workflow_id, evaluated_through)
+        SELECT community_id, id, $3
+        FROM workflows
+        WHERE community_id = $1 AND id = $2
+        ON CONFLICT (community_id, workflow_id) DO NOTHING
+        RETURNING evaluated_through
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(now)
+    .fetch_optional(pool)
+    .await?;
+
+    if inserted.is_some() {
+        return Ok(None);
+    }
+
+    let cursor = sqlx::query_scalar(
+        r#"
+        SELECT evaluated_through
+        FROM workflow_schedule_cursors
+        WHERE community_id = $1 AND workflow_id = $2
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(cursor)
+}
+
+/// Advance a workflow's evaluated-through cursor with compare-and-swap.
+///
+/// Multiple scheduler pods may scan the same window. Only a pod that still
+/// observes `expected` advances it; fire claims independently deduplicate work.
+pub async fn advance_workflow_schedule_cursor(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    expected: DateTime<Utc>,
+    evaluated_through: DateTime<Utc>,
+) -> Result<bool> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE workflow_schedule_cursors
+        SET evaluated_through = $4, updated_at = NOW()
+        WHERE community_id = $1
+          AND workflow_id = $2
+          AND evaluated_through = $3
+          AND evaluated_through < $4
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(expected)
+    .bind(evaluated_through)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    Ok(affected == 1)
+}
+
 /// Link a won scheduled-fire claim to the workflow run it created.
 ///
 /// This is for ops/audit forensics only; the claim row remains the dedupe
@@ -1561,6 +1640,42 @@ impl Db {
         workflow_id: Uuid,
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
         crate::workflow::latest_scheduled_workflow_fire(&self.pool, community_id, workflow_id).await
+    }
+
+    /// Read or safely seed a workflow's durable schedule evaluation cursor.
+    #[datastore_span(name = "get_or_seed_workflow_schedule_cursor", system = "postgresql")]
+    pub async fn get_or_seed_workflow_schedule_cursor(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        crate::workflow::get_or_seed_workflow_schedule_cursor(
+            &self.pool,
+            community_id,
+            workflow_id,
+            now,
+        )
+        .await
+    }
+
+    /// Compare-and-swap a workflow's durable schedule evaluation cursor.
+    #[datastore_span(name = "advance_workflow_schedule_cursor", system = "postgresql")]
+    pub async fn advance_workflow_schedule_cursor(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        expected: chrono::DateTime<chrono::Utc>,
+        evaluated_through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        crate::workflow::advance_workflow_schedule_cursor(
+            &self.pool,
+            community_id,
+            workflow_id,
+            expected,
+            evaluated_through,
+        )
+        .await
     }
 
     /// Attach the workflow run id created from a won scheduled-fire claim.

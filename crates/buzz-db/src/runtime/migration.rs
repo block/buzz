@@ -2470,6 +2470,7 @@ mod postgres_tests {
             "events",
             "channels",
             "scheduled_workflow_fires",
+            "workflow_schedule_cursors",
             "audit_log",
         ] {
             let exists = sqlx::query_scalar::<_, bool>(
