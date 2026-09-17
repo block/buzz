@@ -53,10 +53,7 @@ export type MessageNotificationSource =
   | "approval"
   | "needs_action"
   | "dm"
-  | "thread_reply"
-  // A plain new message in a channel (WhatsApp-style: notify for everything in
-  // a channel until it's muted).
-  | "channel";
+  | "thread_reply";
 
 const MESSAGE_BODY_FALLBACKS: Record<MessageNotificationSource, string> = {
   mention: "Something in Buzz needs your attention.",
@@ -64,7 +61,6 @@ const MESSAGE_BODY_FALLBACKS: Record<MessageNotificationSource, string> = {
   needs_action: "Something in Buzz needs your attention.",
   dm: "New message",
   thread_reply: "New reply",
-  channel: "New message",
 };
 
 /**
@@ -110,9 +106,7 @@ export function formatMessageNotification(opts: {
           ? senderName
             ? `${senderName} replied`
             : "Reply"
-          : source === "channel"
-            ? (senderName ?? "New message")
-            : (senderName ?? "Needs Action");
+          : (senderName ?? "Needs Action");
 
   return { title: formatNotificationTitle({ prefix, channelLabel }), body };
 }

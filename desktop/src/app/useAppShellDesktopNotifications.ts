@@ -6,7 +6,6 @@ import {
   shouldBounceForChannelNotification,
 } from "@/app/AppShell.helpers";
 import { useCommunityJoinAlerts } from "@/features/community-members/useCommunityJoinAlerts";
-import { isThreadReply } from "@/features/messages/lib/threading";
 import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
@@ -60,54 +59,11 @@ export function useAppShellDesktopNotifications({
   const resolveSenderName = useNotificationSenderName();
 
   const handleChannelNotification = React.useEffectEvent(
-    (channelId: string, event: RelayEvent) => {
+    (_channelId: string, event: RelayEvent) => {
       if (!enabled) return;
+      if (!shouldBounceForChannelNotification(event.tags)) return;
       if (!notificationSettings.desktopEnabled) return;
-
-      const bounce = () => {
-        if (shouldBounceForChannelNotification(event.tags)) {
-          void requestDockBounce();
-        }
-      };
-
-      // Thread replies and DMs each have their own desktop-notification path
-      // (thread-reply and DM). This handler owns every OTHER top-level channel
-      // message — WhatsApp-style: notify for every message in a channel until it
-      // is muted. Muted channels never reach here (shouldNotifyForEvent excludes
-      // them upstream, and only fires this callback for unmuted channels).
-      // Top-level @-mentions are notified here too (with mention-specific copy)
-      // rather than via the home-feed path, so a mention reliably toasts.
-      const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
-      if (isThreadReply(event.tags)) {
-        bounce();
-        return;
-      }
-      const channel = channels.find((c) => c.id === channelId);
-      if (channel?.channelType === "dm") {
-        bounce();
-        return;
-      }
-
-      const isMention = hasMentionForEvent(event, normalizedPubkey);
-      const channelName = channel?.name?.trim() ?? null;
-      const { title, body } = formatMessageNotification({
-        source: isMention ? "mention" : "channel",
-        senderName: resolveSenderName(event.pubkey),
-        channelName,
-        content: event.content,
-      });
-
-      void sendDesktopNotification({
-        title,
-        body,
-        target: buildEventNotificationTarget(event, {
-          id: channelId,
-          name: channelName ?? "",
-        }),
-      }).then((didSend) => {
-        if (!didSend) return;
-        void requestDockBounce();
-      });
+      void requestDockBounce();
     },
   );
 

@@ -16,8 +16,12 @@ import {
 // queued macOS activation becomes available. See src-tauri notification code.
 const NATIVE_NOTIFICATION_ACTIVATED_EVENT = "native-notification-activated";
 const TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS = "take_pending_activations";
+const TAKE_PENDING_WINDOWS_NOTIFICATION_ACTIVATIONS =
+  "take_pending_windows_activations";
 const MACOS_NOTIFICATION_PERMISSION_STATE = "notification_permission_state";
 const REQUEST_MACOS_NOTIFICATION_ACCESS = "request_notification_access";
+const WINDOWS_NOTIFICATION_PERMISSION_STATE =
+  "windows_notification_permission_state";
 
 export type DesktopNotificationPermissionState =
   | NotificationPermission
@@ -150,22 +154,14 @@ export async function getDesktopNotificationPermissionState(): Promise<DesktopNo
     }
   }
 
-  // `@tauri-apps/plugin-notification`'s injected init script special-cases
-  // Windows: `isPermissionGranted()` skips the real backend call entirely
-  // and just trusts its own in-memory `window.Notification.permission`,
-  // which starts at "default" on every cold start. Because "default" reads
-  // as not-granted, the script immediately latches its own permission to
-  // "denied" before Buzz's code ever runs — so the checks below would just
-  // read back that self-inflicted "denied" forever, without a real OS-level
-  // notification permission ever having been checked. The plugin's desktop
-  // backend (including Windows) always grants permission unconditionally,
-  // so ask it directly here instead of trusting the shim's cached value.
+  // Windows has enabled/disabled toast settings, not a browser-style prompt
+  // lifecycle. Query the AppUserModelID's native ToastNotifier setting so a
+  // system block remains terminal until the user changes Windows Settings.
   if (isTauri() && isWindowsPlatform()) {
     try {
-      const granted = await invoke<boolean | null>(
-        "plugin:notification|is_permission_granted",
+      return await invoke<NotificationPermission>(
+        WINDOWS_NOTIFICATION_PERMISSION_STATE,
       );
-      return granted === null ? "default" : granted ? "granted" : "denied";
     } catch {
       return "default";
     }
@@ -199,16 +195,18 @@ export async function requestDesktopNotificationAccess(): Promise<DesktopNotific
   }
 
   const request =
-    isTauri() && isMacPlatform()
-      ? invoke<NotificationPermission>(REQUEST_MACOS_NOTIFICATION_ACCESS).catch(
-          (error) => {
+    isTauri() && isWindowsPlatform()
+      ? getDesktopNotificationPermissionState()
+      : isTauri() && isMacPlatform()
+        ? invoke<NotificationPermission>(
+            REQUEST_MACOS_NOTIFICATION_ACCESS,
+          ).catch((error) => {
             if (shouldUseMacDevelopmentFallback(error)) {
               return requestPermission();
             }
             throw error;
-          },
-        )
-      : requestPermission();
+          })
+        : requestPermission();
   pendingPermissionRequest = request.finally(() => {
     pendingPermissionRequest = null;
   });
@@ -239,8 +237,11 @@ export async function listenForDesktopNotificationActions(
 
   if (isTauri()) {
     const usesMacActivationQueue = isMacPlatform();
+    const usesWindowsActivationQueue = isWindowsPlatform();
+    const usesActivationQueue =
+      usesMacActivationQueue || usesWindowsActivationQueue;
 
-    if (!isLinuxPlatform() && !usesMacActivationQueue) {
+    if (!isLinuxPlatform() && !usesActivationQueue) {
       try {
         pluginListener = await onAction((notification) => {
           const target = parseNotificationTarget(
@@ -257,12 +258,25 @@ export async function listenForDesktopNotificationActions(
       }
     }
 
-    // Linux forwards the target as the event payload. macOS queues targets in
-    // Rust first so cold-start clicks survive until this listener is mounted.
+    // Linux forwards the target as the event payload. macOS and Windows queue
+    // targets in Rust first so cold-start clicks survive until this listener is mounted.
     const dispatchNativeActivations = async (payload?: unknown) => {
       if (usesMacActivationQueue) {
         const targets = await invoke<unknown[]>(
           TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS,
+        );
+        for (const pendingTarget of targets) {
+          const target = parseNotificationTarget(pendingTarget);
+          if (target) {
+            dispatchDesktopNotificationTarget(target);
+          }
+        }
+        return;
+      }
+
+      if (usesWindowsActivationQueue) {
+        const targets = await invoke<unknown[]>(
+          TAKE_PENDING_WINDOWS_NOTIFICATION_ACTIVATIONS,
         );
         for (const pendingTarget of targets) {
           const target = parseNotificationTarget(pendingTarget);
@@ -295,12 +309,12 @@ export async function listenForDesktopNotificationActions(
       nativeUnlisten = null;
     }
 
-    if (nativeUnlisten && usesMacActivationQueue) {
+    if (nativeUnlisten && usesActivationQueue) {
       try {
         await dispatchNativeActivations();
       } catch (error) {
         console.error(
-          "Failed to drain pending macOS notification activations",
+          "Failed to drain pending notification activations",
           error,
         );
       }
