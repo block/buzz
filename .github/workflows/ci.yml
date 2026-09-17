@@ -63,7 +63,6 @@ jobs:
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
               - 'desktop/**'
-              - '!desktop/src-tauri/**'
               - 'pnpm-lock.yaml'
             desktop-rust:
               - 'desktop/src-tauri/**'
@@ -113,7 +112,9 @@ jobs:
           scripts/test-rust-cache-contract.sh
           scripts/test-rust-cache-contract-regressions.sh
       - name: CI required-context isolation contract
-        run: scripts/test-ci-required-context-isolation.sh
+        run: |
+          scripts/test-ci-required-context-isolation.sh
+          node --test scripts/ci-selection.test.mjs
       - name: File size policy
         run: just file-size-check
 
@@ -330,9 +331,31 @@ jobs:
           RESULT: ${{ needs.relay-domain.outputs.desktop_e2e_integration_result }}
         run: test "$RESULT" = success
 
+  # These contexts must finish without waiting for desktop's relay artifacts.
+  # Only one reporter owns each required name for a given change selection.
+  backend-not-required:
+    name: ${{ (needs.changes.result != 'success' || (github.event_name != 'push' && needs.changes.outputs.rust != 'true')) && matrix.check || format('{0} (skip reporter)', matrix.check) }}
+    needs: [changes]
+    if: always() && (needs.changes.result != 'success' || (github.event_name != 'push' && needs.changes.outputs.rust != 'true'))
+    strategy:
+      matrix:
+        check: ['Backend Integration (relay e2e)', 'Relay E2E', 'PostgreSQL Tests']
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verify path selection before reporting not required
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST: ${{ needs.changes.outputs.rust }}
+        run: |
+          test "$CHANGES_RESULT" = success
+          test "$RUST" = false
+          echo "Backend checks are not required for these changed paths."
+
   backend-integration:
-    name: Backend Integration (relay e2e)
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    name: ${{ (needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')) && 'Backend Integration (relay e2e)' || 'Backend Integration (relay e2e) (not selected)' }}
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -344,8 +367,8 @@ jobs:
         run: test "$RESULT" = success
 
   postgres-tests:
-    name: PostgreSQL Tests
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    name: ${{ (needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')) && 'PostgreSQL Tests' || 'PostgreSQL Tests (not selected)' }}
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
     needs: [changes, relay-artifacts-domain, postgres-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -357,8 +380,8 @@ jobs:
         run: test "$RESULT" = success
 
   relay-e2e:
-    name: Relay E2E
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    name: ${{ (needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')) && 'Relay E2E' || 'Relay E2E (not selected)' }}
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
