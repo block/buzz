@@ -14,9 +14,9 @@ pub mod upload_record;
 pub mod validation;
 
 pub use bucket_index::{
-    classify_key, fold_bucket_listing, is_tenant_owned_key, sweep_bucket_taxonomy, tenant_prefixes,
-    BucketAggregate, BucketSnapshot, CommunityStorage, KeyClass, Page, SweepError,
-    TaxonomySweepOutcome,
+    classify_key, fold_bucket_listing, fold_bucket_listing_totals, is_tenant_owned_key,
+    sweep_bucket_taxonomy, tenant_prefixes, BucketAggregate, BucketSnapshot, CommunityStorage,
+    KeyClass, Page, SweepError, TaxonomySweepOutcome,
 };
 pub use config::{MediaConfig, S3AddressingStyle};
 pub use error::MediaError;
