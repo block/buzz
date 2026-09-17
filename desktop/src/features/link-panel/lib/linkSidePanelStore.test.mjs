@@ -55,3 +55,36 @@ test("LINK_SIDE_PANEL_PIN_ID is stable for native teardown", async () => {
   const { LINK_SIDE_PANEL_PIN_ID } = await import("./linkSidePanelStore.ts");
   assert.equal(LINK_SIDE_PANEL_PIN_ID, "hula-link-side-panel");
 });
+
+test("openLinkSidePanel keepAlive uses a dedicated pinId and survives close via hide", async () => {
+  const {
+    closeLinkSidePanel,
+    destroyLinkSidePanelIfPin,
+    getLinkSidePanel,
+    openLinkSidePanel,
+  } = await import("./linkSidePanelStore.ts");
+
+  assert.equal(
+    openLinkSidePanel("https://app.example.com", {
+      title: "Demo",
+      pinId: "playground-pin:demo-1",
+      keepAlive: true,
+    }),
+    true,
+  );
+  const panel = getLinkSidePanel();
+  assert.equal(panel?.title, "Demo");
+  assert.equal(panel?.pinId, "playground-pin:demo-1");
+  assert.equal(panel?.keepAlive, true);
+
+  closeLinkSidePanel();
+  assert.equal(getLinkSidePanel(), null);
+
+  // Re-open then destroy via unpin helper.
+  openLinkSidePanel("https://app.example.com", {
+    pinId: "playground-pin:demo-1",
+    keepAlive: true,
+  });
+  destroyLinkSidePanelIfPin("playground-pin:demo-1");
+  assert.equal(getLinkSidePanel(), null);
+});

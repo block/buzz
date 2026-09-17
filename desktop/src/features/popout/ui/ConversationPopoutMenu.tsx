@@ -5,7 +5,7 @@ import {
   openPopoutWindow,
   popoutErrorMessage,
 } from "@/features/popout/lib/popoutWindow";
-import { listPlaygroundSessions } from "@/features/playground/lib/sessions";
+import { listConversationPlaygroundPins } from "@/features/playground/lib/conversationPins";
 import type { PlaygroundCard } from "@/features/playground/lib/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -24,7 +24,7 @@ import {
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
 
-function sessionAsCard(session: {
+function pinAsCard(session: {
   sid: string;
   name: string;
   url: string;
@@ -44,6 +44,12 @@ function sessionAsCard(session: {
   };
 }
 
+function playgroundPinsScopeKey(channelId: string, threadId?: string | null): string {
+  const trimmedThread = threadId?.trim() ?? "";
+  if (trimmedThread) return `thread:${trimmedThread}`;
+  return `channel:${channelId}`;
+}
+
 export function ConversationPopoutMenu({
   channelId,
   threadId,
@@ -51,7 +57,9 @@ export function ConversationPopoutMenu({
   channelId: string;
   threadId?: string | null;
 }) {
-  const playgrounds = listPlaygroundSessions().map(sessionAsCard);
+  const playgrounds = listConversationPlaygroundPins(
+    playgroundPinsScopeKey(channelId, threadId),
+  ).map(pinAsCard);
 
   async function openPlain() {
     try {

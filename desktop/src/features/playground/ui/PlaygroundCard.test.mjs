@@ -48,6 +48,10 @@ afterEach(async () => {
     "@/features/link-panel/lib/linkSidePanelStore.ts"
   );
   resetLinkSidePanelStore();
+  const { resetConversationPlaygroundPins } = await import(
+    "../lib/conversationPins.ts"
+  );
+  resetConversationPlaygroundPins();
   globalThis.localStorage?.clear();
   delete globalThis.__BUZZ_PLAYGROUND_PROBE__;
   delete globalThis.__BUZZ_PLAYGROUND_OPEN_URL__;
@@ -74,15 +78,15 @@ async function renderCard(cardData = card) {
   const rootRoute = createRootRoute({
     component: Outlet,
   });
-  const indexRoute = createRoute({
+  const channelRoute = createRoute({
     getParentRoute: () => rootRoute,
-    path: "/",
+    path: "/channels/$channelId",
     component: () => createElement(PlaygroundCard, { card: cardData }),
   });
   const router = createRouter({
     defaultPendingMs: 0,
-    routeTree: rootRoute.addChildren([indexRoute]),
-    history: createMemoryHistory({ initialEntries: ["/"] }),
+    routeTree: rootRoute.addChildren([channelRoute]),
+    history: createMemoryHistory({ initialEntries: ["/channels/chan-1"] }),
   });
   await router.load();
   render(createElement(RouterProvider, { router }));
@@ -142,9 +146,14 @@ test("Open probes first: down means toast and no ghost row", async () => {
   );
 });
 
-test("Pin on a new sid probes and creates a session", async () => {
+test("Pin on a new sid probes and adds a conversation-scoped header pin", async () => {
   const { fireEvent, waitFor } = await import("@testing-library/react");
-  const { listPlaygroundSessions } = await import("../lib/sessions.ts");
+  const { listConversationPlaygroundPins } = await import(
+    "../lib/conversationPins.ts"
+  );
+  const { getActivePlaygroundSid, listPlaygroundSessions } = await import(
+    "../lib/sessions.ts"
+  );
   const screen = await renderCard();
   let probed = 0;
   globalThis.__BUZZ_PLAYGROUND_PROBE__ = () => {
@@ -153,24 +162,27 @@ test("Pin on a new sid probes and creates a session", async () => {
   };
 
   await fireEvent.click(screen.getByTestId("playground-card-pin-action"));
-  await waitFor(() => assert.equal(listPlaygroundSessions().length, 1));
+  await waitFor(() =>
+    assert.equal(listConversationPlaygroundPins("channel:chan-1").length, 1),
+  );
+  assert.equal(listConversationPlaygroundPins("channel:chan-1")[0]?.name, "Demo");
+  // Pin must not open the overlay / left-rail session list.
+  assert.equal(listPlaygroundSessions().length, 0);
+  assert.equal(getActivePlaygroundSid(), null);
   assert.equal(probed, 1);
 });
 
-test("Pin on an existing sid shows it and does not probe again", async () => {
+test("Pin on an existing conversation pin reopens the header menu without probing", async () => {
   const { fireEvent, waitFor } = await import("@testing-library/react");
   const {
-    addPlaygroundSession,
-    dismissPlayground,
-    getActivePlaygroundSid,
-    listPlaygroundSessions,
-  } = await import("../lib/sessions.ts");
+    getConversationPlaygroundPinsMenuOpenRequest,
+    listConversationPlaygroundPins,
+    pinPlaygroundToConversation,
+  } = await import("../lib/conversationPins.ts");
   const screen = await renderCard();
 
-  addPlaygroundSession(card);
-  dismissPlayground();
-  assert.equal(getActivePlaygroundSid(), null);
-  assert.equal(listPlaygroundSessions().length, 1);
+  pinPlaygroundToConversation("channel:chan-1", card);
+  assert.equal(listConversationPlaygroundPins("channel:chan-1").length, 1);
 
   let probed = 0;
   globalThis.__BUZZ_PLAYGROUND_PROBE__ = () => {
@@ -178,9 +190,15 @@ test("Pin on an existing sid shows it and does not probe again", async () => {
     return { up: true, status: 200 };
   };
 
+  const before = getConversationPlaygroundPinsMenuOpenRequest();
   await fireEvent.click(screen.getByTestId("playground-card-pin-action"));
-  await waitFor(() => assert.equal(getActivePlaygroundSid(), "demo-1"));
-  assert.equal(listPlaygroundSessions().length, 1);
+  await waitFor(() => {
+    const req = getConversationPlaygroundPinsMenuOpenRequest();
+    assert.ok(req);
+    assert.equal(req.scopeKey, "channel:chan-1");
+    assert.notEqual(req.nonce, before?.nonce ?? -1);
+  });
+  assert.equal(listConversationPlaygroundPins("channel:chan-1").length, 1);
   assert.equal(probed, 0);
 });
 

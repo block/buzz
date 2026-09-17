@@ -13,7 +13,13 @@ import {
 import {
   playgroundConversationFromRoute,
   playgroundConversationHasOpenThread,
+  playgroundPinScopeKey,
 } from "@/features/playground/lib/conversation";
+import {
+  hasConversationPlaygroundPin,
+  pinPlaygroundToConversation,
+  requestOpenConversationPlaygroundPinsMenu,
+} from "@/features/playground/lib/conversationPins";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import {
@@ -25,12 +31,7 @@ import {
 } from "@/shared/ui/attachment";
 
 import { probePlaygroundUrl } from "../lib/probe";
-import {
-  addPlaygroundSession,
-  hasPlaygroundSession,
-  notePlaygroundCard,
-  showPlaygroundSession,
-} from "../lib/sessions";
+import { notePlaygroundCard } from "../lib/sessions";
 import {
   playgroundPin,
   type PlaygroundCard as PlaygroundCardData,
@@ -100,15 +101,23 @@ export function PlaygroundCard({ card }: { card: PlaygroundCardData }) {
       void openPlaygroundInBrowser(card.url);
       return;
     }
-    if (hasPlaygroundSession(card.sid)) {
-      showPlaygroundSession(card.sid);
+    if (!conversation) {
+      toast.error("Open a channel or thread to pin a playground.");
+      return;
+    }
+    const scopeKey = playgroundPinScopeKey(conversation);
+    if (hasConversationPlaygroundPin(scopeKey, card.sid)) {
+      requestOpenConversationPlaygroundPinsMenu(scopeKey);
       return;
     }
     setBusy(true);
     void (async () => {
       try {
         if (!(await ensureUp())) return;
-        addPlaygroundSession(card);
+        // Pin only adds to this conversation's header list and opens the
+        // dropdown — it does not open the slide-out by itself.
+        pinPlaygroundToConversation(scopeKey, card);
+        requestOpenConversationPlaygroundPinsMenu(scopeKey);
       } catch (error) {
         toast.error(popoutErrorMessage(error, "Playground is down."));
       } finally {

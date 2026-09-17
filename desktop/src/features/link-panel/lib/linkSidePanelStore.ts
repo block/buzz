@@ -1,5 +1,8 @@
 import { parkPlaygroundHost } from "@/features/playground/lib/sessions";
-import { closePinWebview } from "@/features/pinned-sites/lib/pinWebview";
+import {
+  closePinWebview,
+  hidePinWebview,
+} from "@/features/pinned-sites/lib/pinWebview";
 
 /** Stable pin-webview id for the channel/thread link slide-out. */
 export const LINK_SIDE_PANEL_PIN_ID = "hula-link-side-panel";
@@ -8,6 +11,19 @@ export type LinkSidePanelState = {
   expanded: boolean;
   title: string;
   url: string;
+  /** Native pin webview id. Defaults to {@link LINK_SIDE_PANEL_PIN_ID}. */
+  pinId: string;
+  /**
+   * When true, closing the panel hides the native webview instead of
+   * destroying it so a conversation playground pin can resume later.
+   */
+  keepAlive: boolean;
+};
+
+export type OpenLinkSidePanelOptions = {
+  title?: string;
+  pinId?: string;
+  keepAlive?: boolean;
 };
 
 type Store = {
@@ -37,6 +53,14 @@ function titleFromUrl(url: string): string {
     return parsed.hostname.replace(/^www\./, "") || "Link";
   } catch {
     return "Link";
+  }
+}
+
+function teardownPanelWebview(panel: LinkSidePanelState): void {
+  if (panel.keepAlive) {
+    void hidePinWebview(panel.pinId);
+  } else {
+    void closePinWebview(panel.pinId);
   }
 }
 
@@ -70,15 +94,37 @@ export function getLinkSidePanel(): LinkSidePanelState | null {
  * channel/thread. Parks playground overlay/embed hosts first so native
  * children cannot strand over the conversation (same class of teardown as
  * PRs #53/#54).
+ *
+ * Pass `keepAlive` + a stable `pinId` for conversation playground pins so
+ * closing the panel parks the webview instead of destroying it.
  */
-export function openLinkSidePanel(url: string): boolean {
+export function openLinkSidePanel(
+  url: string,
+  options?: OpenLinkSidePanelOptions,
+): boolean {
   const trimmed = url.trim();
   if (!isLinkSidePanelUrl(trimmed)) return false;
   parkPlaygroundHost();
+
+  const nextPinId = options?.pinId?.trim() || LINK_SIDE_PANEL_PIN_ID;
+  const nextKeepAlive = Boolean(options?.keepAlive);
+  const title = options?.title?.trim() || titleFromUrl(trimmed);
+
+  const previous = store.panel;
+  if (
+    previous &&
+    (previous.pinId !== nextPinId || previous.keepAlive !== nextKeepAlive)
+  ) {
+    // Switching targets: park or destroy the outgoing webview first.
+    teardownPanelWebview(previous);
+  }
+
   store.panel = {
     expanded: false,
-    title: titleFromUrl(trimmed),
+    title,
     url: trimmed,
+    pinId: nextPinId,
+    keepAlive: nextKeepAlive,
   };
   emit();
   return true;
@@ -97,17 +143,30 @@ export function toggleLinkSidePanelExpanded(): void {
 }
 
 /**
- * Close the link slide-out and destroy its native pin webview so nothing
- * remains painted over the channel.
+ * Close the link slide-out. Keep-alive playground pins hide their native
+ * webview; ordinary link opens destroy {@link LINK_SIDE_PANEL_PIN_ID}.
  */
 export function closeLinkSidePanel(): void {
   if (!store.panel) {
     void closePinWebview(LINK_SIDE_PANEL_PIN_ID);
     return;
   }
+  const panel = store.panel;
   store.panel = null;
   emit();
-  void closePinWebview(LINK_SIDE_PANEL_PIN_ID);
+  teardownPanelWebview(panel);
+}
+
+/**
+ * Destroy a keep-alive (or ordinary) link webview and clear the slide-out when
+ * it was showing that pin — used when unpinning a conversation playground.
+ */
+export function destroyLinkSidePanelIfPin(pinId: string): void {
+  if (store.panel?.pinId === pinId) {
+    store.panel = null;
+    emit();
+  }
+  void closePinWebview(pinId);
 }
 
 /** Test helper — clear listeners and state without native teardown. */

@@ -17,6 +17,7 @@ import {
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { ConversationPopoutMenu } from "@/features/popout/ui/ConversationPopoutMenu";
+import { ConversationPlaygroundPinsMenu } from "@/features/playground/ui/ConversationPlaygroundPinsMenu";
 import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
 import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
@@ -132,7 +133,10 @@ export function ChannelScreenHeader({
     activeChannel || terminalButton || channelActions ? (
       <div className="flex items-center gap-1">
         {activeChannel ? (
-          <ConversationPopoutMenu channelId={activeChannel.id} />
+          <>
+            <ConversationPlaygroundPinsMenu channelId={activeChannel.id} />
+            <ConversationPopoutMenu channelId={activeChannel.id} />
+          </>
         ) : null}
         {terminalButton}
         {channelActions}

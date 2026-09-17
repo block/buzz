@@ -3,6 +3,7 @@ import { ArrowDown } from "lucide-react";
 
 import { usePopoutThreadOnlyLayout } from "@/features/popout/lib/popoutLayout";
 import { ConversationPopoutMenu } from "@/features/popout/ui/ConversationPopoutMenu";
+import { ConversationPlaygroundPinsMenu } from "@/features/playground/ui/ConversationPlaygroundPinsMenu";
 
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
 import {
@@ -919,10 +920,16 @@ export function MessageThreadPanel({
               headerTitleAriaLabel={headerTitleAriaLabel}
               headerTrailing={
                 channelId ? (
-                  <ConversationPopoutMenu
-                    channelId={channelId}
-                    threadId={threadHeadId}
-                  />
+                  <>
+                    <ConversationPlaygroundPinsMenu
+                      channelId={channelId}
+                      threadId={threadHeadId}
+                    />
+                    <ConversationPopoutMenu
+                      channelId={channelId}
+                      threadId={threadHeadId}
+                    />
+                  </>
                 ) : null
               }
               isFocusMode={isFocusMode}

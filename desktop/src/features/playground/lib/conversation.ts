@@ -41,3 +41,16 @@ export function playgroundConversationHasOpenThread(
 ): boolean {
   return Boolean(conversation?.draftKey.startsWith("thread:"));
 }
+
+/**
+ * Scope key for header playground pins. Channel view → that channel;
+ * thread view → that thread only (not the parent channel).
+ */
+export function playgroundPinScopeKey(
+  conversation: PlaygroundConversation,
+): string {
+  return conversation.draftKey.startsWith("thread:")
+    ? conversation.draftKey
+    : `channel:${conversation.channelId}`;
+}
+

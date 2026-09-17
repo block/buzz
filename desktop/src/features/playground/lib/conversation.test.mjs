@@ -54,3 +54,18 @@ test("screenshot is absent without a channel and present with one", () => {
   assert.equal(playgroundConversationHasOpenThread(thread), true);
   assert.equal(playgroundConversationHasOpenThread(null), false);
 });
+
+test("playgroundPinScopeKey distinguishes channel vs thread", async () => {
+  const { playgroundPinScopeKey } = await import("./conversation.ts");
+  assert.equal(
+    playgroundPinScopeKey({ channelId: "chan-a", draftKey: "chan-a" }),
+    "channel:chan-a",
+  );
+  assert.equal(
+    playgroundPinScopeKey({
+      channelId: "chan-a",
+      draftKey: "thread:root-1",
+    }),
+    "thread:root-1",
+  );
+});

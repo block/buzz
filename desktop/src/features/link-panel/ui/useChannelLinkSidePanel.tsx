@@ -67,7 +67,13 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
   return {
     idleAuxiliaryHeaderActions: headerActions,
     idleAuxiliaryOverridesThread: panel.expanded,
-    idleAuxiliaryPanel: <LinkSidePanelSurface url={panel.url} />,
+    idleAuxiliaryPanel: (
+      <LinkSidePanelSurface
+        keepAlive={panel.keepAlive}
+        pinId={panel.pinId}
+        url={panel.url}
+      />
+    ),
     idleAuxiliaryTitle: panel.title,
     onCloseIdleAuxiliaryPanel: closeLinkSidePanel,
     open: true,

@@ -3,6 +3,7 @@ import * as React from "react";
 
 import {
   closePinWebview,
+  hidePinWebview,
   PIN_WEBVIEW_RESTORE_EVENT,
   pinWebviewBoundsAreUsable,
   showPinWebview,
@@ -30,7 +31,15 @@ function readBounds(element: HTMLElement): PinWebviewBounds {
  * showPinWebview (hide-epoch + per-pin show generation) so remounts do not
  * blank the first open (PRs #53/#54 patterns).
  */
-export function LinkSidePanelSurface({ url }: { url: string }) {
+export function LinkSidePanelSurface({
+  keepAlive = false,
+  pinId = LINK_SIDE_PANEL_PIN_ID,
+  url,
+}: {
+  keepAlive?: boolean;
+  pinId?: string;
+  url: string;
+}) {
   const hostRef = React.useRef<HTMLDivElement | null>(null);
   const native = isTauri() || import.meta.env.MODE === "e2e";
   const [loadError, setLoadError] = React.useState<string | null>(null);
@@ -40,9 +49,7 @@ export function LinkSidePanelSurface({ url }: { url: string }) {
     const host = hostRef.current;
     if (!host) return;
     let cancelled = false;
-    const pinId = LINK_SIDE_PANEL_PIN_ID;
-
-    const openOrResize = () => {
+        const openOrResize = () => {
       if (cancelled || !hostRef.current) return;
       if (isNativeWebviewModalParked()) return;
       const bounds = readBounds(hostRef.current);
@@ -84,11 +91,15 @@ export function LinkSidePanelSurface({ url }: { url: string }) {
       observer.disconnect();
       window.removeEventListener(PIN_WEBVIEW_RESTORE_EVENT, restore);
       void unlistenLoad.then((stop) => stop());
-      // Destroy on unmount — hide alone can leave a parked child that a late
-      // show resurrects over the channel thread.
-      void closePinWebview(pinId);
+      // Ordinary link opens destroy on unmount. Keep-alive playground pins
+      // only hide so the session survives until the header X unpins.
+      if (keepAlive) {
+        void hidePinWebview(pinId);
+      } else {
+        void closePinWebview(pinId);
+      }
     };
-  }, [native, url]);
+  }, [keepAlive, native, pinId, url]);
 
   return (
     <div
