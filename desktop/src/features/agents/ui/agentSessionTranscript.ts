@@ -1141,6 +1141,26 @@ export function processTranscriptEvent(
         );
       }
     }
+  } else if (event.kind === "desktop_lost_contact") {
+    // Desktop-synthesized (see activeAgentTurnsStore.ts's emitLostContactEvent)
+    // — not a wire frame from the harness, so it gets its own honest kind
+    // rather than posing as "acp_read". Routes to the SAME neutral
+    // status-card rendering as describeFreeformStatus above (no new render
+    // class): a plain title/text lifecycle item, styled "status" not "error".
+    const payload = asRecord(event.payload);
+    const status = describeFreeformStatus(payload);
+    if (status) {
+      upsertLifecycleItem(
+        d,
+        `status:${ch}:${event.turnId ?? event.seq}:${status.statusType}`,
+        "status",
+        status.title,
+        status.text,
+        event.timestamp,
+        ctx,
+        status.statusType,
+      );
+    }
   }
 
   if (!d.changed && d.latestSessionId === state.latestSessionId) {

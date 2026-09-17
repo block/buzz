@@ -22,8 +22,10 @@ import {
   subscribeAgentManagementRequests,
   resetAgentObserverStore,
   _testProcessLiveObserverEvents,
+  _testSetConnectionState,
 } from "./observerRelayStore.ts";
 import { formatElapsed } from "./ui/agentSessionUtils.ts";
+import { OVERRIDES_KEY } from "../../shared/features/store.ts";
 
 const AGENT =
   "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
@@ -2448,5 +2450,477 @@ describe("clearActiveTurnsForAgent", () => {
     );
 
     mock.timers.reset();
+  });
+});
+
+/**
+ * agentActivityLostContact preview flag: fixes the solo-turn 3-minute pause
+ * bug (Part A, shouldPausePrune) and replaces pruneExpired's bare
+ * `agentTurns.delete(turnId)` with a neutral synthetic "Lost contact" feed
+ * item (Part B). Flag OFF must reproduce today's behavior byte-for-byte —
+ * that is the rollback plan (see the "flag off" describe block below).
+ */
+describe("agentActivityLostContact: solo-turn pause fix + Lost contact synthetic item", () => {
+  const EPOCH = Date.parse("2024-01-01T00:00:00Z");
+  const at = (ms) => new Date(EPOCH + ms).toISOString();
+  const PRUNE_PAUSE_MAX_MS = 3 * 60_000;
+  const LOST_CONTACT_TITLE = "Lost contact";
+  const LOST_CONTACT_TEXT =
+    "Activity could no longer be observed; completion is unknown.";
+
+  function installFlagOverride(enabled) {
+    const values = new Map([
+      [OVERRIDES_KEY, JSON.stringify({ agentActivityLostContact: enabled })],
+    ]);
+    globalThis.window = {
+      localStorage: {
+        getItem: (key) => values.get(key) ?? null,
+        setItem: (key, next) => values.set(key, String(next)),
+      },
+    };
+  }
+
+  function lostContactItems(agent) {
+    return getAgentTranscript(agent).filter(
+      (item) => item.type === "lifecycle" && item.title === LOST_CONTACT_TITLE,
+    );
+  }
+
+  let unsubscribe;
+
+  beforeEach(() => {
+    resetActiveAgentTurnsStore();
+    resetAgentObserverStore();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: EPOCH });
+    unsubscribe = subscribeActiveAgentTurns(() => {});
+  });
+
+  afterEach(() => {
+    unsubscribe();
+    mock.timers.reset();
+    delete globalThis.window;
+    resetAgentObserverStore();
+  });
+
+  describe("flag on", () => {
+    beforeEach(() => {
+      installFlagOverride(true);
+      _testSetConnectionState("idle");
+    });
+
+    it("1. solo kill -9: drops the badge at the normal ~25s bound (not 3 minutes) and emits Lost contact", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+
+      mock.timers.tick(30_000);
+
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        0,
+        "a solo turn with no fresh siblings and no independent outage evidence must prune at the normal bound",
+      );
+
+      const [item] = lostContactItems(AGENT);
+      assert.ok(item, "a Lost contact item must be emitted");
+      assert.equal(item.renderClass, "status");
+      assert.equal(item.text, LOST_CONTACT_TEXT);
+      assert.equal(item.channelId, "c1");
+      assert.equal(item.turnId, "t1");
+
+      const rawEvents = getAgentObserverSnapshot(AGENT, true).events;
+      const synthetic = rawEvents.find(
+        (e) => e.kind === "desktop_lost_contact",
+      );
+      assert.ok(
+        synthetic,
+        "the synthetic event must be present in the raw feed",
+      );
+      assert.ok(
+        synthetic.seq < 0,
+        "the synthetic event must use a reserved negative seq",
+      );
+    });
+
+    it("2a. multi-turn: two siblings going stale together are legitimately paused, unlike a solo turn", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+        makeEvent({ seq: 2, turnId: "t2", channelId: "c2", timestamp: at(0) }),
+      ]);
+
+      // Past the normal 25s bound: both survive because a real sibling turn
+      // (not just each turn's own inactivity) corroborates the outage.
+      mock.timers.tick(30_000);
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        2,
+        "two turns going stale together are independently corroborated, so the pause is legitimate",
+      );
+      assert.equal(lostContactItems(AGENT).length, 0);
+
+      // Past the bounded 3-minute backstop: the pause is bounded, so both
+      // must now prune and both must emit Lost contact — same standard as
+      // the normal-bound path.
+      mock.timers.tick(150_000);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+      assert.equal(
+        lostContactItems(AGENT).length,
+        2,
+        "both stale siblings must emit Lost contact at the backstop",
+      );
+    });
+
+    it("2b. multi-turn: a lone stale turn among fresh siblings is not shielded — prunes normally, exactly like the solo case", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          turnId: "dead",
+          channelId: "c1",
+          timestamp: at(0),
+        }),
+        makeEvent({
+          seq: 2,
+          turnId: "live",
+          channelId: "c2",
+          timestamp: at(0),
+        }),
+      ]);
+
+      for (let t = 10_000; t <= 30_000; t += 10_000) {
+        mock.timers.tick(10_000);
+        syncAgentTurnsFromEvents(AGENT, [
+          makeEvent({
+            seq: 2 + t / 10_000,
+            kind: "turn_liveness",
+            turnId: "live",
+            channelId: "c2",
+            timestamp: at(t),
+          }),
+        ]);
+      }
+
+      const channels = new Set(
+        getActiveTurnsForAgent(AGENT).map((s) => s.channelId),
+      );
+      assert.ok(
+        !channels.has("c1"),
+        "the dead turn must prune at the normal bound",
+      );
+      assert.ok(channels.has("c2"), "the fresh sibling must survive untouched");
+
+      const items = lostContactItems(AGENT);
+      assert.equal(
+        items.length,
+        1,
+        "only the genuinely dead turn emits Lost contact",
+      );
+      assert.equal(items[0].turnId, "dead");
+    });
+
+    it("3. recovery: independent outage evidence recovering before threshold produces no synthetic item", () => {
+      _testSetConnectionState("error");
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+
+      mock.timers.tick(30_000);
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        1,
+        "paused while independent outage evidence (relay connection) is current",
+      );
+
+      _testSetConnectionState("open");
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(30_000),
+        }),
+      ]);
+
+      mock.timers.tick(15_000);
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        1,
+        "a refreshed turn recovers and resumes normally",
+      );
+      assert.equal(
+        lostContactItems(AGENT).length,
+        0,
+        "recovery before pruning must not emit a synthetic item",
+      );
+    });
+
+    it("4. backstop expiry: a persistent outage exceeding the 3-minute cap emits Lost contact", () => {
+      _testSetConnectionState("error");
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+
+      mock.timers.tick(30_000);
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        1,
+        "paused during the bounded window",
+      );
+
+      mock.timers.tick(150_000);
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        0,
+        "the backstop must still bound the pause even under persistent independent evidence",
+      );
+      assert.equal(
+        lostContactItems(AGENT).length,
+        1,
+        "backstop-expiry prune must emit Lost contact, same as the normal-bound path",
+      );
+    });
+
+    it("5. a late turn_liveness arriving after prune/tombstone does not resurrect the turn", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+      mock.timers.tick(30_000);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+
+      // A wire-delayed liveness frame from before the kill, carrying a
+      // timestamp older than the synthetic tombstone.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(10_000),
+        }),
+      ]);
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        0,
+        "a late liveness frame timestamped before the synthetic tombstone must not resurrect the pruned turn",
+      );
+    });
+
+    it("6. synthetic seq: two synthetic events for one agent get distinct decrementing negative seqs, survive dedup, and sort correctly", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+      mock.timers.tick(30_000);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          turnId: "t2",
+          channelId: "c2",
+          timestamp: at(30_000),
+        }),
+      ]);
+      mock.timers.tick(30_000);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+
+      const events = getAgentObserverSnapshot(AGENT, true).events;
+      const synthetics = events
+        .filter((e) => e.kind === "desktop_lost_contact")
+        .sort((a, b) => a.seq - b.seq);
+      assert.equal(
+        synthetics.length,
+        2,
+        "both synthetic events must survive appendAgentEvents dedup",
+      );
+      assert.deepEqual(
+        synthetics.map((e) => e.seq),
+        [-2, -1],
+        "synthetic seqs must be distinct and strictly decrementing, starting at -1",
+      );
+
+      for (let i = 1; i < events.length; i++) {
+        assert.ok(
+          Date.parse(events[i].timestamp) >=
+            Date.parse(events[i - 1].timestamp),
+          "the raw event journal must stay ordered by timestamp, synthetic events included",
+        );
+      }
+    });
+
+    it("7. panel close/reopen: the Lost contact item persists across re-reads of the module-level store", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+      mock.timers.tick(30_000);
+
+      const firstRead = getAgentTranscript(AGENT);
+      assert.ok(
+        firstRead.some(
+          (i) => i.type === "lifecycle" && i.title === LOST_CONTACT_TITLE,
+        ),
+        "the Lost contact item must be present on first read",
+      );
+
+      // Simulate a panel close/reopen: a fresh read from the module-level
+      // store with no reset and no remount-driven state.
+      const secondRead = getAgentTranscript(AGENT);
+      assert.equal(
+        secondRead,
+        firstRead,
+        "the module-level transcript reference is stable across reads",
+      );
+      assert.ok(
+        secondRead.some(
+          (i) => i.type === "lifecycle" && i.title === LOST_CONTACT_TITLE,
+        ),
+        "the synthetic item must persist across a simulated panel remount",
+      );
+    });
+
+    it("9. clock skew: a synthetic item generated while the agent-host clock leads the desktop clock still sorts last", () => {
+      const SKEW = 60 * 60_000; // agent host clock is 1 hour ahead of desktop
+      const agentTs = (desktopMs) =>
+        new Date(EPOCH + desktopMs + SKEW).toISOString();
+      const startEvent = makeEvent({
+        seq: 1,
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: agentTs(0),
+      });
+
+      // Feed the real event through BOTH stores: syncAgentTurnsFromEvents
+      // drives the liveness/prune state under test, and injectObserverEventsForE2E
+      // (the same appendAgentEvents ingestion path) puts it in the raw feed
+      // so it can be compared against the synthetic event's ordering below.
+      syncAgentTurnsFromEvents(AGENT, [startEvent]);
+      injectObserverEventsForE2E(AGENT, [startEvent]);
+
+      mock.timers.tick(30_000);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+
+      const events = getAgentObserverSnapshot(AGENT, true).events;
+      const lastReal = events.filter((e) => e.seq > 0).at(-1);
+      const synthetic = events.find((e) => e.kind === "desktop_lost_contact");
+      assert.ok(lastReal && synthetic);
+      assert.ok(
+        Date.parse(synthetic.timestamp) >= Date.parse(lastReal.timestamp),
+        "the synthetic timestamp must sort at/after the last real event despite the agent-host clock running ahead",
+      );
+      assert.equal(
+        events.at(-1).seq,
+        synthetic.seq,
+        "the synthetic event must be the newest entry in the sorted raw journal",
+      );
+    });
+
+    it("desktop_lost_contact renders the neutral status card; a real acp_read event's rendering is unchanged", () => {
+      // A real acp_read freeform-status frame, exercised through the exact
+      // same rendering path, to prove the new kind is additive and does not
+      // alter existing acp_read/acp_write classification.
+      injectObserverEventsForE2E(AGENT_2, [
+        makeEvent({
+          seq: 1,
+          kind: "acp_read",
+          turnId: "real-t1",
+          channelId: "real-c1",
+          timestamp: at(0),
+          payload: { title: "Some status", text: "Some detail" },
+        }),
+      ]);
+      const realItem = getAgentTranscript(AGENT_2).find(
+        (i) => i.type === "lifecycle" && i.title === "Some status",
+      );
+      assert.ok(
+        realItem,
+        "a real acp_read freeform-status frame must still render",
+      );
+      assert.equal(realItem.renderClass, "status");
+      assert.equal(realItem.text, "Some detail");
+
+      // A real acp_read/turn_liveness frame must still refresh a tracked
+      // turn's liveness — unaffected by the new kind.
+      syncAgentTurnsFromEvents(AGENT_2, [
+        makeEvent({
+          seq: 2,
+          turnId: "live-t1",
+          channelId: "live-c1",
+          timestamp: at(0),
+        }),
+      ]);
+      mock.timers.tick(10_000);
+      syncAgentTurnsFromEvents(AGENT_2, [
+        makeEvent({
+          seq: 3,
+          kind: "acp_read",
+          turnId: "live-t1",
+          channelId: "live-c1",
+          timestamp: at(10_000),
+        }),
+      ]);
+      mock.timers.tick(20_000);
+      assert.ok(
+        new Set(getActiveTurnsForAgent(AGENT_2).map((s) => s.channelId)).has(
+          "live-c1",
+        ),
+        "a real acp_read must still refresh liveness exactly as before",
+      );
+
+      // The synthetic desktop_lost_contact kind renders through its own
+      // dedicated branch — same copy, same "status" card.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+      mock.timers.tick(30_000);
+      const [syntheticItem] = lostContactItems(AGENT);
+      assert.ok(syntheticItem);
+      assert.equal(syntheticItem.renderClass, "status");
+      assert.equal(syntheticItem.text, LOST_CONTACT_TEXT);
+    });
+  });
+
+  describe("flag off (rollback)", () => {
+    it("8. flag off: solo turn pauses the full 3 minutes and prunes silently, exactly like today", () => {
+      // No override installed — matches the production default (manifest
+      // entry has no defaultEnabled, which resolves to false).
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+
+      mock.timers.tick(30_000);
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        1,
+        "flag off: a solo turn must still be paused past the normal bound, exactly like today",
+      );
+
+      mock.timers.tick(150_000);
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        0,
+        "flag off: a solo turn must prune only after the 3-minute backstop, exactly like today",
+      );
+
+      assert.equal(
+        lostContactItems(AGENT).length,
+        0,
+        "flag off: no synthetic item may be emitted — silent delete, exactly like today",
+      );
+      const rawEvents = getAgentObserverSnapshot(AGENT, true).events;
+      assert.ok(
+        rawEvents.every((e) => e.seq >= 0),
+        "flag off: no synthetic (negative-seq) event may be injected",
+      );
+    });
+
+    it("8b. flag off with an explicit false override: identical to the unset default", () => {
+      installFlagOverride(false);
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+
+      mock.timers.tick(PRUNE_PAUSE_MAX_MS);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+      assert.equal(lostContactItems(AGENT).length, 0);
+    });
   });
 });

@@ -30,6 +30,12 @@
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
       "platforms": ["desktop"]
+    },
+    {
+      "id": "agentActivityLostContact",
+      "name": "Agent activity: Lost contact",
+      "description": "Fix the solo-turn 3-minute badge pause and surface a neutral \"Lost contact\" feed item when a turn is pruned instead of silently deleting it",
+      "platforms": ["desktop"]
     }
   ]
 }

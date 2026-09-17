@@ -729,6 +729,17 @@ export function subscribeControlResults(
   };
 }
 
+/**
+ * Read the current observer relay connection state. Unlike per-agent state,
+ * the relay connection is a single shared websocket, so this is not keyed by
+ * agent. Exposed so other stores (activeAgentTurnsStore's prune-pause logic)
+ * can treat a currently-disconnected relay as independent evidence of a
+ * broad outage, without re-deriving connection tracking of their own.
+ */
+export function getObserverConnectionState(): ConnectionState {
+  return connectionState;
+}
+
 export function getAgentObserverSnapshot(
   agentPubkey?: string | null,
   // `_enabled` previously gated store reads — now only gates the relay
@@ -967,6 +978,14 @@ export function _testProcessLiveObserverEvents(
   events: readonly ObserverEvent[],
 ): void {
   processLiveObserverEvents(agentPubkey, events);
+}
+
+/**
+ * Test-only: force the module-level relay connection state without driving a
+ * real subscription. Only call from tests — never from production code.
+ */
+export function _testSetConnectionState(state: ConnectionState): void {
+  setConnectionState(state);
 }
 
 /**

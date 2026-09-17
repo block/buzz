@@ -3,7 +3,9 @@ import * as React from "react";
 import {
   subscribeAgentObserverStore,
   getAgentObserverSnapshot,
+  getObserverConnectionState,
   compareObserverEvents,
+  syncAgentObserverEvents,
   type AgentObserverStoreUpdate,
 } from "@/features/agents/observerRelayStore";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -11,7 +13,31 @@ import {
   isDocumentVisible,
   subscribeDocumentVisibility,
 } from "@/shared/lib/useDocumentVisible";
+import { getFeature, getOverrides, resolveEnabled } from "@/shared/features";
 import type { ObserverEvent } from "./ui/agentSessionTypes";
+
+// Preview-feature gate for the solo-turn pause fix + "Lost contact" synthetic
+// feed item (see shouldPausePrune / pruneExpired below). Read directly from
+// the manifest/overrides rather than the useFeatureEnabled() hook because
+// this module's prune sweep runs on a setInterval outside any component tree.
+//
+// Deliberately fails CLOSED (disabled) if the manifest entry is ever missing,
+// unlike useFeatureEnabled's fail-open convention for graduated/stable
+// features. That convention exists so a feature that graduated out of the
+// manifest keeps rendering; here, "missing from the manifest" must never
+// silently switch on a change to prune/liveness behavior. Closed == today's
+// behavior == the safe default.
+const LOST_CONTACT_FEATURE_ID = "agentActivityLostContact";
+
+function isLostContactFeatureEnabled(): boolean {
+  const feature = getFeature(LOST_CONTACT_FEATURE_ID);
+  if (!feature) return false;
+  return resolveEnabled(
+    LOST_CONTACT_FEATURE_ID,
+    getOverrides(),
+    feature.defaultEnabled,
+  );
+}
 
 /** Harness emits turn_liveness every ~10s (BUZZ_ACP_TURN_LIVENESS_SECS). */
 const LIVENESS_INTERVAL_MS = 10_000;
@@ -56,6 +82,11 @@ type ActiveTurn = {
   channelId: string;
   startedAt: number;
   lastActivityAt: number;
+  // Carried through from the event that (re)started this turn so a later
+  // synthetic "Lost contact" item (see emitLostContactEvent) can be stamped
+  // with the same identity a real terminal event for this turn would carry.
+  sessionId: string | null;
+  agentIndex: number | null;
 };
 
 /** One working channel surfaced to the UI, anchored to the desktop clock. */
@@ -179,6 +210,8 @@ function startTurn(
   channelId: string,
   turnId: string,
   timestamp: string,
+  sessionId: string | null = null,
+  agentIndex: number | null = null,
 ) {
   const key = normalizePubkey(agentPubkey);
   let agentTurns = activeTurnsByAgent.get(key);
@@ -208,6 +241,8 @@ function startTurn(
     channelId,
     startedAt,
     lastActivityAt: Date.now(),
+    sessionId,
+    agentIndex,
   });
   invalidateCache(key);
 }
@@ -254,7 +289,14 @@ function resurrectTurn(agentPubkey: string, event: ObserverEvent): boolean {
     frameAt !== null && startedAtMs !== null && startedAtMs <= frameAt
       ? startedAt
       : event.timestamp;
-  startTurn(agentPubkey, event.channelId, event.turnId, safeStartedAt);
+  startTurn(
+    agentPubkey,
+    event.channelId,
+    event.turnId,
+    safeStartedAt,
+    event.sessionId ?? null,
+    event.agentIndex ?? null,
+  );
   return true;
 }
 
@@ -314,8 +356,39 @@ function endTurn(
   invalidateCache(key);
 }
 
+/**
+ * Independent evidence of a CURRENT, per-agent broad outage — i.e. evidence
+ * that does not come from the very turn(s) whose staleness we're judging.
+ *
+ * - Two or more tracked turns for the same agent is a real second data point:
+ *   if they are ALL stale together (which is what shouldPausePrune's
+ *   maxActivity check establishes), that correlation across independent
+ *   turns is itself the signal a lone turn cannot manufacture on its own.
+ * - With only one tracked turn, there is no sibling to corroborate — the
+ *   only independent signal left is the observer relay connection itself
+ *   being down. "closed"/"error" are treated as outage evidence; "idle"
+ *   (never subscribed — the default in unit tests and before any managed
+ *   agent connects) and "connecting" (routine initial handshake) are not,
+ *   since neither implies a connection that WAS working just went dark.
+ */
+function hasIndependentPauseEvidence(agentTurns: Map<string, ActiveTurn>) {
+  if (agentTurns.size >= 2) return true;
+  const state = getObserverConnectionState();
+  return state === "closed" || state === "error";
+}
+
 /** True when every tracked turn for one agent is stale, but only until the
- * bounded backstop expires. Other agents' activity intentionally has no effect. */
+ * bounded backstop expires. Other agents' activity intentionally has no effect.
+ *
+ * Behind LOST_CONTACT_FEATURE_ID (see isLostContactFeatureEnabled): a lone
+ * tracked turn is stale relative only to itself, so treating that as pause
+ * evidence lets a solo turn manufacture "broad outage" cover for its own
+ * silence — the turn's own inactivity was the ONLY input to maxActivity. That
+ * silently stretched a single dead turn's badge from the normal ~25s prune to
+ * the full 3-minute backstop. With the flag on, a pause additionally requires
+ * hasIndependentPauseEvidence: a real sibling turn, or connection-level
+ * evidence. Flag off preserves today's behavior exactly (rollback path).
+ */
 function shouldPausePrune(
   agentTurns: Map<string, ActiveTurn>,
   now: number,
@@ -325,16 +398,105 @@ function shouldPausePrune(
     if (turn.lastActivityAt > maxActivity) maxActivity = turn.lastActivityAt;
   }
   const silentFor = now - maxActivity;
-  return (
+  const legacyPause =
     maxActivity > 0 &&
     silentFor > FRAME_GAP_PAUSE_MS &&
-    silentFor < PRUNE_PAUSE_MAX_MS
-  );
+    silentFor < PRUNE_PAUSE_MAX_MS;
+  if (!legacyPause) return false;
+  if (!isLostContactFeatureEnabled()) return legacyPause;
+  return hasIndependentPauseEvidence(agentTurns);
+}
+
+// Reserved negative seq namespace for synthetic (desktop-generated) observer
+// events, keyed per agent — mirrors the shape of activeTurnsByAgent /
+// clockOffsetByAgent above. Real harness seqs are always positive and reset
+// to 1 on reconnect (see the composite-watermark comment near
+// `lastProcessed`), so negative seqs can never collide with a real one.
+// Starts at -1 and strictly decrements per emission; never reused, never
+// persisted across reload or reset.
+const syntheticSeqByAgent = new Map<string, number>();
+
+function nextSyntheticSeq(agentKey: string): number {
+  const next = (syntheticSeqByAgent.get(agentKey) ?? 0) - 1;
+  syntheticSeqByAgent.set(agentKey, next);
+  return next;
+}
+
+const LOST_CONTACT_LABEL = "Lost contact";
+const LOST_CONTACT_DETAIL =
+  "Activity could no longer be observed; completion is unknown.";
+
+/**
+ * Emit the neutral "Lost contact" feed item for a turn that just got pruned
+ * (at either the normal REMOVE_AFTER_MS bound or the PRUNE_PAUSE_MAX_MS
+ * backstop) — same copy, same neutral styling, regardless of which bound
+ * fired, per the "one evidence standard, one label, always" product call.
+ *
+ * Routes through syncAgentObserverEvents — a thin wrapper around the same
+ * appendAgentEvents() ingestion observerRelayStore's live relay path and
+ * injectObserverEventsForE2E use — rather than writing transcriptByAgent
+ * directly, so it survives the eventsByAgent rebuild that out-of-order
+ * arrival or cap-eviction triggers (see appendAgentEvents' rebuild branch).
+ * `ObserverEvent` carries no signature field (agentSessionTypes.ts) — it is
+ * already a decoded client-side view type — so a client-synthesized instance
+ * is a legitimate value of that type, not a forged wire frame.
+ *
+ * The event's `kind` is the desktop-owned `"desktop_lost_contact"` — NOT
+ * "acp_read"/"acp_write" — so it never claims an ACP read/write happened when
+ * nothing was read or written (VISION_ACTIVITY.md's "never fabricate
+ * semantics"). agentSessionTranscript.ts has one dedicated `else if` branch
+ * for this kind that reuses the exact same freeform-status/"status"
+ * lifecycle-card rendering as real acp_read/acp_write status frames — no new
+ * render class. Because the kind isn't acp_read/acp_write/turn_liveness, it
+ * also doesn't match any case in this store's own processEvent switch below:
+ * it can't refresh a turn's liveness or attempt to resurrect one (correct —
+ * a Lost contact report must never revive the turn it's reporting on), and
+ * it falls through harmlessly to the `if (offsetChanged) notifyListeners()`
+ * tail. It still needs the same-instant tombstone below, independently: a
+ * genuinely late REAL turn_liveness frame for this turnId (delayed on the
+ * wire from before the kill) must not resurrect the turn after we've already
+ * reported contact lost.
+ */
+function emitLostContactEvent(agentKey: string, turn: ActiveTurn) {
+  // Observer timestamps are in the agent-host clock, not the desktop clock
+  // (see clockOffsetByAgent above). Stamping this with a raw desktop
+  // Date.now() could sort it BEFORE real events for this turn if the agent
+  // host clock runs ahead of the desktop. Translate desktop time into
+  // agent-host terms — the inverse of the startedAt + offset anchor
+  // derivation. `offset` is a running minimum (conservative; can go
+  // stale-too-small under growing skew, sub-second over a session per the
+  // clockOffsetByAgent comment) — good enough for ordering, not exact.
+  const offset = clockOffsetByAgent.get(agentKey) ?? 0;
+  const hostNowIso = new Date(Date.now() - offset).toISOString();
+  const hostNowMs = parseTimestamp(hostNowIso) ?? Date.now() - offset;
+
+  // Tombstone at the same instant the synthetic event is stamped with, so a
+  // late real turn_liveness for this turnId (on the wire from before the
+  // kill) cannot resurrect it — resurrectTurn blocks when frameAt <= terminalAt.
+  recordTerminal(agentKey, turn.turnId, hostNowMs);
+
+  const syntheticEvent: ObserverEvent = {
+    seq: nextSyntheticSeq(agentKey),
+    timestamp: hostNowIso,
+    kind: "desktop_lost_contact",
+    agentIndex: turn.agentIndex,
+    channelId: turn.channelId,
+    sessionId: turn.sessionId,
+    turnId: turn.turnId,
+    startedAt: null,
+    payload: {
+      type: "lost_contact",
+      title: LOST_CONTACT_LABEL,
+      text: LOST_CONTACT_DETAIL,
+    },
+  };
+  syncAgentObserverEvents(agentKey, [syntheticEvent]);
 }
 
 function pruneExpired() {
   const now = Date.now();
   let changed = false;
+  const lostContactEnabled = isLostContactFeatureEnabled();
   for (const [agentKey, agentTurns] of activeTurnsByAgent) {
     // A single fresh tracked turn for this agent means a stale sibling is
     // genuinely dead and must still prune at 25s. Conversely, all of this
@@ -347,6 +509,9 @@ function pruneExpired() {
         agentTurns.delete(turnId);
         invalidateCache(agentKey);
         changed = true;
+        if (lostContactEnabled) {
+          emitLostContactEvent(agentKey, turn);
+        }
       }
     }
     if (agentTurns.size === 0) {
@@ -408,6 +573,8 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
           event.channelId,
           event.turnId ?? `seq-${event.seq}`,
           event.timestamp,
+          event.sessionId ?? null,
+          event.agentIndex ?? null,
         );
         notifyListeners();
         return;
@@ -711,6 +878,7 @@ export function resetActiveAgentTurnsStore() {
   cachedTurnSummaries.clear();
   cachedChannelTurnSummaries = null;
   terminalAtByAgent.clear();
+  syntheticSeqByAgent.clear();
   notifyListeners();
 }
 
