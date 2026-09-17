@@ -66,7 +66,10 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
 
   return {
     idleAuxiliaryHeaderActions: headerActions,
-    idleAuxiliaryOverridesThread: panel.expanded,
+    // Match Project workspace sheets: any open link panel covers the
+    // thread, not only the expanded/fullscreen state. Otherwise Open /
+    // pin / link clicks update the store while the thread keeps the slot.
+    idleAuxiliaryOverridesThread: true,
     idleAuxiliaryPanel: (
       <LinkSidePanelSurface
         keepAlive={panel.keepAlive}

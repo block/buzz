@@ -88,6 +88,28 @@ test("getChannelIntroKind keeps private and ephemeral labels for other streams",
   );
 });
 
+test("an open link slide-out must override a thread even when not expanded", () => {
+  // Regression for useChannelLinkSidePanel: it used to pass panel.expanded as
+  // idleAuxiliaryOverridesThread. Open / pin / link clicks from inside a
+  // thread updated the store, but the thread kept the right-hand slot so the
+  // slide-out never appeared. Contract matches Project workspace sheets:
+  // any open idle auxiliary that wants the slide-out sets overrideThread.
+  assert.equal(shouldPrioritizeIdleAuxiliary(true, true), true);
+  assert.equal(
+    shouldUseFocusIdleDrawer({
+      channelManagementOpen: false,
+      hasAgentSession: false,
+      hasIdleAuxiliaryPanel: true,
+      hasIdlePanelCloseHandler: true,
+      hasProfilePanel: false,
+      hasThreadSurface: true,
+      overrideThread: true,
+      useSplitAuxiliaryPane: true,
+    }),
+    true,
+  );
+});
+
 test("idle auxiliary priority does not depend on thread layout mode", () => {
   assert.equal(shouldPrioritizeIdleAuxiliary(true, true), true);
   assert.equal(shouldPrioritizeIdleAuxiliary(true, false), false);

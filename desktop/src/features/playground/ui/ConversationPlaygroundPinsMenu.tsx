@@ -87,14 +87,26 @@ export function ConversationPlaygroundPinsMenu({
         <TooltipTrigger asChild>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label="Playground pins"
-              className="shrink-0"
+              aria-label={
+                pins.length > 0
+                  ? `Playground pins (${pins.length})`
+                  : "Playground pins"
+              }
+              className="relative shrink-0"
               data-testid="conversation-playground-pins-menu"
               size="icon"
               type="button"
               variant="ghost"
             >
               <Pin />
+              {pins.length > 0 ? (
+                <span
+                  className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-border bg-background px-0.5 text-2xs font-bold text-muted-foreground"
+                  data-testid="conversation-playground-pins-badge"
+                >
+                  {pins.length}
+                </span>
+              ) : null}
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>
