@@ -63,14 +63,18 @@ export function getChannelIntroDescription(channel: Channel): string | null {
 }
 
 /**
- * Link/pin slide-out width inside the focus drawer.
- * `false` → normal side-panel width (collapsed). `true`/omit → full-bleed.
+ * Left inset for the idle focus drawer (Projects Tasks/Reviews parity).
+ *
+ * - `false` / omit → `THREAD_FOCUS_SLIVER_WIDTH_PX` (~90%+ sheet, thin channel strip)
+ * - `true` → `0` (link/pin fullscreen expand, true full-bleed)
+ *
+ * Never pins to the resizable thread-slot width — that was the #72 regression.
  */
-export function resolveIdleFocusDrawerWidthPx(
+export function resolveIdleFocusDrawerLeftPx(
   expanded: boolean | undefined,
-  sidePanelWidthPx: number,
-): number | undefined {
-  return expanded === false ? sidePanelWidthPx : undefined;
+  sliverWidthPx: number,
+): number {
+  return expanded === true ? 0 : sliverWidthPx;
 }
 
 /**

@@ -23,8 +23,9 @@ export type ChannelLinkSidePanelChrome = {
 /**
  * Projects Tasks / Reviews sheet chrome reused for http(s) link opens:
  * right-hand idle auxiliary panel with independent expand + close.
- * Both states slide in via the focus drawer; expand goes full-bleed, collapse
- * keeps normal side-panel width. Thread override stays always-on (#63).
+ * Both states slide in via the focus drawer; default open matches Projects
+ * width (channel sliver); expand goes true full-bleed. Thread override
+ * stays always-on (#63).
  */
 export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
   const store = React.useSyncExternalStore(

@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   getChannelIntroDescription,
   getChannelIntroKind,
-  resolveIdleFocusDrawerWidthPx,
+  resolveIdleFocusDrawerLeftPx,
   shouldEnableIdleFocusDrawerEscape,
   shouldPrioritizeIdleAuxiliary,
   shouldUseFocusIdleDrawer,
@@ -130,16 +130,17 @@ test("link slide-out keeps focus drawer when overriding a thread (slide-in)", ()
     useSplitAuxiliaryPane: true,
   };
   // Collapsed and expanded both use the animated focus drawer so Open/pin
-  // slides in. Width (side vs full-bleed) is applied in ChannelPane via
-  // FocusThreadDrawer widthPx — not by skipping the drawer for collapsed.
+  // slides in. Left inset (Projects sliver vs true full-bleed) is applied in
+  // ChannelPane via FocusThreadDrawer leftPx — not by skipping the drawer.
   assert.equal(shouldUseFocusIdleDrawer(base), true);
   assert.equal(shouldPrioritizeIdleAuxiliary(true, true), true);
 });
 
-test("link slide-out collapsed uses side width; expanded/omitted is full-bleed", () => {
-  assert.equal(resolveIdleFocusDrawerWidthPx(false, 420), 420);
-  assert.equal(resolveIdleFocusDrawerWidthPx(true, 420), undefined);
-  assert.equal(resolveIdleFocusDrawerWidthPx(undefined, 420), undefined);
+test("link slide-out default matches Projects sliver; expanded is true full-bleed", () => {
+  const sliver = 72;
+  assert.equal(resolveIdleFocusDrawerLeftPx(false, sliver), sliver);
+  assert.equal(resolveIdleFocusDrawerLeftPx(undefined, sliver), sliver);
+  assert.equal(resolveIdleFocusDrawerLeftPx(true, sliver), 0);
 });
 
 test("fullscreen-expanded idle drawer yields Escape to chrome collapse", () => {

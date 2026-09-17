@@ -36,7 +36,10 @@ import {
 } from "@/features/channels/ui/ThreadPanelSurface";
 import { ThreadViewModeToggle } from "@/features/channels/ui/ThreadViewModeToggle";
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
-import { THREAD_SURFACE_KEY } from "@/features/channels/lib/threadFocusLayout";
+import {
+  THREAD_FOCUS_SLIVER_WIDTH_PX,
+  THREAD_SURFACE_KEY,
+} from "@/features/channels/lib/threadFocusLayout";
 import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout";
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
@@ -52,7 +55,7 @@ import {
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
 import {
   mentionsKnownAgent,
-  resolveIdleFocusDrawerWidthPx,
+  resolveIdleFocusDrawerLeftPx,
   selectThreadComposerBotTypingPubkeys,
   shouldEnableIdleFocusDrawerEscape,
   shouldPrioritizeIdleAuxiliary,
@@ -448,8 +451,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   const overlayIdleAuxiliaryOverThread =
     priorityIdleAuxiliary && hasThreadSurface && !isOverlay;
   // Overlay-only replace keeps Open/pin visible on narrow/mobile layouts.
-  // Desktop collapsed/expanded both use the animated focus drawer (width
-  // differs); do not statically swap the thread slot — that skipped slide-in.
+  // Desktop default + fullscreen both use the animated focus drawer (left
+  // inset differs); do not statically swap the thread slot — that skipped slide-in.
   const replaceThreadWithIdleAuxiliary =
     priorityIdleAuxiliary && hasThreadSurface && isOverlay;
   const useFocusIdleDrawer = shouldUseFocusIdleDrawer({
@@ -464,9 +467,11 @@ export const ChannelPane = React.memo(function ChannelPane({
   });
   const showIdleAuxiliaryOverThread =
     overlayIdleAuxiliaryOverThread && useFocusIdleDrawer;
-  const idleAuxiliarySidePanelWidth = resolveIdleFocusDrawerWidthPx(
+  // Projects Tasks/Reviews omit expanded → sliver. Link/pin default matches;
+  // expand goes true full-bleed (left 0). Never use thread-slot widthPx.
+  const idleAuxiliaryLeftPx = resolveIdleFocusDrawerLeftPx(
     idleAuxiliaryExpanded,
-    threadPanelWidthPx,
+    THREAD_FOCUS_SLIVER_WIDTH_PX,
   );
   const idleAuxiliaryEscapeEnabled =
     shouldEnableIdleFocusDrawerEscape(idleAuxiliaryExpanded);
@@ -550,15 +555,12 @@ export const ChannelPane = React.memo(function ChannelPane({
       <FocusThreadDrawer
         channelName={activeChannel?.name ?? "channel"}
         escapeEnabled={idleAuxiliaryEscapeEnabled}
-        key={
-          idleAuxiliarySidePanelWidth != null
-            ? "idle-auxiliary-side"
-            : "idle-auxiliary-focus"
-        }
+        // Stable key preserves keep-alive pin webviews across expand/collapse.
+        key="idle-auxiliary-focus"
         label={idleAuxiliaryTitle || "Panel"}
+        leftPx={idleAuxiliaryLeftPx}
         onClose={onCloseIdleAuxiliaryPanel}
         restoreFocusTarget={threadSurface.restoreFocusTarget}
-        widthPx={idleAuxiliarySidePanelWidth}
       >
         {panel}
       </FocusThreadDrawer>

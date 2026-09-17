@@ -20,11 +20,11 @@ type FocusThreadDrawerProps = {
   /** Resolve an explicit focus target after this drawer has been dismissed. */
   restoreFocusTarget?: () => HTMLElement | null;
   /**
-   * When set, the drawer is a right-anchored panel of this width instead of
-   * nearly full-bleed (channel sliver). Used by the link/pin slide-out in its
-   * collapsed state so open still slides in without covering the conversation.
+   * Left inset from the channel content edge. Defaults to the Projects/thread
+   * focus sliver (`THREAD_FOCUS_SLIVER_WIDTH_PX`). Pass `0` for true full-bleed
+   * (link/pin fullscreen expand).
    */
-  widthPx?: number;
+  leftPx?: number;
 };
 
 /**
@@ -197,7 +197,7 @@ export function FocusThreadDrawer({
   hasActiveEdit = false,
   onClose,
   restoreFocusTarget,
-  widthPx,
+  leftPx,
 }: FocusThreadDrawerProps) {
   const prefersReducedMotion = useReducedMotion();
   const travelPx = prefersReducedMotion ? 0 : THREAD_FOCUS_DRAWER_TRAVEL_PX;
@@ -310,11 +310,7 @@ export function FocusThreadDrawer({
           x: travelPx,
         }}
         initial={{ opacity: 0, x: travelPx }}
-        style={
-          widthPx != null
-            ? { width: widthPx }
-            : { left: THREAD_FOCUS_SLIVER_WIDTH_PX }
-        }
+        style={{ left: leftPx ?? THREAD_FOCUS_SLIVER_WIDTH_PX }}
         transition={
           prefersReducedMotion ? REDUCED_MOTION_TRANSITION : ENTER_TRANSITION
         }

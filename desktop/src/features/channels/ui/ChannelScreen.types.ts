@@ -23,8 +23,9 @@ export type ChannelScreenProps = {
   idleAuxiliaryHeaderActions?: IdleAuxiliaryHeaderControls;
   idleAuxiliaryOverridesThread?: boolean;
   /**
-   * Link/pin slide-out only: false keeps a normal-width sliding focus drawer;
-   * true/omitted uses the full-bleed focus drawer. Projects omit this.
+   * Link/pin slide-out only: false/omitted matches Projects Tasks/Reviews
+   * (~90%+ focus drawer with channel sliver). true = true full-bleed (left 0).
+   * Projects omit this prop.
    */
   idleAuxiliaryExpanded?: boolean;
   idleAuxiliaryTitle?: string;
