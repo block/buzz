@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/rtl.dart';
 import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/deeplink/deep_link.dart';
@@ -74,11 +75,12 @@ final openDownloadedFileProvider = Provider<OpenDownloadedFile>((ref) {
 });
 
 String _safeDownloadedFilename(String filename) {
-  final safe = filename
-      .split(RegExp(r'[/\\]'))
-      .last
-      .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
-      .trim();
+  final safe =
+      filename
+          .split(RegExp(r'[/\\]'))
+          .last
+          .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
+          .trim();
   return safe.isEmpty ? 'attachment' : safe;
 }
 
@@ -171,13 +173,14 @@ class MessageContent extends HookConsumerWidget {
     final resolvedAgentMentionPubkeys = {
       ...agentMentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
     };
-    final resolvedChannelNames = channelNames.isNotEmpty
-        ? channelNames
-        : <String, String>{
-            for (final channel
-                in ref.watch(channelsProvider).asData?.value ?? const [])
-              channel.name.toLowerCase(): channel.id,
-          };
+    final resolvedChannelNames =
+        channelNames.isNotEmpty
+            ? channelNames
+            : <String, String>{
+              for (final channel
+                  in ref.watch(channelsProvider).asData?.value ?? const [])
+                channel.name.toLowerCase(): channel.id,
+            };
     final channelHandler = useRef(onChannelTap)..value = onChannelTap;
     final resolvedChannelTap = useMemoized(
       () => (String channelId) {
@@ -195,8 +198,7 @@ class MessageContent extends HookConsumerWidget {
     final replyHandler = useRef(onMediaReply)..value = onMediaReply;
     final moreHandler = useRef(onMediaMore)..value = onMediaMore;
     final mediaReply = useMemoized(
-      () =>
-          () => replyHandler.value?.call(),
+      () => () => replyHandler.value?.call(),
       const [],
     );
     final mediaMore = useMemoized(
@@ -212,9 +214,10 @@ class MessageContent extends HookConsumerWidget {
         '${entry.key}\u0000${entry.value}',
     ].join('\u0001');
     final imetaByUrl = parseImetaTags(tags);
-    final trailingGallery = maxLines == null
-        ? _extractTrailingImageGallery(content, imetaByUrl)
-        : null;
+    final trailingGallery =
+        maxLines == null
+            ? _extractTrailingImageGallery(content, imetaByUrl)
+            : null;
     final markdownContent = trailingGallery?.content ?? content;
     final customEmoji = _mergeCustomEmoji(
       customEmojiFromTags(tags),
@@ -239,15 +242,15 @@ class MessageContent extends HookConsumerWidget {
           nativeEmoji: ref.watch(nativeEmojiGlyphsProvider),
           customEmoji: customEmoji,
         );
-    final style = emojiOnly
-        ? baseTextStyle?.copyWith(
-            fontSize: kEmojiOnlyFontSize,
-            height: kEmojiOnlyHeight,
-          )
-        : baseTextStyle;
-    final inlineCustomEmojiSize = emojiOnly
-        ? kEmojiOnlyCustomEmojiSize
-        : kCustomEmojiInlineSize;
+    final style =
+        emojiOnly
+            ? baseTextStyle?.copyWith(
+              fontSize: kEmojiOnlyFontSize,
+              height: kEmojiOnlyHeight,
+            )
+            : baseTextStyle;
+    final inlineCustomEmojiSize =
+        emojiOnly ? kEmojiOnlyCustomEmojiSize : kCustomEmojiInlineSize;
 
     final linkNormalizedContent = useMemoized(
       () => normalizeBareLinks(markdownContent),
@@ -266,10 +269,8 @@ class MessageContent extends HookConsumerWidget {
           mentionBuf.write('`${mentionParts[i]}`');
         } else {
           var segment = mentionParts[i];
-          for (final range in mentionOccurrences(
-            segment,
-            mentionBindings.keys,
-          ).reversed) {
+          for (final range
+              in mentionOccurrences(segment, mentionBindings.keys).reversed) {
             segment = segment.replaceRange(
               range.start,
               range.end,
@@ -309,36 +310,43 @@ class MessageContent extends HookConsumerWidget {
       key: ValueKey(
         '$finalContent\u0000$mentionPresentationKey\u0000$channelPresentationKey',
       ),
-      child: GptMarkdown(
-        finalContent,
-        style: style,
-        followLinkColor: false,
-        // normalizeBareLinks() already turns bare URLs into Markdown links;
-        // gpt_markdown 1.2.0 autolinks by default, so both would run.
-        autolink: false,
-        codeBuilder: (context, name, code, closed) =>
-            _MessageCodeBlock(name: name, code: code),
-        linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
-          context,
-          ref,
-          linkText,
-          url,
-          imetaByUrl[url],
-          linkStyle,
-          style,
-          resolvedChannelTap,
-          resolvedChannelNames,
+      child: Directionality(
+        textDirection: textDirectionFor(finalContent),
+        child: GptMarkdown(
+          finalContent,
+          textDirection: textDirectionFor(finalContent),
+          style: style,
+          followLinkColor: false,
+          // normalizeBareLinks() already turns bare URLs into Markdown links;
+          // gpt_markdown 1.2.0 autolinks by default, so both would run.
+          autolink: false,
+          codeBuilder:
+              (context, name, code, closed) =>
+                  _MessageCodeBlock(name: name, code: code),
+          linkBuilder:
+              (context, linkText, url, linkStyle) => _buildLink(
+                context,
+                ref,
+                linkText,
+                url,
+                imetaByUrl[url],
+                linkStyle,
+                style,
+                resolvedChannelTap,
+                resolvedChannelNames,
+              ),
+          imageBuilder:
+              (context, imageUrl, _, _) => _buildMedia(
+                context,
+                imageUrl,
+                imetaByUrl[imageUrl],
+                onReply: onMediaReply == null ? null : mediaReply,
+                onMore: onMediaMore == null ? null : mediaMore,
+              ),
+          textAlign: textAlign,
+          maxLines: maxLines,
+          inlineComponents: inlineComponents,
         ),
-        imageBuilder: (context, imageUrl, _, _) => _buildMedia(
-          context,
-          imageUrl,
-          imetaByUrl[imageUrl],
-          onReply: onMediaReply == null ? null : mediaReply,
-          onMore: onMediaMore == null ? null : mediaMore,
-        ),
-        textAlign: textAlign,
-        maxLines: maxLines,
-        inlineComponents: inlineComponents,
       ),
     );
     if (trailingGallery == null) return markdown;
@@ -422,9 +430,10 @@ class MessageContent extends HookConsumerWidget {
       return _buildMedia(context, url, imeta);
     }
     final uri = Uri.tryParse(url);
-    final buzzLink = uri?.scheme == 'buzz'
-        ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)
-        : null;
+    final buzzLink =
+        uri?.scheme == 'buzz'
+            ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)
+            : null;
     final isBuzzLink =
         buzzLink is ChannelDeepLink ||
         buzzLink is MessageDeepLink ||
@@ -454,9 +463,10 @@ class MessageContent extends HookConsumerWidget {
           'pr' => LucideIcons.gitPullRequest,
           _ => LucideIcons.circleDot,
         },
-        label: type == 'repo'
-            ? repository
-            : '$repository · ${eventId!.substring(0, 8)}',
+        label:
+            type == 'repo'
+                ? repository
+                : '$repository · ${eventId!.substring(0, 8)}',
         semanticLabel: switch (type) {
           'repo' => 'Repository $repository',
           'pr' =>
@@ -473,26 +483,30 @@ class MessageContent extends HookConsumerWidget {
       decoration: TextDecoration.underline,
       decorationColor: context.colors.primary,
     );
-    final linkTextWidget = isCanonicalBuzzLabel
-        ? Text(
-            text,
-            style: baseStyle.copyWith(
-              color: context.colors.primary,
-              fontWeight: FontWeight.w600,
-            ),
-          )
-        : Text.rich(TextSpan(style: authoredLinkStyle, children: [linkText]));
+    final linkTextWidget =
+        isCanonicalBuzzLabel
+            ? Text(
+              text,
+              style: baseStyle.copyWith(
+                color: context.colors.primary,
+                fontWeight: FontWeight.w600,
+              ),
+            )
+            : Text.rich(
+              TextSpan(style: authoredLinkStyle, children: [linkText]),
+            );
 
-    final renderedLink = isCanonicalBuzzLabel && buzzPresentation != null
-        ? _TokenPill(
-            key: ValueKey('buzz-link-chip:$url'),
-            icon: buzzPresentation.icon,
-            interactive: buzzPresentation.interactive,
-            semanticLabel: buzzPresentation.semanticLabel,
-            text: buzzPresentation.label,
-            textStyle: baseStyle.copyWith(fontWeight: FontWeight.w600),
-          )
-        : linkTextWidget;
+    final renderedLink =
+        isCanonicalBuzzLabel && buzzPresentation != null
+            ? _TokenPill(
+              key: ValueKey('buzz-link-chip:$url'),
+              icon: buzzPresentation.icon,
+              interactive: buzzPresentation.interactive,
+              semanticLabel: buzzPresentation.semanticLabel,
+              text: buzzPresentation.label,
+              textStyle: baseStyle.copyWith(fontWeight: FontWeight.w600),
+            )
+            : linkTextWidget;
 
     // Mobile has no repo/PR/issue destination yet. Keep these presentation-only
     // instead of exposing a control whose tap cannot do anything.
@@ -583,16 +597,17 @@ class _MessageImagePreview extends HookConsumerWidget {
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half),
       child: GestureDetector(
-        onTap: () => openImageViewer(
-          context,
-          imageUrl: url,
-          heroTag: heroTag,
-          semanticLabel: semanticLabel,
-          previewDecodeWidth: previewDecodeWidth,
-          aspectRatio: imeta?.aspectRatio,
-          onReply: onReply,
-          onMore: onMore,
-        ),
+        onTap:
+            () => openImageViewer(
+              context,
+              imageUrl: url,
+              heroTag: heroTag,
+              semanticLabel: semanticLabel,
+              previewDecodeWidth: previewDecodeWidth,
+              aspectRatio: imeta?.aspectRatio,
+              onReply: onReply,
+              onMore: onMore,
+            ),
         child: _MessageMediaPreviewFrame(
           previewKey: ValueKey('message-media-image-preview:$url'),
           backgroundColor: context.colors.surfaceContainerHighest,
@@ -608,10 +623,11 @@ class _MessageImagePreview extends HookConsumerWidget {
                 decodeWidth: previewDecodeWidth,
                 fit: layout.fit,
                 semanticLabel: semanticLabel,
-                errorBuilder: (_, _, _) => _MediaPreviewFallback(
-                  icon: LucideIcons.imageOff,
-                  label: 'Image unavailable',
-                ),
+                errorBuilder:
+                    (_, _, _) => _MediaPreviewFallback(
+                      icon: LucideIcons.imageOff,
+                      label: 'Image unavailable',
+                    ),
               ),
             ),
           ),
@@ -640,9 +656,8 @@ class _MessageMediaPreviewFrame extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final resolvedWidth = constraints == null
-        ? (width ?? _messageMediaMaxWidth(context))
-        : width;
+    final resolvedWidth =
+        constraints == null ? (width ?? _messageMediaMaxWidth(context)) : width;
 
     return Container(
       key: previewKey,
@@ -834,9 +849,10 @@ class _MessageCodeBlock extends HookWidget {
                     icon: Icon(
                       isCopied.value ? LucideIcons.check : LucideIcons.copy,
                       size: 14,
-                      color: isCopied.value
-                          ? context.colors.primary
-                          : context.colors.onSurfaceVariant,
+                      color:
+                          isCopied.value
+                              ? context.colors.primary
+                              : context.colors.onSurfaceVariant,
                     ),
                   ),
                 ),
@@ -889,9 +905,10 @@ class _MentionMd extends InlineMd {
     if (bindings.containsKey(name) && matches.length != 1) {
       return TextSpan(text: text, style: config.style);
     }
-    final displayName = name.contains(RegExp(r'\([0-9a-f]{64}\)'))
-        ? displayLabels[name]
-        : mentionNames[pubkey];
+    final displayName =
+        name.contains(RegExp(r'\([0-9a-f]{64}\)'))
+            ? displayLabels[name]
+            : mentionNames[pubkey];
 
     final isAgent =
         pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
@@ -910,9 +927,10 @@ class _MentionMd extends InlineMd {
     return WidgetSpan(
       alignment: PlaceholderAlignment.baseline,
       baseline: TextBaseline.alphabetic,
-      child: pubkey != null && onMentionTap != null
-          ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
-          : pill,
+      child:
+          pubkey != null && onMentionTap != null
+              ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
+              : pill,
     );
   }
 }
