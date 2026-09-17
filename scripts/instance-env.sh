@@ -9,15 +9,23 @@
 
 WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
-PYTHON_CMD="python3"
-if ! python3 --version &>/dev/null; then
+PYTHON_CMD=""
+if python3 -c "import sys" &>/dev/null; then
+  PYTHON_CMD="python3"
+elif python -c "import sys" &>/dev/null; then
   PYTHON_CMD="python"
 fi
 
 # Derive a stable base port from the worktree root so the same worktree always
 # gets the same ports. This keeps the Tauri dev config stable between runs and
 # preserves Cargo's build cache.
-BASE_PORT=$($PYTHON_CMD -c "import hashlib,sys; h=int(hashlib.sha256(sys.argv[1].encode()).hexdigest(), 16); print(10000 + h % 55000)" "$WORKTREE_ROOT")
+if [[ -n "${PYTHON_CMD}" ]]; then
+  BASE_PORT=$($PYTHON_CMD -c "import hashlib,sys; h=int(hashlib.sha256(sys.argv[1].encode()).hexdigest(), 16); print(10000 + h % 55000)" "$WORKTREE_ROOT")
+elif command -v node &>/dev/null; then
+  BASE_PORT=$(node -e "const crypto = require('crypto'); const h = parseInt(crypto.createHash('sha256').update(process.argv[1]).digest('hex').substring(0, 12), 16); console.log(10000 + h % 55000);" "$WORKTREE_ROOT")
+else
+  BASE_PORT=10000
+fi
 export BUZZ_VITE_PORT=$BASE_PORT
 export BUZZ_HMR_PORT=$((BASE_PORT + 1))
 export BUZZ_RELAY_PORT=3000
@@ -80,7 +88,13 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
                     ;;
             esac
 
-            KEYRING_IDENTITY="$(printf '%s' "$KEYRING_BLOB" | $PYTHON_CMD -c 'import json, sys; value = json.load(sys.stdin).get("identity", ""); print(value if isinstance(value, str) else "")' 2>/dev/null || true)"
+            if [[ -n "${PYTHON_CMD}" ]]; then
+                KEYRING_IDENTITY="$(printf '%s' "$KEYRING_BLOB" | $PYTHON_CMD -c 'import json, sys; value = json.load(sys.stdin).get("identity", ""); print(value if isinstance(value, str) else "")' 2>/dev/null || true)"
+            elif command -v node &>/dev/null; then
+                KEYRING_IDENTITY="$(printf '%s' "$KEYRING_BLOB" | node -e "let data=''; process.stdin.on('data', c => data+=c); process.stdin.on('end', () => { try { let obj=JSON.parse(data); console.log(typeof obj.identity === 'string' ? obj.identity : ''); } catch(e){} });" 2>/dev/null || true)"
+            else
+                KEYRING_IDENTITY=""
+            fi
             CANONICAL_KEY="$HOME/Library/Application Support/xyz.block.buzz.app.dev/identity.key"
             LEGACY_CANONICAL_KEY="$HOME/Library/Application Support/xyz.block.sprout.app.dev/identity.key"
 
