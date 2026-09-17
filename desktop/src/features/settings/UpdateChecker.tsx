@@ -23,7 +23,7 @@ export function UpdateChecker() {
     <section className="min-w-0" data-testid="settings-updates">
       <SettingsSectionHeader
         title="Software Updates"
-        description="Keep Hula Buzz up to date with the latest features and fixes."
+        description="Keep Hula Buzz up to date with the latest Hula desktop releases."
       />
 
       <SettingsOptionGroup title="About">
