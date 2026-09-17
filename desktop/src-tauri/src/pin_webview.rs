@@ -765,6 +765,15 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_accepts_playground_pin_hyphen_ids() {
+        // Conversation playground pins use playground-pin-{sid}. A colon
+        // separator fails sanitize and surfaces as Failed to open link.
+        assert!(sanitize_pin_id("playground-pin-demo-1").is_ok());
+        assert!(sanitize_pin_id("playground-pin:demo-1").is_err());
+        assert!(sanitize_pin_id("hula-link-side-panel").is_ok());
+    }
+
+    #[test]
     fn body_hash_is_lowercase_hex_sha256() {
         assert_eq!(
             hash_response_body(b""),

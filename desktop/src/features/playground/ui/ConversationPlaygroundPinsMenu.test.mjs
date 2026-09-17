@@ -132,3 +132,34 @@ test("thread scope badge ignores channel pins", async () => {
     "1",
   );
 });
+
+test("header pin open path uses keepAlive and sanitize-safe pinId", async () => {
+  // Mirrors ConversationPlaygroundPinsMenu.openPin — the named-pin click path.
+  const { conversationPlaygroundPinWebviewId } = await import(
+    "../lib/conversationPins.ts"
+  );
+  const { getLinkSidePanel, openLinkSidePanel } = await import(
+    "@/features/link-panel/lib/linkSidePanelStore.ts"
+  );
+
+  const pin = {
+    sid: "alpha",
+    name: "Alpha",
+    url: "https://a.example.com",
+  };
+  assert.equal(
+    openLinkSidePanel(pin.url, {
+      title: pin.name,
+      pinId: conversationPlaygroundPinWebviewId(pin.sid),
+      keepAlive: true,
+    }),
+    true,
+  );
+  const panel = getLinkSidePanel();
+  assert.ok(panel);
+  assert.equal(panel.url, pin.url);
+  assert.equal(panel.title, pin.name);
+  assert.equal(panel.keepAlive, true);
+  assert.equal(panel.pinId, "playground-pin-alpha");
+  assert.match(panel.pinId, /^[A-Za-z0-9_-]+$/);
+});

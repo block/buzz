@@ -44,9 +44,13 @@ function cardToPin(card: PlaygroundCard): ConversationPlaygroundPin {
   };
 }
 
-/** Native pin-webview id kept alive for a conversation playground pin. */
+/**
+ * Native pin-webview id kept alive for a conversation playground pin.
+ * Must match pin_webview::sanitize_pin_id (ascii alnum / - / _) — a colon
+ * here made header-pin opens fail with "invalid pin id" → Failed to open link.
+ */
 export function conversationPlaygroundPinWebviewId(sid: string): string {
-  return `playground-pin:${sid}`;
+  return `playground-pin-${sid}`;
 }
 
 export function subscribeConversationPlaygroundPins(

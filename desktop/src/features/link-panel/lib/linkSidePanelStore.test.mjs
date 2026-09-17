@@ -67,14 +67,14 @@ test("openLinkSidePanel keepAlive uses a dedicated pinId and survives close via 
   assert.equal(
     openLinkSidePanel("https://app.example.com", {
       title: "Demo",
-      pinId: "playground-pin:demo-1",
+      pinId: "playground-pin-demo-1",
       keepAlive: true,
     }),
     true,
   );
   const panel = getLinkSidePanel();
   assert.equal(panel?.title, "Demo");
-  assert.equal(panel?.pinId, "playground-pin:demo-1");
+  assert.equal(panel?.pinId, "playground-pin-demo-1");
   assert.equal(panel?.keepAlive, true);
 
   closeLinkSidePanel();
@@ -82,9 +82,9 @@ test("openLinkSidePanel keepAlive uses a dedicated pinId and survives close via 
 
   // Re-open then destroy via unpin helper.
   openLinkSidePanel("https://app.example.com", {
-    pinId: "playground-pin:demo-1",
+    pinId: "playground-pin-demo-1",
     keepAlive: true,
   });
-  destroyLinkSidePanelIfPin("playground-pin:demo-1");
+  destroyLinkSidePanelIfPin("playground-pin-demo-1");
   assert.equal(getLinkSidePanel(), null);
 });

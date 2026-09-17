@@ -92,3 +92,11 @@ test("listConversationPlaygroundPins returns stable refs across alternating scop
   assert.equal(channelA.length, 1);
   assert.equal(threadEmpty.length, 0);
 });
+
+test("conversationPlaygroundPinWebviewId is sanitize_pin_id-safe (no colon)", async () => {
+  const { conversationPlaygroundPinWebviewId } = await import("./conversationPins.ts");
+  const id = conversationPlaygroundPinWebviewId("demo-1");
+  assert.equal(id, "playground-pin-demo-1");
+  assert.match(id, /^[A-Za-z0-9_-]+$/);
+  assert.ok(!id.includes(":"));
+});
