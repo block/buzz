@@ -2,10 +2,6 @@ import type * as React from "react";
 import { useSyncExternalStore } from "react";
 import * as BuzzTheme from "@/app/BuzzThemeSurfaces";
 import { HuddleRoomHeader, HuddleStartingView } from "@/features/huddle";
-import {
-  PLAYGROUND_OPAQUE_FILL_STYLE,
-  playgroundFullscreenTitlebarGapClass,
-} from "@/features/playground/lib/overlayLayout";
 import { PlaygroundHost } from "@/features/playground/ui/PlaygroundHost";
 import {
   getActiveEmbeddedWindow,
@@ -19,6 +15,7 @@ import {
   subscribePopoutSettings,
 } from "@/features/popout/lib/popoutSettings";
 import { currentPopoutPayload } from "@/features/popout/lib/popoutWindow";
+import { PopoutOverlayTitlebar } from "@/features/popout/ui/PopoutOverlayTitlebar";
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -108,13 +105,7 @@ export function AppShellChannelSurface({
         ) : null}
         {isOsPopout ? (
           <>
-            <div
-              aria-hidden
-              className={cn("shrink-0", playgroundFullscreenTitlebarGapClass)}
-              data-tauri-drag-region
-              data-testid="popout-titlebar-gap"
-              style={PLAYGROUND_OPAQUE_FILL_STYLE}
-            />
+            <PopoutOverlayTitlebar payload={osPopout} />
             <div
               className={cn(
                 "relative flex min-h-0 min-w-0 flex-1",
