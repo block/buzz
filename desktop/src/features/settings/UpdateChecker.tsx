@@ -1,3 +1,5 @@
+import * as React from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import { Button } from "@/shared/ui/button";
@@ -6,15 +8,38 @@ import {
   SettingsOptionRow,
 } from "./ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "./ui/SettingsSectionHeader";
+
 export function UpdateChecker() {
   const { status, checkForUpdate, installAndRelaunch } = useUpdaterContext();
+  const [appVersion, setAppVersion] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    void getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion(null));
+  }, []);
 
   return (
     <section className="min-w-0" data-testid="settings-updates">
       <SettingsSectionHeader
         title="Software Updates"
-        description="Keep Buzz up to date with the latest features and fixes."
+        description="Keep Hula Buzz up to date with the latest features and fixes."
       />
+
+      <SettingsOptionGroup title="About">
+        <SettingsOptionRow>
+          <div className="min-w-0">
+            <p className="text-sm font-medium">Hula Buzz</p>
+            <p
+              className="text-sm font-normal text-muted-foreground/70"
+              data-settings-subcopy
+              data-testid="settings-about-version"
+            >
+              {appVersion ? `Version ${appVersion}` : "Version…"}
+            </p>
+          </div>
+        </SettingsOptionRow>
+      </SettingsOptionGroup>
 
       <SettingsOptionGroup title="Update status">
         {status.state === "idle" && (

@@ -46,8 +46,18 @@ pub fn install<R: Runtime>(builder: Builder<R>) -> Builder<R> {
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let pkg_info = app.package_info();
     let config = app.config();
+    // productName (Hula Buzz) is the About title users see; package_info.name
+    // already mirrors it when tauri.conf sets productName, but prefer the
+    // config field so About never falls back to the crate name.
+    let about_name = config
+        .product_name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| pkg_info.name.clone());
     let about_metadata = AboutMetadata {
-        name: Some(pkg_info.name.clone()),
+        name: Some(about_name),
+        // Full semver including Hula prerelease (e.g. 0.5.23-hula.2), matching
+        // package.json / tauri.conf / Cargo.toml after set-version-from-tag.
         version: Some(pkg_info.version.to_string()),
         copyright: config.bundle.copyright.clone(),
         authors: config.bundle.publisher.clone().map(|p| vec![p]),

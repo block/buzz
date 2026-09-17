@@ -30,6 +30,13 @@ keys into chat, commits, or PR bodies).
 
 ## Cut a release
 
+Hula desktop versions are **Block base + Hula sub-increment**, e.g.
+`0.5.23-hula.2`. The release workflow runs `desktop/scripts/set-version-from-tag.mjs`
+so `package.json`, `tauri.conf.json`, `Cargo.toml`, and the `buzz-desktop`
+`Cargo.lock` entry all match the tag before build. About / Settings read that
+same value via Tauri `getVersion()` (not a hardcoded string).
+
+
 Preferred (workflow dispatch):
 
 ```sh
@@ -37,7 +44,7 @@ gh auth switch --user jmfcamp
 gh workflow run hula-desktop-release.yml \
   --repo jmfcamp/buzz \
   --ref main \
-  -f version=0.5.18 \
+  -f version=0.5.23-hula.2 \
   -f promote_updater=true
 gh auth switch --user jchula   # or your usual account
 ```
@@ -45,10 +52,10 @@ gh auth switch --user jchula   # or your usual account
 Or from a clean checkout on the intended commit:
 
 ```sh
-just hula-desktop-release 0.5.18
+just hula-desktop-release 0.5.23-hula.2
 ```
 
-That tags `hula-desktop-v0.5.18` and pushes it, which also triggers the workflow.
+That tags `hula-desktop-v0.5.23-hula.2` and pushes it, which also triggers the workflow.
 
 ## What the workflow publishes
 
