@@ -229,9 +229,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   void _handleWindowLiveEvent(NostrEvent event) {
     if (!_mergeWindowEventIntoStore(event)) return;
-    final flattened = _withDeepLinkEvents(
-      flattenChannelWindowEvents(_windowStore),
-    );
+    final windowEvents = flattenChannelWindowEvents(_windowStore);
+    // Flattening already orders the window. Only merge and sort again when
+    // there are retained deep-link events to include.
+    final flattened = _deepLinkEvents.isEmpty
+        ? windowEvents
+        : _withDeepLinkEvents(windowEvents);
     _lastKnownMessages = flattened;
     state = AsyncData(flattened);
   }

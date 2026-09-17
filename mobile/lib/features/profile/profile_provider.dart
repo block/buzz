@@ -236,7 +236,9 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       ownerPubkey: verifiedOaOwnerPubkey(submittedEvent.tags, pubkey),
     );
     state = AsyncData(profile);
-    ref.read(userCacheProvider.notifier).put(profile);
+    // Record the confirmed event order with the profile so an older batch
+    // completing after this save cannot replace it.
+    ref.read(userCacheProvider.notifier).cacheProfileEvent(submittedEvent);
   }
 
   void _requireCurrentWriteContext(_ProfileWriteContext context) {
