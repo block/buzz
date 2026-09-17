@@ -323,7 +323,14 @@ class _ComposeBarLayout extends HookWidget {
   }
 
   Widget _buildTextField(BuildContext context) {
-    return TextField(
+    // The composer mirrors the live text direction: as soon as the draft
+    // starts with an RTL character the field flips to right-to-left, and
+    // flips back when the draft is cleared or retyped in Latin.
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: controller,
+      builder: (context, value, _) => Directionality(
+        textDirection: textDirectionFor(value.text),
+        child: TextField(
       controller: controller,
       focusNode: focusNode,
       keyboardType: TextInputType.multiline,
@@ -355,6 +362,8 @@ class _ComposeBarLayout extends HookWidget {
           vertical: Grid.half,
         ),
         isDense: true,
+      ),
+        ),
       ),
     );
   }

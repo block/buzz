@@ -30,6 +30,7 @@ import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext
 import { useMentions } from "@/features/messages/lib/useMentions";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { setKeepMentionedAgentsPinned } from "@/features/messages/lib/autoPinMentionedAgentsPreference";
+import { isRtlContent } from "@/shared/lib/rtl";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { CUSTOM_EMOJI_NODE_NAME } from "@/features/messages/lib/customEmojiNode";
 import {
@@ -102,6 +103,7 @@ function MessageComposerImpl({
   typingRootEventId = null,
 }: MessageComposerProps) {
   const {
+    composerText,
     contentRef,
     isContentEmpty,
     setComposerContent,
@@ -950,7 +952,9 @@ function MessageComposerImpl({
               ref={composerScrollRef}
               onKeyDown={handleEditorKeyDown}
             >
-              <EditorContent editor={richText.editor} />
+              <div dir={isRtlContent(composerText) ? "rtl" : undefined}>
+                <EditorContent editor={richText.editor} />
+              </div>
             </div>
             <ComposerDockToolbar
               addressedAgents={
