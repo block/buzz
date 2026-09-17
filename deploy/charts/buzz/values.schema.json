@@ -112,7 +112,8 @@
         "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "healthPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "trafficDistribution": { "type": "string", "enum": ["", "PreferClose", "PreferSameZone", "PreferSameNode"], "description": "Service spec.trafficDistribution. Empty omits the field (cluster default)." }
       }
     },
     "serviceAccount": {
@@ -292,7 +293,8 @@
           "properties": {
             "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-            "annotations": { "type": "object" }
+            "annotations": { "type": "object" },
+            "trafficDistribution": { "type": "string", "enum": ["", "PreferClose", "PreferSameZone", "PreferSameNode"], "description": "Service spec.trafficDistribution. Empty omits the field (cluster default)." }
           }
         },
         "podAnnotations": { "type": "object" },
