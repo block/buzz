@@ -252,5 +252,15 @@ class AgeSignalNotifier extends Notifier<AgeSignalState> {
 }
 
 final ageSignalProvider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-  AgeSignalNotifier.new,
+  _DisabledAgeSignalNotifier.new,
 );
+
+// Temporarily disable age blocking: platform age checks can lock users out of
+// the app. Keep the allowed transition so push snapshots are restored normally.
+class _DisabledAgeSignalNotifier extends AgeSignalNotifier {
+  @override
+  AgeSignalState build() => AgeSignalState.allowed;
+
+  @override
+  Future<void> request() async {}
+}

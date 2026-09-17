@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:buzz/app.dart';
 import 'package:buzz/features/age_gate/age_restriction_page.dart';
 import 'package:buzz/features/age_gate/age_signal_push_bootstrap.dart';
@@ -98,75 +96,65 @@ void main() {
     expect(badgeCounts.last, 0);
   });
 
-  testWidgets('keeps app content unmounted until the signal resolves', (
-    tester,
-  ) async {
-    final response = Completer<Object?>();
-    final relaySession = _CountingRelaySessionNotifier();
-    var requests = 0;
-    var snapshotSuspensions = 0;
-    var snapshotRestorations = 0;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(ageSignalChannel, (call) {
-          requests += 1;
-          return response.future;
-        });
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
+  testWidgets(
+    'opens app and restores push snapshots without a native age check',
+    (tester) async {
+      final relaySession = _CountingRelaySessionNotifier();
+      var requests = 0;
+      var snapshotSuspensions = 0;
+      var snapshotRestorations = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ageSignalChannel, (call) {
+            requests += 1;
+            throw PlatformException(code: 'unavailable');
+          });
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
 
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
-          relaySessionProvider.overrideWith(() => relaySession),
-          suspendCommunitySnapshotForAgeCheckProvider.overrideWithValue(
-            () async {
-              snapshotSuspensions += 1;
-              if (snapshotSuspensions == 1) {
-                throw StateError('injected suspension failure');
-              }
-            },
-          ),
-          resumeCommunitySnapshotAfterAgeCheckProvider.overrideWithValue(
-            () async {
-              snapshotRestorations += 1;
-              if (snapshotRestorations == 1) {
-                throw StateError('injected restoration failure');
-              }
-            },
-          ),
-          ageSignalPushSnapshotRetryWaitProvider.overrideWithValue(
-            (_) async {},
-          ),
-          savedPrefsProvider.overrideWithValue(prefs),
-        ],
-        child: const AgeSignalPushBootstrap(child: App()),
-      ),
-    );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+            relaySessionProvider.overrideWith(() => relaySession),
+            suspendCommunitySnapshotForAgeCheckProvider.overrideWithValue(
+              () async {
+                snapshotSuspensions += 1;
+                if (snapshotSuspensions == 1) {
+                  throw StateError('injected suspension failure');
+                }
+              },
+            ),
+            resumeCommunitySnapshotAfterAgeCheckProvider.overrideWithValue(
+              () async {
+                snapshotRestorations += 1;
+                if (snapshotRestorations == 1) {
+                  throw StateError('injected restoration failure');
+                }
+              },
+            ),
+            ageSignalPushSnapshotRetryWaitProvider.overrideWithValue(
+              (_) async {},
+            ),
+            savedPrefsProvider.overrideWithValue(prefs),
+          ],
+          child: const AgeSignalPushBootstrap(child: App()),
+        ),
+      );
 
-    expect(requests, 1);
-    expect(find.bySemanticsLabel('Checking age eligibility'), findsOneWidget);
-    expect(find.byType(HomePage), findsNothing);
-    expect(find.byType(Navigator), findsNothing);
-    expect(relaySession.builds, 0);
-    await tester.pump();
-    await tester.pump();
-    expect(snapshotSuspensions, 2);
-    expect(snapshotRestorations, 0);
+      await tester.pump();
+      await tester.pump();
+      expect(snapshotSuspensions, 0);
 
-    response.complete({'status': 'noSignal', 'ageUpper': null});
-    await tester.pump();
-    await tester.pump();
-
-    expect(find.bySemanticsLabel('Checking age eligibility'), findsNothing);
-    expect(find.byType(HomePage), findsOneWidget);
-    expect(find.byType(Navigator), findsOneWidget);
-    expect(relaySession.builds, 1);
-    expect(requests, 1);
-    await tester.pump();
-    await tester.pump();
-    expect(snapshotRestorations, 2);
-  });
+      expect(find.bySemanticsLabel('Checking age eligibility'), findsNothing);
+      expect(find.byType(HomePage), findsOneWidget);
+      expect(find.byType(Navigator), findsOneWidget);
+      expect(relaySession.builds, 1);
+      expect(requests, 0);
+      await tester.pump();
+      await tester.pump();
+      expect(snapshotRestorations, 2);
+    },
+  );
 
   testWidgets('offers a retry after the native age check fails', (
     tester,

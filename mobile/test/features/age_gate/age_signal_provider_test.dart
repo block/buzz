@@ -13,6 +13,27 @@ void main() {
         .setMockMethodCallHandler(ageSignalChannel, null);
   });
 
+  test(
+    'production launch allows access without requesting a native age signal',
+    () async {
+      var nativeCalls = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ageSignalChannel, (_) async {
+            nativeCalls += 1;
+            throw PlatformException(code: 'unavailable');
+          });
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      expect(container.read(ageSignalProvider), AgeSignalState.allowed);
+      await container.read(ageSignalProvider.notifier).request();
+      await container.read(ageSignalProvider.notifier).request();
+
+      expect(container.read(ageSignalProvider), AgeSignalState.allowed);
+      expect(nativeCalls, 0);
+    },
+  );
+
   Future<AgeSignalState> requestWithResponse(Object? response) async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(ageSignalChannel, (call) async {
@@ -20,7 +41,9 @@ void main() {
           expect(call.arguments, isNull);
           return response;
         });
-    final container = ProviderContainer();
+    final container = ProviderContainer(
+      overrides: [ageSignalProvider.overrideWith(AgeSignalNotifier.new)],
+    );
     addTearDown(container.dispose);
 
     await container.read(ageSignalProvider.notifier).request();
@@ -506,7 +529,9 @@ void main() {
           requests += 1;
           return {'status': 'noSignal', 'ageUpper': null};
         });
-    final container = ProviderContainer();
+    final container = ProviderContainer(
+      overrides: [ageSignalProvider.overrideWith(AgeSignalNotifier.new)],
+    );
     addTearDown(container.dispose);
     final notifier = container.read(ageSignalProvider.notifier);
 
