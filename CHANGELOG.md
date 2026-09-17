@@ -4,7 +4,7 @@
 
 ### Desktop and shared changes
 
-- Follow delivered channel messages before their first reply.
+- Follow or unfollow delivered channel messages before their first reply.
 
 ## v0.5.24
 
