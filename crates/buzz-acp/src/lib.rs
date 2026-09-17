@@ -161,9 +161,45 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
     config.agent_owner.clone()
 }
 
-/// Cache for the agent's owner pubkey.
-///
-/// Owner is now provided via `--agent-owner` config flag (no REST lookup).
+/// Why the inbound author gate refused an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorRejection {
+    /// `respond-to` is `nobody`.
+    RespondToNobody,
+    /// This agent has no owner, so it has no siblings either.
+    NoOwnerConfigured,
+    /// The author has no kind:0 profile on this relay.
+    NoProfile,
+    /// The author's profile has no `auth` tag naming our owner.
+    NoAuthTag,
+    /// An `auth` tag names our owner but does not verify for the author.
+    BadSignature,
+    /// The profile lookup timed out, failed, or returned a malformed reply.
+    LookupFailed,
+    /// An earlier lookup already refused this author.
+    Cached,
+}
+
+impl AuthorRejection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RespondToNobody => "respond_to_nobody",
+            Self::NoOwnerConfigured => "no_owner_configured",
+            Self::NoProfile => "no_profile",
+            Self::NoAuthTag => "no_auth_tag",
+            Self::BadSignature => "bad_signature",
+            Self::LookupFailed => "lookup_failed",
+            Self::Cached => "cached",
+        }
+    }
+}
+
+impl std::fmt::Display for AuthorRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Cache for the agent's owner pubkey + sibling lookups.
 ///
 /// Siblings are other agents whose NIP-OA auth tag proves the same owner.
@@ -206,32 +242,119 @@ impl OwnerCache {
 
 /// Check if `author` is the owner OR a sibling (same owner via NIP-OA).
 ///
-/// For unknown authors, queries their kind:0 profile to extract the NIP-OA
-/// auth tag and verify the owner matches. Result is cached.
+/// `event` is the event being gated. When `author` signed it, a valid NIP-OA
+/// `auth` tag on the event proves the owner without any lookup. Otherwise the
+/// author's kind:0 profile is queried for the tag. Profile verdicts are cached.
 async fn is_owner_or_sibling(
     author: &str,
+    event: Option<&nostr::Event>,
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
-) -> bool {
+) -> Result<(), AuthorRejection> {
     let my_owner = match owner_cache.get() {
         Some(o) => o,
-        None => return false, // no owner configured — fail closed
+        None => return Err(AuthorRejection::NoOwnerConfigured), // fail closed
     };
 
     // Direct owner check.
     if author == my_owner {
-        return true;
+        return Ok(());
     }
 
-    // Check sibling cache.
-    if let Some(cached) = owner_cache.is_known_sibling(author) {
-        return cached;
+    let cached = owner_cache.is_known_sibling(author);
+    if cached == Some(true) {
+        return Ok(());
+    }
+
+    // The event's own attestation outranks a cached "no" (the author may have
+    // been attested since) and needs no network call. Only an unconditional
+    // attestation vouches for the author's later events.
+    if let Some(event) = event.filter(|event| event.pubkey.to_hex() == author) {
+        match event_attestation(event, my_owner) {
+            EventAttestation::Unconditional => {
+                owner_cache.cache_sibling(author.to_string(), true);
+                return Ok(());
+            }
+            EventAttestation::Scoped => return Ok(()),
+            EventAttestation::Missing => {}
+        }
+    }
+
+    if cached == Some(false) {
+        return Err(AuthorRejection::Cached);
     }
 
     // Query the author's kind:0 profile to check for NIP-OA auth tag.
-    let is_sibling = check_sibling_via_profile(author, my_owner, rest_client).await;
-    owner_cache.cache_sibling(author.to_string(), is_sibling);
-    is_sibling
+    let verdict = check_sibling_via_profile(author, my_owner, rest_client).await;
+    owner_cache.cache_sibling(author.to_string(), verdict.is_ok());
+    verdict
+}
+
+/// What an event's own NIP-OA `auth` tag proves about its signer.
+#[derive(Debug, PartialEq, Eq)]
+enum EventAttestation {
+    /// No single valid tag from our owner that admits this event.
+    Missing,
+    /// Admits this event only: its `kind=` or `created_at` clauses may
+    /// exclude the signer's other events.
+    Scoped,
+    /// Our owner attests the signer with no conditions.
+    Unconditional,
+}
+
+/// Check the NIP-OA `auth` tag carried on `event` against `expected_owner`.
+///
+/// The tag must be the event's only `auth` tag, name our owner, verify for the
+/// event's signer, and have every condition hold for this event, the same rule
+/// Desktop applies when it attributes a profile to an owner. The event's own
+/// signature is verified when it is received from the relay, so a tag copied
+/// onto another key's event fails here.
+fn event_attestation(event: &nostr::Event, expected_owner: &str) -> EventAttestation {
+    let mut auth_tags = event
+        .tags
+        .iter()
+        .map(nostr::Tag::as_slice)
+        .filter(|parts| parts.first().map(String::as_str) == Some("auth"));
+    let Some(parts) = auth_tags.next() else {
+        return EventAttestation::Missing;
+    };
+    // An ambiguous attestation is not an attestation.
+    if auth_tags.next().is_some() {
+        tracing::debug!(author = %event.pubkey, "event carries more than one auth tag");
+        return EventAttestation::Missing;
+    }
+    if !parts
+        .get(1)
+        .is_some_and(|owner| owner.eq_ignore_ascii_case(expected_owner))
+    {
+        return EventAttestation::Missing;
+    }
+    let Ok(tag_json) = serde_json::to_string(parts) else {
+        return EventAttestation::Missing;
+    };
+    // Checks the owner signature and every `created_at` clause against the
+    // event's signed timestamp. `kind=` clauses are left to us.
+    if let Err(e) = buzz_sdk::nip_oa::verify_auth_tag_for_auth_event(
+        &tag_json,
+        &event.pubkey,
+        event.created_at.as_secs(),
+    ) {
+        tracing::debug!(author = %event.pubkey, "event auth tag rejected: {e}");
+        return EventAttestation::Missing;
+    }
+    let conditions = parts.get(2).map(String::as_str).unwrap_or_default();
+    if conditions.is_empty() {
+        return EventAttestation::Unconditional;
+    }
+    let kinds_hold = conditions
+        .split('&')
+        .filter_map(|clause| clause.strip_prefix("kind="))
+        .all(|kind| kind.parse::<u16>() == Ok(event.kind.as_u16()));
+    if kinds_hold {
+        EventAttestation::Scoped
+    } else {
+        EventAttestation::Missing
+    }
 }
 
 /// Return the workflow owner attributed by a relay-signed workflow message.
@@ -337,14 +460,21 @@ fn effective_prompt_author(
 mod inbound_author_gate {
     use super::{
         effective_prompt_author, is_dm_channel, is_owner_or_sibling, pool, refresh_relay_self,
-        relay, OwnerCache, RespondTo,
+        relay, AuthorRejection, OwnerCache, RespondTo,
     };
     use std::collections::HashSet;
 
     pub(crate) struct InboundAuthorGateDecision {
         pub(crate) effective_author: String,
-        pub(crate) allowed: bool,
+        pub(crate) rejection: Option<AuthorRejection>,
         pub(crate) is_dm: bool,
+    }
+
+    impl InboundAuthorGateDecision {
+        #[cfg(test)]
+        pub(crate) fn allowed(&self) -> bool {
+            self.rejection.is_none()
+        }
     }
 
     /// An event that passed the complete listener author boundary.
@@ -369,27 +499,34 @@ mod inbound_author_gate {
     ///
     /// This stays private to the gate module so neither listener can bypass
     /// workflow attribution by calling the raw-signer policy directly.
+    ///
+    /// `event` is offered to the sibling check, which reads its `auth` tag only
+    /// when `author` is the event's signer (never for a workflow-attributed
+    /// owner, whose authority is the relay's signature, not a tag).
     async fn author_allowed(
         respond_to: &RespondTo,
         allowlist: &HashSet<String>,
         author: &str,
+        event: Option<&nostr::Event>,
         is_dm: bool,
         owner_cache: &OwnerCache,
         rest_client: &relay::RestClient,
-    ) -> bool {
+    ) -> Result<(), AuthorRejection> {
         if is_dm {
             return match respond_to {
-                RespondTo::Nobody => false,
-                _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
+                RespondTo::Nobody => Err(AuthorRejection::RespondToNobody),
+                _ => is_owner_or_sibling(author, event, owner_cache, rest_client).await,
             };
         }
         match respond_to {
-            RespondTo::Anyone => true,
-            RespondTo::Nobody => false,
-            RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
+            RespondTo::Anyone => Ok(()),
+            RespondTo::Nobody => Err(AuthorRejection::RespondToNobody),
+            RespondTo::OwnerOnly => {
+                is_owner_or_sibling(author, event, owner_cache, rest_client).await
+            }
+            RespondTo::Allowlist if allowlist.contains(author) => Ok(()),
             RespondTo::Allowlist => {
-                allowlist.contains(author)
-                    || is_owner_or_sibling(author, owner_cache, rest_client).await
+                is_owner_or_sibling(author, event, owner_cache, rest_client).await
             }
         }
     }
@@ -407,11 +544,13 @@ mod inbound_author_gate {
             respond_to,
             allowlist,
             author,
+            None,
             is_dm,
             owner_cache,
             rest_client,
         )
         .await
+        .is_ok()
     }
 
     pub(crate) struct InboundAuthorGate {
@@ -505,18 +644,20 @@ mod inbound_author_gate {
         ) -> InboundAuthorGateDecision {
             let effective_author =
                 effective_prompt_author(event, self.relay_self.as_deref(), &self.agent_pubkey_hex);
-            let allowed = author_allowed(
+            let rejection = author_allowed(
                 respond_to,
                 allowlist,
                 &effective_author,
+                Some(event),
                 is_dm,
                 owner_cache,
                 rest_client,
             )
-            .await;
+            .await
+            .err();
             InboundAuthorGateDecision {
                 effective_author,
-                allowed,
+                rejection,
                 is_dm,
             }
         }
@@ -540,15 +681,34 @@ mod inbound_author_gate {
                     rest_client,
                 )
                 .await;
-            if !decision.allowed {
-                tracing::debug!(
-                    channel_id = %buzz_event.channel_id,
-                    raw_author = %buzz_event.event.pubkey.to_hex(),
-                    effective_author = %decision.effective_author,
-                    mode = %respond_to,
-                    is_dm = decision.is_dm,
-                    "inbound author gate — dropping event"
-                );
+            if let Some(reason) = decision.rejection {
+                // A fresh sibling verdict is logged where operators look, so a
+                // silently ignored agent mention can be explained. Verdicts
+                // that repeat per event (cached, configured policy) stay at
+                // debug to keep busy channels quiet.
+                macro_rules! log_drop {
+                    ($level:ident) => {
+                        tracing::$level!(
+                            channel_id = %buzz_event.channel_id,
+                            event_id = %buzz_event.event.id.to_hex(),
+                            raw_author = %buzz_event.event.pubkey.to_hex(),
+                            effective_author = %decision.effective_author,
+                            mode = %respond_to,
+                            is_dm = decision.is_dm,
+                            %reason,
+                            "inbound author gate — dropping event"
+                        )
+                    };
+                }
+                match reason {
+                    AuthorRejection::LookupFailed => log_drop!(warn),
+                    AuthorRejection::NoProfile
+                    | AuthorRejection::NoAuthTag
+                    | AuthorRejection::BadSignature => log_drop!(info),
+                    AuthorRejection::Cached
+                    | AuthorRejection::RespondToNobody
+                    | AuthorRejection::NoOwnerConfigured => log_drop!(debug),
+                }
                 return None;
             }
             Some(AuthorizedListenerEvent {
@@ -785,47 +945,50 @@ pub(crate) async fn is_dm_channel(
 
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
 /// proves the same owner as us.
+///
+/// Each rejection names why the author is not a sibling, so the gate can log it.
 async fn check_sibling_via_profile(
     author: &str,
     expected_owner: &str,
     rest_client: &relay::RestClient,
-) -> bool {
+) -> Result<(), AuthorRejection> {
+    // Not a pubkey, so it cannot have a profile.
+    let Ok(agent_pk) = nostr::PublicKey::from_hex(author) else {
+        return Err(AuthorRejection::NoProfile);
+    };
     let filter = nostr::Filter::new()
         .kind(nostr::Kind::Metadata)
-        .author(match nostr::PublicKey::from_hex(author) {
-            Ok(pk) => pk,
-            Err(_) => return false,
-        })
+        .author(agent_pk)
         .limit(1);
 
     let resp = match tokio::time::timeout(Duration::from_millis(2000), rest_client.query(&[filter]))
         .await
     {
         Ok(Ok(v)) => v,
-        _ => return false, // timeout or error — fail closed
+        Ok(Err(e)) => {
+            tracing::debug!(author, "sibling profile lookup failed: {e}");
+            return Err(AuthorRejection::LookupFailed);
+        }
+        Err(_) => {
+            tracing::debug!(author, "sibling profile lookup timed out");
+            return Err(AuthorRejection::LookupFailed);
+        }
     };
 
     // Look for an "auth" tag in the profile event.
-    let events = match resp.as_array() {
-        Some(arr) => arr,
-        None => return false,
+    let Some(events) = resp.as_array() else {
+        return Err(AuthorRejection::LookupFailed);
     };
-    let event = match events.first() {
-        Some(e) => e,
-        None => return false,
+    let Some(event) = events.first() else {
+        return Err(AuthorRejection::NoProfile);
     };
-    let tags = match event.get("tags").and_then(|t| t.as_array()) {
-        Some(t) => t,
-        None => return false,
+    let Some(tags) = event.get("tags").and_then(|t| t.as_array()) else {
+        return Err(AuthorRejection::LookupFailed);
     };
 
     // Find ["auth", owner_pk, conditions, sig] and verify the Schnorr signature.
     // Don't trust the relay — verify ourselves.
-    let agent_pk = match nostr::PublicKey::from_hex(author) {
-        Ok(pk) => pk,
-        Err(_) => return false,
-    };
-
+    let mut rejection = AuthorRejection::NoAuthTag;
     for tag in tags {
         let parts = match tag.as_array() {
             Some(p) if p.len() >= 4 => p,
@@ -847,15 +1010,16 @@ async fn check_sibling_via_profile(
         match buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent_pk) {
             Ok(_) => {
                 tracing::debug!(author, expected_owner, "sibling verified via NIP-OA");
-                return true;
+                return Ok(());
             }
             Err(e) => {
                 tracing::debug!(author, "NIP-OA auth tag verification failed: {e}");
+                rejection = AuthorRejection::BadSignature;
             }
         }
     }
 
-    false
+    Err(rejection)
 }
 
 /// Observer frames are published at a global rate of AT MOST ONE relay frame
@@ -7264,7 +7428,7 @@ mod author_gate_tests {
             "a connected gate must attribute a relay-signed workflow dispatch to its owner, not the relay signer"
         );
         assert!(
-            decision.allowed,
+            decision.allowed(),
             "an owner-only agent must wake for its own workflow's explicit mention"
         );
         server.abort();
@@ -7309,7 +7473,7 @@ mod author_gate_tests {
             "without a verified relay identity the gate must fall back to the raw signer"
         );
         assert!(
-            !decision.allowed,
+            !decision.allowed(),
             "unattributed relay-signed output must not wake an owner-only agent"
         );
         server.abort();
@@ -7372,7 +7536,7 @@ mod author_gate_tests {
             decision.effective_author, workflow_owner,
             "a reconnect refresh must restore delegated workflow attribution"
         );
-        assert!(decision.allowed);
+        assert!(decision.allowed());
         server.abort();
     }
 
@@ -7434,7 +7598,7 @@ mod author_gate_tests {
             .await;
         server.abort();
         assert!(
-            decision.allowed,
+            decision.allowed(),
             "a generation-0 workflow wake must recover after the startup NIP-11 failure"
         );
         assert_eq!(decision.effective_author, workflow_owner);
@@ -7493,7 +7657,7 @@ mod author_gate_tests {
                         &rest_client,
                     )
                     .await;
-                assert_eq!(decision.allowed, identity.is_some());
+                assert_eq!(decision.allowed(), identity.is_some());
                 assert_eq!(
                     gate.relay_identity_for_test(),
                     identity.as_deref(),
@@ -7512,7 +7676,7 @@ mod author_gate_tests {
                     &rest_client,
                 )
                 .await;
-            assert!(decision.allowed);
+            assert!(decision.allowed());
             assert_eq!(decision.effective_author, workflow_owner);
             assert_eq!(
                 gate.relay_identity_for_test(),
@@ -7574,7 +7738,7 @@ mod author_gate_tests {
             .await;
         assert_eq!(gate.relay_identity_for_test(), Some(old_relay_hex.as_str()));
         assert!(
-            !first_new.allowed,
+            !first_new.allowed(),
             "the new signer must remain fail-closed while NIP-11 is unavailable"
         );
 
@@ -7591,7 +7755,7 @@ mod author_gate_tests {
         assert_eq!(gate.relay_identity_for_test(), Some(new_relay_hex.as_str()));
         assert_eq!(recovered.effective_author, workflow_owner);
         assert!(
-            recovered.allowed,
+            recovered.allowed(),
             "a later event on the same connection must use the refreshed relay key"
         );
 
@@ -7610,7 +7774,10 @@ mod author_gate_tests {
                 &rest_client,
             )
             .await;
-        assert!(!stale.allowed, "the rotated-away relay key must be evicted");
+        assert!(
+            !stale.allowed(),
+            "the rotated-away relay key must be evicted"
+        );
 
         server.abort();
     }
@@ -7649,7 +7816,7 @@ mod author_gate_tests {
             .await;
         assert_eq!(decision.effective_author, workflow_owner);
         assert!(
-            decision.allowed,
+            decision.allowed(),
             "a verified workflow owner for an explicitly targeted agent must flow through the existing sibling policy"
         );
         server.abort();
@@ -7689,7 +7856,7 @@ mod author_gate_tests {
         server.abort();
         assert_eq!(decision.effective_author, relay.public_key().to_hex());
         assert!(
-            !decision.allowed,
+            !decision.allowed(),
             "the legacy owner p tag alone must not wake an agent-owned workflow"
         );
     }
@@ -7731,7 +7898,7 @@ mod author_gate_tests {
         server.abort();
         assert_eq!(decision.effective_author, attacker.public_key().to_hex());
         assert!(
-            !decision.allowed,
+            !decision.allowed(),
             "an attacker-signed workflow event must not borrow trusted owner authority"
         );
     }
@@ -8078,6 +8245,325 @@ mod author_gate_tests {
             is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
             "an unresolvable channel type must be treated as a DM"
         );
+    }
+
+    /// NIP-OA `auth` tag in which `owner` attests `agent` under `conditions`.
+    fn auth_tag(owner: &nostr::Keys, agent: &nostr::PublicKey, conditions: &str) -> nostr::Tag {
+        let json = buzz_sdk::nip_oa::compute_auth_tag(owner, agent, conditions).unwrap();
+        let parts: Vec<String> = serde_json::from_str(&json).unwrap();
+        nostr::Tag::parse(parts).unwrap()
+    }
+
+    /// A channel message signed by `agent` carrying `tags`.
+    fn agent_message(agent: &nostr::Keys, tags: Vec<nostr::Tag>) -> nostr::Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16), "@you hi")
+            .tags(tags)
+            .sign_with_keys(agent)
+            .unwrap()
+    }
+
+    /// The `/query` reply for `agent`'s kind:0 profile carrying `tags`.
+    fn profile_reply(agent: &nostr::Keys, tags: Vec<nostr::Tag>) -> serde_json::Value {
+        let profile = nostr::EventBuilder::new(nostr::Kind::Metadata, "{}")
+            .tags(tags)
+            .sign_with_keys(agent)
+            .unwrap();
+        serde_json::json!([profile])
+    }
+
+    #[tokio::test]
+    async fn test_event_auth_tag_admits_sibling_without_a_profile() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let event = agent_message(&agent, vec![auth_tag(&owner, &agent.public_key(), "")]);
+        // The relay answers every request with a non-array body, so a profile
+        // lookup could only fail: admission has to come from the event.
+        let (rest_client, server) = nip11_server(serde_json::json!({ "name": "relay" })).await;
+        let gate = InboundAuthorGate::connect(&rest_client, &agent_hex, "test").await;
+        let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+
+        let decision = gate
+            .evaluate_for_test(
+                &event,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                false,
+                &cache,
+                &rest_client,
+            )
+            .await;
+        server.abort();
+
+        assert_eq!(decision.rejection, None);
+        assert_eq!(cache.is_known_sibling(&agent_hex), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_event_auth_tag_overrides_cached_negative() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+        cache.cache_sibling(agent_hex.clone(), false);
+
+        let untagged = agent_message(&agent, vec![]);
+        assert_eq!(
+            is_owner_or_sibling(&agent_hex, Some(&untagged), &cache, &dummy_rest_client()).await,
+            Err(AuthorRejection::Cached)
+        );
+
+        let tagged = agent_message(&agent, vec![auth_tag(&owner, &agent.public_key(), "")]);
+        assert_eq!(
+            is_owner_or_sibling(&agent_hex, Some(&tagged), &cache, &dummy_rest_client()).await,
+            Ok(()),
+            "a valid attestation on the event must not wait out a stale cached \"no\""
+        );
+        assert_eq!(cache.is_known_sibling(&agent_hex), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_event_attestation_requires_one_valid_tag_that_admits_this_event() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let agent_pk = agent.public_key();
+        let other = nostr::Keys::generate();
+        let now = nostr::Timestamp::now().as_secs();
+
+        let cases = [
+            (
+                "another owner's attestation",
+                vec![auth_tag(&other, &agent_pk, "")],
+            ),
+            (
+                "an attestation of a different agent",
+                vec![auth_tag(&owner, &other.public_key(), "")],
+            ),
+            (
+                "a kind clause that excludes this event",
+                vec![auth_tag(&owner, &agent_pk, "kind=0")],
+            ),
+            (
+                "an expired created_at clause",
+                vec![auth_tag(
+                    &owner,
+                    &agent_pk,
+                    &format!("created_at<{}", now - 60),
+                )],
+            ),
+            (
+                "two auth tags",
+                vec![
+                    auth_tag(&owner, &agent_pk, ""),
+                    auth_tag(&owner, &agent_pk, "kind=0"),
+                ],
+            ),
+            (
+                "a valid tag beside a malformed one",
+                vec![
+                    auth_tag(&owner, &agent_pk, ""),
+                    nostr::Tag::parse(["auth"]).unwrap(),
+                ],
+            ),
+            (
+                "an uppercase owner",
+                vec![nostr::Tag::parse({
+                    let mut parts = auth_tag(&owner, &agent_pk, "").to_vec();
+                    parts[1] = parts[1].to_ascii_uppercase();
+                    parts
+                })
+                .unwrap()],
+            ),
+        ];
+        for (label, tags) in cases {
+            assert_eq!(
+                event_attestation(&agent_message(&agent, tags), &owner.public_key().to_hex()),
+                EventAttestation::Missing,
+                "{label} must not prove the owner"
+            );
+        }
+
+        let bounded = format!(
+            "kind={KIND_STREAM_MESSAGE}&created_at>{}&created_at<{}",
+            now - 60,
+            now + 60
+        );
+        assert_eq!(
+            event_attestation(
+                &agent_message(&agent, vec![auth_tag(&owner, &agent_pk, &bounded)]),
+                &owner.public_key().to_hex()
+            ),
+            EventAttestation::Scoped,
+            "conditions that admit this event must prove the owner for this event"
+        );
+        assert_eq!(
+            event_attestation(
+                &agent_message(&agent, vec![auth_tag(&owner, &agent_pk, "")]),
+                &owner.public_key().to_hex()
+            ),
+            EventAttestation::Unconditional
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scoped_event_attestation_admits_only_its_event() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+        let scoped = agent_message(
+            &agent,
+            vec![auth_tag(
+                &owner,
+                &agent.public_key(),
+                &format!("kind={KIND_STREAM_MESSAGE}"),
+            )],
+        );
+
+        assert_eq!(
+            is_owner_or_sibling(&agent_hex, Some(&scoped), &cache, &dummy_rest_client()).await,
+            Ok(())
+        );
+        assert_eq!(
+            cache.is_known_sibling(&agent_hex),
+            None,
+            "a conditional attestation must not vouch for the author's later events"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_event_attestation_admits_sibling_in_dm_and_allowlist_miss() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let event = agent_message(&agent, vec![auth_tag(&owner, &agent.public_key(), "")]);
+        let (rest_client, server) = nip11_server(serde_json::json!({ "name": "relay" })).await;
+        let gate =
+            InboundAuthorGate::connect(&rest_client, &agent.public_key().to_hex(), "test").await;
+
+        for (respond_to, is_dm) in [
+            (RespondTo::OwnerOnly, true),
+            (RespondTo::Allowlist, true),
+            (RespondTo::Allowlist, false),
+        ] {
+            let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+            let decision = gate
+                .evaluate_for_test(
+                    &event,
+                    &respond_to,
+                    &HashSet::from([EXTERNAL.to_string()]),
+                    is_dm,
+                    &cache,
+                    &rest_client,
+                )
+                .await;
+            assert_eq!(decision.rejection, None, "{respond_to} is_dm={is_dm}");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_event_auth_tag_ignored_for_workflow_attributed_author() {
+        // A relay-attributed workflow owner is not the event's signer, so the
+        // signer's own attestation must not vouch for them.
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let workflow_owner = nostr::Keys::generate().public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+        cache.cache_sibling(workflow_owner.clone(), false);
+        let event = agent_message(&agent, vec![auth_tag(&owner, &agent.public_key(), "")]);
+
+        assert_eq!(
+            is_owner_or_sibling(&workflow_owner, Some(&event), &cache, &dummy_rest_client()).await,
+            Err(AuthorRejection::Cached)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_profile_lookup_reports_lookup_failed() {
+        let owner = nostr::Keys::generate();
+        let agent_hex = nostr::Keys::generate().public_key().to_hex();
+        for (label, reply) in [
+            (
+                "non-array reply",
+                Ok(serde_json::json!({ "error": "not an array" })),
+            ),
+            ("HTTP error", Err(())),
+        ] {
+            let (rest_client, server) =
+                nip11_scripted_server(std::collections::VecDeque::from([reply])).await;
+            let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+
+            let verdict = is_owner_or_sibling(&agent_hex, None, &cache, &rest_client).await;
+            server.abort();
+            assert_eq!(verdict, Err(AuthorRejection::LookupFailed), "{label}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_profile_rejections_report_their_reason_and_cache() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let other = nostr::Keys::generate();
+        let cases = [
+            (
+                "no profile",
+                serde_json::json!([]),
+                AuthorRejection::NoProfile,
+            ),
+            (
+                "profile without an auth tag",
+                profile_reply(&agent, vec![]),
+                AuthorRejection::NoAuthTag,
+            ),
+            (
+                "profile attested by another owner",
+                profile_reply(&agent, vec![auth_tag(&other, &agent.public_key(), "")]),
+                AuthorRejection::NoAuthTag,
+            ),
+            (
+                "our owner's tag copied from another agent",
+                profile_reply(&agent, vec![auth_tag(&owner, &other.public_key(), "")]),
+                AuthorRejection::BadSignature,
+            ),
+        ];
+        for (label, reply, expected) in cases {
+            let agent_hex = agent.public_key().to_hex();
+            let (rest_client, server) = nip11_server(reply).await;
+            let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+
+            let first = is_owner_or_sibling(&agent_hex, None, &cache, &rest_client).await;
+            let second = is_owner_or_sibling(&agent_hex, None, &cache, &rest_client).await;
+            server.abort();
+
+            assert_eq!(first, Err(expected), "{label}");
+            assert_eq!(second, Err(AuthorRejection::Cached), "{label} is cached");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_nobody_and_missing_owner_report_their_reason() {
+        let cache = OwnerCache::new(None);
+        let event = agent_message(&nostr::Keys::generate(), vec![]);
+        let author = event.pubkey.to_hex();
+        assert_eq!(
+            is_owner_or_sibling(&author, Some(&event), &cache, &dummy_rest_client()).await,
+            Err(AuthorRejection::NoOwnerConfigured)
+        );
+
+        let (rest_client, server) = nip11_server(serde_json::json!({ "name": "relay" })).await;
+        let gate = InboundAuthorGate::connect(&rest_client, &author, "test").await;
+        let decision = gate
+            .evaluate_for_test(
+                &event,
+                &RespondTo::Nobody,
+                &HashSet::new(),
+                false,
+                &cache_with_sibling(),
+                &rest_client,
+            )
+            .await;
+        server.abort();
+        assert_eq!(decision.rejection, Some(AuthorRejection::RespondToNobody));
     }
 }
 
