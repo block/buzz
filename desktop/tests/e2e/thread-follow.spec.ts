@@ -4,7 +4,8 @@ import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const CHANNEL = "general";
-const STORAGE_KEY = `buzz-thread-follows.v1:${"deadbeef".repeat(8)}`;
+const SELF_PUBKEY = "deadbeef".repeat(8);
+const STORAGE_KEY = `buzz-thread-follows.v1:${SELF_PUBKEY}`;
 const SCREENSHOTS = "test-results/thread-follow";
 
 type MockMessage = { id: string; created_at: number; pubkey: string };
@@ -35,6 +36,7 @@ async function emitMessage(
     extraTags?: string[][];
     id?: string;
     pending?: boolean;
+    pubkey?: string;
   },
 ): Promise<MockMessage> {
   const message = await page.evaluate(
@@ -52,7 +54,7 @@ async function emitMessage(
     {
       ...input,
       channelName: CHANNEL,
-      pubkey: TEST_IDENTITIES.alice.pubkey,
+      pubkey: input.pubkey ?? TEST_IDENTITIES.alice.pubkey,
     },
   );
   if (!message) throw new Error("mock message emitter is unavailable");
@@ -246,6 +248,7 @@ test("following a broadcast reply persists its thread root", async ({
   const followItem = page.getByRole("menuitem", { name: "Follow thread" });
   await followItem.focus();
   await page.keyboard.press("Enter");
+  await expect(page.getByRole("menu")).toHaveCount(0);
   await expect.poll(() => storedFollowIds(page)).toEqual([root.id]);
   expect(await storedFollowIds(page)).not.toContain(broadcastReply.id);
 
@@ -263,5 +266,44 @@ test("following a broadcast reply persists its thread root", async ({
   await expect(unfollowItem).toBeVisible();
   await unfollowItem.focus();
   await page.keyboard.press("Enter");
+  await expect.poll(() => storedFollowIds(page)).toEqual([]);
+});
+
+test("a delivered self-authored root immediately offers unfollow", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId(`channel-${CHANNEL}`).click();
+  await waitForMockLiveSubscription(page, CHANNEL);
+
+  const root = await emitMessage(page, {
+    content: "Root written by the current user",
+    pubkey: SELF_PUBKEY,
+  });
+  await waitForMessageProcessing(page, root.id);
+
+  await openMessageMenu(page, root.id);
+  await expect(
+    page.getByRole("menuitem", { name: "Unfollow thread" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Follow thread", exact: true }),
+  ).toHaveCount(0);
+  await expect.poll(() => storedFollowIds(page)).toEqual([]);
+
+  const unfollowItem = page.getByRole("menuitem", {
+    name: "Unfollow thread",
+  });
+  await unfollowItem.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await openMessageMenu(page, root.id);
+  await expect(
+    page.getByRole("menuitem", { name: "Follow thread", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Unfollow thread" }),
+  ).toHaveCount(0);
   await expect.poll(() => storedFollowIds(page)).toEqual([]);
 });

@@ -571,10 +571,14 @@ export function useUnreadChannels(
 
   const muteThread = React.useCallback(
     (rootId: string) => {
+      const didAdd = !mutedRootIdsRef.current.has(rootId);
       mutedRootIdsRef.current.add(rootId);
       observedPersistence.updateMembership("muted_root", rootId, true);
       if (normalizedPubkey !== null) {
         mutedStore.write(normalizedPubkey, mutedRootIdsRef.current);
+      }
+      if (didAdd) {
+        bumpMembershipVersion();
       }
       bumpLatestVersion();
     },
@@ -583,10 +587,13 @@ export function useUnreadChannels(
 
   const unmuteThread = React.useCallback(
     (rootId: string) => {
-      mutedRootIdsRef.current.delete(rootId);
+      const didDelete = mutedRootIdsRef.current.delete(rootId);
       observedPersistence.updateMembership("muted_root", rootId, false);
       if (normalizedPubkey !== null) {
         mutedStore.write(normalizedPubkey, mutedRootIdsRef.current);
+      }
+      if (didDelete) {
+        bumpMembershipVersion();
       }
       bumpLatestVersion();
     },
@@ -949,6 +956,11 @@ export function useUnreadChannels(
     () => new Set(mentionedRootIdsRef.current) as ReadonlySet<string>,
     [membershipVersion],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: membershipVersion is the intentional re-derivation signal
+  const mutedRootIds = React.useMemo(
+    () => new Set(mutedRootIdsRef.current) as ReadonlySet<string>,
+    [membershipVersion],
+  );
 
   return {
     unreadChannelIds,
@@ -977,7 +989,7 @@ export function useUnreadChannels(
       currentActivityScope,
       threadActivityRef.current,
     ),
-    mutedRootIds: mutedRootIdsRef.current as ReadonlySet<string>,
+    mutedRootIds,
     muteThread,
     unmuteThread,
   };
