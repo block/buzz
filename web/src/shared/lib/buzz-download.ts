@@ -1,5 +1,7 @@
 export const BUZZ_RELEASES_URL = "https://github.com/block/buzz/releases";
+/** Official iOS download destination. */
 export const BUZZ_IOS_APP_STORE_URL = "https://apps.apple.com/app/id6779728271";
+/** Official Android download destination. */
 export const BUZZ_ANDROID_PLAY_STORE_URL =
   "https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile";
 const BUZZ_RELEASES_API_URL =
@@ -100,6 +102,9 @@ export async function detectBuzzDownloadPlatform(
     navigatorValue,
     userAgentData,
   );
+  if (operatingSystem === "ios" || operatingSystem === "android") {
+    return { operatingSystem, architecture: "unknown" };
+  }
   let architecture = normalizeArchitecture(navigatorValue.userAgent);
 
   if (userAgentData?.getHighEntropyValues) {

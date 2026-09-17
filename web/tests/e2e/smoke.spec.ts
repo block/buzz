@@ -318,7 +318,12 @@ test("invite download links to the appropriate platform destination", async ({
         maxTouchPoints: { configurable: true, value: maxTouchPoints },
         userAgentData: {
           configurable: true,
-          value: { platform, mobile: maxTouchPoints > 0 },
+          value: {
+            platform,
+            mobile: maxTouchPoints > 0,
+            // Store routing must not wait for desktop architecture hints.
+            getHighEntropyValues: () => new Promise(() => {}),
+          },
         },
       });
     }, device);
@@ -361,6 +366,12 @@ test("invite download links to the appropriate platform destination", async ({
       page.getByRole("link", { name: "Download it now" }),
       device.name,
     ).toHaveAttribute("href", device.expectedUrl);
+    await context.route(device.expectedUrl, (route) =>
+      route.fulfill({ contentType: "text/html", body: "Store destination" }),
+    );
+    const destination = context.waitForEvent("page");
+    await page.getByRole("link", { name: "Download it now" }).click();
+    await expect(await destination).toHaveURL(device.expectedUrl);
     await context.close();
   }
 });
