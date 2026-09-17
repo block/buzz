@@ -49,7 +49,10 @@ export type ChannelPaneProps = {
   idleAuxiliaryHeaderActions?: IdleAuxiliaryHeaderControls;
   /** Show the idle auxiliary surface ahead of an already-open thread. */
   idleAuxiliaryOverridesThread?: boolean;
-  /** When false, idle auxiliary is a side panel; true/omitted uses focus drawer when eligible. */
+  /**
+   * Link/pin slide-out only: false keeps a normal-width sliding focus drawer;
+   * true/omitted uses the full-bleed focus drawer. Projects omit this.
+   */
   idleAuxiliaryExpanded?: boolean;
   idleAuxiliaryTitle?: string;
   hasOlderMessages?: boolean;

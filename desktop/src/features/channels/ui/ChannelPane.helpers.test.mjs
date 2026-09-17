@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   getChannelIntroDescription,
   getChannelIntroKind,
+  resolveIdleFocusDrawerWidthPx,
+  shouldEnableIdleFocusDrawerEscape,
   shouldPrioritizeIdleAuxiliary,
   shouldUseFocusIdleDrawer,
 } from "./ChannelPane.helpers.ts";
@@ -116,7 +118,7 @@ test("idle auxiliary priority does not depend on thread layout mode", () => {
   assert.equal(shouldPrioritizeIdleAuxiliary(false, true), false);
 });
 
-test("link slide-out expand gates focus drawer; collapsed stays a side panel", () => {
+test("link slide-out keeps focus drawer when overriding a thread (slide-in)", () => {
   const base = {
     channelManagementOpen: false,
     hasAgentSession: false,
@@ -127,10 +129,21 @@ test("link slide-out expand gates focus drawer; collapsed stays a side panel", (
     overrideThread: true,
     useSplitAuxiliaryPane: true,
   };
-  // Default / expanded → focus drawer covering the conversation.
+  // Collapsed and expanded both use the animated focus drawer so Open/pin
+  // slides in. Width (side vs full-bleed) is applied in ChannelPane via
+  // FocusThreadDrawer widthPx — not by skipping the drawer for collapsed.
   assert.equal(shouldUseFocusIdleDrawer(base), true);
-  assert.equal(shouldUseFocusIdleDrawer({ ...base, expanded: true }), true);
-  // Collapsed → normal-width side panel (still overrides thread slot via
-  // shouldPrioritizeIdleAuxiliary + replaceThreadWithIdleAuxiliary).
-  assert.equal(shouldUseFocusIdleDrawer({ ...base, expanded: false }), false);
+  assert.equal(shouldPrioritizeIdleAuxiliary(true, true), true);
+});
+
+test("link slide-out collapsed uses side width; expanded/omitted is full-bleed", () => {
+  assert.equal(resolveIdleFocusDrawerWidthPx(false, 420), 420);
+  assert.equal(resolveIdleFocusDrawerWidthPx(true, 420), undefined);
+  assert.equal(resolveIdleFocusDrawerWidthPx(undefined, 420), undefined);
+});
+
+test("fullscreen-expanded idle drawer yields Escape to chrome collapse", () => {
+  assert.equal(shouldEnableIdleFocusDrawerEscape(true), false);
+  assert.equal(shouldEnableIdleFocusDrawerEscape(false), true);
+  assert.equal(shouldEnableIdleFocusDrawerEscape(undefined), true);
 });

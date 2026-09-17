@@ -52,7 +52,9 @@ import {
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
 import {
   mentionsKnownAgent,
+  resolveIdleFocusDrawerWidthPx,
   selectThreadComposerBotTypingPubkeys,
+  shouldEnableIdleFocusDrawerEscape,
   shouldPrioritizeIdleAuxiliary,
   shouldUseFocusIdleDrawer,
 } from "@/features/channels/ui/ChannelPane.helpers";
@@ -445,9 +447,13 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const overlayIdleAuxiliaryOverThread =
     priorityIdleAuxiliary && hasThreadSurface && !isOverlay;
+  // Overlay-only replace keeps Open/pin visible on narrow/mobile layouts.
+  // Desktop collapsed/expanded both use the animated focus drawer (width
+  // differs); do not statically swap the thread slot — that skipped slide-in.
+  const replaceThreadWithIdleAuxiliary =
+    priorityIdleAuxiliary && hasThreadSurface && isOverlay;
   const useFocusIdleDrawer = shouldUseFocusIdleDrawer({
     channelManagementOpen,
-    expanded: idleAuxiliaryExpanded,
     hasAgentSession: Boolean(activeChannel && selectedAgent),
     hasIdleAuxiliaryPanel: Boolean(idleAuxiliaryPanel),
     hasIdlePanelCloseHandler: Boolean(onCloseIdleAuxiliaryPanel),
@@ -456,14 +462,14 @@ export const ChannelPane = React.memo(function ChannelPane({
     overrideThread: overlayIdleAuxiliaryOverThread,
     useSplitAuxiliaryPane,
   });
-  // When the idle sheet overrides a thread but is not expanded, replace the
-  // thread slot with a normal-width side panel (link slide-out collapsed).
-  const replaceThreadWithIdleAuxiliary =
-    priorityIdleAuxiliary &&
-    hasThreadSurface &&
-    (isOverlay || !useFocusIdleDrawer);
   const showIdleAuxiliaryOverThread =
     overlayIdleAuxiliaryOverThread && useFocusIdleDrawer;
+  const idleAuxiliarySidePanelWidth = resolveIdleFocusDrawerWidthPx(
+    idleAuxiliaryExpanded,
+    threadPanelWidthPx,
+  );
+  const idleAuxiliaryEscapeEnabled =
+    shouldEnableIdleFocusDrawerEscape(idleAuxiliaryExpanded);
   const { channelIsCovered, markExitComplete } = useFocusDrawerPresence(
     useFocusThreadDrawer || useFocusIdleDrawer,
     priorityIdleAuxiliary
@@ -543,10 +549,16 @@ export const ChannelPane = React.memo(function ChannelPane({
     useFocusIdleDrawer && onCloseIdleAuxiliaryPanel ? (
       <FocusThreadDrawer
         channelName={activeChannel?.name ?? "channel"}
-        key="idle-auxiliary-surface"
+        escapeEnabled={idleAuxiliaryEscapeEnabled}
+        key={
+          idleAuxiliarySidePanelWidth != null
+            ? "idle-auxiliary-side"
+            : "idle-auxiliary-focus"
+        }
         label={idleAuxiliaryTitle || "Panel"}
         onClose={onCloseIdleAuxiliaryPanel}
         restoreFocusTarget={threadSurface.restoreFocusTarget}
+        widthPx={idleAuxiliarySidePanelWidth}
       >
         {panel}
       </FocusThreadDrawer>

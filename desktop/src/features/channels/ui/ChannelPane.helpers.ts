@@ -7,7 +7,6 @@ import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
 export function shouldUseFocusIdleDrawer({
   channelManagementOpen,
-  expanded = true,
   hasAgentSession,
   hasIdleAuxiliaryPanel,
   hasIdlePanelCloseHandler,
@@ -17,12 +16,6 @@ export function shouldUseFocusIdleDrawer({
   useSplitAuxiliaryPane,
 }: {
   channelManagementOpen: boolean;
-  /**
-   * When false, the idle auxiliary stays a normal-width side panel even if it
-   * overrides a thread. Link slide-out uses this for collapsed vs fullscreen.
-   * Omit / true preserves Project sheet behavior (focus drawer when eligible).
-   */
-  expanded?: boolean;
   hasAgentSession: boolean;
   hasIdleAuxiliaryPanel: boolean;
   hasIdlePanelCloseHandler: boolean;
@@ -31,7 +24,6 @@ export function shouldUseFocusIdleDrawer({
   overrideThread?: boolean;
   useSplitAuxiliaryPane: boolean;
 }): boolean {
-  if (!expanded) return false;
   return (
     (useSplitAuxiliaryPane || overrideThread) &&
     !channelManagementOpen &&
@@ -68,6 +60,27 @@ export function getChannelIntroKind(
 
 export function getChannelIntroDescription(channel: Channel): string | null {
   return getChannelDetail(channel);
+}
+
+/**
+ * Link/pin slide-out width inside the focus drawer.
+ * `false` → normal side-panel width (collapsed). `true`/omit → full-bleed.
+ */
+export function resolveIdleFocusDrawerWidthPx(
+  expanded: boolean | undefined,
+  sidePanelWidthPx: number,
+): number | undefined {
+  return expanded === false ? sidePanelWidthPx : undefined;
+}
+
+/**
+ * When the link panel is fullscreen-expanded, Escape collapses via chrome;
+ * otherwise the focus drawer owns Escape to close.
+ */
+export function shouldEnableIdleFocusDrawerEscape(
+  expanded: boolean | undefined,
+): boolean {
+  return expanded !== true;
 }
 
 /** Whether a caller-owned auxiliary sheet should render ahead of a thread. */
