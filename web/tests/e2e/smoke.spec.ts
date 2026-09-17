@@ -294,6 +294,14 @@ test("invite download links to the appropriate platform destination", async ({
       maxTouchPoints: 5,
     },
     {
+      name: "Fire tablet",
+      expectedUrl: BUZZ_RELEASES_URL,
+      platform: "Linux armv8l",
+      userAgent:
+        "Mozilla/5.0 (Linux; Android 9; KFMAWI) AppleWebKit/537.36 Silk/126.0 like Chrome/126.0.0.0 Safari/537.36",
+      maxTouchPoints: 5,
+    },
+    {
       name: "ChromeOS",
       expectedUrl: BUZZ_RELEASES_URL,
       platform: "Linux x86_64",

@@ -49,6 +49,8 @@ function normalizeOperatingSystem(
   const isIPadDesktopMode =
     platform === "macintel" && navigatorValue.maxTouchPoints > 1;
   if (isIPadDesktopMode || /iphone|ipad|ipod/.test(userAgent)) return "ios";
+  // Fire OS identifies as Android but does not ship with Google Play.
+  if (/kindle|silk/.test(userAgent)) return "unknown";
   if (/android/.test(userAgent) || platform === "android") return "android";
 
   const isUnsupportedDevice =
