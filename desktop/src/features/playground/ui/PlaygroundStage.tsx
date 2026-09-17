@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
+import { isNativeWebviewModalParked } from "@/shared/lib/nativeWebviewModalPark";
 
 import { readPlaygroundStageBounds } from "../lib/deviceBezel";
 import {
@@ -18,8 +19,8 @@ import { PLAYGROUND_DOM_PROBE_SCRIPT } from "../lib/updates";
 import {
   evalPlaygroundWebview,
   hidePlaygroundWebview,
+  PLAYGROUND_WEBVIEW_RESTORE_EVENT,
   playgroundWebviewBoundsAreUsable,
-  setPlaygroundWebviewBounds,
   showPlaygroundWebview,
 } from "../lib/webview";
 import type { PlaygroundSession } from "../lib/sessions";
@@ -353,6 +354,8 @@ function NativeStageHost({
 
     const sync = () => {
       if (cancelled || !hostRef.current) return;
+      // Blocking Buzz modals park native children — do not re-show under them.
+      if (isNativeWebviewModalParked()) return;
       const bounds = readPlaygroundStageBounds(
         hostRef.current,
         viewportWidth != null && viewportHeight != null
@@ -361,27 +364,28 @@ function NativeStageHost({
         chrome,
       );
       if (!playgroundWebviewBoundsAreUsable(bounds)) return;
-      if (!opened) {
-        opened = true;
-        const sid = session.sid;
-        void showPlaygroundWebview({
-          sid,
-          url: session.url,
-          bounds,
-          userAgent,
-        }).then(() => {
-          // Dismiss/unmount may have won the race while show was in flight.
-          // Re-hide so the WKWebView cannot sit orphaned above the shell.
-          if (cancelled) {
-            void hidePlaygroundWebview(sid);
-            return;
-          }
+      // Always show (not setBounds-only). A late keeper `visible: false` or
+      // modal park can hide after the first open; setBounds alone left a blank
+      // stage until Inspect re-applied bounds. Visible show also bumps the
+      // generation so in-flight keeper hides restore via the event below.
+      const sid = session.sid;
+      const firstOpen = !opened;
+      opened = true;
+      void showPlaygroundWebview({
+        sid,
+        url: session.url,
+        bounds,
+        visible: true,
+        userAgent,
+      }).then(() => {
+        if (cancelled) {
+          void hidePlaygroundWebview(sid);
+          return;
+        }
+        if (firstOpen) {
           return evalPlaygroundWebview(sid, PLAYGROUND_DOM_PROBE_SCRIPT);
-        });
-        return;
-      }
-      if (cancelled) return;
-      void setPlaygroundWebviewBounds(session.sid, bounds, userAgent);
+        }
+      });
     };
 
     sync();
@@ -391,6 +395,13 @@ function NativeStageHost({
       observer.observe(chrome);
     }
     window.addEventListener("resize", sync);
+    // Modal park (and pin restore) hides playground children without
+    // unmounting this host — re-open so the stage is visible again.
+    const restore = () => {
+      opened = false;
+      sync();
+    };
+    window.addEventListener(PLAYGROUND_WEBVIEW_RESTORE_EVENT, restore);
     const visualViewport = window.visualViewport;
     visualViewport?.addEventListener("resize", sync);
     visualViewport?.addEventListener("scroll", sync);
@@ -404,6 +415,7 @@ function NativeStageHost({
       cancelled = true;
       observer.disconnect();
       window.removeEventListener("resize", sync);
+      window.removeEventListener(PLAYGROUND_WEBVIEW_RESTORE_EVENT, restore);
       visualViewport?.removeEventListener("resize", sync);
       visualViewport?.removeEventListener("scroll", sync);
       if (typeof window.cancelAnimationFrame === "function") {

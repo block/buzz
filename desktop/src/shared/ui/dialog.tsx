@@ -12,6 +12,7 @@ import {
   MODAL_CONTENT_MOTION_CLASS,
   MODAL_OVERLAY_MOTION_CLASS,
 } from "@/shared/ui/modalMotion";
+import { ParkNativeWebviewsWhileMounted } from "@/shared/ui/ParkNativeWebviewsWhileMounted";
 
 const Dialog = DialogPrimitive.Root;
 const DialogTrigger = DialogPrimitive.Trigger;
@@ -77,6 +78,7 @@ const DialogContent = React.forwardRef<
     ref,
   ) => (
     <DialogPortal>
+      <ParkNativeWebviewsWhileMounted />
       <DialogOverlay
         data-testid="dialog-overlay"
         className={cn(

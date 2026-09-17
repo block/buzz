@@ -2,6 +2,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { ArrowLeft, ArrowRight, Compass, RefreshCw } from "lucide-react";
 import * as React from "react";
 
+import { isNativeWebviewModalParked } from "@/shared/lib/nativeWebviewModalPark";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { Button } from "@/shared/ui/button";
 
@@ -16,7 +17,6 @@ import {
   pinWebviewGoForward,
   pinWebviewReload,
   pollPinWebview,
-  setPinWebviewBounds,
   showPinWebview,
   subscribePinWebviewLoad,
   subscribePinWebviewNav,
@@ -197,43 +197,38 @@ function PinnedSiteSurface({
     const host = hostRef.current;
     if (!host) return;
     let cancelled = false;
-    let opened = false;
 
     const openOrResize = () => {
       if (cancelled || !hostRef.current) return;
+      // Blocking Buzz modals park native children — do not re-show under them.
+      if (isNativeWebviewModalParked()) return;
       const bounds = readBounds(hostRef.current);
-      if (!opened) {
-        if (!pinWebviewBoundsAreUsable(bounds)) return;
-        opened = true;
-        const id = pinId;
-        void showPinWebview({
-          pinId: id,
-          startUrl,
-          bounds,
-        }).catch((error) => {
-          console.error("Failed to open pinned site", error);
-          if (!cancelled) {
-            setLoadError(
-              error instanceof Error
-                ? error.message
-                : "Failed to open pinned site.",
-            );
-          }
-        });
-        // Late dismiss / hide-all while show is in flight is cancelled inside
-        // showPinWebview (hide-epoch + per-pin show generation). Do not
-        // hide+bump here — that races remount first-open and blanks until
-        // a second click.
-        return;
-      }
-      void setPinWebviewBounds(pinId, bounds);
+      if (!pinWebviewBoundsAreUsable(bounds)) return;
+      // Always show (not setBounds-only). After a hide/park, setBounds left the
+      // WKWebView invisible until a second interaction. showPinWebview reuses
+      // the child and calls show(); hide-epoch + generation still cancel late
+      // dismiss races (#53/#54/#59).
+      const id = pinId;
+      void showPinWebview({
+        pinId: id,
+        startUrl,
+        bounds,
+      }).catch((error) => {
+        console.error("Failed to open pinned site", error);
+        if (!cancelled) {
+          setLoadError(
+            error instanceof Error
+              ? error.message
+              : "Failed to open pinned site.",
+          );
+        }
+      });
     };
 
     openOrResize();
     const observer = new ResizeObserver(openOrResize);
     observer.observe(host);
     const restore = () => {
-      opened = false;
       openOrResize();
     };
     window.addEventListener(PIN_WEBVIEW_RESTORE_EVENT, restore);

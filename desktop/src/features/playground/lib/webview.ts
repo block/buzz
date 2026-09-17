@@ -90,6 +90,47 @@ export function playgroundWebviewBoundsAreUsable(
   );
 }
 
+/**
+ * Playground NativeStageHost listens for this after a modal park or a late
+ * keeper `visible: false` show that stomped an on-stage paint.
+ */
+export const PLAYGROUND_WEBVIEW_RESTORE_EVENT =
+  "buzz:playground-webview-restore";
+
+/**
+ * Bumped by visible shows. A parked keeper show (visible: false) that started
+ * before a stage/embed show must not leave the WKWebView hidden off-screen —
+ * that looked like "blank until Inspect" because Inspect re-applies bounds.
+ */
+const playgroundShowGeneration = new Map<string, number>();
+
+export function getPlaygroundShowGeneration(sid: string): number {
+  return playgroundShowGeneration.get(sid) ?? 0;
+}
+
+/** Test helper. */
+export function resetPlaygroundShowGeneration(): void {
+  playgroundShowGeneration.clear();
+}
+
+function nextPlaygroundShowGeneration(sid: string): number {
+  const next = (playgroundShowGeneration.get(sid) ?? 0) + 1;
+  playgroundShowGeneration.set(sid, next);
+  return next;
+}
+
+function dispatchPlaygroundRestore(): void {
+  if (typeof window === "undefined") return;
+  if (typeof window.dispatchEvent !== "function") return;
+  const EventCtor = window.Event;
+  if (typeof EventCtor !== "function") return;
+  try {
+    window.dispatchEvent(new EventCtor(PLAYGROUND_WEBVIEW_RESTORE_EVENT));
+  } catch {
+    // Node test hosts may lack a DOM Event implementation.
+  }
+}
+
 export async function showPlaygroundWebview(input: {
   sid: string;
   url: string;
@@ -97,17 +138,32 @@ export async function showPlaygroundWebview(input: {
   visible?: boolean;
   userAgent?: string;
 }): Promise<PlaygroundNavState> {
-  return invokePlayground(
+  const wantVisible = input.visible ?? true;
+  // Visible stage/embed claims ownership. Keeper (visible: false) snapshots
+  // the current generation and must restore if a visible show won mid-flight.
+  const generationAtStart = wantVisible
+    ? nextPlaygroundShowGeneration(input.sid)
+    : (playgroundShowGeneration.get(input.sid) ?? 0);
+  const nav = await invokePlayground(
     "playground_webview_show",
     {
       sid: input.sid,
       url: input.url,
       bounds: input.bounds,
-      visible: input.visible ?? true,
+      visible: wantVisible,
       userAgent: input.userAgent ?? null,
     },
     { sid: input.sid, ...EMPTY_NAV, currentUrl: input.url },
   );
+  if (
+    !wantVisible &&
+    (playgroundShowGeneration.get(input.sid) ?? 0) !== generationAtStart
+  ) {
+    // Late keeper hide/offscreen bounds stomped an on-stage show — ask the
+    // mounted host to paint again (same signal as modal-park release).
+    dispatchPlaygroundRestore();
+  }
+  return nav;
 }
 
 export async function hidePlaygroundWebview(sid: string): Promise<void> {

@@ -8,6 +8,7 @@ import { X } from "lucide-react";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
+import { ParkNativeWebviewsWhileMounted } from "@/shared/ui/ParkNativeWebviewsWhileMounted";
 
 const Sheet = SheetPrimitive.Root;
 
@@ -66,6 +67,7 @@ const SheetContent = React.forwardRef<
   SheetContentProps
 >(({ side = "right", className, children, ...props }, ref) => (
   <SheetPortal>
+    <ParkNativeWebviewsWhileMounted />
     <SheetOverlay />
     <SheetPrimitive.Content
       ref={ref}

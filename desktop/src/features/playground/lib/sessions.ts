@@ -1,5 +1,6 @@
 import { getStorageItem, setStorageItem } from "@/shared/lib/safeStorage";
 import { hideAllPinWebviews } from "@/features/pinned-sites/lib/pinWebview";
+import { notifyPinWebviewRestore } from "@/shared/lib/nativeWebviewModalPark";
 import {
   dismissEmbeddedWindow,
   getActiveEmbeddedWindow,
@@ -256,15 +257,9 @@ function getActiveEmbeddedWindowSafe() {
 }
 
 function notifyPinRestore() {
-  if (typeof window === "undefined") return;
-  if (typeof window.dispatchEvent !== "function") return;
-  const EventCtor = window.Event;
-  if (typeof EventCtor !== "function") return;
-  try {
-    window.dispatchEvent(new EventCtor("buzz:pin-webview-restore"));
-  } catch {
-    // Node test hosts may lack a DOM Event implementation.
-  }
+  // Defer while a blocking modal park is held so dismiss cannot restore a
+  // pin/link webview underneath an open Dialog/Sheet.
+  notifyPinWebviewRestore();
 }
 
 export function resetPlaygroundState() {

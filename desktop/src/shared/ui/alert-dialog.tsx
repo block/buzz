@@ -15,6 +15,7 @@ import {
   MODAL_CONTENT_MOTION_CLASS,
   MODAL_OVERLAY_MOTION_CLASS,
 } from "@/shared/ui/modalMotion";
+import { ParkNativeWebviewsWhileMounted } from "@/shared/ui/ParkNativeWebviewsWhileMounted";
 
 const AlertDialog = AlertDialogPrimitive.Root;
 const AlertDialogTrigger = AlertDialogPrimitive.Trigger;
@@ -59,6 +60,7 @@ const AlertDialogContent = React.forwardRef<
     ref,
   ) => (
     <AlertDialogPortal>
+      <ParkNativeWebviewsWhileMounted />
       <AlertDialogOverlay />
       <div
         className={cn(

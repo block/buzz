@@ -5,11 +5,11 @@ import {
   closePinWebview,
   PIN_WEBVIEW_RESTORE_EVENT,
   pinWebviewBoundsAreUsable,
-  setPinWebviewBounds,
   showPinWebview,
   subscribePinWebviewLoad,
   type PinWebviewBounds,
 } from "@/features/pinned-sites/lib/pinWebview";
+import { isNativeWebviewModalParked } from "@/shared/lib/nativeWebviewModalPark";
 import { Button } from "@/shared/ui/button";
 
 import { LINK_SIDE_PANEL_PIN_ID } from "../lib/linkSidePanelStore";
@@ -40,41 +40,34 @@ export function LinkSidePanelSurface({ url }: { url: string }) {
     const host = hostRef.current;
     if (!host) return;
     let cancelled = false;
-    let opened = false;
     const pinId = LINK_SIDE_PANEL_PIN_ID;
 
     const openOrResize = () => {
       if (cancelled || !hostRef.current) return;
+      if (isNativeWebviewModalParked()) return;
       const bounds = readBounds(hostRef.current);
-      if (!opened) {
-        if (!pinWebviewBoundsAreUsable(bounds)) return;
-        opened = true;
-        void showPinWebview({
-          pinId,
-          startUrl: url,
-          bounds,
-        }).catch((error) => {
-          console.error("Failed to open link side panel", error);
-          if (!cancelled) {
-            setLoadError(
-              error instanceof Error
-                ? error.message
-                : "Failed to open link.",
-            );
-          }
-        });
-        // Late dismiss is handled inside showPinWebview (epoch + generation).
-        // Do not hide+bump on cancel — that blanks remounted first opens.
-        return;
-      }
-      void setPinWebviewBounds(pinId, bounds);
+      if (!pinWebviewBoundsAreUsable(bounds)) return;
+      // Always show — same blank-until-interaction class as pins/playground.
+      void showPinWebview({
+        pinId,
+        startUrl: url,
+        bounds,
+      }).catch((error) => {
+        console.error("Failed to open link side panel", error);
+        if (!cancelled) {
+          setLoadError(
+            error instanceof Error
+              ? error.message
+              : "Failed to open link.",
+          );
+        }
+      });
     };
 
     openOrResize();
     const observer = new ResizeObserver(openOrResize);
     observer.observe(host);
     const restore = () => {
-      opened = false;
       openOrResize();
     };
     window.addEventListener(PIN_WEBVIEW_RESTORE_EVENT, restore);
