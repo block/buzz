@@ -101,11 +101,21 @@ pub fn open_playground_inspector(webview: &Webview) -> Result<(), String> {
 
 /// Pin min=max to the current frame so WebKit cannot grow or shrink the
 /// Buzz window when the inspector frontend appears. Never call `set_size`.
-pub fn lock_main_window_size(app: &AppHandle, before: Option<(u32, u32)>) {
+/// Uses the inspected webview's parent window label (main or pop-out split).
+pub fn lock_main_window_size(
+    app: &AppHandle,
+    window_label: &str,
+    before: Option<(u32, u32)>,
+) {
     let Some(before) = before else {
         return;
     };
-    let Some(window) = app.get_window(APP_WEBVIEW_LABEL) else {
+    let label = if window_label.is_empty() {
+        APP_WEBVIEW_LABEL
+    } else {
+        window_label
+    };
+    let Some(window) = app.get_window(label) else {
         return;
     };
     let size = tauri::PhysicalSize::new(before.0, before.1);
@@ -113,8 +123,13 @@ pub fn lock_main_window_size(app: &AppHandle, before: Option<(u32, u32)>) {
     let _ = window.set_max_size(Some(size));
 }
 
-pub fn unlock_main_window_size(app: &AppHandle) {
-    let Some(window) = app.get_window(APP_WEBVIEW_LABEL) else {
+pub fn unlock_main_window_size(app: &AppHandle, window_label: &str) {
+    let label = if window_label.is_empty() {
+        APP_WEBVIEW_LABEL
+    } else {
+        window_label
+    };
+    let Some(window) = app.get_window(label) else {
         return;
     };
     let _ = window.set_min_size(Some(tauri::LogicalSize::new(
@@ -124,18 +139,41 @@ pub fn unlock_main_window_size(app: &AppHandle) {
     let _ = window.set_max_size(None::<tauri::LogicalSize<f64>>);
 }
 
+/// Prefer the frozen pre-inspect rect so a docked inspector cannot permanently
+/// widen the child webview by overwriting `last_bounds` mid-session.
+pub fn inspect_restore_bounds(
+    pre_inspect: Option<&PlaygroundBounds>,
+    last: Option<&PlaygroundBounds>,
+) -> Option<PlaygroundBounds> {
+    pre_inspect.or(last).cloned()
+}
+
 fn reapply_last_bounds(app: &AppHandle, sid: &str, window_label: &str) {
     let Some(manager) = app.try_state::<PlaygroundWebviewManager>() else {
         return;
     };
     let bounds = manager.sessions.lock().ok().and_then(|sessions| {
-        sessions
-            .get(sid)
-            .and_then(|session| session.last_bounds.clone())
+        sessions.get(sid).and_then(|session| {
+            inspect_restore_bounds(
+                session.pre_inspect_bounds.as_ref(),
+                session.last_bounds.as_ref(),
+            )
+        })
     });
     if let Some(bounds) = bounds.as_ref() {
         let keep = clamp_webview_bounds_to_stage(bounds, bounds);
         let _ = apply_bounds(app, sid, window_label, &keep);
+    }
+}
+
+fn clear_pre_inspect_bounds(app: &AppHandle, sid: &str) {
+    let Some(manager) = app.try_state::<PlaygroundWebviewManager>() else {
+        return;
+    };
+    if let Ok(mut sessions) = manager.sessions.lock() {
+        if let Some(session) = sessions.get_mut(sid) {
+            session.pre_inspect_bounds = None;
+        }
     }
 }
 
@@ -145,7 +183,7 @@ pub fn schedule_inspect_stage_restore(app: AppHandle, sid: String, window_label:
         // until that page exists, so re-detach during the open settle, then
         // keep pinning the stage for as long as Inspect stays open — including
         // if the user later docks to the bottom or side. Never set_size the
-        // main window; the frame was locked before show.
+        // host window; the frame was locked before show.
         for delay_ms in [16_u64, 50, 200, 500] {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             reapply_last_bounds(&app, &sid, &window_label);
@@ -155,8 +193,16 @@ pub fn schedule_inspect_stage_restore(app: AppHandle, sid: String, window_label:
             tokio::time::sleep(Duration::from_millis(250)).await;
             reapply_last_bounds(&app, &sid, &window_label);
             if !playground_inspector_is_visible(&app, &sid, &window_label) {
-                reapply_last_bounds(&app, &sid, &window_label);
-                unlock_main_window_size(&app);
+                // Hard-restore after close: WebKit may settle the child frame
+                // a few ticks after isVisible flips false.
+                for delay_ms in [0_u64, 16, 50, 200, 500, 1000] {
+                    if delay_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                    reapply_last_bounds(&app, &sid, &window_label);
+                }
+                clear_pre_inspect_bounds(&app, &sid);
+                unlock_main_window_size(&app, &window_label);
                 break;
             }
         }
@@ -168,6 +214,11 @@ pub fn playground_inspector_is_visible(app: &AppHandle, sid: &str, window_label:
         return false;
     };
     inspector_is_visible(&webview)
+}
+
+/// Shared visibility probe so pin Inspect can use the same macOS private API.
+pub fn inspector_is_visible_for_webview(webview: &Webview) -> bool {
+    inspector_is_visible(webview)
 }
 
 fn inspector_is_visible(webview: &Webview) -> bool {
@@ -372,6 +423,27 @@ mod tests {
             visible_flag.store(true, Ordering::Relaxed);
         });
         assert!(visible.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn inspect_restore_prefers_frozen_pre_inspect_bounds() {
+        let frozen = PlaygroundBounds {
+            x: 40.0,
+            y: 80.0,
+            width: 480.0,
+            height: 640.0,
+        };
+        let stretched = PlaygroundBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 1400.0,
+            height: 900.0,
+        };
+        let keep = inspect_restore_bounds(Some(&frozen), Some(&stretched)).expect("bounds");
+        assert_eq!(keep.width, 480.0);
+        assert_eq!(keep.x, 40.0);
+        let fallback = inspect_restore_bounds(None, Some(&stretched)).expect("fallback");
+        assert_eq!(fallback.width, 1400.0);
     }
 
     #[test]

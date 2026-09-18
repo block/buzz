@@ -77,6 +77,8 @@ struct PlaygroundSession {
     last_modified: Option<String>,
     body_hash: Option<String>,
     last_bounds: Option<PlaygroundBounds>,
+    /// Frozen at Inspect open; preferred by restore until Inspect closes.
+    pre_inspect_bounds: Option<PlaygroundBounds>,
     last_user_agent: Option<String>,
 }
 
@@ -91,6 +93,7 @@ impl PlaygroundSession {
             last_modified: None,
             body_hash: None,
             last_bounds: None,
+            pre_inspect_bounds: None,
             last_user_agent: None,
         }
     }
@@ -467,6 +470,11 @@ fn record_navigation(app: &AppHandle, manager: &PlaygroundWebviewManager, sid: &
 fn remember_bounds(manager: &PlaygroundWebviewManager, sid: &str, bounds: &PlaygroundBounds) {
     if let Ok(mut sessions) = manager.sessions.lock() {
         if let Some(session) = sessions.get_mut(sid) {
+            // While Inspect is open, keep the frozen pre-inspect rect authoritative
+            // so a docked inspector cannot permanently stretch last_bounds.
+            if session.pre_inspect_bounds.is_some() {
+                return;
+            }
             session.last_bounds = Some(bounds.clone());
         }
     }
@@ -559,7 +567,9 @@ pub async fn playground_webview_show(
         if session.start_url.origin() != url.origin() {
             *session = PlaygroundSession::new(url.clone());
         }
-        session.last_bounds = Some(bounds.clone());
+        if session.pre_inspect_bounds.is_none() {
+            session.last_bounds = Some(bounds.clone());
+        }
         session.nav_state(&sid)
     };
 
@@ -775,17 +785,28 @@ pub async fn playground_webview_inspect(
             .ok()
             .map(|size| (size.width, size.height))
     });
-    let bounds = manager.sessions.lock().ok().and_then(|sessions| {
-        sessions
-            .get(&sid)
-            .and_then(|session| session.last_bounds.clone())
-    });
-    // Lock the Buzz window *before* show so a briefly docked inspector
-    // cannot grow/shrink it (that flash hides the left menu). Detach-then-show
-    // on macOS. Do not call open_devtools() or set_size().
-    inspect::lock_main_window_size(&app, window_size);
+    let bounds = {
+        let mut sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "playground session lock poisoned".to_string())?;
+        let session = sessions.get_mut(&sid);
+        let bounds = session.as_ref().and_then(|s| s.last_bounds.clone());
+        if let Some(session) = session {
+            // Freeze pre-inspect layout so close can hard-restore even if
+            // WebKit temporarily stretches the child to the full client.
+            if session.pre_inspect_bounds.is_none() {
+                session.pre_inspect_bounds = bounds.clone();
+            }
+        }
+        bounds
+    };
+    // Lock the inspected window *before* show so a briefly docked inspector
+    // cannot grow/shrink it (that flash hides the left menu / split chat).
+    // Detach-then-show on macOS. Do not call open_devtools() or set_size().
+    inspect::lock_main_window_size(&app, &window_label, window_size);
     if let Err(error) = inspect::open_playground_inspector(&webview) {
-        inspect::unlock_main_window_size(&app);
+        inspect::unlock_main_window_size(&app, &window_label);
         return Err(error);
     }
     if let Some(before) = bounds.as_ref() {

@@ -291,7 +291,10 @@ function MobileDeviceMuseum({
           {orientation === "portrait" ? "Portrait" : "Landscape"}
         </button>
       </div>
-      <div className="flex min-h-0 flex-1 items-start justify-center overflow-auto p-3">
+      <div
+        className="flex min-h-0 flex-1 items-start justify-center overflow-auto bg-white p-3"
+        data-testid="playground-mobile-backdrop"
+      >
         {device ? (
           <DeviceBezel device={device} orientation={orientation}>
             <NativeStageHost

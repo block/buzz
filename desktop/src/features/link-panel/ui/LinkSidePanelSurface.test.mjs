@@ -78,4 +78,6 @@ test("mobile surface paints device museum + hardware bezel", async () => {
   assert.ok(screen.getByTestId("link-side-panel-device-iphone-16"));
   assert.ok(screen.getByTestId("playground-device-frame"));
   assert.ok(screen.getByTestId("link-side-panel-orientation"));
+  const backdrop = screen.getByTestId("link-side-panel-mobile-backdrop");
+  assert.ok(backdrop.className.includes("bg-white"));
 });

@@ -78,6 +78,8 @@ async function renderStage(mode = "mobile") {
 
 test("mobile stage paints a hardware bezel around a smaller inner screen", async () => {
   const screen = await renderStage("mobile");
+  const backdrop = screen.getByTestId("playground-mobile-backdrop");
+  assert.ok(backdrop.className.includes("bg-white"));
   const frame = screen.getByTestId("playground-device-frame");
   const inner = screen.getByTestId("playground-device-screen");
   const host = screen.getByTestId("playground-webview-host");

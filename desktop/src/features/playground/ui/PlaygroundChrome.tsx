@@ -41,8 +41,8 @@ import {
   PLAYGROUND_OPAQUE_FILL_STYLE,
 } from "../lib/overlayLayout";
 import {
-  dismissAndStagePlaygroundScreenshot,
   playgroundScreenshotFile,
+  stagePlaygroundScreenshotDraft,
 } from "../lib/screenshot";
 import { dismissPlayground, disposePlayground } from "../lib/sessions";
 import type { PlaygroundSession } from "../lib/sessions";
@@ -51,6 +51,7 @@ import type { PlaygroundNavState } from "../lib/types";
 import {
   getPlaygroundWebviewNavState,
   inspectPlaygroundWebview,
+  PLAYGROUND_WEBVIEW_RESTORE_EVENT,
   playgroundWebviewGoBack,
   playgroundWebviewGoForward,
   playgroundWebviewNavigate,
@@ -130,6 +131,9 @@ export function PlaygroundChrome({
     try {
       await inspectPlaygroundWebview(session.sid);
       onStageResync?.();
+      // Re-sync host bounds after Inspect so a docked inspector cannot leave
+      // the split/dock pane permanently full-width.
+      window.dispatchEvent(new Event(PLAYGROUND_WEBVIEW_RESTORE_EVENT));
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -154,7 +158,10 @@ export function PlaygroundChrome({
     try {
       const result = await screenshotPlaygroundWebview(session.sid);
       const file = playgroundScreenshotFile(result);
-      dismissAndStagePlaygroundScreenshot({ conversation, file });
+      // Stage only — never park/hide the split/dock webview (JM: screenshot
+      // was blanking the left pane via dismissPlayground).
+      stagePlaygroundScreenshotDraft({ conversation, file });
+      toast.success("Screenshot added to draft");
     } catch (error) {
       toast.error(
         error instanceof Error

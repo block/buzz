@@ -92,6 +92,7 @@ struct PinSession {
     body_hash: Option<String>,
     last_load_failed: bool,
     last_bounds: Option<PinBounds>,
+    pre_inspect_bounds: Option<PinBounds>,
 }
 
 impl PinSession {
@@ -119,6 +120,7 @@ impl PinSession {
             body_hash: persisted.body_hash,
             last_load_failed: false,
             last_bounds: None,
+            pre_inspect_bounds: None,
         }
     }
 
@@ -485,6 +487,9 @@ fn navigate_pin_webview(
 fn remember_bounds(manager: &PinWebviewManager, pin_id: &str, bounds: &PinBounds) {
     if let Ok(mut sessions) = manager.sessions.lock() {
         if let Some(session) = sessions.get_mut(pin_id) {
+            if session.pre_inspect_bounds.is_some() {
+                return;
+            }
             session.last_bounds = Some(bounds.clone());
         }
     }
@@ -546,7 +551,9 @@ fn reuse_existing_webview(
     bounds: &PinBounds,
 ) -> Result<PinNavState, String> {
     apply_bounds(app, pin_id, window_label, bounds)?;
-    session.last_bounds = Some(bounds.clone());
+    if session.pre_inspect_bounds.is_none() {
+        session.last_bounds = Some(bounds.clone());
+    }
     remember_bounds(manager, pin_id, bounds);
     let current = webview.url().ok();
     if should_navigate_existing(
@@ -658,7 +665,9 @@ pub async fn pin_webview_show(
         .map_err(|error| error.to_string())?;
 
     session.last_load_failed = false;
-    session.last_bounds = Some(bounds.clone());
+    if session.pre_inspect_bounds.is_none() {
+        session.last_bounds = Some(bounds.clone());
+    }
     let nav = session.nav_state(&pin_id);
     persist_session(&app, &pin_id, &session);
     store_session(&manager, pin_id, session);
@@ -942,24 +951,34 @@ pub async fn pin_webview_inspect(
             .ok()
             .map(|size| (size.width, size.height))
     });
-    let bounds = manager.sessions.lock().ok().and_then(|sessions| {
-        sessions
-            .get(&pin_id)
-            .and_then(|session| session.last_bounds.clone())
-    });
+    let bounds = {
+        let mut sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "pinned site session lock poisoned".to_string())?;
+        let session = sessions.get_mut(&pin_id);
+        let bounds = session.as_ref().and_then(|s| s.last_bounds.clone());
+        if let Some(session) = session {
+            if session.pre_inspect_bounds.is_none() {
+                session.pre_inspect_bounds = bounds.clone();
+            }
+        }
+        bounds
+    };
     // Same window-lock posture as playground Inspect so the inspector cannot
-    // grow the Buzz frame and hide the left nav.
-    crate::playground_webview::inspect::lock_main_window_size(&app, window_size);
+    // grow the Buzz/pop-out frame and hide the left nav or split chat.
+    crate::playground_webview::inspect::lock_main_window_size(&app, &window_label, window_size);
     if let Err(error) = crate::playground_webview::inspect::open_playground_inspector(&webview) {
-        crate::playground_webview::inspect::unlock_main_window_size(&app);
+        crate::playground_webview::inspect::unlock_main_window_size(&app, &window_label);
         return Err(error);
     }
     // Keep the pin webview inside the last slide-out/host rect (no stretch).
     if let Some(before) = bounds.as_ref() {
         let _ = apply_bounds(&app, &pin_id, &window_label, before);
     }
+    // Long-lived restore (parity with playground): do NOT unlock until Inspect
+    // closes, then hard-restore frozen pre-inspect bounds.
     schedule_pin_inspect_bounds_restore(app.clone(), pin_id.clone(), window_label.clone());
-    crate::playground_webview::inspect::unlock_main_window_size(&app);
     Ok(PinInspectResult { webview_id })
 }
 
@@ -969,7 +988,41 @@ fn schedule_pin_inspect_bounds_restore(app: AppHandle, pin_id: String, window_la
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             reapply_pin_last_bounds(&app, &pin_id, &window_label);
         }
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            reapply_pin_last_bounds(&app, &pin_id, &window_label);
+            // Probe the pin webview's inspector (not playground-{sid}).
+            if !pin_inspector_is_visible(&app, &pin_id, &window_label) {
+                for delay_ms in [0_u64, 16, 50, 200, 500, 1000] {
+                    if delay_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                    reapply_pin_last_bounds(&app, &pin_id, &window_label);
+                }
+                clear_pin_pre_inspect_bounds(&app, &pin_id);
+                crate::playground_webview::inspect::unlock_main_window_size(&app, &window_label);
+                break;
+            }
+        }
     });
+}
+
+fn pin_inspector_is_visible(app: &AppHandle, pin_id: &str, window_label: &str) -> bool {
+    let Some(webview) = app.get_webview(&pin_webview_label(pin_id, window_label)) else {
+        return false;
+    };
+    crate::playground_webview::inspect::inspector_is_visible_for_webview(&webview)
+}
+
+fn clear_pin_pre_inspect_bounds(app: &AppHandle, pin_id: &str) {
+    let Some(manager) = app.try_state::<PinWebviewManager>() else {
+        return;
+    };
+    if let Ok(mut sessions) = manager.sessions.lock() {
+        if let Some(session) = sessions.get_mut(pin_id) {
+            session.pre_inspect_bounds = None;
+        }
+    }
 }
 
 fn reapply_pin_last_bounds(app: &AppHandle, pin_id: &str, window_label: &str) {
@@ -977,9 +1030,12 @@ fn reapply_pin_last_bounds(app: &AppHandle, pin_id: &str, window_label: &str) {
         return;
     };
     let bounds = manager.sessions.lock().ok().and_then(|sessions| {
-        sessions
-            .get(pin_id)
-            .and_then(|session| session.last_bounds.clone())
+        sessions.get(pin_id).and_then(|session| {
+            session
+                .pre_inspect_bounds
+                .clone()
+                .or_else(|| session.last_bounds.clone())
+        })
     });
     if let Some(bounds) = bounds.as_ref() {
         let _ = apply_bounds(app, pin_id, window_label, bounds);
