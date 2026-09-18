@@ -1022,7 +1022,7 @@ fn clear_pin_pre_inspect_bounds(app: &AppHandle, pin_id: &str) {
         if let Some(session) = sessions.get_mut(pin_id) {
             session.pre_inspect_bounds = None;
         }
-    }
+    };
 }
 
 fn reapply_pin_last_bounds(app: &AppHandle, pin_id: &str, window_label: &str) {

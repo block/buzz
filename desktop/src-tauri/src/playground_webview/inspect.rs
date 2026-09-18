@@ -174,7 +174,7 @@ fn clear_pre_inspect_bounds(app: &AppHandle, sid: &str) {
         if let Some(session) = sessions.get_mut(sid) {
             session.pre_inspect_bounds = None;
         }
-    }
+    };
 }
 
 pub fn schedule_inspect_stage_restore(app: AppHandle, sid: String, window_label: String) {
