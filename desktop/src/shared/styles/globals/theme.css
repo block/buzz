@@ -152,7 +152,9 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: "Inter Variable", Inter, "Avenir Next", "Segoe UI", sans-serif;
+    font-family:
+      "Inter Variable", Inter, "Avenir Next", "Segoe UI", "Apple Color Emoji",
+      "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
   }
 
   /*
