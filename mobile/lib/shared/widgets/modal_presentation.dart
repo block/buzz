@@ -50,29 +50,38 @@ Future<T?> showBuzzModalBottomSheet<T>({
 }) {
   final isIos = defaultTargetPlatform == TargetPlatform.iOS;
   final theme = Theme.of(context);
+  // Explicitly colored sheets (for example the dark Huddle drawer) own their
+  // complete surface treatment. Standard utility sheets use the quieter page
+  // canvas and promote their controls onto the base app surface.
+  final sheetTheme = backgroundColor == null
+      ? utilitySurfaceThemeData(theme)
+      : theme;
   final surfaceColor =
       backgroundColor ??
-      theme.bottomSheetTheme.modalBackgroundColor ??
-      theme.bottomSheetTheme.backgroundColor ??
-      context.colors.surface;
+      sheetTheme.bottomSheetTheme.modalBackgroundColor ??
+      sheetTheme.bottomSheetTheme.backgroundColor ??
+      sheetTheme.colorScheme.surface;
   final reduceMotion = MediaQuery.disableAnimationsOf(context);
 
   return showModalBottomSheet<T>(
     context: context,
-    builder: (sheetContext) => ConcentricSheetSurface(
-      enabled: isIos,
-      color: surfaceColor,
-      child: _SheetContent(
-        title: title,
-        showCloseButton: showCloseButton,
-        showDragHandle: showDragHandle == true,
-        surfaceColor: surfaceColor,
-        child: builder(sheetContext),
+    builder: (sheetContext) => Theme(
+      data: sheetTheme,
+      child: Builder(
+        builder: (themedContext) => ConcentricSheetSurface(
+          enabled: isIos,
+          color: surfaceColor,
+          child: _SheetContent(
+            title: title,
+            showCloseButton: showCloseButton,
+            showDragHandle: showDragHandle == true,
+            surfaceColor: surfaceColor,
+            child: builder(themedContext),
+          ),
+        ),
       ),
     ),
-    backgroundColor: isIos || title != null
-        ? Colors.transparent
-        : backgroundColor,
+    backgroundColor: isIos || title != null ? Colors.transparent : surfaceColor,
     barrierLabel: barrierLabel,
     elevation: elevation,
     shape: shape,

@@ -10,9 +10,12 @@ class _HuddleCallParticipants extends StatelessWidget {
     required this.localPubkey,
     required this.activeSpeakerPubkeys,
     required this.speakerLevels,
+    required this.workingAgentPubkeys,
     required this.retryTooltip,
     required this.retryIcon,
     required this.onRetry,
+    required this.onParticipantTap,
+    required this.onOverflowTap,
   });
 
   final bool connected;
@@ -23,9 +26,12 @@ class _HuddleCallParticipants extends StatelessWidget {
   final String? localPubkey;
   final Set<String> activeSpeakerPubkeys;
   final Map<String, double> speakerLevels;
+  final Set<String> workingAgentPubkeys;
   final String retryTooltip;
   final IconData retryIcon;
   final VoidCallback onRetry;
+  final ValueChanged<String> onParticipantTap;
+  final VoidCallback onOverflowTap;
 
   @override
   Widget build(BuildContext context) {
@@ -74,10 +80,13 @@ class _HuddleCallParticipants extends StatelessWidget {
     final localHeightFactor = hasDenseRemoteRoster ? 0.42 : 0.5;
     final movementDuration = reducedMotion
         ? Duration.zero
-        : const Duration(milliseconds: 260);
+        : const Duration(milliseconds: 360);
     final entryDuration = reducedMotion
         ? Duration.zero
-        : const Duration(milliseconds: 180);
+        : const Duration(milliseconds: 420);
+    final exitDuration = reducedMotion
+        ? Duration.zero
+        : const Duration(milliseconds: 360);
 
     return Stack(
       key: const ValueKey('huddle-participant-stage'),
@@ -87,7 +96,7 @@ class _HuddleCallParticipants extends StatelessWidget {
           child: TweenAnimationBuilder<double>(
             key: const ValueKey('huddle-local-participant-motion'),
             duration: movementDuration,
-            curve: Curves.easeInOutCubic,
+            curve: Curves.easeOutBack,
             tween: Tween(
               begin: hasRemoteParticipants ? 1 : 0,
               end: hasRemoteParticipants ? 1 : 0,
@@ -119,7 +128,9 @@ class _HuddleCallParticipants extends StatelessWidget {
               speakerLevel: localPubkey == null
                   ? 0
                   : speakerLevels[localPubkey] ?? 0,
+              preparingResponse: false,
               isSelf: true,
+              onTap: null,
             ),
           ),
         ),
@@ -131,54 +142,18 @@ class _HuddleCallParticipants extends StatelessWidget {
             child: Align(
               key: const ValueKey('huddle-remote-participant-group'),
               alignment: const Alignment(0, 0.35),
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final layout = _HuddleParticipantLayout.fit(
-                    availableSize: constraints.biggest,
-                    participantCount: remotePubkeys.length,
-                    dense: hasDenseRemoteRoster,
-                  );
-                  return TweenAnimationBuilder<double>(
-                    key: const ValueKey('huddle-remote-participants'),
-                    duration: movementDuration,
-                    curve: Curves.easeInOutCubic,
-                    tween: Tween(end: layout.frameSize),
-                    builder: (context, frameSize, _) => Wrap(
-                      alignment: WrapAlignment.center,
-                      runAlignment: WrapAlignment.center,
-                      spacing: layout.spacing,
-                      runSpacing: layout.runSpacing,
-                      children: [
-                        for (final pubkey in remotePubkeys)
-                          SizedBox(
-                            key: ValueKey('huddle-participant-entry-$pubkey'),
-                            width: frameSize,
-                            height: frameSize + _huddleParticipantLabelSpace,
-                            child: TweenAnimationBuilder<double>(
-                              duration: entryDuration,
-                              curve: Curves.easeOutCubic,
-                              tween: Tween(begin: 0, end: 1),
-                              builder: (context, value, child) => Opacity(
-                                opacity: value,
-                                child: Transform.scale(
-                                  scale: 0.95 + value * 0.05,
-                                  child: child,
-                                ),
-                              ),
-                              child: _HuddleCallAvatar(
-                                pubkey: pubkey,
-                                profile: profiles[pubkey],
-                                fallbackLabel: fallbackLabels[pubkey],
-                                active: activeSpeakerPubkeys.contains(pubkey),
-                                speakerLevel: speakerLevels[pubkey] ?? 0,
-                                frameSize: frameSize,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  );
-                },
+              child: _HuddleParticipantCluster(
+                pubkeys: remotePubkeys,
+                profiles: profiles,
+                fallbackLabels: fallbackLabels,
+                activeSpeakerPubkeys: activeSpeakerPubkeys,
+                speakerLevels: speakerLevels,
+                workingAgentPubkeys: workingAgentPubkeys,
+                movementDuration: movementDuration,
+                entryDuration: entryDuration,
+                exitDuration: exitDuration,
+                onParticipantTap: onParticipantTap,
+                onOverflowTap: onOverflowTap,
               ),
             ),
           ),
@@ -223,62 +198,6 @@ class _HuddleLoadingBee extends HookWidget {
           flapAmount: flapAmount,
         ),
       ),
-    );
-  }
-}
-
-class _HuddleParticipantLayout {
-  const _HuddleParticipantLayout({
-    required this.frameSize,
-    required this.spacing,
-    required this.runSpacing,
-  });
-
-  final double frameSize;
-  final double spacing;
-  final double runSpacing;
-
-  static _HuddleParticipantLayout fit({
-    required Size availableSize,
-    required int participantCount,
-    required bool dense,
-  }) {
-    const spacing = Grid.xs;
-    const runSpacing = Grid.xxs;
-    final maximumFrameSize = dense
-        ? _huddleDenseAvatarFrameSize
-        : _huddleAvatarFrameSize;
-    if (participantCount <= 0 || availableSize.isEmpty) {
-      return _HuddleParticipantLayout(
-        frameSize: maximumFrameSize,
-        spacing: spacing,
-        runSpacing: runSpacing,
-      );
-    }
-
-    var bestFrameSize = _huddleMinimumAvatarFrameSize;
-    for (var columns = 1; columns <= participantCount; columns++) {
-      final rows = (participantCount + columns - 1) ~/ columns;
-      final widthForAvatars = availableSize.width - spacing * (columns - 1);
-      final heightForAvatars =
-          availableSize.height -
-          runSpacing * (rows - 1) -
-          _huddleParticipantLabelSpace * rows;
-      if (widthForAvatars <= 0 || heightForAvatars <= 0) continue;
-
-      final widthBound = widthForAvatars / columns;
-      final heightBound = heightForAvatars / rows;
-      final candidate = min(maximumFrameSize, min(widthBound, heightBound));
-      if (candidate > bestFrameSize) bestFrameSize = candidate;
-    }
-
-    return _HuddleParticipantLayout(
-      frameSize: bestFrameSize.clamp(
-        _huddleMinimumAvatarFrameSize,
-        maximumFrameSize,
-      ),
-      spacing: spacing,
-      runSpacing: runSpacing,
     );
   }
 }

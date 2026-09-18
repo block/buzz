@@ -269,7 +269,7 @@ fn row_to_audit_entry(row: &sqlx::postgres::PgRow) -> Result<AuditEntry, AuditEr
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use crate::action::AuditAction;
     use crate::entry::NewAuditEntry;

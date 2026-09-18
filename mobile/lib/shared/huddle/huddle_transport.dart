@@ -115,7 +115,7 @@ final class HuddleTransportState {
 ///
 /// This socket intentionally does not reuse [RelaySocket]: the main Nostr
 /// connection speaks JSON arrays and ignores binary messages, while Huddle
-/// audio uses JSON objects for its handshake/control plane and binary Opus v3
+/// audio uses JSON objects for its handshake/control plane and binary Opus v2
 /// frames for media. [connect] completes only after the relay's `joined`
 /// response, making authentication and room admission observable to callers.
 abstract interface class HuddleTransportClient {
@@ -295,7 +295,7 @@ final class HuddleTransport implements HuddleTransportClient {
     }
 
     try {
-      channel.sink.add(HuddleWireV3.encodeClientFrame(header, opusPayload));
+      channel.sink.add(HuddleWireV2.encodeClientFrame(header, opusPayload));
     } catch (error) {
       throw HuddleTransportError(
         code: HuddleTransportErrorCode.sendFailed,
@@ -409,7 +409,7 @@ final class HuddleTransport implements HuddleTransportClient {
     }
 
     try {
-      final auth = HuddleAuthV3.buildMessage(
+      final auth = HuddleAuthV2.buildMessage(
         parameters: parameters,
         challenge: challenge,
       );
@@ -806,12 +806,11 @@ final class HuddleTransport implements HuddleTransportClient {
       return;
     }
     try {
-      final frame = HuddleWireV3.decodeRelayFrame(bytes);
-      // The authoritative control roster owns the routing table. Packets from
-      // absent/recycled slots are stale and must never allocate playback state.
-      // The epoch fences the reuse race: an in-flight frame authored by a
-      // departed occupant that arrives after its index is reassigned carries
-      // the old epoch and is dropped rather than mis-attributed.
+      final frame = HuddleWireV2.decodeRelayFrame(bytes);
+      // The authoritative control roster owns the routing table. Protocol v2
+      // carries only the peer index, so packets are accepted only while that
+      // index is currently present. V3's stricter occupancy-epoch fence is not
+      // available in this compatibility build.
       if (!_isCurrentOccupant(frame.peerIndex, frame.epoch)) return;
       if (_audioIngress.length == _audioIngressCapacity) {
         _audioIngress.removeFirst();
@@ -829,14 +828,10 @@ final class HuddleTransport implements HuddleTransportClient {
     }
   }
 
-  /// Whether `peerIndex` is currently occupied at exactly `epoch`. A frame is
-  /// deliverable only when both match the authoritative roster: an absent slot
-  /// is stale, and a slot reused by a later occupant has advanced its epoch, so
-  /// a departed occupant's in-flight frame is fenced rather than mis-attributed.
-  bool _isCurrentOccupant(int peerIndex, int epoch) {
-    final occupant = _state.peers[peerIndex];
-    return occupant != null && occupant.epoch == epoch;
-  }
+  /// Whether `peerIndex` is currently occupied. Protocol v2 has no media epoch,
+  /// so the control-plane roster is the strongest routing boundary available.
+  bool _isCurrentOccupant(int peerIndex, int _) =>
+      _state.peers.containsKey(peerIndex);
 
   void _purgeAudioIngress(Set<int> peerIndices) {
     if (peerIndices.isEmpty || _audioIngress.isEmpty) return;
@@ -854,7 +849,8 @@ final class HuddleTransport implements HuddleTransportClient {
       // Control and media are handled by the same socket callback, but queued
       // media drains on later event-loop turns. Revalidate here so a removal
       // or index replacement wins over every frame queued before that control.
-      // The epoch check rejects a frame whose slot was reused after it queued.
+      // Revalidate occupancy after the event-loop hop so a control-plane leave
+      // can purge queued v2 media before it reaches native playout.
       if (_isCurrentOccupant(frame.peerIndex, frame.epoch)) {
         _audioController.add(frame);
         break;

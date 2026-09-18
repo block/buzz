@@ -869,13 +869,15 @@ test("native: an ingested event reaches the hook's unread counts, not just the p
     await first.unmount();
     first = null;
 
-    // A notifying event exists natively when the renderer reopens.
+    // A notifying event exists natively when the renderer reopens. It is
+    // high-priority (a mention) because the non-DM sidebar numeral counts
+    // unread mentions/broadcasts via the projection's highPriorityCount.
     store.events.set("evt-badge", {
       id: "evt-badge",
       channelId: CHANNEL,
       createdAt: NOW_S,
       rootId: null,
-      highPriority: false,
+      highPriority: true,
       countsTowardBadge: true,
       countsTowardAppBadge: true,
     });
@@ -898,7 +900,7 @@ test("native: an ingested event reaches the hook's unread counts, not just the p
     assert.equal(
       second.result.unreadChannelCounts.get(CHANNEL),
       1,
-      "the native badgeCount must reach unreadChannelCounts; asserting projectionsRef alone leaves this lane untested",
+      "the native highPriorityCount must reach unreadChannelCounts; asserting projectionsRef alone leaves this lane untested",
     );
     assert.ok(
       second.result.unreadChannelIds.has(CHANNEL),

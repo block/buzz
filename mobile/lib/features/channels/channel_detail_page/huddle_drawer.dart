@@ -218,6 +218,7 @@ class _MobileHuddleDrawer extends ConsumerWidget {
                           icon: LucideIcons.chevronUp,
                           foregroundColor: foreground,
                           backgroundColor: controlSurface,
+                          useHapticFeedback: true,
                           onPressed: restoreFullScreen,
                         ),
                         const SizedBox(width: Grid.twelve),
@@ -235,6 +236,7 @@ class _MobileHuddleDrawer extends ConsumerWidget {
                               ? foreground
                               : controlSurface,
                           toggled: session.isSpeakerEnabled,
+                          useHapticFeedback: true,
                           onPressed: () => unawaited(
                             sessionController.setSpeakerEnabled(
                               !session.isSpeakerEnabled,
@@ -256,6 +258,7 @@ class _MobileHuddleDrawer extends ConsumerWidget {
                               ? controlSurface
                               : foreground,
                           toggled: session.isMuted,
+                          useHapticFeedback: true,
                           onPressed: () => unawaited(
                             sessionController.setMuted(!session.isMuted),
                           ),
@@ -269,6 +272,7 @@ class _MobileHuddleDrawer extends ConsumerWidget {
                       icon: LucideIcons.phoneOff,
                       foregroundColor: context.colors.error,
                       backgroundColor: controlSurface,
+                      useHapticFeedback: true,
                       onPressed: leave,
                     ),
                   ],

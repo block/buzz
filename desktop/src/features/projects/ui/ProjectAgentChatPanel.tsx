@@ -9,7 +9,9 @@ import { normalizeRelayUrl } from "@/features/communities/communityStorage";
 import { useCommunities } from "@/features/communities/useCommunities";
 import type { ProjectDetailAgentContext } from "@/features/projects/lib/projectDetailAgentContext";
 import { projectDetailAgentContextBlock } from "@/features/projects/lib/projectDetailAgentContext";
+import { pickDefaultProjectsAgent } from "@/features/projects/lib/projectAgentSelection";
 import {
+  projectAgentMembershipInput,
   restoreProjectsAgentConversation,
   submitProjectAgentMessage,
 } from "@/features/projects/lib/projectAgentConversation";
@@ -24,6 +26,7 @@ import {
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { addChannelMembers } from "@/shared/api/tauri";
 import { sendChannelMessage } from "@/shared/api/tauriMessages";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -45,25 +48,29 @@ type ProjectAgentConversation = {
 };
 
 export function ProjectAgentChatPanel({
-  canResetWidth,
+  canResetWidth = false,
   constrainToAvailableSpace = true,
   context,
   detached = false,
+  homeChannel = null,
+  layout = "pane",
   onClose,
   onResetWidth,
   onResizeStart,
   sharedHeaderBackdrop,
-  widthPx,
+  widthPx = 0,
 }: {
-  canResetWidth: boolean;
+  canResetWidth?: boolean;
   constrainToAvailableSpace?: boolean;
   context: ProjectDetailAgentContext;
   detached?: boolean;
+  homeChannel?: Channel | null;
+  layout?: "pane" | "canvas";
   onClose?: () => void;
-  onResetWidth: () => void;
-  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onResetWidth?: () => void;
+  onResizeStart?: (event: React.PointerEvent<HTMLButtonElement>) => void;
   sharedHeaderBackdrop?: boolean;
-  widthPx: number;
+  widthPx?: number;
 }) {
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
@@ -97,7 +104,8 @@ export function ProjectAgentChatPanel({
   const profileQuery = useProfileQuery();
   const openDmMutation = useOpenDmMutation();
   const startAgentMutation = useStartManagedAgentMutation();
-  const selectedAgent = conversation?.agent ?? candidates[0] ?? null;
+  const selectedAgent =
+    conversation?.agent ?? pickDefaultProjectsAgent(candidates);
   const candidateProfilesQuery = useUsersBatchQuery(
     selectedAgent ? [selectedAgent.pubkey] : [],
   );
@@ -119,11 +127,13 @@ export function ProjectAgentChatPanel({
         candidates,
         channels: channelsQuery.data ?? [],
         currentPubkey: identityQuery.data?.pubkey ?? null,
+        homeChannelId: homeChannel?.id ?? null,
         stored: storedConversation,
       }),
     [
       candidates,
       channelsQuery.data,
+      homeChannel?.id,
       identityQuery.data?.pubkey,
       storedConversation,
     ],
@@ -148,10 +158,30 @@ export function ProjectAgentChatPanel({
         // `submitProjectAgentMessage` binds every relay side effect to the
         // scope captured here (fail closed), and threads follow-ups onto the
         // opener so a same-second follow-up cannot be hidden by id ordering.
+        if (
+          homeChannel &&
+          (!conversation || conversation.channel.id === homeChannel.id)
+        ) {
+          const alreadyMember = homeChannel.memberPubkeys.some(
+            (pubkey) =>
+              normalizePubkey(pubkey) === normalizePubkey(selectedAgent.pubkey),
+          );
+          if (!alreadyMember) {
+            await addChannelMembers(
+              projectAgentMembershipInput({
+                channelId: homeChannel.id,
+                agentPubkey: selectedAgent.pubkey,
+                relayScope,
+                signerScope,
+              }),
+            );
+          }
+        }
         const { channel, sent } = await submitProjectAgentMessage({
           agent: selectedAgent,
           conversation,
           content: `${trimmed}${contextPayload}`,
+          homeChannel,
           mentionPubkeys: [
             ...new Set([...mentionPubkeys, selectedAgent.pubkey]),
           ],
@@ -209,11 +239,13 @@ export function ProjectAgentChatPanel({
     [
       contextPayload,
       conversation,
+      homeChannel,
       identityQuery.data?.pubkey,
       isSending,
       openDmMutation,
       relayScope,
       selectedAgent,
+      signerScope,
       startAgentMutation,
       storageScope,
     ],
@@ -225,98 +257,122 @@ export function ProjectAgentChatPanel({
     setConversation(null);
   }, [storageScope]);
 
-  return (
-    <RightAuxiliaryPane
-      canResetWidth={canResetWidth}
-      constrainToAvailableSpace={constrainToAvailableSpace}
-      detached={detached}
-      onResetWidth={onResetWidth}
-      onResizeStart={onResizeStart}
-      testId="project-agent-chat-panel"
-      widthPx={widthPx}
+  const conversationBody = (
+    <div
+      className={cn(
+        "relative flex min-h-0 min-w-0 flex-1 flex-col",
+        (detached || layout === "canvas") && "bg-background",
+      )}
     >
-      <div
-        className={cn(
-          "relative flex min-h-0 min-w-0 flex-1 flex-col",
-          detached && "bg-background",
-        )}
-      >
+      {layout === "pane" ? (
         <ProjectAgentContextStrip
           context={context}
           onClose={onClose}
           sharedBackdrop={sharedHeaderBackdrop}
         />
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div
-            className="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto pb-4 pt-[4.25rem]"
-            data-testid="project-agent-conversation-scroll"
-          >
-            {conversation ? (
-              <ConversationThread
-                agent={conversation.agent}
-                agentAvatarUrl={selectedAgentAvatarUrl}
-                channel={conversation.channel}
-                currentPubkey={identityQuery.data?.pubkey ?? null}
-                selfAvatarUrl={profileQuery.data?.avatarUrl ?? null}
-                opener={conversation.opener}
-              />
-            ) : (
-              <div className="flex min-h-40 flex-1 flex-col items-center justify-center gap-2 text-center">
-                <p className="text-sm font-medium text-foreground">
-                  Ask about this page
-                </p>
-                <p className="max-w-56 text-xs text-muted-foreground">
-                  Start a conversation with the project agent.
-                </p>
-              </div>
-            )}
-          </div>
-          {context.selection?.length ? (
-            <ProjectAgentSelectionComposerBanner items={context.selection} />
-          ) : null}
-          <MessageComposer
-            channelId={conversation?.channel.id ?? null}
-            channelName={selectedAgent?.name ?? "project agent"}
-            channelType="dm"
-            containerClassName="px-3 pb-3"
-            disabled={!selectedAgent || isSending}
-            draftKey={`project-agent:${storageScope ?? "unscoped"}`}
-            isSending={isSending}
-            layoutMode="standalone"
-            onSend={handleSubmit}
-            placeholder={
-              selectedAgent
-                ? `Message ${selectedAgent.name}`
-                : "No agents available"
-            }
-            profiles={candidateProfilesQuery.data?.profiles}
-            showBackgroundUploadProgress={false}
-            showTopBorder={false}
-            toolbarExtraActions={
-              <>
-                <AgentContextPayloadPreview
-                  iconOnly
-                  payload={contextPayload}
-                  triggerLabel="Preview message context"
-                />
-                {conversation ? (
-                  <Button
-                    aria-label="Clear project agent chat"
-                    className="h-7 w-7"
-                    onClick={handleClear}
-                    size="icon"
-                    title="Clear conversation"
-                    type="button"
-                    variant="ghost"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
-                ) : null}
-              </>
-            }
-          />
+      ) : null}
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div
+          className={cn(
+            "flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto pb-4",
+            layout === "pane" ? "pt-[4.25rem]" : "pt-6",
+          )}
+          data-testid="project-agent-conversation-scroll"
+        >
+          {conversation ? (
+            <ConversationThread
+              agent={conversation.agent}
+              agentAvatarUrl={selectedAgentAvatarUrl}
+              channel={conversation.channel}
+              currentPubkey={identityQuery.data?.pubkey ?? null}
+              selfAvatarUrl={profileQuery.data?.avatarUrl ?? null}
+              opener={conversation.opener}
+            />
+          ) : (
+            <div className="flex min-h-40 flex-1 flex-col items-center justify-center gap-2 text-center">
+              <p className="text-sm font-medium text-foreground">
+                {homeChannel
+                  ? "Explain what this project should be"
+                  : "Ask about this page"}
+              </p>
+              <p className="max-w-72 text-xs text-muted-foreground">
+                {homeChannel
+                  ? "The project agent will build it out from this channel."
+                  : "Start a conversation with the project agent."}
+              </p>
+            </div>
+          )}
         </div>
+        {context.selection?.length ? (
+          <ProjectAgentSelectionComposerBanner items={context.selection} />
+        ) : null}
+        <MessageComposer
+          channelId={conversation?.channel.id ?? homeChannel?.id ?? null}
+          channelName={selectedAgent?.name ?? "project agent"}
+          channelType={homeChannel?.channelType ?? "dm"}
+          containerClassName="px-3 pb-3"
+          disabled={!selectedAgent || isSending}
+          draftKey={`project-agent:${storageScope ?? "unscoped"}`}
+          isSending={isSending}
+          layoutMode="standalone"
+          onSend={handleSubmit}
+          placeholder={
+            selectedAgent
+              ? `Message ${selectedAgent.name}`
+              : "No agents available"
+          }
+          profiles={candidateProfilesQuery.data?.profiles}
+          showBackgroundUploadProgress={false}
+          showTopBorder={false}
+          toolbarExtraActions={
+            <>
+              <AgentContextPayloadPreview
+                iconOnly
+                payload={contextPayload}
+                triggerLabel="Preview message context"
+              />
+              {conversation ? (
+                <Button
+                  aria-label="Clear project agent chat"
+                  className="h-7 w-7"
+                  onClick={handleClear}
+                  size="icon"
+                  title="Clear conversation"
+                  type="button"
+                  variant="ghost"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              ) : null}
+            </>
+          }
+        />
       </div>
+    </div>
+  );
+
+  if (layout === "canvas") {
+    return (
+      <div
+        className="flex min-h-0 min-w-0 flex-1 flex-col"
+        data-testid="project-agent-chat-panel"
+      >
+        {conversationBody}
+      </div>
+    );
+  }
+
+  return (
+    <RightAuxiliaryPane
+      canResetWidth={canResetWidth}
+      constrainToAvailableSpace={constrainToAvailableSpace}
+      detached={detached}
+      onResetWidth={onResetWidth ?? (() => {})}
+      onResizeStart={onResizeStart ?? (() => {})}
+      testId="project-agent-chat-panel"
+      widthPx={widthPx}
+    >
+      {conversationBody}
     </RightAuxiliaryPane>
   );
 }

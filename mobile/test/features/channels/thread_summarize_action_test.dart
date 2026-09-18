@@ -2,6 +2,7 @@ import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 
 TimelineMessage _message({
   required String id,
@@ -21,15 +22,15 @@ void main() {
     test('names authors the way the thread rows name them', () {
       final digest = threadSummaryDigest(
         [
-          _message(id: '1', pubkey: 'ABC123', content: 'first'),
-          _message(id: '2', pubkey: 'def456', content: 'second'),
+          _message(id: '1', pubkey: 'ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB', content: 'first'),
+          _message(id: '2', pubkey: 'cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd', content: 'second'),
         ],
         profiles: const {
-          'abc123': UserProfile(pubkey: 'abc123', displayName: 'Ada'),
+          'abababababababababababababababababababababababababababababababab': UserProfile(pubkey: 'abababababababababababababababababababababababababababababababab', displayName: 'Ada'),
         },
       );
 
-      expect(digest.map((entry) => entry.author), ['Ada', 'def456']);
+      expect(digest.map((entry) => entry.author), ['Ada', shortPubkey('cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd')]);
       expect(digest.map((entry) => entry.text), ['first', 'second']);
     });
 
@@ -37,11 +38,11 @@ void main() {
       final digest = threadSummaryDigest([
         _message(
           id: '1',
-          pubkey: 'aaaaaaaabbbbbbbbccccccccdddddddd',
+          pubkey: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
           content: 'hello',
         ),
       ], profiles: const {});
-      expect(digest.single.author, 'aaaaaaaa…');
+      expect(digest.single.author, shortPubkey('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'));
     });
 
     test('drops system rows, which are chrome rather than conversation', () {

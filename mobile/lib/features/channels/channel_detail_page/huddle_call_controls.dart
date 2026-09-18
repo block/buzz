@@ -35,6 +35,7 @@ class _HuddleCallControls extends StatelessWidget {
                 : context.colors.surfaceContainerHighest,
             dimension: 80,
             toggled: isSpeakerEnabled,
+            useHapticFeedback: true,
             onPressed: onToggleSpeaker,
           ),
           const SizedBox(width: Grid.sm),
@@ -50,6 +51,7 @@ class _HuddleCallControls extends StatelessWidget {
                 : context.colors.primary,
             dimension: 80,
             toggled: isMuted,
+            useHapticFeedback: true,
             onPressed: onToggleMute,
           ),
           const SizedBox(width: Grid.sm),
@@ -60,6 +62,7 @@ class _HuddleCallControls extends StatelessWidget {
             foregroundColor: context.colors.onSurface,
             backgroundColor: context.colors.surfaceContainerHighest,
             dimension: 80,
+            useHapticFeedback: true,
             onPressed: onReact,
           ),
         ],
@@ -79,6 +82,7 @@ class _HuddleRoundControl extends StatelessWidget {
     this.dimension = 64,
     this.showTooltip = true,
     this.toggled,
+    this.useHapticFeedback = false,
   });
 
   final String tooltip;
@@ -89,21 +93,31 @@ class _HuddleRoundControl extends StatelessWidget {
   final double dimension;
   final bool showTooltip;
   final bool? toggled;
+  final bool useHapticFeedback;
 
   @override
   Widget build(BuildContext context) {
+    final effectiveOnPressed = onPressed == null
+        ? null
+        : () {
+            if (useHapticFeedback) {
+              unawaited(HapticFeedback.selectionClick());
+            }
+            onPressed!();
+          };
+
     return Semantics(
       label: tooltip,
       button: true,
       enabled: onPressed != null,
       toggled: toggled,
-      onTap: onPressed,
+      onTap: effectiveOnPressed,
       child: ExcludeSemantics(
         child: SizedBox.square(
           dimension: dimension,
           child: IconButton(
             tooltip: showTooltip ? tooltip : null,
-            onPressed: onPressed,
+            onPressed: effectiveOnPressed,
             style: IconButton.styleFrom(
               foregroundColor: foregroundColor,
               backgroundColor: backgroundColor,

@@ -1,4 +1,5 @@
-import { ArrowUp, AtSign, X } from "lucide-react";
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+import { ArrowUp, AtSign, Square, X } from "lucide-react";
 import {
   AnimatePresence,
   motion,
@@ -9,6 +10,7 @@ import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 export type ComposerAddressAgent = {
@@ -58,7 +60,7 @@ function AddressedAgentAvatar({
   return (
     <motion.span
       animate={controls}
-      className="relative block h-5 w-5 shrink-0"
+      className="relative block h-4.5 w-4.5 shrink-0"
       data-pulse-version={pulseVersion}
       data-shake-version={shakeVersion}
       data-testid={`composer-address-lock-${agent.pubkey}`}
@@ -66,8 +68,9 @@ function AddressedAgentAvatar({
     >
       <UserAvatar
         avatarUrl={agent.avatarUrl}
-        className="h-5 w-5"
+        className="h-4.5 w-4.5"
         displayName={agent.displayName}
+        shape="squircle"
         size="xs"
         testId="composer-address-lock-avatar"
       />
@@ -125,7 +128,11 @@ type AddressAgentsProps = {
 
 export function ComposerMentionButton({
   agents,
+  confirmationTitle,
   disabled,
+  onConfirmationDismiss,
+  onConfirmationHoverChange,
+  onConfirmationTurnOff,
   onCaptureSelection,
   onOpen,
   onRemove,
@@ -133,7 +140,11 @@ export function ComposerMentionButton({
   shakeVersionByPubkey = {},
   showAgents,
 }: AddressAgentsProps & {
+  confirmationTitle?: string | null;
   disabled: boolean;
+  onConfirmationDismiss?: () => void;
+  onConfirmationHoverChange?: (hovered: boolean) => void;
+  onConfirmationTurnOff?: () => void;
   onCaptureSelection: () => void;
   onOpen: () => void;
   onRemove: (pubkey: string) => void;
@@ -142,108 +153,193 @@ export function ComposerMentionButton({
   const visibleAgents = showAgents ? agents.slice(0, VISIBLE_AGENT_LIMIT) : [];
   const hiddenCount = showAgents ? agents.length - visibleAgents.length : 0;
   const hasAgents = visibleAgents.length > 0;
+  const shouldReduceMotion = useReducedMotion();
+  const [showActiveChrome, setShowActiveChrome] = React.useState(hasAgents);
   const newlyAddedAgentPubkeys = useNewlyAddedAgentPubkeys(visibleAgents);
 
+  React.useEffect(() => {
+    if (hasAgents) setShowActiveChrome(true);
+  }, [hasAgents]);
+
   return (
-    <div
-      className={cn(
-        "flex h-8 min-w-8 items-center justify-center rounded-lg transition-colors",
-        hasAgents
-          ? "gap-1.5 bg-primary/15 pl-2 pr-1 text-primary hover:bg-primary/25 hover:text-primary/90"
-          : "text-foreground",
-      )}
+    <Popover
+      modal={false}
+      onOpenChange={(open) => {
+        if (!open) onConfirmationDismiss?.();
+      }}
+      open={Boolean(confirmationTitle)}
     >
-      <Tooltip disableHoverableContent>
-        <TooltipTrigger asChild>
+      <PopoverAnchor asChild>
+        <div
+          className={cn(
+            "flex h-8 min-w-8 items-center justify-center rounded-lg transition-colors",
+            showActiveChrome
+              ? "gap-1.5 bg-primary/15 pl-2 pr-1.5 text-primary hover:bg-primary/25 hover:text-primary/90"
+              : "text-foreground",
+          )}
+        >
+          <Tooltip disableHoverableContent>
+            <TooltipTrigger asChild>
+              <button
+                aria-label={hasAgents ? "Manage mentions" : "Mention someone"}
+                className={cn(
+                  "flex h-8 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+                  showActiveChrome
+                    ? "-ml-2 w-6 rounded-l-lg rounded-r-sm pl-2"
+                    : "w-8 hover:bg-accent hover:text-accent-foreground",
+                )}
+                data-mention-picker-trigger=""
+                data-testid="message-insert-mention"
+                disabled={disabled}
+                onClick={onOpen}
+                onMouseDown={(event) => {
+                  onCaptureSelection();
+                  event.preventDefault();
+                }}
+                type="button"
+              >
+                <AtSign aria-hidden="true" className="h-4 w-4 shrink-0" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {hasAgents ? "Manage mentions" : "Mention someone"}
+            </TooltipContent>
+          </Tooltip>
+          <AnimatePresence
+            initial={false}
+            onExitComplete={() => {
+              if (!hasAgents) setShowActiveChrome(false);
+            }}
+          >
+            {hasAgents ? (
+              <motion.span
+                animate={{ opacity: 1, width: "auto" }}
+                className="flex items-center gap-1 overflow-hidden"
+                data-testid="composer-address-locks"
+                exit={{ opacity: 0, width: 0 }}
+                initial={shouldReduceMotion ? false : { opacity: 0, width: 0 }}
+                transition={
+                  shouldReduceMotion
+                    ? { duration: 0 }
+                    : { duration: 0.12, ease: "easeOut" }
+                }
+              >
+                <AnimatePresence mode="popLayout">
+                  {visibleAgents.map((agent) => (
+                    <Tooltip disableHoverableContent key={agent.pubkey}>
+                      <TooltipTrigger asChild>
+                        <motion.button
+                          aria-label={`Don't automatically mention ${agent.displayName} in this thread`}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className="group/address relative rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                          data-testid={`composer-address-lock-remove-${agent.pubkey}`}
+                          disabled={disabled}
+                          exit={
+                            shouldReduceMotion
+                              ? { opacity: 0 }
+                              : { opacity: 0, scale: 0.8 }
+                          }
+                          initial={
+                            newlyAddedAgentPubkeys.has(agent.pubkey)
+                              ? shouldReduceMotion
+                                ? { opacity: 0 }
+                                : { opacity: 0, scale: 0.8 }
+                              : false
+                          }
+                          layout={!shouldReduceMotion}
+                          onClick={() => onRemove(agent.pubkey)}
+                          transition={
+                            shouldReduceMotion
+                              ? { duration: 0 }
+                              : addressEntryTransition
+                          }
+                          type="button"
+                        >
+                          <AddressedAgentAvatar
+                            agent={agent}
+                            pulseVersion={
+                              pulseVersionByPubkey[agent.pubkey] ?? 0
+                            }
+                            shakeVersion={
+                              shakeVersionByPubkey[agent.pubkey] ?? 0
+                            }
+                          />
+                          <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover/address:opacity-100 group-focus-visible/address:opacity-100">
+                            <X aria-hidden="true" className="h-3 w-3" />
+                          </span>
+                        </motion.button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        Don't automatically mention {agent.displayName} in this
+                        thread <AgentManagementMarker pubkey={agent.pubkey} />
+                      </TooltipContent>
+                    </Tooltip>
+                  ))}
+                </AnimatePresence>
+                <RemainingAgentCount count={hiddenCount} />
+              </motion.span>
+            ) : null}
+          </AnimatePresence>
+        </div>
+      </PopoverAnchor>
+      {confirmationTitle ? (
+        <PopoverContent
+          align="center"
+          aria-live="polite"
+          className="flex max-w-[calc(100vw-2rem)] items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs"
+          collisionPadding={8}
+          data-testid="composer-auto-pin-confirmation"
+          onCloseAutoFocus={(event) => event.preventDefault()}
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onPointerEnter={() => onConfirmationHoverChange?.(true)}
+          onPointerLeave={() => onConfirmationHoverChange?.(false)}
+          side="right"
+          sideOffset={8}
+          style={{ width: "max-content" }}
+        >
+          <span className="whitespace-nowrap">{confirmationTitle}</span>
           <button
-            aria-label={
-              hasAgents ? "Manage automatic agent mentions" : "Mention someone"
-            }
-            className={cn(
-              "flex h-8 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
-              hasAgents
-                ? "-ml-2 w-6 rounded-l-lg rounded-r-sm pl-2"
-                : "w-8 hover:bg-accent hover:text-accent-foreground",
-            )}
-            data-mention-picker-trigger=""
-            data-testid="message-insert-mention"
-            disabled={disabled}
-            onClick={onOpen}
-            onMouseDown={onCaptureSelection}
+            className="shrink-0 rounded-md px-1.5 py-1 font-medium text-primary outline-hidden hover:bg-primary/10 focus-visible:ring-1 focus-visible:ring-ring"
+            onClick={onConfirmationTurnOff}
+            onMouseDown={(event) => event.preventDefault()}
             type="button"
           >
-            <AtSign aria-hidden="true" className="h-4 w-4 shrink-0" />
+            Turn off
           </button>
-        </TooltipTrigger>
-        <TooltipContent>
-          {hasAgents ? "Manage automatic agent mentions" : "Mention someone"}
-        </TooltipContent>
-      </Tooltip>
-      {hasAgents ? (
-        <span
-          className="flex items-center gap-1"
-          data-testid="composer-address-locks"
-        >
-          <AnimatePresence mode="popLayout">
-            {visibleAgents.map((agent) => (
-              <Tooltip disableHoverableContent key={agent.pubkey}>
-                <TooltipTrigger asChild>
-                  <motion.button
-                    aria-label={`Stop automatically mentioning ${agent.displayName}`}
-                    animate={{ opacity: 1, scale: 1 }}
-                    className="group/address relative rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-                    data-testid={`composer-address-lock-remove-${agent.pubkey}`}
-                    disabled={disabled}
-                    exit={{ opacity: 0, scale: 0.8 }}
-                    initial={
-                      newlyAddedAgentPubkeys.has(agent.pubkey)
-                        ? { opacity: 0, scale: 0.8 }
-                        : false
-                    }
-                    layout
-                    onClick={() => onRemove(agent.pubkey)}
-                    transition={addressEntryTransition}
-                    type="button"
-                  >
-                    <AddressedAgentAvatar
-                      agent={agent}
-                      pulseVersion={pulseVersionByPubkey[agent.pubkey] ?? 0}
-                      shakeVersion={shakeVersionByPubkey[agent.pubkey] ?? 0}
-                    />
-                    <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-full bg-foreground/80 text-background opacity-0 transition-opacity group-hover/address:opacity-100 group-focus-visible/address:opacity-100">
-                      <X aria-hidden="true" className="h-3 w-3" />
-                    </span>
-                  </motion.button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  Stop automatically mentioning {agent.displayName}
-                </TooltipContent>
-              </Tooltip>
-            ))}
-          </AnimatePresence>
-          <RemainingAgentCount count={hiddenCount} />
-        </span>
+        </PopoverContent>
       ) : null}
-    </div>
+    </Popover>
   );
 }
 
 export function ComposerSendButton({
   isSending,
+  onFinishVoiceNote,
   sendDisabled,
 }: {
   isSending: boolean;
+  onFinishVoiceNote?: () => void;
   sendDisabled: boolean;
 }) {
+  const isFinishingVoiceNote = onFinishVoiceNote != null;
   return (
     <button
-      aria-label={isSending ? "Sending" : "Send message"}
+      aria-label={
+        isFinishingVoiceNote
+          ? "Finish voice note"
+          : isSending
+            ? "Sending"
+            : "Send message"
+      }
       className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground shadow transition-colors hover:bg-primary/90 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-      data-testid="send-message"
+      data-testid={isFinishingVoiceNote ? "finish-voice-note" : "send-message"}
       disabled={sendDisabled || isSending}
-      type="submit"
+      onClick={onFinishVoiceNote}
+      type={isFinishingVoiceNote ? "button" : "submit"}
     >
-      {isSending ? (
+      {isFinishingVoiceNote ? (
+        <Square aria-hidden className="h-3.5 w-3.5 fill-current" />
+      ) : isSending ? (
         <SendSpinner />
       ) : (
         <ArrowUp aria-hidden className="h-4 w-4" />

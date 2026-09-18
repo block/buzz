@@ -25,10 +25,12 @@ const ProjectSelectionContext =
 
 export function ProjectSelectionProvider({
   children,
+  onClear,
   onSelect,
   resetKey,
 }: {
   children: React.ReactNode;
+  onClear?: () => void;
   onSelect?: () => void;
   resetKey: string;
 }) {
@@ -42,6 +44,9 @@ export function ProjectSelectionProvider({
   }
   const onSelectRef = React.useRef(onSelect);
   onSelectRef.current = onSelect;
+  const onClearRef = React.useRef(onClear);
+  onClearRef.current = onClear;
+  const wasActiveRef = React.useRef(false);
 
   const clear = React.useCallback(() => {
     setState(EMPTY_PROJECT_SELECTION);
@@ -61,7 +66,10 @@ export function ProjectSelectionProvider({
   }, []);
 
   React.useEffect(() => {
-    if (state.items.length > 0) onSelectRef.current?.();
+    const active = state.items.length > 0;
+    if (active && !wasActiveRef.current) onSelectRef.current?.();
+    if (!active && wasActiveRef.current) onClearRef.current?.();
+    wasActiveRef.current = active;
   }, [state.items.length]);
 
   React.useEffect(() => {

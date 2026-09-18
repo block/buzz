@@ -98,6 +98,8 @@ type TimelineMessageListProps = {
   searchMatchingMessageIds?: Set<string>;
   /** The current find-in-channel query string. */
   searchQuery?: string;
+  /** Keep date chips pinned while the timeline scrolls. */
+  stickyDayDividers?: boolean;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
   /** Content rendered as the first virtual row before channel history. */
@@ -154,6 +156,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchActiveMessageId = null,
   searchMatchingMessageIds,
   searchQuery,
+  stickyDayDividers = true,
   threadUnreadCounts,
   unfollowThreadById,
   leadingContent,
@@ -352,7 +355,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
           key={group.key}
         >
           {hideDayDividers || group.headingTimestamp === null ? null : (
-            <DayDivider label={formatDayGroupLabel(group.headingTimestamp)} />
+            <DayDivider
+              label={formatDayGroupLabel(group.headingTimestamp)}
+              sticky={stickyDayDividers}
+            />
           )}
           {group.items.map((item) => (
             <TimelineRowShell item={item} key={getTimelineItemKey(item)}>

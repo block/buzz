@@ -30,6 +30,7 @@ import {
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { SignOutSection } from "./SignOutSection";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
+import { canonicalNpub, UNAVAILABLE_KEY_LABEL } from "@/shared/lib/pubkey";
 
 type ProfileSettingsCardProps = {
   currentPubkey?: string;
@@ -302,7 +303,10 @@ export function ProfileSettingsCard({
     profile?.displayName ||
     fallbackDisplayName ||
     "Your profile";
-  const resolvedPubkey = profile?.pubkey ?? currentPubkey ?? "Unavailable";
+  // Identity details show and copy the full canonical npub; a key that
+  // cannot be encoded renders the neutral label and is never copyable.
+  const identityNpub = canonicalNpub(profile?.pubkey ?? currentPubkey ?? "");
+  const resolvedPubkey = identityNpub ?? UNAVAILABLE_KEY_LABEL;
   const nip05Handle = profile?.nip05Handle ?? "Not set";
   const emojiAvatarPreview = React.useMemo(
     () => parseEmojiAvatarDataUrl(avatarUrlDraft),
@@ -786,9 +790,7 @@ export function ProfileSettingsCard({
                               data-testid="profile-identity-details"
                             >
                               <IdentityRow
-                                copyValue={
-                                  profile?.pubkey ?? currentPubkey ?? undefined
-                                }
+                                copyValue={identityNpub ?? undefined}
                                 label="Public key"
                                 testId="profile-pubkey"
                                 value={resolvedPubkey}

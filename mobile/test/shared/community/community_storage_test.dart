@@ -4,12 +4,14 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/push/push_subscription.dart';
 
 /// In-memory fake that extends Fake to satisfy all FlutterSecureStorage
 /// interface methods, but implements the core read/write/delete with real
 /// in-memory logic.
 class FakeSecureStorage extends Fake implements FlutterSecureStorage {
   final Map<String, String> _data = {};
+  final Map<String, int> _writeCounts = {};
 
   @override
   Future<String?> read({
@@ -33,6 +35,7 @@ class FakeSecureStorage extends Fake implements FlutterSecureStorage {
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
   }) async {
+    _writeCounts[key] = (_writeCounts[key] ?? 0) + 1;
     if (value != null) {
       _data[key] = value;
     } else {
@@ -85,6 +88,7 @@ class FakeSecureStorage extends Fake implements FlutterSecureStorage {
   // Convenience for setting up test data.
   String? operator [](String key) => _data[key];
   void operator []=(String key, String value) => _data[key] = value;
+  int writeCount(String key) => _writeCounts[key] ?? 0;
 }
 
 void main() {
@@ -117,7 +121,84 @@ void main() {
       expect(loaded.first.name, 'Test');
       expect(loaded.first.relayUrl, 'https://relay.example.com');
       expect(loaded.first.pubkey, 'abc123');
+      expect(
+        loaded.first.pushSubscriptionState.authority,
+        BuzzPushLeaseSubscriptionAuthority.desired,
+      );
     });
+
+    test('round-trips desired push subscription state', () async {
+      final pubkey = 'a' * 64;
+      final subscriptions = buildDesiredBuzzPushSubscriptions(
+        myPubkey: pubkey,
+        channelIds: const ['123e4567-e89b-42d3-a456-426614174000'],
+      );
+      final community =
+          Community.create(
+            name: 'Push',
+            relayUrl: 'https://relay.example.com',
+            pubkey: pubkey,
+          ).copyWith(
+            pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+              desired: subscriptions,
+            ),
+          );
+
+      await storage.save(community);
+      final loaded = (await storage.loadAll()).single;
+
+      expect(
+        loaded.pushSubscriptionState.toJson(),
+        community.pushSubscriptionState.toJson(),
+      );
+    });
+
+    test('round-trips a pending push tombstone journal', () async {
+      final subscription = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+        notificationClass: 'default',
+      );
+      final state =
+          BuzzPushLeaseSubscriptionState.desired(desired: [subscription])
+              .withAccepted(subscriptions: [subscription], generation: 4)
+              .withPendingTombstone(5);
+      final community = Community.create(
+        name: 'Push',
+        relayUrl: 'https://relay.example.com',
+      ).copyWith(pushSubscriptionState: state);
+
+      await storage.save(community);
+      final loaded = (await storage.loadAll()).single;
+
+      expect(loaded.pushSubscriptionState.toJson(), state.toJson());
+      expect(loaded.pushSubscriptionState.pendingTombstoneGeneration, 5);
+    });
+
+    test(
+      'migrates a disabled reserved generation into a tombstone journal',
+      () {
+        final community =
+            Community.create(
+              name: 'Push',
+              relayUrl: 'https://relay.example.com',
+            ).copyWith(
+              pushNotificationsEnabled: false,
+              pushSubscriptionState:
+                  const BuzzPushLeaseSubscriptionState.desired(
+                    acceptedGeneration: 4,
+                    generationCursor: 5,
+                  ),
+            );
+        final json = community.toJson();
+        (json['pushSubscriptionState'] as Map<String, dynamic>).remove(
+          'pendingTombstoneGeneration',
+        );
+
+        final migrated = Community.fromJson(json);
+
+        expect(migrated.pushSubscriptionState.pendingTombstoneGeneration, 5);
+      },
+    );
 
     test('save updates existing community with same id', () async {
       final ws = Community.create(

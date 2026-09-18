@@ -1,6 +1,7 @@
 import { MessageSquareText } from "lucide-react";
 import * as React from "react";
 
+import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
@@ -30,6 +31,8 @@ type ForumViewProps = {
   onTargetReached?: (messageId: string) => void;
   selectedPostId: string | null;
   targetReplyId: string | null;
+  targetSearchMessageId?: string;
+  targetSearchQuery?: string;
 };
 
 function canDelete(postPubkey: string, currentPubkey?: string): boolean {
@@ -47,6 +50,8 @@ export function ForumView({
   onTargetReached,
   selectedPostId,
   targetReplyId,
+  targetSearchMessageId,
+  targetSearchQuery,
 }: ForumViewProps) {
   const [isComposerOpen, setIsComposerOpen] = React.useState(false);
   const postsScrollRef = React.useRef<HTMLDivElement>(null);
@@ -132,6 +137,8 @@ export function ForumView({
 
     return (
       <ForumThreadPanel
+        key={`${channel.id}:${selectedPostId}`}
+        postId={selectedPostId}
         canDeletePost={canDeleteExpandedPost}
         currentPubkey={effectiveCurrentPubkey}
         isDeletingPost={deletePostMutation.isPending}
@@ -156,6 +163,8 @@ export function ForumView({
         onTargetReached={onTargetReached}
         profiles={profiles}
         targetEventId={targetReplyId}
+        targetSearchMessageId={targetSearchMessageId}
+        targetSearchQuery={targetSearchQuery}
         thread={threadQuery.data}
       />
     );
@@ -169,6 +178,7 @@ export function ForumView({
             autocompleteBelow
             channelId={channel.id}
             channelType="forum"
+            draftKey={`forum:${channel.id}`}
             isSending={createPostMutation.isPending}
             onCancel={() => setIsComposerOpen(false)}
             onSubmit={async (content, mentionPubkeys, mediaTags) => {
@@ -201,6 +211,7 @@ export function ForumView({
       <div
         className="flex-1 overflow-y-auto"
         data-scroll-restoration-id={`forum-list:${channel.id}`}
+        onCopy={handleTimelineMentionCopy}
         ref={postsScrollRef}
       >
         {postsQuery.isLoading ? (

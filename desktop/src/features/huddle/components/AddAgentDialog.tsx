@@ -181,6 +181,7 @@ export function AddAgentDialog({
                       avatarUrl={agent.avatar_url}
                       className="h-9 w-9 shrink-0 text-xs"
                       label={agent.name}
+                      shape="squircle"
                     />
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">
                       {agent.name}

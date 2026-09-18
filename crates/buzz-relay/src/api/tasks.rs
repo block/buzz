@@ -202,7 +202,11 @@ async fn authorize_task_request(
 
     let path_with_query = request_path(path, raw_query);
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
-    let (pubkey, event_id_bytes) = bridge::verify_bridge_auth_with_options(
+    let bridge::VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    } = bridge::verify_bridge_auth_with_options(
         headers,
         method,
         &url,
@@ -222,6 +226,7 @@ async fn authorize_task_request(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        signed_created_at,
     )
     .await?;
 

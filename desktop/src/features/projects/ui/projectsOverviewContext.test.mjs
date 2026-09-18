@@ -51,7 +51,7 @@ function makePullRequest(status, author = REVIEW_AUTHOR) {
   };
 }
 
-test("activity pod shows workspace details and a create-project action", () => {
+test("activity pod shows workspace details without a create action", () => {
   const context = projectsOverviewContext({
     filter: "all",
     issues: [],
@@ -72,9 +72,9 @@ test("activity pod shows workspace details and a create-project action", () => {
     },
   });
 
-  assert.equal(context.title, "Projects");
+  assert.equal(context.title, "Activity");
   assert.equal(context.detailsTitle, "Details");
-  assert.equal(context.action?.label, "Create project");
+  assert.equal(context.action, null);
   assert.deepEqual(
     context.stats.map((stat) => [stat.label, stat.count]),
     [
@@ -103,7 +103,7 @@ test("projects pod keeps create-project and drops task/review totals", () => {
   );
 });
 
-test("repositories pod matches repository activity copy", () => {
+test("repositories pod matches repository activity copy and add action", () => {
   const context = projectsOverviewContext({
     filter: "repositories",
     issues: [makeIssue("In Progress"), makeIssue("Done")],
@@ -113,7 +113,8 @@ test("repositories pod matches repository activity copy", () => {
 
   assert.equal(context.title, "Repositories");
   assert.equal(context.detailsTitle, "Repository activity");
-  assert.equal(context.action, null);
+  assert.equal(context.action?.kind, "repository");
+  assert.equal(context.action?.label, "Add repository");
   assert.deepEqual(
     context.stats.map((stat) => [stat.label, stat.count]),
     [
@@ -124,7 +125,7 @@ test("repositories pod matches repository activity copy", () => {
   );
 });
 
-test("channels pod titles itself and omits a primary create action", () => {
+test("channels pod titles itself and provides an add action", () => {
   const context = projectsOverviewContext({
     filter: "channels",
     issues: [],
@@ -134,10 +135,67 @@ test("channels pod titles itself and omits a primary create action", () => {
 
   assert.equal(context.title, "Channels");
   assert.equal(context.detailsTitle, "Details");
-  assert.equal(context.action, null);
+  assert.equal(context.action?.kind, "channel");
+  assert.equal(context.action?.label, "Add channel");
   assert.deepEqual(
     context.stats.map((stat) => stat.label),
     ["Channels", "Projects", "Repositories"],
+  );
+});
+
+test("repository-only read models count toward repository and channel context", () => {
+  const explicitProject = makeProject();
+  const repositoryOnly = makeProject({
+    id: "repository-design-system",
+    name: "design-system",
+    repositories: [
+      {
+        id: "repo-design-system",
+        name: "design-system",
+        owner: REVIEW_AUTHOR,
+        channelId: CHANNEL_B,
+      },
+    ],
+  });
+  const repositorySummaries = {
+    "repo-design-system": {
+      latestCommit: { author: REVIEW_AUTHOR },
+    },
+  };
+
+  const repositories = projectsOverviewContext({
+    filter: "repositories",
+    issues: [],
+    projectReadModels: [explicitProject, repositoryOnly],
+    projects: [explicitProject],
+    pullRequests: [],
+    repositorySummaries,
+  });
+  const channels = projectsOverviewContext({
+    filter: "channels",
+    issues: [],
+    projectReadModels: [explicitProject, repositoryOnly],
+    projects: [explicitProject],
+    pullRequests: [],
+    repositorySummaries,
+  });
+
+  assert.deepEqual(
+    repositories.stats.map((stat) => [stat.label, stat.count]),
+    [
+      ["Repositories", 2],
+      ["Active tasks", 0],
+      ["Open reviews", 0],
+    ],
+  );
+  assert.deepEqual(repositories.people, [REVIEW_AUTHOR]);
+  assert.deepEqual(
+    channels.stats.map((stat) => [stat.label, stat.count]),
+    [
+      ["Channels", 2],
+      ["Projects", 1],
+      ["Repositories", 2],
+    ],
   );
 });
 

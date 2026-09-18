@@ -7,6 +7,7 @@ authors = [{ name = "Buzz" }]
 keywords = ["buzz-native", "messaging", "mentions"]
 
 [metadata]
+evaluation_layer = "regression"
 difficulty = "easy"
 category = "collaboration"
 tags = ["messaging", "mentions", "implicit-behavior"]

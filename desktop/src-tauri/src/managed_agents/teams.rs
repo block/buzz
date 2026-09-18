@@ -9,7 +9,7 @@ use crate::{
 
 use super::team_repair::team_persona_key;
 
-pub(crate) fn teams_store_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn teams_store_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("teams.json"))
 }
 
@@ -59,6 +59,9 @@ fn built_in_team_records(built_ins: &[BuiltInTeam], now: &str) -> Vec<TeamRecord
             instructions: None,
             persona_ids: team.persona_ids.iter().map(|s| s.to_string()).collect(),
             is_builtin: true,
+            // Built-in teams are never shareable to the catalog.
+            shared: false,
+            catalog_source: None,
             source_dir: None,
             is_symlink: false,
             symlink_target: None,
@@ -173,7 +176,7 @@ pub(crate) fn load_teams_readonly(path: &std::path::Path) -> Result<Vec<TeamReco
     Ok(records)
 }
 
-pub fn load_teams(app: &AppHandle) -> Result<Vec<TeamRecord>, String> {
+pub fn load_teams<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<TeamRecord>, String> {
     let path = teams_store_path(app)?;
     let now = now_iso();
 
@@ -196,7 +199,10 @@ pub fn load_teams(app: &AppHandle) -> Result<Vec<TeamRecord>, String> {
     Ok(records)
 }
 
-pub fn save_teams(app: &AppHandle, records: &[TeamRecord]) -> Result<(), String> {
+pub fn save_teams<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    records: &[TeamRecord],
+) -> Result<(), String> {
     let mut sorted = records.to_vec();
     sort_teams(&mut sorted);
 
@@ -235,7 +241,9 @@ fn agents_referencing_team<'a>(
 /// enqueue NIP-09 tombstones for them — without this, the team coordinate is
 /// tombstoned but the orphaned kind:30175 persona heads stay live on the relay.
 /// For JSON-only teams (no `source_dir`), nothing cascades and the returned
-/// vec is empty.
+/// vec is empty. For catalog-adopted teams (`catalog_source` present), member
+/// copies matching this publication's provenance are deactivated (re-activatable
+/// on re-add), not deleted.
 pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<Vec<String>, String> {
     let mut teams = load_teams(app)?;
     let team = teams
@@ -291,14 +299,189 @@ pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<Vec<St
                 }
             }
         }
+    } else if let Some(catalog_source) = &team.catalog_source.clone() {
+        // Catalog-adopted team: deactivate member copies matching this
+        // publication that no remaining team references AND no standalone
+        // managed agent depends on — a copy backing an agent must stay active
+        // so the agent keeps working.
+        let mut personas = super::load_personas(app)?;
+        let managed_agents = crate::managed_agents::load_managed_agents(app)?;
+
+        // The teams remaining AFTER this one is removed — used to check
+        // whether any copy is still referenced before deactivating it.
+        let remaining_teams: Vec<_> = teams.iter().filter(|t| t.id != team_id).collect();
+
+        let changed = deactivate_catalog_member_copies_with_ref_check(
+            &mut personas,
+            &catalog_source.owner_pubkey,
+            &catalog_source.team_d_tag,
+            &remaining_teams,
+            &managed_agents,
+        );
+
+        // Remove the team record from the working slice; save both atomically.
+        teams.retain(|record| record.id != team_id);
+
+        let personas_path = super::managed_agents_store_path(app)?;
+        let teams_path = teams_store_path(app)?;
+        let personas_to_write = personas.clone();
+        let teams_to_write = teams.clone();
+
+        // Byte-snapshot both stores before writing so a save failure rolls
+        // back both, via the same commit primitive as catalog adoption (I6).
+        let personas_snap = crate::managed_agents::storage::snapshot_store(&personas_path)?;
+        let teams_snap = crate::managed_agents::storage::snapshot_store(&teams_path)?;
+
+        crate::managed_agents::storage::commit_stores_with_snapshots(
+            &personas_path,
+            &teams_path,
+            personas_snap,
+            teams_snap,
+            || {
+                if changed {
+                    super::save_personas(app, &personas_to_write)?;
+                }
+                Ok(())
+            },
+            || save_teams(app, &teams_to_write),
+        )?;
+
+        return Ok(cascaded_persona_d_tags);
     }
 
-    // 4. Remove TeamRecord
+    // Remove TeamRecord
     teams.retain(|record| record.id != team_id);
     save_teams(app, &teams)?;
     Ok(cascaded_persona_d_tags)
 }
 
+/// Deactivate non-built-in personas whose provenance matches
+/// `(owner_pubkey, team_d_tag)` AND that are not referenced by any remaining
+/// team's `persona_ids` or any managed agent's `persona_id`.
+///
+/// The agent case is critical: deleting a catalog team must not archive a copy
+/// a standalone managed agent depends on, which would leave the agent pointing
+/// at a hidden inactive definition. Returns `true` when any record changed.
+pub(crate) fn deactivate_catalog_member_copies_with_ref_check(
+    personas: &mut [super::AgentDefinition],
+    owner_pubkey: &str,
+    team_d_tag: &str,
+    remaining_teams: &[&super::TeamRecord],
+    managed_agents: &[super::ManagedAgentRecord],
+) -> bool {
+    let mut changed = false;
+    for persona in personas.iter_mut() {
+        if persona.is_builtin {
+            continue;
+        }
+        let is_copy = persona
+            .team_catalog_source
+            .as_ref()
+            .is_some_and(|s| s.owner_pubkey == owner_pubkey && s.team_d_tag == team_d_tag);
+        if !is_copy || !persona.is_active {
+            continue;
+        }
+        // Skip copies still referenced by another remaining team.
+        let still_in_team = remaining_teams
+            .iter()
+            .any(|t| t.persona_ids.iter().any(|id| id == &persona.id));
+        // Skip copies that a standalone managed agent was created from.
+        let still_in_agent = managed_agents
+            .iter()
+            .any(|a| a.persona_id.as_deref() == Some(persona.id.as_str()));
+        if still_in_team || still_in_agent {
+            continue;
+        }
+        persona.is_active = false;
+        changed = true;
+    }
+    changed
+}
+
 #[cfg(test)]
 #[path = "teams_tests.rs"]
 mod tests;
+
+/// Test-only seam for [`delete_team_with_cascade`] that takes explicit file
+/// paths instead of an `AppHandle`. Mirrors the catalog-adopted deletion path
+/// (the only path that uses the byte-rollback boundary) without requiring a
+/// full Tauri runtime.
+///
+/// Only the catalog-adopted path is covered by this seam because that is the
+/// path with the byte-rollback boundary. Directory-backed team deletion
+/// requires filesystem operations that are best left to integration tests.
+#[cfg(test)]
+pub(crate) fn delete_catalog_team_at(
+    personas_path: &std::path::Path,
+    teams_path: &std::path::Path,
+    team_id: &str,
+) -> Result<(), String> {
+    // Read raw JSON without the merge-in-built-ins side effect so the test
+    // stores reflect exactly what delete_team_with_cascade writes (which also
+    // reads via load_teams, not load_teams_readonly, and never writes back
+    // built-ins in the middle of a delete).
+    let personas: Vec<super::AgentDefinition> = if personas_path.exists() {
+        let json = std::fs::read_to_string(personas_path)
+            .map_err(|e| format!("failed to read personas: {e}"))?;
+        serde_json::from_str(&json).map_err(|e| format!("failed to parse personas: {e}"))?
+    } else {
+        Vec::new()
+    };
+    let teams: Vec<TeamRecord> = if teams_path.exists() {
+        let json = std::fs::read_to_string(teams_path)
+            .map_err(|e| format!("failed to read teams: {e}"))?;
+        serde_json::from_str(&json).map_err(|e| format!("failed to parse teams: {e}"))?
+    } else {
+        Vec::new()
+    };
+
+    let team = teams
+        .iter()
+        .find(|t| t.id == team_id)
+        .ok_or_else(|| format!("team {team_id} not found"))?;
+
+    let catalog_source = team
+        .catalog_source
+        .as_ref()
+        .ok_or_else(|| "delete_catalog_team_at only handles catalog-adopted teams".to_string())?
+        .clone();
+
+    let mut personas_mut = personas;
+    let remaining_teams: Vec<&TeamRecord> = teams.iter().filter(|t| t.id != team_id).collect();
+
+    // No managed agents in the test seam — pass an empty slice. Test coverage
+    // for the agent-reference preservation path lives in teams_tests.rs.
+    deactivate_catalog_member_copies_with_ref_check(
+        &mut personas_mut,
+        &catalog_source.owner_pubkey,
+        &catalog_source.team_d_tag,
+        &remaining_teams,
+        &[],
+    );
+
+    let new_teams: Vec<TeamRecord> = teams.into_iter().filter(|t| t.id != team_id).collect();
+
+    let personas_snap = super::storage::snapshot_store(personas_path)?;
+    let teams_snap = super::storage::snapshot_store(teams_path)?;
+
+    super::storage::commit_stores_with_snapshots(
+        personas_path,
+        teams_path,
+        personas_snap,
+        teams_snap,
+        || {
+            let json = serde_json::to_vec_pretty(&personas_mut)
+                .map_err(|e| format!("failed to serialize personas: {e}"))?;
+            super::storage::atomic_write_json(personas_path, &json)
+        },
+        || {
+            let mut sorted = new_teams.clone();
+            sort_teams(&mut sorted);
+            let json = serde_json::to_vec_pretty(&sorted)
+                .map_err(|e| format!("failed to serialize teams: {e}"))?;
+            super::storage::atomic_write_json(teams_path, &json)
+        },
+    )?;
+
+    Ok(())
+}

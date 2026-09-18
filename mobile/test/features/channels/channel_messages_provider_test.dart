@@ -11,6 +11,105 @@ import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
+  test('live window without deep links does not rescan flattened ids', () async {
+    var historyIdReads = 0;
+    final history = _IdReadTrackingEvent(
+      _event(id: 'history', createdAt: 10),
+      onIdRead: () => historyIdReads++,
+    );
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [history, _bounds()],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    historyIdReads = 0;
+    relaySession.emit(_event(id: 'live', createdAt: 20));
+
+    // One read checks page membership; one builds the flattened window. The
+    // distinct timestamps need no id tie-break when sorting. A redundant
+    // deep-link merge would read the historical id a third time to build its
+    // dedup set. Allow fewer reads if either required pass is optimized later.
+    expect(historyIdReads, lessThanOrEqualTo(2));
+    expect(
+      container.read(channelMessagesProvider(_channelId)).value!.length,
+      2,
+    );
+  });
+
+  for (final retainDeepLink in [false, true]) {
+    test(
+      'live window keeps chronological order with retained deep link: $retainDeepLink',
+      () async {
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              _event(id: 'newer-history', createdAt: 20),
+              _event(id: 'older-history', createdAt: 10),
+              _bounds(),
+            ],
+          ],
+        );
+        final container = _buildContainer(relaySession);
+        addTearDown(container.dispose);
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        if (retainDeepLink) {
+          final load = notifier.loadEventsById(['deep-link']);
+          relaySession.completeTargetHistory([
+            _event(id: 'deep-link', createdAt: 5),
+          ]);
+          await load;
+        }
+
+        // Older live rows must insert in order, including the descending-id
+        // tie-break within a second, on both sides of the deep-link fast path.
+        relaySession.emit(_event(id: 'a-live', createdAt: 15));
+        relaySession.emit(_event(id: 'z-live', createdAt: 15));
+        expect(
+          container
+              .read(channelMessagesProvider(_channelId))
+              .value!
+              .map((event) => event.id),
+          [
+            if (retainDeepLink) 'deep-link',
+            'older-history',
+            'z-live',
+            'a-live',
+            'newer-history',
+          ],
+        );
+
+        if (retainDeepLink) {
+          notifier.releaseDeepLinkEvents(['deep-link']);
+          relaySession.emit(_event(id: 'newest-live', createdAt: 30));
+          expect(
+            container
+                .read(channelMessagesProvider(_channelId))
+                .value!
+                .map((event) => event.id),
+            [
+              'older-history',
+              'z-live',
+              'a-live',
+              'newer-history',
+              'newest-live',
+            ],
+          );
+        }
+      },
+    );
+  }
+
   test(
     'keeps live events that arrive while initial history is loading',
     () async {
@@ -57,6 +156,67 @@ void main() {
         EventKind.channelEventKinds,
       );
       expect(relaySession.historyFilters.first.tags['#h'], [_channelId]);
+    },
+  );
+
+  test(
+    'initial window hydration preserves equal-second live message order',
+    () async {
+      final window = Completer<List<NostrEvent>>();
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [window.future],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+
+      relaySession.emit(_event(id: 'z-live', createdAt: 20));
+      relaySession.emit(_event(id: 'a-live', createdAt: 20));
+      await _pumpEventQueue();
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['z-live', 'a-live'],
+      );
+
+      window.complete([_bounds()]);
+      await _pumpEventQueue();
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['z-live', 'a-live'],
+      );
+    },
+  );
+
+  test(
+    'websocket fallback uses desktop channel order for equal-second history',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      relaySession.completeHistory([
+        _event(id: 'a-history', createdAt: 10),
+        _event(id: 'z-history', createdAt: 10),
+      ]);
+      await _pumpEventQueue();
+
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['z-history', 'a-history'],
+      );
     },
   );
 
@@ -203,8 +363,14 @@ void main() {
         channelMessagesProvider(_channelId).notifier,
       );
 
-      final targetLoad = notifier.loadEventsById(const ['target']);
-      relaySession.completeTargetHistory([_event(id: 'target', createdAt: 5)]);
+      final targetLoad = notifier.loadEventsById(const [
+        'a-target',
+        'z-target',
+      ]);
+      relaySession.completeTargetHistory([
+        _event(id: 'a-target', createdAt: 10),
+        _event(id: 'z-target', createdAt: 10),
+      ]);
       await targetLoad;
 
       expect(
@@ -212,7 +378,7 @@ void main() {
         isTrue,
       );
 
-      relaySession.completeHistory([_event(id: 'history', createdAt: 10)]);
+      relaySession.completeHistory([_event(id: 'm-history', createdAt: 10)]);
       await _pumpEventQueue();
 
       expect(
@@ -220,7 +386,7 @@ void main() {
             .read(channelMessagesProvider(_channelId))
             .value
             ?.map((event) => event.id),
-        ['target', 'history'],
+        ['z-target', 'm-history', 'a-target'],
       );
     },
   );
@@ -436,7 +602,11 @@ void main() {
       await relaySession.subscribed;
       await _pumpEventQueue();
       const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
-      container.read(threadRepliesWithLocalProvider(args));
+      final threadSubscription = container.listen(
+        threadRepliesWithLocalProvider(args),
+        (_, _) {},
+      );
+      addTearDown(threadSubscription.close);
       await _pumpEventQueue();
       final notifier = container.read(
         channelMessagesProvider(_channelId).notifier,
@@ -467,7 +637,6 @@ void main() {
 
       relaySession.emit(reply);
       await container.read(threadRepliesProvider(args).future);
-      container.read(threadRepliesWithLocalProvider(args));
       await _pumpEventQueue();
       expect(
         container
@@ -515,7 +684,11 @@ void main() {
       await relaySession.subscribed;
       await _pumpEventQueue();
       const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
-      container.read(threadRepliesWithLocalProvider(args));
+      final threadSubscription = container.listen(
+        threadRepliesWithLocalProvider(args),
+        (_, _) {},
+      );
+      addTearDown(threadSubscription.close);
       await _pumpEventQueue();
       final notifier = container.read(
         channelMessagesProvider(_channelId).notifier,
@@ -546,6 +719,61 @@ void main() {
             .read(threadRepliesWithLocalProvider(args))
             .value
             ?.map((event) => event.id),
+        ['reply'],
+      );
+    },
+  );
+
+  test(
+    'websocket fallback refetches an open thread when a reply arrives live',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          Exception('channel window unavailable'),
+          <NostrEvent>[],
+          [
+            _event(
+              id: 'reply',
+              createdAt: 20,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+          ],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      relaySession.completeHistory([_event(id: 'history', createdAt: 10)]);
+      await _pumpEventQueue();
+      expect(relaySession.operations, ['subscribe', 'query', 'fetch']);
+
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      final subscription = container.listen(
+        threadRepliesProvider(args),
+        (_, _) {},
+      );
+      addTearDown(subscription.close);
+      expect(await container.read(threadRepliesProvider(args).future), isEmpty);
+
+      relaySession.emit(
+        _event(
+          id: 'reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        ),
+      );
+      await _pumpEventQueue();
+
+      expect(
+        (await container.read(
+          threadRepliesProvider(args).future,
+        )).map((event) => event.id),
         ['reply'],
       );
     },
@@ -724,6 +952,78 @@ void main() {
     expect(entries.single.summary!.lastReplyAt, 21);
   });
 
+  test(
+    'legacy pagination preserves desktop equal-second channel order',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        historyResults: [
+          [_event(id: 'a-head', createdAt: 20)],
+          [
+            _event(id: 'm-older', createdAt: 20),
+            _event(id: 'z-older', createdAt: 20),
+          ],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      await expectLater(notifier.fetchOlder(), completion(isTrue));
+
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['z-older', 'm-older', 'a-head'],
+      );
+    },
+  );
+
+  test(
+    'window pagination preserves desktop equal-second channel order',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [
+            _event(id: 'a-head', createdAt: 20),
+            _bounds(hasMore: true, cursorCreatedAt: 20, cursorId: 'a-head'),
+          ],
+          [
+            _event(id: 'm-older', createdAt: 20),
+            _event(id: 'z-older', createdAt: 20),
+            _bounds(dTag: '${_channelId.toLowerCase()}:20:a-head'),
+          ],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      await expectLater(notifier.fetchOlder(), completion(isTrue));
+
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['z-older', 'm-older', 'a-head'],
+      );
+    },
+  );
+
   test('window pagination failures return false without exhausting', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
@@ -765,6 +1065,27 @@ void main() {
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
+
+class _IdReadTrackingEvent extends NostrEvent {
+  final void Function() onIdRead;
+
+  _IdReadTrackingEvent(NostrEvent event, {required this.onIdRead})
+    : super(
+        id: event.id,
+        pubkey: event.pubkey,
+        createdAt: event.createdAt,
+        kind: event.kind,
+        tags: event.tags,
+        content: event.content,
+        sig: event.sig,
+      );
+
+  @override
+  String get id {
+    onIdRead();
+    return super.id;
+  }
+}
 
 ProviderContainer _buildContainer(_RecordingRelaySessionNotifier relaySession) {
   return ProviderContainer(
@@ -867,6 +1188,7 @@ Future<void> _pumpEventQueue() async {
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final bool failSubscribe;
   final Queue<Object> _queryResults;
+  final Queue<List<NostrEvent>> _historyResults;
   final List<String> operations = [];
   final List<NostrFilter> liveFilters = [];
   final List<NostrFilter> historyFilters = [];
@@ -879,7 +1201,9 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   _RecordingRelaySessionNotifier({
     this.failSubscribe = false,
     List<Object> queryResults = const [],
-  }) : _queryResults = Queue<Object>.of(queryResults);
+    List<List<NostrEvent>> historyResults = const [],
+  }) : _queryResults = Queue<Object>.of(queryResults),
+       _historyResults = Queue<List<NostrEvent>>.of(historyResults);
 
   Future<void> get subscribed => _subscribed.future;
 
@@ -917,6 +1241,9 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
       final completer = Completer<List<NostrEvent>>();
       _targetHistories.add(completer);
       return completer.future;
+    }
+    if (_historyResults.isNotEmpty) {
+      return Future.value(_historyResults.removeFirst());
     }
     return _history.future;
   }

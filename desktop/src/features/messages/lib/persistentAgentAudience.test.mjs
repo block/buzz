@@ -134,20 +134,29 @@ test("reset clears every audience for refresh and community boundaries", async (
   assert.deepEqual(currentAudiences(store), {});
 });
 
-test("channel and thread composers share the channel audience scope", async () => {
+test("channel and thread composers have independent audience scopes", async () => {
   const store = await loadStore(8);
   const channelScope = store.getPersistentAgentAudienceScope({
     ownerPubkey: ownerA,
     channelId: "channel-a",
+    composerKey: "channel-a",
   });
   const threadScope = store.getPersistentAgentAudienceScope({
     ownerPubkey: ownerA,
     channelId: "channel-a",
-    threadRootId: "root",
+    composerKey: "thread:root",
+  });
+  const otherThreadScope = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "channel-a",
+    composerKey: "thread:other-root",
   });
 
   assert.equal(channelScope, `${ownerA}:channel-a:channel`);
-  assert.equal(threadScope, channelScope);
+  assert.equal(threadScope, `${ownerA}:channel-a:thread:root`);
+  assert.equal(otherThreadScope, `${ownerA}:channel-a:thread:other-root`);
+  assert.notEqual(threadScope, channelScope);
+  assert.notEqual(otherThreadScope, threadScope);
 });
 
 test("delayed promotion cannot overwrite a newer audience choice", async () => {
@@ -188,6 +197,57 @@ test("stale auto-pin Undo cannot remove a newer explicit choice", async () => {
   });
 
   assert.equal(removed, false);
+  assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
+});
+
+test("explicitly excluded agents are not auto-promoted again", async () => {
+  const store = await loadStore(12);
+  const scope = `${ownerA}:channel-a:channel`;
+  store.setPersistentAgentAudience(scope, [agentA]);
+  store.excludePersistentAgentAudienceMember(scope, agentA);
+
+  const promotion = store.promotePersistentAgentAudienceIfUnchanged({
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    pubkeys: [agentA],
+    scope,
+  });
+
+  assert.equal(promotion, null);
+  assert.deepEqual(currentAudiences(store), { [scope]: [] });
+
+  store.addPersistentAgentAudienceMember(scope, agentA);
+  assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
+});
+
+test("initialization preserves exclusions across thread remounts", async () => {
+  const store = await loadStore(14);
+  const scope = `${ownerA}:channel-a:thread-a`;
+
+  store.initializePersistentAgentAudience(scope, [agentA]);
+  assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
+
+  store.excludePersistentAgentAudienceMember(scope, agentA);
+  store.initializePersistentAgentAudience(scope, [agentA]);
+  assert.deepEqual(currentAudiences(store), { [scope]: [] });
+
+  store.addPersistentAgentAudienceMember(scope, agentA);
+  assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
+});
+
+test("explicit re-selection reinstates an excluded agent", async () => {
+  const store = await loadStore(13);
+  const scope = `${ownerA}:channel-a:channel`;
+  store.setPersistentAgentAudience(scope, [agentA]);
+  store.excludePersistentAgentAudienceMember(scope, agentA);
+
+  const promotion = store.promotePersistentAgentAudienceIfUnchanged({
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    reinstateExcluded: true,
+    pubkeys: [agentA],
+    scope,
+  });
+
+  assert.deepEqual(promotion?.promotedPubkeys, [agentA]);
   assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
 });
 

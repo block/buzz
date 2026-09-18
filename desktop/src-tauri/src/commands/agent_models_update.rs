@@ -35,6 +35,88 @@ fn ensure_access_policy_change_supported(
     Ok(())
 }
 
+/// Reject an effort mutation for a non-local record. Remote effort is
+/// deployment-owned (set via `policy_env` at deploy time); persisting locally
+/// would make the canonical column diverge from the deployed runtime's actual
+/// effort.
+fn ensure_effort_change_supported(
+    record: &ManagedAgentRecord,
+    effort_level: &Option<Option<String>>,
+) -> Result<(), String> {
+    if effort_level.is_some() && record.backend != crate::managed_agents::BackendKind::Local {
+        return Err(format!(
+            "agent {} is not a local agent; remote effort is set at deploy time",
+            record.pubkey
+        ));
+    }
+    Ok(())
+}
+
+/// Guard/apply seam for the effort step inside `apply_record_field_updates`.
+fn apply_effort_update(
+    record: &mut ManagedAgentRecord,
+    effort_level: Option<Option<String>>,
+) -> Result<(), String> {
+    ensure_effort_change_supported(record, &effort_level)?;
+    if let Some(effort_override) = effort_level {
+        crate::commands::agent_config::apply_picker_effort_level(record, effort_override);
+    }
+    Ok(())
+}
+
+/// Proof token returned by `apply_record_field_updates`. Zero-size and
+/// `#[must_use]`; consumed by `stamp_record_updated_at`, so removing the
+/// `apply_record_field_updates` call from `update_managed_agent` leaves
+/// `applied` undefined at the timestamp site — a compile error.
+#[derive(Debug)]
+#[must_use]
+pub(crate) struct RecordFieldsApplied(());
+
+/// Apply the env-vars and effort steps of `update_managed_agent` to a record
+/// in the correct order: env_vars FIRST (so the same-request map cannot
+/// reintroduce a stale alias), then the canonical effort column write.
+///
+/// Returns a `RecordFieldsApplied` token that must be passed to
+/// `stamp_record_updated_at`. Removing this call from `update_managed_agent`
+/// leaves `applied` undefined at the timestamp site — a compile error.
+///
+/// Called by `update_managed_agent` inside its locked transaction and by tests.
+/// Any step deleted from inside this function is directly caught by the
+/// corresponding test assertion.
+///
+/// Mutation proofs (see `agent_models_update_tests.rs`):
+///   - Deleting the `apply_effort_update` call leaves `effort_level` unchanged.
+///   - Deleting `ensure_effort_change_supported` inside `apply_effort_update`
+///     lets non-local writes pass `Ok(())` without mutating the column.
+///   - Deleting `apply_picker_effort_level` inside `apply_effort_update`
+///     leaves `effort_level == None` on a local-set request.
+pub(crate) fn apply_record_field_updates(
+    record: &mut ManagedAgentRecord,
+    env_vars: Option<&std::collections::BTreeMap<String, String>>,
+    inherit_transition: bool,
+    effort_level: Option<Option<String>>,
+) -> Result<RecordFieldsApplied, String> {
+    // Order is load-bearing: env_vars before effort so a same-request
+    // env_vars map cannot reintroduce a stale alias after the column write.
+    crate::managed_agents::apply_env_vars_then_effort_transition(
+        record,
+        env_vars.cloned(),
+        inherit_transition,
+    );
+    apply_effort_update(record, effort_level)?;
+    Ok(RecordFieldsApplied(()))
+}
+
+/// Stamp `record.updated_at` with the current ISO timestamp, consuming the
+/// `RecordFieldsApplied` proof token. Removing `apply_record_field_updates`
+/// from `update_managed_agent` leaves `applied` undefined here — a compile error.
+pub(crate) fn stamp_record_updated_at(
+    record: &mut ManagedAgentRecord,
+    _applied: RecordFieldsApplied,
+) {
+    record.updated_at = crate::util::now_iso();
+}
+
 /// Flush a retained managed-agent policy, preserving any earlier profile error.
 pub(crate) async fn flush_managed_agent_policy(
     app: &AppHandle,
@@ -115,15 +197,17 @@ pub async fn update_managed_agent(
         // Harness edit: the persona's runtime is authoritative, so an explicit
         // `agent_command_override` is persisted ONLY when the user picks a
         // command that diverges from the persona, and the empty/whitespace
-        // "Inherit from persona" sentinel clears both the pin and the
-        // materialized record runtime. A name-only edit
+        // "Inherit from persona" sentinel clears the pin, the materialized
+        // record runtime, AND the per-instance effort override (column here,
+        // env aliases after `env_vars` is applied below). A name-only edit
         // (`agent_command == None`) leaves the pin intact. `harness_override`
         // threads the user's explicit intent — see `apply_agent_command_update`
         // and `update_time_agent_command_override` for the full resolution
         // rules.
+        let mut inherit_transition = false;
         if let Some(agent_command) = input.agent_command {
             let personas = load_personas(&app).unwrap_or_default();
-            crate::managed_agents::apply_agent_command_update(
+            inherit_transition = crate::managed_agents::apply_agent_command_update(
                 record,
                 &personas,
                 &agent_command,
@@ -136,9 +220,16 @@ pub async fn update_managed_agent(
         // mcp_command is intentionally not applied here — the effective MCP
         // command is always catalog-derived (known_acp_runtime at spawn time)
         // and the per-record field is never read by the runtime.
-        if let Some(env_vars) = input.env_vars {
-            crate::managed_agents::validate_user_env_keys(&env_vars)?;
-            record.env_vars = env_vars;
+        //
+        // Apply the caller-supplied `env_vars` (validated first), then — only on
+        // the pin→inherit transition — strip the record effort env aliases. The
+        // order is load-bearing: stripping AFTER the env replacement is what
+        // stops a same-request `env_vars` map from reintroducing a stale effort
+        // alias while the instance inherits its harness. The column was already
+        // cleared inside `apply_agent_command_update`. See
+        // `apply_env_vars_then_effort_transition` for the pinned invariant.
+        if let Some(ref env_vars) = input.env_vars {
+            crate::managed_agents::validate_user_env_keys(env_vars)?;
         }
 
         // Native provider/model fields are authoritative. Keep the typed marker
@@ -211,7 +302,23 @@ pub async fn update_managed_agent(
             record.respond_to_allowlist = prospective_allowlist;
         }
 
-        record.updated_at = now_iso();
+        // Effort + env_vars: applied together inside `apply_record_field_updates` to
+        // enforce the ordering invariant (env_vars before effort column write) and
+        // provide a directly-testable production seam. Effort persists inside the
+        // locked transaction so an access-policy restart above snapshots and
+        // launches the new effort value. Present+Some(v)=set; Present+None=clear;
+        // Absent=don't touch (the dialog sends it only when effortTouched).
+        // The returned token is consumed by `stamp_record_updated_at`; removing
+        // this call from `update_managed_agent` leaves `applied` undefined there
+        // — a compile error (the sole outer-seam proof for this call site).
+        let applied = apply_record_field_updates(
+            record,
+            input.env_vars.as_ref(),
+            inherit_transition,
+            input.effort_level,
+        )?;
+
+        stamp_record_updated_at(record, applied);
 
         save_managed_agents(&app, &records)?;
 
@@ -244,8 +351,16 @@ pub async fn update_managed_agent(
                 .avatar_url
                 .clone()
                 .or_else(|| managed_agent_avatar_url(&effective_command));
+            let about = crate::managed_agents::record_effective_description(record, &personas);
             let auth_tag = record.auth_tag.clone();
-            Some((agent_keys, relay_url, display_name, avatar_url, auth_tag))
+            Some((
+                agent_keys,
+                relay_url,
+                display_name,
+                avatar_url,
+                about,
+                auth_tag,
+            ))
         } else {
             None
         };
@@ -291,13 +406,14 @@ pub async fn update_managed_agent(
     // A rename is committed only when profile sync succeeds; otherwise restore
     // the complete pre-edit record so Desktop and the relay keep one
     // authoritative name.
-    if let Some((agent_keys, relay_url, display_name, avatar_url, auth_tag)) = sync_params {
+    if let Some((agent_keys, relay_url, display_name, avatar_url, about, auth_tag)) = sync_params {
         if let Err(sync_error) = sync_managed_agent_profile(
             &state,
             &relay_url,
             &agent_keys,
             &display_name,
             avatar_url.as_deref(),
+            about.as_deref(),
             auth_tag.as_deref(),
         )
         .await
@@ -356,5 +472,6 @@ pub async fn update_managed_agent(
 }
 
 #[cfg(test)]
+#[allow(unused_must_use)]
 #[path = "agent_models_update_tests.rs"]
 mod tests;

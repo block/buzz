@@ -213,6 +213,21 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
     Ok(())
 }
 
+/// Attach NIP-30 `["emoji", shortcode, url]` tags.
+///
+/// Each element of `emoji_tags` must be a three-element vector whose first
+/// entry is `"emoji"`.  Entries that don't match this shape are silently
+/// skipped so an unknown future shape never blocks a message send.
+fn nip30_emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), SdkError> {
+    for et in emoji_tags {
+        if et.len() == 3 && et[0] == "emoji" {
+            let parts: Vec<&str> = et.iter().map(String::as_str).collect();
+            tags.push(Tag::parse(parts).map_err(|e| SdkError::InvalidTag(e.to_string()))?);
+        }
+    }
+    Ok(())
+}
+
 /// Build a stream message (kind 9).
 ///
 /// - `channel_id`: target channel UUID
@@ -221,6 +236,7 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
 /// - `mentions`: pubkey hex strings to p-tag (deduped, max 50)
 /// - `broadcast`: if true, adds `["broadcast", "1"]` tag
 /// - `media_tags`: raw imeta tag vectors
+/// - `emoji_tags`: NIP-30 `["emoji", shortcode, url]` tag vectors
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -228,6 +244,7 @@ pub fn build_message(
     mentions: &[&str],
     broadcast: bool,
     media_tags: &[Vec<String>],
+    emoji_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
@@ -239,6 +256,7 @@ pub fn build_message(
         tags.push(tag(&["broadcast", "1"])?);
     }
     imeta_tags(media_tags, &mut tags)?;
+    nip30_emoji_tags(emoji_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content)
         .tags(tags)
         .allow_self_tagging())
@@ -2380,7 +2398,7 @@ mod tests {
     #[test]
     fn message_happy_path() {
         let cid = uuid();
-        let ev = sign(build_message(cid, "hello", None, &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "hello", None, &[], false, &[], &[]).unwrap());
         assert_eq!(ev.kind.as_u16(), 9);
         assert_eq!(ev.content, "hello");
         assert!(has_tag(&ev, "h", &cid.to_string()));
@@ -2394,7 +2412,8 @@ mod tests {
         let cid = uuid();
         let sender = keys();
         let self_pk = sender.public_key().to_hex();
-        let builder = build_message(cid, "self-canary", None, &[&self_pk], false, &[]).unwrap();
+        let builder =
+            build_message(cid, "self-canary", None, &[&self_pk], false, &[], &[]).unwrap();
         let ev = builder.sign_with_keys(&sender).expect("sign");
         assert!(
             has_tag(&ev, "p", &self_pk),
@@ -2485,7 +2504,7 @@ mod tests {
             root_event_id: eid,
             parent_event_id: eid,
         };
-        let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, &[], &[]).unwrap());
         // Direct reply: only one e-tag with "reply" marker
         let e_tags: Vec<_> = ev
             .tags
@@ -2508,7 +2527,7 @@ mod tests {
             root_event_id: root,
             parent_event_id: parent,
         };
-        let ev = sign(build_message(cid, "nested", Some(&tr), &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "nested", Some(&tr), &[], false, &[], &[]).unwrap());
         let e_tags: Vec<_> = ev
             .tags
             .iter()
@@ -2526,7 +2545,7 @@ mod tests {
     #[test]
     fn message_broadcast_flag() {
         let cid = uuid();
-        let ev = sign(build_message(cid, "hi", None, &[], true, &[]).unwrap());
+        let ev = sign(build_message(cid, "hi", None, &[], true, &[], &[]).unwrap());
         assert!(has_tag(&ev, "broadcast", "1"));
     }
 
@@ -2534,7 +2553,7 @@ mod tests {
     fn message_mentions_deduped() {
         let cid = uuid();
         let hex = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
-        let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[], &[]).unwrap());
         let p_tags = tag_values(&ev, "p");
         assert_eq!(p_tags.len(), 1);
     }
@@ -2555,7 +2574,7 @@ mod tests {
             })
             .collect();
         let refs: Vec<&str> = hexes.iter().map(|s| s.as_str()).collect();
-        let result = build_message(cid, "hi", None, &refs, false, &[]);
+        let result = build_message(cid, "hi", None, &refs, false, &[], &[]);
         assert!(matches!(result, Err(SdkError::TooManyMentions)));
     }
 
@@ -2563,7 +2582,7 @@ mod tests {
     fn message_content_too_large() {
         let cid = uuid();
         let big = "x".repeat(64 * 1024 + 1);
-        let result = build_message(cid, &big, None, &[], false, &[]);
+        let result = build_message(cid, &big, None, &[], false, &[], &[]);
         assert!(matches!(result, Err(SdkError::ContentTooLarge { .. })));
     }
 
@@ -2571,7 +2590,91 @@ mod tests {
     fn message_max_content_ok() {
         let cid = uuid();
         let max = "x".repeat(64 * 1024);
-        assert!(build_message(cid, &max, None, &[], false, &[]).is_ok());
+        assert!(build_message(cid, &max, None, &[], false, &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn message_emoji_tags_attached() {
+        let cid = uuid();
+        let emoji_tags = vec![
+            vec![
+                "emoji".to_string(),
+                "wave".to_string(),
+                "https://example.com/wave.gif".to_string(),
+            ],
+            vec![
+                "emoji".to_string(),
+                "party".to_string(),
+                "https://example.com/party.gif".to_string(),
+            ],
+        ];
+        let ev = sign(
+            build_message(
+                cid,
+                ":wave: hey :party:",
+                None,
+                &[],
+                false,
+                &[],
+                &emoji_tags,
+            )
+            .unwrap(),
+        );
+        // Both emoji tags present
+        assert!(ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice() == ["emoji", "wave", "https://example.com/wave.gif"]));
+        assert!(ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice() == ["emoji", "party", "https://example.com/party.gif"]));
+        // kind 9
+        assert_eq!(ev.kind.as_u16(), 9);
+    }
+
+    #[test]
+    fn message_malformed_emoji_tag_silently_skipped() {
+        let cid = uuid();
+        let emoji_tags = vec![
+            // only 2 elements — invalid, must be skipped
+            vec!["emoji".to_string(), "wave".to_string()],
+            // wrong kind — must be skipped
+            vec![
+                "imeta".to_string(),
+                "wave".to_string(),
+                "https://example.com/wave.gif".to_string(),
+            ],
+            // valid
+            vec![
+                "emoji".to_string(),
+                "ok".to_string(),
+                "https://example.com/ok.gif".to_string(),
+            ],
+        ];
+        let ev = sign(build_message(cid, "hi", None, &[], false, &[], &emoji_tags).unwrap());
+        let emoji_count = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some("emoji"))
+            .count();
+        assert_eq!(emoji_count, 1);
+        assert!(ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice() == ["emoji", "ok", "https://example.com/ok.gif"]));
+    }
+
+    #[test]
+    fn message_empty_emoji_tags_slice_ok() {
+        let cid = uuid();
+        let ev = sign(build_message(cid, "hello", None, &[], false, &[], &[]).unwrap());
+        let emoji_count = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some("emoji"))
+            .count();
+        assert_eq!(emoji_count, 0);
     }
 
     #[test]

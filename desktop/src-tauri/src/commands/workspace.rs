@@ -136,6 +136,20 @@ pub async fn validate_repos_dir(dir: String) -> Result<(), String> {
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
+/// Refresh avatar source trust without reconnecting or restoring the workspace.
+/// Only the user's saved community list may supply these origins.
+#[tauri::command]
+pub fn set_agent_avatar_communities(
+    relay_urls: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    *state
+        .agent_avatar_communities
+        .lock()
+        .map_err(|e| e.to_string())? = relay_urls;
+    Ok(())
+}
+
 /// Apply a workspace's configuration to the backend session.
 ///
 /// Called by the frontend on app init (after reload) to configure the
@@ -228,9 +242,8 @@ pub async fn apply_workspace(
         // experiment before launch-time restore can spawn any agents. Missing
         // means the stable behavior: desktop remains authoritative.
         state
-            .managed_agent_profile_reconcile_enabled
+            .managed_agent_profile_reconcile_enabled()
             .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
-
         // ── Filesystem side-effect (non-fatal) ────────────────────────────────
         // Persist the *effective* repos_dir (None when the candidate failed
         // validation) for the backend to read at boot, then re-point REPOS to
@@ -345,7 +358,7 @@ pub async fn apply_workspace(
                 }
             }
         });
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(feature = "mesh-llm"))]
@@ -364,9 +377,11 @@ pub async fn apply_workspace(
         return Ok(());
     }
 
-    assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
-
-    Ok(())
+    #[cfg(not(feature = "mesh-llm"))]
+    {
+        assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ import {
   addRepositoryToProject,
   eventToRepository,
 } from "@/features/projects/projectModels";
+import { markProjectDataAuthoritative } from "@/features/projects/projectSnapshot";
 import { publishProjectOwnerAnnouncement } from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
@@ -315,6 +316,7 @@ export function useAddProjectRepositoryMutation() {
     mutationFn: (input: AddProjectRepositoryInput) =>
       addProjectRepository(input),
     onSuccess: ({ previousProjectId, project }) => {
+      markProjectDataAuthoritative(project, "local-write");
       if (previousProjectId !== project.id) {
         queryClient.removeQueries({
           exact: true,

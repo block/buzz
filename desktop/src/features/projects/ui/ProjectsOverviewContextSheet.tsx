@@ -1,8 +1,7 @@
-import { Info } from "lucide-react";
 import * as React from "react";
 
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { DrawerPanelIcon } from "@/shared/ui/DrawerPanelIcon";
 import { Sheet, SheetContent, SheetTitle } from "@/shared/ui/sheet";
 
 export const ProjectsOverviewNarrowContextToggle = React.forwardRef<
@@ -21,12 +20,10 @@ export const ProjectsOverviewNarrowContextToggle = React.forwardRef<
     type="button"
     variant="ghost"
   >
-    <Info
-      className={cn(
-        "h-4 w-4 transition-opacity duration-200 ease-linear",
-        open ? "opacity-100" : "opacity-60",
-      )}
-      data-testid="projects-overview-context-icon"
+    <DrawerPanelIcon
+      className="-scale-x-100"
+      side={open ? "left" : "right"}
+      testId="projects-overview-context-icon"
     />
   </Button>
 ));
