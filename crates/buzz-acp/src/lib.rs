@@ -13,6 +13,7 @@ mod queue;
 mod relay;
 mod scope;
 mod setup_mode;
+mod team_context;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -2760,6 +2761,21 @@ async fn tokio_main() -> Result<()> {
 
     let base_prompt_content = config.base_prompt_content.take();
     let cwd = current_working_directory()?;
+    // Run the ordered team-context providers once at startup (best-effort)
+    // and fold their output ahead of the persona/team-supplied base
+    // team_instructions, so every agent — modern (with_team) and legacy
+    // (format_prompt) — receives them without touching either prompt path.
+    let team_context_providers = team_context::builtin_team_context_providers();
+    let team_context_ctx = team_context::TeamContextCtx {
+        relay_url: &config.relay_url,
+        keys: &config.keys,
+    };
+    let team_instructions = team_context::build_team_instructions(
+        &team_context_providers,
+        &team_context_ctx,
+        config.team_instructions.as_deref(),
+    )
+    .await;
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2769,7 +2785,7 @@ async fn tokio_main() -> Result<()> {
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
-        team_instructions: config.team_instructions.clone(),
+        team_instructions,
         base_prompt: if config.no_base_prompt {
             None
         } else {
