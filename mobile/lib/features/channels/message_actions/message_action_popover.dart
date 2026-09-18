@@ -56,6 +56,7 @@ bool _tryShowMessageActionsPopover({
   required VoidCallback? onPopoverDismissed,
   required FocusNode? composerFocusNode,
   required VoidCallback? restoreComposerFocus,
+  required VoidCallback? onSelectText,
 }) {
   if (anchorRect == null || captureAnchorSnapshot == null) return false;
   final shouldRestoreComposerFocus = composerFocusNode?.hasFocus ?? false;
@@ -77,6 +78,7 @@ bool _tryShowMessageActionsPopover({
       composerFocusNode: composerFocusNode,
       restoreComposerFocus: restoreComposerFocus,
       shouldRestoreComposerFocus: shouldRestoreComposerFocus,
+      onSelectText: onSelectText,
     ).then((shown) {
       if (shown || !context.mounted) return;
       showMessageActions(
@@ -89,6 +91,7 @@ bool _tryShowMessageActionsPopover({
         currentPubkey: currentPubkey,
         isMember: isMember,
         isArchived: isArchived,
+        onSelectText: onSelectText,
       );
     }),
   );
@@ -112,6 +115,7 @@ Future<bool> _showMessageActionsPopover({
   required FocusNode? composerFocusNode,
   required VoidCallback? restoreComposerFocus,
   required bool shouldRestoreComposerFocus,
+  required VoidCallback? onSelectText,
 }) async {
   if (_messageActionPresentationInFlight) return true;
   _messageActionPresentationInFlight = true;
@@ -127,6 +131,7 @@ Future<bool> _showMessageActionsPopover({
       currentPubkey: currentPubkey,
       isMember: isMember,
       isArchived: isArchived,
+      onSelectText: onSelectText,
     );
     if (actions.isEmpty) return false;
     final nativeActionSurfaceSupport = _supportsIosNativeMessageActionSurface();
@@ -229,6 +234,7 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
   required String? currentPubkey,
   required bool isMember,
   required bool isArchived,
+  required VoidCallback? onSelectText,
 }) {
   final actions = <_PopoverMessageAction>[];
   final messages = allMessages;
@@ -363,6 +369,17 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
             Clipboard.setData(ClipboardData(text: message.content)),
       ),
     );
+    if (onSelectText != null) {
+      actions.add(
+        _PopoverMessageAction(
+          id: 'selectText',
+          title: 'Select text',
+          icon: LucideIcons.textCursorInput,
+          group: _PopoverMessageActionGroup.utility,
+          onSelected: onSelectText,
+        ),
+      );
+    }
   }
 
   if (canManageMessage) {
@@ -409,11 +426,12 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
     'markUnread': 1,
     'edit': 2,
     'copyText': 3,
-    'copyLink': 4,
-    'remind': 5,
-    'followThread': 6,
-    'unfollowThread': 6,
-    'delete': 7,
+    'selectText': 4,
+    'copyLink': 5,
+    'remind': 6,
+    'followThread': 7,
+    'unfollowThread': 7,
+    'delete': 8,
   };
   actions.sort(
     (left, right) => actionOrder[left.id]!.compareTo(actionOrder[right.id]!),
@@ -446,6 +464,7 @@ class _PopoverMessageAction {
     'markUnread' => 'envelope.badge',
     'edit' => 'pencil',
     'copyText' => 'doc.on.doc',
+    'selectText' => 'text.cursor',
     'copyLink' => 'link',
     'remind' => 'clock',
     'followThread' => 'bell',
