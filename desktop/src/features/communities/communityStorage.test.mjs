@@ -8,6 +8,7 @@ import {
   loadCommunityDiscoveryAfterLeave,
   markCommunityDiscoveryAfterLeave,
   migrateLegacyCommunityStorage,
+  resolveReposDirUpdate,
   saveCommunities,
   shouldAutoConnectDefaultRelay,
 } from "./communityStorage.ts";
@@ -115,6 +116,66 @@ test("completed final leave persists discovery until a community is saved", () =
 
   assert.equal(saveCommunities([{ id: "joined" }]), true);
   assert.equal(loadCommunityDiscoveryAfterLeave(storage), false);
+});
+
+test("clearing the repos dir skips validation and emits the clear", async () => {
+  const validated = [];
+  const validate = async (dir) => {
+    validated.push(dir);
+    throw new Error("repos dir must be an absolute path (got ``)");
+  };
+
+  // Regression for #6755: the cleared field used to be run through
+  // validate_repos_dir, which always rejects "", so the override could
+  // never be removed once set.
+  const result = await resolveReposDirUpdate("", "/Users/me/dev", validate);
+
+  assert.deepEqual(result, { kind: "changed", value: undefined });
+  assert.deepEqual(validated, []);
+});
+
+test("a repos dir left blank with no override set is unchanged", async () => {
+  const result = await resolveReposDirUpdate("", undefined, async () => {
+    throw new Error("should not be called");
+  });
+
+  assert.deepEqual(result, { kind: "unchanged" });
+});
+
+test("an untouched repos dir does not re-validate or emit", async () => {
+  const result = await resolveReposDirUpdate(
+    "/Users/me/dev",
+    "/Users/me/dev",
+    async () => {
+      throw new Error("should not be called");
+    },
+  );
+
+  assert.deepEqual(result, { kind: "unchanged" });
+});
+
+test("a new repos dir is validated and rejections surface as errors", async () => {
+  const validated = [];
+  const validate = async (dir) => {
+    validated.push(dir);
+    if (dir === "relative/path") {
+      throw new Error("repos dir must be an absolute path");
+    }
+  };
+
+  assert.deepEqual(
+    await resolveReposDirUpdate("relative/path", undefined, validate),
+    { kind: "invalid", error: "Error: repos dir must be an absolute path" },
+  );
+  assert.deepEqual(
+    await resolveReposDirUpdate(
+      "/Users/me/checkouts",
+      "/Users/me/dev",
+      validate,
+    ),
+    { kind: "changed", value: "/Users/me/checkouts" },
+  );
+  assert.deepEqual(validated, ["relative/path", "/Users/me/checkouts"]);
 });
 
 test("clearCommunityStorage preserves completed final-leave discovery", () => {
