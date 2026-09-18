@@ -1,6 +1,8 @@
 // Shared schema, included from the same source the runtime command parses with,
 // so the build-time validation below and the runtime parse cannot drift.
 include!("src/commands/reconnect_hook_config.rs");
+include!("src/commands/enterprise_relay_url.rs");
+include!("src/builderlab_api_config.rs");
 // Same source of truth the runtime filters with, so a baked build env cannot
 // carry a reserved key the runtime believes it already rejected.
 include!("src/managed_agents/reserved_env_keys.rs");
@@ -18,6 +20,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_RELAY_RECONNECT_CMD");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_ENTERPRISE_AUTH_RELAYS");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_BUILDERLAB_API_BASE_URL");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_DEMO_SLUG");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
 
@@ -124,6 +128,24 @@ fn main() {
     if std::env::var("BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY").is_ok() {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1");
     }
+
+    let enterprise_auth_relays = std::env::var("BUZZ_BUILD_ENTERPRISE_AUTH_RELAYS").ok();
+    if let Some(relays) = enterprise_auth_relays.as_deref() {
+        let trimmed = relays.trim();
+        parse_enterprise_relay_allowlist(trimmed).unwrap_or_else(|error| panic!("{error}"));
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_ENTERPRISE_AUTH_RELAYS={trimmed}");
+    }
+
+    let builderlab_api_base_url = resolve_builderlab_api_base_url(
+        std::env::var("BUZZ_BUILD_BUILDERLAB_API_BASE_URL")
+            .ok()
+            .as_deref(),
+        enterprise_auth_relays.as_deref(),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    println!(
+        "cargo:rustc-env=BUZZ_DESKTOP_BUILD_BUILDERLAB_API_BASE_URL={builderlab_api_base_url}"
+    );
 
     let updater_public_key = std::env::var("BUZZ_UPDATER_PUBLIC_KEY")
         .ok()

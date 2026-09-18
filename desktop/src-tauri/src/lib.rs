@@ -4,6 +4,8 @@ mod app_state;
 mod archive;
 mod build_identity;
 mod builderlab;
+#[cfg(test)]
+mod builderlab_api_config;
 mod channel_head_cache;
 mod commands;
 mod deep_link;
@@ -685,6 +687,7 @@ pub fn run() {
             read_clipboard_text,
             fetch_snapshot_bytes,
             relay_requires_membership,
+            enterprise_login_gate,
             list_relay_members,
             get_my_relay_membership,
             add_relay_member,

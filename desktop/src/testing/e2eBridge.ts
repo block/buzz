@@ -220,10 +220,13 @@ type E2eConfig = {
     projectRepoSnapshotError?: string;
     /** Delay remote repository snapshots so project loading UI is observable. */
     projectRepoSnapshotDelayMs?: number;
+    /** Enterprise login gate result for the selected relay. Defaults to not required. */
+    enterpriseLoginGate?: { status: "notRequired" } | { status: "required" };
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
     builderlabAuth?: {
       email?: string;
-      name?: string;
+      username?: string | null;
+      name?: string | null;
       expiresAt: string;
     } | null;
     /** Optional policy returned by the native join-policy discovery command. */
@@ -6832,6 +6835,7 @@ async function handleGetProfile(config: E2eConfig | undefined) {
 async function handleUpdateProfile(
   args: {
     displayName?: string;
+    name?: string;
     avatarUrl?: string;
     about?: string;
     nip05Handle?: string;
@@ -6856,10 +6860,12 @@ async function handleUpdateProfile(
 
     const profile = ensureMockProfile(config);
     const hasDisplayNameUpdate = typeof args.displayName === "string";
+    const hasNameUpdate = typeof args.name === "string";
     const hasAvatarUrlUpdate = typeof args.avatarUrl === "string";
     const hasAboutUpdate = typeof args.about === "string";
     const hasNip05HandleUpdate = typeof args.nip05Handle === "string";
     const nextDisplayName = args.displayName?.trim() ?? "";
+    const nextName = args.name?.trim() ?? "";
     const nextAvatarUrl = args.avatarUrl?.trim() ?? "";
     const nextAbout = args.about?.trim() ?? "";
     const nextNip05Handle = args.nip05Handle?.trim() ?? "";
@@ -6867,6 +6873,9 @@ async function handleUpdateProfile(
     if (hasDisplayNameUpdate && nextDisplayName !== profile.display_name) {
       profile.display_name = nextDisplayName || null;
       applyMockDisplayName(profile.pubkey, profile.display_name);
+    }
+    if (hasNameUpdate && nextName !== profile.name) {
+      profile.name = nextName || null;
     }
     if (hasAvatarUrlUpdate && nextAvatarUrl !== profile.avatar_url) {
       profile.avatar_url = nextAvatarUrl || null;
@@ -6890,7 +6899,7 @@ async function handleUpdateProfile(
     : {};
   const profileContent = JSON.stringify({
     display_name: args.displayName ?? currentContent.display_name ?? undefined,
-    name: currentContent.display_name ?? undefined,
+    name: args.name ?? currentContent.name ?? undefined,
     picture: args.avatarUrl ?? currentContent.picture ?? undefined,
     about: args.about ?? currentContent.about ?? undefined,
     nip05: args.nip05Handle ?? currentContent.nip05 ?? undefined,
@@ -12481,6 +12490,10 @@ export function maybeInstallE2eTauriMocks() {
           registry: await handleMockCommand("list_voice_registry", null),
         };
       }
+      case "enterprise_login_gate":
+        return (
+          activeConfig?.mock?.enterpriseLoginGate ?? { status: "notRequired" }
+        );
       case "get_builderlab_auth":
         return activeConfig?.mock?.builderlabAuth ?? null;
       case "start_builderlab_login": {

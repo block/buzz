@@ -4,6 +4,7 @@ import { Plus, Users } from "lucide-react";
 
 import {
   markCommunityOnboardingComplete,
+  type CommunityOnboardingStage,
   useCommunityOnboarding,
 } from "@/features/onboarding/communityOnboarding";
 import { initializeStarterChannels } from "@/features/onboarding/hooks";
@@ -39,6 +40,17 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
+
+function nextRetryStage(
+  stage: CommunityOnboardingStage | undefined,
+  hasInviteCode: boolean,
+): CommunityOnboardingStage {
+  return stage === "corporate-profile"
+    ? "connecting"
+    : hasInviteCode
+      ? "claiming"
+      : "connecting";
+}
 
 function isRelayMembershipDeniedError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -261,7 +273,10 @@ export function CommunityOnboardingFlow({
 
   const retry = () =>
     update({
-      stage: transaction?.inviteCode ? "claiming" : "connecting",
+      stage: nextRetryStage(
+        transaction?.stage,
+        Boolean(transaction?.inviteCode),
+      ),
       error: undefined,
     });
   const relayUrl = transaction?.relayUrl;
@@ -526,7 +541,8 @@ export function CommunityOnboardingFlow({
             data-testid="community-onboarding-body"
           >
             {transaction.stage === "claiming" ||
-            transaction.stage === "connecting" ? (
+            transaction.stage === "connecting" ||
+            transaction.stage === "corporate-profile" ? (
               <>
                 <Users className="mx-auto h-10 w-10" />
                 <h1 className="mt-5 text-title font-normal">
@@ -534,9 +550,11 @@ export function CommunityOnboardingFlow({
                 </h1>
                 <p className="mt-3 text-sm text-foreground/80">
                   {transaction.error ??
-                    (transaction.stage === "claiming"
-                      ? "Accepting your invite…"
-                      : "Connecting securely…")}
+                    (transaction.stage === "corporate-profile"
+                      ? "Saving your company profile…"
+                      : transaction.stage === "claiming"
+                        ? "Accepting your invite…"
+                        : "Connecting securely…")}
                 </p>
                 <div className="mt-6 flex justify-center gap-3">
                   {transaction.error ? (

@@ -39,6 +39,7 @@ pub async fn get_profile(state: State<'_, AppState>) -> Result<ProfileInfo, Stri
 #[tauri::command]
 pub async fn update_profile(
     display_name: Option<String>,
+    name: Option<String>,
     avatar_url: Option<String>,
     about: Option<String>,
     nip05_handle: Option<String>,
@@ -66,7 +67,9 @@ pub async fn update_profile(
     let dn = display_name
         .as_deref()
         .or_else(|| current.get("display_name").and_then(Value::as_str));
-    let name = current.get("name").and_then(Value::as_str);
+    let name = name
+        .as_deref()
+        .or_else(|| current.get("name").and_then(Value::as_str));
     let picture = avatar_url
         .as_deref()
         .or_else(|| current.get("picture").and_then(Value::as_str));

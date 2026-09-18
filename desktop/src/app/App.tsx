@@ -45,6 +45,7 @@ import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequire
 import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
 import { loadCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
+import { EnterpriseBrowserLoginGate } from "@/features/communities/EnterpriseBrowserLoginGate";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
@@ -66,7 +67,7 @@ import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { hydrateChannelHeads } from "@/features/messages/lib/channelHeadCache";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
-import { getProfile } from "@/shared/api/tauriProfiles";
+import { getProfile, updateProfile } from "@/shared/api/tauriProfiles";
 import {
   type AddCommunityDeepLinkPayload,
   listenForDeepLinks,
@@ -544,12 +545,50 @@ function CommunityApp({
     transaction?.communityId === activeCommunity?.id &&
     community.isReady &&
     community.appliedKey === communityKey;
+  const enterpriseProfile = community.isReady
+    ? community.enterpriseProfile
+    : null;
   useEffect(() => {
     if (transaction?.stage !== "connecting" || !targetIsReady) return;
     const transactionId = transaction.id;
     const relayUrl = transaction.relayUrl;
     if (profileCheckTransactionRef.current === transactionId) return;
     profileCheckTransactionRef.current = transactionId;
+
+    if (enterpriseProfile) {
+      void updateProfile({
+        displayName: enterpriseProfile.displayName,
+        name: enterpriseProfile.username,
+      })
+        .then(() => {
+          if (
+            !isTransactionStillConnecting(transactionRef.current, transactionId)
+          )
+            return;
+          communityOnboarding.update(
+            { stage: "team-intro", error: undefined },
+            transactionId,
+          );
+        })
+        .catch((error) => {
+          if (
+            !isTransactionStillConnecting(transactionRef.current, transactionId)
+          )
+            return;
+          profileCheckTransactionRef.current = null;
+          communityOnboarding.update(
+            {
+              stage: "corporate-profile",
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Could not save your corporate profile",
+            },
+            transactionId,
+          );
+        });
+      return;
+    }
 
     // resolveProfileCheckAction resolves exactly once (Promise.race + timer
     // cleared on settle), so no settled flag is needed here.
@@ -577,6 +616,7 @@ function CommunityApp({
     transaction?.stage,
     transaction?.id,
     transaction?.relayUrl,
+    enterpriseProfile,
   ]);
   // During "entering" the transaction stays alive as a curtain: the app mounts
   // underneath (already pointed at the Welcome channel route) while the
@@ -594,8 +634,22 @@ function CommunityApp({
   const showBootSplashOverlay =
     bootSplashPhase !== "done" && !isCommunitySwitch && !isContinuingOnboarding;
 
+  const enterpriseLoginGate =
+    "enterpriseLogin" in community ? community.enterpriseLogin : null;
   let appContent: ReactNode = null;
-  if (!transaction) {
+  if (enterpriseLoginGate) {
+    appContent = (
+      <EnterpriseBrowserLoginGate
+        communityName={enterpriseLoginGate.communityName}
+        error={enterpriseLoginGate.error}
+        onCancel={() => {
+          enterpriseLoginGate.onCancel();
+          if (transaction) void handleCommunityOnboardingCancel();
+        }}
+        onContinue={enterpriseLoginGate.onContinue}
+      />
+    );
+  } else if (!transaction) {
     if (community.needsSetup) {
       // Show welcome setup for first-run users with no communities
       appContent = (
@@ -676,7 +730,7 @@ function CommunityApp({
   return (
     <>
       {appContent}
-      {transaction ? (
+      {transaction && !enterpriseLoginGate ? (
         <div
           className={isEnteringCurtain ? "fixed inset-0 z-50" : undefined}
           data-testid={

@@ -1,5 +1,5 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { nsecEncode, npubEncode } from "nostr-tools/nip19";
 
 import {
@@ -1620,6 +1620,121 @@ test("first-community X cancels a pending sign-in", async ({ page }) => {
   await expect
     .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
     .toEqual(expect.arrayContaining(["cancel_builderlab_login"]));
+});
+
+test("authoritative corporate profile save failure stays non-editable and retries exact values", async ({
+  page,
+}) => {
+  const relayUrl = "wss://enterprise.communities.buzz.xyz";
+  const transactionId = "txn-corporate-profile-retry";
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript(
+    ({
+      pubkey,
+      storageKey,
+      transactionStorageKey,
+      relayUrl,
+      transactionId,
+    }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify([
+          {
+            id: "e2e-enterprise-community",
+            name: "Enterprise",
+            relayUrl,
+            addedAt: "2026-09-18T00:00:00.000Z",
+            pubkey,
+          },
+        ]),
+      );
+      window.localStorage.setItem(
+        "buzz-active-community-id",
+        "e2e-enterprise-community",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        transactionStorageKey,
+        JSON.stringify({
+          id: transactionId,
+          source: "first-community",
+          stage: "connecting",
+          relayUrl,
+          communityName: "Enterprise",
+          communityId: "e2e-enterprise-community",
+          addedCommunity: true,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    {
+      pubkey: BLANK_TYLER_IDENTITY.pubkey,
+      storageKey: "buzz-communities",
+      transactionStorageKey: COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+      relayUrl,
+      transactionId,
+    },
+  );
+  await installMockBridge(
+    page,
+    {
+      enterpriseLoginGate: { status: "required" },
+      builderlabAuth: {
+        email: "brad@example.com",
+        username: "seiler",
+        name: "Brad Seiler",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      profileUpdateErrors: ["Temporary corporate profile sync failure.", null],
+    },
+    {
+      relayWsUrl: relayUrl,
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await expect(
+    page.getByText("Temporary corporate profile sync failure."),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("community-profile-name-key")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate((key) => {
+        const raw = window.localStorage.getItem(key);
+        return raw ? JSON.parse(raw).stage : null;
+      }, COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY),
+    )
+    .toBe("corporate-profile");
+
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Meet your starter team" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+          .filter(({ command }) => command === "update_profile")
+          .map(({ payload }) => payload),
+      ),
+    )
+    .toEqual([
+      { displayName: "Brad Seiler", name: "seiler" },
+      { displayName: "Brad Seiler", name: "seiler" },
+    ]);
 });
 
 test("first-community owner can replace a mismatched account identity", async ({
