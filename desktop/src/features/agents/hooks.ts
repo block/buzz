@@ -44,6 +44,7 @@ import {
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 import {
+  clearManagedAgentLog,
   setManagedAgentAutoRestart,
   setManagedAgentStartOnAppLaunch,
   startManagedAgent,
@@ -894,6 +895,17 @@ export function useManagedAgentLogQuery(
     retry: false,
     refetchInterval,
     ...managedAgentLogFocusRefetchPolicy,
+  });
+}
+
+export function useClearManagedAgentLogMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (pubkey: string) => clearManagedAgentLog(pubkey),
+    onSuccess: (_result, pubkey) =>
+      queryClient.invalidateQueries({
+        queryKey: ["managed-agent-log", pubkey],
+      }),
   });
 }
 
