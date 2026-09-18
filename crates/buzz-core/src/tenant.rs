@@ -112,7 +112,17 @@ impl TenantContext {
 /// - strip a single trailing dot (the FQDN root label);
 /// - strip a default port suffix (`:80`, `:443`) — non-default ports are kept,
 ///   since a deployment may legitimately serve different communities on
-///   different ports of the same name.
+///   different ports of the same name;
+/// - fold loopback hosts (`localhost`, `[::1]`, any `127.0.0.0/8` address)
+///   into the canonical `127.0.0.1`, preserving any explicit port.
+///
+/// The loopback fold mirrors the client side: `crate::relay::normalize_relay_url`
+/// canonicalizes every loopback relay URL to `127.0.0.1` before the desktop
+/// spawns an agent harness, and `buzz-auth`'s NIP-42 verification applies the
+/// same equivalence when comparing relay URLs. Those clients cannot distinguish
+/// `localhost` from `127.0.0.1`, so host resolution must not either — without
+/// the fold, a deployment bound to `localhost:3000` is unreachable (404) by the
+/// very harnesses whose URLs were rewritten to `127.0.0.1:3000`.
 ///
 /// The input is trimmed of surrounding whitespace. An empty result (e.g. the
 /// caller passed `""`) is returned as-is; resolution treats an empty or
@@ -134,7 +144,40 @@ pub fn normalize_host(host: &str) -> String {
     if let Some(stripped) = host.strip_suffix('.') {
         host = stripped.to_string();
     }
-    host
+    fold_loopback(&host)
+}
+
+/// Fold loopback host names into the canonical `127.0.0.1`, keeping any
+/// explicit port (`localhost:3000` → `127.0.0.1:3000`). Non-loopback hosts are
+/// returned unchanged.
+fn fold_loopback(host: &str) -> String {
+    // Split off an explicit numeric port. For a bracketed IPv6 literal without
+    // a port (`[::1]`) the rsplit lands inside the brackets and the "port"
+    // fails the all-digits check, so it correctly falls through to no-port.
+    let (name, port) = match host.rsplit_once(':') {
+        Some((name, port))
+            if !name.is_empty() && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            (name, Some(port))
+        }
+        _ => (host, None),
+    };
+    let is_loopback = if name == "localhost" {
+        true
+    } else if let Some(v6) = name.strip_prefix('[').and_then(|n| n.strip_suffix(']')) {
+        v6.parse::<std::net::Ipv6Addr>()
+            .is_ok_and(|addr| addr.is_loopback())
+    } else {
+        name.parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|addr| addr.is_loopback())
+    };
+    if !is_loopback {
+        return host.to_string();
+    }
+    match port {
+        Some(port) => format!("127.0.0.1:{port}"),
+        None => "127.0.0.1".to_string(),
+    }
 }
 
 /// Extract the authority (host plus an explicit non-default port, if present)
@@ -220,9 +263,36 @@ mod tests {
 
     #[test]
     fn normalize_host_leaves_ipv6_literal_intact() {
-        // IPv6 literals contain colons but no trailing default-port suffix.
-        assert_eq!(normalize_host("[::1]"), "[::1]");
-        assert_eq!(normalize_host("[::1]:443"), "[::1]");
+        // Non-loopback IPv6 literals contain colons but no trailing
+        // default-port suffix; they must survive unchanged.
+        assert_eq!(normalize_host("[2001:db8::1]"), "[2001:db8::1]");
+        assert_eq!(normalize_host("[2001:db8::1]:443"), "[2001:db8::1]");
+        assert_eq!(normalize_host("[2001:db8::1]:3000"), "[2001:db8::1]:3000");
+    }
+
+    #[test]
+    fn normalize_host_folds_loopback_variants() {
+        // All loopback spellings are the SAME deployment from the client's
+        // point of view (clients canonicalize them to 127.0.0.1 before
+        // connecting), so they must resolve to the same tenant key.
+        for variant in ["localhost:3000", "127.0.0.1:3000", "[::1]:3000"] {
+            assert_eq!(normalize_host(variant), "127.0.0.1:3000", "variant {variant:?}");
+        }
+        for variant in ["localhost", "LOCALHOST", "localhost.", "127.0.0.1", "[::1]"] {
+            assert_eq!(normalize_host(variant), "127.0.0.1", "variant {variant:?}");
+        }
+        // The whole 127.0.0.0/8 block is loopback.
+        assert_eq!(normalize_host("127.0.0.53:3000"), "127.0.0.1:3000");
+        // Default ports still collapse before the fold.
+        assert_eq!(normalize_host("localhost:80"), "127.0.0.1");
+    }
+
+    #[test]
+    fn normalize_host_does_not_fold_non_loopback() {
+        // Near-misses must stay distinct tenants.
+        assert_eq!(normalize_host("localhost.example"), "localhost.example");
+        assert_eq!(normalize_host("128.0.0.1:3000"), "128.0.0.1:3000");
+        assert_eq!(normalize_host("10.0.0.1:3000"), "10.0.0.1:3000");
     }
 
     #[test]
@@ -235,9 +305,14 @@ mod tests {
     #[test]
     fn relay_url_authority_keeps_explicit_nondefault_port() {
         // The default dev seed: startup, bind_deployment_community, and
-        // buzz-admin must all derive `localhost:3000` (NOT bare `localhost`),
-        // or the admin lookup misses the community startup seeded.
-        assert_eq!(relay_url_authority("ws://localhost:3000"), "localhost:3000");
+        // buzz-admin must all derive `127.0.0.1:3000` (NOT a bare host), or
+        // the admin lookup misses the community startup seeded. `localhost`
+        // folds to `127.0.0.1` so the seeded community matches harness
+        // connections, whose URLs are canonicalized client-side.
+        assert_eq!(
+            relay_url_authority("ws://localhost:3000"),
+            "127.0.0.1:3000"
+        );
         assert_eq!(
             relay_url_authority("wss://relay.example:8443"),
             "relay.example:8443"
@@ -263,7 +338,12 @@ mod tests {
     fn relay_url_authority_preserves_ipv6_brackets() {
         // `host_str()` strips IPv6 brackets and the port; `relay_url_authority`
         // must keep both so the authority matches `communities.host`.
-        assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
+        assert_eq!(
+            relay_url_authority("ws://[2001:db8::1]:3000"),
+            "[2001:db8::1]:3000"
+        );
+        // Loopback IPv6 folds like every other loopback spelling.
+        assert_eq!(relay_url_authority("ws://[::1]:3000"), "127.0.0.1:3000");
     }
 
     #[test]
