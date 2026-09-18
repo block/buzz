@@ -853,6 +853,12 @@ pub async fn mesh_model_catalog() -> CmdResult<mesh_llm::MeshModelCatalog> {
         .map_err(|error| format!("mesh catalog task failed: {error}"))
 }
 
+/// Build-time probe: Share Compute / mesh-llm is compiled into this binary.
+#[tauri::command]
+pub fn mesh_feature_enabled() -> bool {
+    true
+}
+
 #[cfg(all(test, feature = "mesh-llm"))]
 #[path = "mesh_llm_tests.rs"]
 mod tests;
