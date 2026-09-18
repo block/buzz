@@ -4,9 +4,22 @@
 //!
 //! ```text
 //! buzz-pair source --relay wss://relay.example.com [--nsec nsec1...]
+//!                  [--envelope-relay https://relay.example.com]
 //! buzz-pair target [--relay wss://relay.example.com]
 //! buzz-pair test-vectors
 //! ```
+//!
+//! # Payload shape
+//!
+//! By default `source` transfers a bare bech32 `nsec1...` string
+//! ([`PayloadType::Nsec`]). The Buzz **mobile** app does not accept that: its
+//! `_processPayload` begins with `jsonDecode(payload) as Map<String, dynamic>`,
+//! so a bare nsec dies on the leading `n` with
+//! `FormatException: Unexpected character (at character 1)`.
+//!
+//! Passing `--envelope-relay <https url>` switches the payload to the JSON
+//! envelope the mobile app — and the desktop app, its real counterpart —
+//! actually decodes: `{"relayUrl","pubkey","nsec"}` as [`PayloadType::Custom`].
 //!
 //! The `source` subcommand acts as the secret-holding device; `target` acts
 //! as the receiving device. Together they exercise the full NIP-AB protocol
@@ -53,6 +66,13 @@ enum Cmd {
         /// nsec (bech32) of the key to transfer. If omitted, generates a test key.
         #[arg(long)]
         nsec: Option<String>,
+
+        /// Emit the mobile/desktop JSON envelope `{relayUrl,pubkey,nsec}` instead
+        /// of a bare nsec. The value is the `https://` URL of the Buzz relay the
+        /// paired device should join; it becomes the envelope's `relayUrl`, and is
+        /// distinct from `--relay`, which is the ephemeral pairing relay.
+        #[arg(long, value_name = "HTTPS_URL")]
+        envelope_relay: Option<String>,
     },
 
     /// Act as the target device (scans QR code, receives the secret).
@@ -96,6 +116,14 @@ enum CliError {
 
 #[tokio::main]
 async fn main() {
+    // Without this, every wss:// pairing relay panics inside
+    // rustls ("Could not automatically determine the process-level
+    // CryptoProvider") because both ring and aws-lc-rs are in the workspace
+    // tree. Plain ws:// never reaches this code path, which is why interop
+    // testing against a plaintext spike relay could not have found it.
+    // Idempotent: the Err just means a provider was already installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
     if let Err(e) = run(cli.command).await {
         eprintln!("error: {e}");
@@ -105,15 +133,23 @@ async fn main() {
 
 async fn run(cmd: Cmd) -> Result<(), CliError> {
     match cmd {
-        Cmd::Source { relay, nsec } => cmd_source(relay, nsec).await,
+        Cmd::Source {
+            relay,
+            nsec,
+            envelope_relay,
+        } => cmd_source(relay, nsec, envelope_relay).await,
         Cmd::Target { relay, show_secret } => cmd_target(relay, show_secret).await,
         Cmd::TestVectors => cmd_test_vectors(),
     }
 }
 
-async fn cmd_source(relay_url: String, nsec: Option<String>) -> Result<(), CliError> {
+async fn cmd_source(
+    relay_url: String,
+    nsec: Option<String>,
+    envelope_relay: Option<String>,
+) -> Result<(), CliError> {
     // Resolve the payload to transfer.
-    let (payload_str, payload_type) = resolve_payload(nsec)?;
+    let (payload_str, payload_type) = resolve_payload(nsec, envelope_relay)?;
 
     // Create pairing session.
     let (mut session, qr) = PairingSession::new_source(relay_url.clone());
@@ -574,16 +610,48 @@ fn parse_relay_event(text: &str, sub_id: &str) -> Option<Event> {
     serde_json::from_value(arr[2].clone()).ok()
 }
 
+/// Build the JSON pairing envelope the Buzz apps decode.
+///
+/// Exactly the three fields `_processPayload` reads
+/// (`mobile/lib/features/pairing/pairing_provider.dart`), in the same shape the
+/// desktop app sends (`desktop/src-tauri/src/commands/pairing.rs`):
+///
+/// ```json
+/// { "relayUrl": "https://…", "pubkey": "<64-char hex>", "nsec": "nsec1…" }
+/// ```
+///
+/// `pubkey` is derived from `nsec` rather than taken separately — the two must
+/// describe one identity, and deriving it removes the chance of them drifting.
+fn build_envelope(relay_url: &str, nsec: &str) -> Result<Zeroizing<String>, CliError> {
+    let sk = SecretKey::parse(nsec).map_err(|e| CliError::InvalidNsec(e.to_string()))?;
+    let keys = Keys::new(sk);
+    Ok(Zeroizing::new(
+        serde_json::json!({
+            "relayUrl": relay_url,
+            "pubkey": keys.public_key().to_hex(),
+            "nsec": nsec,
+        })
+        .to_string(),
+    ))
+}
+
 /// Resolve the payload to send.
 ///
-/// If `nsec` is provided, parse it as bech32 and return the raw nsec string.
-/// Otherwise generate a fresh test key and return its nsec.
-fn resolve_payload(nsec: Option<String>) -> Result<(Zeroizing<String>, PayloadType), CliError> {
-    match nsec {
+/// If `nsec` is provided, parse it as bech32; otherwise generate a fresh test key.
+///
+/// With `envelope_relay` set, the payload is the JSON envelope
+/// ([`PayloadType::Custom`]) the Buzz apps decode. Without it, the payload stays
+/// the bare bech32 nsec ([`PayloadType::Nsec`]) — unchanged upstream behaviour,
+/// which is correct for CLI-to-CLI interop testing and wrong for the apps.
+fn resolve_payload(
+    nsec: Option<String>,
+    envelope_relay: Option<String>,
+) -> Result<(Zeroizing<String>, PayloadType), CliError> {
+    let nsec = match nsec {
         Some(s) => {
             // Validate it parses as a secret key.
             let _sk = SecretKey::parse(&s).map_err(|e| CliError::InvalidNsec(e.to_string()))?;
-            Ok((Zeroizing::new(s), PayloadType::Nsec))
+            Zeroizing::new(s)
         }
         None => {
             let keys = Keys::generate();
@@ -592,8 +660,24 @@ fn resolve_payload(nsec: Option<String>) -> Result<(Zeroizing<String>, PayloadTy
                 .to_bech32()
                 .map_err(|e| CliError::InvalidNsec(e.to_string()))?;
             println!("(no --nsec provided; using generated test key)");
-            Ok((Zeroizing::new(nsec_str), PayloadType::Nsec))
+            Zeroizing::new(nsec_str)
         }
+    };
+
+    match envelope_relay {
+        Some(relay) => {
+            // Gate 2 of `_processPayload` rejects any non-https URL in a release
+            // build. Warn at mint time rather than let it surface on a handset as
+            // a second, unrelated-looking failure.
+            if !relay.starts_with("https://") {
+                eprintln!(
+                    "warning: --envelope-relay {relay} is not https:// — \
+                     release builds of the Buzz app will reject it (debug builds allow it)"
+                );
+            }
+            Ok((build_envelope(&relay, &nsec)?, PayloadType::Custom))
+        }
+        None => Ok((nsec, PayloadType::Nsec)),
     }
 }
 
@@ -620,4 +704,130 @@ fn hex_to_32(s: &str) -> Result<[u8; 32], CliError> {
     bytes
         .try_into()
         .map_err(|_| CliError::Other(format!("expected 32 bytes, got wrong length for '{s}'")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Map, Value};
+
+    const RELAY: &str = "https://relay.example.com";
+
+    fn fresh_nsec() -> String {
+        Keys::generate().secret_key().to_bech32().unwrap()
+    }
+
+    /// Stand-in for gate 1 of the mobile app's `_processPayload`:
+    /// `jsonDecode(payload) as Map<String, dynamic>`. Dart throws
+    /// `FormatException` where this returns `Err`.
+    fn json_decode_as_map(payload: &str) -> Result<Map<String, Value>, serde_json::Error> {
+        serde_json::from_str::<Map<String, Value>>(payload)
+    }
+
+    /// The defect this change exists to fix, pinned so it cannot come back
+    /// silently: the default payload is a bare bech32 nsec, and the app's very
+    /// first step cannot decode it. Character 1 is the `n` of `nsec1`.
+    #[test]
+    fn bare_nsec_payload_fails_the_apps_first_gate() {
+        let nsec = fresh_nsec();
+        let (payload, ty) = resolve_payload(Some(nsec.clone()), None).unwrap();
+
+        assert!(matches!(ty, PayloadType::Nsec));
+        assert!(payload.starts_with("nsec1"));
+        assert!(
+            json_decode_as_map(&payload).is_err(),
+            "a bare nsec must not be JSON — this is the FormatException the mobile app raises"
+        );
+    }
+
+    /// The fix: with `--envelope-relay`, gate 1 passes and the map carries
+    /// exactly the three fields `_processPayload` reads.
+    #[test]
+    fn envelope_payload_clears_the_apps_first_gate() {
+        let nsec = fresh_nsec();
+        let (payload, ty) = resolve_payload(Some(nsec.clone()), Some(RELAY.to_string())).unwrap();
+
+        assert!(matches!(ty, PayloadType::Custom));
+        let map = json_decode_as_map(&payload).expect("envelope must jsonDecode as a map");
+
+        assert_eq!(map.len(), 3, "exactly three fields, no extras: {map:?}");
+        assert_eq!(map["relayUrl"], Value::String(RELAY.to_string()));
+        assert_eq!(map["nsec"], Value::String(nsec.clone()));
+
+        // `relayUrl` non-null is the app's own second check inside gate 1.
+        assert!(map["relayUrl"].is_string());
+    }
+
+    /// `pubkey` must belong to the transferred `nsec`. A fresh or stale key here
+    /// decodes fine and then strands the device on a community it cannot sign for.
+    #[test]
+    fn envelope_pubkey_is_derived_from_the_transferred_nsec() {
+        let nsec = fresh_nsec();
+        let expected = Keys::new(SecretKey::parse(&nsec).unwrap())
+            .public_key()
+            .to_hex();
+
+        let (payload, _) = resolve_payload(Some(nsec), Some(RELAY.to_string())).unwrap();
+        let map = json_decode_as_map(&payload).unwrap();
+
+        assert_eq!(map["pubkey"], Value::String(expected));
+        assert_eq!(
+            map["pubkey"].as_str().unwrap().len(),
+            64,
+            "pubkey is 64-char hex, not npub — the app stores it as Community.pubkey"
+        );
+    }
+
+    /// The generated-key path (no `--nsec`) must produce a coherent envelope too,
+    /// not just the explicit-key path.
+    #[test]
+    fn generated_key_envelope_is_internally_consistent() {
+        let (payload, ty) = resolve_payload(None, Some(RELAY.to_string())).unwrap();
+
+        assert!(matches!(ty, PayloadType::Custom));
+        let map = json_decode_as_map(&payload).unwrap();
+        let nsec = map["nsec"].as_str().unwrap();
+        let derived = Keys::new(SecretKey::parse(nsec).unwrap())
+            .public_key()
+            .to_hex();
+
+        assert_eq!(map["pubkey"], Value::String(derived));
+    }
+
+    /// Upstream CLI-to-CLI interop behaviour must be untouched when the flag is
+    /// absent — this crate is still the NIP-AB interop tool.
+    #[test]
+    fn absent_flag_leaves_upstream_behaviour_unchanged() {
+        let nsec = fresh_nsec();
+        let (payload, ty) = resolve_payload(Some(nsec.clone()), None).unwrap();
+
+        assert!(matches!(ty, PayloadType::Nsec));
+        assert_eq!(&*payload, &nsec);
+    }
+
+    /// An unparseable nsec must be rejected at mint time, not shipped inside a
+    /// well-formed envelope that only fails three gates later on the handset.
+    #[test]
+    fn invalid_nsec_is_rejected_before_an_envelope_is_built() {
+        assert!(build_envelope(RELAY, "nsec1notarealkey").is_err());
+        assert!(resolve_payload(Some("definitely-not-bech32".into()), Some(RELAY.into())).is_err());
+    }
+
+    /// Unicode and empty relay URLs must not corrupt the JSON — serde escapes
+    /// them, and Dart's `jsonDecode` reads them back byte-identically.
+    #[test]
+    fn odd_relay_urls_stay_well_formed_json() {
+        let nsec = fresh_nsec();
+        for relay in [
+            "",
+            "https://relay.exämple.com/pä†h",
+            "https://a.com/\"quote\"",
+        ] {
+            let payload = build_envelope(relay, &nsec).unwrap();
+            let map = json_decode_as_map(&payload)
+                .unwrap_or_else(|e| panic!("relay {relay:?} broke the envelope: {e}"));
+            assert_eq!(map["relayUrl"], Value::String(relay.to_string()));
+            assert_eq!(map.len(), 3);
+        }
+    }
 }
