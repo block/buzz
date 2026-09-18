@@ -117,6 +117,17 @@ pub const KIND_PUSH_LEASE: u32 = 30350;
 /// plus exact public projection bindings. See `docs/nips/NIP-PMA.md`.
 pub const KIND_PRIVATE_MANAGED_AGENT: u32 = 30179;
 
+/// NIP-AW: channel-visible agent work status (parameterized replaceable,
+/// agent-authored).
+///
+/// A redacted, channel-scoped projection of an agent's current work: turn
+/// status, model id, and tool-call titles — never tool arguments, prompts, or
+/// message content. Addressed by `(pubkey, kind, d_tag)` with `d` = channel
+/// UUID and a matching `h` tag, so each agent stores at most one live snapshot
+/// per channel and reads inherit NIP-29 channel-membership gating. See
+/// `docs/nips/NIP-AW.md`.
+pub const KIND_AGENT_WORK_STATUS: u32 = 30181;
+
 /// Kinds whose stored events are readable only by their author.
 ///
 /// The relay must never reveal the existence, count, tags, content, schedule,
@@ -659,6 +670,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MANAGED_AGENT,
     KIND_TEAM_CATALOG,
     KIND_PRIVATE_MANAGED_AGENT,
+    KIND_AGENT_WORK_STATUS,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
@@ -861,6 +873,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 300
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM_CATALOG)); // 30178 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PRIVATE_MANAGED_AGENT)); // 30179 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_AGENT_WORK_STATUS)); // 30181 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999

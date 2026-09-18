@@ -13,28 +13,28 @@ use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_AGENT_WORK_STATUS, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST,
+    KIND_BOOKMARK_SET, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
+    KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
+    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -445,6 +445,10 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
+        // NIP-AW: channel-scoped agent work status — channel content, same
+        // transport scope as messages; membership is enforced by the generic
+        // h-tag channel gate.
+        KIND_AGENT_WORK_STATUS => Ok(Scope::MessagesWrite),
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
@@ -732,6 +736,10 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_HUDDLE_PARTICIPANT_LEFT
             | KIND_HUDDLE_ENDED
             | KIND_HUDDLE_GUIDELINES
+            // NIP-AW: agent work status is meaningless without a channel — a
+            // missing h tag would store it globally, readable by any relay
+            // member, defeating the channel-membership privacy contract.
+            | KIND_AGENT_WORK_STATUS
     )
 }
 
@@ -1891,6 +1899,24 @@ fn validate_engram_nip44_content(content: &str) -> Result<(), String> {
 ///
 /// Ownership (`is_agent_owner`) is an async DB check performed separately in
 /// `ingest_event_inner` after this synchronous envelope check.
+/// NIP-AW: the addressable coordinate must be the channel itself.
+///
+/// `d` must be exactly one tag whose value is the same UUID as the `h` tag
+/// (already resolved to `channel_id` by the caller). This pins one live status
+/// per (agent, channel): a divergent `d` would let an author store multiple
+/// snapshots for one channel, or collide a coordinate across channels.
+fn validate_agent_work_status_envelope(event: &Event, channel_id: Uuid) -> Result<(), String> {
+    const LABEL: &str = "agent work status";
+    let d = single_bounded_d_tag(event, LABEL)?;
+    let d_uuid = d
+        .parse::<Uuid>()
+        .map_err(|_| format!("{LABEL} `d` tag must be a channel UUID"))?;
+    if d_uuid != channel_id {
+        return Err(format!("{LABEL} `d` tag must match the `h` channel tag"));
+    }
+    Ok(())
+}
+
 fn validate_agent_turn_metric_envelope(event: &nostr::Event) -> Result<(), String> {
     let event_pubkey_hex = event.pubkey.to_hex();
     let mut p_tags: Vec<&str> = Vec::new();
@@ -2799,6 +2825,14 @@ async fn ingest_event_inner(
     if kind_u32 == KIND_PROJECT {
         validate_project_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_AGENT_WORK_STATUS {
+        // requires_h_channel_scope guarantees channel_id is Some here.
+        if let Some(ch_id) = channel_id {
+            validate_agent_work_status_envelope(&event, ch_id)
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        }
     }
 
     // Track pre-created channel UUID for compensation on insert failure.
@@ -3770,6 +3804,54 @@ mod postgres_tests {
     #[test]
     fn user_status_does_not_require_h_tag() {
         assert!(!requires_h_channel_scope(KIND_USER_STATUS));
+    }
+
+    #[test]
+    fn agent_work_status_is_channel_scoped_messages_write() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_AGENT_WORK_STATUS, &dummy).unwrap(),
+            Scope::MessagesWrite,
+        );
+        // Channel-scoped by contract: h required, never stored globally.
+        assert!(requires_h_channel_scope(KIND_AGENT_WORK_STATUS));
+        assert!(!is_global_only_kind(KIND_AGENT_WORK_STATUS));
+    }
+
+    #[test]
+    fn agent_work_status_d_must_match_h_channel() {
+        let ch = uuid::Uuid::parse_str("0b7c0958-3f7f-48c8-af3f-31e549b10e31").unwrap();
+        let other = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let ch_str = ch.to_string();
+
+        let good = make_event_with_tags(
+            KIND_AGENT_WORK_STATUS,
+            "{}",
+            &[&["h", ch_str.as_str()], &["d", ch_str.as_str()]],
+        );
+        assert!(validate_agent_work_status_envelope(&good, ch).is_ok());
+
+        let mismatched = make_event_with_tags(
+            KIND_AGENT_WORK_STATUS,
+            "{}",
+            &[&["h", ch_str.as_str()], &["d", other.to_string().as_str()]],
+        );
+        assert!(validate_agent_work_status_envelope(&mismatched, ch)
+            .unwrap_err()
+            .contains("must match the `h` channel tag"));
+
+        let non_uuid = make_event_with_tags(
+            KIND_AGENT_WORK_STATUS,
+            "{}",
+            &[&["h", ch_str.as_str()], &["d", "general"]],
+        );
+        assert!(validate_agent_work_status_envelope(&non_uuid, ch)
+            .unwrap_err()
+            .contains("must be a channel UUID"));
+
+        let missing_d =
+            make_event_with_tags(KIND_AGENT_WORK_STATUS, "{}", &[&["h", ch_str.as_str()]]);
+        assert!(validate_agent_work_status_envelope(&missing_d, ch).is_err());
     }
 
     #[test]
