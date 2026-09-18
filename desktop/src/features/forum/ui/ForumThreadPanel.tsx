@@ -162,6 +162,7 @@ export function ForumThreadPanel({
   targetSearchQuery,
 }: ForumThreadPanelProps) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const autoScrolledPostIdRef = React.useRef<string | null>(null);
   const { channels } = useChannelNavigation();
   const channelNames = React.useMemo(
     () => channels.filter((c) => c.channelType !== "dm").map((c) => c.name),
@@ -184,6 +185,29 @@ export function ForumThreadPanel({
     targetElement.scrollIntoView({ block: "center" });
     onTargetReached?.(targetEventId);
   }, [onTargetReached, targetEventId, thread]);
+
+  // Opening a thread without a link target lands on the newest reply, matching
+  // the stream timeline. Runs once per opened post so live replies never yank
+  // a reader who has scrolled elsewhere; a link target owns positioning
+  // instead, including after it is cleared via onTargetReached.
+  React.useEffect(() => {
+    if (!thread) {
+      return;
+    }
+    if (autoScrolledPostIdRef.current === thread.post.eventId) {
+      return;
+    }
+    autoScrolledPostIdRef.current = thread.post.eventId;
+
+    if (targetEventId) {
+      return;
+    }
+
+    const scrollElement = scrollRef.current;
+    if (scrollElement) {
+      scrollElement.scrollTop = scrollElement.scrollHeight;
+    }
+  }, [targetEventId, thread]);
 
   if (isLoading || !thread) {
     return (
