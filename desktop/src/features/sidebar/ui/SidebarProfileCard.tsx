@@ -156,6 +156,7 @@ export function SidebarProfileCard({
             displayName={resolvedDisplayName}
             isStatusPending={isPresencePending}
             onClearUserStatus={onClearUserStatus}
+            onAddCommunity={onOpenAddCommunity}
             onOpenSettings={onOpenSettings}
             onSendFeedback={onSendFeedback}
             onSetStatus={onSetPresenceStatus ?? (() => {})}
