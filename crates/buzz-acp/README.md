@@ -236,7 +236,13 @@ Start with **N=2** for most deployments. Increase if queue depth grows under loa
 
 ## Forum Channels
 
-By default, the ACP harness subscribes to stream message kinds (9, 46010, 40007). To receive forum events, opt in with `--kinds` and disable the mention filter (forum posts don't @mention agents):
+By default, the ACP harness subscribes to mentioned stream messages, workflow
+requests, reminders, forum posts, and forum comments (kinds 9, 46010, 40007,
+45001, and 45003). A forum post or comment wakes an agent only when it includes
+the agent's `p` tag.
+
+To receive all forum activity, including unmentioned posts, comments, and votes,
+opt in with `--kinds` and disable the mention filter:
 
 **CLI flags:**
 ```bash
@@ -260,13 +266,16 @@ Forum event kinds:
 - **45002** — Vote on a post or comment
 - **45003** — Comment reply on a forum post
 
-> **Note:** Without `--no-mention-filter` (or `require_mention = false`), the default `subscribe=mentions` mode filters events that don't @mention the agent — forum posts will be invisible.
+> **Note:** The default `subscribe=mentions` mode receives forum posts and
+> comments that explicitly mention the agent. Without `--no-mention-filter` (or
+> `require_mention = false`), unmentioned forum activity remains invisible.
 
 ## How It Works
 
 1. **Startup** — Spawns N agent subprocesses (default 1), sends ACP `initialize` to each, connects to the relay with NIP-42 auth.
 2. **Channel discovery** — Queries the relay REST API for accessible channels, subscribes to each.
-3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
+3. **Event loop** — Listens for supported events with the agent's pubkey in a
+   `#p` tag. Events queue per channel.
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
