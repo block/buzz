@@ -1418,17 +1418,30 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     // Now send cancel and release the round-2 gate. Cancel is enqueued before
     // round 2 can respond, so the turn exits with stopReason: cancelled.
     let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
+    // Wait for the cancel acknowledgement before releasing the round-2 gate.
+    // Releasing the gate immediately after `send` (the prior shape) let the
+    // gated HTTP response resolve before the agent had processed the cancel,
+    // so session/prompt could intermittently return a race-driven error
+    // stopReason instead of `cancelled`. Drain any usage frames that arrive
+    // before the acknowledgement so the ordering assertion still holds.
+    let (frames_before_cancel_ack, cancel_ack) =
+        recv_until_with_drain(&mut h, |v| v["id"] == json!(c_id)).await;
+    assert_eq!(
+        cancel_ack["id"],
+        json!(c_id),
+        "session/cancel was not acknowledged"
+    );
     let _ = gate_tx.send(()); // unblock round 2
 
     let mut saw_usage_before_prompt_response = false;
-    let mut saw_usage = false;
-    let mut saw_cancel_ok = false;
+    let mut saw_usage = frames_before_cancel_ack.iter().any(is_usage_update);
+    if saw_usage {
+        saw_usage_before_prompt_response = true;
+    }
     let mut saw_prompt_response = false;
     for _ in 0..40 {
         let v = h.recv().await;
-        if v["id"] == json!(c_id) {
-            saw_cancel_ok = true;
-        } else if is_usage_update(&v) {
+        if is_usage_update(&v) {
             saw_usage = true;
             if !saw_prompt_response {
                 saw_usage_before_prompt_response = true;
@@ -1441,11 +1454,10 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
                 "turn must end with stopReason: cancelled"
             );
         }
-        if saw_usage && saw_prompt_response && saw_cancel_ok {
+        if saw_usage && saw_prompt_response {
             break;
         }
     }
-    assert!(saw_cancel_ok, "session/cancel was not acknowledged");
     assert!(
         saw_usage,
         "expected usage_update notification for cancelled turn with observed tokens"
