@@ -14,7 +14,8 @@ use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
     KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
+    KIND_CANVAS, KIND_COMMUNITY_JOIN_MATERIAL, KIND_CONTACT_LIST, KIND_DELETION,
+    KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
     KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
     KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
     KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
@@ -503,6 +504,10 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // only ensures the actor can write user-scoped state, which any
         // profile-publishing user already holds.
         KIND_IA_ARCHIVE_REQUEST | KIND_IA_UNARCHIVE_REQUEST => Ok(Scope::UsersWrite),
+        // Join-by-address: the community join material is COMMUNITY-OWNED state —
+        // only an owner/admin-scoped AUTH (AdminChannels) may publish it. The
+        // scope gate is the authz: a member key cannot forge the join material.
+        KIND_COMMUNITY_JOIN_MATERIAL => Ok(Scope::AdminChannels),
         KIND_NIP29_EDIT_METADATA => {
             // kind:9002 scope split: archived tag → AdminChannels, else ChannelsWrite
             let has_archived = event
@@ -700,6 +705,9 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_AGENT_TURN_METRIC
             // NIP-PL leases are author-owned, addressable global state.
             | super::push_lease::KIND_PUSH_LEASE
+            // Join-by-address: the community's join material is community-global
+            // (parameterized-replaceable, keyed by (owner pubkey, kind, d tag)).
+            | KIND_COMMUNITY_JOIN_MATERIAL
     )
 }
 
