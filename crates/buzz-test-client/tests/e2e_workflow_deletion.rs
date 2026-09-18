@@ -50,10 +50,35 @@ async fn query_definition(
         .subscribe(&subscription, vec![definition_filter(keys, workflow_id)])
         .await
         .expect("subscribe for fresh workflow definition query");
-    client
+    let events = client
         .collect_until_eose(&subscription, Duration::from_secs(5))
         .await
-        .expect("query workflow definition")
+        .expect("query workflow definition");
+    client
+        .close_subscription(&subscription)
+        .await
+        .expect("close definition query");
+    events
+}
+
+async fn query_deletion(client: &mut BuzzTestClient, deletion: &Event) -> Vec<Event> {
+    let subscription = sub_id("deletion-query");
+    client
+        .subscribe(
+            &subscription,
+            vec![Filter::new().kind(Kind::EventDeletion).id(deletion.id)],
+        )
+        .await
+        .expect("fresh exact-ID deletion query");
+    let events = client
+        .collect_until_eose(&subscription, Duration::from_secs(5))
+        .await
+        .expect("query deletion history");
+    client
+        .close_subscription(&subscription)
+        .await
+        .expect("close deletion query");
+    events
 }
 
 async fn database_representation_counts(
@@ -393,8 +418,12 @@ async fn run_failed_deletion_replay_scenario(pool: &PgPool) {
         .await
         .expect("count stored deletion");
     assert_eq!(
-        stored_requests, 1,
-        "retry must exercise an already-persisted request"
+        stored_requests, 0,
+        "rejected deletion must roll back its public event"
+    );
+    assert!(
+        query_deletion(&mut client, &deletion).await.is_empty(),
+        "rejected deletion must not appear in fresh REQ history"
     );
     injector.remove().await;
     let replayed = client
@@ -407,6 +436,10 @@ async fn run_failed_deletion_replay_scenario(pool: &PgPool) {
         replayed.message
     );
     assert_eq!(replayed.event_id, deletion_id.to_hex());
+    assert_eq!(
+        query_deletion(&mut client, &deletion).await,
+        vec![deletion.clone()]
+    );
     assert_live_event(&mut listener, &subscription, &deletion).await;
     let marker = flush_audit(&mut client, &keys, pool).await;
     assert_live_event(&mut listener, &subscription, &marker).await;
@@ -522,4 +555,226 @@ async fn workflow_can_be_intentionally_recreated_with_a_backdated_definition() {
             .accepted
     );
     client.disconnect().await.expect("disconnect");
+}
+
+async fn concurrent_deletion_scenario(
+    pool: &PgPool,
+    barrier: &mut Option<sqlx::Transaction<'_, sqlx::Postgres>>,
+    tasks: &mut tokio::task::JoinSet<Result<buzz_test_client::OkResponse, TestClientError>>,
+) {
+    let keys = Keys::generate();
+    let channel_id = Uuid::new_v4().to_string();
+    let workflow_id = Uuid::new_v4();
+    let workflow_id_text = workflow_id.to_string();
+    let mut client = BuzzTestClient::connect(&relay_url(), &keys)
+        .await
+        .expect("connect");
+    create_channel(&mut client, &keys, &channel_id).await;
+    create_workflow(&mut client, &keys, &channel_id, &workflow_id_text).await;
+    let deletion = EventBuilder::new(Kind::EventDeletion, "")
+        .tags([
+            Tag::parse([
+                "a",
+                &format!("30620:{}:{workflow_id}", keys.public_key().to_hex()),
+            ])
+            .expect("coordinate"),
+            Tag::public_key(Keys::generate().public_key()),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign deletion");
+    let mut listener = BuzzTestClient::connect(&relay_url(), &keys)
+        .await
+        .expect("listener");
+    let subscription = sub_id("concurrent-listener");
+    listener
+        .subscribe(
+            &subscription,
+            vec![Filter::new()
+                .kinds([Kind::EventDeletion, Kind::TextNote])
+                .author(keys.public_key())],
+        )
+        .await
+        .expect("subscribe before concurrent requests");
+    assert!(listener
+        .collect_until_eose(&subscription, Duration::from_secs(5))
+        .await
+        .expect("listener EOSE")
+        .is_empty());
+
+    // Block A's first-insert-only mention indexing. In the old split path its
+    // public event is already committed and B can repair while A is held. In
+    // the atomic path B must wait on A's uncommitted unique event insertion.
+    // Both orderings are causally observed in Postgres, never guessed by sleep.
+    let lock_key = 7_735_306_205_i64;
+    *barrier = Some(pool.begin().await.expect("barrier transaction"));
+    let held = barrier.as_mut().expect("barrier exists");
+    let controller: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut **held)
+        .await
+        .expect("controller pid");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut **held)
+        .await
+        .expect("hold indexing barrier");
+    // Interpolated values are a fixed integer and an EventId's hex encoding,
+    // neither of which can contain SQL syntax.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION block_workflow_deletion_index() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN IF NEW.event_id = decode('{}', 'hex') THEN
+           PERFORM pg_advisory_xact_lock({lock_key});
+         END IF; RETURN NEW; END $$;
+         CREATE TRIGGER block_workflow_deletion_index BEFORE INSERT ON event_mentions
+         FOR EACH ROW EXECUTE FUNCTION block_workflow_deletion_index();",
+        deletion.id.to_hex()
+    )))
+    .execute(pool)
+    .await
+    .expect("install event-scoped indexing barrier");
+
+    let mut second_client = BuzzTestClient::connect(&relay_url(), &keys)
+        .await
+        .expect("second publisher");
+    let first_event = deletion.clone();
+    tasks.spawn(async move { client.send_event(first_event).await });
+    let first_pid: i32 =
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pid = sqlx::query_scalar::<_, i32>(
+                "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) LIMIT 1")
+                .bind(controller).fetch_optional(pool).await.expect("find held first ingest");
+                if let Some(pid) = pid {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first ingest must reach indexing barrier");
+    let second_event = deletion.clone();
+    let second = tasks.spawn(async move { second_client.send_event(second_event).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
+                .bind(first_pid).fetch_one(pool).await.expect("observe second ingest wait");
+            if blocked || second.is_finished() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("second ingest must either block on A or finish its repair");
+    barrier
+        .take()
+        .expect("held barrier")
+        .commit()
+        .await
+        .expect("release first ingest");
+    let first = tasks
+        .join_next()
+        .await
+        .expect("first task")
+        .expect("join first")
+        .expect("first response");
+    let second = tasks
+        .join_next()
+        .await
+        .expect("second task")
+        .expect("join second")
+        .expect("second response");
+    assert!(
+        first.accepted && second.accepted,
+        "both requests accepted: {first:?}, {second:?}"
+    );
+    let mut client = BuzzTestClient::connect(&relay_url(), &keys)
+        .await
+        .expect("verification client");
+    let marker = flush_audit(&mut client, &keys, pool).await;
+    assert_eq!(
+        audit_count(pool, &deletion).await,
+        1,
+        "concurrent ingests must have one dispatch/audit owner"
+    );
+    assert_eq!(
+        [&first, &second]
+            .iter()
+            .filter(|response| response.message.is_empty())
+            .count(),
+        1,
+        "exactly one ingest owns normal acceptance"
+    );
+    assert_eq!(
+        [&first, &second]
+            .iter()
+            .filter(|response| response.message.starts_with("duplicate:"))
+            .count(),
+        1,
+        "the other ingest must be a completed duplicate"
+    );
+    // Fan-out tasks can complete out of order; require each exact event once.
+    let mut expected = vec![deletion.clone(), marker];
+    for _ in 0..2 {
+        match listener
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("receive deletion/fence")
+        {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } => {
+                assert_eq!(subscription_id, subscription);
+                let index = expected
+                    .iter()
+                    .position(|candidate| candidate == event.as_ref())
+                    .expect("one copy of each exact deletion/fence event");
+                expected.remove(index);
+            }
+            other => panic!("expected deletion/fence, got {other:?}"),
+        }
+    }
+    assert_no_live_deletion(&mut listener).await;
+    assert_eq!(query_deletion(&mut client, &deletion).await, vec![deletion]);
+    assert_eq!(
+        database_representation_counts(pool, &keys, workflow_id).await,
+        (0, 0)
+    );
+    assert!(query_definition(&mut client, &keys, &workflow_id_text)
+        .await
+        .is_empty());
+    assert_trigger_rejected(&mut client, &keys, &workflow_id_text).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_identical_deletions_dispatch_and_audit_once() {
+    let pool = PgPool::connect(&database_url())
+        .await
+        .expect("isolated database");
+    let mut barrier = None;
+    let mut tasks = tokio::task::JoinSet::new();
+    let result = AssertUnwindSafe(concurrent_deletion_scenario(
+        &pool,
+        &mut barrier,
+        &mut tasks,
+    ))
+    .catch_unwind()
+    .await;
+    // Release blocked server transactions before dropping a trigger they use.
+    if let Some(barrier) = barrier {
+        barrier
+            .rollback()
+            .await
+            .expect("release failed scenario barrier");
+    }
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    sqlx::raw_sql(
+        "DROP TRIGGER IF EXISTS block_workflow_deletion_index ON event_mentions;
+        DROP FUNCTION IF EXISTS block_workflow_deletion_index();",
+    )
+    .execute(&pool)
+    .await
+    .expect("remove indexing barrier");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }

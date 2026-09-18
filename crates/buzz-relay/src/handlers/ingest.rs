@@ -3144,7 +3144,15 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
+    let (stored_event, was_inserted) = if workflow_deletion {
+        // A single commit owns public acceptance, domain mutation, and dispatch.
+        // Failure rolls everything back; identical concurrent requests cannot
+        // divide insertion and repair ownership between two relay workers.
+        crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
@@ -3203,21 +3211,7 @@ async fn ingest_event_inner(
         }
     };
 
-    // Workflow deletion must not acknowledge a failed domain mutation. Its
-    // idempotent transaction also runs for duplicate requests: the event may
-    // have been stored before a failure, including by an older relay version.
-    let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
-    let workflow_deletion_changed = if workflow_deletion {
-        crate::handlers::side_effects::handle_a_tag_deletion(tenant, &event, state)
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
-    } else {
-        false
-    };
-
-    // A repaired deletion still needs the normal audit and live dispatch below.
-    // Completed duplicates remain no-ops, including channel-less/orphan repairs.
-    if !was_inserted && !workflow_deletion_changed {
+    if !was_inserted {
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,

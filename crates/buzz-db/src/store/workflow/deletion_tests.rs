@@ -250,3 +250,45 @@ async fn workflow_deletion_rolls_back_both_representations_on_failure() {
         .expect("retry after failure");
     assert_absent(&db, &query, id).await;
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn legacy_stored_deletion_repair_has_one_committed_dispatch_owner() {
+    let (db, community) = setup().await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let d_tag = id.to_string();
+    let now = Timestamp::now().as_secs();
+    let query = seed(&db, community, &keys, id, &d_tag, now).await;
+    let deletion = EventBuilder::new(Kind::EventDeletion, "")
+        .tags([Tag::parse([
+            "a",
+            &format!("30620:{}:{d_tag}", keys.public_key().to_hex()),
+        ])
+        .expect("coordinate")])
+        .custom_created_at(Timestamp::from(now))
+        .sign_with_keys(&keys)
+        .expect("sign legacy deletion");
+    // Older relay versions could persist the request without applying deletion.
+    db.insert_event_with_thread_metadata(community, &deletion, None, None)
+        .await
+        .expect("legacy request");
+    let (first, second) = tokio::join!(
+        db.insert_workflow_deletion(community, &deletion, &owner, &d_tag),
+        db.insert_workflow_deletion(community, &deletion, &owner, &d_tag),
+    );
+    let (_, first_dispatch, _) = first.expect("first repair");
+    let (_, second_dispatch, _) = second.expect("concurrent repair");
+    assert_ne!(
+        first_dispatch, second_dispatch,
+        "only one committed repair dispatches"
+    );
+    assert_absent(&db, &query, id).await;
+    assert!(
+        !db.insert_workflow_deletion(community, &deletion, &owner, &d_tag)
+            .await
+            .expect("completed duplicate")
+            .1
+    );
+}

@@ -2109,14 +2109,43 @@ pub(crate) fn is_workflow_deletion(event: &Event) -> bool {
             })
 }
 
-/// Handle NIP-09 deletion via `a` tag (addressable/parameterized-replaceable events).
-/// Parses "kind:pubkey:d-tag" and deletes the corresponding DB record.
-/// Returns whether a workflow deletion changed state, for duplicate repair dispatch.
-pub(crate) async fn handle_a_tag_deletion(
+/// Persist an already-authorized workflow deletion and its domain changes atomically.
+pub(crate) async fn persist_workflow_deletion(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
+    let coordinate = event
+        .tags
+        .iter()
+        .find(|tag| tag.kind().to_string() == "a")
+        .and_then(|tag| tag.content())
+        .ok_or_else(|| anyhow::anyhow!("missing workflow coordinate"))?;
+    let mut parts = coordinate.splitn(3, ':');
+    let _kind = parts.next();
+    let owner = hex::decode(parts.next().unwrap_or_default())?;
+    let d_tag = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid workflow coordinate"))?;
+    let (stored, dispatch, channel_id) = state
+        .db
+        .insert_workflow_deletion(tenant.community(), event, &owner, d_tag)
+        .await?;
+    if let Some(channel_id) = channel_id {
+        state
+            .workflow_engine
+            .invalidate_channel_workflows(tenant.community(), channel_id);
+    }
+    Ok((stored, dispatch))
+}
+
+/// Handle NIP-09 deletion via `a` tag (addressable/parameterized-replaceable events).
+/// Parses "kind:pubkey:d-tag" and deletes the corresponding DB record.
+async fn handle_a_tag_deletion(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> anyhow::Result<()> {
     let a_value = event
         .tags
         .iter()
@@ -2140,25 +2169,10 @@ pub(crate) async fn handle_a_tag_deletion(
             tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
         }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
-            // Authorization checked this coordinate's owner (including NIP-OA),
-            // not necessarily the signer of the deletion request.
-            let owner_bytes = hex::decode(pubkey_hex)
-                .map_err(|_| anyhow::anyhow!("invalid pubkey hex in workflow coordinate"))?;
-            let outcome = state
-                .db
-                .delete_workflow_by_coordinate(
-                    tenant.community(),
-                    &owner_bytes,
-                    d_tag,
-                    event.created_at.as_secs() as i64,
-                )
-                .await?;
-            if let Some(channel_id) = outcome.channel_id {
-                state
-                    .workflow_engine
-                    .invalidate_channel_workflows(tenant.community(), channel_id);
-            }
-            return Ok(outcome.changed);
+            // Workflow deletion belongs to the atomic persistence path in ingest.
+            return Err(anyhow::anyhow!(
+                "workflow deletion requires atomic persistence"
+            ));
         }
         // Other NIP-33 events have no executable workflow projection.
         k if is_parameterized_replaceable(k) => {
@@ -2213,7 +2227,7 @@ pub(crate) async fn handle_a_tag_deletion(
         }
     }
 
-    Ok(false)
+    Ok(())
 }
 
 async fn handle_standard_deletion_event(
@@ -2226,9 +2240,7 @@ async fn handle_standard_deletion_event(
         // NIP-09 a-tag deletion path for addressable events. Keyed on the
         // absence of *any* e tag (not just valid e-ids): a malformed e + a must
         // not route here and silently soft-delete the coordinate.
-        return handle_a_tag_deletion(tenant, event, state)
-            .await
-            .map(|_| ());
+        return handle_a_tag_deletion(tenant, event, state).await;
     }
 
     for target_id in target_ids {
