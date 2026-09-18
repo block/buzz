@@ -18,7 +18,9 @@ migration:
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {cpu: 250m, memory: 128Mi}
-publicDeliveryUrl: https://push.buzz.xyz/v1/deliveries/apns
+# Exact externally reachable HTTPS origin. The gateway derives transport routes
+# from this value; NIP-PL v1 App Attest audiences remain registered constants.
+gatewayOrigin: ""
 maxGrantLifetimeSeconds: 2592000
 profiles:
   dogfood:
@@ -34,12 +36,13 @@ appAttestRoot:
   secretKey: app-attest-root.pem
 service:
   port: 8080
+podAnnotations: {}
 httpRoute:
   # Disabled by default so a generic install cannot claim an unattached route.
-  # Production enables this with an explicit Gateway parentRef.
+  # Enable only when this chart owns a Gateway API route. Environments with an
+  # existing ingress or service mesh route should keep this disabled.
   enabled: false
   parentRefs: []
-  hostnames: [push.buzz.xyz]
 resources:
   requests: {cpu: 100m, memory: 128Mi}
   limits: {cpu: "1", memory: 512Mi}
@@ -60,8 +63,9 @@ networkPolicy:
     podSelector:
       k8s-app: kube-dns
   # Scoped ingress to the private metrics port (8081). Off by default so 8081
-  # has no pod ingress at all; enable only alongside podMonitor and name the
-  # scraper's namespace/pod so reachability stays narrow.
+  # has no pod ingress at all; enable alongside podMonitor or an external
+  # annotation-discovered scraper and name its namespace/pod so reachability
+  # stays narrow.
   monitoring:
     enabled: false
     namespaceSelector: {}

@@ -43,16 +43,21 @@ function requirementKey(
 }
 
 /**
- * Returns true when every requirement in the nudge is a `cli_login` surface.
- * Non-authOnly all-cli_login cards (at least one install-state row) route to
- * Agent runtimes — install/login problems can't be fixed in Edit Agent. AuthOnly cards
- * (every row is `availability === "available"`) are purely informational and
- * do not route anywhere.
+ * Requirements owned by runtime discovery route to Agent runtimes. This covers
+ * Git Bash, unresolved binaries, and all-CLI-login cards with installation work.
+ * Auth-only cards remain informational because Agent runtimes cannot log in to
+ * an external CLI for the user.
  */
 function hasGitBashRequirement(
   reqs: ConfigNudgePayload["requirements"],
 ): boolean {
   return reqs.some((r) => r.surface === "git_bash");
+}
+
+function hasMissingBinaryRequirement(
+  reqs: ConfigNudgePayload["requirements"],
+): boolean {
+  return reqs.some((r) => r.surface === "missing_binary");
 }
 
 function isAllCliLogin(reqs: ConfigNudgePayload["requirements"]): boolean {
@@ -62,7 +67,15 @@ function isAllCliLogin(reqs: ConfigNudgePayload["requirements"]): boolean {
 export function shouldOpenDoctor(
   reqs: ConfigNudgePayload["requirements"],
 ): boolean {
-  return isAllCliLogin(reqs) || hasGitBashRequirement(reqs);
+  return (
+    isAllCliLogin(reqs) ||
+    hasGitBashRequirement(reqs) ||
+    hasMissingBinaryRequirement(reqs)
+  );
+}
+
+export function missingBinaryRecoveryMessage(): string {
+  return "not found in PATH — install it or update PATH, then restart Buzz";
 }
 
 /**
@@ -165,9 +178,10 @@ export function focusTargetForRequirement(
  * the system.
  *
  * Routing:
- * (A) Any card with a `git_bash` requirement, or one whose requirements are all
- *     install-state `cli_login`, opens Settings → Agent runtimes. A card-level
- *     Agent runtimes label in `AttachmentActions` confirms the action at rest.
+ * (A) Any card with a `git_bash` or `missing_binary` requirement, or one whose
+ *     requirements are all install-state `cli_login`, opens Settings → Agent
+ *     runtimes. A card-level Agent runtimes label in `AttachmentActions` confirms
+ *     the action at rest.
  * (A-auth) A card whose requirements are all available `cli_login` surfaces is
  *     purely informational: Agent runtimes cannot authenticate a CLI, and `setup_copy`
  *     already gives the needed command.
@@ -211,7 +225,7 @@ export function ConfigNudgeCard({
 
   const handleOpen = () => {
     if (shouldOpenDoctor(nudge.requirements)) {
-      // Git Bash and install-state CLI requirements both resolve in Agent runtimes.
+      // Runtime installation and discovery requirements resolve in Agent runtimes.
       // Informational-only cards never mount this trigger.
       openDoctor();
     } else {
@@ -384,15 +398,16 @@ function RequirementRow({
         </div>
       );
     case "missing_binary": {
-      // Missing-binary rows are purely informational — the user must install the
-      // binary or update their PATH. No in-app action can fix this.
+      // Agent runtimes owns installation guidance and the re-check action. The
+      // restart guidance remains visible here because a normal agent restart does
+      // not invalidate Desktop's negative command-resolution cache.
       return (
         <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
           <span className="flex-1 [overflow-wrap:anywhere]">
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
               {requirement.command}
             </code>{" "}
-            not found in PATH — install it or check your PATH settings
+            {missingBinaryRecoveryMessage()}
           </span>
         </div>
       );

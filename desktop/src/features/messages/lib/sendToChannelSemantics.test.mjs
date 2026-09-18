@@ -109,3 +109,34 @@ test("send-to-channel handles messages without semantic tags", () => {
     { mentionPubkeys: [], semanticTags: [] },
   );
 });
+
+test("latest edit reference snapshot retains recipients added by an earlier edit without historical p-tags", () => {
+  assert.deepEqual(
+    getSendToChannelSemantics({
+      body: "@Alice retained",
+      edited: true,
+      pubkey: SOURCE,
+      tags: [
+        ["p", "d".repeat(64)],
+        ["mention", MENTION],
+        ["buzz:mention-snapshot"],
+      ],
+    }),
+    { mentionPubkeys: [MENTION], semanticTags: [["mention", MENTION]] },
+  );
+});
+
+test("snapshot forwarding preserves delivered automatic addresses but never promotes unnotified annotated metadata", () => {
+  const orphan = "d".repeat(64);
+  const address = ["mention", MENTION, "agent-address"];
+  const unnotified = ["mention", orphan, "agent-address"];
+  assert.deepEqual(
+    getSendToChannelSemantics({
+      body: "edited",
+      edited: true,
+      pubkey: SOURCE,
+      tags: [["p", MENTION], address, unnotified, ["buzz:mention-snapshot"]],
+    }),
+    { mentionPubkeys: [MENTION], semanticTags: [address, unnotified] },
+  );
+});

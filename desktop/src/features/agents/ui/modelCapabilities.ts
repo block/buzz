@@ -302,6 +302,19 @@ function isDatabricksModelServiceFqn(model: string): boolean {
   );
 }
 
+// Mirror fqn_requires_responses: routing is the only inferred FQN capability.
+function fqnRequiresResponses(model: string): boolean {
+  const service = model.split(".").at(-1) ?? "";
+  const stripped = stripCatalogPrefix(
+    service.toLowerCase(),
+    MANIFEST.family_tokens,
+  );
+  const match = /^gpt-([0-9]+)(?:$|[^a-z0-9])/.exec(stripped);
+  if (!match) return false;
+  const major = Number(match[1]);
+  return major >= 5 && major <= 0xffffffff;
+}
+
 /**
  * Resolve the capability profile for a `(provider, rawModelId)` pair.
  *
@@ -315,8 +328,8 @@ export function resolveModelCapabilities(
 ): CapabilityResult {
   const canon = canonicalizeProvider(provider);
   const blank = rawModelId.trim().length === 0;
-  // Unity Catalog FQNs are neutral model-service identities. Resolve them
-  // through the concrete-unknown fallback before suffix family matching.
+  // FQNs keep neutral effort capabilities; only GPT-5+ service names
+  // select Responses. Catalog/schema names never choose the protocol.
   const modelServiceFqn =
     canon === "databricks_v2" && isDatabricksModelServiceFqn(rawModelId);
 
@@ -370,7 +383,11 @@ export function resolveModelCapabilities(
   // 3. Provider fallback (blank vs. concrete-unknown); never carries a label.
   const pair = fallbackPair(canon);
   const state = blank ? pair.blank : pair.concrete_unknown;
-  return toResult(state, state.databricks_v2_wire_route, null);
+  const route =
+    modelServiceFqn && fqnRequiresResponses(rawModelId)
+      ? "openai-responses"
+      : state.databricks_v2_wire_route;
+  return toResult(state, route, null);
 }
 
 /** Authoritative list of known Databricks v2 model ids, sourced from the manifest. */

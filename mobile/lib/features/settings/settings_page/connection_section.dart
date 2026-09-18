@@ -121,12 +121,16 @@ class _IdentityRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final privHex = nostr.Nip19.decode(payload: nsec).data;
-    final pubkey = privHex.isNotEmpty ? nostr.Keys(privHex).public : 'unknown';
+    final npub = privHex.isNotEmpty
+        ? fullNpub(nostr.Keys(privHex).public)
+        : null;
 
+    // The full npub is the canonical copy/share form (never raw hex); an
+    // invalid identity is surfaced as unavailable and never copied.
     return Semantics(
       button: true,
       label: 'Copy identity public key',
-      value: pubkey,
+      value: npub ?? 'Identity unavailable',
       child: AppListRow(
         icon: LucideIcons.key,
         title: 'Identity (pubkey)',
@@ -135,9 +139,11 @@ class _IdentityRow extends StatelessWidget {
           size: 18,
           color: context.colors.onSurfaceVariant,
         ),
-        onTap: () async {
-          await copyToClipboard(context, pubkey, message: 'Pubkey copied');
-        },
+        onTap: npub == null
+            ? null
+            : () async {
+                await copyToClipboard(context, npub, message: 'Pubkey copied');
+              },
       ),
     );
   }

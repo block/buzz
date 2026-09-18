@@ -10,6 +10,20 @@ class _NotificationsSection extends ConsumerWidget {
     }
     final community = ref.watch(activeCommunityProvider).value;
     if (community == null) return const SizedBox.shrink();
+    if (!Env.pushGatewayConfigured) {
+      return AppListCard(
+        label: 'Notifications',
+        verticalPadding: Grid.twelve,
+        children: [
+          AppListRow(
+            key: const ValueKey('push-notifications-unavailable'),
+            icon: LucideIcons.bell,
+            title: 'Push notifications',
+            subtitle: 'Unavailable in this build',
+          ),
+        ],
+      );
+    }
     final authorization = ref.watch(buzzPushAuthorizationStatusProvider);
     final status = authorization.value;
     final permissionUnavailable = authorization.hasError;

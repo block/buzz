@@ -1,0 +1,9 @@
+{
+  "gpt-5.6-luna": {
+    "provider": "openai",
+    "api_key_env": "OPENAI_COMPAT_API_KEY",
+    "env": {
+      "RUST_LOG": "acp::wire=debug"
+    }
+  }
+}

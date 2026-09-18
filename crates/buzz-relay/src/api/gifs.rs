@@ -138,7 +138,11 @@ async fn authenticate(
         })?;
 
     let expected_url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
-    let (pubkey, event_id_bytes) = bridge::verify_bridge_auth_with_options(
+    let bridge::VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    } = bridge::verify_bridge_auth_with_options(
         headers,
         "POST",
         &expected_url,
@@ -152,9 +156,8 @@ async fn authenticate(
         state,
         tenant.community(),
         &pubkey.to_bytes(),
-        headers
-            .get("x-auth-tag")
-            .and_then(|value| value.to_str().ok()),
+        relay_members::extract_auth_tag_header(headers),
+        signed_created_at,
     )
     .await?;
 

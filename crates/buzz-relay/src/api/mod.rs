@@ -37,7 +37,10 @@ pub(crate) fn not_found(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
 /// Moved here from the deleted `relay_members` module. Called by `media.rs`, `bridge.rs`,
 /// `git/transport.rs`, and `audio/handler.rs`.
 pub mod relay_members {
-    use axum::{http::StatusCode, response::Json};
+    use axum::{
+        http::{HeaderMap, StatusCode},
+        response::Json,
+    };
     use buzz_core::{tenant::CommunityId, TenantContext};
     use tracing::{debug, info};
 
@@ -56,15 +59,30 @@ pub mod relay_members {
         Denied,
     }
 
+    /// Return the sole NIP-OA credential header, if one was supplied.
+    ///
+    /// Repeated security-sensitive headers are ambiguous across HTTP stacks,
+    /// so they are treated as no credential instead of silently selecting one.
+    pub fn extract_auth_tag_header(headers: &HeaderMap) -> Option<&str> {
+        let mut values = headers.get_all("x-auth-tag").iter();
+        let (Some(value), None) = (values.next(), values.next()) else {
+            return None;
+        };
+        value.to_str().ok()
+    }
+
     /// Check relay membership without committing to an HTTP response shape.
     ///
     /// `community` is the server-resolved tenant of the request; membership is
     /// scoped to it so admitting a pubkey to community A never admits it to B.
+    /// A NIP-OA credential is usable only when `signed_auth_created_at` came
+    /// from the already-verified authentication event carrying that request.
     pub async fn check_relay_membership(
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
     ) -> Result<MembershipDecision, String> {
         if !state.config.require_relay_membership {
             return Ok(MembershipDecision::OpenRelay);
@@ -84,8 +102,16 @@ pub mod relay_members {
             if let Some(tag_json) = auth_tag_header {
                 let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes)
                     .map_err(|e| format!("invalid agent pubkey for NIP-OA check: {e}"))?;
+                let Some(auth_created_at) = signed_auth_created_at else {
+                    info!(agent = %pubkey_hex, "NIP-OA auth tag has no verified signed auth timestamp");
+                    return Ok(MembershipDecision::Denied);
+                };
 
-                match buzz_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
+                match buzz_sdk::nip_oa::verify_auth_tag_for_auth_event(
+                    tag_json,
+                    &agent_pubkey,
+                    auth_created_at,
+                ) {
                     Ok(owner_pubkey) => {
                         let owner_hex = owner_pubkey.to_hex();
                         let owner_is_member = state
@@ -128,8 +154,17 @@ pub mod relay_members {
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
-        match check_relay_membership(state, community, pubkey_bytes, auth_tag_header).await {
+        match check_relay_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+        )
+        .await
+        {
             Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
             Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
             Ok(MembershipDecision::Denied) => Err((
@@ -150,16 +185,22 @@ pub mod relay_members {
     ///
     /// Used on open relays (`require_relay_membership = false`) to opportunistically
     /// extract the owner pubkey for agent→owner backfill. The NIP-OA signature is
-    /// cryptographically self-proving, so no feature flag is needed — if the tag
-    /// verifies, the owner relationship is authentic. Returns `None` if the tag
-    /// is absent or invalid.
+    /// cryptographically self-proving, so no feature flag is needed. Temporal
+    /// conditions are evaluated against `signed_auth_created_at`. Returns
+    /// `None` if the tag, timestamp, or conditions are absent or invalid.
     pub fn extract_nip_oa_owner(
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
     ) -> Option<nostr::PublicKey> {
         let tag_json = auth_tag_header?;
+        let auth_created_at = signed_auth_created_at?;
         let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes).ok()?;
-        match buzz_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
+        match buzz_sdk::nip_oa::verify_auth_tag_for_auth_event(
+            tag_json,
+            &agent_pubkey,
+            auth_created_at,
+        ) {
             Ok(owner) => Some(owner),
             Err(e) => {
                 info!("extract_nip_oa_owner: invalid auth tag: {e}");
@@ -182,7 +223,7 @@ pub mod relay_members {
         for (role, pubkey) in [("agent", agent), ("owner", owner)] {
             match state
                 .db
-                .ensure_user(tenant.community(), pubkey.as_bytes())
+                .ensure_user_for_authorization(tenant.community(), pubkey.as_bytes())
                 .await
             {
                 Ok(true) => {
@@ -202,7 +243,11 @@ pub mod relay_members {
 
         let materialized = match state
             .db
-            .set_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())
+            .set_agent_owner_for_authorization(
+                tenant.community(),
+                agent.as_bytes(),
+                owner.as_bytes(),
+            )
             .await
         {
             Ok(true) => true,
@@ -236,8 +281,21 @@ pub mod relay_members {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use axum::http::{HeaderMap, HeaderValue};
         use buzz_sdk::nip_oa::compute_auth_tag;
         use nostr::Keys;
+
+        #[test]
+        fn auth_tag_header_must_be_unique() {
+            let mut headers = HeaderMap::new();
+            assert_eq!(extract_auth_tag_header(&headers), None);
+
+            headers.insert("x-auth-tag", HeaderValue::from_static("credential-one"));
+            assert_eq!(extract_auth_tag_header(&headers), Some("credential-one"));
+
+            headers.append("x-auth-tag", HeaderValue::from_static("credential-two"));
+            assert_eq!(extract_auth_tag_header(&headers), None);
+        }
 
         /// Valid NIP-OA auth tag → returns Some(owner_pubkey).
         #[test]
@@ -249,9 +307,49 @@ pub mod relay_members {
             let tag_json = compute_auth_tag(&owner_keys, &agent_pubkey, "")
                 .expect("compute_auth_tag must succeed");
 
-            let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some(&tag_json));
+            let result = extract_nip_oa_owner(
+                &agent_pubkey.to_bytes(),
+                Some(&tag_json),
+                Some(nostr::Timestamp::now().as_secs()),
+            );
 
             assert_eq!(result, Some(owner_keys.public_key()));
+        }
+
+        #[test]
+        fn nip_oa_time_conditions_use_signed_auth_event_time() {
+            let owner_keys = Keys::generate();
+            let agent_pubkey = Keys::generate().public_key();
+
+            let expired = compute_auth_tag(&owner_keys, &agent_pubkey, "created_at<200")
+                .expect("sign expired credential");
+            assert_eq!(
+                extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some(&expired), Some(200)),
+                None
+            );
+
+            let future = compute_auth_tag(&owner_keys, &agent_pubkey, "created_at>200")
+                .expect("sign future credential");
+            assert_eq!(
+                extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some(&future), Some(200)),
+                None
+            );
+
+            let in_window = compute_auth_tag(
+                &owner_keys,
+                &agent_pubkey,
+                "kind=9&created_at>199&created_at<201",
+            )
+            .expect("sign in-window credential");
+            assert_eq!(
+                extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some(&in_window), Some(200)),
+                Some(owner_keys.public_key())
+            );
+            assert_eq!(
+                extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some(&in_window), None),
+                None,
+                "a credential without a verified signed auth timestamp must fail closed"
+            );
         }
 
         /// No auth tag → returns None.
@@ -260,7 +358,11 @@ pub mod relay_members {
             let agent_keys = Keys::generate();
             let agent_pubkey = agent_keys.public_key();
 
-            let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), None);
+            let result = extract_nip_oa_owner(
+                &agent_pubkey.to_bytes(),
+                None,
+                Some(nostr::Timestamp::now().as_secs()),
+            );
 
             assert_eq!(result, None);
         }
@@ -271,7 +373,11 @@ pub mod relay_members {
             let agent_keys = Keys::generate();
             let agent_pubkey = agent_keys.public_key();
 
-            let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some("not valid json"));
+            let result = extract_nip_oa_owner(
+                &agent_pubkey.to_bytes(),
+                Some("not valid json"),
+                Some(nostr::Timestamp::now().as_secs()),
+            );
 
             assert_eq!(result, None);
         }

@@ -2706,6 +2706,30 @@ async fn ordinary_400_stays_terminal_and_triggers_no_recovery() {
 /// part of the assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn context_recovery_budget_exhaustion_surfaces_the_error() {
+    assert_context_recovery_budget_exhaustion(false).await;
+}
+
+/// The same real provider/ACP scenario with stderr collection held until after
+/// the stdout response. The old immediate snapshot cannot observe the budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_recovery_budget_exhaustion_waits_for_delayed_stderr() {
+    assert_context_recovery_budget_exhaustion(true).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "timed out waiting for stderr diagnostic")]
+async fn stderr_diagnostic_wait_is_bounded_when_absent() {
+    let llm = spawn_capturing_llm(vec![]).await;
+    let h = Harness::spawn(&llm.url).await;
+    h.wait_for_stderr(
+        "diagnostic that is never emitted",
+        Duration::from_millis(20),
+    )
+    .await;
+}
+
+async fn assert_context_recovery_budget_exhaustion(delay_stderr: bool) {
+    let (release_stderr, stderr_gate) = tokio::sync::oneshot::channel();
     // Enough canned 400s that the queue is never the thing that stops the loop;
     // the fallback response is also a 400-shaped body under this helper only if
     // queued, so keep the queue generously long.
@@ -2713,7 +2737,7 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
         .map(|_| (400, openai_context_length_error()))
         .collect();
     let llm = spawn_capturing_llm_with_status(responses).await;
-    let mut h = Harness::spawn_with_env(
+    let mut h = Harness::spawn_with_stderr_gate(
         &llm.url,
         &[
             ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
@@ -2723,6 +2747,7 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
             ),
             ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
         ],
+        delay_stderr.then_some(stderr_gate),
     )
     .await;
     let sid = init_session(&mut h, json!([])).await;
@@ -2751,8 +2776,27 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
     // floor produce a surfaced error, so the assertion above passes either way
     // — and the floor can fire on the first rung without the budget ever being
     // consumed, which would make this test silently exercise a different
-    // mechanism than its name claims. Pin the budget explicitly.
-    let stderr = h.stderr_text();
+    // mechanism than its name claims. Pin the budget explicitly. Stdout is not
+    // a barrier for the independent stderr collector.
+    let stderr = {
+        let wait = h.wait_for_stderr("context recovery budget spent", Duration::from_secs(5));
+        tokio::pin!(wait);
+        if delay_stderr {
+            assert!(
+                !h.stderr_text().contains("context recovery budget spent"),
+                "the old immediate snapshot must miss the held diagnostic"
+            );
+            // Prove the actual wait stays pending before releasing the collector,
+            // without a sleep or depending on how quickly either task runs.
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(wait.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            release_stderr.send(()).expect("release stderr collection");
+        }
+        wait.await
+    };
     assert!(
         stderr.contains("context recovery budget spent"),
         "the per-run recovery BUDGET must be what stops the loop here, not the prompt floor; \
@@ -2766,6 +2810,15 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
         rungs, 3,
         "expected all 3 recovery rungs to be attempted before giving up, saw {rungs} — \
          stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("context recovery would shrink"),
+        "the prompt floor must not stop this fixture: {stderr}"
+    );
+    assert_eq!(
+        llm.captured.lock().await.len(),
+        4,
+        "expected the rejected completion plus exactly three failed summaries"
     );
     h.shutdown().await;
 }
@@ -2816,7 +2869,9 @@ async fn small_history_context_400_refuses_rescue_at_the_prompt_floor() {
         r0.get("error").is_some(),
         "a context 400 with no shrinkable history must surface the error, got: {r0}"
     );
-    let stderr = h.stderr_text();
+    let stderr = h
+        .wait_for_stderr("context recovery would shrink", Duration::from_secs(5))
+        .await;
     assert!(
         stderr.contains("below the") && stderr.contains("floor"),
         "the prompt-budget FLOOR must be what stops this, not the recovery budget; got: {stderr}"

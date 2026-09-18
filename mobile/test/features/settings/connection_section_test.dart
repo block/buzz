@@ -53,9 +53,27 @@ void main() {
     final expectedPubkey = nostr.Keys(
       '1111111111111111111111111111111111111111111111111111111111111111',
     ).public;
+    // Keys('1'×64).public ↔ this npub — the NIP-19 canonical vector for the
+    // identity row, hardcoded so the codec itself stays under test.
+    const expectedNpub =
+        'npub1fu64hh9hes90w2808n8tjc2ajp5yhddjef0ctx4s7zmsgp6cwx4qgy4eg9';
     expect(find.text('Connected to'), findsNothing);
     expect(find.text('https://relay.test'), findsNothing);
+    // Neither the raw hex key nor the full npub is rendered visually — the
+    // full npub is exposed through a11y and the clipboard only.
     expect(find.text(expectedPubkey), findsNothing);
+    expect(find.text(expectedNpub), findsNothing);
+    // The identity row's a11y value carries the full npub (not raw hex).
+    expect(
+      find.ancestor(
+        of: find.text('Identity (pubkey)'),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics && widget.properties.value == expectedNpub,
+        ),
+      ),
+      findsOneWidget,
+    );
     final copy = tester.getRect(find.byIcon(LucideIcons.copy));
     final chevron = tester.getRect(find.byIcon(LucideIcons.chevronRight).first);
     expect(copy.center.dx, closeTo(chevron.center.dx, 0.5));
@@ -63,7 +81,7 @@ void main() {
     await tester.tap(find.text('Identity (pubkey)'));
     await tester.pump();
     expect(clipboardCall?.method, 'Clipboard.setData');
-    expect(clipboardCall?.arguments, {'text': expectedPubkey});
+    expect(clipboardCall?.arguments, {'text': expectedNpub});
     expect(find.text('Pubkey copied'), findsOneWidget);
   });
 

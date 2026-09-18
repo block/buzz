@@ -19,7 +19,10 @@ import { toast } from "sonner";
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import { buildMentionClipboardHtml } from "@/features/messages/lib/mentionClipboard";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { useMessageMentionIdentities } from "@/features/messages/lib/useMessageMentionIdentities";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { ReportMessageDialog } from "@/features/moderation/ui/ReportMessageDialog";
 import { MessageModerationMenuItems } from "@/features/moderation/ui/MessageModerationMenuItems";
 import type {
@@ -49,6 +52,7 @@ import {
 import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { ProtectedMessageAction } from "@protected-feature-components";
 
 const ACTION_BUTTON_CLASS = "h-8 w-8 rounded-full p-0";
 const ACTION_ICON_CLASS = "!h-4 !w-4";
@@ -94,11 +98,14 @@ function MoreActionsMenu({
   open,
   isFollowingThread,
   isUnread,
+  profiles,
 }: {
   /** Channel UUID for the "Copy link" action. When null/undefined, the
    *  Copy link entry is hidden (e.g. inbox preview rows that don't have it). */
   channelId?: string | null;
   message: TimelineMessage;
+  /** Resolves the mention identities carried by "Copy message". */
+  profiles?: UserProfileLookup;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onFollowThread?: (message: TimelineMessage) => void;
@@ -114,18 +121,18 @@ function MoreActionsMenu({
 }) {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   const [isReportDialogOpen, setIsReportDialogOpen] = React.useState(false);
-  // Set true the moment the user picks "Edit message". The
-  // `onCloseAutoFocus` handler on `DropdownMenuContent` reads it to
-  // suppress Radix's default focus-restoration (which would yank focus
-  // back to the trigger and steal it from the composer's editor — the
-  // composer schedules its own focus on RAF, but Radix's restoration
-  // runs in a setTimeout that fires after our RAF and wins the race).
-  // Reset to false inside the handler so Escape / non-Edit closes still
-  // get default trigger-restoration (a11y intact for keyboard users).
-  const editJustSelectedRef = React.useRef(false);
+  // Transfer focus ownership only after the menu has finished closing.
+  // During its exit animation Radix's pointer-leave handler can still focus
+  // the menu, stealing keystrokes from an already-open composer. Merely
+  // suppressing trigger restoration does not prevent that earlier race.
+  const pendingEditRef = React.useRef<(() => void) | null>(null);
 
   const hasCopyActions =
     !message.pending && message.kind !== KIND_HUDDLE_STARTED;
+  // "Copy message" copies the Markdown body verbatim, so its plain flavor is
+  // already readable anywhere. The HTML sidecar adds only identity, letting a
+  // paste back into Buzz re-light each chip with the pubkey the author tagged.
+  const mentionIdentities = useMessageMentionIdentities(message.tags, profiles);
 
   // A report needs a real, delivered event to target and a known author to
   // name in the NIP-56 `p` tag. Pending sends and system huddle rows have
@@ -160,9 +167,11 @@ function MoreActionsMenu({
           side="top"
           sideOffset={6}
           onCloseAutoFocus={(event) => {
-            if (editJustSelectedRef.current) {
+            const startEdit = pendingEditRef.current;
+            if (startEdit) {
               event.preventDefault();
-              editJustSelectedRef.current = false;
+              pendingEditRef.current = null;
+              startEdit();
             }
           }}
         >
@@ -170,8 +179,7 @@ function MoreActionsMenu({
             <DropdownMenuItem
               data-testid={`edit-message-${message.id}`}
               onSelect={() => {
-                editJustSelectedRef.current = true;
-                onEdit(message);
+                pendingEditRef.current = () => onEdit(message);
               }}
             >
               <Pencil className="h-4 w-4" />
@@ -224,6 +232,10 @@ function MoreActionsMenu({
                 copyTextToClipboard(
                   message.body,
                   "Message copied to clipboard",
+                  buildMentionClipboardHtml({
+                    identities: mentionIdentities,
+                    text: message.body,
+                  }) ?? undefined,
                 );
               }}
             >
@@ -384,6 +396,7 @@ function isCustomEmojiShortcode(emoji: string) {
 export const MessageActionBar = React.memo(function MessageActionBar({
   channelId,
   message,
+  ref,
   onDelete,
   onEdit,
   onFollowThread,
@@ -399,11 +412,15 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   reactions,
   isFollowingThread,
   isUnread,
+  profiles,
 }: {
   /** Channel UUID — required for the "Copy link" action; when omitted the
    *  action is hidden (callers like the home inbox that lack the context). */
   channelId?: string | null;
   message: TimelineMessage;
+  /** Attached to the root element so hosts can measure the rail's rendered
+   *  footprint (e.g. to reserve its width in the message-header layout). */
+  ref?: React.Ref<HTMLDivElement>;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onFollowThread?: (message: TimelineMessage) => void;
@@ -421,6 +438,8 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   /** Current read state of the clicked message, from the same predicate the
    *  unread badge uses. Drives the single mark-read/unread toggle label. */
   isUnread?: boolean;
+  /** Resolves the mention identities carried by "Copy message". */
+  profiles?: UserProfileLookup;
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
@@ -499,6 +518,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
           : "",
       )}
       data-testid={`message-action-bar-${message.id}`}
+      ref={ref}
     >
       <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
         <div className="flex items-center gap-0.5 p-1">
@@ -561,6 +581,8 @@ export const MessageActionBar = React.memo(function MessageActionBar({
               </PopoverContent>
             </Popover>
           ) : null}
+
+          <ProtectedMessageAction channelId={channelId} message={message} />
 
           {hasReactionAction && quickReactionItems.length > 0 ? (
             <div
@@ -628,6 +650,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
               open={isDropdownOpen}
               isFollowingThread={isFollowingThread}
               isUnread={isUnread}
+              profiles={profiles}
             />
           ) : null}
         </div>

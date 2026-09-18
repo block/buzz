@@ -606,7 +606,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     //! Row-44 conformance: API token lookups MUST be keyed on
     //! `(community_id, token_hash)`, not on `token_hash` alone. The storage
     //! UNIQUE index is a *storage* guarantee; the WHERE clause here is the
@@ -625,10 +625,8 @@ mod tests {
     use crate::{ApiTokenRecord, Db};
     use sqlx::PgPool;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
-
     async fn setup_db() -> Db {
-        let pool = PgPool::connect(TEST_DB_URL)
+        let pool = PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to test DB");
         Db::from_pool(pool)

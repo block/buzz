@@ -586,7 +586,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use crate::{event, migration, replaceable};
     use sqlx::postgres::PgPoolOptions;
@@ -601,6 +601,11 @@ mod tests {
         let pool = PgPool::connect(&database_url)
             .await
             .expect("connect to test DB");
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() == Ok("migration") {
+            migration::run_migrations(&pool)
+                .await
+                .expect("apply migration schema");
+        }
         Db::from_pool(pool)
     }
 
@@ -994,7 +999,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn nip_rs_transaction_operation_restores_hard_delete_opt_in() {
+    async fn migration_schema_nip_rs_transaction_operation_restores_hard_delete_opt_in() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
         let db = setup_db().await;
@@ -1034,7 +1039,7 @@ mod tests {
         );
 
         let mut tx = db
-            .begin_transaction()
+            .begin_event_write_transaction()
             .await
             .expect("begin caller transaction");
         let result = db
@@ -1104,7 +1109,10 @@ mod tests {
                 .1
         );
 
-        let mut tx = db.begin_transaction().await.expect("begin replacement tx");
+        let mut tx = db
+            .begin_event_write_transaction()
+            .await
+            .expect("begin replacement tx");
         let outcome = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
@@ -1138,7 +1146,7 @@ mod tests {
         assert_eq!(live_id, old.id.as_bytes().to_vec());
 
         let mut tx = db
-            .begin_transaction()
+            .begin_event_write_transaction()
             .await
             .expect("begin stale revision tx");
         let mismatch = db
@@ -1172,7 +1180,7 @@ mod tests {
         .sign_with_keys(&keys)
         .expect("sign missing project");
         let mut tx = db
-            .begin_transaction()
+            .begin_event_write_transaction()
             .await
             .expect("begin missing revision tx");
         let missing_result = db
@@ -1250,7 +1258,7 @@ mod tests {
         .expect("install failure injection");
 
         let mut tx = db
-            .begin_transaction()
+            .begin_event_write_transaction()
             .await
             .expect("begin caller transaction");
         let error = db
@@ -1331,7 +1339,7 @@ mod tests {
             .expect("soft-delete duplicate row");
 
         let mut seed_tx = db
-            .begin_transaction()
+            .begin_event_write_transaction()
             .await
             .expect("begin seed transaction");
         let (_, was_inserted) =
@@ -1342,7 +1350,7 @@ mod tests {
         seed_tx.commit().await.expect("commit older live head");
 
         let mut tx = db
-            .begin_transaction()
+            .begin_event_write_transaction()
             .await
             .expect("begin caller transaction");
         let result = db
@@ -1444,7 +1452,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn mesh_status_replacement_keeps_one_physical_row() {
+    async fn migration_schema_mesh_status_replacement_keeps_one_physical_row() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
         let db = setup_db().await;
@@ -1607,7 +1615,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn nip_rs_hard_delete_fence_fails_closed_and_scopes_opt_in_to_transaction() {
+    async fn migration_schema_nip_rs_hard_delete_fence_fails_closed_and_scopes_opt_in_to_transaction(
+    ) {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
         let db = setup_db().await;

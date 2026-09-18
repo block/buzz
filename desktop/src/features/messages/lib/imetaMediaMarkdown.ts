@@ -288,7 +288,11 @@ export function formatImetaMediaLine(
   const lower = filename?.toLowerCase();
   const isSnapshotPng =
     lower?.endsWith(".agent.png") || lower?.endsWith(".team.png");
-  if (type.startsWith("video/")) {
+  const isPackagedVoiceNote =
+    type.toLowerCase() === "video/mp4" &&
+    lower?.startsWith("voice-note-") &&
+    lower.endsWith(".mp4");
+  if (type.startsWith("video/") && !isPackagedVoiceNote) {
     const line = `![video](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }

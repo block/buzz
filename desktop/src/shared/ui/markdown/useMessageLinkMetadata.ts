@@ -4,7 +4,7 @@ import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
 import { summarizeMessageLinkContent } from "@/features/messages/lib/messageLinkMetadata";
 import { getEventById } from "@/shared/api/tauri";
 import { getUserProfile } from "@/shared/api/tauriProfiles";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { isDefinitiveEventNotFound } from "@/shared/lib/eventLookupError";
 
 const MESSAGE_METADATA_RETRY_DELAY_MS = 750;
@@ -70,7 +70,7 @@ function fetchMetadata(
           author:
             profile?.displayName?.trim() ||
             profile?.nip05Handle?.trim() ||
-            truncatePubkey(event.pubkey),
+            truncateNpub(event.pubkey),
           createdAt: event.created_at,
           snippet: summarizeMessageLinkContent(event.content),
         };

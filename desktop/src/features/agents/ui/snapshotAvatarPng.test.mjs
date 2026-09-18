@@ -38,7 +38,7 @@ test("resolveSnapshotAvatarPng: emoji SVG is rasterized onto a canvas", async ()
   };
 
   const emojiSvg =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="256" fill="#ffcc00"/><text>✨</text></svg>';
+    '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="256" fill="#ffcc00"/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="258">✨</text></svg>';
   const result = await resolveSnapshotAvatarPng(
     `data:image/svg+xml,${encodeURIComponent(emojiSvg)}`,
     {

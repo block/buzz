@@ -124,6 +124,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
       fallbackLabel: fallbackLabel,
       isSelf: isSelf,
     );
+    final isAgent = profile?.isAgent == true || fallbackLabel != null;
 
     final semanticStates = [
       label,
@@ -183,7 +184,14 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                             width: speakingRingSize,
                             height: speakingRingSize,
                             decoration: BoxDecoration(
-                              shape: BoxShape.circle,
+                              shape: isAgent
+                                  ? BoxShape.rectangle
+                                  : BoxShape.circle,
+                              borderRadius: isAgent
+                                  ? BorderRadius.circular(
+                                      speakingRingSize * 0.3,
+                                    )
+                                  : null,
                               color: context.colors.primary.withValues(
                                 alpha: 0.07,
                               ),
@@ -207,7 +215,14 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                 width: avatarRadius * 2,
                                 height: avatarRadius * 2,
                                 decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
+                                  shape: isAgent
+                                      ? BoxShape.rectangle
+                                      : BoxShape.circle,
+                                  borderRadius: isAgent
+                                      ? BorderRadius.circular(
+                                          avatarRadius * 0.6,
+                                        )
+                                      : null,
                                   color: context.colors.primaryContainer,
                                 ),
                                 alignment: Alignment.center,
@@ -230,6 +245,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                   size: fallbackIconSize,
                                   color: context.colors.onPrimaryContainer,
                                 ),
+                                isAgent: isAgent,
                               ),
                       ),
                     ],

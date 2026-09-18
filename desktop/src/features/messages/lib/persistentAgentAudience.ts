@@ -160,6 +160,23 @@ export function removePersistentAgentAudienceMembersIfUnchanged({
   return true;
 }
 
+export function initializePersistentAgentAudience(
+  scope: string,
+  pubkeys: Iterable<string>,
+): void {
+  if (!scope) return;
+  const excluded = excludedPubkeysByScope.get(scope);
+  const initialPubkeys = normalizePubkeys(pubkeys).filter(
+    (pubkey) =>
+      !(audiences[scope] ?? []).includes(pubkey) && !excluded?.has(pubkey),
+  );
+  if (initialPubkeys.length === 0) return;
+  setPersistentAgentAudience(scope, [
+    ...(audiences[scope] ?? []),
+    ...initialPubkeys,
+  ]);
+}
+
 export function addPersistentAgentAudienceMember(
   scope: string,
   pubkey: string,

@@ -17,6 +17,8 @@ fn make_agent(
     runtime_pid: Option<u32>,
 ) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: pubkey.to_string(),
         name: "Test Agent".to_string(),
         persona_id: persona_id.map(str::to_string),

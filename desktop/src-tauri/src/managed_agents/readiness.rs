@@ -269,6 +269,20 @@ fn resolve_effective_agent_env_with_def(
     );
     env.extend(user_env);
 
+    // Single harness-agnostic effort authority (PR #4625): resolve effective
+    // effort over the canonical column AND all env tiers, emit one destination
+    // key. Runs AFTER the layer stack so launch, remote deploy, and the restart
+    // snapshot agree — no double authority, no foreign key, no badge disagreement.
+    super::config_bridge::effort::apply_launch_effort(
+        &mut env,
+        record,
+        runtime,
+        personas,
+        &global.env_vars,
+        harness_def.as_deref(),
+        &baked_build_env(),
+    );
+
     // Buzz shared compute is a native Buzz provider. Translate it to buzz-agent's
     // OpenAI-compatible transport only in the effective runtime environment.
     #[cfg(feature = "mesh-llm")]

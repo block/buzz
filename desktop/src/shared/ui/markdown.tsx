@@ -3,18 +3,17 @@ import { createPortal } from "react-dom";
 import type { Components } from "react-markdown";
 import { ChevronLeft, ChevronRight, Download } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { requestOpenSnapshotImport } from "@/features/agents/openSnapshotImportFromUrlEvent";
 import { parseChannelLink } from "@/features/messages/lib/channelLink";
+import { isAudioAttachment } from "@/features/messages/lib/audioAttachment";
 import {
   parseMessageLink,
   resolveMessageLinkRenderTarget,
   type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
-import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
-import { invokeTauri } from "@/shared/api/tauri";
+import { renderAudioMessageAttachment } from "@/features/messages/ui/AudioMessageAttachment";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
 import { parseEntityLink } from "@/shared/lib/entityLink";
@@ -23,7 +22,7 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
-import { InlineChip } from "@/shared/ui/InlineChip";
+import { createMarkdownMention } from "./markdown/MarkdownMention";
 import { LinkPreviewList } from "@/shared/ui/link-preview-list";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import {
@@ -43,6 +42,7 @@ import {
   markdownPropsAreEqual,
 } from "./markdownUtils";
 import { ImageMosaic } from "./markdown/ImageMosaic";
+import { copyImageToClipboard, downloadImage } from "./markdown/imageActions";
 import { ImageGalleryStatus } from "./markdown/ImageGalleryStatus";
 import { ImageLightboxZoomControls } from "./markdown/ImageLightboxZoomControls";
 import {
@@ -68,7 +68,7 @@ import {
   type MediaContextMenuPosition,
   useDismissMediaContextMenu,
 } from "./markdown/MediaContextMenu";
-import { isVideoMedia } from "./markdown/mediaEntry";
+import { isRelayDownloadable, isVideoMedia } from "./markdown/mediaEntry";
 import {
   type ImageGalleryDirection,
   type ImageGalleryItem,
@@ -145,26 +145,6 @@ type ImageBlockProps = {
 type WebKitGestureLikeEvent = Event & {
   scale?: number;
 };
-
-function copyImageToClipboard(src: string | undefined) {
-  if (!src) return;
-  invokeTauri("copy_image_to_clipboard", { url: src })
-    .then(() => {
-      toast.success("Copied to clipboard");
-    })
-    .catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : "Copy failed";
-      toast.error(msg);
-    });
-}
-
-function downloadImage(src: string | undefined) {
-  if (!src) return;
-  invokeTauri("download_image", { url: src }).catch((err: unknown) => {
-    const msg = err instanceof Error ? err.message : "Download failed";
-    toast.error(msg);
-  });
-}
 
 function ImageZoomOverlay({
   alt,
@@ -1262,6 +1242,16 @@ export function createMarkdownComponents(
 
     const label = getReactNodeText(children);
 
+    const audioAttachment = renderAudioMessageAttachment(
+      href ? imetaByUrl?.get(href) : undefined,
+      href,
+      label,
+      href && isRelayDownloadable(href, relayOrigin ?? undefined)
+        ? href
+        : undefined,
+    );
+    if (audioAttachment) return audioAttachment;
+
     // Classify verified agent/team snapshots before generic files.
     const snapshotCard = resolveSnapshotCard(
       href ? imetaByUrl?.get(href) : undefined,
@@ -1527,6 +1517,7 @@ export function createMarkdownComponents(
       <ol className={cn("list-decimal", listClassName)}>{children}</ol>
     ),
     p: function MarkdownParagraph({ children }) {
+      const { imetaByUrl } = useMarkdownRuntime();
       // Detect media-only paragraphs (images + <br> from remarkBreaks).
       // Multi-image: render as a compact, count-aware mosaic. Two images split
       // a row, three form a hero-and-stack triptych, and larger odd counts let
@@ -1535,12 +1526,18 @@ export function createMarkdownComponents(
       // (the img component returns block-level wrappers for lightbox/video).
       const childArray = React.Children.toArray(children);
       const { imageChildren } = classifyChildren(childArray);
+      const hasAudioAttachment = childArray.some(
+        (child) =>
+          React.isValidElement<{ href?: string }>(child) &&
+          typeof child.props.href === "string" &&
+          isAudioAttachment(imetaByUrl?.get(child.props.href)),
+      );
 
       if (isImageOnlyParagraph(childArray)) {
         return <ImageMosaic>{imageChildren}</ImageMosaic>;
       }
 
-      if (hasBlockMedia(childArray)) {
+      if (hasBlockMedia(childArray) || hasAudioAttachment) {
         return <div>{children}</div>;
       }
 
@@ -1566,60 +1563,19 @@ export function createMarkdownComponents(
     ),
     table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
     td: ({ children }) => (
-      <td className="border-t border-border/70 px-3 py-2 align-top">
+      <td className="min-w-24 border-t border-border/70 px-3 py-2 align-top">
         {children}
       </td>
     ),
     th: ({ children }) => (
-      <th className="bg-muted/60 px-3 py-2 font-semibold text-foreground">
+      <th className="min-w-24 bg-muted/60 px-3 py-2 align-top font-semibold text-foreground">
         {children}
       </th>
     ),
     ul: ({ children }) => (
       <ul className={cn("list-disc", listClassName)}>{children}</ul>
     ),
-    mention: function MarkdownMention({
-      children,
-    }: {
-      children?: React.ReactNode;
-    }) {
-      const { agentMentionPubkeysByName, mentionPubkeysByName } =
-        useMarkdownRuntime();
-      const mentionText = String(children ?? "");
-      const mentionName = mentionText.replace(/^@/, "").trim().toLowerCase();
-      const pubkey = mentionPubkeysByName?.[mentionName];
-      const isAgentMention =
-        pubkey !== undefined &&
-        agentMentionPubkeysByName?.[mentionName] === pubkey;
-      const mentionLabel = mentionText.replace(/^@/, "");
-      // Only chips that actually open a profile get the clickable affordance.
-      // A mention whose pubkey didn't resolve stays a plain chip — a pointer
-      // cursor there promises a click that does nothing.
-      const opensProfile = interactive && pubkey !== undefined;
-      const mentionNode = (
-        <InlineChip
-          data-mention=""
-          className={cn(isAgentMention && "agent-mention-highlight")}
-          icon={isAgentMention ? "agent" : "human"}
-          interactive={opensProfile}
-        >
-          {mentionLabel}
-        </InlineChip>
-      );
-
-      return opensProfile ? (
-        <UserProfilePopover
-          botIdenticonValue={mentionLabel}
-          pubkey={pubkey}
-          role={isAgentMention ? "bot" : undefined}
-          triggerElement="span"
-        >
-          {mentionNode}
-        </UserProfilePopover>
-      ) : (
-        mentionNode
-      );
-    },
+    mention: createMarkdownMention(interactive),
     emoji: ({ src, alt }: { src?: string; alt?: string }) => {
       const resolvedSrc = src ? rewriteRelayUrl(src) : src;
       if (!resolvedSrc) {
