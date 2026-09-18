@@ -76,6 +76,40 @@ function overlay(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+/** WCAG 2.1 contrast ratio between two opaque colors. */
+function contrastRatio(hex1: string, hex2: string): number {
+  const [lighter, darker] = [luminance(hex1), luminance(hex2)].sort(
+    (a, b) => b - a,
+  );
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/** WCAG AA minimum for normal-size text. */
+const AA_CONTRAST = 4.5;
+
+/**
+ * Push `color` toward white (dark themes) or black (light themes) in 5% steps
+ * until it clears `target` contrast against `bg`, preserving hue.
+ *
+ * Syntax themes tune their accents against the editor background, not against
+ * the slightly elevated surface an inline chip sits on, so a handful of themes
+ * land just under AA when their accent is reused verbatim. Nudging beats
+ * substituting: the color stays recognizably the theme's own.
+ */
+function ensureContrast(
+  color: string,
+  bg: string,
+  target: number,
+  isDark: boolean,
+): string {
+  const pole = isDark ? "#ffffff" : "#000000";
+  for (let step = 0; step <= 20; step++) {
+    const candidate = step === 0 ? color : mix(color, pole, step * 0.05);
+    if (contrastRatio(candidate, bg) >= target) return candidate;
+  }
+  return pole;
+}
+
 // =============================================================================
 // Chrome Color Calculation
 // =============================================================================
@@ -193,6 +227,7 @@ export function createThemeVars(
   syntaxFg: string,
   syntaxComment: string,
   gitColors?: ThemeGitColors,
+  syntaxKeyword?: string,
 ): ThemeResult {
   const isDark = luminance(syntaxBg) < 0.5;
 
@@ -214,6 +249,15 @@ export function createThemeVars(
   // Derived colors
   const borderColor = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
   const hoverBg = elevate(0.06);
+  // Inline `code` chips sit on --muted (hoverBg) and, until now, inherited body
+  // text color — the one piece of message markdown with no tie to the syntax
+  // theme. Borrow the keyword accent instead, held to AA against that chip.
+  const codeFg = ensureContrast(
+    syntaxKeyword ?? syntaxFg,
+    hoverBg,
+    AA_CONTRAST,
+    isDark,
+  );
   const huddleControlBg = isDark ? mix(hoverBg, syntaxFg, 0.14) : "#333333";
   const huddleControlHoverBg = isDark
     ? mix(huddleControlBg, syntaxFg, 0.08)
@@ -257,6 +301,7 @@ export function createThemeVars(
       "--card-foreground": textFg,
       "--popover-foreground": textFg,
       "--muted-foreground": hexToHsl(syntaxComment),
+      "--code-foreground": hexToHsl(codeFg),
       "--accent-foreground": textFg,
       "--secondary-foreground": textFg,
 
