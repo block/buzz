@@ -55,6 +55,26 @@ fn default_agent_command_resolves_bundled_buzz_agent() {
 }
 
 #[test]
+fn normalizes_grok_args_to_agent_always_approve_stdio() {
+    assert_eq!(
+        normalize_agent_args("grok", Vec::new()),
+        vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string()
+        ]
+    );
+    assert_eq!(
+        normalize_agent_args("grok", vec!["".into()]),
+        vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string()
+        ]
+    );
+}
+
+#[test]
 fn normalizes_claude_and_codex_args_to_empty() {
     assert_eq!(
         normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
