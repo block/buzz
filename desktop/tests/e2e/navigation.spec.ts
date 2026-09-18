@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
@@ -38,6 +39,56 @@ async function navigateToWorkflows(page: import("@playwright/test").Page) {
   await page.getByTestId("open-workflows-view").click();
   await expect(page).toHaveURL(/#\/workflows$/);
   await expect(page.getByTestId("workflows-view")).toBeVisible();
+}
+
+async function openHistoryMenuWithLongPress(
+  page: import("@playwright/test").Page,
+  button: import("@playwright/test").Locator,
+  menu: import("@playwright/test").Locator,
+) {
+  const bounds = await button.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(
+    (bounds?.x ?? 0) + (bounds?.width ?? 0) / 2,
+    (bounds?.y ?? 0) + (bounds?.height ?? 0) / 2,
+  );
+  await page.mouse.down();
+  await expect(menu).toBeVisible();
+  await page.mouse.up();
+  await expect(menu).toBeVisible();
+}
+
+/**
+ * Describes an open history menu by where it sits relative to its button, how
+ * big it is, and what it lists. Comparing this instead of raw pixels keeps the
+ * "both gestures open the same menu" assertion legible: a mismatch names the
+ * field that drifted rather than handing back an opaque Buffer diff.
+ */
+async function readHistoryMenuLayout(
+  page: import("@playwright/test").Page,
+  button: import("@playwright/test").Locator,
+  menu: import("@playwright/test").Locator,
+  itemTestId: string,
+) {
+  await waitForAnimations(page);
+  const [buttonBounds, menuBounds, items] = await Promise.all([
+    button.boundingBox(),
+    menu.boundingBox(),
+    menu.getByTestId(itemTestId).allTextContents(),
+  ]);
+  if (!buttonBounds || !menuBounds) {
+    throw new Error("History control is not visible");
+  }
+
+  return {
+    height: Math.round(menuBounds.height),
+    items,
+    // Radix anchors a context menu at the pointer, and both gestures point at
+    // the button's centre, so the offset must come out identical.
+    offsetX: Math.round(menuBounds.x - buttonBounds.x),
+    offsetY: Math.round(menuBounds.y - buttonBounds.y),
+    width: Math.round(menuBounds.width),
+  };
 }
 
 async function createWorkflow(
@@ -91,6 +142,129 @@ test("global back and forward move across channel routes", async ({ page }) => {
 
   await page.getByTestId("global-forward").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
+});
+
+test("back and forward history menus match across right click and long press", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await page.getByTestId("channel-engineering").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+
+  const backButton = page.getByTestId("global-back");
+  const historyMenu = page.getByTestId("global-back-history-menu");
+
+  await expect(backButton).toHaveAttribute("data-history-count", "3");
+  await backButton.click({ button: "right" });
+  await expect(historyMenu).toBeVisible();
+  await expect(historyMenu.getByTestId("global-back-history-item")).toHaveText([
+    "#random",
+    "#general",
+    "Inbox",
+  ]);
+  const rightClickLayout = await readHistoryMenuLayout(
+    page,
+    backButton,
+    historyMenu,
+    "global-back-history-item",
+  );
+  await page.keyboard.press("Escape");
+  await expect(historyMenu).not.toBeVisible();
+
+  await openHistoryMenuWithLongPress(page, backButton, historyMenu);
+  await expect(historyMenu.getByTestId("global-back-history-item")).toHaveText([
+    "#random",
+    "#general",
+    "Inbox",
+  ]);
+  expect(
+    await readHistoryMenuLayout(
+      page,
+      backButton,
+      historyMenu,
+      "global-back-history-item",
+    ),
+  ).toEqual(rightClickLayout);
+  await historyMenu
+    .getByRole("menuitem", { name: "Go back to #general" })
+    .click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const forwardButton = page.getByTestId("global-forward");
+  const forwardHistoryMenu = page.getByTestId("global-forward-history-menu");
+
+  await expect(forwardButton).toHaveAttribute("data-history-count", "2");
+  await forwardButton.click({ button: "right" });
+  await expect(forwardHistoryMenu).toBeVisible();
+  await expect(
+    forwardHistoryMenu.getByTestId("global-forward-history-item"),
+  ).toHaveText(["#random", "#engineering"]);
+  const forwardRightClickLayout = await readHistoryMenuLayout(
+    page,
+    forwardButton,
+    forwardHistoryMenu,
+    "global-forward-history-item",
+  );
+  await page.keyboard.press("Escape");
+  await expect(forwardHistoryMenu).not.toBeVisible();
+
+  await openHistoryMenuWithLongPress(page, forwardButton, forwardHistoryMenu);
+  await expect(
+    forwardHistoryMenu.getByTestId("global-forward-history-item"),
+  ).toHaveText(["#random", "#engineering"]);
+  expect(
+    await readHistoryMenuLayout(
+      page,
+      forwardButton,
+      forwardHistoryMenu,
+      "global-forward-history-item",
+    ),
+  ).toEqual(forwardRightClickLayout);
+  await forwardHistoryMenu
+    .getByRole("menuitem", { name: "Go forward to #engineering" })
+    .click();
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+});
+
+test("left clicking a history button only dismisses its open menu", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  const backButton = page.getByTestId("global-back");
+  const historyMenu = page.getByTestId("global-back-history-menu");
+  await backButton.click({ button: "right" });
+  await expect(historyMenu).toBeVisible();
+  await waitForAnimations(page);
+
+  // The open menu is modal, so its dismiss layer — not the button — takes the
+  // click. Drive the mouse directly: Playwright's actionability checks refuse
+  // to click a button that is covered.
+  const bounds = await backButton.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.click(
+    (bounds?.x ?? 0) + (bounds?.width ?? 0) / 2,
+    (bounds?.y ?? 0) + (bounds?.height ?? 0) / 2,
+  );
+
+  // One click closes the menu and does nothing else, like the native control.
+  await expect(historyMenu).not.toBeVisible();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  // The next click is an ordinary back — proof the dismissal neither consumed
+  // it nor left the button inert.
+  await backButton.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
 test("back/forward keyboard chords work while the composer has focus", async ({
