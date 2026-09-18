@@ -194,6 +194,9 @@ export function deriveCommunityName(relayUrl: string): string {
     if (isLocalRelayHost(host)) {
       return "Local Dev";
     }
+    if (/^\d+(?:\.\d+){3}$/.test(host) || host.includes(":")) {
+      return `Community (${host})`;
+    }
     const parts = host.split(".");
     // Detect staging environments (e.g. buzz-oss.stage.blox.sqprod.co)
     if (parts.some((p) => p === "stage" || p === "staging")) {
@@ -219,6 +222,8 @@ export function initFirstCommunity(
   const community: Community = {
     id: crypto.randomUUID(),
     name: trimmedName || deriveCommunityName(normalizedUrl),
+    // New connections follow relay truth; only legacy records infer an alias.
+    localName: "",
     relayUrl: normalizedUrl,
     // Compiled default relays must admit the first token-less connection; there
     // is no invite-token prompt on this auto-connect path.

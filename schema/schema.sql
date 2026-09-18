@@ -54,6 +54,9 @@ CREATE TABLE communities (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     host            VARCHAR(255) NOT NULL,
     signing_key     BYTEA,
+    name TEXT CONSTRAINT communities_name_valid CHECK (
+        name IS NULL OR (octet_length(name) BETWEEN 1 AND 256 AND name = btrim(name))
+    ),
     -- Per-community workspace icon (NIP-11 `icon`), set via kind:9033.
     -- Added by migration 0003; kept here so desired-state applies match.
     icon            TEXT,

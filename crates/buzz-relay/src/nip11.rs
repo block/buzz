@@ -25,6 +25,11 @@ pub(crate) const NIP_RELAY_MEMBERSHIP: u32 = 43;
 pub struct RelayInfo {
     /// Human-readable relay name.
     pub name: String,
+    /// Canonical public community name, distinct from the legacy relay label.
+    /// Present only after a successful host-scoped read on a supporting relay.
+    /// A null descriptor name means no owner/admin has named this community yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community_profile: Option<CommunityProfile>,
     /// Human-readable relay description.
     pub description: String,
     /// Workspace icon URL (NIP-11 `icon`), per-community, set by relay
@@ -67,6 +72,14 @@ pub struct RelayInfo {
     /// Relay's own signing pubkey (NIP-11 `self` field, NIP-43).
     #[serde(rename = "self", skip_serializing_if = "Option::is_none")]
     pub relay_self: Option<String>,
+}
+
+/// Public, host-scoped presentation state. Presence advertises name support;
+/// `name: null` means the community has not been named yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommunityProfile {
+    /// Canonical owner/admin-controlled name (1–256 UTF-8 bytes).
+    pub name: Option<String>,
 }
 
 /// Public capability descriptor for relay-proxied GIF search.
@@ -201,6 +214,7 @@ impl RelayInfo {
 
         Self {
             name: "Buzz Relay".to_string(),
+            community_profile: None,
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             pubkey: None,
@@ -293,6 +307,14 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         admin_api.as_deref(),
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
+    if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+        if let Ok(name) = state.db.get_community_name(tenant.community()).await {
+            if let Some(name) = &name {
+                info.name = name.clone();
+            }
+            info.community_profile = Some(CommunityProfile { name });
+        }
+    }
     let tenant_host = if state.config.push_enabled {
         crate::tenant::bind_community(&state.db, raw_host)
             .await

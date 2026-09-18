@@ -105,6 +105,7 @@ export default defineConfig({
         "**/huddle-thread-load-failure.spec.ts",
         "**/workspace-rail.spec.ts",
         "**/community-rail.spec.ts",
+        "**/community-name.spec.ts",
         "**/boot-splash.spec.ts",
         "**/thread-reply-anchor-roleplay.spec.ts",
         "**/threadpane-ultrawide.spec.ts",

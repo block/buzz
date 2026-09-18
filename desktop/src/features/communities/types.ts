@@ -1,6 +1,12 @@
 export type Community = {
   id: string;
   name: string;
+  /** Cached relay truth; undefined means no supported read yet. */
+  canonicalName?: string | null;
+  /** Previous device label, retained as fallback without publishing it. */
+  fallbackName?: string;
+  /** Explicit device-only nickname; blank/absent follows the shared name. */
+  localName?: string;
   relayUrl: string;
   token?: string;
   /**

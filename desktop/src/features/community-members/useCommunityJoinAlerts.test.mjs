@@ -157,6 +157,13 @@ function installDOMShim() {
       configurable: true,
     });
   }
+  const windowEvents = new MinimalEventTarget();
+  globalThis.window.addEventListener =
+    windowEvents.addEventListener.bind(windowEvents);
+  globalThis.window.removeEventListener =
+    windowEvents.removeEventListener.bind(windowEvents);
+  globalThis.window.dispatchEvent =
+    windowEvents.dispatchEvent.bind(windowEvents);
   globalThis.MutationObserver = class {
     observe() {}
     disconnect() {}
