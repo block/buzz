@@ -172,11 +172,15 @@ _ensure-sidecar-stubs:
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
     SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
-    if [[ "$TARGET" != *windows* ]]; then
+    EXT=""
+    if [[ "$TARGET" == *windows* ]]; then
+        # Tauri's externalBin validation expects binaries/<bin>-<triple>.exe.
+        EXT=".exe"
+    else
         SIDECARS+=(buzz-backend-kubernetes)
     fi
     for bin in "${SIDECARS[@]}"; do
-        touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        touch "desktop/src-tauri/binaries/${bin}-${TARGET}${EXT}"
     done
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
