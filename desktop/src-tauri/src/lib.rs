@@ -834,6 +834,7 @@ pub fn run() {
             confirm_pairing_sas,
             cancel_pairing,
             apply_workspace,
+            set_agent_avatar_communities,
             validate_repos_dir,
             get_active_workspace,
             fetch_workspace_icon,

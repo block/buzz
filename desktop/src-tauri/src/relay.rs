@@ -535,6 +535,8 @@ fn build_profile_event(
         .map_err(|e| format!("failed to sign profile event: {e}"))
 }
 
+pub(crate) mod profile_avatar;
+
 // ── Managed-agent profile sync ──────────────────────────────────────────────
 
 /// Sync a managed agent's kind:0 profile event to the relay using NIP-98 auth.
@@ -544,6 +546,8 @@ fn build_profile_event(
 /// description (see `managed_agents::record_effective_description`); the
 /// relay treats kind:0
 /// fields as absolute, so passing `None` clears any previously published about.
+/// Configured-community avatar media is copied into this target before signing;
+/// transfer failure never replaces the existing profile with a foreign URL.
 pub async fn sync_managed_agent_profile(
     state: &AppState,
     relay_url: &str,
@@ -554,8 +558,17 @@ pub async fn sync_managed_agent_profile(
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
     crate::relay_admission::wait_for_rate_limit().await;
-    // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
-    let event = build_profile_event(agent_keys, display_name, avatar_url, about, auth_tag)?;
+    // Resolve media before replacing the complete profile. A failed transfer
+    // leaves the previous kind:0 untouched and the saved source available to retry.
+    let avatar_url =
+        profile_avatar::localize_avatar(state, relay_url, agent_keys, avatar_url, auth_tag).await?;
+    let event = build_profile_event(
+        agent_keys,
+        display_name,
+        avatar_url.as_deref(),
+        about,
+        auth_tag,
+    )?;
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
@@ -564,8 +577,9 @@ pub async fn sync_managed_agent_profile(
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
 
     let mut request = state
-        .http_client
+        .media_fetch_client
         .post(&url)
+        .timeout(std::time::Duration::from_secs(30))
         .header("Authorization", auth)
         .header("Content-Type", "application/json");
     if let Some(tag) = auth_tag {
@@ -584,6 +598,10 @@ pub async fn sync_managed_agent_profile(
         ));
     }
 
+    let result: SubmitEventResponse = parse_json_response(response).await?;
+    if !result.accepted {
+        return Err(format!("relay rejected agent profile: {}", result.message));
+    }
     Ok(())
 }
 
