@@ -30,6 +30,7 @@ async function waitForMockLiveSubscription(
 async function emitMessage(
   page: import("@playwright/test").Page,
   input: {
+    channelName?: string;
     content: string;
     parentEventId?: string;
     createdAt?: number;
@@ -53,12 +54,23 @@ async function emitMessage(
       }),
     {
       ...input,
-      channelName: CHANNEL,
+      channelName: input.channelName ?? CHANNEL,
       pubkey: input.pubkey ?? TEST_IDENTITIES.alice.pubkey,
     },
   );
   if (!message) throw new Error("mock message emitter is unavailable");
   return message;
+}
+
+async function expectNoThreadFollowControls(
+  page: import("@playwright/test").Page,
+  messageId: string,
+) {
+  await openMessageMenu(page, messageId);
+  await expect(
+    page.getByRole("menuitem", { name: /^(Unfollow|Follow) thread$/ }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
 }
 
 async function openMessageMenu(
@@ -306,4 +318,85 @@ test("a delivered self-authored root immediately offers unfollow", async ({
     page.getByRole("menuitem", { name: "Unfollow thread" }),
   ).toHaveCount(0);
   await expect.poll(() => storedFollowIds(page)).toEqual([]);
+});
+
+test("a mention-only root offers follow and explicit follow enables ordinary reply notifications", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId(`channel-${CHANNEL}`).click();
+  await waitForMockLiveSubscription(page, CHANNEL);
+
+  const root = await emitMessage(page, {
+    content: "Thread root before mention",
+  });
+  const mention = await emitMessage(page, {
+    content: "Mention-only thread reply",
+    parentEventId: root.id,
+    extraTags: [["p", SELF_PUBKEY]],
+  });
+  await waitForMessageProcessing(page, mention.id);
+
+  await openMessageMenu(page, root.id);
+  const followItem = page.getByRole("menuitem", {
+    name: "Follow thread",
+    exact: true,
+  });
+  await expect(followItem).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Unfollow thread" }),
+  ).toHaveCount(0);
+  await followItem.click();
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect.poll(() => storedFollowIds(page)).toEqual([root.id]);
+
+  await page.getByTestId("channel-random").click();
+  await emitMessage(page, {
+    content: "Ordinary reply after explicit follow",
+    parentEventId: root.id,
+    createdAt: Math.floor(Date.now() / 1000) + 60,
+  });
+  await expect
+    .poll(() => notificationBodies(page))
+    .toContain("Ordinary reply after explicit follow");
+});
+
+test("a plain DM message omits thread follow controls", async ({ page }) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await waitForMockLiveSubscription(page, "alice-tyler");
+
+  const root = await emitMessage(page, {
+    channelName: "alice-tyler",
+    content: "Plain DM root",
+    pubkey: SELF_PUBKEY,
+  });
+  await waitForMessageProcessing(page, root.id);
+  await expectNoThreadFollowControls(page, root.id);
+});
+
+test("a DM thread summary omits thread follow controls", async ({ page }) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await waitForMockLiveSubscription(page, "alice-tyler");
+
+  const root = await emitMessage(page, {
+    channelName: "alice-tyler",
+    content: "DM thread root",
+  });
+  const reply = await emitMessage(page, {
+    channelName: "alice-tyler",
+    content: "DM thread reply",
+    parentEventId: root.id,
+  });
+  await waitForMessageProcessing(page, reply.id);
+  await expect(
+    page.locator(`[data-thread-head-id="${root.id}"]`),
+  ).toBeVisible();
+  await expectNoThreadFollowControls(page, root.id);
 });
