@@ -4594,17 +4594,49 @@ fn dispatch_pending(
     dispatched_channels
 }
 
-/// Stable, privacy-safe identity for one ordered event set.
+/// Stable, privacy-safe identity for one admitted batch across retries.
 ///
-/// Retries reconstruct the same ordered event IDs, so the digest remains
-/// stable without persisting prompt bodies or other private content.
+/// A retry can absorb newer traffic before it is flushed again. Hashing the
+/// complete mutable event set would therefore assign the original work a new
+/// identity. The earliest received event is the immutable admission anchor:
+/// requeue paths preserve its monotonic timestamp, while traffic that joins a
+/// retry necessarily arrived later. Relay timestamps are only second-granular,
+/// so they cannot safely order two events admitted in the same second.
 fn batch_correlation_id(batch: &FlushBatch) -> String {
     let mut digest = Sha256::new();
     digest.update(batch.channel_id.as_bytes());
-    for event in batch.cancelled_events.iter().chain(&batch.events) {
-        digest.update(event.event.id.as_bytes());
-    }
+    let anchor = batch
+        .cancelled_events
+        .iter()
+        .chain(&batch.events)
+        .min_by_key(|event| (event.received_at, event.event.id))
+        .expect("a dispatched batch must contain at least one event");
+    digest.update(anchor.event.id.as_bytes());
     format!("acp-{}", hex::encode(&digest.finalize()[..12]))
+}
+
+/// User-facing wording for a sanitized error class.
+///
+/// Observer payloads retain the stable machine class; notices use readable
+/// copy and never include the provider's untrusted message.
+fn human_error_reason(error: &acp::AcpError) -> &'static str {
+    match error.sanitized_class() {
+        "transport_io" => "the agent transport failed",
+        "protocol_json" => "the agent returned invalid protocol data",
+        "agent_exited" => "the agent process exited",
+        "idle_timeout" => "the turn timed out",
+        "hard_timeout" => "the turn exceeded the maximum duration",
+        "cancel_drain_timeout" => "the cancelled turn did not stop cleanly",
+        "request_timeout" => "the agent did not respond in time",
+        "transport_write_timeout" => "the agent stopped accepting requests",
+        "protocol_error" => "the agent protocol failed",
+        "provider_rate_limited" => "the provider rate-limited the request",
+        "provider_overloaded" => "the provider was overloaded",
+        "provider_context_limit" => "the request exceeded the provider context limit",
+        "provider_model_not_found" => "the configured model was not found",
+        "provider_authentication" => "provider authentication failed",
+        _ => "the provider could not complete the request",
+    }
 }
 
 /// Returns `true` when `error` is a non-retryable authentication failure.
@@ -4718,7 +4750,9 @@ fn handle_prompt_result(
     // match arm in the death_message construction reads it.
     let mut hard_timeout_fate_suffix: Option<&'static str> = None;
     let mut terminal_class = match &result.outcome {
-        PromptOutcome::Ok(_) => "signed",
+        // ACP prompt completion is not proof that a signed Buzz event reached
+        // the relay. Delivery is certified separately by signed-event readback.
+        PromptOutcome::Ok(_) => "prompt-completed",
         _ => "abandoned",
     };
 
@@ -4835,7 +4869,7 @@ fn handle_prompt_result(
                         "the turn exceeded the maximum duration".to_string()
                     }
                     PromptOutcome::AgentExited => "the agent process exited".to_string(),
-                    PromptOutcome::Error(e) => e.sanitized_class().to_string(),
+                    PromptOutcome::Error(e) => human_error_reason(e).to_string(),
                     PromptOutcome::ProjectContextIndeterminate(reason) => reason.clone(),
                     _ => "repeated failures".to_string(),
                 };
@@ -11258,6 +11292,20 @@ mod error_outcome_emission_tests {
         .await;
     }
 
+    #[test]
+    fn generic_provider_error_has_readable_private_safe_notice_copy() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "opaque provider failure; secret=must-not-escape".into(),
+        };
+        assert_eq!(
+            human_error_reason(&error),
+            "the provider could not complete the request"
+        );
+        assert!(!human_error_reason(&error).contains('_'));
+        assert!(!human_error_reason(&error).contains("must-not-escape"));
+    }
+
     async fn assert_application_error_is_requeued(error: acp::AcpError) {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
@@ -11436,7 +11484,24 @@ mod error_outcome_emission_tests {
                 .sessions
                 .insert(batch.scope.clone(), format!("session-{}", worker.index));
         }
+        let unaffected_scope = scope::SessionScope::Conversation {
+            channel_id: channels[2],
+        };
+        workers[0]
+            .state
+            .sessions
+            .insert(unaffected_scope.clone(), "session-unaffected".into());
         let mut pool = AgentPool::from_slots(vec![None, None]);
+        for (worker, batch) in workers.iter_mut().zip(&batches) {
+            let generation = pool.record_scope_owner(batch.scope.clone(), worker.index);
+            worker
+                .state
+                .set_scope_owner_generation(batch.scope.clone(), generation);
+        }
+        let unaffected_generation = pool.record_scope_owner(unaffected_scope.clone(), 0);
+        workers[0]
+            .state
+            .set_scope_owner_generation(unaffected_scope.clone(), unaffected_generation);
         register(&mut pool, 0, batches[0].clone(), "provider-turn-0");
         register(&mut pool, 1, batches[1].clone(), "provider-turn-1");
 
@@ -11496,11 +11561,67 @@ mod error_outcome_emission_tests {
         );
         assert!(pool.agents_mut().iter().all(Option::is_some));
         assert!(respawn_tasks.is_empty());
+        assert_eq!(
+            pool.agents_mut()[0]
+                .as_ref()
+                .unwrap()
+                .state
+                .sessions
+                .get(&batches[0].scope)
+                .map(String::as_str),
+            Some("session-0"),
+            "application error with an intact pipe must preserve its scoped session"
+        );
+        assert_eq!(
+            pool.agents_mut()[0]
+                .as_ref()
+                .unwrap()
+                .state
+                .sessions
+                .get(&unaffected_scope)
+                .map(String::as_str),
+            Some("session-unaffected"),
+            "an unrelated session on the same worker must survive"
+        );
+        assert_eq!(
+            pool.agents_mut()[1]
+                .as_ref()
+                .unwrap()
+                .state
+                .sessions
+                .get(&batches[1].scope)
+                .map(String::as_str),
+            Some("session-1"),
+            "the other failed worker's intact scoped session must survive"
+        );
+
+        // Exercise the real retry path. New traffic joins the requeued batch,
+        // but its admission correlation remains anchored to the oldest event.
+        let original_event_id = batches[0].events[0].event.id.to_hex();
+        let joined = queued(channels[0], "newer-private-prompt");
+        let joined_event_id = joined.event.id.to_hex();
+        assert!(queue.push(joined));
+        queue.clear_retry_throttle_for_test(batches[0].scope.clone());
+        let retry_batch = queue.flush_next().expect("requeued batch redispatches");
+        assert_eq!(retry_batch.scope, batches[0].scope);
+        assert_eq!(batch_correlation_id(&retry_batch), stable);
+        let retry_ids: HashSet<_> = retry_batch
+            .events
+            .iter()
+            .map(|event| event.event.id.to_hex())
+            .collect();
+        assert_eq!(retry_ids.len(), 2);
+        assert!(retry_ids.contains(&original_event_id));
+        assert!(retry_ids.contains(&joined_event_id));
 
         // Exhaustion is explicit and distinct from retry.
         queue.set_retry_count_for_test(&batches[2].scope, crate::queue::MAX_RETRIES);
-        let worker = pool.try_claim(None).expect("reusable worker");
+        let mut worker = pool.try_claim(None).expect("reusable worker");
         let worker_index = worker.index;
+        let generation = pool.record_scope_owner(batches[2].scope.clone(), worker_index);
+        worker
+            .state
+            .set_scope_owner_generation(batches[2].scope.clone(), generation);
         register(
             &mut pool,
             worker_index,
@@ -11525,15 +11646,17 @@ mod error_outcome_emission_tests {
             &observer,
         );
 
-        // A successful production result is recorded as signed, while a
-        // removed channel is explicitly abandoned rather than silently lost.
-        let worker = pool.try_claim(None).expect("reusable worker");
+        // Prompt completion is explicit but is not mislabeled as signed relay
+        // delivery. The removed channel is explicitly abandoned.
+        let worker = pool
+            .try_claim(Some(&retry_batch.scope))
+            .expect("reusable worker");
         let worker_index = worker.index;
         register(
             &mut pool,
             worker_index,
-            batches[2].clone(),
-            "provider-turn-signed",
+            retry_batch.clone(),
+            "provider-turn-retry-completed",
         );
         complete(
             &mut pool,
@@ -11542,7 +11665,7 @@ mod error_outcome_emission_tests {
             worker,
             None,
             PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
-            "provider-turn-signed",
+            "provider-turn-retry-completed",
             &no_removed,
             &mut crash_history,
             &respawn_tx,
@@ -11589,7 +11712,7 @@ mod error_outcome_emission_tests {
             .collect();
         assert_eq!(
             classes,
-            HashSet::from(["signed", "requeued", "dead-lettered", "abandoned"])
+            HashSet::from(["prompt-completed", "requeued", "dead-lettered", "abandoned",])
         );
         assert!(terminals.iter().all(|event| {
             event.payload["correlationId"]
