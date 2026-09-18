@@ -112,6 +112,8 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 Run `just ci` before every PR — it runs repository-wide formatting, lint,
 and static checks; Rust, Tauri, desktop, and mobile tests; and desktop and web
 builds. Clippy passing does not mean fmt passes; run both.
+For changes limited to the mobile codebase, run `just mobile-check mobile-test`
+instead of `just ci`.
 
 Run `just test` for integration tests if you touched `buzz-relay`,
 `buzz-db`, or `buzz-auth` — these require a running Postgres and Redis.
