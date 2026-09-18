@@ -787,11 +787,23 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
+/// Zero-arg runtimes must be listed here explicitly, not left to fall through
+/// to `None`. Windows cannot represent an empty-string environment variable —
+/// `SetEnvironmentVariable(name, "")` deletes the variable instead of setting
+/// it — so when the desktop spawns one of these agents with an empty args
+/// list, `BUZZ_ACP_AGENT_ARGS` never reaches the child process on Windows and
+/// clap falls back to its own `default_value = "acp"`. Any runtime missing
+/// from this list then receives a spurious `acp` argv token on Windows only
+/// (Linux/macOS pass the real empty string through untouched), which for a
+/// runtime that doesn't understand an `acp` subcommand (e.g. `hermes-acp`)
+/// crashes the child before it can respond to ACP `initialize`, surfacing to
+/// the user as "agent process exited unexpectedly" / an empty model list.
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        | "claudecode" | "buzz-agent" | "hermes" | "hermes-agent" | "hermes-acp"
+        | "amp" | "amp-acp" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -1674,6 +1686,33 @@ mod tests {
             normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn normalizes_hermes_and_amp_args_to_empty() {
+        // Regression test: on Windows, `BUZZ_ACP_AGENT_ARGS=""` is dropped
+        // from the child's environment (Windows cannot represent an
+        // empty-string env var), so clap falls back to its own
+        // `default_value = "acp"` and the spawned process sees a lone "acp"
+        // argv token it never asked for. hermes-acp and amp-acp don't take
+        // an `acp` subcommand and crash on it (block/buzz#hermes-model-load).
+        for command in ["hermes", "hermes-agent", "hermes-acp", "amp", "amp-acp"] {
+            assert_eq!(
+                normalize_agent_args(command, Vec::new()),
+                Vec::<String>::new(),
+                "command={command}"
+            );
+            assert_eq!(
+                normalize_agent_args(command, vec!["".into()]),
+                Vec::<String>::new(),
+                "command={command}"
+            );
+            assert_eq!(
+                normalize_agent_args(command, vec!["acp".into()]),
+                Vec::<String>::new(),
+                "command={command}"
+            );
+        }
     }
 
     #[test]
