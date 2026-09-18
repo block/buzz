@@ -126,7 +126,11 @@ moka    = { version = "0.12", features = ["sync"] }
 futures-util = "0.3"
 
 # WebSocket client (test client)
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+# Both root sources on purpose. Native roots let wss:// work where the OS trusts a
+# CA the Mozilla bundle does not (TLS-inspecting proxies), and honor SSL_CERT_FILE.
+# Keeping webpki roots means an empty native store is not fatal, so hosts without a
+# system trust store — minimal containers — behave as they do today.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
 url = "2"
 
 # Property-based testing (dev-only)
