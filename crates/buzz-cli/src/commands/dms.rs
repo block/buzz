@@ -4,12 +4,30 @@ use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{parse_uuid, sdk_err, validate_hex64};
 
-/// List DM conversations by querying kind:41001 (relay-confirmed DMs) filtered by our pubkey.
+fn has_tag(event: &serde_json::Value, name: &str, value: &str) -> bool {
+    event
+        .get("tags")
+        .and_then(|tags| tags.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                tag.as_array().is_some_and(|values| {
+                    values.first().and_then(|entry| entry.as_str()) == Some(name)
+                        && values.get(1).and_then(|entry| entry.as_str()) == Some(value)
+                })
+            })
+        })
+}
+
+fn is_dm_metadata(event: &serde_json::Value, my_pubkey: &str) -> bool {
+    has_tag(event, "t", "dm") && has_tag(event, "p", my_pubkey)
+}
+
+/// List DMs from canonical kind:39000 metadata, scoped to this participant.
 pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(), CliError> {
     let my_pk = client.keys().public_key().to_hex();
     let limit = limit.unwrap_or(50).min(200);
     let filter = serde_json::json!({
-        "kinds": [41001],
+        "kinds": [39000],
         "#p": [my_pk],
         "limit": limit
     });
@@ -17,17 +35,18 @@ pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(),
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     let dms: Vec<serde_json::Value> = events
         .iter()
-        .map(|e| {
-            let dm_id = extract_d_tag(e);
-            let participants: Vec<String> = e
+        .filter(|event| is_dm_metadata(event, &my_pk))
+        .map(|event| {
+            let dm_id = extract_d_tag(event);
+            let participants: Vec<String> = event
                 .get("tags")
-                .and_then(|t| t.as_array())
+                .and_then(|tags| tags.as_array())
                 .map(|tags| {
                     tags.iter()
                         .filter_map(|tag| {
-                            let arr = tag.as_array()?;
-                            if arr.first()?.as_str()? == "p" {
-                                arr.get(1)?.as_str().map(|s| s.to_string())
+                            let values = tag.as_array()?;
+                            if values.first()?.as_str()? == "p" {
+                                values.get(1)?.as_str().map(str::to_owned)
                             } else {
                                 None
                             }
@@ -38,7 +57,7 @@ pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(),
             serde_json::json!({
                 "dm_id": dm_id,
                 "participants": participants,
-                "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+                "created_at": event.get("created_at").and_then(|value| value.as_u64()).unwrap_or(0),
             })
         })
         .collect();
@@ -132,5 +151,42 @@ pub async fn dispatch(cmd: crate::DmsCmd, client: &BuzzClient) -> Result<(), Cli
         DmsCmd::Open { pubkeys } => cmd_open_dm(client, &pubkeys).await,
         DmsCmd::AddMember { channel, pubkey } => cmd_add_dm_member(client, &channel, &pubkey).await,
         DmsCmd::Hide { channel } => cmd_hide_dm(client, &channel).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VIEWER: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const OTHER: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    #[test]
+    fn recognizes_canonical_dm_metadata() {
+        let event = serde_json::json!({
+            "created_at": 42,
+            "tags": [
+                ["d", "3f5a452d-afd9-4d05-8263-8cfdf68b16b7"],
+                ["hidden"],
+                ["t", "dm"],
+                ["p", VIEWER],
+                ["p", OTHER]
+            ]
+        });
+
+        assert!(is_dm_metadata(&event, VIEWER));
+    }
+
+    #[test]
+    fn rejects_non_dm_or_mis_scoped_metadata() {
+        let stream = serde_json::json!({
+            "tags": [["d", "85ca0239-d670-4bc9-ba2b-82fb063b3f3d"], ["t", "stream"], ["p", VIEWER]]
+        });
+        let other_dm = serde_json::json!({
+            "tags": [["d", "5a4021da-4652-4f52-9aa1-b2f937cbeab6"], ["t", "dm"], ["p", OTHER]]
+        });
+
+        assert!(!is_dm_metadata(&stream, VIEWER));
+        assert!(!is_dm_metadata(&other_dm, VIEWER));
     }
 }
