@@ -111,7 +111,11 @@ jobs:
       - name: Analyze
         run: cd mobile && flutter analyze
       - name: Test
-        run: cd mobile && flutter test
+        run: cd mobile && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+      - name: Test mobile without push configuration
+        run: cd mobile && flutter test test/shared/push/push_unconfigured_build_test.dart
+      - name: Test mobile recipe argument forwarding
+        run: /bin/bash scripts/test-mobile-gateway-recipes.sh
       - name: Build Android debug APK
         run: just mobile-build-android
 
@@ -131,8 +135,12 @@ jobs:
         run: swift build -c release --package-path mobile/ios/BuzzPushKit
       - name: Test
         run: swift test --package-path mobile/ios/BuzzPushKit
+      - name: Build complete iOS simulator app
+        run: cd mobile && flutter build ios --simulator --debug --no-pub
       - name: Build complete unsigned iOS release
-        run: cd mobile && flutter build ios --release --no-codesign --no-pub
+        run: |
+          /bin/bash scripts/test-mobile-gateway-recipes.sh
+          cd mobile && flutter build ios --release --no-codesign --no-pub
 
   results:
     name: Results

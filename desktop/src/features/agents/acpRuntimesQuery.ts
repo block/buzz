@@ -272,17 +272,32 @@ export function useAcpRuntimesQueryForced(options?: {
     queryFn: () => discoverAcpRuntimes({ force: true }),
     enabled: false,
   });
-  const forceRefresh = React.useCallback(
-    () => refreshAcpRuntimes(queryClient),
-    [queryClient],
-  );
+  const [hasForcedCheckStarted, setHasForcedCheckStarted] =
+    React.useState(false);
+  const [isOwnedForcedCheckPending, setIsOwnedForcedCheckPending] =
+    React.useState(false);
+  const forceRefresh = React.useCallback(async () => {
+    // Own the launch state instead of inferring it from the query observer.
+    // A fast mocked/native response can start and settle inside one React
+    // batch, so consumers may never render the transient query fetching state.
+    setHasForcedCheckStarted(true);
+    setIsOwnedForcedCheckPending(true);
+    try {
+      return await refreshAcpRuntimes(queryClient);
+    } finally {
+      setIsOwnedForcedCheckPending(false);
+    }
+  }, [queryClient]);
   React.useEffect(() => {
-    if (enabled && forceOnMount) void forceRefresh();
+    if (!enabled || !forceOnMount) return;
+    void forceRefresh();
   }, [enabled, forceOnMount, forceRefresh]);
-  const isFetching = query.isFetching || forcedQuery.isFetching;
+  const isFetching =
+    isOwnedForcedCheckPending || query.isFetching || forcedQuery.isFetching;
   return {
     ...query,
     error: forcedQuery.error ?? query.error,
+    hasForcedCheckStarted,
     isError: forcedQuery.isError || query.isError,
     isFetching,
     isLoading: isFetching && query.data === undefined,

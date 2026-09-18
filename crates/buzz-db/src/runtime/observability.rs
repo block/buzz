@@ -7,6 +7,8 @@ use std::future::Future;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use super::DbPoolRole;
+
 /// One valid pool/operation acquisition family.
 ///
 /// Keeping role and operation in one enum makes invalid combinations
@@ -111,9 +113,9 @@ impl PoolOperation {
     pub(crate) const fn pool_role(self) -> &'static str {
         match self {
             Self::ReaderBootstrap | Self::ReaderAuthorization | Self::ReaderSubscriptionHistory => {
-                "reader"
+                DbPoolRole::Reader.as_str()
             }
-            _ => "writer",
+            _ => DbPoolRole::Writer.as_str(),
         }
     }
 
@@ -138,21 +140,21 @@ impl PoolOperation {
 }
 
 pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] = [
-    ("writer", "bootstrap"),
-    ("reader", "bootstrap"),
-    ("writer", "readiness"),
-    ("writer", "tenant_resolution"),
-    ("writer", "authentication"),
-    ("writer", "authorization"),
-    ("reader", "authorization"),
-    ("writer", "subscription_history"),
-    ("reader", "subscription_history"),
-    ("writer", "event_write"),
-    ("writer", "maintenance"),
+    (DbPoolRole::Writer.as_str(), "bootstrap"),
+    (DbPoolRole::Reader.as_str(), "bootstrap"),
+    (DbPoolRole::Writer.as_str(), "readiness"),
+    (DbPoolRole::Writer.as_str(), "tenant_resolution"),
+    (DbPoolRole::Writer.as_str(), "authentication"),
+    (DbPoolRole::Writer.as_str(), "authorization"),
+    (DbPoolRole::Reader.as_str(), "authorization"),
+    (DbPoolRole::Writer.as_str(), "subscription_history"),
+    (DbPoolRole::Reader.as_str(), "subscription_history"),
+    (DbPoolRole::Writer.as_str(), "event_write"),
+    (DbPoolRole::Writer.as_str(), "maintenance"),
 ];
 
-/// Eleven valid pairs × (12 histogram series + 4 outcome counters + 1 gauge).
-pub(crate) const POOL_ACQUIRE_RAW_SERIES_PER_POD: usize = POOL_ACQUIRE_VALID_PAIRS.len() * 17;
+/// Eleven valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
+pub(crate) const POOL_ACQUIRE_RAW_SERIES_PER_POD: usize = POOL_ACQUIRE_VALID_PAIRS.len() * 18;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LockType {
@@ -355,7 +357,7 @@ fn publish_waiters(pair: PoolOperation, value: u64) {
 /// idle eviction cannot turn an expected zero into ambiguous missing data.
 pub(crate) fn refresh_pool_waiters(include_reader: bool) {
     for pair in PoolOperation::ALL {
-        if pair.pool_role() == "reader" && !include_reader {
+        if pair.pool_role() == DbPoolRole::Reader.as_str() && !include_reader {
             continue;
         }
         let waiters = POOL_WAITERS[pair.index()]
@@ -380,6 +382,12 @@ struct PoolAcquireAttempt {
 
 impl PoolAcquireAttempt {
     fn start(pair: PoolOperation, emit_legacy: bool) -> Self {
+        metrics::counter!(
+            "buzz_db_pool_acquire_started_total",
+            "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
+        )
+        .increment(1);
         {
             let mut waiters = POOL_WAITERS[pair.index()]
                 .lock()
@@ -604,7 +612,7 @@ mod tests {
                 PoolOperation::ReaderSubscriptionHistory,
             ]
         );
-        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 187);
+        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 198);
         assert_eq!(
             LockType::ALL.map(LockType::as_str),
             [
@@ -861,6 +869,24 @@ mod tests {
         let _guard = metrics::set_default_local_recorder(&recorder);
 
         let attempt = PoolAcquireAttempt::start(PoolOperation::WriterTenantResolution, false);
+        let in_flight = snapshotter.snapshot().into_vec();
+        assert!(in_flight.iter().any(|(key, _, _, value)| {
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect::<BTreeMap<_, _>>();
+            matches!(value, DebugValue::Counter(1))
+                && key.key().name() == "buzz_db_pool_acquire_started_total"
+                && labels.get("pool_role") == Some(&"writer")
+                && labels.get("operation") == Some(&"tenant_resolution")
+        }));
+        assert!(
+            in_flight.iter().all(|(key, _, _, _)| {
+                key.key().name() != "buzz_db_pool_acquire_attempts_total"
+            }),
+            "the request-start signal must be observable before its terminal"
+        );
         drop(attempt);
         refresh_pool_waiters(true);
 

@@ -109,8 +109,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Pi",
         command: "buzz-pi-acp",
         args: &[],
-        install_instructions_url: "https://github.com/salman1993/pi-acp",
-        install_hint: "Requires Node.js 22 or newer. Install the Pi ACP adapter with `npm install -g --install-links=true git+https://github.com/salman1993/pi-acp.git#main`. Restart Buzz, then select Pi as the agent harness. Run the same install command again to update the adapter.",
+        install_instructions_url: "https://github.com/salman1993/buzz-pi-acp",
+        install_hint: "Requires Node.js 22 or newer. Install the Pi ACP adapter with `npm install -g --install-links=true 'git+https://github.com/salman1993/buzz-pi-acp.git#86b201e'`. Make sure `buzz-pi-acp` is on PATH, then restart Buzz.",
         underlying_cli: Some("pi"),
         underlying_cli_install_hint: Some(
             "Install Pi with `npm install -g @earendil-works/pi-coding-agent`, then run `pi` to configure its model provider.",
@@ -434,11 +434,11 @@ mod tests {
         assert!(adapter_missing.default_args.is_empty());
         assert_eq!(
             adapter_missing.install_hint,
-            "Requires Node.js 22 or newer. Install the Pi ACP adapter with `npm install -g --install-links=true git+https://github.com/salman1993/pi-acp.git#main`. Restart Buzz, then select Pi as the agent harness. Run the same install command again to update the adapter."
+            "Requires Node.js 22 or newer. Install the Pi ACP adapter with `npm install -g --install-links=true 'git+https://github.com/salman1993/buzz-pi-acp.git#86b201e'`. Make sure `buzz-pi-acp` is on PATH, then restart Buzz."
         );
         assert_eq!(
             adapter_missing.install_instructions_url,
-            "https://github.com/salman1993/pi-acp"
+            "https://github.com/salman1993/buzz-pi-acp"
         );
 
         let cli_missing = preset_catalog_entry(preset, |command| {
@@ -462,7 +462,7 @@ mod tests {
         );
         assert_eq!(
             not_installed.install_hint,
-            "Install Pi with `npm install -g @earendil-works/pi-coding-agent`, then run `pi` to configure its model provider. Requires Node.js 22 or newer. Install the Pi ACP adapter with `npm install -g --install-links=true git+https://github.com/salman1993/pi-acp.git#main`. Restart Buzz, then select Pi as the agent harness. Run the same install command again to update the adapter."
+            "Install Pi with `npm install -g @earendil-works/pi-coding-agent`, then run `pi` to configure its model provider. Requires Node.js 22 or newer. Install the Pi ACP adapter with `npm install -g --install-links=true 'git+https://github.com/salman1993/buzz-pi-acp.git#86b201e'`. Make sure `buzz-pi-acp` is on PATH, then restart Buzz."
         );
     }
 

@@ -400,7 +400,7 @@ class RunnerTests: XCTestCase {
     let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
 
     XCTAssertEqual(size.width, 216)
-    XCTAssertEqual(size.height, 264)
+    XCTAssertEqual(size.height, 324) // Five actions, including voice notes.
     XCTAssertEqual(NativeAttachmentMenuLayout.contentPadding, 16)
     XCTAssertEqual(
       NativeAttachmentMenuLayout.itemHeight(compatibleWith: traits),

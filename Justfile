@@ -385,6 +385,12 @@ test-unit:
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
+        # Storage accounting crosses three crates whose focused regression
+        # suites are otherwise absent from the infra-free unit lane.
+        cargo nextest run -p buzz-media --lib \
+            -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys)'
+        cargo nextest run -p buzz-admin \
+            -E 'test(=storage_snapshot_tests::failed_fold_never_invokes_snapshot_persistence)'
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the
@@ -451,7 +457,7 @@ test-unit:
         # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
         # unit job either.
         cargo nextest run -p buzz-relay --lib \
-            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/)'
+            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/)'
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
@@ -829,7 +835,9 @@ mobile-check:
 
 # Run mobile tests
 mobile-test:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test
+    /bin/bash ./scripts/test-mobile-gateway-recipes.sh
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test test/shared/push/push_unconfigured_build_test.dart
 
 # Regenerate the emoji dataset asset from desktop's emoji-mart install.
 # Output is committed — rerun after bumping @emoji-mart/data.
@@ -838,8 +846,16 @@ mobile-emoji-data:
 
 # Compile an unsigned Android debug APK (worktree-aware debug identity)
 mobile-build-android:
+    #!/usr/bin/env bash
+    set -euo pipefail
     ./scripts/mobile-worktree-overrides.sh
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build apk --debug --no-pub
+    set -- build apk --debug --no-pub
+    if [[ -n "${BUZZ_PUSH_GATEWAY_URL:-}" ]]; then
+        set -- "$@" --dart-define="BUZZ_PUSH_GATEWAY_URL=${BUZZ_PUSH_GATEWAY_URL}"
+    fi
+    unset GIT_DIR GIT_WORK_TREE
+    cd {{mobile_dir}}
+    flutter "$@"
 
 # Run the mobile app on iOS simulator (worktree-aware debug identity)
 mobile-dev:
@@ -850,9 +866,18 @@ mobile-dev:
         sleep 3
     fi
     ./scripts/mobile-worktree-overrides.sh
+    gateway_url="${BUZZ_PUSH_GATEWAY_URL:-}"
+    overrides_file="{{mobile_dir}}/ios/Flutter/AppOverrides.xcconfig"
+    if [[ -z "$gateway_url" && -f "$overrides_file" ]]; then
+        gateway_url="$(sed -nE 's/^[[:space:]]*BUZZ_PUSH_GATEWAY_URL[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' "$overrides_file" | tail -n 1 | sed 's/\$()//g')"
+    fi
+    set -- run
+    if [[ -n "$gateway_url" ]]; then
+        set -- "$@" --dart-define="BUZZ_PUSH_GATEWAY_URL=${gateway_url}"
+    fi
     cd {{mobile_dir}}
     unset GIT_DIR GIT_WORK_TREE
-    flutter run
+    flutter "$@"
 
 # Uninstall stale worktree-suffixed Buzz debug installs (production apps kept)
 mobile-clean:

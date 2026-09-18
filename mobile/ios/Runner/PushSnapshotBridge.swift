@@ -1,44 +1,88 @@
 import BuzzPushKit
 import Flutter
 import Foundation
+import Intents
+import UserNotifications
 
 final class BuzzPushSnapshotBridge {
-  private let appGroupIdentifier: String?
+  private let containerURL: () -> URL?
   private let endpointGrantStore: BuzzPushEndpointGrantKeychainStore
+  private let interactionDeletionDeadline: BuzzInteractionDeletionDeadline
   private let keychainAccessGroup: String?
   private let queue = DispatchQueue(
     label: "xyz.block.buzz.push-snapshot",
     qos: .utility
   )
   private lazy var store: BuzzPushPresentationCacheStore? = {
-    guard let appGroupIdentifier,
-      let container = FileManager.default.containerURL(
-        forSecurityApplicationGroupIdentifier: appGroupIdentifier
-      )
-    else { return nil }
+    guard let container = containerURL() else { return nil }
     return BuzzPushPresentationCacheStore(containerURL: container)
   }()
+  private let ageRestrictionSession = BuzzAgeRestrictionSession()
 
   init(
     appGroupIdentifier: String?,
     endpointGrantStore: BuzzPushEndpointGrantKeychainStore,
-    keychainAccessGroup: String?
+    keychainAccessGroup: String?,
+    containerURL: (() -> URL?)? = nil,
+    interactionDeletionDeadline: BuzzInteractionDeletionDeadline =
+      BuzzInteractionDeletionDeadline(
+        timeout: 5,
+        deleteAllInteractions: { completion in
+          INInteraction.deleteAll(completion: completion)
+        },
+        scheduleTimeout: { delay, action in
+          DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + delay,
+            execute: action
+          )
+        }
+      )
   ) {
-    self.appGroupIdentifier = appGroupIdentifier
+    self.containerURL = containerURL ?? {
+      guard let appGroupIdentifier else { return nil }
+      return FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupIdentifier)
+    }
     self.endpointGrantStore = endpointGrantStore
     self.keychainAccessGroup = keychainAccessGroup
+    self.interactionDeletionDeadline = interactionDeletionDeadline
   }
 
   @discardableResult
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) -> Bool {
-    guard call.method == "syncPushSnapshot",
+    if call.method == "restoreAgeRestrictedNotifications" {
+      queue.async { [self] in
+        ageRestrictionSession.release()
+        BuzzInteractionCleanupRetry(
+          containerURL: containerURL(), deletion: interactionDeletionDeadline
+        ).retryPending { error in
+          Self.complete(result, value: error.map {
+            FlutterError(code: "interaction_cleanup_retry_failed",
+              message: "Unable to finish pending interaction cleanup.",
+              details: $0.localizedDescription)
+          })
+        }
+      }
+      return true
+    }
+    if call.method == "purgeAgeRestrictedNotifications" {
+      purgeAgeRestrictedNotifications(result: result)
+      return true
+    }
+    let strictAgeGateWrite = call.method == "syncAgeGatePushSnapshot"
+    guard strictAgeGateWrite || call.method == "syncPushSnapshot",
       let arguments = call.arguments as? [String: Any],
       let section = arguments["section"] as? String
     else {
       return false
     }
     switch section {
-    case "communities": syncCommunities(arguments, result: result)
+    case "communities":
+      syncCommunities(
+        arguments,
+        requiresStore: strictAgeGateWrite,
+        result: result
+      )
     case "profiles": cacheProfiles(arguments, result: result)
     case "channels": cacheChannels(arguments, result: result)
     case "avatar": cacheAvatar(arguments, result: result)
@@ -47,10 +91,60 @@ final class BuzzPushSnapshotBridge {
     return true
   }
 
-  private func syncCommunities(_ arguments: [String: Any], result: @escaping FlutterResult) {
+  private func purgeAgeRestrictedNotifications(result: @escaping FlutterResult) {
+    queue.async { [weak self] in
+      do {
+        guard let self, let container = containerURL() else {
+          throw NSError(
+            domain: "BuzzPushSnapshotBridge",
+            code: 1,
+            userInfo: [
+              NSLocalizedDescriptionKey: "The age-restriction session container is unavailable."
+            ]
+          )
+        }
+        try ageRestrictionSession.restrict(containerURL: container)
+        // Preserve snapshots and credentials. Restriction authority expires
+        // with this process even when cleanup or a later storage read fails.
+        let center = UNUserNotificationCenter.current()
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
+        BuzzInteractionCleanupRetry(
+          containerURL: container, deletion: interactionDeletionDeadline
+        ).request { error in
+          Self.complete(
+            result,
+            value: error.map {
+              FlutterError(
+                code: "age_restriction_purge_failed",
+                message: "Unable to suppress and purge restricted notifications.",
+                details: $0.localizedDescription
+              )
+            }
+          )
+        }
+      } catch {
+        Self.complete(
+          result,
+          value: FlutterError(
+            code: "age_restriction_purge_failed",
+            message: "Unable to suppress and purge restricted notifications.",
+            details: error.localizedDescription
+          )
+        )
+      }
+    }
+  }
+
+  private func syncCommunities(
+    _ arguments: [String: Any],
+    requiresStore: Bool,
+    result: @escaping FlutterResult
+  ) {
     guard let communities = arguments["communities"] as? [[String: Any]],
       let signingKeys = arguments["signingKeys"] as? [String: String],
-      communities.count <= BuzzPushPresentationCacheStore.maximumCommunities
+      communities.count <= BuzzPushPresentationCacheStore.maximumCommunities,
+      !requiresStore || arguments["settleFence"] is Bool
     else {
       result(
         FlutterError(
@@ -63,8 +157,30 @@ final class BuzzPushSnapshotBridge {
     }
     queue.async { [weak self] in
       do {
-        guard let self, let store else {
-          Self.complete(result, value: nil)
+        guard let self else {
+          Self.complete(
+            result,
+            value: requiresStore
+              ? FlutterError(
+                code: "snapshot_sync_unavailable",
+                message: "The push snapshot bridge is unavailable.",
+                details: nil
+              )
+              : nil
+          )
+          return
+        }
+        guard let store else {
+          Self.complete(
+            result,
+            value: requiresStore
+              ? FlutterError(
+                code: "snapshot_sync_unavailable",
+                message: "The push snapshot store is unavailable.",
+                details: nil
+              )
+              : nil
+          )
           return
         }
         // Relay-metadata enrichment is optional presentation state. A damaged
@@ -83,10 +199,11 @@ final class BuzzPushSnapshotBridge {
         }
         let data = try JSONSerialization.data(withJSONObject: enriched, options: [.sortedKeys])
         let decoded = try JSONDecoder().decode([PushLeaseCommunity].self, from: data)
+        // Ordinary snapshot maintenance never changes age access.
         try store.replaceCommunities(decoded)
         try BuzzPushKeychain.replace(
           signingKeys: signingKeys,
-          accessGroup: keychainAccessGroup
+          accessGroup: self.keychainAccessGroup
         )
         Self.complete(result, value: nil)
       } catch {
@@ -248,11 +365,9 @@ final class BuzzPushSnapshotBridge {
   }
 
   private func community(id: String) -> PushLeaseCommunity? {
-    guard let appGroupIdentifier,
-      let container = FileManager.default.containerURL(
-        forSecurityApplicationGroupIdentifier: appGroupIdentifier
-      ),
-      let data = try? Data(contentsOf: container.appendingPathComponent(BuzzPushPresentationCacheStore.fileName)),
+    guard let container = containerURL(),
+      let data = try? Data(
+        contentsOf: container.appendingPathComponent(BuzzPushPresentationCacheStore.fileName)),
       let snapshot = try? JSONDecoder().decode(BuzzPushPresentationCacheSnapshot.self, from: data)
     else { return nil }
     return snapshot.communities.first { $0.id == id }
