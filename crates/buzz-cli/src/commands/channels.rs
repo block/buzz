@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use buzz_core::kind::{
-    KIND_MANAGED_AGENT, KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE, KIND_TEAM,
+    KIND_AGENT_PROFILE, KIND_MANAGED_AGENT, KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE, KIND_TEAM,
 };
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
@@ -1408,6 +1408,39 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
+async fn fetch_own_agent_profile(client: &BuzzClient) -> Result<Option<nostr::Event>, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [KIND_AGENT_PROFILE],
+        "authors": [client.keys().public_key().to_hex()],
+        "limit": 1,
+    });
+    let raw = client.query(&filter).await?;
+    let mut events: Vec<nostr::Event> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse agent profile response: {e}")))?;
+    events.sort_by_key(|event| std::cmp::Reverse(event.created_at));
+    Ok(events.into_iter().next())
+}
+
+fn build_agent_profile_content(
+    prior: Option<&nostr::Event>,
+    policy: &str,
+) -> Result<String, CliError> {
+    let mut content = match prior {
+        Some(event) => serde_json::from_str::<serde_json::Value>(&event.content)
+            .map_err(|e| CliError::Other(format!("failed to parse existing agent profile: {e}")))?,
+        None => serde_json::json!({}),
+    };
+    let object = content.as_object_mut().ok_or_else(|| {
+        CliError::Other("existing agent profile content must be a JSON object".to_string())
+    })?;
+    object.insert(
+        "channel_add_policy".to_string(),
+        serde_json::Value::String(policy.to_string()),
+    );
+    serde_json::to_string(&content)
+        .map_err(|e| CliError::Other(format!("failed to serialize agent profile: {e}")))
+}
+
 /// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
 pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
     match policy {
@@ -1439,13 +1472,12 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         }
     }
 
-    let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
+    // kind:10100 is a replaceable event. Carry forward the existing profile so
+    // changing the policy does not erase fields such as name or respond_to.
+    let prior_profile = fetch_own_agent_profile(client).await?;
+    let content = build_agent_profile_content(prior_profile.as_ref(), policy)?;
     use nostr::{EventBuilder, Kind};
-    let builder = EventBuilder::new(
-        Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
-        &content,
-    )
-    .tags([]);
+    let builder = EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE as u16), &content).tags([]);
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
@@ -1586,11 +1618,12 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
-        cmd_set_add_policy, fetch_candidate_hints, finalize_roster_resolution, format_candidate,
-        hints_from_results, join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, CandidateHint,
-        ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
+        apply_cardinality_rule, assemble_roster_resolution, build_agent_profile_content,
+        build_hint_map, build_template_report, cmd_set_add_policy, fetch_candidate_hints,
+        finalize_roster_resolution, format_candidate, hints_from_results, join_bounded_queries,
+        name_matches, resolve_roster_with_archive_filter, validate_ttl_seconds,
+        validate_update_channel_fields, ArchivedExclusion, CandidateHint, ChannelSummary,
+        ResolvedAgent, RosterResolution, SkippedSlug, KIND_AGENT_PROFILE,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -1780,6 +1813,28 @@ mod tests {
             result.is_ok(),
             "empty allowed list should permit any policy: {result:?}"
         );
+    }
+
+    #[test]
+    fn set_add_policy_preserves_existing_agent_profile_fields() {
+        use nostr::{EventBuilder, Keys, Kind};
+
+        let keys = Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
+            .expect("valid test key");
+        let prior = EventBuilder::new(
+            Kind::Custom(KIND_AGENT_PROFILE as u16),
+            r#"{"name":"Scout","respond_to":"anyone","channel_add_policy":"owner_only"}"#,
+        )
+        .sign_with_keys(&keys)
+        .expect("sign profile");
+
+        let content = build_agent_profile_content(Some(&prior), "nobody")
+            .expect("profile content should be updated");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+
+        assert_eq!(value["name"], "Scout");
+        assert_eq!(value["respond_to"], "anyone");
+        assert_eq!(value["channel_add_policy"], "nobody");
     }
 
     // --- Integration test: full env-var → cmd_set_add_policy() path ---
