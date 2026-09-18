@@ -21,7 +21,7 @@
 
 #[cfg(target_os = "macos")]
 use tauri::menu::{
-    AboutMetadata, Menu, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
+    AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
 };
 #[cfg(target_os = "macos")]
 use tauri::AppHandle;
@@ -63,6 +63,13 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                 true,
                 &[
                     &PredefinedMenuItem::about(app, None, Some(about_metadata))?,
+                    &MenuItem::with_id(
+                        app,
+                        crate::tray_menu::OPEN_SETTINGS_ID,
+                        "Settings…",
+                        true,
+                        Some("CmdOrCtrl+,"),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::services(app, None)?,
                     &PredefinedMenuItem::separator(app)?,
