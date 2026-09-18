@@ -1159,6 +1159,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tauri-utils",
+ "tauri-winrt-notification",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.29.0",
@@ -1170,7 +1171,9 @@ dependencies = [
  "uuid",
  "webkit2gtk",
  "window-vibrancy",
+ "windows 0.61.3",
  "windows-sys 0.61.2",
+ "winsafe",
  "zeroize",
  "zip 8.6.0",
 ]
@@ -2308,7 +2311,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -10905,7 +10908,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -13189,6 +13192,12 @@ dependencies = [
  "cfg-if 1.0.4",
  "windows-sys 0.59.0",
 ]
+
+[[package]]
+name = "winsafe"
+version = "0.0.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ef0ffc427f045c0cc9ebffd6f4f91153dcd2a1547b5c3c29ee3f541e16e95c6"
 
 [[package]]
 name = "wit-bindgen"
