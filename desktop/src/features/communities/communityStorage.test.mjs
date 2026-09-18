@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   clearCommunityStorage,
   initFirstCommunity,
+  joinHomePath,
   loadCommunities,
   loadCommunityDiscoveryAfterLeave,
   markCommunityDiscoveryAfterLeave,
@@ -131,4 +132,32 @@ test("clearCommunityStorage preserves completed final-leave discovery", () => {
 
   assert.equal(storage.length, 1);
   assert.equal(loadCommunityDiscoveryAfterLeave(storage), true);
+});
+
+const WINDOWS_HOME = "C:\\Users\\you\\";
+
+test("joinHomePath strips a trailing separator of either style", () => {
+  assert.equal(
+    joinHomePath("/Users/you/", "Development"),
+    "/Users/you/Development",
+  );
+  assert.equal(
+    joinHomePath("/Users/you", "Development"),
+    "/Users/you/Development",
+  );
+  assert.equal(
+    joinHomePath(WINDOWS_HOME, "Documents"),
+    "C:\\Users\\you\\Documents",
+  );
+});
+
+test("joinHomePath rewrites forward slashes for a Windows home", () => {
+  assert.equal(
+    joinHomePath(WINDOWS_HOME, "Documents/docker"),
+    "C:\\Users\\you\\Documents\\docker",
+  );
+});
+
+test("joinHomePath keeps backslashes intact for a Unix home", () => {
+  assert.equal(joinHomePath("/Users/you", "odd\\name"), "/Users/you/odd\\name");
 });
