@@ -164,6 +164,55 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::Archived => cmd_archived(client).await,
+
+        AgentsCmd::PublishProfile {
+            name,
+            agent_type,
+            channel_ids,
+            status,
+            respond_to,
+            respond_to_allowlist,
+            channel_add_policy,
+        } => {
+            match respond_to.as_str() {
+                "owner-only" | "allowlist" | "anyone" => {}
+                _ => {
+                    return Err(CliError::Usage(format!(
+                        "--respond-to must be 'owner-only', 'allowlist', or 'anyone' (got: {respond_to})"
+                    )))
+                }
+            }
+            match channel_add_policy.as_str() {
+                "anyone" | "owner_only" | "nobody" => {}
+                _ => {
+                    return Err(CliError::Usage(format!(
+                        "--channel-add-policy must be 'anyone', 'owner_only', or 'nobody' (got: {channel_add_policy})"
+                    )))
+                }
+            }
+            let content = json!({
+                "name": name,
+                "agent_type": agent_type,
+                "channels": [],
+                "channel_ids": channel_ids,
+                "capabilities": [],
+                "status": status,
+                "respond_to": respond_to,
+                "respond_to_allowlist": respond_to_allowlist,
+                "channel_add_policy": channel_add_policy,
+            })
+            .to_string();
+            use nostr::{EventBuilder, Kind};
+            let builder = EventBuilder::new(
+                Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
+                &content,
+            )
+            .tags([]);
+            let event = client.sign_event(builder)?;
+            let resp = client.submit_event(event).await?;
+            println!("{resp}");
+            Ok(())
+        }
     }
 }
 
