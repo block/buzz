@@ -513,3 +513,119 @@ test("addThreadActivityItems keeps newest items when input is newest-first", () 
   assert.equal(result.items[0].id, "reply-1");
   assert.equal(result.items.at(-1).id, "reply-100");
 });
+
+// --- A future-dated created_at must not mark later messages read ---
+//
+// `created_at` is self-asserted by the sending client and the relay does not
+// bound it for ordinary messages. Before the skew policy, one event dated a
+// year out landed in the read marker verbatim, so every genuinely new message
+// failed `createdAt > readAt` and was classified read: no badge, no divider,
+// no thread resume, until wall-clock time caught up.
+//
+// The tolerance decides whether a timestamp is *plausible*; it is not a value
+// to clamp to. Clamping an outlier to `now + 120` would manufacture a read
+// frontier two minutes into the future and hide every legitimate message that
+// arrives before the clock reaches it. An implausible timestamp is discarded
+// and the marker repaired to the present instead.
+
+const NOW = 1_780_000_000;
+const YEAR_AHEAD = NOW + 365 * 24 * 60 * 60;
+
+test("resolveChannelReadMarker_futureCallerReadAt_repairsToThePresent", () => {
+  const result = resolveChannelReadMarker(
+    new Date(YEAR_AHEAD * 1_000).toISOString(),
+    undefined,
+    NOW,
+  );
+
+  assert.equal(result.markAt, NOW);
+  assert.ok(
+    result.markAt < YEAR_AHEAD,
+    "a future-dated message must not push the marker past it",
+  );
+});
+
+test("resolveChannelReadMarker_repairedMarker_doesNotHideTheNextTwoMinutes", () => {
+  // The regression the ceiling-clamp version had: a correct message arriving a
+  // second from now must still be unread against the repaired marker.
+  const { markAt } = resolveChannelReadMarker(
+    new Date(YEAR_AHEAD * 1_000).toISOString(),
+    undefined,
+    NOW,
+  );
+
+  const marker = computeChannelUnreadMarker(
+    [topLevel("soon", NOW + 1)],
+    markAt,
+  );
+
+  assert.equal(marker.firstUnreadMessageId, "soon");
+  assert.equal(marker.unreadCount, 1);
+});
+
+test("resolveChannelReadMarker_futureObservedLatest_repairsAndKeepsObserved", () => {
+  const result = resolveChannelReadMarker(null, YEAR_AHEAD, NOW);
+
+  assert.equal(result.markAt, NOW);
+  // The observed refs must survive: that event really is still unread, so
+  // clearing them would drop the sidebar dot the policy exists to preserve.
+  assert.equal(result.clearObserved, false);
+});
+
+test("resolveChannelReadMarker_keepsThePlausibleInputWhenTheOtherIsPoison", () => {
+  // Discarding is per-input, not on the max: a real caller position must not be
+  // thrown away just because the observed timestamp beside it is implausible.
+  const realRead = NOW - 3_600;
+
+  const result = resolveChannelReadMarker(
+    new Date(realRead * 1_000).toISOString(),
+    YEAR_AHEAD,
+    NOW,
+  );
+
+  assert.equal(result.markAt, realRead);
+  assert.equal(result.clearObserved, false);
+});
+
+test("resolveChannelReadMarker_afterRepair_aLaterRealMessageIsStillUnread", () => {
+  // The end-to-end shape of the bug, through the same comparison the divider
+  // uses: poison arrives, the channel is marked read, then a genuine message.
+  const { markAt } = resolveChannelReadMarker(
+    new Date(YEAR_AHEAD * 1_000).toISOString(),
+    undefined,
+    NOW,
+  );
+  const genuineMessage = topLevel("later", NOW + 300);
+
+  const marker = computeChannelUnreadMarker([genuineMessage], markAt);
+
+  assert.equal(marker.firstUnreadMessageId, "later");
+  assert.equal(marker.unreadCount, 1);
+});
+
+test("resolveChannelReadMarker_ordinarySkewInsideTolerance_isKept", () => {
+  // A sender 30s ahead of this machine is normal. Discarding that would move
+  // the marker back to now and leave a message the user just read unread.
+  const slightlyAhead = NOW + 30;
+
+  const result = resolveChannelReadMarker(
+    new Date(slightlyAhead * 1_000).toISOString(),
+    undefined,
+    NOW,
+  );
+
+  assert.equal(result.markAt, slightlyAhead);
+});
+
+test("resolveChannelReadMarker_pastReadAt_isUnaffectedByTheCeiling", () => {
+  // Comfortably before NOW: the ceiling must only ever bite upwards.
+  const readAt = new Date((NOW - 86_400) * 1_000).toISOString();
+  const expected = NOW - 86_400;
+
+  assert.equal(
+    resolveChannelReadMarker(readAt, undefined, NOW).markAt,
+    expected,
+  );
+  assert.equal(resolveChannelReadMarker(null, 200, NOW).markAt, 200);
+  assert.equal(resolveChannelReadMarker(null, undefined, NOW).markAt, null);
+});
