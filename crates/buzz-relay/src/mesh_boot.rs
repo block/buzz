@@ -315,7 +315,13 @@ pub(crate) async fn run_demo_echo(
     tracing::info!(%session_id, %peer, "mesh demo echo: session open");
     let mut drain_tick = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
-        let frame = tokio::select! {
+        // Race only the cancel-safe frame *extraction* against the drain
+        // tick. `recv_validated` must not be raced here: it holds the frame
+        // it just read across the Redis fence await, so a drain tick firing
+        // mid-validation would drop the future and silently destroy the
+        // frame — the stream then looks idle forever and the peer times out
+        // waiting for an echo that can no longer happen (#2458).
+        let wire_frame = tokio::select! {
             _ = drain_tick.tick() => {
                 if shutting_down.load(Ordering::Relaxed) {
                     if let Some(community_id) = stream.community_id() {
@@ -332,7 +338,13 @@ pub(crate) async fn run_demo_echo(
                 }
                 continue;
             }
-            frame = stream.recv_validated(&directory) => frame,
+            frame = stream.recv_frame() => frame,
+        };
+        // Validation (fence + Redis) runs outside the cancellable region.
+        let frame = match wire_frame {
+            Ok(Some(frame)) => stream.validate_received(&directory, frame).await,
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.into()),
         };
         match frame {
             Ok(Some(ReliableFrame::Data(payload))) => {
