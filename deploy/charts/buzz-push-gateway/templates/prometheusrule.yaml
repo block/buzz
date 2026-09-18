@@ -15,15 +15,15 @@ spec:
         # unhealthy; no endpoint is being invalidated but nothing is delivering.
         - alert: PushGatewayConfigurationFault
           expr: |
-            sum(rate(push_gateway_apns_deliveries_total{outcome="configuration_fault"}[5m])) > 0
+            sum(rate({__name__=~"push_gateway_(apns|fcm)_deliveries_total",outcome="configuration_fault"}[5m])) > 0
           for: 10m
           labels: { severity: critical }
           annotations:
-            summary: Push gateway APNs configuration faults
+            summary: Push gateway provider configuration faults
             description: >-
-              APNs is returning certificate or topic configuration faults.
-              Deliveries are failing without invalidating endpoints. See the
-              runbook and check the APNs certificate identity and topic.
+              APNs or FCM is returning credential or profile configuration
+              faults. Deliveries are failing without invalidating endpoints.
+              Check the provider credentials and configured application profile.
         # Authority store unavailable at admission = durable dependency is down.
         - alert: PushGatewayAdmissionUnavailable
           expr: |
@@ -86,4 +86,22 @@ spec:
               (429/500/503), above a minimum sample count, has exceeded the
               configured threshold continuously for 15m. APNs may be throttling
               or degraded; deliveries are delayed but not lost.
+        - alert: PushGatewayHighFcmRetryRate
+          expr: |
+            (
+              sum(increase(push_gateway_fcm_deliveries_total{outcome="retry"}[10m]))
+                / sum(increase(push_gateway_fcm_deliveries_total[10m]))
+              > {{ .Values.prometheusRule.apnsRetryRatioThreshold }}
+            )
+            and
+            sum(increase(push_gateway_fcm_deliveries_total[10m])) >= {{ .Values.prometheusRule.apnsRetryMinSamples }}
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: Push gateway high FCM retry ratio
+            description: >-
+              The retryable fraction of FCM attempts over a 10m window, above
+              a minimum sample count, has exceeded the configured threshold
+              continuously for 15m. FCM may be throttling or degraded;
+              deliveries are delayed but not lost.
 {{- end }}

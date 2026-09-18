@@ -10,6 +10,7 @@ import android.media.MediaExtractor
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.os.Build
+import android.content.Intent
 import androidx.annotation.RequiresApi
 import com.google.android.play.agesignals.AgeSignalsException
 import com.google.android.play.agesignals.model.AgeSignalsErrorCode
@@ -130,6 +131,7 @@ class MainActivity : FlutterFragmentActivity() {
     private var ageSignalChannel: MethodChannel? = null
     private val ageSignalRequest = AgeSignalRequest()
     private var huddleMediaPlugin: HuddleMediaPlugin? = null
+    private var pushPlugin: BuzzAndroidPushPlugin? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -138,6 +140,8 @@ class MainActivity : FlutterFragmentActivity() {
             this,
             flutterEngine.dartExecutor.binaryMessenger,
         )
+        pushPlugin = BuzzAndroidPushPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
+        pushPlugin?.notificationOpened(intent)
 
         mediaUploadChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -198,13 +202,22 @@ class MainActivity : FlutterFragmentActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        pushPlugin?.onRequestPermissionsResult(requestCode, grantResults)
         huddleMediaPlugin?.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pushPlugin?.notificationOpened(intent)
     }
 
     override fun onDestroy() {
         ageSignalRequest.retire()
         huddleMediaPlugin?.dispose()
         huddleMediaPlugin = null
+        pushPlugin?.dispose()
+        pushPlugin = null
         super.onDestroy()
     }
 

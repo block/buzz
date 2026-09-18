@@ -30,6 +30,9 @@
       "properties": {
         "dogfood": {
           "$ref": "#/$defs/enabledProfile"
+        },
+        "android": {
+          "$ref": "#/$defs/androidProfile"
         }
       }
     },
@@ -301,6 +304,28 @@
           "minLength": 1
         }
       }
+    },
+    "androidProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "firebaseProjectId", "firebaseProjectNumber", "firebaseAppId", "fcmServiceAccount"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "firebaseProjectId": { "type": "string" },
+        "firebaseProjectNumber": { "type": "string", "pattern": "^$|^[0-9]+$" },
+        "firebaseAppId": { "type": "string" },
+        "fcmServiceAccount": { "$ref": "#/$defs/apnsCert" }
+      },
+      "allOf": [{
+        "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+        "then": {
+          "properties": {
+            "firebaseProjectId": { "minLength": 1 },
+            "firebaseProjectNumber": { "minLength": 1 },
+            "firebaseAppId": { "minLength": 1 }
+          }
+        }
+      }]
     }
   },
   "required": [

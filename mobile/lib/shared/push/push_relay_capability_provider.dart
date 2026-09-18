@@ -6,11 +6,12 @@ import '../relay/relay_provider.dart';
 import '../relay/relay_session.dart';
 import 'dev_push_lease.dart';
 
-typedef BuzzPushDescriptorFetcher =
-    Future<BuzzPushLeaseDescriptor> Function(String relayBaseUrl);
+typedef BuzzPushDescriptorFetcher = Future<BuzzPushLeaseDescriptor> Function(
+  String relayBaseUrl,
+);
 
 final buzzPushDescriptorFetcherProvider = Provider<BuzzPushDescriptorFetcher>(
-  (ref) => fetchBuzzPushLeaseDescriptor,
+  (ref) => fetchBuzzPushLeaseDescriptorForCurrentPlatform,
 );
 
 /// The fully validated push capability advertised by the current relay.

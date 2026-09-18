@@ -346,7 +346,7 @@ pub struct Config {
     pub push_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
-    /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
+    /// Exact HTTPS gateway endpoint used to submit client-authorized push delivery capabilities.
     /// Required while push is enabled. An explicitly empty setting is allowed
     /// only while push is disabled.
     pub push_gateway_delivery_url: Option<url::Url>,
@@ -458,12 +458,12 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
         || url.port().is_some()
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.path() != "/v1/deliveries/apns"
+        || !matches!(url.path(), "/v1/deliveries" | "/v1/deliveries/apns")
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(ConfigError::InvalidValue(
-            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTPS /v1/deliveries/apns URL without an explicit port, credentials, query, or fragment"
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTPS /v1/deliveries or /v1/deliveries/apns URL without an explicit port, credentials, query, or fragment"
                 .to_string(),
         ));
     }
@@ -2258,6 +2258,7 @@ mod tests {
 
     #[test]
     fn push_gateway_url_is_exact_and_fail_closed() {
+        assert!(parse_push_gateway_delivery_url("https://push.example/v1/deliveries").is_ok());
         assert!(parse_push_gateway_delivery_url("https://push.example/v1/deliveries/apns").is_ok());
         for invalid in [
             "http://push.example/v1/deliveries/apns",
@@ -2265,6 +2266,11 @@ mod tests {
             "https://push.example/v1/deliveries/apns/",
             "https://push.example/v1/deliveries/apns?token=x",
             "https://user@push.example/v1/deliveries/apns",
+            "http://push.example/v1/deliveries",
+            "https://push.example:8443/v1/deliveries",
+            "https://push.example/v1/deliveries/",
+            "https://push.example/v1/deliveries?token=x",
+            "https://user@push.example/v1/deliveries",
         ] {
             assert!(
                 parse_push_gateway_delivery_url(invalid).is_err(),

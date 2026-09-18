@@ -16,6 +16,14 @@ pub struct AppProfileConfig {
     pub apns_environment: ApnsEnvironment,
 }
 
+#[derive(Debug, Clone)]
+pub struct AndroidProfileConfig {
+    pub firebase_project_id: String,
+    pub firebase_project_number: String,
+    pub firebase_app_id: String,
+    pub service_account_path: PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyConfig {
     pub id: String,
@@ -34,6 +42,9 @@ pub struct Config {
     pub endpoint_quota_max_deliveries: i64,
     /// Server-owned dogfood application identity and APNs transport.
     pub profile: AppProfileConfig,
+    /// Optional Android FCM profile. All four variables must be supplied
+    /// together; partial configuration fails startup.
+    pub android_profile: Option<AndroidProfileConfig>,
     pub database_url: String,
     pub app_attest_root_cert_path: PathBuf,
     /// Ordered current key first, followed by decrypt-only predecessors.
@@ -50,6 +61,8 @@ pub struct GatewayUrls {
     pub origin: url::Url,
     /// Exact NIP-98 delivery endpoint used by relays.
     pub delivery: url::Url,
+    /// Legacy APNs-only delivery endpoint accepted during rollout.
+    pub legacy_delivery: url::Url,
     /// App Attest audience for installation enrollment.
     pub enroll_audience: String,
     /// App Attest audience for relay delegation.
@@ -69,7 +82,8 @@ impl GatewayUrls {
                 .join(path)
                 .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_GATEWAY_ORIGIN"))
         };
-        let delivery = derive("v1/deliveries/apns")?;
+        let delivery = derive("v1/deliveries")?;
+        let legacy_delivery = derive("v1/deliveries/apns")?;
         // NIP-PL v1 registers these exact audience strings. The configurable
         // origin controls transport only; changing transcript bytes requires
         // a separately versioned protocol profile.
@@ -82,6 +96,7 @@ impl GatewayUrls {
         Ok(Self {
             origin,
             delivery,
+            legacy_delivery,
             enroll_audience,
             delegate_audience,
             rotate_endpoint_audience,
@@ -158,6 +173,62 @@ fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, Config
     })
 }
 
+fn parse_android_profile(
+    e: &HashMap<String, String>,
+) -> Result<Option<AndroidProfileConfig>, ConfigError> {
+    const KEYS: [&str; 4] = [
+        "BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_ID",
+        "BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_NUMBER",
+        "BUZZ_PUSH_ANDROID_FIREBASE_APP_ID",
+        "BUZZ_PUSH_ANDROID_FCM_SERVICE_ACCOUNT_PATH",
+    ];
+    let values = KEYS.map(|key| {
+        e.get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    });
+    if values.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    if values.iter().any(Option::is_none) {
+        let missing = KEYS
+            .into_iter()
+            .zip(values)
+            .find_map(|(key, value)| value.is_none().then_some(key))
+            .unwrap_or(KEYS[0]);
+        return Err(ConfigError::Missing(missing));
+    }
+    let [project_id, project_number, app_id, service_account_path] =
+        values.map(|value| value.unwrap_or_default());
+    if !project_id
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(ConfigError::Invalid(
+            "BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_ID",
+        ));
+    }
+    if !project_number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ConfigError::Invalid(
+            "BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_NUMBER",
+        ));
+    }
+    let app_id_prefix = format!("1:{project_number}:android:");
+    if app_id.len() > 256
+        || !app_id.strip_prefix(&app_id_prefix).is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(ConfigError::Invalid("BUZZ_PUSH_ANDROID_FIREBASE_APP_ID"));
+    }
+    Ok(Some(AndroidProfileConfig {
+        firebase_project_id: project_id.to_owned(),
+        firebase_project_number: project_number.to_owned(),
+        firebase_app_id: app_id.to_owned(),
+        service_account_path: service_account_path.into(),
+    }))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_map(&std::env::vars().collect())
@@ -226,6 +297,7 @@ impl Config {
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
         let profile = parse_profile(e)?;
+        let android_profile = parse_android_profile(e)?;
         let bind_addr = e
             .get("BUZZ_PUSH_BIND_ADDR")
             .map(String::as_str)
@@ -247,6 +319,7 @@ impl Config {
             endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries,
             profile,
+            android_profile,
             database_url: req(e, "DATABASE_URL")?.to_owned(),
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
             grant_keys,
@@ -341,6 +414,10 @@ mod tests {
         assert_eq!(config.gateway_urls.origin.as_str(), "https://push.example/");
         assert_eq!(
             config.gateway_urls.delivery.as_str(),
+            "https://push.example/v1/deliveries"
+        );
+        assert_eq!(
+            config.gateway_urls.legacy_delivery.as_str(),
             "https://push.example/v1/deliveries/apns"
         );
         assert_eq!(
@@ -415,6 +492,62 @@ mod tests {
         let config = Config::from_map(&env).unwrap();
         assert_eq!(config.bind_addr, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(config.health_addr, "0.0.0.0:8081".parse().unwrap());
+    }
+
+    #[test]
+    fn android_profile_is_optional_but_rejects_partial_configuration() {
+        assert!(Config::from_map(&base()).unwrap().android_profile.is_none());
+
+        let mut complete = base();
+        complete.extend([
+            (
+                "BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_ID".into(),
+                "buzz-production".into(),
+            ),
+            (
+                "BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_NUMBER".into(),
+                "123456789".into(),
+            ),
+            (
+                "BUZZ_PUSH_ANDROID_FIREBASE_APP_ID".into(),
+                "1:123456789:android:abc".into(),
+            ),
+            (
+                "BUZZ_PUSH_ANDROID_FCM_SERVICE_ACCOUNT_PATH".into(),
+                "/fcm/service-account.json".into(),
+            ),
+        ]);
+        let parsed = Config::from_map(&complete)
+            .unwrap()
+            .android_profile
+            .unwrap();
+        assert_eq!(parsed.firebase_project_id, "buzz-production");
+
+        for (key, invalid, expected) in [
+            (
+                "BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_NUMBER",
+                "not-a-number",
+                "BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_NUMBER",
+            ),
+            (
+                "BUZZ_PUSH_ANDROID_FIREBASE_APP_ID",
+                "1:other:android:abc",
+                "BUZZ_PUSH_ANDROID_FIREBASE_APP_ID",
+            ),
+        ] {
+            let mut candidate = complete.clone();
+            candidate.insert(key.into(), invalid.into());
+            assert!(matches!(
+                Config::from_map(&candidate),
+                Err(ConfigError::Invalid(variable)) if variable == expected
+            ));
+        }
+
+        complete.remove("BUZZ_PUSH_ANDROID_FIREBASE_APP_ID");
+        assert!(matches!(
+            Config::from_map(&complete),
+            Err(ConfigError::Missing("BUZZ_PUSH_ANDROID_FIREBASE_APP_ID"))
+        ));
     }
 
     #[test]

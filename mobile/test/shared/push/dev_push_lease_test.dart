@@ -128,13 +128,12 @@ void main() {
         memberPubkey: signer.public,
         subscriptions: const [],
         now: () => now,
-        submit:
-            ({
-              required kind,
-              required content,
-              required tags,
-              createdAt,
-            }) async => throw StateError('should not publish'),
+        submit: ({
+          required kind,
+          required content,
+          required tags,
+          createdAt,
+        }) async => throw StateError('should not publish'),
       ),
       throwsFormatException,
     );
@@ -231,13 +230,12 @@ void main() {
           ),
         ],
         now: () => now,
-        submit:
-            ({
-              required kind,
-              required content,
-              required tags,
-              createdAt,
-            }) async => throw Exception('invalid: origin mismatch'),
+        submit: ({
+          required kind,
+          required content,
+          required tags,
+          createdAt,
+        }) async => throw Exception('invalid: origin mismatch'),
       ),
       throwsA(
         isA<Exception>().having(
@@ -328,6 +326,17 @@ void main() {
       throwsA(isA<FormatException>()),
     );
   });
+
+  test('descriptor selects the Android FCM profile explicitly', () {
+    final descriptor = BuzzPushLeaseDescriptor.fromRelayInformation(
+      _descriptorJson(relay.public),
+      appProfile: buzzAndroidPushAppProfile,
+      expectedTransport: buzzAndroidPushTransport,
+    );
+
+    expect(descriptor.appProfile, buzzAndroidPushAppProfile);
+    expect(descriptor.transport, buzzAndroidPushTransport);
+  });
 }
 
 class _UnauthenticatedAuthNotifier extends AuthNotifier {
@@ -400,11 +409,13 @@ Map<String, dynamic> _descriptorJson(String relayPubkey) => {
     ],
     'app_profiles': [
       {'id': 'buzz-ios-dogfood', 'transport': 'apns'},
+      {'id': 'buzz-android-fcm', 'transport': 'fcm'},
     ],
     'push_kinds': [9, 40002, 45001, 45003],
     'h_grammar': 'uuid-v4-lowercase',
     'class_support': {
       'apns': ['default'],
+      'fcm': ['default'],
     },
     'limitation': {
       'max_lease_ttl': 2592000,

@@ -46,6 +46,20 @@ void main() {
     expect(apnsRegistrationError.value, isNull);
   });
 
+  test('captures FCM token success and clears the previous error', () async {
+    apnsRegistrationError.value = 'old error';
+    await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .handlePlatformMessage(
+          _channel.name,
+          _channel.codec.encodeMethodCall(
+            const MethodCall('fcmTokenChanged', {'token': 'fcm-token'}),
+          ),
+          (_) {},
+        );
+    expect(apnsDeviceToken.value, 'fcm-token');
+    expect(apnsRegistrationError.value, isNull);
+  });
+
   test(
     'starts native permission and APNs registration without a result gate',
     () async {
@@ -106,6 +120,17 @@ void main() {
     await purgeAgeRestrictedBuzzNotifications();
   });
 
+  test('starts native permission and FCM registration on Android', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'startRegistration');
+          return null;
+        });
+
+    await startBuzzPushRegistration();
+  });
+
   test('reads native notification authorization status', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -150,9 +175,9 @@ void main() {
       await container.read(buzzPushAuthorizationStatusProvider.future),
       BuzzPushAuthorizationStatus.notDetermined,
     );
-    final lifecycle =
-        container.read(appLifecycleProvider.notifier)
-            as _TestAppLifecycleNotifier;
+    final lifecycle = container.read(
+      appLifecycleProvider.notifier,
+    ) as _TestAppLifecycleNotifier;
     lifecycle.setState(AppLifecycleState.paused);
     lifecycle.setState(AppLifecycleState.resumed);
     await _waitForAuthorization(container, BuzzPushAuthorizationStatus.denied);
@@ -177,9 +202,9 @@ void main() {
       await container.read(buzzPushAuthorizationStatusProvider.future),
       BuzzPushAuthorizationStatus.authorized,
     );
-    final lifecycle =
-        container.read(appLifecycleProvider.notifier)
-            as _TestAppLifecycleNotifier;
+    final lifecycle = container.read(
+      appLifecycleProvider.notifier,
+    ) as _TestAppLifecycleNotifier;
     lifecycle.setState(AppLifecycleState.paused);
     lifecycle.setState(AppLifecycleState.resumed);
     await _waitForAuthorization(container, BuzzPushAuthorizationStatus.denied);
@@ -209,6 +234,23 @@ void main() {
     expect(grants.single.expiresAt, 1752624000);
     expect(pushEndpointGrants.value.single.endpointGrant, 'opaque-grant');
     expect(pushEndpointGrantError.value, isNull);
+  });
+
+  test('reads persisted FCM endpoint grants on Android', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(_channel, (call) async {
+      expect(call.method, 'endpointGrants');
+      return [
+        {..._grantMap('fcm-grant'), 'appProfile': 'buzz-android-fcm'},
+      ];
+    });
+
+    final grants = await readBuzzPushEndpointGrants();
+
+    expect(grants.single.appProfile, 'buzz-android-fcm');
+    expect(grants.single.endpointGrant, 'fcm-grant');
   });
 
   test(
@@ -311,6 +353,18 @@ void main() {
           (_) {},
         );
     expect(apnsRegistrationError.value, 'denied');
+  });
+
+  test('exposes FCM registration failure', () async {
+    await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .handlePlatformMessage(
+          _channel.name,
+          _channel.codec.encodeMethodCall(
+            const MethodCall('fcmRegistrationFailed', {'message': 'offline'}),
+          ),
+          (_) {},
+        );
+    expect(apnsRegistrationError.value, 'offline');
   });
 
   test('routes a warm notification response with opaque IDs', () async {
