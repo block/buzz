@@ -80,7 +80,8 @@ env:
   # Single source of truth for the image name. Set GHCR_IMAGE as a repo
   # variable to override (e.g., for forks that want to push to their own
   # namespace without forking this file).
-  IMAGE_NAME: ${{ vars.GHCR_IMAGE != '' && vars.GHCR_IMAGE || 'ghcr.io/block/buzz' }}
+  IMAGE_NAME: ${{ vars.GHCR_IMAGE != '' && vars.GHCR_IMAGE || format('ghcr.io/{0}/buzz', github.repository_owner) }}
+  PUSH_GATEWAY_IMAGE: ${{ vars.GHCR_PUSH_GATEWAY_IMAGE != '' && vars.GHCR_PUSH_GATEWAY_IMAGE || format('ghcr.io/{0}/buzz-push-gateway', github.repository_owner) }}
 
 jobs:
   build:
@@ -481,7 +482,7 @@ jobs:
             echo
             echo "Verify provenance:"
             echo '```'
-            echo "gh attestation verify oci://${IMAGE_NAME}@${MERGED_DIGEST} --owner block"
+            echo "gh attestation verify oci://${IMAGE_NAME}@${MERGED_DIGEST} --owner ${GITHUB_REPOSITORY_OWNER}"
             echo '```'
             if [[ "$VARIANT" == "release" ]]; then
               echo
@@ -539,7 +540,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
         with:
-          images: ghcr.io/block/buzz-push-gateway
+          images: ${{ env.PUSH_GATEWAY_IMAGE }}
           labels: |
             org.opencontainers.image.title=Buzz Push Gateway
             org.opencontainers.image.description=Capability-gated APNs last hop for Buzz
@@ -552,9 +553,11 @@ jobs:
           file: ./Dockerfile.push-gateway
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=ghcr.io/block/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
-          cache-from: type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:${{ matrix.arch }}
-          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:{0},mode=max,compression=zstd', matrix.arch) || '' }}
+          outputs: type=image,name=${{ env.PUSH_GATEWAY_IMAGE }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: type=registry,ref=${{ env.PUSH_GATEWAY_IMAGE }}-buildcache:${{ matrix.arch }}
+          # PRs may consume the public cache but only trusted main/tag builds
+          # publish cache layers to their repository owner's package namespace.
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}-buildcache:{1},mode=max,compression=zstd', env.PUSH_GATEWAY_IMAGE, matrix.arch) || '' }}
       - name: Export digest
         if: github.event_name != 'pull_request'
         env:
@@ -599,7 +602,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
         with:
-          images: ghcr.io/block/buzz-push-gateway
+          images: ${{ env.PUSH_GATEWAY_IMAGE }}
           tags: |
             type=ref,event=branch,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
             type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
@@ -613,7 +616,7 @@ jobs:
         run: |
           set -euo pipefail
           tags=(); while IFS= read -r tag; do [ -n "$tag" ] && tags+=("-t" "$tag"); done <<< "$META_TAGS"
-          digests=(); for digest in *; do digests+=("ghcr.io/block/buzz-push-gateway@sha256:${digest}"); done
+          digests=(); for digest in *; do digests+=("${PUSH_GATEWAY_IMAGE}@sha256:${digest}"); done
           docker buildx imagetools create "${tags[@]}" "${digests[@]}"
           first_tag=$(echo "$META_TAGS" | head -n1)
           digest=$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest}}' | jq -r '.digest')
@@ -621,7 +624,7 @@ jobs:
       - name: Attest gateway image provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
-          subject-name: ghcr.io/block/buzz-push-gateway
+          subject-name: ${{ env.PUSH_GATEWAY_IMAGE }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
       - name: Gateway publication summary
@@ -631,7 +634,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "### Published \`ghcr.io/block/buzz-push-gateway\`"
+            echo "### Published \`${PUSH_GATEWAY_IMAGE}\`"
             echo
             printf "**Digest:** \`%s\`\n" "$GATEWAY_DIGEST"
             echo
@@ -642,6 +645,6 @@ jobs:
             echo
             echo 'Verify provenance before deployment:'
             echo "\`\`\`"
-            printf 'gh attestation verify oci://ghcr.io/block/buzz-push-gateway@%s --owner block\n' "$GATEWAY_DIGEST"
+            printf 'gh attestation verify oci://%s@%s --owner %s\n' "$PUSH_GATEWAY_IMAGE" "$GATEWAY_DIGEST" "$GITHUB_REPOSITORY_OWNER"
             echo "\`\`\`"
           } >> "$GITHUB_STEP_SUMMARY"
