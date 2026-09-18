@@ -113,6 +113,46 @@ pub enum AcpError {
     AgentError { code: i64, message: String },
 }
 
+impl AcpError {
+    /// Privacy-safe error class for logs and observer records.
+    ///
+    /// Provider messages are intentionally treated as untrusted: they can
+    /// echo prompt or account content. Keep the numeric JSON-RPC code
+    /// separately when available and expose only this bounded classification.
+    pub fn sanitized_class(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "transport_io",
+            Self::Json(_) => "protocol_json",
+            Self::AgentExited => "agent_exited",
+            Self::IdleTimeout(_) => "idle_timeout",
+            Self::HardTimeout { .. } => "hard_timeout",
+            Self::CancelDrainTimeout(_) => "cancel_drain_timeout",
+            Self::Timeout(_) => "request_timeout",
+            Self::WriteTimeout(_) => "transport_write_timeout",
+            Self::Protocol(_) => "protocol_error",
+            Self::AgentError { message, .. } => {
+                let message = message.to_ascii_lowercase();
+                if message.contains("rate limit") || message.contains("too many requests") {
+                    "provider_rate_limited"
+                } else if message.contains("overload") || message.contains("capacity") {
+                    "provider_overloaded"
+                } else if message.contains("context") && message.contains("length") {
+                    "provider_context_limit"
+                } else if message.contains("model") && message.contains("not found") {
+                    "provider_model_not_found"
+                } else if message.contains("auth")
+                    || message.contains("unauthorized")
+                    || message.contains("invalid token")
+                {
+                    "provider_authentication"
+                } else {
+                    "provider_application_error"
+                }
+            }
+        }
+    }
+}
+
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific

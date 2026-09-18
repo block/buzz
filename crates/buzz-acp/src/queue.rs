@@ -525,6 +525,18 @@ impl EventQueue {
         }
     }
 
+    /// One-based attempt number for the next dispatch of `scope`.
+    ///
+    /// The counter is owned by the queue and survives bounded requeues, so
+    /// observer records do not have to infer retry state from log ordering.
+    pub fn next_attempt<K: IntoScope>(&self, scope: K) -> u32 {
+        self.retry_counts
+            .get(&scope.into_scope())
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
     /// Re-queue a batch of events that failed to process.
     ///
     /// Events are pushed back to the **front** of the channel's queue so they
