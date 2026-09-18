@@ -122,7 +122,7 @@ fn run_buzz_acp_auth_command<const N: usize>(
     let acp_path = std::env::current_exe()
         .map(|path| path.with_file_name(format!("buzz-acp{}", std::env::consts::EXE_SUFFIX)))
         .ok()
-        .filter(|path| path.exists())
+        .filter(|path| is_usable_auth_helper(path))
         .or_else(|| resolve_command("buzz-acp"))
         .ok_or_else(|| "buzz-acp helper not found".to_string())?;
 
@@ -199,6 +199,23 @@ fn run_buzz_acp_auth_command_with_paths<const N: usize>(
     command
         .output()
         .map_err(|error| format!("failed to run buzz-acp auth helper: {error}"))
+}
+
+fn is_usable_auth_helper(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    true
 }
 
 fn command_error(label: &str, output: &std::process::Output) -> String {
@@ -462,8 +479,8 @@ fn shell_escape(arg: &str) -> String {
 mod tests {
     use super::{
         adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
-        run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, uses_terminal_auth,
-        windows_terminal_args, AcpAuthMethod,
+        is_usable_auth_helper, run_buzz_acp_auth_command_with_paths, shell_escape, shell_join,
+        uses_terminal_auth, windows_terminal_args, AcpAuthMethod,
     };
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed
@@ -496,6 +513,57 @@ mod tests {
         assert_eq!(
             append_inherited_path(Some("only-augmented".into()), None),
             Some("only-augmented".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_helper_rejects_empty_non_executable_stub() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let stub_path = temp.path().join("buzz-acp");
+        fs::write(&stub_path, []).expect("write stub");
+        fs::set_permissions(&stub_path, fs::Permissions::from_mode(0o644))
+            .expect("chmod non-executable stub");
+        assert!(
+            !is_usable_auth_helper(&stub_path),
+            "empty non-executable placeholder should be rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_helper_accepts_non_empty_executable_binary_path() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let helper_path = temp.path().join("buzz-acp");
+        fs::write(&helper_path, b"#!/bin/sh\nexit 0\n").expect("write helper");
+        fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod executable helper");
+        assert!(
+            is_usable_auth_helper(&helper_path),
+            "non-empty executable helper should be accepted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_helper_rejects_empty_executable_stub() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let stub_path = temp.path().join("buzz-acp");
+        fs::write(&stub_path, []).expect("write empty executable stub");
+        fs::set_permissions(&stub_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod executable empty stub");
+        assert!(
+            !is_usable_auth_helper(&stub_path),
+            "empty executable placeholder should be rejected"
         );
     }
 
