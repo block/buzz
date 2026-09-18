@@ -28,6 +28,7 @@ export type ChannelScreenProps = {
    * Projects omit this prop.
    */
   idleAuxiliaryExpanded?: boolean;
+  idleAuxiliaryBodyClassName?: string;
   idleAuxiliaryTitle?: string;
   headerEndActions?: ReactNode;
   onAddFiles?: () => void;

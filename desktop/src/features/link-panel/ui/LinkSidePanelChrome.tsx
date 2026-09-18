@@ -16,6 +16,7 @@ import { deriveShellRoute } from "@/app/AppShell.helpers";
 import {
   getPinWebviewNavState,
   inspectPinWebview,
+  PIN_WEBVIEW_RESTORE_EVENT,
   pinWebviewGoBack,
   pinWebviewGoForward,
   pinWebviewReload,
@@ -171,6 +172,9 @@ export function LinkSidePanelChrome({
   async function handleInspect() {
     try {
       await inspectPinWebview(pinId);
+      // Re-apply host bounds so a briefly docked inspector cannot stretch
+      // the pin webview past the slide-out width.
+      window.dispatchEvent(new Event(PIN_WEBVIEW_RESTORE_EVENT));
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not open inspector.",

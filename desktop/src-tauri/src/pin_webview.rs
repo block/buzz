@@ -91,6 +91,7 @@ struct PinSession {
     last_modified: Option<String>,
     body_hash: Option<String>,
     last_load_failed: bool,
+    last_bounds: Option<PinBounds>,
 }
 
 impl PinSession {
@@ -117,6 +118,7 @@ impl PinSession {
             last_modified: persisted.last_modified,
             body_hash: persisted.body_hash,
             last_load_failed: false,
+            last_bounds: None,
         }
     }
 
@@ -480,6 +482,14 @@ fn navigate_pin_webview(
     }
 }
 
+fn remember_bounds(manager: &PinWebviewManager, pin_id: &str, bounds: &PinBounds) {
+    if let Ok(mut sessions) = manager.sessions.lock() {
+        if let Some(session) = sessions.get_mut(pin_id) {
+            session.last_bounds = Some(bounds.clone());
+        }
+    }
+}
+
 fn apply_bounds(
     app: &AppHandle,
     pin_id: &str,
@@ -536,6 +546,8 @@ fn reuse_existing_webview(
     bounds: &PinBounds,
 ) -> Result<PinNavState, String> {
     apply_bounds(app, pin_id, window_label, bounds)?;
+    session.last_bounds = Some(bounds.clone());
+    remember_bounds(manager, pin_id, bounds);
     let current = webview.url().ok();
     if should_navigate_existing(
         current.as_ref(),
@@ -646,6 +658,7 @@ pub async fn pin_webview_show(
         .map_err(|error| error.to_string())?;
 
     session.last_load_failed = false;
+    session.last_bounds = Some(bounds.clone());
     let nav = session.nav_state(&pin_id);
     persist_session(&app, &pin_id, &session);
     store_session(&manager, pin_id, session);
@@ -687,13 +700,16 @@ pub async fn pin_webview_hide_all(
 #[tauri::command]
 pub async fn pin_webview_set_bounds(
     app: AppHandle,
+    manager: State<'_, PinWebviewManager>,
     pin_id: String,
     bounds: PinBounds,
     window_label: Option<String>,
 ) -> Result<(), String> {
     let pin_id = sanitize_pin_id(&pin_id)?;
     let window_label = normalize_window_label(window_label.as_deref());
-    apply_bounds(&app, &pin_id, &window_label, &bounds)
+    apply_bounds(&app, &pin_id, &window_label, &bounds)?;
+    remember_bounds(&manager, &pin_id, &bounds);
+    Ok(())
 }
 
 #[tauri::command]
@@ -907,6 +923,7 @@ pub async fn pin_webview_poll(
 #[tauri::command]
 pub async fn pin_webview_inspect(
     app: AppHandle,
+    manager: State<'_, PinWebviewManager>,
     pin_id: String,
     window_label: Option<String>,
 ) -> Result<PinInspectResult, String> {
@@ -925,6 +942,11 @@ pub async fn pin_webview_inspect(
             .ok()
             .map(|size| (size.width, size.height))
     });
+    let bounds = manager.sessions.lock().ok().and_then(|sessions| {
+        sessions
+            .get(&pin_id)
+            .and_then(|session| session.last_bounds.clone())
+    });
     // Same window-lock posture as playground Inspect so the inspector cannot
     // grow the Buzz frame and hide the left nav.
     crate::playground_webview::inspect::lock_main_window_size(&app, window_size);
@@ -932,8 +954,36 @@ pub async fn pin_webview_inspect(
         crate::playground_webview::inspect::unlock_main_window_size(&app);
         return Err(error);
     }
+    // Keep the pin webview inside the last slide-out/host rect (no stretch).
+    if let Some(before) = bounds.as_ref() {
+        let _ = apply_bounds(&app, &pin_id, &window_label, before);
+    }
+    schedule_pin_inspect_bounds_restore(app.clone(), pin_id.clone(), window_label.clone());
     crate::playground_webview::inspect::unlock_main_window_size(&app);
     Ok(PinInspectResult { webview_id })
+}
+
+fn schedule_pin_inspect_bounds_restore(app: AppHandle, pin_id: String, window_label: String) {
+    tauri::async_runtime::spawn(async move {
+        for delay_ms in [16_u64, 50, 200, 500] {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            reapply_pin_last_bounds(&app, &pin_id, &window_label);
+        }
+    });
+}
+
+fn reapply_pin_last_bounds(app: &AppHandle, pin_id: &str, window_label: &str) {
+    let Some(manager) = app.try_state::<PinWebviewManager>() else {
+        return;
+    };
+    let bounds = manager.sessions.lock().ok().and_then(|sessions| {
+        sessions
+            .get(pin_id)
+            .and_then(|session| session.last_bounds.clone())
+    });
+    if let Some(bounds) = bounds.as_ref() {
+        let _ = apply_bounds(app, pin_id, window_label, bounds);
+    }
 }
 
 #[tauri::command]

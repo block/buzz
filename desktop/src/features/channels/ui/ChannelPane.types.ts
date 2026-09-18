@@ -55,6 +55,8 @@ export type ChannelPaneProps = {
    * Projects omit this prop.
    */
   idleAuxiliaryExpanded?: boolean;
+  /** Body class for idle auxiliary (e.g. link webview fill). */
+  idleAuxiliaryBodyClassName?: string;
   idleAuxiliaryTitle?: string;
   hasOlderMessages?: boolean;
   /** True when the loaded window provably starts at the channel's beginning. */

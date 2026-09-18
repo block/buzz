@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useLocation } from "@tanstack/react-router";
 
 import type { IdleAuxiliaryHeaderControls } from "@/features/channels/ui/IdleAuxiliaryPanel";
 
@@ -10,7 +11,12 @@ import {
 import { LinkSidePanelChrome } from "./LinkSidePanelChrome";
 import { LinkSidePanelSurface } from "./LinkSidePanelSurface";
 
+/** Body fill for native webview — no scroll gutter under Desktop mode. */
+export const LINK_SIDE_PANEL_BODY_CLASS =
+  "overflow-hidden px-0 pb-0 flex flex-col";
+
 export type ChannelLinkSidePanelChrome = {
+  idleAuxiliaryBodyClassName: string;
   idleAuxiliaryExpanded: boolean;
   idleAuxiliaryHeaderActions: IdleAuxiliaryHeaderControls;
   idleAuxiliaryOverridesThread: boolean;
@@ -26,6 +32,9 @@ export type ChannelLinkSidePanelChrome = {
  * Both states slide in via the focus drawer; default open matches Projects
  * width (channel sliver); expand goes true full-bleed. Thread override
  * stays always-on (#63).
+ *
+ * Leaving the channel route (Projects, etc.) clears the panel so a
+ * fullscreen webview cannot cover the destination.
  */
 export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
   const store = React.useSyncExternalStore(
@@ -34,6 +43,15 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
     getLinkSidePanelStore,
   );
   const panel = store.panel;
+  const location = useLocation();
+
+  React.useEffect(() => {
+    // Pathname change (or ChannelScreen unmount) tears down fullscreen /
+    // side web so Projects and other shells are not covered.
+    return () => {
+      closeLinkSidePanel();
+    };
+  }, [location.pathname]);
 
   const headerActions = React.useMemo(() => {
     if (!panel) return undefined;
@@ -52,6 +70,7 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
   if (!panel || !headerActions) return null;
 
   return {
+    idleAuxiliaryBodyClassName: LINK_SIDE_PANEL_BODY_CLASS,
     idleAuxiliaryExpanded: panel.expanded,
     idleAuxiliaryHeaderActions: headerActions,
     // Match Project workspace sheets: any open link panel covers the

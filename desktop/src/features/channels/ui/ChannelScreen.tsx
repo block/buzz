@@ -96,7 +96,7 @@ export function ChannelScreen({
   currentProfile,
   headerEndActions, idleAuxiliaryPanel,
   idleAuxiliaryHeaderActions, idleAuxiliaryOverridesThread,
-  idleAuxiliaryExpanded, idleAuxiliaryTitle,
+  idleAuxiliaryExpanded, idleAuxiliaryBodyClassName, idleAuxiliaryTitle,
   onAddFiles, onCloseIdleAuxiliaryPanel,
   onCloseForumPost, onSelectForumPost,
   selectedForumPostId, targetForumReplyId,
@@ -112,6 +112,8 @@ export function ChannelScreen({
     linkSidePanel?.idleAuxiliaryOverridesThread ?? idleAuxiliaryOverridesThread ?? false;
   const resolvedIdleAuxiliaryExpanded =
     linkSidePanel?.idleAuxiliaryExpanded ?? idleAuxiliaryExpanded;
+  const resolvedIdleAuxiliaryBodyClassName =
+    linkSidePanel?.idleAuxiliaryBodyClassName ?? idleAuxiliaryBodyClassName;
   const resolvedIdleAuxiliaryTitle =
     linkSidePanel?.idleAuxiliaryTitle ?? idleAuxiliaryTitle ?? "";
   const resolvedOnCloseIdleAuxiliaryPanel =
@@ -868,7 +870,7 @@ export function ChannelScreen({
                   canResetThreadPanelWidth={canResetThreadPanelWidth}
                   fetchOlder={fetchOlder}
                   header={channelHeader}
-                  {...{ idleAuxiliaryHeaderActions: resolvedIdleAuxiliaryHeaderActions, idleAuxiliaryOverridesThread: resolvedIdleAuxiliaryOverridesThread, idleAuxiliaryExpanded: resolvedIdleAuxiliaryExpanded, idleAuxiliaryPanel: resolvedIdleAuxiliaryPanel, idleAuxiliaryTitle: resolvedIdleAuxiliaryTitle, hasOlderMessages, historyExhausted }}
+                  {...{ idleAuxiliaryHeaderActions: resolvedIdleAuxiliaryHeaderActions, idleAuxiliaryOverridesThread: resolvedIdleAuxiliaryOverridesThread, idleAuxiliaryExpanded: resolvedIdleAuxiliaryExpanded, idleAuxiliaryBodyClassName: resolvedIdleAuxiliaryBodyClassName, idleAuxiliaryPanel: resolvedIdleAuxiliaryPanel, idleAuxiliaryTitle: resolvedIdleAuxiliaryTitle, hasOlderMessages, historyExhausted }}
                   {...{ onAddFiles }}
                   onAddAgent={handleOpenAddBot}
                   onBrowseChannels={openBrowseChannels}

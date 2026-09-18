@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   joinPlaygroundUrl,
+  playgroundAddressDisplay,
   playgroundAddressNavigation,
   splitLockedPlaygroundUrl,
   suffixFromCurrentUrl,
@@ -60,5 +61,32 @@ test("suffix navigates to prefix+suffix and rejects http or debug ports", () => 
       "https://app.example.com/foo/baz",
     ),
     "baz",
+  );
+});
+
+test("address display is locked under prefix or full URL once off-lock", () => {
+  assert.deepEqual(
+    playgroundAddressDisplay(
+      "https://app.example.com",
+      "https://app.example.com",
+    ),
+    { mode: "locked", prefix: "https://app.example.com/", suffix: "" },
+  );
+  assert.deepEqual(
+    playgroundAddressDisplay(
+      "https://app.example.com/foo/bar",
+      "https://app.example.com/foo/baz",
+    ),
+    { mode: "locked", prefix: "https://app.example.com/foo/", suffix: "baz" },
+  );
+  assert.deepEqual(
+    playgroundAddressDisplay(
+      "https://dev-patient.hulapreview.com/",
+      "https://long-cake.example/cdn-cgi/access/login/dev-patient.hulapreview.com?kid=1",
+    ),
+    {
+      mode: "full",
+      url: "https://long-cake.example/cdn-cgi/access/login/dev-patient.hulapreview.com?kid=1",
+    },
   );
 });

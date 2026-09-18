@@ -66,6 +66,7 @@ import {
 } from "@/features/user-status/hooks";
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
 import { useCommunityPinnedSitesLiveUpdates } from "@/features/pinned-sites/hooks";
+import { closeLinkSidePanel } from "@/features/link-panel/lib/linkSidePanelStore";
 import { hideAllPinWebviews } from "@/features/pinned-sites/lib/pinWebview";
 import { useArchiveSync } from "@/features/local-archive/useArchiveSync";
 import { useArchiveAgentMetricsBridge } from "@/features/local-archive/useArchiveAgentMetricsBridge";
@@ -237,6 +238,10 @@ export function AppShell() {
   React.useEffect(() => {
     if (selectedView !== "pin") {
       void hideAllPinWebviews();
+    }
+    // Leaving channels (Projects, Inbox, etc.) must clear fullscreen link web.
+    if (selectedView !== "channel") {
+      closeLinkSidePanel();
     }
   }, [selectedView]);
   useMembershipNotifications(identityQuery.data?.pubkey);

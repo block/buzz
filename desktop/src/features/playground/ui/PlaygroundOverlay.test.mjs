@@ -1002,3 +1002,23 @@ test("locked dock fullscreen covers both panes and restores the split", async ()
     /^dock:/,
   );
 });
+
+
+test("chrome keeps URL on row 1 and right-justifies tooling on the mode row", async () => {
+  const screen = await renderOverlay();
+  const chrome = screen.getByTestId("playground-chrome");
+  const address = screen.getByTestId("playground-address");
+  const modeRow = screen.getByTestId("playground-mode-row");
+  const tools = screen.getByTestId("playground-tool-icons");
+
+  assert.equal(address.parentElement, chrome);
+  assert.equal(modeRow.parentElement, chrome);
+  assert.ok(address.compareDocumentPosition(modeRow) & 4);
+
+  assert.ok(modeRow.contains(screen.getByTestId("playground-mode-desktop")));
+  assert.ok(modeRow.contains(tools));
+  assert.match(tools.className, /ml-auto/);
+  assert.ok(tools.contains(screen.getByTestId("playground-back")));
+  assert.ok(tools.contains(screen.getByTestId("playground-inspect")));
+  assert.equal(address.contains(screen.getByTestId("playground-back")), false);
+});

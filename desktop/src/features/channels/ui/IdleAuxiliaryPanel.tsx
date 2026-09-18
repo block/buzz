@@ -8,6 +8,7 @@ import {
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
 } from "@/shared/layout/AuxiliaryPanel";
+import { cn } from "@/shared/lib/cn";
 
 export type IdleAuxiliaryHeaderControls = {
   actions?: React.ReactNode;
@@ -16,6 +17,7 @@ export type IdleAuxiliaryHeaderControls = {
 };
 
 export function IdleAuxiliaryPanel({
+  bodyClassName,
   canResetWidth,
   children,
   headerControls,
@@ -28,6 +30,8 @@ export function IdleAuxiliaryPanel({
   useSplitAuxiliaryPane,
   widthPx,
 }: {
+  /** Override body scroll/padding — link/pin webviews need overflow-hidden fill. */
+  bodyClassName?: string;
   canResetWidth: boolean;
   children: React.ReactNode;
   headerControls?: IdleAuxiliaryHeaderControls;
@@ -74,7 +78,12 @@ export function IdleAuxiliaryPanel({
         </AuxiliaryPanelHeader>
       }
     >
-      <AuxiliaryPanelBody className="overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-8">
+      <AuxiliaryPanelBody
+        className={cn(
+          "overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-8",
+          bodyClassName,
+        )}
+      >
         {children}
       </AuxiliaryPanelBody>
     </AuxiliaryPanel>

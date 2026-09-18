@@ -98,6 +98,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   idleAuxiliaryHeaderActions,
   idleAuxiliaryOverridesThread = false,
   idleAuxiliaryExpanded,
+  idleAuxiliaryBodyClassName,
   idleAuxiliaryTitle = "",
   hasOlderMessages,
   historyExhausted,
@@ -571,6 +572,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     idleAuxiliaryPanel && onCloseIdleAuxiliaryPanel
       ? wrapIdlePanel(
           <IdleAuxiliaryPanel
+            bodyClassName={idleAuxiliaryBodyClassName}
             canResetWidth={canResetThreadPanelWidth}
             headerControls={idleAuxiliaryHeaderActions}
             isFocusDrawer={useFocusIdleDrawer}
