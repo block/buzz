@@ -5,9 +5,13 @@ import {
   commandsMatch,
   parseTimestamp,
   pickPreferredManagedAgent,
+  findPersonaAgentCandidates,
   findReusablePersonaAgent,
+  findReusableTeamPersonaAgent,
+  findTeamPersonaAgentCandidates,
   findReusableGenericAgent,
   findReusableAgent,
+  reusableDeploymentConfigurationError,
   resolveReusableAgentAccessPolicy,
 } from "./agentReuse.ts";
 
@@ -22,6 +26,9 @@ function makeAgent(overrides = {}) {
     agentCommand: "goose",
     status: "running",
     personaId: null,
+    teamId: null,
+    backend: { type: "local" },
+    model: null,
     systemPrompt: null,
     updatedAt: "2026-01-15T00:00:00Z",
     ...overrides,
@@ -171,11 +178,11 @@ test("findReusablePersonaAgent: finds agent with matching personaId", () => {
   assert.equal(result, agent);
 });
 
-test("findReusablePersonaAgent: excludes agent already in channel", () => {
+test("findReusablePersonaAgent: reuses agent already in channel", () => {
   const agent = makeAgent({ personaId: "persona-1", pubkey: PUB_A });
   const channelMembers = new Set([PUB_A]);
   const result = findReusablePersonaAgent([agent], "persona-1", channelMembers);
-  assert.equal(result, undefined);
+  assert.equal(result, agent);
 });
 
 test("findReusablePersonaAgent: excludes agent with different personaId", () => {
@@ -185,7 +192,7 @@ test("findReusablePersonaAgent: excludes agent with different personaId", () => 
   assert.equal(result, undefined);
 });
 
-test("findReusablePersonaAgent: prefers running agent", () => {
+test("findReusablePersonaAgent: fails closed when the binding is ambiguous", () => {
   const stopped = makeAgent({
     id: "s",
     personaId: "p1",
@@ -206,14 +213,216 @@ test("findReusablePersonaAgent: prefers running agent", () => {
     "p1",
     channelMembers,
   );
-  assert.equal(result.id, "r");
+  assert.equal(result, undefined);
+});
+
+test("findPersonaAgentCandidates: excludes inactive identities", () => {
+  const inactive = makeAgent({
+    id: "inactive",
+    personaId: "p1",
+    isActive: false,
+  });
+  const active = makeAgent({ id: "active", personaId: "p1", pubkey: PUB_B });
+
+  assert.deepEqual(findPersonaAgentCandidates([inactive, active], "p1"), [
+    active,
+  ]);
 });
 
 test("findReusablePersonaAgent: pubkey comparison is case-insensitive", () => {
   const agent = makeAgent({ personaId: "p1", pubkey: PUB_A.toUpperCase() });
   const channelMembers = new Set([PUB_A]);
   const result = findReusablePersonaAgent([agent], "p1", channelMembers);
+  assert.equal(result, agent);
+});
+
+test("findReusablePersonaAgent: excludes team-bound instances", () => {
+  const agent = makeAgent({
+    personaId: "p1",
+    teamId: "team-a",
+    pubkey: PUB_A,
+  });
+  const result = findReusablePersonaAgent([agent], "p1", new Set());
   assert.equal(result, undefined);
+});
+
+test("findReusableTeamPersonaAgent: reuses the exact team persona already in channel", () => {
+  const agent = makeAgent({
+    personaId: "p1",
+    teamId: "team-a",
+    pubkey: PUB_A,
+  });
+  const result = findReusableTeamPersonaAgent(
+    [agent],
+    "p1",
+    "team-a",
+    new Set([PUB_A]),
+  );
+  assert.equal(result, agent);
+});
+
+test("findReusableTeamPersonaAgent: never reuses across teams", () => {
+  const agent = makeAgent({
+    personaId: "p1",
+    teamId: "team-b",
+    pubkey: PUB_A,
+  });
+  const result = findReusableTeamPersonaAgent(
+    [agent],
+    "p1",
+    "team-a",
+    new Set(),
+  );
+  assert.equal(result, undefined);
+});
+
+test("findReusableTeamPersonaAgent: fails closed on duplicate team bindings", () => {
+  const inChannel = makeAgent({
+    id: "in-channel",
+    personaId: "p1",
+    teamId: "team-a",
+    pubkey: PUB_A,
+    status: "stopped",
+  });
+  const elsewhere = makeAgent({
+    id: "elsewhere",
+    personaId: "p1",
+    teamId: "team-a",
+    pubkey: PUB_B,
+    status: "running",
+  });
+  const result = findReusableTeamPersonaAgent(
+    [elsewhere, inChannel],
+    "p1",
+    "team-a",
+    new Set([PUB_A]),
+  );
+  assert.equal(result, undefined);
+});
+
+test("findTeamPersonaAgentCandidates: excludes inactive identities", () => {
+  const inactive = makeAgent({
+    id: "inactive",
+    personaId: "p1",
+    teamId: "team-a",
+    isActive: false,
+  });
+  const active = makeAgent({
+    id: "active",
+    personaId: "p1",
+    teamId: "team-a",
+    pubkey: PUB_B,
+  });
+
+  assert.deepEqual(
+    findTeamPersonaAgentCandidates([inactive, active], "p1", "team-a"),
+    [active],
+  );
+});
+
+test("reusableDeploymentConfigurationError: accepts matching local deployment", () => {
+  const agent = makeAgent({
+    agentCommand: "/usr/local/bin/goose",
+    model: "gpt-5",
+  });
+  assert.equal(
+    reusableDeploymentConfigurationError(agent, {
+      runtimeCommand: "goose",
+      model: "gpt-5",
+      backend: { type: "local" },
+    }),
+    null,
+  );
+});
+
+test("reusableDeploymentConfigurationError: rejects local to provider reuse", () => {
+  const error = reusableDeploymentConfigurationError(makeAgent(), {
+    runtimeCommand: "goose",
+    backend: { type: "provider", id: "remote", config: {} },
+  });
+  assert.match(error, /uses local, requested provider/);
+});
+
+test("reusableDeploymentConfigurationError: rejects runtime mismatch", () => {
+  const error = reusableDeploymentConfigurationError(makeAgent(), {
+    runtimeCommand: "claude-acp",
+  });
+  assert.match(error, /uses runtime goose, requested claude-acp/);
+});
+
+test("reusableDeploymentConfigurationError: rejects model mismatch", () => {
+  const error = reusableDeploymentConfigurationError(
+    makeAgent({ model: "gpt-5" }),
+    { runtimeCommand: "goose", model: "claude-opus" },
+  );
+  assert.match(error, /uses model gpt-5, requested claude-opus/);
+});
+
+test("reusableDeploymentConfigurationError: rejects provider mismatch", () => {
+  const error = reusableDeploymentConfigurationError(
+    makeAgent({ backend: { type: "provider", id: "one", config: {} } }),
+    {
+      runtimeCommand: "goose",
+      backend: { type: "provider", id: "two", config: {} },
+    },
+  );
+  assert.match(error, /uses provider one, requested two/);
+});
+
+test("reusableDeploymentConfigurationError: rejects provider runtime mismatch", () => {
+  const error = reusableDeploymentConfigurationError(
+    makeAgent({
+      agentCommand: "goose",
+      backend: { type: "provider", id: "remote", config: {} },
+    }),
+    {
+      runtimeCommand: "claude-acp",
+      backend: { type: "provider", id: "remote", config: {} },
+    },
+  );
+  assert.match(error, /uses runtime goose, requested claude-acp/);
+});
+
+test("reusableDeploymentConfigurationError: rejects provider config mismatch", () => {
+  const error = reusableDeploymentConfigurationError(
+    makeAgent({
+      backend: {
+        type: "provider",
+        id: "remote",
+        config: { region: "us-east", nested: { replicas: 2 } },
+      },
+    }),
+    {
+      runtimeCommand: "goose",
+      backend: {
+        type: "provider",
+        id: "remote",
+        config: { region: "us-west", nested: { replicas: 2 } },
+      },
+    },
+  );
+  assert.match(error, /different provider configuration/);
+});
+
+test("reusableDeploymentConfigurationError: accepts normalized provider config", () => {
+  const error = reusableDeploymentConfigurationError(
+    makeAgent({
+      backend: {
+        type: "provider",
+        id: "remote",
+        config: { nested: { replicas: 2, zone: "a" }, region: "us-east" },
+      },
+    }),
+    {
+      runtimeCommand: "goose",
+      backend: {
+        type: "provider",
+        id: "remote",
+        config: { region: "us-east", nested: { zone: "a", replicas: 2 } },
+      },
+    },
+  );
+  assert.equal(error, null);
 });
 
 test("findReusableGenericAgent: finds agent with matching command and no persona/prompt", () => {

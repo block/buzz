@@ -1,8 +1,12 @@
 import {
   commandsMatch,
+  findPersonaAgentCandidates,
   findReusableGenericAgent,
   findReusablePersonaAgent,
+  findReusableTeamPersonaAgent,
+  findTeamPersonaAgentCandidates,
   pickPreferredManagedAgent,
+  reusableDeploymentConfigurationError,
   resolveReusableAgentAccessPolicy,
 } from "@/features/agents/agentReuse";
 export { findReusableAgent } from "@/features/agents/agentReuse";
@@ -326,20 +330,100 @@ export async function provisionChannelManagedAgent(
     throw new Error("Agent name is required.");
   }
 
-  // Smart reuse: if a managed agent with the same personaId already exists
-  // and is not already in this channel, attach it instead of creating a new one.
+  // Team deployment is idempotent by (team, persona). Repeating the same
+  // deployment reuses its exact identity, including when it is already in the
+  // target channel. A different team still receives its own instance.
   if (
     input.personaId &&
+    input.teamId &&
     !input.forceNewInstance &&
     context?.managedAgents &&
     context.channelMemberPubkeys
   ) {
+    const candidates = findTeamPersonaAgentCandidates(
+      context.managedAgents,
+      input.personaId,
+      input.teamId,
+    );
+    if (candidates.length > 1) {
+      throw new Error(
+        `Team deployment is ambiguous: ${candidates.length} active identities exist for persona ${input.personaId} in team ${input.teamId}. Archive duplicates before retrying.`,
+      );
+    }
+    const reusable = findReusableTeamPersonaAgent(
+      context.managedAgents,
+      input.personaId,
+      input.teamId,
+      context.channelMemberPubkeys,
+    );
+    if (reusable) {
+      const configurationError = reusableDeploymentConfigurationError(
+        reusable,
+        {
+          runtimeCommand: input.runtime.command,
+          model: input.model,
+          backend: input.backend,
+        },
+      );
+      if (configurationError) {
+        throw new Error(
+          `Existing team deployment is incompatible: ${configurationError}. Update or archive it explicitly before retrying.`,
+        );
+      }
+      const definition = context.personas.find(
+        (persona) => persona.id === input.personaId,
+      );
+      const { agent: updatedAgent } = await applyReusableAgentAccessPolicy(
+        reusable,
+        input,
+        definition,
+      );
+      return {
+        agent: updatedAgent,
+        created: false,
+        runtimeId: input.runtime.id,
+      };
+    }
+  }
+
+  // Standalone persona deployment also converges on one unbound identity,
+  // whether or not it is already in the target channel. Team-bound instances
+  // only reuse via the exact (team, persona) path above, never across teams.
+  if (
+    input.personaId &&
+    !input.teamId &&
+    !input.forceNewInstance &&
+    context?.managedAgents &&
+    context.channelMemberPubkeys
+  ) {
+    const candidates = findPersonaAgentCandidates(
+      context.managedAgents,
+      input.personaId,
+    );
+    if (candidates.length > 1) {
+      throw new Error(
+        `Persona deployment is ambiguous: ${candidates.length} active unbound identities exist for persona ${input.personaId}. Archive duplicates before retrying.`,
+      );
+    }
     const reusable = findReusablePersonaAgent(
       context.managedAgents,
       input.personaId,
       context.channelMemberPubkeys,
     );
     if (reusable) {
+      const configurationError = reusableDeploymentConfigurationError(
+        reusable,
+        {
+          runtimeCommand: input.runtime.command,
+          model: input.model,
+          backend: input.backend,
+        },
+      );
+      if (configurationError) {
+        throw new Error(
+          `Existing persona deployment is incompatible: ${configurationError}. Update or archive it explicitly before retrying.`,
+        );
+      }
       const definition = context.personas.find(
         (persona) => persona.id === input.personaId,
       );
@@ -404,6 +488,7 @@ export async function provisionChannelManagedAgent(
     agentArgs: [],
     mcpCommand: input.runtime.mcpCommand ?? "",
     personaId: input.personaId ?? undefined,
+    forceNewInstance: input.forceNewInstance ?? false,
     teamId: input.teamId ?? undefined,
     systemPrompt: input.systemPrompt?.trim() || undefined,
     avatarUrl: resolvedAvatarUrl,

@@ -145,6 +145,12 @@ pub struct CreateManagedAgentRequest {
     pub name: String,
     #[serde(default)]
     pub persona_id: Option<String>,
+    /// Explicitly opt out of convergent persona deployment. Persona-backed
+    /// creation otherwise reuses one active identity per unbound persona or
+    /// `(team_id, persona_id)` binding. Only an intentional user action should
+    /// set this true.
+    #[serde(default)]
+    pub force_new_instance: bool,
     /// Optional deployment-time team binding for runtime instruction layering.
     #[serde(default)]
     pub team_id: Option<String>,
