@@ -240,6 +240,17 @@ fn push_descriptor(
 ) -> Option<serde_json::Value> {
     let host = tenant_host?;
     push_configured.then_some(())?;
+    // Unauthenticated NIP-11 must never advertise a private/loopback origin.
+    // When a reverse proxy forwards the internal bind Host (or a client hits
+    // the origin directly), omit the push descriptor rather than disclosing
+    // topology that the fronting proxy exists to hide.
+    if !push_origin_host_is_public(host) {
+        tracing::warn!(
+            host,
+            "omitting NIP-11 push descriptor: tenant host is not a public origin"
+        );
+        return None;
+    }
     let scheme = if relay_url.starts_with("wss://") {
         "wss"
     } else {
@@ -271,6 +282,29 @@ fn push_descriptor(
             "max_string_len": 512
         }
     }))
+}
+
+/// Whether `host` (a tenant authority, possibly with a non-default port) is
+/// safe to advertise as `push.origin` on the unauthenticated NIP-11 document.
+///
+/// Domains other than `localhost` are treated as public. Literal IP hosts use
+/// [`buzz_core::network::is_private_ip`]. Unparseable authorities fail closed.
+fn push_origin_host_is_public(host: &str) -> bool {
+    // Same Host normalization as tenant binding (trailing FQDN dot, default
+    // ports) so `localhost.` cannot slip past the loopback deny.
+    let host = buzz_core::tenant::normalize_host(host);
+    if host.is_empty() {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(&format!("http://{host}/")) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Domain(domain)) => !domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => !buzz_core::network::is_private_ip(&std::net::IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => !buzz_core::network::is_private_ip(&std::net::IpAddr::V6(ip)),
+        None => false,
+    }
 }
 
 /// Builds the served NIP-11 document for a request arriving on `raw_host`.
@@ -417,6 +451,44 @@ mod tests {
             descriptor["push_kinds"],
             serde_json::json!(crate::handlers::push_lease::PUSH_KINDS)
         );
+    }
+
+    #[test]
+    fn push_descriptor_omits_private_and_loopback_origins() {
+        let keys = nostr::Keys::generate();
+        for host in [
+            "10.0.0.1:3001",
+            "192.168.1.10",
+            "127.0.0.1:3000",
+            "localhost:3000",
+            "localhost",
+            "localhost.",
+            "[::1]:3000",
+        ] {
+            assert!(
+                push_descriptor(true, "ws://relay", "key", &keys, Some(host)).is_none(),
+                "private/loopback host {host:?} must not be advertised as push.origin"
+            );
+        }
+        let public = push_descriptor(
+            true,
+            "wss://relay",
+            "key",
+            &keys,
+            Some("community.example.com"),
+        )
+        .expect("public hostname must still advertise push");
+        assert_eq!(public["origin"], "wss://community.example.com");
+    }
+
+    #[test]
+    fn push_origin_host_classification() {
+        assert!(push_origin_host_is_public("tenant.example"));
+        assert!(push_origin_host_is_public("community.example.com:8443"));
+        assert!(!push_origin_host_is_public("10.0.0.1:3001"));
+        assert!(!push_origin_host_is_public("localhost:3000"));
+        assert!(!push_origin_host_is_public("localhost."));
+        assert!(!push_origin_host_is_public(""));
     }
 
     #[test]
