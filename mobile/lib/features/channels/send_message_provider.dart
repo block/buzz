@@ -126,24 +126,42 @@ class SendMessage {
     Channel channel,
     String? authorPubkey,
   ) async {
-    List<ChannelMember>? members;
-    try {
-      members = await _fetchMembers(channelId);
-    } catch (_) {
-      // Fall back to metadata below so an unavailable membership query does
-      // not block ordinary DM sends.
-    }
-
+    var members = await _tryFetchMembers(channelId);
     final author = authorPubkey?.toLowerCase();
-    final participants = members != null && members.isNotEmpty
+    var participants = members != null && members.isNotEmpty
         ? members.map((member) => member.pubkey)
         : channel.participantPubkeys;
+
+    // A DM always has at least one other participant besides the sender, so
+    // both the live membership query and the channel-metadata fallback
+    // coming back empty at once means the data isn't available right now —
+    // e.g. a relay reconnect in progress (common on mobile after
+    // backgrounding) — not that the DM genuinely has nobody else in it.
+    // Retry briefly instead of silently sending with zero recipients.
+    for (var attempt = 0; participants.isEmpty && attempt < 3; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      members = await _tryFetchMembers(channelId);
+      if (members != null && members.isNotEmpty) {
+        participants = members.map((member) => member.pubkey);
+      }
+    }
+
     return {
       for (final participant in participants)
         if (participant.trim().isNotEmpty &&
             participant.toLowerCase() != author)
           participant.toLowerCase(),
     };
+  }
+
+  Future<List<ChannelMember>?> _tryFetchMembers(String channelId) async {
+    try {
+      return await _fetchMembers(channelId);
+    } catch (_) {
+      // Fall back to metadata below so an unavailable membership query does
+      // not block ordinary DM sends.
+      return null;
+    }
   }
 
   void _ensureDeliveryValid() {
