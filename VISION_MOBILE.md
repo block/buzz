@@ -62,6 +62,5 @@ The following are preferred architectural approaches in service of the experienc
 ### Notifications
 
 - Message notifications show the Buzz icon, sender avatar, channel name, and message snippet, subject to privacy choices.
-- Notifications are delivered exactly once, barring APNs-side failures.
 - Notifications respect shared preferences and mute state and avoid alerts for activity already known to be read.
 - Opening a notification reaches the relevant community and conversation, including from a cold start. Inaccessible content has a clear explanation.
