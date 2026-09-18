@@ -564,3 +564,57 @@ fn refresh_skill_overwrites_on_version_bump() {
         "SKILL.md must be refreshed on version bump"
     );
 }
+
+#[test]
+fn nest_writes_a_claude_md_pointing_at_agents_md() {
+    // Claude Code loads CLAUDE.md, not AGENTS.md, and buzz-acp only names the
+    // orientation file in the prompt — without this pointer everything in it
+    // (including the commit-identity rules) is inert for that runtime.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("nest");
+    ensure_nest_at(&root).unwrap();
+
+    let claude_md = std::fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+    // Exact bytes, not `trim()`: `@./AGENTS.md` is an include directive, and
+    // leading whitespace or a missing newline is the kind of drift that stops
+    // it resolving. It must be the whole file.
+    assert_eq!(claude_md, "@./AGENTS.md\n");
+    assert_eq!(claude_md, super::CLAUDE_MD);
+    assert!(root.join("AGENTS.md").exists());
+}
+
+#[test]
+fn a_nest_with_no_claude_md_gets_the_pointer_back() {
+    // The state the write-failure cleanup restores: no file, so the next
+    // launch's `create_new` succeeds and writes the pointer. (The failing
+    // write itself needs an I/O fault to reproduce and is not simulated here;
+    // this covers the state it hands back.)
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("nest");
+    ensure_nest_at(&root).unwrap();
+    std::fs::remove_file(root.join("CLAUDE.md")).unwrap();
+
+    ensure_nest_at(&root).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
+        super::CLAUDE_MD,
+        "a nest missing its pointer must get it back on the next launch"
+    );
+}
+
+#[test]
+fn nest_never_clobbers_an_existing_claude_md() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("nest");
+    ensure_nest_at(&root).unwrap();
+
+    std::fs::write(root.join("CLAUDE.md"), "@./AGENTS.md\n\nmine\n").unwrap();
+    ensure_nest_at(&root).unwrap();
+
+    let claude_md = std::fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+    assert!(
+        claude_md.contains("mine"),
+        "user content must survive: {claude_md}"
+    );
+}
