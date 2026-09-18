@@ -177,16 +177,21 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // the same boot) and BEFORE backfill_standalone_agents (so a manufactured
     // definition never snapshots a suffix this strips).
     strip_baked_team_instructions(app);
+    // Canonicalize structured provider/model fields and strip stale derived
+    // env keys BEFORE matching standalone agents to folded definitions. If
+    // this ran after backfill, pre-cleanup data could prevent a valid match
+    // and any provider rewrite would stale the newly written source hash.
+    reconcile_databricks_v1_to_v2(app);
     refresh_builtin_agent_avatars(app);
-    // B5: manufacture definitions for standalone agents AFTER the fold (so
-    // pre-existing definition slugs exist for collision checks) and before event
-    // sync republishes — the backfilled link flips the 30177 projection.
+    // B5: link standalone agents to compatible folded definitions, otherwise
+    // manufacture definitions, AFTER the fold and provider/env cleanup (so
+    // matching sees canonical records) and before event sync republishes —
+    // the backfilled link is what flips the 30177 projection to its slim shape.
     backfill_standalone_agents(app);
     // Repair dropped team↔member links, then detach directory-backed teams,
     // gated on a clean repair so a failure preserves `source_dir` for a retry.
     team_membership::repair_then_detach_teams(app);
     reconcile_provider_mcp_commands(app);
-    reconcile_databricks_v1_to_v2(app);
     materialize_agent_runtimes(app);
 }
 
