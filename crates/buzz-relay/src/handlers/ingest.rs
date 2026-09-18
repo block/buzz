@@ -19,7 +19,7 @@ use buzz_core::kind::{
     KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
     KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
+    KIND_HANDLER_INFO, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
     KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
@@ -466,7 +466,10 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // palette is the client-side union of every member's own set.
         | KIND_EMOJI_SET
         | KIND_EMOJI_LIST
-        | KIND_AGENT_PROFILE => Ok(Scope::UsersWrite),
+        | KIND_AGENT_PROFILE
+        // NIP-89: handler-info is a self-declaration, same ownership shape as
+        // kind:0 and the NIP-65 relay list above.
+        | KIND_HANDLER_INFO => Ok(Scope::UsersWrite),
         KIND_DELETION
         | KIND_REACTION
         | KIND_GIFT_WRAP
@@ -649,6 +652,9 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_EVENT_REMINDER
             // Agent profile (10100): user-owned replaceable, keyed by pubkey.
             | KIND_AGENT_PROFILE
+            // NIP-89 handler-info (31990): self-declared, keyed by (pubkey, kind, d_tag).
+            // A stray `h` tag must not channel-scope it.
+            | KIND_HANDLER_INFO
             // NIP-AP: persona definitions (30175): owner-authored, keyed by (pubkey, kind, d_tag).
             | KIND_PERSONA
             // NIP-AP: team (30176) + managed-agent (30177) definitions and the
@@ -3958,6 +3964,24 @@ mod postgres_tests {
             required_scope_for_kind(KIND_AGENT_TURN_METRIC, &dummy).unwrap(),
             Scope::MessagesWrite,
             "kind:44200 requires MessagesWrite scope"
+        );
+    }
+
+    #[test]
+    fn handler_info_is_global_only_and_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        assert!(
+            is_global_only_kind(KIND_HANDLER_INFO),
+            "kind:31990 (NIP-89 handler-info) must be global-only (no h tag)"
+        );
+        assert!(
+            !requires_h_channel_scope(KIND_HANDLER_INFO),
+            "kind:31990 must not require an h-tag"
+        );
+        assert_eq!(
+            required_scope_for_kind(KIND_HANDLER_INFO, &dummy).unwrap(),
+            Scope::UsersWrite,
+            "kind:31990 requires UsersWrite scope, same as kind:0 and the NIP-65 relay list"
         );
     }
 
