@@ -35,6 +35,22 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
 pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
 
+/// Event kinds that open agent turns unless an operator supplies an override.
+///
+/// `mentions` and `all` differ only in whether a `p` tag is required; both
+/// modes subscribe to and match this same bounded set by default.
+pub(crate) fn default_subscription_kinds() -> Vec<u32> {
+    use buzz_core::kind::{
+        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    };
+
+    vec![
+        KIND_STREAM_MESSAGE,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        KIND_STREAM_REMINDER,
+    ]
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to parse nostr keys: {0}")]
@@ -1338,10 +1354,6 @@ pub fn resolve_channel_filters(
     discovered_channels: &[Uuid],
     rules: &[SubscriptionRule],
 ) -> HashMap<Uuid, ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     let target_channels: Vec<Uuid> = if let Some(ref overrides) = config.channels_override {
         overrides
             .iter()
@@ -1356,13 +1368,10 @@ pub fn resolve_channel_filters(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => {
-            let kinds = config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            });
+            let kinds = config
+                .kinds_override
+                .clone()
+                .unwrap_or_else(default_subscription_kinds);
             let require_mention = !config.no_mention_filter;
             for ch in &target_channels {
                 result.insert(
@@ -1375,11 +1384,15 @@ pub fn resolve_channel_filters(
             }
         }
         SubscribeMode::All => {
+            let kinds = config
+                .kinds_override
+                .clone()
+                .unwrap_or_else(default_subscription_kinds);
             for ch in &target_channels {
                 result.insert(
                     *ch,
                     ChannelFilter {
-                        kinds: config.kinds_override.clone(),
+                        kinds: Some(kinds.clone()),
                         require_mention: false,
                     },
                 );
@@ -1440,10 +1453,6 @@ pub fn resolve_dynamic_channel_filter(
     channel_id: Uuid,
     rules: &[crate::filter::SubscriptionRule],
 ) -> Option<ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     // In Mentions/All mode, if the operator explicitly constrained channels
     // with --channels, only allow dynamic subscription to channels in that
     // allowlist. Config mode ignores --channels (per CLI contract) and uses
@@ -1461,17 +1470,21 @@ pub fn resolve_dynamic_channel_filter(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => Some(ChannelFilter {
-            kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            })),
+            kinds: Some(
+                config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(default_subscription_kinds),
+            ),
             require_mention: !config.no_mention_filter,
         }),
         SubscribeMode::All => Some(ChannelFilter {
-            kinds: config.kinds_override.clone(),
+            kinds: Some(
+                config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(default_subscription_kinds),
+            ),
             require_mention: false,
         }),
         SubscribeMode::Config => {
@@ -1868,19 +1881,22 @@ mod tests {
     }
 
     #[test]
-    fn test_all_mode_wildcard() {
+    fn test_all_mode_defaults_to_message_kinds() {
+        // SubscribeMode::All should mean "same kinds as Mentions, without
+        // the mention requirement" — not "all event kinds" (wildcard).
+        // Without this default, typing indicators (kind 20002) and other
+        // ephemeral kinds open agent turns and cancel pending wakeups.
+        // See #4949.
         let config = test_config(SubscribeMode::All);
         let channels = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
         let result = resolve_channel_filters(&config, &channels, &[]);
+        let expected = default_subscription_kinds();
 
         assert_eq!(result.len(), 3);
         for ch in &channels {
             let f = result.get(ch).unwrap();
-            assert!(
-                f.kinds.is_none(),
-                "all mode with no override = wildcard kinds"
-            );
-            assert!(!f.require_mention);
+            assert_eq!(f.kinds.as_deref(), Some(expected.as_slice()));
+            assert!(!f.require_mention, "All mode must not require mention");
         }
     }
 
@@ -1893,6 +1909,20 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert_eq!(f.kinds.as_ref().unwrap(), &[9, 7]);
+    }
+
+    #[test]
+    fn test_all_mode_dynamic_filter_defaults_to_message_kinds() {
+        // resolve_dynamic_channel_filter must also default to the message
+        // kinds list when BUZZ_ACP_KINDS is not set, not wildcard.
+        // See #4949.
+        let config = test_config(SubscribeMode::All);
+        let ch = Uuid::new_v4();
+        let result = resolve_dynamic_channel_filter(&config, ch, &[]);
+
+        let f = result.expect("All mode must return a filter");
+        assert_eq!(f.kinds, Some(default_subscription_kinds()));
+        assert!(!f.require_mention, "All mode must not require mention");
     }
 
     #[test]
