@@ -334,6 +334,7 @@ pub fn build_managed_agent_summary(
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
+        credential_persistence: Some(crate::managed_agents::storage::credential_persistence_for_agent(&record.pubkey, &record.private_key_nsec)),
     })
 }
 
