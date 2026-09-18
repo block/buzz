@@ -70,6 +70,7 @@ export type SetChannelPurposeInput = {
 };
 
 export type CanvasResponse = {
+  eventId: string | null;
   content: string | null;
   updatedAt: number | null;
   author: string | null;
@@ -78,6 +79,8 @@ export type CanvasResponse = {
 export type SetCanvasInput = {
   channelId: string;
   content: string;
+  enforceRevision?: boolean;
+  expectedEventId?: string | null;
 };
 
 export type SetCanvasResult = {

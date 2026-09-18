@@ -27,11 +27,14 @@ import {
   unarchiveChannel,
   updateChannel,
 } from "@/shared/api/tauri";
+import { relayClient } from "@/shared/api/relayClient";
 import type {
   AddChannelMembersInput,
+  CanvasResponse,
   Channel,
   ChannelDetail,
   CreateChannelInput,
+  RelayEvent,
   SetChannelPurposeInput,
   SetChannelTopicInput,
   UpdateChannelInput,
@@ -976,15 +979,94 @@ export function useCanvasQuery(channelId: string | null, enabled = true) {
   });
 }
 
+export function useCanvasSubscription(
+  channelId: string | null,
+  enabled = true,
+) {
+  const queryClient = useQueryClient();
+
+  React.useEffect(() => {
+    if (!enabled || !channelId) {
+      return;
+    }
+    let isDisposed = false;
+    let cleanup: (() => void) | undefined;
+    const applyCanvasEvent = (event: RelayEvent) => {
+      queryClient.setQueryData<CanvasResponse>(
+        ["channel-canvas", channelId],
+        (current) => {
+          if (current?.updatedAt && current.updatedAt > event.created_at) {
+            return current;
+          }
+          return {
+            author: event.pubkey,
+            content: event.content,
+            eventId: event.id,
+            updatedAt: event.created_at,
+          };
+        },
+      );
+    };
+    void relayClient
+      .subscribeLive(
+        {
+          "#h": [channelId],
+          kinds: [40100],
+          limit: 0,
+        },
+        applyCanvasEvent,
+      )
+      .then((dispose) => {
+        if (isDisposed) {
+          dispose();
+          return;
+        }
+        cleanup = dispose;
+      })
+      .catch((error) => {
+        console.error(
+          "Failed to subscribe to channel canvas",
+          channelId,
+          error,
+        );
+      });
+    const disposeReconnect = relayClient.subscribeToReconnects(() => {
+      void queryClient.invalidateQueries({
+        queryKey: ["channel-canvas", channelId],
+      });
+    });
+    return () => {
+      isDisposed = true;
+      cleanup?.();
+      disposeReconnect();
+    };
+  }, [channelId, enabled, queryClient]);
+}
+
 export function useSetCanvasMutation(channelId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (content: string) => {
+    mutationFn: (
+      input:
+        | string
+        | {
+            content: string;
+            enforceRevision?: boolean;
+            expectedEventId?: string | null;
+          },
+    ) => {
       if (!channelId) {
         return Promise.reject(new Error("No channel selected"));
       }
-      return setCanvas({ channelId, content });
+      return setCanvas({
+        channelId,
+        content: typeof input === "string" ? input : input.content,
+        enforceRevision:
+          typeof input === "string" ? false : input.enforceRevision,
+        expectedEventId:
+          typeof input === "string" ? undefined : input.expectedEventId,
+      });
     },
     onSuccess: () => {
       if (channelId) {

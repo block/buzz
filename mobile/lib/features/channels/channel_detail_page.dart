@@ -38,6 +38,8 @@ import '../forum/forum_posts_view.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
+import 'canvas_board.dart';
+import 'channel_canvas_board.dart';
 import 'channel_link_navigation.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
@@ -271,6 +273,7 @@ class ChannelDetailPage extends HookConsumerWidget {
     final restoreComposerFocus = useRef<VoidCallback?>(null);
     final sendMessage = ref.read(sendMessageProvider);
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
+    final canvasAsync = ref.watch(channelCanvasProvider(channel.id));
     final channelsAsync = ref.watch(channelsProvider);
     final messagesState = ref.watch(channelMessagesProvider(channel.id));
     final huddleLifecycle =
@@ -349,6 +352,25 @@ class ChannelDetailPage extends HookConsumerWidget {
         channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
+    final canvas = canvasAsync.asData?.value;
+    final selectedCanvasView = useState(
+      initialChannelCanvasView(
+        channelName: resolvedChannel.name,
+        storedValue: ref
+            .read(savedPrefsProvider)
+            .getString(channelCanvasViewPreferenceKey(channel.id)),
+      ),
+    );
+    final boardAvailable = channelHasCanvasBoard(
+      channelName: resolvedChannel.name,
+      isDm: resolvedChannel.isDm,
+      content: canvas?.content,
+    );
+    final showsBoard =
+        boardAvailable &&
+        initialMessageId == null &&
+        initialThreadRootId == null &&
+        selectedCanvasView.value == ChannelCanvasView.board;
     final participantCount = resolvedChannel.participantPubkeys
         .map((pubkey) => pubkey.trim().toLowerCase())
         .where((pubkey) => pubkey.isNotEmpty)
@@ -531,6 +553,38 @@ class ChannelDetailPage extends HookConsumerWidget {
       return session.registerVisibleChannel(channel.id);
     }, [channel.id]);
 
+    useEffect(() {
+      if (sessionStatus != SessionStatus.connected || !boardAvailable) {
+        return null;
+      }
+      var disposed = false;
+      void Function()? unsubscribe;
+      Future.microtask(() async {
+        try {
+          final cleanup = await ref
+              .read(relaySessionProvider.notifier)
+              .subscribe(NostrFilters.canvas(channel.id), (_) {
+                if (!disposed) {
+                  ref.invalidate(channelCanvasProvider(channel.id));
+                }
+              });
+          if (disposed) {
+            cleanup();
+          } else {
+            unsubscribe = cleanup;
+          }
+        } catch (error) {
+          if (!disposed) {
+            debugPrint('[CanvasBoard] live subscription failed: $error');
+          }
+        }
+      });
+      return () {
+        disposed = true;
+        unsubscribe?.call();
+      };
+    }, [boardAvailable, channel.id, sessionStatus]);
+
     useEffect(
       () {
         if (channel.isForum) return null;
@@ -567,6 +621,52 @@ class ChannelDetailPage extends HookConsumerWidget {
             .clearObservedUnreadCoveredByRead(channel.id, readTimestamp);
       });
     }, [channel.id, readState.isReady, readTimestamp]);
+
+    Future<void> openCanvasThread(String threadId) async {
+      final notifier = ref.read(channelMessagesProvider(channel.id).notifier);
+      try {
+        await _loadDeepLinkEvents(ref, channel.id, {threadId});
+        final events =
+            ref.read(channelMessagesProvider(channel.id)).value ??
+            const <NostrEvent>[];
+        final messages = formatTimeline(events, currentPubkey: currentPubkey);
+        final threadHead = messages
+            .where((message) => message.id == threadId)
+            .firstOrNull;
+        if (threadHead == null) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Couldn’t load this card thread.')),
+            );
+          }
+          return;
+        }
+        if (!context.mounted) return;
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: messages,
+              channelId: channel.id,
+              currentPubkey: currentPubkey,
+              isMember: resolvedChannel.isMember,
+              isArchived: resolvedChannel.isArchived,
+            ),
+          ),
+        );
+      } finally {
+        notifier.releaseDeepLinkEvents({threadId});
+      }
+    }
+
+    void selectCanvasView(ChannelCanvasView view) {
+      selectedCanvasView.value = view;
+      unawaited(
+        ref
+            .read(savedPrefsProvider)
+            .setString(channelCanvasViewPreferenceKey(channel.id), view.name),
+      );
+    }
 
     return FrostedScaffold(
       resizeToAvoidBottomInset:
@@ -653,6 +753,33 @@ class ChannelDetailPage extends HookConsumerWidget {
                 ),
               ]
             : [
+                if (boardAvailable)
+                  PopupMenuButton<ChannelCanvasView>(
+                    key: const ValueKey('channel-view-mode-menu'),
+                    tooltip: 'View mode',
+                    initialValue: showsBoard
+                        ? ChannelCanvasView.board
+                        : ChannelCanvasView.stream,
+                    onSelected: selectCanvasView,
+                    itemBuilder: (_) => [
+                      CheckedPopupMenuItem(
+                        value: ChannelCanvasView.board,
+                        checked: showsBoard,
+                        child: const Text('Board'),
+                      ),
+                      CheckedPopupMenuItem(
+                        value: ChannelCanvasView.stream,
+                        checked: !showsBoard,
+                        child: const Text('Stream'),
+                      ),
+                    ],
+                    icon: Icon(
+                      showsBoard
+                          ? LucideIcons.layoutGrid
+                          : LucideIcons.messageSquareText,
+                      size: 21,
+                    ),
+                  ),
                 if (showsComposer)
                   _HuddleButton(
                     channel: resolvedChannel,
@@ -669,7 +796,21 @@ class ChannelDetailPage extends HookConsumerWidget {
           Column(
             children: [
               Expanded(
-                child: resolvedChannel.isForum
+                child: showsBoard
+                    ? ChannelCanvasBoard(
+                        channelName: resolvedChannel.name,
+                        content: canvas?.content,
+                        errorMessage: canvasAsync.hasError
+                            ? 'Couldn’t load the channel board.'
+                            : null,
+                        isLoading: canvasAsync.isLoading,
+                        topPadding: frostedAppBarHeight(
+                          context,
+                          titleContentHeight: appBarTitleContentHeight,
+                        ),
+                        onOpenThread: openCanvasThread,
+                      )
+                    : resolvedChannel.isForum
                     ? Stack(
                         fit: StackFit.expand,
                         children: [
@@ -777,7 +918,8 @@ class ChannelDetailPage extends HookConsumerWidget {
                         ),
                       ),
               ),
-              if (!resolvedChannel.isForum &&
+              if (!showsBoard &&
+                  !resolvedChannel.isForum &&
                   (!resolvedChannel.isMember ||
                       resolvedChannel.isArchived)) ...[
                 AnimatedSize(
@@ -795,7 +937,7 @@ class ChannelDetailPage extends HookConsumerWidget {
               ],
             ],
           ),
-          if (showsComposer)
+          if (showsComposer && !showsBoard)
             AndroidImeLift(
               child: Align(
                 alignment: Alignment.bottomCenter,

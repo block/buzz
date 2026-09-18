@@ -140,11 +140,13 @@ class ChannelCanvas {
   final String? content;
   final DateTime? updatedAt;
   final String? authorPubkey;
+  final String? eventId;
 
   const ChannelCanvas({
     required this.content,
     required this.updatedAt,
     required this.authorPubkey,
+    this.eventId,
   });
 }
 
@@ -598,6 +600,7 @@ final channelCanvasProvider = FutureProvider.family<ChannelCanvas, String>((
       content: null,
       updatedAt: null,
       authorPubkey: null,
+      eventId: null,
     );
   }
   final event = events.first;
@@ -608,6 +611,7 @@ final channelCanvasProvider = FutureProvider.family<ChannelCanvas, String>((
       isUtc: true,
     ),
     authorPubkey: event.pubkey,
+    eventId: event.id,
   );
 });
 
