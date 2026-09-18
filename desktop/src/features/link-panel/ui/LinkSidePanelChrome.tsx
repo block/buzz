@@ -91,6 +91,10 @@ function ModeButton({
 /**
  * Playground-style web chrome for the link/pin slide-out header actions.
  * Title + close stay on IdleAuxiliaryPanel.
+ *
+ * Layout (two rows so long URLs cannot push tooling off-screen):
+ * 1. URL only — truncates/ellipsis within the available header width
+ * 2. Desktop/Responsive/Mobile on the left; nav/tool icons right-justified
  */
 export function LinkSidePanelChrome({
   expanded,
@@ -194,124 +198,136 @@ export function LinkSidePanelChrome({
         className="flex min-w-0 max-w-full flex-col items-stretch gap-0.5"
         data-testid="link-side-panel-chrome"
       >
-        <div className="flex min-w-0 items-center gap-0.5">
-          <ChromeIconButton
-            aria-label="Back"
-            data-testid="link-side-panel-back"
-            disabled={!nav.canGoBack}
-            onClick={() => {
-              void pinWebviewGoBack(pinId).then(setNav);
-            }}
-            size="icon-xs"
-            tooltip="Back"
-            type="button"
-            variant="ghost"
-          >
-            <ArrowLeft />
-          </ChromeIconButton>
-          <ChromeIconButton
-            aria-label="Forward"
-            data-testid="link-side-panel-forward"
-            disabled={!nav.canGoForward}
-            onClick={() => {
-              void pinWebviewGoForward(pinId).then(setNav);
-            }}
-            size="icon-xs"
-            tooltip="Forward"
-            type="button"
-            variant="ghost"
-          >
-            <ArrowRight />
-          </ChromeIconButton>
-          <ChromeIconButton
-            aria-label="Refresh"
-            data-testid="link-side-panel-refresh"
-            onClick={() => {
-              void pinWebviewReload(pinId);
-            }}
-            size="icon-xs"
-            tooltip="Refresh"
-            type="button"
-            variant="ghost"
-          >
-            <RefreshCw />
-          </ChromeIconButton>
-          <div
-            className="min-w-0 flex-1 truncate rounded-md border border-border bg-muted/40 px-2 py-0.5 font-mono text-2xs text-muted-foreground"
-            data-testid="link-side-panel-url"
-            title={currentUrl}
-          >
-            {currentUrl}
-          </div>
-          <ChromeIconButton
-            aria-label="Copy URL"
-            data-testid="link-side-panel-copy-url"
-            onClick={() => copyTextToClipboard(currentUrl, "URL copied")}
-            size="icon-xs"
-            tooltip="Copy URL"
-            type="button"
-            variant="ghost"
-          >
-            <Copy />
-          </ChromeIconButton>
-          <ChromeIconButton
-            aria-label="Inspect"
-            data-testid="link-side-panel-inspect"
-            onClick={() => void handleInspect()}
-            size="icon-xs"
-            tooltip="Inspect"
-            type="button"
-            variant="outline"
-          >
-            <Inspect />
-          </ChromeIconButton>
-          {canScreenshot ? (
-            <ChromeIconButton
-              aria-label="Screenshot"
-              data-testid="link-side-panel-screenshot"
-              onClick={() => void handleScreenshot()}
-              size="icon-xs"
-              tooltip="Screenshot"
-              type="button"
-              variant="outline"
-            >
-              <Camera />
-            </ChromeIconButton>
-          ) : null}
-          <ChromeIconButton
-            aria-label={expandLabel}
-            data-testid="link-side-panel-expand"
-            onClick={() => toggleLinkSidePanelExpanded()}
-            size="icon-xs"
-            tooltip={expandLabel}
-            type="button"
-            variant="outline"
-          >
-            {expanded ? <Minimize2 /> : <Maximize2 />}
-          </ChromeIconButton>
+        {/*
+         * Row 1: URL only (title/X live on IdleAuxiliaryPanel). Truncate so
+         * long addresses never shove chrome controls off-screen.
+         */}
+        <div
+          className="min-w-0 truncate rounded-md border border-border bg-muted/40 px-2 py-0.5 font-mono text-2xs text-muted-foreground"
+          data-testid="link-side-panel-url"
+          title={currentUrl}
+        >
+          {currentUrl}
         </div>
+        {/*
+         * Row 2: device modes on the left, tooling icons right-justified.
+         */}
         <div
           className="flex min-w-0 items-center gap-1"
           data-testid="link-side-panel-mode-row"
         >
-          <ModeButton
-            active={viewportMode === "desktop"}
-            label="Desktop"
-            onSelect={() => setLinkSidePanelViewportMode("desktop")}
-            testId="link-side-panel-mode-desktop"
-          />
-          <ModeButton
-            active={viewportMode === "responsive"}
-            label="Responsive"
-            onSelect={() => setLinkSidePanelViewportMode("responsive")}
-            testId="link-side-panel-mode-responsive"
-          />
-          <ModeButton
-            active={viewportMode === "mobile"}
-            label="Mobile"
-            onSelect={() => setLinkSidePanelViewportMode("mobile")}
-            testId="link-side-panel-mode-mobile"
-          />
+          <div className="flex min-w-0 items-center gap-1">
+            <ModeButton
+              active={viewportMode === "desktop"}
+              label="Desktop"
+              onSelect={() => setLinkSidePanelViewportMode("desktop")}
+              testId="link-side-panel-mode-desktop"
+            />
+            <ModeButton
+              active={viewportMode === "responsive"}
+              label="Responsive"
+              onSelect={() => setLinkSidePanelViewportMode("responsive")}
+              testId="link-side-panel-mode-responsive"
+            />
+            <ModeButton
+              active={viewportMode === "mobile"}
+              label="Mobile"
+              onSelect={() => setLinkSidePanelViewportMode("mobile")}
+              testId="link-side-panel-mode-mobile"
+            />
+          </div>
+          <div
+            className="ml-auto flex shrink-0 items-center gap-0.5"
+            data-testid="link-side-panel-tool-icons"
+          >
+            <ChromeIconButton
+              aria-label="Back"
+              data-testid="link-side-panel-back"
+              disabled={!nav.canGoBack}
+              onClick={() => {
+                void pinWebviewGoBack(pinId).then(setNav);
+              }}
+              size="icon-xs"
+              tooltip="Back"
+              type="button"
+              variant="ghost"
+            >
+              <ArrowLeft />
+            </ChromeIconButton>
+            <ChromeIconButton
+              aria-label="Forward"
+              data-testid="link-side-panel-forward"
+              disabled={!nav.canGoForward}
+              onClick={() => {
+                void pinWebviewGoForward(pinId).then(setNav);
+              }}
+              size="icon-xs"
+              tooltip="Forward"
+              type="button"
+              variant="ghost"
+            >
+              <ArrowRight />
+            </ChromeIconButton>
+            <ChromeIconButton
+              aria-label="Refresh"
+              data-testid="link-side-panel-refresh"
+              onClick={() => {
+                void pinWebviewReload(pinId);
+              }}
+              size="icon-xs"
+              tooltip="Refresh"
+              type="button"
+              variant="ghost"
+            >
+              <RefreshCw />
+            </ChromeIconButton>
+            <ChromeIconButton
+              aria-label="Copy URL"
+              data-testid="link-side-panel-copy-url"
+              onClick={() => copyTextToClipboard(currentUrl, "URL copied")}
+              size="icon-xs"
+              tooltip="Copy URL"
+              type="button"
+              variant="ghost"
+            >
+              <Copy />
+            </ChromeIconButton>
+            <ChromeIconButton
+              aria-label="Inspect"
+              data-testid="link-side-panel-inspect"
+              onClick={() => void handleInspect()}
+              size="icon-xs"
+              tooltip="Inspect"
+              type="button"
+              variant="outline"
+            >
+              <Inspect />
+            </ChromeIconButton>
+            {canScreenshot ? (
+              <ChromeIconButton
+                aria-label="Screenshot"
+                data-testid="link-side-panel-screenshot"
+                onClick={() => void handleScreenshot()}
+                size="icon-xs"
+                tooltip="Screenshot"
+                type="button"
+                variant="outline"
+              >
+                <Camera />
+              </ChromeIconButton>
+            ) : null}
+            <ChromeIconButton
+              aria-label={expandLabel}
+              data-testid="link-side-panel-expand"
+              onClick={() => toggleLinkSidePanelExpanded()}
+              size="icon-xs"
+              tooltip={expandLabel}
+              type="button"
+              variant="outline"
+            >
+              {expanded ? <Minimize2 /> : <Maximize2 />}
+            </ChromeIconButton>
+          </div>
         </div>
       </div>
     </TooltipProvider>

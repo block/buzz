@@ -320,8 +320,10 @@ export function AuxiliaryPanelHeaderActions({
     return null;
   }
 
+  // min-w-0 (not shrink-0): link/pin chrome URL must ellipsize inside the
+  // remaining header width instead of forcing tooling past the panel edge.
   return (
-    <div className="ml-auto flex shrink-0 items-center gap-0.5">
+    <div className="ml-auto flex min-w-0 items-center gap-0.5">
       {children}
       {includeCloseAction ? <AuxiliaryPanelHeaderCloseAction /> : null}
     </div>
