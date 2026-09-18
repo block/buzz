@@ -249,7 +249,9 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               channelId={channelId}
               currentPubkey={currentPubkey}
               entry={item.entry}
-              followThreadById={followThreadById}
+              followThreadById={
+                channelType === "dm" ? undefined : followThreadById
+              }
               footer={messageFooters?.[item.entry.message.id] ?? null}
               highlightedMessageId={highlightedMessageId}
               huddleMemberPubkeys={huddleMemberPubkeys}
@@ -263,7 +265,9 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
                   ? false
                   : item.isFollowedByContinuation
               }
-              isFollowingThreadById={isFollowingThreadById}
+              isFollowingThreadById={
+                channelType === "dm" ? undefined : isFollowingThreadById
+              }
               isUnread={isMessageUnreadById?.(item.entry.message.id)}
               playEntrance={item.entry.message.id === entranceMessageId}
               onEntranceComplete={onEntranceMessageComplete}
@@ -279,7 +283,9 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               searchMatchingMessageIds={searchMatchingMessageIds}
               searchQuery={searchQuery}
               threadUnreadCounts={threadUnreadCounts}
-              unfollowThreadById={unfollowThreadById}
+              unfollowThreadById={
+                channelType === "dm" ? undefined : unfollowThreadById
+              }
               videoReviewContext={videoReviewContextById.get(
                 item.entry.message.id,
               )}
@@ -289,6 +295,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     },
     [
       channelId,
+      channelType,
       alwaysShowMessageIdentity,
       currentPubkey,
       followThreadById,
