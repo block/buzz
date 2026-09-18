@@ -110,6 +110,7 @@ import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent = {
   pubkey: string;
   name: string;
+  is_active?: boolean;
   persona_id: string | null;
   // Optional: pre-feature fixtures may omit it. The record's harness/runtime id.
   runtime?: string | null;
@@ -612,6 +613,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   return {
     pubkey: agent.pubkey,
     name: agent.name,
+    isActive: agent.is_active ?? true,
     personaId: agent.persona_id,
     runtime: agent.runtime ?? null,
     teamId: agent.team_id ?? null,
@@ -771,6 +773,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
       input: {
         name: input.name,
         personaId: input.personaId,
+        forceNewInstance: input.forceNewInstance ?? false,
         teamId: input.teamId,
         relayUrl: input.relayUrl,
         acpCommand: input.acpCommand,

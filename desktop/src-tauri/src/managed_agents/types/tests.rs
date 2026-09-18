@@ -275,6 +275,18 @@ fn create_request_deserializes_camel_case_relay_mesh() {
     );
 }
 
+#[test]
+fn create_request_defaults_to_convergent_persona_deployment() {
+    let default_request: CreateManagedAgentRequest =
+        serde_json::from_str(r#"{"name":"agent"}"#).expect("minimal create request");
+    assert!(!default_request.force_new_instance);
+
+    let forced_request: CreateManagedAgentRequest =
+        serde_json::from_str(r#"{"name":"agent","forceNewInstance":true}"#)
+            .expect("explicit fresh-instance request");
+    assert!(forced_request.force_new_instance);
+}
+
 /// Persisted records use snake_case; the camelCase alias must not break
 /// the stored-record round trip.
 #[test]
@@ -736,6 +748,7 @@ fn summary_fixture(
         session_policy: Default::default(),
         pubkey: "aa".repeat(32),
         name: "test".into(),
+        is_active: true,
         persona_id: None,
         runtime: None,
         team_id: None,

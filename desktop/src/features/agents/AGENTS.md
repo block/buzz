@@ -308,6 +308,16 @@ with a TypeScript lookup table or an id comparison in a component.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs retain neutral effort capabilities. A boundary-matched GPT-5-or-newer family in the service-name component selects OpenAI Responses so tools can coexist with reasoning; other FQNs use MLflow Chat Completions. Catalog/schema components never influence routing. Keep this route-only rule identical in the Rust and TypeScript capability interpreters. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
+18. **Automated persona deployment is convergent by deployment binding.** A
+    standalone persona reuses its one unbound managed identity. A team persona
+    reuses the identity bound to that exact `(team_id, persona_id)` pair, so
+    deploying the same team to another channel attaches the existing identity
+    instead of minting a sibling. Different teams may still deploy the same
+    persona independently, and an explicit `forceNewInstance` request remains
+    the only opt-out. Keep the Rust create-command guard as the final authority:
+    UI reuse prevents ordinary retries, while the locked phase-3 check closes
+    stale-read and concurrent-create races before persistence.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness

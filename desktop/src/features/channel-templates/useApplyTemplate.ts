@@ -120,6 +120,7 @@ export function useApplyTemplate() {
           runtime: resolved.runtime ?? defaultProvider,
           name: persona.displayName,
           personaId: persona.id,
+          teamId: team.id,
           systemPrompt: persona.systemPrompt,
           avatarUrl: persona.avatarUrl ?? undefined,
           model: teamEntry.model ?? persona.model ?? undefined,
