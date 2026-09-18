@@ -32,6 +32,12 @@ import {
   type FontSize,
 } from "@/shared/lib/fontSizePreference";
 import {
+  previewInterfaceContrast,
+  setInterfaceContrast,
+  useInterfaceContrast,
+  type InterfaceContrast,
+} from "@/shared/lib/contrastPreference";
+import {
   ACCENT_COLORS,
   DEFAULT_GLASS_OPACITY,
   GLASS_OPACITY_MAX,
@@ -106,6 +112,24 @@ const CONVERSATION_DENSITY_OPTIONS: readonly {
   {
     value: "spacious",
     label: "Spacious",
+  },
+];
+
+const INTERFACE_CONTRAST_OPTIONS: readonly {
+  value: InterfaceContrast;
+  label: string;
+}[] = [
+  {
+    value: "low",
+    label: "Low",
+  },
+  {
+    value: "default",
+    label: "Default",
+  },
+  {
+    value: "high",
+    label: "High",
   },
 ];
 
@@ -203,6 +227,7 @@ function ConversationPreview() {
 export function ConversationDisplaySettings() {
   const density = useConversationDensity();
   const fontSize = useFontSize();
+  const contrast = useInterfaceContrast();
 
   return (
     <div data-testid="conversation-display-group">
@@ -225,6 +250,27 @@ export function ConversationDisplaySettings() {
           options={FONT_SIZE_OPTIONS}
           testId="font-size-control"
           value={fontSize}
+        />
+      </SettingsOptionRow>
+      <SettingsOptionRow data-testid="interface-contrast-row">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Interface contrast</p>
+          <p
+            className="text-sm font-normal text-muted-foreground/70"
+            data-settings-subcopy
+          >
+            How strongly borders, panels, and row highlights are drawn
+          </p>
+        </div>
+        <SegmentedControl
+          size="wide"
+          legend="Interface contrast"
+          onPreviewChange={previewInterfaceContrast}
+          onValueChange={setInterfaceContrast}
+          optionTestIdPrefix="interface-contrast"
+          options={INTERFACE_CONTRAST_OPTIONS}
+          testId="interface-contrast-control"
+          value={contrast}
         />
       </SettingsOptionRow>
       <SettingsOptionRow data-testid="conversation-density-row">
