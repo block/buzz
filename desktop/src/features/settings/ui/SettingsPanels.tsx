@@ -69,6 +69,7 @@ import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { AgentsSettingsPanel } from "./AgentsSettingsPanel";
+import { AgentOperationsSettingsCard } from "./AgentOperationsSettingsCard";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import {
   SettingsOptionGroup,
@@ -833,7 +834,12 @@ export function renderSettingsSection(
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
-      return <AgentsSettingsPanel />;
+      return (
+        <div className="space-y-12">
+          <AgentsSettingsPanel />
+          <AgentOperationsSettingsCard />
+        </div>
+      );
     case "channel-templates":
       return <ChannelTemplatesSettingsCard />;
     case "compute":
