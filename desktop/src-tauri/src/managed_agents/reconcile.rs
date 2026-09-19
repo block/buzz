@@ -75,18 +75,32 @@ fn reconcile_agents_in_dir_at(
     keys: &nostr::Keys,
     db_path: &Path,
 ) -> Result<u32, String> {
-    let store_path = base_dir.join("managed-agents.json");
-    if !store_path.exists() {
-        return Ok(0);
+    // Enumerate every store file: the legacy global store plus each community
+    // shard (#7184). Every record's kind:30177 head must stay reconciled
+    // regardless of which community it is scoped to — the retention store is
+    // relay-scoped, so a head published by a save in community A must not be
+    // orphaned just because A's shard was written while B is active.
+    let mut store_paths = vec![base_dir.join("managed-agents.json")];
+    store_paths.extend(super::storage::community_shard_paths(base_dir));
+
+    let mut records: Vec<ManagedAgentRecord> = Vec::new();
+    for store_path in &store_paths {
+        if !store_path.exists() {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(store_path)
+            .map_err(|e| format!("failed to read {}: {e}", store_path.display()))?;
+
+        let shard_records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|e| {
+            super::storage::backup_invalid_store(store_path);
+            format!(
+                "failed to parse {} (preserved as .invalid): {e}",
+                store_path.display()
+            )
+        })?;
+        records.extend(shard_records);
     }
-
-    let content = std::fs::read_to_string(&store_path)
-        .map_err(|e| format!("failed to read managed-agents.json: {e}"))?;
-
-    let records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|e| {
-        super::storage::backup_invalid_store(&store_path);
-        format!("failed to parse managed-agents.json (preserved as .invalid): {e}")
-    })?;
 
     if records.is_empty() {
         return Ok(0);
