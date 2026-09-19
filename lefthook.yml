@@ -71,8 +71,13 @@ pre-commit:
 # `--if-exists doNothing` makes it idempotent and preserves an existing
 # sign-off (including `git commit -s` and a different signer's trailer).
 commit-msg:
+  # Ordered, not parallel: `strip-ai-attribution` rewrites the message file and
+  # `signoff` appends to it, so running them concurrently would race on {1}.
+  piped: true
   commands:
-    signoff:
+    1_strip-ai-attribution:
+      run: ./scripts/strip-ai-attribution.sh {1}
+    2_signoff:
       run: 'git interpret-trailers --if-exists doNothing --trailer "Signed-off-by: $(git var GIT_COMMITTER_IDENT | sed ''s/ [0-9]* [+-][0-9]*$//'')" --in-place {1}'
 
 pre-push:
