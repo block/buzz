@@ -64,6 +64,31 @@ pub struct AppProfile<'a> {
     pub transport: &'a str,
 }
 
+const DOGFOOD_APP_PROFILES: &[AppProfile<'static>] = &[AppProfile {
+    id: "buzz-ios-dogfood",
+    transport: "apns",
+}];
+const CUSTOM_APP_PROFILES: &[AppProfile<'static>] = &[
+    AppProfile {
+        id: "buzz-ios-dogfood",
+        transport: "apns",
+    },
+    AppProfile {
+        id: "buzz-ios-custom",
+        transport: "apns",
+    },
+];
+
+pub(crate) const fn supported_app_profiles(
+    custom_profile_enabled: bool,
+) -> &'static [AppProfile<'static>] {
+    if custom_profile_enabled {
+        CUSTOM_APP_PROFILES
+    } else {
+        DOGFOOD_APP_PROFILES
+    }
+}
+
 pub struct LeaseLimits<'a> {
     pub expected_origin: &'a str,
     pub author_hex: &'a str,
@@ -488,29 +513,10 @@ pub async fn accept(
     let body = parse_plaintext(&plaintext, MAX_PLAINTEXT)?;
     let origin = canonical_origin(&state.config.relay_url, tenant.host())?;
     let author_hex = event.pubkey.to_hex();
-    let dogfood_profiles = [AppProfile {
-        id: "buzz-ios-dogfood",
-        transport: "apns",
-    }];
-    let custom_profiles = [
-        AppProfile {
-            id: "buzz-ios-dogfood",
-            transport: "apns",
-        },
-        AppProfile {
-            id: "buzz-ios-custom",
-            transport: "apns",
-        },
-    ];
-    let app_profiles = if state.config.push_custom_profile_enabled {
-        &custom_profiles[..]
-    } else {
-        &dogfood_profiles[..]
-    };
     let limits = LeaseLimits {
         expected_origin: &origin,
         author_hex: &author_hex,
-        app_profiles,
+        app_profiles: supported_app_profiles(state.config.push_custom_profile_enabled),
         supported_classes: &["default"],
         push_kinds: PUSH_KINDS,
         max_subscriptions: 16,

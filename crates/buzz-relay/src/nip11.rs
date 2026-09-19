@@ -246,16 +246,15 @@ fn push_descriptor(
     } else {
         "ws"
     };
-    let mut app_profiles = vec![serde_json::json!({
-        "id": "buzz-ios-dogfood",
-        "transport": "apns"
-    })];
-    if custom_profile_enabled {
-        app_profiles.push(serde_json::json!({
-            "id": "buzz-ios-custom",
-            "transport": "apns"
-        }));
-    }
+    let app_profiles = crate::handlers::push_lease::supported_app_profiles(custom_profile_enabled)
+        .iter()
+        .map(|profile| {
+            serde_json::json!({
+                "id": profile.id,
+                "transport": profile.transport
+            })
+        })
+        .collect::<Vec<_>>();
     Some(serde_json::json!({
         "origin": format!("{scheme}://{host}"),
         "keys": [{

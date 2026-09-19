@@ -71,11 +71,7 @@ fn ts(v: DateTime<Utc>) -> i64 {
     v.timestamp()
 }
 fn profile(v: &str) -> Result<AppProfile, AuthorityError> {
-    match v {
-        "buzz-ios-dogfood" => Ok(AppProfile::BuzzIosDogfood),
-        "buzz-ios-custom" => Ok(AppProfile::BuzzIosCustom),
-        _ => Err(AuthorityError::Unavailable),
-    }
+    AppProfile::try_from(v).map_err(|()| AuthorityError::Unavailable)
 }
 fn db(_: sqlx::Error) -> AuthorityError {
     AuthorityError::Unavailable

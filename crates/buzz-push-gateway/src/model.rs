@@ -31,6 +31,18 @@ impl AppProfile {
     }
 }
 
+impl TryFrom<&str> for AppProfile {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            value if value == Self::BuzzIosDogfood.as_str() => Ok(Self::BuzzIosDogfood),
+            value if value == Self::BuzzIosCustom.as_str() => Ok(Self::BuzzIosCustom),
+            _ => Err(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::AppProfile;
@@ -45,6 +57,15 @@ mod tests {
             serde_json::to_string(&AppProfile::BuzzIosCustom).unwrap(),
             r#""buzz-ios-custom""#
         );
+        assert_eq!(
+            AppProfile::try_from(AppProfile::BuzzIosDogfood.as_str()),
+            Ok(AppProfile::BuzzIosDogfood)
+        );
+        assert_eq!(
+            AppProfile::try_from(AppProfile::BuzzIosCustom.as_str()),
+            Ok(AppProfile::BuzzIosCustom)
+        );
+        assert_eq!(AppProfile::try_from("unknown"), Err(()));
         assert!(serde_json::from_str::<AppProfile>(r#""unknown""#).is_err());
     }
 }
