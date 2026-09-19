@@ -336,7 +336,12 @@ async fn reconcile_roster(
         // snapshot.
         return Ok(());
     }
-    if guard.is_none() {
+    if guard
+        .as_ref()
+        .is_none_or(|runtime| runtime.cleanup_requested())
+    {
+        // Stop intent wins over a roster snapshot resolved before teardown.
+        // An incomplete cleanup is user-actionable, not an automatic restart loop.
         return Ok(());
     }
     drop(guard);

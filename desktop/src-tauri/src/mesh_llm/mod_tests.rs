@@ -3,7 +3,7 @@
 use super::find_progressish_reason;
 use serde_json::json;
 
-fn pending_client_runtime(
+pub(super) fn pending_client_runtime(
     task: tokio::task::JoinHandle<anyhow::Result<mesh_llm_sdk::EmbeddedNodeHandle>>,
 ) -> super::DesktopMeshRuntime {
     let request = super::StartMeshNodeRequest {
@@ -17,6 +17,7 @@ fn pending_client_runtime(
     };
     super::DesktopMeshRuntime {
         id: 7,
+        cleanup_requested: std::sync::atomic::AtomicBool::new(false),
         handle: tokio::sync::Mutex::new(super::DesktopMeshHandle::Starting {
             task,
             queued_join_tokens: Vec::new(),
@@ -35,7 +36,14 @@ async fn pending_client_status_does_not_wait_for_management_timeout() {
     let task = tokio::spawn(async {
         std::future::pending::<anyhow::Result<mesh_llm_sdk::EmbeddedNodeHandle>>().await
     });
-    let runtime = pending_client_runtime(task);
+    let mut runtime = pending_client_runtime(task);
+    // Stop checks actual listener release; use unprivileged, dynamically chosen
+    // ports rather than the deliberately unreachable status fixture's 1/2.
+    let api = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let console = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    runtime.api_base_url = format!("http://127.0.0.1:{}/v1", api.local_addr().unwrap().port());
+    runtime.console_url = format!("http://127.0.0.1:{}", console.local_addr().unwrap().port());
+    drop((api, console));
 
     let status = tokio::time::timeout(std::time::Duration::from_secs(1), runtime.status())
         .await
@@ -50,10 +58,12 @@ async fn pending_client_status_does_not_wait_for_management_timeout() {
     assert_eq!(report["serveTargets"], json!([]));
     assert_eq!(report["models"], json!([]));
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), runtime.stop())
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), runtime.stop())
         .await
         .expect("stopping a pending client should abort its SDK task")
-        .expect("pending client stop should succeed");
+        .expect_err("aborting the waiter cannot stop a pending native runtime");
+    assert!(error.to_string().contains("shutdown handle"));
+    assert!(runtime.cleanup_requested());
 }
 
 #[tokio::test]
@@ -723,4 +733,155 @@ fn serving_usage_defaults_to_zero_on_missing_fields() {
     let usage = super::serving_usage_from_payload(&json!({}));
     assert_eq!(usage, super::MeshServingUsage::default());
     assert_eq!(usage.remote_attempts + usage.endpoint_attempts, 0);
+}
+
+#[tokio::test]
+async fn startup_preflight_rejects_either_foreign_listener_without_touching_it() {
+    use std::net::{Ipv4Addr, TcpListener};
+    let api = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let console = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let api_port = api.local_addr().unwrap().port();
+    let console_port = console.local_addr().unwrap().port();
+    let error = super::preflight_mesh_ports(api_port, console_port).unwrap_err();
+    assert!(error.to_string().contains(&format!("API port {api_port}")));
+    drop(api);
+    let error = super::preflight_mesh_ports(api_port, console_port).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains(&format!("console port {console_port}")));
+    assert!(
+        std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, console_port)).is_ok(),
+        "foreign owner must remain untouched"
+    );
+    drop(console);
+    super::preflight_mesh_ports(api_port, console_port).unwrap();
+    // Preflight reservations must be released for the SDK to bind.
+    let _api = TcpListener::bind((Ipv4Addr::LOCALHOST, api_port)).unwrap();
+    let _console = TcpListener::bind((Ipv4Addr::LOCALHOST, console_port)).unwrap();
+}
+
+#[tokio::test]
+async fn startup_preflight_rejects_same_api_and_console_port() {
+    let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    assert!(super::preflight_mesh_ports(port, port)
+        .unwrap_err()
+        .to_string()
+        .contains("console port"));
+}
+
+#[tokio::test]
+async fn actual_start_rejects_foreign_ports_before_native_initialization_for_both_roles() {
+    for mode in [super::MeshNodeMode::Serve, super::MeshNodeMode::Client] {
+        for occupied_api in [true, false] {
+            let foreign = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let occupied_port = foreign.local_addr().unwrap().port();
+            let free = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let free_port = free.local_addr().unwrap().port();
+            drop(free);
+            let (api, console) = if occupied_api {
+                (occupied_port, free_port)
+            } else {
+                (free_port, occupied_port)
+            };
+            let request = super::StartMeshNodeRequest {
+                mode,
+                model_id: Some("invalid-model-must-never-download".into()),
+                max_vram_gb: None,
+                join_token: None,
+                mesh_name: None,
+                relay_url: None,
+                trusted_owner_ids: None,
+            };
+            let error = match super::DesktopMeshRuntime::start_on_ports(request, api, console).await
+            {
+                Ok(_) => panic!("foreign listener was accepted as ours"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains(&format!("port {occupied_port} is unavailable")),
+                "{error}"
+            );
+            assert!(
+                std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, occupied_port))
+                    .is_ok()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn stop_retains_cleanup_tombstone_when_native_listener_outlives_sdk_waiter() {
+    let foreign = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = foreign.local_addr().unwrap().port();
+    let mut runtime = super::lifecycle_test_runtime(super::MeshNodeMode::Serve, false);
+    runtime.api_base_url = format!("http://127.0.0.1:{port}/v1");
+    let error = runtime.stop().await.unwrap_err().to_string();
+    assert!(error.contains("shutdown handle"), "{error}");
+    assert!(runtime.cleanup_requested());
+    assert!(runtime
+        .status()
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("restart Buzz"));
+}
+
+#[tokio::test]
+async fn pending_native_start_cannot_be_declared_stopped_before_listeners_bind() {
+    let runtime = super::lifecycle_test_runtime(super::MeshNodeMode::Serve, false);
+    let error = runtime.stop().await.unwrap_err().to_string();
+    assert!(error.contains("shutdown handle"), "{error}");
+    assert!(runtime.cleanup_requested());
+    assert!(runtime.status().await.is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_preflight_allows_sdk_listener_restart_after_active_close() {
+    use std::net::Ipv4Addr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // Tokio enables SO_REUSEADDR on Unix, just like the embedded SDK.
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let console = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let console_port = console.local_addr().unwrap().port();
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (mut accepted, _) = listener.accept().await.unwrap();
+        // Server sends FIN first; observing EOF before closing the client
+        // ensures the accepted server socket is the active/TIME_WAIT closer.
+        accepted.shutdown().await.unwrap();
+        let mut byte = [0];
+        assert_eq!(client.read(&mut byte).await.unwrap(), 0);
+        client.shutdown().await.unwrap();
+        assert_eq!(accepted.read(&mut byte).await.unwrap(), 0);
+        drop((accepted, client, listener));
+
+        let no_reuse = tokio::net::TcpSocket::new_v4().unwrap();
+        no_reuse.set_reuseaddr(false).unwrap();
+        assert!(
+            no_reuse.bind(address).is_err(),
+            "fixture must leave TIME_WAIT that requires SO_REUSEADDR"
+        );
+        let error = super::preflight_mesh_ports(address.port(), console_port).unwrap_err();
+        assert!(error.to_string().contains("console port"));
+        drop(console);
+        super::preflight_mesh_ports(address.port(), console_port)
+            .expect("TIME_WAIT is not a live foreign listener");
+    })
+    .await
+    .expect("loopback close handshake must finish promptly");
 }

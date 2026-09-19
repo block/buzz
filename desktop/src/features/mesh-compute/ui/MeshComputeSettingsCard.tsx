@@ -1,6 +1,5 @@
 import * as React from "react";
-import { ChevronDown } from "lucide-react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { ChevronDown, Hexagon, Sparkles } from "lucide-react";
 
 import { Switch } from "@/shared/ui/switch";
 import { cn } from "@/shared/lib/cn";
@@ -29,6 +28,12 @@ import type {
 } from "@/shared/api/tauriMesh";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
+import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { Button } from "@/shared/ui/button";
+import { useMeshSnapshot } from "../hooks/useMeshSnapshot";
+import { deriveCommunityComputeMapModel } from "../communityComputeMapModel";
+import { CommunityComputeTerritoryMap } from "./CommunityComputeTerritoryMap";
 import { classifyModelRef } from "../classifyModelRef";
 import {
   downloadPercent,
@@ -51,11 +56,6 @@ const MESH_SELECT_TRIGGER_CLASS = cn(
   PERSONA_FIELD_SHELL_CLASS,
   "h-11 px-3 py-2 leading-6 hover:bg-muted/40 focus:bg-muted/40 [&>svg]:text-muted-foreground/60",
 );
-
-const SHARE_COMPUTE_REVEAL_TRANSITION = {
-  duration: 0.22,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
 
 function readDraft(key: string): string {
   try {
@@ -85,8 +85,11 @@ function writeDraft(key: string, value: string): void {
  * exposing implementation protocols or raw mesh controls.
  */
 export function MeshComputeSettingsCard() {
-  const shouldReduceMotion = useReducedMotion();
-  const { status, error, refresh } = useMeshNodeStatus();
+  const { activeCommunity } = useCommunities();
+  const communityName = activeCommunity?.name ?? "this community";
+  const { status, error, refresh, update } = useMeshNodeStatus();
+  const [snapshotRefreshKey, setSnapshotRefreshKey] = React.useState(0);
+  const { snapshot } = useMeshSnapshot({ refreshKey: snapshotRefreshKey });
   const [installedModels, setInstalledModels] = React.useState<
     MeshModelOption[]
   >([]);
@@ -99,13 +102,31 @@ export function MeshComputeSettingsCard() {
   );
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
-  const [actionInFlight, setActionInFlight] = React.useState(false);
+  const actionSequence = React.useRef(0);
   const [pendingAction, setPendingAction] = React.useState<
     "start" | "stop" | null
   >(null);
+  const actionInFlight = pendingAction !== null;
   const [actionError, setActionError] = React.useState<string | null>(null);
   const { progress: downloadProgress, reset: resetDownloadProgress } =
     useMeshDownloadProgress();
+
+  // A start command can keep waiting on inference readiness after polling
+  // proves the runtime is running (or failed and needs stopping to retry).
+  // Release the action lock on that authoritative status, and retire the
+  // command so its late result/error/finally cannot overwrite a subsequent stop.
+  React.useEffect(() => {
+    if (
+      pendingAction === "start" &&
+      status?.mode === "serve" &&
+      (status.state === "running" || status.state === "failed")
+    ) {
+      actionSequence.current += 1;
+      setPendingAction(null);
+      resetDownloadProgress();
+      setSnapshotRefreshKey((current) => current + 1);
+    }
+  }, [pendingAction, status?.mode, status?.state, resetDownloadProgress]);
 
   // Fetch installed models. Called on mount and whenever the running state
   // changes (a fresh start may have downloaded a new model). Stale-tolerant —
@@ -187,23 +208,40 @@ export function MeshComputeSettingsCard() {
   const refClass = classifyModelRef(modelInput);
   const canStart = refClass.kind !== "unknown" && !actionInFlight;
   const showSharingControls = isSharing || pendingAction === "start";
+  // Live runtime state wins over the still-pending command promise. Starting a
+  // node waits on an additional inference-readiness probe, so the command can
+  // remain in flight after status already proves this machine is running. Do
+  // not leave the visual state spinning during that window.
+  const isSuccessfullySharing =
+    pendingAction !== "stop" &&
+    status?.mode === "serve" &&
+    status.state === "running";
+  const isTransitioning =
+    !isSuccessfullySharing &&
+    (pendingAction !== null ||
+      status?.state === "starting" ||
+      status?.state === "stopping");
 
   async function handleToggle(next: boolean) {
-    // Never let the Share switch tear down a consume session. The switch is
-    // already disabled while consuming, but status can be stale between polls,
-    // so refuse a stop that isn't stopping OUR serve node as a belt-and-braces
-    // guard (the backend enforces this authoritatively too).
-    if (!next && !isSharing) {
+    // Never let the Share switch tear down a consume session: refuse a stop
+    // that isn't stopping OUR serve node (the backend checks this too).
+    // Keep stop locked through command completion, even if polling says off:
+    // teardown removes the runtime before persisting the disabled config.
+    if (
+      actionInFlight ||
+      status?.state === "stopping" ||
+      (!next && !isSharing)
+    ) {
       return;
     }
+    const sequence = ++actionSequence.current;
     setActionError(null);
     setPendingAction(next ? "start" : "stop");
-    setActionInFlight(true);
     try {
       if (next) {
         const maxVram =
           maxVramGb.trim() === "" ? undefined : Number.parseFloat(maxVramGb);
-        await meshStartNode({
+        const nextStatus = await meshStartNode({
           mode: "serve",
           modelId: modelInput.trim() || undefined,
           maxVramGb:
@@ -211,24 +249,33 @@ export function MeshComputeSettingsCard() {
               ? maxVram
               : undefined,
         });
+        if (sequence !== actionSequence.current) return;
+        update(nextStatus);
       } else {
-        await meshStopNode();
+        const nextStatus = await meshStopNode();
+        if (sequence !== actionSequence.current) return;
+        update(nextStatus);
       }
       refresh();
+      setSnapshotRefreshKey((current) => current + 1);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      if (sequence === actionSequence.current) {
+        setActionError(err instanceof Error ? err.message : String(err));
+        refresh();
+      }
     } finally {
-      setActionInFlight(false);
-      setPendingAction(null);
-      resetDownloadProgress();
+      if (sequence === actionSequence.current) {
+        setPendingAction(null);
+        resetDownloadProgress();
+      }
     }
   }
 
   return (
     <section className="min-w-0" data-testid="settings-mesh-share-compute">
       <SettingsSectionHeader
-        title="Share compute"
-        description="Share this machine with members of this relay so they can run agents here."
+        title="Compute"
+        description="Sharing helps your community run faster, more capable agents without sending prompts to an outside provider—and every contributor makes that shared resource more useful for everyone."
       />
 
       {error ? (
@@ -248,20 +295,68 @@ export function MeshComputeSettingsCard() {
       <SettingsOptionGroup title="Sharing">
         <div className="space-y-5 px-4 py-3">
           <div className="flex min-w-0 items-start justify-between gap-6">
-            <div className="min-w-0">
-              <label
-                className="text-sm font-medium"
-                htmlFor="mesh-share-compute-toggle"
+            <div className="flex min-w-0 items-start gap-3">
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "relative mt-0.5 flex size-7 shrink-0 items-center justify-center text-muted-foreground",
+                  isSuccessfullySharing && "text-emerald-500",
+                  isTransitioning && "text-foreground",
+                )}
               >
-                Share this machine
-              </label>
-              {!isSharing ? (
-                <StatusLine
-                  isConsuming={isConsuming}
-                  pendingAction={pendingAction}
-                  status={status}
-                />
-              ) : null}
+                {isSuccessfullySharing ? (
+                  <span className="absolute inset-0 animate-ping text-emerald-400 opacity-30 motion-reduce:animate-none">
+                    <Hexagon className="size-7 fill-current" />
+                  </span>
+                ) : null}
+                {isTransitioning ? (
+                  <svg className="size-7" viewBox="0 0 32 32">
+                    <title>Preparing shared compute</title>
+                    <polygon
+                      className="fill-none stroke-current opacity-20"
+                      points="16,2 28,9 28,23 16,30 4,23 4,9"
+                      strokeWidth="2"
+                    />
+                    <polygon
+                      className="mesh-compute-hex-trace fill-none stroke-current motion-reduce:[animation:none]"
+                      pathLength="100"
+                      points="16,2 28,9 28,23 16,30 4,23 4,9"
+                      strokeDasharray="18 82"
+                      strokeLinecap="round"
+                      strokeWidth="2.5"
+                    />
+                  </svg>
+                ) : (
+                  <Hexagon
+                    className={cn(
+                      "size-6",
+                      isSuccessfullySharing && "fill-current",
+                    )}
+                  />
+                )}
+              </span>
+              <div className="min-w-0">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="mesh-share-compute-toggle"
+                >
+                  {isSuccessfullySharing
+                    ? "You’re sharing compute"
+                    : "Share your machine"}
+                </label>
+                {!isSuccessfullySharing ? (
+                  <StatusLine
+                    isConsuming={isConsuming}
+                    pendingAction={pendingAction}
+                    status={status}
+                  />
+                ) : (
+                  <p className="mt-1 text-sm text-emerald-600 dark:text-emerald-400">
+                    This machine is actively sharing compute on {communityName}
+                    ’s mesh.
+                  </p>
+                )}
+              </div>
             </div>
             <Switch
               checked={isSharing}
@@ -271,6 +366,7 @@ export function MeshComputeSettingsCard() {
                 // client can start sharing once a valid local model is selected.
                 // Unknown occupants remain protected from replacement.
                 actionInFlight ||
+                status?.state === "stopping" ||
                 (isSharing
                   ? false
                   : slotOccupied && !isConsuming
@@ -330,6 +426,33 @@ export function MeshComputeSettingsCard() {
                   usePersonaInputStyle
                   value={maxVramGb}
                 />
+                {showSharingControls ? (
+                  <section
+                    className="mt-3 space-y-1"
+                    data-testid="mesh-share-compute-sharing-status"
+                  >
+                    <h3 className="text-sm font-medium">Status</h3>
+                    <div className="space-y-1 rounded-lg bg-muted/30 px-3 py-2">
+                      <StatusLine
+                        isConsuming={isConsuming}
+                        omitSharingVerb
+                        pendingAction={pendingAction}
+                        status={status}
+                      />
+                      {servingIndicator.show ? (
+                        <p
+                          className="text-2xs text-muted-foreground"
+                          data-testid="mesh-serving-usage"
+                        >
+                          {servingIndicator.label}
+                          {servingIndicator.detail
+                            ? ` · ${servingIndicator.detail}`
+                            : null}
+                        </p>
+                      ) : null}
+                    </div>
+                  </section>
+                ) : null}
                 {status?.consoleUrl ? (
                   <p className="text-sm font-normal text-muted-foreground">
                     Debug console:{" "}
@@ -347,59 +470,47 @@ export function MeshComputeSettingsCard() {
             ) : null}
           </div>
 
-          <AnimatePresence initial={false}>
-            {showSharingControls ? (
-              <motion.div
-                animate={{ height: "auto", opacity: 1 }}
-                className="overflow-hidden"
-                data-testid="mesh-share-compute-options-motion"
-                exit={{ height: 0, opacity: 0 }}
-                initial={{ height: 0, opacity: 0 }}
-                key="mesh-share-compute-options"
-                transition={
-                  shouldReduceMotion
-                    ? { duration: 0 }
-                    : SHARE_COMPUTE_REVEAL_TRANSITION
-                }
-              >
-                <section
-                  className="space-y-1"
-                  data-testid="mesh-share-compute-sharing-status"
-                >
-                  <h3 className="text-sm font-medium">Status</h3>
-                  <div className="space-y-1 rounded-lg bg-muted/30 px-3 py-2">
-                    <StatusLine
-                      isConsuming={isConsuming}
-                      omitSharingVerb
-                      pendingAction={pendingAction}
-                      status={status}
-                    />
-                    {servingIndicator.show ? (
-                      <p
-                        className={
-                          servingIndicator.hasRemoteConsumers
-                            ? "text-2xs text-emerald-600 dark:text-emerald-400"
-                            : "text-2xs text-muted-foreground"
-                        }
-                        data-testid="mesh-serving-usage"
-                        title={servingIndicator.detail ?? undefined}
-                      >
-                        {servingIndicator.label}
-                        {servingIndicator.detail ? (
-                          <span className="text-muted-foreground">
-                            {" "}
-                            · {servingIndicator.detail}
-                          </span>
-                        ) : null}
-                      </p>
-                    ) : null}
-                  </div>
-                </section>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
+          {(snapshot?.contributorMemberCount ?? 0) >= 6 ? (
+            <section className="space-y-2" data-testid="community-compute-view">
+              <div>
+                <h3 className="text-base font-semibold">Community mesh</h3>
+                <p className="text-xs text-muted-foreground">
+                  {snapshot?.contributorMemberCount} people are contributing
+                  compute.
+                </p>
+              </div>
+              <CommunityComputeTerritoryMap
+                model={deriveCommunityComputeMapModel(snapshot)}
+              />
+            </section>
+          ) : null}
         </div>
       </SettingsOptionGroup>
+
+      <section
+        className="mt-5 rounded-xl border border-border/70 bg-muted/15 p-4"
+        data-testid="mesh-community-agent-card"
+      >
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-base font-semibold">
+              Put the community mesh to work
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Anyone can use compute shared by the community—even if this
+              machine can’t contribute. Name your agent and customize its
+              instructions; we’ll handle the compute setup.
+            </p>
+          </div>
+          <Button
+            className="shrink-0"
+            onClick={() => requestOpenCreateAgent({ preset: "community-mesh" })}
+            type="button"
+          >
+            <Sparkles /> Create community agent
+          </Button>
+        </div>
+      </section>
     </section>
   );
 }
@@ -496,7 +607,9 @@ function MeshModelPicker({
       seen.add(entry.name);
       return {
         disabled: entry.fit === "too_large",
-        label: <MeshModelOptionLabel entry={entry} />,
+        label: (
+          <MeshModelOptionLabel entry={entry} hardware={catalog?.gpuName} />
+        ),
         value: entry.name,
       };
     });
@@ -523,7 +636,7 @@ function MeshModelPicker({
       ...localOptions,
       { label: "Custom model…", value: CUSTOM_MODEL_DROPDOWN_VALUE },
     ];
-  }, [catalog?.entries, installedModels]);
+  }, [catalog?.entries, catalog?.gpuName, installedModels]);
   const knownModel = options.some((option) => option.value === model.trim());
   const showCustomModelInput =
     isCustomModelEditing || (model.trim().length > 0 && !knownModel);
@@ -578,16 +691,19 @@ function MeshModelPicker({
         className="text-sm font-normal text-muted-foreground/70"
         data-settings-subcopy
       >
-        {catalog
-          ? `Recommended for this machine${catalog.gpuName ? ` (${catalog.gpuName}, ${catalog.vramDisplay} AI memory)` : ""}.`
-          : "Choose a model or enter a model reference or local file."}{" "}
-        Buzz downloads remote models when sharing starts.
+        Buzz downloads the selected model when sharing starts.
       </p>
     </div>
   );
 }
 
-function MeshModelOptionLabel({ entry }: { entry: MeshCatalogEntry }) {
+function MeshModelOptionLabel({
+  entry,
+  hardware,
+}: {
+  entry: MeshCatalogEntry;
+  hardware?: string | null;
+}) {
   return (
     <div className="flex min-w-0 items-center gap-2">
       <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
@@ -596,8 +712,8 @@ function MeshModelOptionLabel({ entry }: { entry: MeshCatalogEntry }) {
         {FIT_LABEL[entry.fit]}
       </span>
       {entry.recommended ? (
-        <span className="shrink-0 rounded bg-primary/15 px-1.5 text-2xs font-medium text-primary">
-          Recommended
+        <span className="shrink-0 text-2xs text-muted-foreground">
+          Recommended for {hardware ?? "this machine"}
         </span>
       ) : null}
       {entry.installed ? (

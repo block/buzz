@@ -530,3 +530,97 @@ fn ensure_serve_runtime_serves_other_model() {
         .join()
         .expect("mesh acceptance thread panicked");
 }
+
+#[tokio::test]
+async fn stop_intent_is_durable_before_cleanup_and_failure_retains_slot() {
+    let state = build_app_state();
+    let runtime = mesh_llm::lifecycle_test_runtime(mesh_llm::MeshNodeMode::Serve, true);
+    let id = runtime.id();
+    *state.mesh_llm_runtime.lock().await = Some(runtime);
+    let generation = state.mesh_recovery.generation();
+    let persisted = std::cell::Cell::new(false);
+    let error = stop_sharing_runtime(&state, || {
+        assert!(
+            state.mesh_llm_runtime.try_lock().is_err(),
+            "intent is serialized with runtime mutations"
+        );
+        persisted.set(true);
+        Ok(())
+    })
+    .await
+    .unwrap_err();
+    assert!(persisted.get());
+    assert!(error.contains("injected cleanup failure"));
+    assert!(error.contains("restart Buzz"));
+    let guard = state.mesh_llm_runtime.lock().await;
+    let retained = guard
+        .as_ref()
+        .expect("cleanup failure must not open a replacement slot");
+    assert_eq!(retained.id(), id);
+    assert!(retained.cleanup_requested());
+    assert!(ensure_current_mesh_start(generation, state.mesh_recovery.generation()).is_err());
+    drop(guard);
+    assert_eq!(
+        mesh_llm::recover_stale_mesh_runtime(&state, mesh_llm::MeshRecoveryUrgency::Foreground)
+            .await,
+        mesh_llm::MeshRuntimeRecovery::ReleasePending
+    );
+}
+
+#[tokio::test]
+async fn failed_off_persistence_does_not_begin_cleanup() {
+    let state = build_app_state();
+    *state.mesh_llm_runtime.lock().await = Some(mesh_llm::lifecycle_test_runtime(
+        mesh_llm::MeshNodeMode::Serve,
+        true,
+    ));
+    let generation = state.mesh_recovery.generation();
+    assert_eq!(
+        stop_sharing_runtime(&state, || Err("disk unavailable".into()))
+            .await
+            .unwrap_err(),
+        "disk unavailable"
+    );
+    assert!(!state
+        .mesh_llm_runtime
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .cleanup_requested());
+    assert_eq!(state.mesh_recovery.generation(), generation);
+}
+
+#[tokio::test]
+async fn stop_consumer_is_a_true_noop_including_saved_intent() {
+    let state = build_app_state();
+    *state.mesh_llm_runtime.lock().await = Some(mesh_llm::lifecycle_test_runtime(
+        mesh_llm::MeshNodeMode::Client,
+        false,
+    ));
+    let generation = state.mesh_recovery.generation();
+    let (status, _) = stop_sharing_runtime(&state, || {
+        panic!("client stop must not persist sharing intent")
+    })
+    .await
+    .unwrap();
+    assert_eq!(status.mode, Some(mesh_llm::MeshNodeMode::Client));
+    assert_eq!(state.mesh_recovery.generation(), generation);
+    let runtime = state.mesh_llm_runtime.lock().await.take().unwrap();
+    assert!(!runtime.cleanup_requested());
+    let _ = runtime.stop().await;
+}
+
+#[tokio::test]
+async fn stop_empty_slot_fences_a_start_still_resolving_discovery() {
+    let state = build_app_state();
+    let generation = state.mesh_recovery.generation();
+    let (status, _) = stop_sharing_runtime(&state, || Ok(())).await.unwrap();
+    assert_eq!(status.state, mesh_llm::stopped_status().state);
+    assert!(ensure_current_mesh_start(generation, state.mesh_recovery.generation()).is_err());
+    assert!(ensure_current_mesh_start(
+        state.mesh_recovery.generation(),
+        state.mesh_recovery.generation()
+    )
+    .is_ok());
+}
