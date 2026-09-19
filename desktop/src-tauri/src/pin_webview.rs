@@ -967,15 +967,16 @@ pub async fn pin_webview_inspect(
         }
         bounds
     };
-    // Natural attached Inspect (shared with playground open_devtools). Callers
-    // should already be app-wide fullscreen so the dock stays in that surface.
+    // Detached WebKit inspector only. Docked open_devtools reparents the pin
+    // WKWebView into a split and breaks mobile/device-bezel framing in link
+    // pop-outs (and still crowds slide-out chrome). Keep bounds locked as a
+    // belt-and-suspenders clamp if WebKit briefly attaches.
     crate::playground_webview::inspect::lock_main_window_size(&app, &window_label, window_size);
-    if let Err(error) = crate::playground_webview::inspect::open_playground_inspector(&webview) {
+    if let Err(error) = crate::playground_webview::inspect::open_detached_inspector(&webview) {
         crate::playground_webview::inspect::unlock_main_window_size(&app, &window_label);
         return Err(error);
     }
-    // Immediately pin the child to the page-host rect so the first dock split
-    // cannot cover header chrome; continuous re-clamp follows in the scheduler.
+    crate::playground_webview::inspect::redetach_inspector_for_webview(&webview);
     if let Some(bounds) = bounds.as_ref() {
         let _ = apply_bounds(&app, &pin_id, &window_label, bounds);
     }
@@ -1033,6 +1034,9 @@ fn schedule_pin_inspect_bounds_restore(app: AppHandle, pin_id: String, window_la
             tokio::time::sleep(Duration::from_millis(250)).await;
             if pin_inspector_is_visible(&app, &pin_id, &window_label) {
                 saw_visible = true;
+                if let Some(wv) = app.get_webview(&pin_webview_label(&pin_id, &window_label)) {
+                    crate::playground_webview::inspect::redetach_inspector_for_webview(&wv);
+                }
                 reapply_pin_last_bounds(&app, &pin_id, &window_label);
                 continue;
             }

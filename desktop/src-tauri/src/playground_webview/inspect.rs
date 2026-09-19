@@ -312,8 +312,22 @@ fn redetach_macos_inspector(app: &AppHandle, sid: &str, window_label: &str) {
     redetach_inspector_for_webview(&webview);
 }
 
+/// Open WebKit Inspect as a separate inspector window (never docked).
+/// Docked `open_devtools` reparents the host WKWebView into a split and
+/// destroys mobile/device-bezel layout in link pop-outs.
+pub fn open_detached_inspector(webview: &Webview) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        return open_detached_macos_inspector(webview);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Non-macOS: best-effort natural inspector.
+        open_playground_inspector(webview)
+    }
+}
+
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
 fn open_detached_macos_inspector(webview: &Webview) -> Result<(), String> {
     webview
         .with_webview(|platform| {
