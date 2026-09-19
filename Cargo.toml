@@ -126,7 +126,25 @@ moka    = { version = "0.12", features = ["sync"] }
 futures-util = "0.3"
 
 # WebSocket client (test client)
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+# WSS trust: OS trust store *in addition to* the compiled-in Mozilla bundle.
+# `webpki-roots` alone bakes the Mozilla list into the binary, so a
+# TLS-terminating proxy — which re-signs every certificate with a private CA
+# that administrators install into the *system* store — fails every WSS
+# handshake with `invalid peer certificate: UnknownIssuer`, while reqwest
+# (rustls-platform-verifier) keeps working. Same class of failure the MCP env
+# passthrough already calls out (crates/buzz-agent/src/mcp.rs) and the same
+# store this repo's own Dockerfile writes its extra proxy CA into.
+#
+# Both features are enabled deliberately. tokio-tungstenite's `tls.rs` writes
+# native roots and webpki roots into the *same* `RootCertStore` (:117 and
+# :122), so they union rather than conflict — and its "no native root CA
+# certificates found" hard error is gated on `rustls-tls-webpki-roots` being
+# absent (:109-112). Enabling native-roots *alone* would therefore turn an
+# empty platform store — reachable via a stale SSL_CERT_FILE / SSL_CERT_DIR,
+# which rustls-native-certs prefers over system paths, or an image without
+# ca-certificates — into a hard failure on every wss:// connection. Keeping
+# webpki as a floor trades no availability for the trust fix.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
 url = "2"
 
 # Property-based testing (dev-only)
