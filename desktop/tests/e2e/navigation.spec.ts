@@ -277,6 +277,30 @@ test("open thread panels survive reload", async ({ page }) => {
   await expect(threadPanel).toBeVisible();
 });
 
+test("inbox unread-only choice survives navigation and reload", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const options = page.getByRole("button", { name: "Inbox options" });
+  const unreadOnly = page.getByRole("switch", { name: "Show unread only" });
+  await options.click();
+  await expect(unreadOnly).not.toBeChecked();
+
+  for (const enabled of [true, false]) {
+    await unreadOnly.setChecked(enabled);
+    await page.keyboard.press("Escape");
+    await page.getByTestId("open-agents-view").click();
+    await expect(page.getByTestId("home-inbox-list")).not.toBeVisible();
+    await page.getByTestId("global-back").click();
+    await options.click();
+    await expect(unreadOnly).toBeChecked({ checked: enabled });
+
+    await page.reload();
+    await options.click();
+    await expect(unreadOnly).toBeChecked({ checked: enabled });
+  }
+});
+
 test("home inbox selection survives reload and back restores it", async ({
   page,
 }) => {
