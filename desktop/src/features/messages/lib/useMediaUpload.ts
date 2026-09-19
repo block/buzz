@@ -316,10 +316,10 @@ export function useMediaUpload({
   );
 
   const queueFiles = React.useCallback(
-    (files: File[]) => {
+    (files: File[], metadata: Array<Pick<BlobDescriptor, "waveform">> = []) => {
       if (files.length === 0) return;
 
-      const attachments = files.map((file) => {
+      const attachments = files.map((file, index) => {
         const id = nextQueuedAttachmentIdRef.current;
         nextQueuedAttachmentIdRef.current += 1;
         const previewUrl =
@@ -331,7 +331,13 @@ export function useMediaUpload({
             if (poster) updateQueuedVideoPoster(id, poster.posterUrl);
           });
         }
-        return { file, id, previewUrl, spoilered: false };
+        return {
+          file,
+          id,
+          previewUrl,
+          spoilered: false,
+          waveform: metadata[index]?.waveform,
+        };
       });
 
       setQueuedAttachmentsState((current) => [...current, ...attachments]);
@@ -368,6 +374,7 @@ export function useMediaUpload({
         current.map((attachment, index) => ({
           ...attachment,
           spoilered: attachments[index]?.spoilered ?? false,
+          waveform: attachments[index]?.waveform,
         })),
       );
     },
@@ -756,9 +763,9 @@ export function useMediaUpload({
 
   /** Upload a File directly — used by Tiptap's editorProps.handlePaste. */
   const uploadFile = React.useCallback(
-    async (file: File) => {
+    async (file: File, metadata: Pick<BlobDescriptor, "waveform"> = {}) => {
       if (shouldQueueFile(file)) {
-        queueFiles([file]);
+        queueFiles([file], [metadata]);
         return;
       }
       const previewId = reserveUploadingPreview(file);
@@ -769,7 +776,7 @@ export function useMediaUpload({
           file,
           uploadProgressId(previewId),
         );
-        onUploaded(descriptor, previewId, epoch);
+        onUploaded({ ...descriptor, ...metadata }, previewId, epoch);
       } catch (err) {
         onUploadError(err, previewId);
       }

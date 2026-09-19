@@ -1359,6 +1359,7 @@ void main() {
                   'm video/mp4',
                   'duration 3.0',
                   'filename voice-note-test.mp4',
+                  'waveform 0 25 80 100',
                 ],
               ],
             ),
@@ -1376,6 +1377,12 @@ void main() {
         expect(
           find.byKey(const ValueKey('voice-note-play-pause')),
           findsOneWidget,
+        );
+        expect(
+          tester
+              .widget<VoiceNoteAttachment>(find.byType(VoiceNoteAttachment))
+              .waveform,
+          const [0, 0.25, 0.8, 1],
         );
         final cardFinder = find.byKey(
           const ValueKey('voice-note-attachment:$url'),
