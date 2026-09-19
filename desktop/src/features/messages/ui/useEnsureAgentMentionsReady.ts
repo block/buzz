@@ -1,6 +1,10 @@
 import * as React from "react";
 import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents";
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type {
+  AgentPersona,
+  ManagedAgent,
+  RelayAgent,
+} from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   enqueueAgentWake,
@@ -14,6 +18,12 @@ import {
 /** What the send path learned while making the mentioned agents ready. */
 export type EnsureAgentMentionsReadyResult = {
   errors: string[];
+  /**
+   * Agents that live on a different computer and so cannot answer from here.
+   * Informational only: the message still sends, the toast just names the
+   * device that would have to reply.
+   */
+  notices: string[];
   pubkeys: string[];
   /**
    * Whether an awaited relay write ran. Informational only: the publish
@@ -52,6 +62,13 @@ type UseEnsureAgentMentionsReadyOptions = {
   getManagedAgentsByPubkey: () => Promise<Map<string, ManagedAgent>>;
   getPersonas: () => Promise<AgentPersona[]>;
   memberPubkeys: ReadonlySet<string>;
+  /**
+   * Looks a pubkey up in the relay directory. The only place a mention that
+   * resolved to another computer's keypair can be named; the caller feeds it
+   * from the `relayAgentsQueryKey` cache React Query already dedupes against
+   * `useMentions`, so this costs no extra fetch.
+   */
+  getRelayAgentByPubkey?: (pubkey: string) => RelayAgent | undefined;
 };
 
 /**
@@ -68,6 +85,7 @@ export function useEnsureAgentMentionsReady({
   attachAgentToChannel,
   getManagedAgentsByPubkey,
   getPersonas,
+  getRelayAgentByPubkey = () => undefined,
   memberPubkeys,
 }: UseEnsureAgentMentionsReadyOptions): EnsureAgentMentionsReady {
   return React.useCallback(
@@ -81,6 +99,7 @@ export function useEnsureAgentMentionsReady({
       if (!capturedChannelId || mentionPubkeys.length === 0) {
         return {
           errors: [] as string[],
+          notices: [] as string[],
           pubkeys: [] as string[],
           wroteRelayState: false,
           agentsToWake: [] as QueuedAgentWake[],
@@ -99,13 +118,20 @@ export function useEnsureAgentMentionsReady({
         ...preparedParticipantPubkeys.map(normalizePubkey),
       ]);
       const errors: string[] = [];
+      const notices: string[] = [];
       const pubkeys: string[] = [];
       let wroteRelayState = false;
       const agentsToWake: QueuedAgentWake[] = [];
       for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
         if (isCancelled()) break;
         const agent = managedAgentsByPubkey.get(pubkey);
-        if (!agent) continue;
+        if (!agent) {
+          const notice = describeUnrunnableMention(
+            getRelayAgentByPubkey(pubkey),
+          );
+          if (notice) notices.push(notice);
+          continue;
+        }
         try {
           const { agent: readyAgent, wrote } = existingMembers.has(pubkey)
             ? { agent, wrote: false }
@@ -148,6 +174,7 @@ export function useEnsureAgentMentionsReady({
       }
       return {
         errors,
+        notices,
         pubkeys: uniqueNormalizedPubkeys(pubkeys),
         wroteRelayState,
         agentsToWake,
@@ -157,7 +184,29 @@ export function useEnsureAgentMentionsReady({
       attachAgentToChannel,
       getManagedAgentsByPubkey,
       getPersonas,
+      getRelayAgentByPubkey,
       memberPubkeys,
     ],
   );
+}
+
+/**
+ * Copy for a mention that resolved to an agent identity this install does not
+ * hold the secret for. Names the owning device when the agent published one,
+ * and never guesses a device name when it did not.
+ *
+ * Returns `null` — meaning stay silent, exactly as before this feature — for
+ * an agent that declares no device at all. Relay-hosted and pre-feature
+ * agents are legitimately not "set up on" any computer, so pinning them to
+ * one would be both wrong and noisy on every shared-agent mention.
+ */
+function describeUnrunnableMention(
+  remote: RelayAgent | undefined,
+): string | null {
+  if (!remote?.deviceId) return null;
+  const name = remote.name.trim() || "That agent";
+  const device = remote.deviceLabel?.trim();
+  return device
+    ? `${name} is set up on ${device}, not on this device. Only that device can reply.`
+    : `${name} is set up on another device, not on this device. Only that device can reply.`;
 }

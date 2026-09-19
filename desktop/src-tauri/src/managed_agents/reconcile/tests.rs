@@ -400,3 +400,38 @@ fn retain_agent_record_is_noop_when_unchanged() {
         "no pending_sync churn for an unchanged record"
     );
 }
+
+/// The 9 key-less DEFINITION rows in a real store (empty `pubkey`, no secret)
+/// are skipped by the reconcile loop, so they never mint a kind:30177
+/// coordinate and therefore never carry a device stamp. Pins the boundary that
+/// makes "every keyed record in this store is THIS device's" true.
+#[test]
+fn keyless_definition_row_publishes_no_device() {
+    let dir = TempDir::new().unwrap();
+    let keys = nostr::Keys::generate();
+    write_store(
+        &dir,
+        &[
+            sample_record("", "keyless-definition"),
+            sample_record("d".repeat(64).as_str(), "keyed-instance"),
+        ],
+    );
+
+    // Only the keyed instance reconciles.
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let pending = get_pending_sync(&conn).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].d_tag, "d".repeat(64));
+    assert!(
+        get_retained_event(&conn, KIND_MANAGED_AGENT, &keys.public_key().to_hex(), "")
+            .unwrap()
+            .is_none(),
+        "a key-less definition row must never get an event coordinate"
+    );
+    // No device stamp on the wire either — `device_identity::current()` is
+    // `None` in unit tests, so the projection stays byte-identical to before.
+    assert!(!pending[0].raw_event.contains("device_id"));
+    assert!(!pending[0].raw_event.contains("device_label"));
+}
