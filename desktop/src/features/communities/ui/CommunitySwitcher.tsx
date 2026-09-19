@@ -7,14 +7,28 @@ import {
   Plus,
   Settings2,
   LogOut,
+  Unplug,
   Ticket,
   WifiOff,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
-import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity";
+import {
+  canRemoveCommunityLocally,
+  type LeaveCommunityResult,
+} from "@/features/communities/leaveCommunity";
 import type { Community } from "@/features/communities/types";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -66,7 +80,10 @@ type CommunitySwitcherProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
+  onRemoveCommunity: (
+    id: string,
+    mode?: "leave" | "local-only",
+  ) => Promise<LeaveCommunityResult | undefined>;
 };
 
 export function CommunityEmojiIcon({
@@ -114,6 +131,11 @@ export function CommunitySwitcher({
   const [dropdownOpen, setDropdownOpen] = React.useState(false);
   const [leaveError, setLeaveError] = React.useState<string | null>(null);
   const [isLeaving, setIsLeaving] = React.useState(false);
+  const [removingCommunity, setRemovingCommunity] =
+    React.useState<Community | null>(null);
+  const [unavailableCommunityId, setUnavailableCommunityId] = React.useState<
+    string | null
+  >(null);
   const profileMenuHoverTimer = React.useRef<number | null>(null);
   const connectionState = useRelayConnection();
   const degraded = isRelayConnectionDegraded(connectionState);
@@ -160,35 +182,43 @@ export function CommunitySwitcher({
     [],
   );
 
-  const handleLeaveCommunity = React.useCallback(async () => {
-    if (!activeCommunity || isLeaving) return;
+  const handleRemoveCommunity = React.useCallback(
+    async (community: Community, mode: "leave" | "local-only" = "leave") => {
+      if (isLeaving) return;
 
-    if (profileMenuHoverTimer.current !== null) {
-      window.clearTimeout(profileMenuHoverTimer.current);
-      profileMenuHoverTimer.current = null;
-    }
-    setIsLeaving(true);
-    setLeaveError(null);
-    try {
-      const result = await onRemoveCommunity(activeCommunity.id);
-      setDropdownOpen(false);
-      if (result?.status === "already-absent") {
-        toast("Community removed", {
-          description:
-            "You were no longer a member, so Buzz removed the community from this device.",
-        });
+      if (profileMenuHoverTimer.current !== null) {
+        window.clearTimeout(profileMenuHoverTimer.current);
+        profileMenuHoverTimer.current = null;
       }
-    } catch (error) {
-      setLeaveError(
-        error instanceof Error
-          ? error.message
-          : "Couldn't leave the community. Try again.",
-      );
-      setDropdownOpen(true);
-    } finally {
-      setIsLeaving(false);
-    }
-  }, [activeCommunity, isLeaving, onRemoveCommunity]);
+      setIsLeaving(true);
+      setLeaveError(null);
+      if (mode === "leave") setUnavailableCommunityId(null);
+      try {
+        const result = await onRemoveCommunity(community.id, mode);
+        setRemovingCommunity(null);
+        setDropdownOpen(false);
+        if (result?.status === "already-absent") {
+          toast("Community removed", {
+            description:
+              "You were no longer a member, so Buzz removed the community from this device.",
+          });
+        }
+      } catch (error) {
+        if (mode === "leave" && canRemoveCommunityLocally(error)) {
+          setUnavailableCommunityId(community.id);
+        }
+        setLeaveError(
+          error instanceof Error
+            ? error.message
+            : "Couldn't remove the community. Try again.",
+        );
+        setDropdownOpen(true);
+      } finally {
+        setIsLeaving(false);
+      }
+    },
+    [isLeaving, onRemoveCommunity],
+  );
 
   const triggerContent = (
     <>
@@ -324,7 +354,7 @@ export function CommunitySwitcher({
                 <button
                   className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-destructive outline-hidden transition-colors hover:bg-destructive/10 focus:bg-destructive/10 focus:outline-none focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
                   disabled={isLeaving}
-                  onClick={() => void handleLeaveCommunity()}
+                  onClick={() => void handleRemoveCommunity(activeCommunity)}
                   role="menuitem"
                   type="button"
                 >
@@ -338,6 +368,23 @@ export function CommunitySwitcher({
                   >
                     {leaveError}
                   </p>
+                ) : null}
+                {unavailableCommunityId === activeCommunity.id ? (
+                  <button
+                    className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-destructive outline-hidden transition-colors hover:bg-destructive/10 focus:bg-destructive/10 focus:outline-none focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+                    disabled={isLeaving}
+                    onClick={() => {
+                      clearProfileMenuHoverTimer();
+                      setLeaveError(null);
+                      setDropdownOpen(false);
+                      setRemovingCommunity(activeCommunity);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <Unplug className="h-4 w-4" />
+                    <span>Remove from this device</span>
+                  </button>
                 ) : null}
                 <hr className="-mx-1 my-1 h-px border-0 bg-muted" />
               </>
@@ -450,6 +497,46 @@ export function CommunitySwitcher({
           <SidebarMenuItem>{switcherDropdown}</SidebarMenuItem>
         </SidebarMenu>
       )}
+
+      <AlertDialog
+        open={removingCommunity !== null}
+        onOpenChange={(open) => {
+          if (!open && !isLeaving) setRemovingCommunity(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Remove {removingCommunity?.name} from this device?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes the saved connection on this device without
+              contacting the server. Your membership and the community on the
+              server are unchanged. Your identity is kept. You can add the
+              community again later.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {leaveError ? (
+            <p className="text-sm text-destructive" role="alert">
+              {leaveError}
+            </p>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isLeaving}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={isLeaving}
+              onClick={(event) => {
+                event.preventDefault();
+                if (removingCommunity) {
+                  void handleRemoveCommunity(removingCommunity, "local-only");
+                }
+              }}
+            >
+              {isLeaving ? "Removing…" : "Remove from this device"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <EditCommunityDialog
         onOpenChange={(open) => {
