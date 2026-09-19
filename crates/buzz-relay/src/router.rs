@@ -2,6 +2,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -17,6 +18,7 @@ use tower::ServiceExt;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
+use tower_http::timeout::{RequestBodyTimeoutLayer, TimeoutBody, TimeoutLayer};
 use tower_http::trace::{HttpMakeClassifier, TraceLayer};
 
 use crate::api;
@@ -26,6 +28,258 @@ use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
 use crate::readiness::{self, ReadinessEvaluation, ReadinessReason};
 use crate::state::AppState;
+
+/// Idle deadline for an API request body: the longest the relay waits for the
+/// *next* body byte before answering `408` and freeing the task. This bounds
+/// reception only. Once the whole body has arrived the handler runs with no
+/// deadline at all, on purpose: the API write handlers commit to the database
+/// and then publish (audit enqueue, fanout, workflow scheduling) inside the
+/// same future, and a wall-clock timeout around that future can drop it
+/// between the commit and the publish. A replay of the same event is then
+/// answered `duplicate:` and the lost audit entry and delivery are never
+/// repaired. See `dispatch_persistent_event` in `handlers/event.rs`.
+/// API bodies are small JSON documents (≤1 MiB), so a 60s idle bound cannot
+/// misfire on a legitimate client; only a withheld body trips it.
+const API_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wall-clock ceiling on receiving an API request body. The idle bound
+/// alone leaves one shape open: a client that trickles a byte inside every
+/// idle window keeps the pre-auth task and its growing buffer alive for as
+/// long as it likes. This ceiling closes that: reception as a whole must
+/// finish within it or the request is answered `408`. It covers body
+/// reception only; the handler still runs with no deadline (see above). At
+/// 1 MiB, 300s means a client slower than about 3.5 KiB/s is refused, which
+/// no legitimate API client is.
+const API_BODY_RECEPTION_CEILING: Duration = Duration::from_secs(300);
+
+/// Idle deadline for a media request body: the longest the relay waits for
+/// the *next* body byte, not a bound on the whole upload. Large uploads over
+/// slow links are legitimate (the video auth window is 3600s precisely so
+/// they can finish), so media must NOT get a tight wall-clock deadline: a
+/// 500 MiB body under such a bound would require a minimum sustained uplink
+/// and cut off real slow uploads. A progressing upload delivers a byte well
+/// inside 60s and completes as long as its body arrives within
+/// [`MEDIA_UPLOAD_CEILING`]; only a withheld body (the parked-task attack)
+/// trips this bound.
+const MEDIA_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wall-clock ceiling on receiving a media *upload* body, measured from
+/// request arrival. It is enforced only while the handler is still reading
+/// body frames: once the last frame is in, the storage writes, upload
+/// record, sidecar publish and audit enqueue run with no deadline, so no
+/// timer can drop the upload future between a durable write and its
+/// publication. 3600s matches the Blossom auth window: an upload still
+/// receiving its body past its own auth expiry was dead anyway.
+///
+/// Named cost: an authed client trickling one byte per <60s never trips the
+/// idle bound and holds an upload permit for up to this ceiling, 12x longer
+/// than the 300s wall-clock main had before the upload/read split. It is
+/// still bounded, and it sits behind Blossom auth, relay membership, 30/min
+/// rate limiting and the 2-per-pubkey concurrency cap, so exhausting the
+/// global permit pool of 8 requires 4 distinct authorized pubkeys. A hung
+/// storage write after the body is complete is not bounded here, as on main;
+/// that is a storage-client concern, not a request-reception one.
+const MEDIA_UPLOAD_CEILING: Duration = Duration::from_secs(3600);
+
+/// Deadline for media *read* routes (`GET`/`HEAD /media/{sha256_ext}`).
+/// These carry no request body, so the idle body timeout is inapplicable —
+/// without their own bound, a hung storage read would park a task forever
+/// (the same shape as #4424, on the read side). Wall-clock is the correct
+/// instrument here: it only covers until response headers are produced — a
+/// streaming blob download escapes it once headers are sent, so large/slow
+/// downloads are never truncated.
+///
+/// 300s preserves the read bound these routes already had when the previous
+/// shared media deadline shipped — splitting uploads off must not silently
+/// tighten reads. It also covers the multi-call pre-header path: the read
+/// handler awaits several *sequential* storage calls before headers (sidecar
+/// MIME read, ext cross-check, HEAD, then GET/range), each independently
+/// allowed up to 60s by rust-s3's per-call default, so a 60s request
+/// deadline could cancel a sequence whose individual calls are all within
+/// their own dependency budgets.
+const MEDIA_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Apply a sub-router's request-body limit with a wall-clock deadline
+/// **outside** it. On expiry the client receives an empty `504 Gateway
+/// Timeout` ([`TimeoutLayer::with_status_code`]) and the service future is
+/// dropped wherever it is. `504`, not `408`: nothing here waits on the
+/// client, so a stall is the relay's storage dependency not answering, and
+/// `408` is reserved for a client that did not deliver its body in time.
+///
+/// Because the future is dropped, this is only safe for routes that mutate
+/// nothing: it wraps the media *read* routes, whose handlers await storage
+/// reads and nothing else. Do NOT put it around a router that commits and
+/// then publishes (the API router uses [`with_body_reception_guard`]) or
+/// around media uploads (see [`with_media_body_guards`]). The admin router,
+/// git policy router, SPA fallback, and health listener are not routed
+/// through any of these helpers, and header-read deadlines before routing
+/// remain open (#4424).
+fn with_request_deadline<S>(router: Router<S>, body_limit: usize, timeout: Duration) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router
+        .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            timeout,
+        ))
+}
+
+/// Wrap a request body so that a wall-clock `ceiling`, measured from now,
+/// bounds its *reception*: if the ceiling elapses while a frame is still
+/// being awaited, the next poll yields a [`buzz_media::BodyDeadlineError`]
+/// (classified as `408` at every consumption path). The deadline is checked
+/// only when the body is polled, so once a handler has read the last frame
+/// nothing can interrupt it. This is the one timing primitive both the API
+/// guard and the media upload guard use for their ceilings, precisely
+/// because it can never cancel a handler future.
+///
+/// Implemented over `into_data_stream`, so trailers are dropped; no request
+/// body the relay reads carries trailers. Frame-level data and errors pass
+/// through unchanged.
+fn with_reception_deadline(body: Body, ceiling: Duration) -> Body {
+    Body::from_stream(ReceptionDeadlineStream {
+        inner: body.into_data_stream(),
+        deadline: Box::pin(tokio::time::sleep(ceiling)),
+    })
+}
+
+/// The stream behind [`with_reception_deadline`].
+struct ReceptionDeadlineStream {
+    inner: axum::body::BodyDataStream,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+}
+
+impl futures_util::Stream for ReceptionDeadlineStream {
+    type Item = Result<bytes::Bytes, axum::BoxError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::future::Future;
+        if self.deadline.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(Some(Err(Box::new(buzz_media::BodyDeadlineError))));
+        }
+        std::pin::Pin::new(&mut self.inner)
+            .poll_next(cx)
+            .map(|next| next.map(|result| result.map_err(Into::into)))
+    }
+}
+
+/// Bound the API router's request-body *reception* without ever bounding its
+/// handlers. The middleware collects the whole body up front under an idle
+/// deadline ([`TimeoutBody`], reset on every frame), a wall-clock reception
+/// `ceiling` ([`with_reception_deadline`]) and a byte limit; it answers `408`
+/// for a body that does not arrive in time and `413` for an oversized one
+/// before any handler runs, and hands a fully buffered body to the handler.
+/// A `Content-Length` over the limit is refused without reading a byte, as
+/// [`RequestBodyLimitLayer`] did before this guard replaced it. Every API
+/// write handler extracts its body in full (`Bytes`, or `Json` for the mesh
+/// demo echo), so this changes nothing about what they see; what it changes
+/// is that no future holding a committed-but-unpublished event can be
+/// dropped by a timer (see [`API_BODY_IDLE_TIMEOUT`]).
+///
+/// The parked-socket attack from #4424 (valid headers, body never sent) is
+/// closed here for the API router: the task is freed at the idle bound, and
+/// a trickled body is freed at the ceiling. A slow handler after a complete
+/// body is left alone, which is the property the tests below pin.
+fn with_body_reception_guard<S>(
+    router: Router<S>,
+    body_limit: usize,
+    idle_timeout: Duration,
+    ceiling: Duration,
+) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(middleware::from_fn(
+        move |request: Request<Body>, next: middleware::Next| {
+            receive_request_body(idle_timeout, ceiling, body_limit, request, next)
+        },
+    ))
+}
+
+/// The body of [`with_body_reception_guard`]: refuse a declared oversize,
+/// buffer under both deadlines, classify, then run.
+async fn receive_request_body(
+    idle_timeout: Duration,
+    ceiling: Duration,
+    body_limit: usize,
+    request: Request<Body>,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let (parts, body) = request.into_parts();
+    let declared_oversize = parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|declared| declared > body_limit);
+    if declared_oversize {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let guarded = Body::new(TimeoutBody::new(
+        idle_timeout,
+        with_reception_deadline(body, ceiling),
+    ));
+    match axum::body::to_bytes(guarded, body_limit).await {
+        Ok(bytes) => {
+            next.run(Request::from_parts(parts, Body::from(bytes)))
+                .await
+        }
+        Err(error) => match buzz_media::classify_body_error(&error) {
+            buzz_media::BodyErrorKind::Timeout => StatusCode::REQUEST_TIMEOUT.into_response(),
+            buzz_media::BodyErrorKind::LengthLimit => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            buzz_media::BodyErrorKind::Other => StatusCode::BAD_REQUEST.into_response(),
+        },
+    }
+}
+
+/// Apply the media *upload* sub-router's request-body limit plus two
+/// reception deadlines: an **idle-based** body timeout
+/// ([`RequestBodyTimeoutLayer`]) that resets on every body frame, so a
+/// slow-but-progressing upload completes while a withheld body fails closed,
+/// and a wall-clock reception `ceiling` ([`with_reception_deadline`]) that
+/// bounds how long a trickling client can hold the upload permit. Neither
+/// synthesizes a response or drops the handler: both surface as a body read
+/// error ([`tower_http::timeout::TimeoutError`] or
+/// [`buzz_media::BodyDeadlineError`] in the source chain), which
+/// `upload_blob` maps to `408 Request Timeout` at every body-consumption path
+/// (see [`buzz_media::classify_body_error`]). Once the handler has read the
+/// last frame no timer exists, so the storage writes, upload record, sidecar
+/// publish and audit enqueue cannot be cancelled mid-way.
+///
+/// Uploads and reads are two different timeout semantics: media *read* routes
+/// take a separate, tight [`with_request_deadline`] instead — do not route
+/// them through this helper, whose ceiling is sized for a 500 MiB slow
+/// upload.
+///
+/// Layer order (outermost first): reception ceiling, idle body timeout, body
+/// limit — so the handler polls `Limited<TimeoutBody<DeadlineBody>>`. All
+/// three guards apply to the body the handler actually reads, and an
+/// oversized `Content-Length` is still rejected up front with `413` by the
+/// limit layer.
+pub(crate) fn with_media_body_guards<S>(
+    router: Router<S>,
+    body_limit: usize,
+    idle_timeout: Duration,
+    ceiling: Duration,
+) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router
+        .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(RequestBodyTimeoutLayer::new(idle_timeout))
+        .layer(middleware::from_fn(
+            move |request: Request<Body>, next: middleware::Next| async move {
+                next.run(request.map(|body| with_reception_deadline(body, ceiling)))
+                    .await
+            },
+        ))
+}
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
 ///
@@ -37,14 +291,27 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .media
         .max_image_bytes
         .max(state.config.media.max_video_bytes) as usize;
-    let media_router = Router::new()
+    // Uploads and reads carry different timeout semantics, so the media
+    // router is split by route class before merging: uploads get body
+    // guards + a generous ceiling; body-less reads get a tight wall-clock
+    // deadline (see the constants above for why neither fits the other).
+    let media_upload_router = Router::new()
         .route("/upload", put(api::media::upload_blob))
-        .route("/media/upload", put(api::media::upload_blob))
-        .route(
-            "/media/{sha256_ext}",
-            get(api::media::get_blob).head(api::media::head_blob),
-        )
-        .layer(RequestBodyLimitLayer::new(media_body_limit))
+        .route("/media/upload", put(api::media::upload_blob));
+    let media_upload_router = with_media_body_guards(
+        media_upload_router,
+        media_body_limit,
+        MEDIA_BODY_IDLE_TIMEOUT,
+        MEDIA_UPLOAD_CEILING,
+    );
+    let media_read_router = Router::new().route(
+        "/media/{sha256_ext}",
+        get(api::media::get_blob).head(api::media::head_blob),
+    );
+    let media_read_router =
+        with_request_deadline(media_read_router, media_body_limit, MEDIA_READ_TIMEOUT);
+    let media_router = media_upload_router
+        .merge(media_read_router)
         .with_state(state.clone());
 
     let git_router = api::git::git_router(state.clone());
@@ -138,10 +405,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/huddle/{channel_id}/audio",
             get(audio::handler::ws_audio_handler),
-        )
-        // Reject request bodies larger than 1 MB to prevent resource exhaustion.
-        .layer(RequestBodyLimitLayer::new(1024 * 1024))
-        .with_state(state.clone());
+        );
+    // Reject request bodies larger than 1 MB to prevent resource exhaustion,
+    // and bound the request future so a withheld body cannot park a task
+    // (WebSocket routes: handshake bounded, established session unaffected).
+    let api_router = with_body_reception_guard(
+        api_router,
+        1024 * 1024,
+        API_BODY_IDLE_TIMEOUT,
+        API_BODY_RECEPTION_CEILING,
+    )
+    .with_state(state.clone());
 
     // Merge — each sub-router carries its own body limit.
     // Metrics → Trace → CORS applied once over the combined router.
@@ -1375,5 +1649,586 @@ mod tests {
             !handler_receives_message_with_limit(limit, limit + 1).await,
             "oversized messages must be rejected by the WebSocket parser before the handler sees them"
         );
+    }
+
+    /// Request-body reception guards. Kept in their own module so the unit
+    /// lane (`just test-unit`) can select them by prefix: they need no
+    /// database, Redis or storage, only in-process routers and a loopback
+    /// listener.
+    mod body_guards {
+        use super::*;
+
+        /// Bound a test's request so a regression fails instead of hanging the
+        /// suite: every stall test below relies on a guard to *produce* the
+        /// response, and without the guard the future never resolves.
+        async fn within_five_seconds<T>(future: impl std::future::Future<Output = T>) -> T {
+            tokio::time::timeout(Duration::from_secs(5), future)
+                .await
+                .expect("the guard must answer at its bound, not park the request")
+        }
+
+        /// A request body that never produces its bytes — the wire shape of a
+        /// client that sends headers and then withholds the body forever.
+        fn stalled_body() -> Body {
+            Body::from_stream(futures_util::stream::pending::<
+                Result<bytes::Bytes, std::io::Error>,
+            >())
+        }
+
+        /// A test router shaped like the production API router: a handler that
+        /// collects its request body, then does `work` (standing in for the
+        /// commit-then-publish tail of a write handler), wrapped by
+        /// [`with_body_reception_guard`] with millisecond deadlines so tests do
+        /// not sleep for production constants. `completed` is set only if the
+        /// handler finishes its work.
+        fn reception_guard_test_router(
+            idle_timeout: Duration,
+            ceiling: Duration,
+            work: Duration,
+            completed: Arc<std::sync::atomic::AtomicBool>,
+        ) -> Router {
+            let router = Router::new().route(
+                "/collect",
+                axum::routing::post(move |request: axum::extract::Request| {
+                    let completed = completed.clone();
+                    async move {
+                        let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await;
+                        tokio::time::sleep(work).await;
+                        completed.store(true, Ordering::SeqCst);
+                        StatusCode::OK
+                    }
+                }),
+            );
+            with_body_reception_guard(router, 1024, idle_timeout, ceiling)
+        }
+
+        /// A test router shaped like the production media router **after the
+        /// upload/read split and merge**: `/upload` (POST) and the legacy
+        /// `/media/upload` alias (PUT, as in production — the literal that must
+        /// keep winning over the read router's `/media/{sha256_ext}` param
+        /// capture) stream their request body and classify read errors the way
+        /// the test handler below does, wrapped by [`with_media_body_guards`];
+        /// `/hang` and `GET /media/{sha256_ext}` (no request body, stall without
+        /// ever polling one — a hung storage read) are wrapped by
+        /// [`with_request_deadline`]; the two are merged like `build_router`
+        /// does. `received` counts body bytes the upload handlers actually
+        /// observed.
+        fn media_guards_test_router(
+            idle_timeout: Duration,
+            upload_ceiling: Duration,
+            read_timeout: Duration,
+            body_limit: usize,
+            received: Arc<std::sync::atomic::AtomicUsize>,
+        ) -> Router {
+            let upload_handler = move |request: axum::extract::Request| {
+                let received = received.clone();
+                async move {
+                    use futures_util::StreamExt;
+                    let mut stream = request.into_body().into_data_stream();
+                    while let Some(next) = stream.next().await {
+                        match next {
+                            Ok(chunk) => {
+                                received.fetch_add(chunk.len(), Ordering::SeqCst);
+                            }
+                            Err(error) => {
+                                return match buzz_media::classify_body_error(&error) {
+                                    buzz_media::BodyErrorKind::Timeout => {
+                                        StatusCode::REQUEST_TIMEOUT
+                                    }
+                                    buzz_media::BodyErrorKind::LengthLimit => {
+                                        StatusCode::PAYLOAD_TOO_LARGE
+                                    }
+                                    buzz_media::BodyErrorKind::Other => {
+                                        StatusCode::INTERNAL_SERVER_ERROR
+                                    }
+                                };
+                            }
+                        }
+                    }
+                    StatusCode::OK
+                }
+            };
+            let upload_router = Router::new()
+                .route("/upload", axum::routing::post(upload_handler.clone()))
+                .route("/media/upload", axum::routing::put(upload_handler));
+            let hang_handler = || async {
+                std::future::pending::<()>().await;
+                StatusCode::OK
+            };
+            let read_router = Router::new()
+                .route("/hang", get(hang_handler))
+                .route("/media/{sha256_ext}", get(hang_handler));
+            with_media_body_guards(upload_router, body_limit, idle_timeout, upload_ceiling)
+                .merge(with_request_deadline(read_router, body_limit, read_timeout))
+        }
+
+        /// A body that delivers every declared byte, just paced: `chunks` chunks
+        /// of `chunk_len` bytes with `gap` between them. The legitimate
+        /// slow-uplink wire shape — the one `stalled_body()` cannot express.
+        fn paced_body(chunks: usize, chunk_len: usize, gap: Duration) -> Body {
+            Body::from_stream(futures_util::stream::unfold(
+                0usize,
+                move |sent| async move {
+                    if sent >= chunks {
+                        return None;
+                    }
+                    if sent > 0 {
+                        tokio::time::sleep(gap).await;
+                    }
+                    Some((
+                        Ok::<_, std::io::Error>(bytes::Bytes::from(vec![0u8; chunk_len])),
+                        sent + 1,
+                    ))
+                },
+            ))
+        }
+
+        #[tokio::test]
+        async fn slow_but_progressing_media_body_completes_past_the_idle_bound() {
+            // THE row that separates an idle deadline from a wall-clock one: the
+            // client sends every byte, just slower than the bound in total. A
+            // wall-clock deadline (the old media TimeoutLayer) cuts this upload
+            // off; the idle deadline must let it finish because every chunk gap
+            // is under the bound. The read deadline is deliberately TIGHTER than
+            // the total upload duration: it must bound only read routes, never
+            // leak onto the merged upload route.
+            let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let router = media_guards_test_router(
+                Duration::from_millis(50),
+                Duration::from_secs(60),
+                Duration::from_millis(50),
+                64 * 1024,
+                received.clone(),
+            );
+
+            // 10 x 100 bytes, 20ms apart: total ~180ms, well past the 50ms bound;
+            // each inter-chunk gap comfortably inside it.
+            let request = Request::post("/upload")
+                .body(paced_body(10, 100, Duration::from_millis(20)))
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "a progressing body must never be cut off by the idle deadline"
+            );
+            assert_eq!(
+                received.load(Ordering::SeqCst),
+                1000,
+                "every declared byte must reach the handler"
+            );
+        }
+
+        #[tokio::test]
+        async fn withheld_media_body_fails_closed_with_408_and_frees_the_task() {
+            // The attack shape: headers sent, body withheld forever. The idle
+            // deadline must surface a typed body error that classifies to 408,
+            // and the handler must *return* (task freed) instead of parking.
+            // The ceiling is generous, so it is the idle bound that fires.
+            let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let router = media_guards_test_router(
+                Duration::from_millis(50),
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                64 * 1024,
+                received.clone(),
+            );
+
+            let request = Request::post("/upload").body(stalled_body()).unwrap();
+            let response = within_five_seconds(router.oneshot(request)).await.unwrap();
+
+            // The handler produced this response itself — its task is released.
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+            assert_eq!(received.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn trickled_media_body_is_refused_at_the_reception_ceiling() {
+            // The shape the idle bound cannot see: every chunk gap is inside the
+            // idle deadline, but the body as a whole outlives the ceiling. The
+            // ceiling must surface as a body error the handler classifies to
+            // 408, after some bytes were already received, and the task must be
+            // released.
+            let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let router = media_guards_test_router(
+                Duration::from_millis(200),
+                Duration::from_millis(100),
+                Duration::from_secs(60),
+                64 * 1024,
+                received.clone(),
+            );
+
+            // 100 x 10 bytes, 20ms apart: ~2s in total, every gap far inside the
+            // 200ms idle bound, the whole body far past the 100ms ceiling.
+            let request = Request::post("/upload")
+                .body(paced_body(100, 10, Duration::from_millis(20)))
+                .unwrap();
+            let response = within_five_seconds(router.oneshot(request)).await.unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::REQUEST_TIMEOUT,
+                "a body that outlives the reception ceiling must be refused as 408"
+            );
+            let received = received.load(Ordering::SeqCst);
+            assert!(
+                received > 0 && received < 1000,
+                "the ceiling fires mid-body, after some bytes and before all: got {received}"
+            );
+        }
+
+        #[tokio::test]
+        async fn complete_media_body_then_slow_handler_is_never_cancelled_by_the_ceiling() {
+            // The cancellation-safety property on the upload side, mirroring the
+            // API guard's: once the last body frame is in, no timer exists. A
+            // handler whose post-body work (storage writes, sidecar publish,
+            // audit enqueue in production) outlives the ceiling many times over
+            // still completes and answers 200, so nothing durable can be left
+            // half-published by a deadline.
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let ceiling = Duration::from_millis(50);
+            let handler = {
+                let completed = completed.clone();
+                move |request: axum::extract::Request| {
+                    let completed = completed.clone();
+                    async move {
+                        let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await;
+                        tokio::time::sleep(ceiling * 10).await;
+                        completed.store(true, Ordering::SeqCst);
+                        StatusCode::OK
+                    }
+                }
+            };
+            let router = with_media_body_guards(
+                Router::new().route("/upload", axum::routing::post(handler)),
+                64 * 1024,
+                Duration::from_secs(60),
+                ceiling,
+            );
+
+            let request = Request::post("/upload")
+                .body(Body::from(vec![0u8; 1024]))
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(
+                completed.load(Ordering::SeqCst),
+                "an upload handler with a complete body must finish its work"
+            );
+        }
+
+        #[tokio::test]
+        async fn media_body_over_the_limit_is_still_rejected_with_413() {
+            // Layer-order regression: the body limit must still guard the body
+            // the handler reads. Declared oversize is rejected up front by the
+            // limit layer; an undeclared oversize stream errors mid-read and
+            // classifies to 413 (never 408, never 500).
+            let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let router = media_guards_test_router(
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                512,
+                received.clone(),
+            );
+
+            let declared = Request::post("/upload")
+                .header("content-length", "1024")
+                .body(Body::from(vec![0u8; 1024]))
+                .unwrap();
+            let response = router.clone().oneshot(declared).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+            let undeclared = Request::post("/upload")
+                .body(paced_body(4, 256, Duration::from_millis(1)))
+                .unwrap();
+            let response = router.oneshot(undeclared).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+
+        #[tokio::test]
+        async fn stalled_no_body_media_route_is_bounded_by_the_read_deadline() {
+            // The body guards only cover routes that read a request body. A GET
+            // with no body that stalls (hung storage read) must be bounded by the
+            // read routes' own wall-clock deadline — the generous upload ceiling
+            // must NOT be what bounds it (here the ceiling is 60s and the request
+            // is bounded to 5s), and with no bound at all this parks a task
+            // forever, reintroducing #4424 on the read side. The status is 504:
+            // nothing here waited on the client.
+            let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let router = media_guards_test_router(
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                Duration::from_millis(50),
+                64 * 1024,
+                received,
+            );
+
+            let request = Request::get("/hang").body(Body::empty()).unwrap();
+            let response = within_five_seconds(router.oneshot(request)).await.unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::GATEWAY_TIMEOUT,
+                "a stalled no-body route must be cut off by the read deadline, not parked"
+            );
+        }
+
+        #[tokio::test]
+        async fn legacy_media_upload_alias_stays_under_the_upload_guards() {
+            // Route-precedence regression: `/media/upload` lives in the *upload*
+            // sub-router while `/media/{sha256_ext}` lives in the *read*
+            // sub-router — two routers sharing a path prefix, merged. If axum
+            // ever resolved the literal under the param capture, the alias would
+            // inherit the tight read wall-clock and a slow upload through the
+            // alias would die there, invisible to tests that only use `/upload`.
+            // The read deadline here is deliberately TIGHTER than the total
+            // upload duration so misrouting is fatal to the test, not silent.
+            let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let router = media_guards_test_router(
+                Duration::from_millis(50),
+                Duration::from_secs(60),
+                Duration::from_millis(50),
+                64 * 1024,
+                received.clone(),
+            );
+
+            // 10 x 100 bytes, 20ms apart: total ~180ms — past the 50ms read
+            // deadline, every gap inside the 50ms idle bound.
+            let request = Request::put("/media/upload")
+                .body(paced_body(10, 100, Duration::from_millis(20)))
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "a slow-but-progressing PUT /media/upload must complete under the \
+             upload guards, not die at the read deadline"
+            );
+            assert_eq!(received.load(Ordering::SeqCst), 1000);
+
+            // Discriminator: GET on the literal must be 405 (method not allowed
+            // on the upload router's literal route), NOT a 504 from the read
+            // deadline — proving the static literal still wins over the read
+            // router's `{sha256_ext}` param capture. The status alone
+            // discriminates: the param route's stalling handler can only ever
+            // produce 504.
+            let request = Request::get("/media/upload").body(Body::empty()).unwrap();
+            let response = router.oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "GET /media/upload must resolve to the upload router's literal \
+             (405), not the read router's param capture"
+            );
+        }
+
+        #[tokio::test]
+        async fn stalled_request_body_times_out_with_408_before_the_handler_runs() {
+            // The parked-socket shape from #4424: headers arrive, the body never
+            // does. The guard must answer at the idle bound and free the task, and
+            // the handler must never have started.
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let router = reception_guard_test_router(
+                Duration::from_millis(50),
+                Duration::from_secs(60),
+                Duration::ZERO,
+                completed.clone(),
+            );
+
+            let request = Request::post("/collect").body(stalled_body()).unwrap();
+            let response = within_five_seconds(router.oneshot(request)).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(body.is_empty(), "reception refusals carry no body");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                !completed.load(Ordering::SeqCst),
+                "the handler must not run for a body that never arrived"
+            );
+        }
+
+        #[tokio::test]
+        async fn trickled_api_body_is_refused_at_the_reception_ceiling() {
+            // One byte inside every idle window, forever: the idle bound never
+            // fires. The reception ceiling must, with 408, before the handler
+            // runs, so a pre-auth task cannot be held past the ceiling.
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let router = reception_guard_test_router(
+                Duration::from_millis(200),
+                Duration::from_millis(100),
+                Duration::ZERO,
+                completed.clone(),
+            );
+
+            // 50 x 1 byte, 20ms apart: ~1s in total, every gap inside the 200ms
+            // idle bound, the whole body past the 100ms ceiling.
+            let request = Request::post("/collect")
+                .body(paced_body(50, 1, Duration::from_millis(20)))
+                .unwrap();
+            let response = within_five_seconds(router.oneshot(request)).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                !completed.load(Ordering::SeqCst),
+                "the handler must not run for a body that never finished arriving"
+            );
+        }
+
+        #[tokio::test]
+        async fn complete_body_then_slow_handler_is_never_cancelled() {
+            // The cancellation-safety property: once the body is in, the handler
+            // owns its future. Work that outlives both the idle deadline and the
+            // reception ceiling many times over still completes, so a committed
+            // write can never be dropped before it is published.
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let idle = Duration::from_millis(20);
+            let router = reception_guard_test_router(idle, idle, idle * 10, completed.clone());
+
+            let request = Request::post("/collect")
+                .body(Body::from("{\"kind\":1}"))
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(
+                completed.load(Ordering::SeqCst),
+                "a handler with a complete body must finish its work"
+            );
+        }
+
+        #[tokio::test]
+        async fn oversized_api_body_is_rejected_with_413_before_the_handler_runs() {
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let router = reception_guard_test_router(
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                Duration::ZERO,
+                completed.clone(),
+            );
+
+            let request = Request::post("/collect")
+                .body(Body::from(vec![b'x'; 2048]))
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert!(
+                !completed.load(Ordering::SeqCst),
+                "the handler must not run for a body over the limit"
+            );
+        }
+
+        #[tokio::test]
+        async fn declared_oversize_api_body_is_refused_without_reading_it() {
+            // `RequestBodyLimitLayer` refused an over-limit `Content-Length` before
+            // reading a byte; the guard that replaced it must keep that. The body
+            // here never yields, so the only way to answer at all is to refuse on
+            // the header.
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let router = reception_guard_test_router(
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                Duration::ZERO,
+                completed.clone(),
+            );
+
+            let request = Request::post("/collect")
+                .header(header::CONTENT_LENGTH, "2048")
+                .body(stalled_body())
+                .unwrap();
+            let response = within_five_seconds(router.oneshot(request)).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert!(
+                !completed.load(Ordering::SeqCst),
+                "the handler must not run for a declared oversize"
+            );
+        }
+
+        #[tokio::test]
+        async fn dropped_stalled_request_never_completes_handler() {
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let router = reception_guard_test_router(
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                Duration::ZERO,
+                completed.clone(),
+            );
+
+            let request = Request::post("/collect").body(stalled_body()).unwrap();
+            let response_future = router.oneshot(request);
+            tokio::select! {
+                _ = response_future => panic!("stalled request must not produce a response yet"),
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+            // `response_future` was dropped by the select; the handler must not
+            // complete afterwards.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                !completed.load(Ordering::SeqCst),
+                "dropped request future must not complete the handler"
+            );
+        }
+
+        #[tokio::test]
+        async fn websocket_session_survives_request_timeout() {
+            // The reception guard buffers the (empty) handshake body and hands the
+            // request on; the upgrade extension survives the rebuild, and the
+            // established session is never under any deadline.
+            let timeout = Duration::from_millis(200);
+            let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+            let router = Router::new().route(
+                "/",
+                get(move |ws: WebSocketUpgrade| {
+                    let received_tx = received_tx.clone();
+                    async move {
+                        ws.on_upgrade(move |mut socket| async move {
+                            let _ = received_tx.send(matches!(socket.recv().await, Some(Ok(_))));
+                        })
+                    }
+                }),
+            );
+            let app = with_body_reception_guard(router, 1024, timeout, timeout);
+
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test WebSocket listener");
+            let addr = listener.local_addr().expect("test listener address");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .expect("test WebSocket server");
+            });
+
+            let (mut client, _) = connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("connect test WebSocket client");
+            // Outlive the request deadline several times over, then prove the
+            // established session still works.
+            tokio::time::sleep(timeout * 4).await;
+            client
+                .send(Message::Text("still alive".into()))
+                .await
+                .expect("send on established session after the deadline");
+
+            let received = tokio::time::timeout(Duration::from_secs(2), received_rx.recv())
+                .await
+                .expect("server should process the message")
+                .expect("server should report receipt");
+            assert!(
+                received,
+                "established WebSocket session must survive the request deadline"
+            );
+
+            server.abort();
+            let _ = server.await;
+        }
     }
 }

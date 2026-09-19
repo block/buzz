@@ -89,6 +89,79 @@ pub enum MediaError {
     /// I/O error during streaming upload.
     #[error("io error: {0}")]
     Io(String),
+    /// The request body was not fully received in time: either it stopped
+    /// making progress (idle deadline) or its total reception outlived the
+    /// reception ceiling.
+    ///
+    /// Distinct from [`MediaError::Io`] (a real transport/storage failure,
+    /// 500) and [`MediaError::FileTooLarge`] (a genuine length-limit breach,
+    /// 413): this is the client not delivering bytes, and it maps to 408 so
+    /// operators never page on it as a storage failure.
+    #[error("request body timed out before it was fully received")]
+    RequestBodyTimeout,
+}
+
+/// The wall-clock reception ceiling elapsed while a request body was still
+/// being read. Emitted by the relay's reception-deadline body wrapper as a
+/// body read error, so it surfaces at the same consumption paths as the idle
+/// [`tower_http::timeout::TimeoutError`] and classifies the same way
+/// ([`BodyErrorKind::Timeout`], `408`). It is never raised after the last
+/// body frame, so a handler that has its whole body is never interrupted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyDeadlineError;
+
+impl std::fmt::Display for BodyDeadlineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("request body reception deadline elapsed")
+    }
+}
+
+impl std::error::Error for BodyDeadlineError {}
+
+/// Classification of a request-body read error, used to pick the response
+/// status at every body-consumption path. Typed checks first, then the
+/// length-limit Display patterns (axum wraps `LengthLimitError` in its error
+/// chain without exposing the type for downcast — see
+/// `test_body_limit_error_detection`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyErrorKind {
+    /// A reception deadline fired while the body was still being read:
+    /// the idle-progress deadline ([`tower_http::timeout::TimeoutError`] in
+    /// the source chain) or the whole-body reception ceiling
+    /// ([`BodyDeadlineError`]). Maps to [`MediaError::RequestBodyTimeout`] /
+    /// `408`.
+    Timeout,
+    /// A body length limit was breached. Maps to
+    /// [`MediaError::FileTooLarge`] / `413`.
+    LengthLimit,
+    /// Any other transport/stream failure. Maps to [`MediaError::Io`] /
+    /// `500`.
+    Other,
+}
+
+/// Walk the error's source chain and classify it — see [`BodyErrorKind`].
+///
+/// The distinction is the response contract: a body that does not arrive in
+/// time is the client's fault (`408`), an oversized body is a policy
+/// rejection (`413`), and collapsing either into [`MediaError::Io`] would
+/// surface a `500` and page operators for a storage failure that never
+/// happened.
+pub fn classify_body_error(error: &(dyn std::error::Error + 'static)) -> BodyErrorKind {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(err) = source {
+        if err.is::<tower_http::timeout::TimeoutError>() || err.is::<BodyDeadlineError>() {
+            return BodyErrorKind::Timeout;
+        }
+        let msg = err.to_string();
+        if msg.contains("length limit")
+            || msg.contains("body limit")
+            || msg.contains("LengthLimitError")
+        {
+            return BodyErrorKind::LengthLimit;
+        }
+        source = err.source();
+    }
+    BodyErrorKind::Other
 }
 
 impl From<image::ImageError> for MediaError {
@@ -151,6 +224,7 @@ impl IntoResponse for MediaError {
             Self::UploadRateLimitExceeded | Self::UploadConcurrencyLimitReached => {
                 (StatusCode::TOO_MANY_REQUESTS, self.to_string())
             }
+            Self::RequestBodyTimeout => (StatusCode::REQUEST_TIMEOUT, self.to_string()),
             Self::UnknownContentType | Self::UnsupportedContainer | Self::WrongCodec => {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, self.to_string())
             }
