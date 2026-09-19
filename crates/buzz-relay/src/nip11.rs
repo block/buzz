@@ -233,7 +233,7 @@ pub async fn relay_info_handler(
 
 fn push_descriptor(
     push_configured: bool,
-    custom_profile_enabled: bool,
+    app_profile_mode: crate::config::PushAppProfileMode,
     relay_url: &str,
     executor_key_id: &str,
     relay_keypair: &nostr::Keys,
@@ -246,7 +246,7 @@ fn push_descriptor(
     } else {
         "ws"
     };
-    let app_profiles = crate::handlers::push_lease::supported_app_profiles(custom_profile_enabled)
+    let app_profiles = crate::handlers::push_lease::supported_app_profiles(app_profile_mode)
         .iter()
         .map(|profile| {
             serde_json::json!({
@@ -313,7 +313,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     };
     if let Some(push) = push_descriptor(
         state.config.push_enabled,
-        state.config.push_custom_profile_enabled,
+        state.config.push_app_profile_mode,
         &state.config.relay_url,
         &state.config.push_executor_key_id,
         &state.relay_keypair,
@@ -413,23 +413,32 @@ const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PushAppProfileMode;
 
     #[test]
     fn push_descriptor_is_gated_by_gateway_configuration_and_tenant_binding() {
         let keys = nostr::Keys::generate();
         assert!(push_descriptor(
             false,
-            false,
+            PushAppProfileMode::Dogfood,
             "ws://relay",
             "key",
             &keys,
             Some("tenant.example")
         )
         .is_none());
-        assert!(push_descriptor(true, false, "ws://relay", "key", &keys, None).is_none());
+        assert!(push_descriptor(
+            true,
+            PushAppProfileMode::Dogfood,
+            "ws://relay",
+            "key",
+            &keys,
+            None
+        )
+        .is_none());
         let descriptor = push_descriptor(
             true,
-            false,
+            PushAppProfileMode::Dogfood,
             "ws://relay",
             "key",
             &keys,
@@ -447,14 +456,27 @@ mod tests {
         );
         let custom = push_descriptor(
             true,
-            true,
+            PushAppProfileMode::Custom,
             "ws://relay",
             "key",
             &keys,
             Some("tenant.example"),
         )
         .expect("custom-profile descriptor");
-        assert_eq!(custom["app_profiles"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            custom["app_profiles"],
+            serde_json::json!([{"id": "buzz-ios-custom", "transport": "apns"}])
+        );
+        let both = push_descriptor(
+            true,
+            PushAppProfileMode::Both,
+            "ws://relay",
+            "key",
+            &keys,
+            Some("tenant.example"),
+        )
+        .expect("dual-profile descriptor");
+        assert_eq!(both["app_profiles"].as_array().unwrap().len(), 2);
     }
 
     #[test]

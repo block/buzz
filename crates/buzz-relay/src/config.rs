@@ -24,6 +24,17 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
+/// Closed set of Apple application profiles advertised and accepted by the relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushAppProfileMode {
+    /// Accept only the stock dogfood profile.
+    Dogfood,
+    /// Accept only the operator-owned custom profile.
+    Custom,
+    /// Accept both stock dogfood and operator-owned custom profiles.
+    Both,
+}
+
 /// Authentication mode for the deployment-admin API.
 ///
 /// Configured by `BUZZ_ADMIN_AUTH`: unset/empty/`nip98` → `Nip98` (fail-secure
@@ -344,9 +355,9 @@ pub struct Config {
     /// Whether NIP-PL push discovery, lease acceptance, matching, and delivery
     /// are enabled for this deployment. Defaults to false.
     pub push_enabled: bool,
-    /// Whether the operator-owned `buzz-ios-custom` profile is advertised and
-    /// accepted. Defaults to false so legacy gateway deployments stay coherent.
-    pub push_custom_profile_enabled: bool,
+    /// Exact Apple application profile set advertised and accepted by the relay.
+    /// Defaults to dogfood so legacy gateway deployments stay coherent.
+    pub push_app_profile_mode: PushAppProfileMode,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
     /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
@@ -486,6 +497,17 @@ fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
                 "{name} must be true or false"
             ))),
         },
+    }
+}
+
+fn parse_push_app_profile_mode(raw: Option<&str>) -> Result<PushAppProfileMode, ConfigError> {
+    match raw.unwrap_or("dogfood") {
+        "dogfood" => Ok(PushAppProfileMode::Dogfood),
+        "custom" => Ok(PushAppProfileMode::Custom),
+        "both" => Ok(PushAppProfileMode::Both),
+        _ => Err(ConfigError::InvalidValue(
+            "BUZZ_PUSH_APP_PROFILE_MODE must be one of dogfood, custom, or both".to_string(),
+        )),
     }
 }
 
@@ -964,7 +986,17 @@ impl Config {
                 hex::encode(secret)
             });
         let push_enabled = parse_bool("BUZZ_PUSH_ENABLED", false)?;
-        let push_custom_profile_enabled = parse_bool("BUZZ_PUSH_CUSTOM_PROFILE_ENABLED", false)?;
+        let push_app_profile_mode_value = match std::env::var("BUZZ_PUSH_APP_PROFILE_MODE") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_PUSH_APP_PROFILE_MODE must be valid UTF-8: {error}"
+                )))
+            }
+        };
+        let push_app_profile_mode =
+            parse_push_app_profile_mode(push_app_profile_mode_value.as_deref())?;
         let push_executor_key_id =
             std::env::var("BUZZ_PUSH_EXECUTOR_KEY_ID").unwrap_or_else(|_| "relay-v1".to_string());
         if push_executor_key_id.is_empty() || push_executor_key_id.len() > 64 {
@@ -1262,7 +1294,7 @@ impl Config {
             git_max_concurrent_ops,
             git_hook_hmac_secret,
             push_enabled,
-            push_custom_profile_enabled,
+            push_app_profile_mode,
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
@@ -2258,6 +2290,27 @@ mod tests {
             result,
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("BUZZ_PUSH_ENABLED")
+        ));
+    }
+
+    #[test]
+    fn push_app_profile_mode_is_closed_and_defaults_to_dogfood() {
+        assert_eq!(
+            parse_push_app_profile_mode(None).unwrap(),
+            PushAppProfileMode::Dogfood
+        );
+        assert_eq!(
+            parse_push_app_profile_mode(Some("custom")).unwrap(),
+            PushAppProfileMode::Custom
+        );
+        assert_eq!(
+            parse_push_app_profile_mode(Some("both")).unwrap(),
+            PushAppProfileMode::Both
+        );
+        assert!(matches!(
+            parse_push_app_profile_mode(Some("custom,dogfood")),
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_PUSH_APP_PROFILE_MODE")
         ));
     }
 

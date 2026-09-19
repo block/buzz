@@ -299,6 +299,13 @@ impl Config {
             true,
             None,
         )?;
+        if dogfood
+            .as_ref()
+            .zip(custom.as_ref())
+            .is_some_and(|(dogfood, custom)| dogfood.app_attest_app_id == custom.app_attest_app_id)
+        {
+            return Err(ConfigError::Invalid("BUZZ_PUSH_CUSTOM_APP_ATTEST_APP_ID"));
+        }
         let mut profiles = HashMap::new();
         if let Some(dogfood) = dogfood {
             profiles.insert(AppProfile::BuzzIosDogfood, dogfood);
@@ -462,6 +469,34 @@ mod tests {
         assert!(matches!(
             Config::from_map(&env),
             Err(ConfigError::Missing("BUZZ_PUSH_CUSTOM_APNS_TOPIC"))
+        ));
+    }
+
+    #[test]
+    fn custom_profile_rejects_the_dogfood_application_identity() {
+        let mut env = base();
+        env.extend([
+            (
+                "BUZZ_PUSH_CUSTOM_APP_ATTEST_APP_ID".into(),
+                "TEAM.xyz.block.buzz.dogfood.mobile".into(),
+            ),
+            (
+                "BUZZ_PUSH_CUSTOM_APNS_CERT_PATH".into(),
+                "/custom-identity.pem".into(),
+            ),
+            (
+                "BUZZ_PUSH_CUSTOM_APNS_TOPIC".into(),
+                "xyz.block.buzz.dogfood.mobile".into(),
+            ),
+            (
+                "BUZZ_PUSH_CUSTOM_APNS_ENVIRONMENT".into(),
+                "production".into(),
+            ),
+        ]);
+
+        assert!(matches!(
+            Config::from_map(&env),
+            Err(ConfigError::Invalid("BUZZ_PUSH_CUSTOM_APP_ATTEST_APP_ID"))
         ));
     }
 

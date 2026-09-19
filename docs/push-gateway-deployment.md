@@ -163,9 +163,12 @@ the established strict boolean parser rejects unknown values and the default is
 false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
 exact HTTPS `/v1/deliveries/apns` URL. An absent or explicitly empty URL while
 enabled is a startup error. The relay advertises and accepts only the dogfood
-profile by default. Set `BUZZ_PUSH_CUSTOM_PROFILE_ENABLED=true` only after the
-connected gateway has the complete `buzz-ios-custom` identity configured; this
-keeps NIP-11 advertisement, lease validation, and gateway authority coherent.
+profile by default. Set `BUZZ_PUSH_APP_PROFILE_MODE` to `dogfood`, `custom`, or
+`both` so the relay's advertised and accepted set exactly matches the connected
+gateway runtimes. Unknown values fail startup. Select `custom` or `both` only
+after the connected gateway has the complete `buzz-ios-custom` identity
+configured; this keeps NIP-11 advertisement, lease validation, and gateway
+authority coherent.
 Only an enabled relay
 advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
 matcher and delivery worker. Relays retain lease matching, authorization, durable

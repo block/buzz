@@ -68,7 +68,11 @@ const DOGFOOD_APP_PROFILES: &[AppProfile<'static>] = &[AppProfile {
     id: "buzz-ios-dogfood",
     transport: "apns",
 }];
-const CUSTOM_APP_PROFILES: &[AppProfile<'static>] = &[
+const CUSTOM_APP_PROFILES: &[AppProfile<'static>] = &[AppProfile {
+    id: "buzz-ios-custom",
+    transport: "apns",
+}];
+const BOTH_APP_PROFILES: &[AppProfile<'static>] = &[
     AppProfile {
         id: "buzz-ios-dogfood",
         transport: "apns",
@@ -80,12 +84,12 @@ const CUSTOM_APP_PROFILES: &[AppProfile<'static>] = &[
 ];
 
 pub(crate) const fn supported_app_profiles(
-    custom_profile_enabled: bool,
+    mode: crate::config::PushAppProfileMode,
 ) -> &'static [AppProfile<'static>] {
-    if custom_profile_enabled {
-        CUSTOM_APP_PROFILES
-    } else {
-        DOGFOOD_APP_PROFILES
+    match mode {
+        crate::config::PushAppProfileMode::Dogfood => DOGFOOD_APP_PROFILES,
+        crate::config::PushAppProfileMode::Custom => CUSTOM_APP_PROFILES,
+        crate::config::PushAppProfileMode::Both => BOTH_APP_PROFILES,
     }
 }
 
@@ -516,7 +520,7 @@ pub async fn accept(
     let limits = LeaseLimits {
         expected_origin: &origin,
         author_hex: &author_hex,
-        app_profiles: supported_app_profiles(state.config.push_custom_profile_enabled),
+        app_profiles: supported_app_profiles(state.config.push_app_profile_mode),
         supported_classes: &["default"],
         push_kinds: PUSH_KINDS,
         max_subscriptions: 16,
@@ -607,6 +611,7 @@ fn canonical_origin(relay_url: &str, host: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PushAppProfileMode;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     fn event(tags: Vec<Tag>) -> Event {
@@ -615,6 +620,23 @@ mod tests {
             .custom_created_at(Timestamp::from(1_000_u64))
             .sign_with_keys(&Keys::generate())
             .unwrap()
+    }
+
+    #[test]
+    fn configured_profile_mode_is_the_exact_lease_allowlist() {
+        let ids = |mode| {
+            supported_app_profiles(mode)
+                .iter()
+                .map(|profile| profile.id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(ids(PushAppProfileMode::Dogfood), ["buzz-ios-dogfood"]);
+        assert_eq!(ids(PushAppProfileMode::Custom), ["buzz-ios-custom"]);
+        assert_eq!(
+            ids(PushAppProfileMode::Both),
+            ["buzz-ios-dogfood", "buzz-ios-custom"]
+        );
     }
 
     #[test]
