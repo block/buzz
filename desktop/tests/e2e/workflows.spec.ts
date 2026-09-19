@@ -79,6 +79,9 @@ async function createWorkflow(
     await dialog
       .getByRole("button", { name: "Trigger: Message Posted" })
       .click();
+    await expect(
+      dialog.getByRole("button", { name: "Trigger event" }),
+    ).toBeVisible();
     await dialog.getByRole("button", { name: "Trigger event" }).click();
     await page
       .getByRole("menuitem", {
