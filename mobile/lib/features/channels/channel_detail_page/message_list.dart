@@ -496,6 +496,7 @@ class _MessageList extends HookConsumerWidget {
                         _MessageBubble(
                           message: message,
                           showAuthor: showAuthor,
+                          hasReplies: entry.summary != null,
                           channelNames: channelNamesMap,
                           currentChannelId: channelId,
                           currentPubkey: currentPubkey,

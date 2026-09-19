@@ -13,6 +13,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/channel_window.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
@@ -3718,6 +3719,88 @@ void main() {
     });
   });
 
+  group('Message row thread navigation', () {
+    testWidgets('tapping a message with unloaded replies opens its thread', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'remote-root',
+        pubkey: 'alice',
+        content: 'Replies are on the relay',
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          messagesNotifier: _FakeMessagesNotifier(
+            [root],
+            summaries: const {
+              'remote-root': ChannelWindowThreadSummary(
+                replyCount: 1,
+                descendantCount: 1,
+                lastReplyAt: 1100,
+                participantPubkeys: ['bob'],
+              ),
+            },
+          ),
+          threadReplies: const {'remote-root': []},
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(findRichText('Replies are on the relay'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+    });
+
+    for (final hasReplies in [false, true]) {
+      testWidgets(
+        hasReplies
+            ? 'tapping a message with replies opens its thread'
+            : 'tapping a message without replies stays in the channel',
+        (tester) async {
+          final root = _textMsg(
+            id: 'tap-root',
+            pubkey: 'alice',
+            content: 'Tap this message',
+          );
+          final replies = [
+            if (hasReplies)
+              _textMsg(
+                id: 'tap-reply',
+                pubkey: 'bob',
+                content: 'A reply',
+                createdAt: 1100,
+                extraTags: const [
+                  ['e', 'tap-root', '', 'reply'],
+                ],
+              ),
+          ];
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [root, ...replies],
+              threadReplies: {'tap-root': replies},
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(findRichText('Tap this message'));
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byType(ThreadDetailPage),
+            hasReplies ? findsOneWidget : findsNothing,
+          );
+          if (!hasReplies) {
+            await tester.longPress(findRichText('Tap this message'));
+            await tester.pumpAndSettle();
+            await tester.tap(find.text('Reply'));
+            await tester.pumpAndSettle();
+            expect(find.byType(ThreadDetailPage), findsOneWidget);
+          }
+        },
+      );
+    }
+  });
+
   group('Deep-link navigation', () {
     testWidgets('opens a nested reply in its direct-parent thread', (
       tester,
@@ -6065,6 +6148,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   bool _hasLoadedMessages;
   final List<List<NostrEvent>> _olderPages;
   final bool failOlderFetch;
+  final Map<String, ChannelWindowThreadSummary> summaries;
   int fetchOlderCalls = 0;
 
   _FakeMessagesNotifier(
@@ -6073,6 +6157,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
     bool hasLoadedMessages = true,
     List<List<NostrEvent>> olderPages = const [],
     this.failOlderFetch = false,
+    this.summaries = const {},
   }) : _hasLoadedMessages = hasLoadedMessages,
        _olderPages = [...olderPages],
        super(channelId);
@@ -6082,6 +6167,9 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
 
   @override
   bool get hasLoadedMessages => _hasLoadedMessages;
+
+  @override
+  Map<String, ChannelWindowThreadSummary> get threadSummaries => summaries;
 
   @override
   bool get reachedOldest => _olderPages.isEmpty && !failOlderFetch;

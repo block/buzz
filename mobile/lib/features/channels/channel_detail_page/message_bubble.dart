@@ -3,6 +3,7 @@ part of '../channel_detail_page.dart';
 class _MessageBubble extends ConsumerWidget {
   final TimelineMessage message;
   final bool showAuthor;
+  final bool hasReplies;
   final Map<String, String> channelNames;
   final String currentChannelId;
   final String? currentPubkey;
@@ -13,6 +14,7 @@ class _MessageBubble extends ConsumerWidget {
   const _MessageBubble({
     required this.message,
     required this.showAuthor,
+    required this.hasReplies,
     required this.channelNames,
     required this.currentChannelId,
     required this.currentPubkey,
@@ -93,9 +95,9 @@ class _MessageBubble extends ConsumerWidget {
           onLongPress: openMessageActions,
           borderRadius: BorderRadius.circular(Radii.md),
           highlightColor: context.colors.primary.withValues(alpha: 0.1),
-          // Tap opens the thread; long-press still opens the action sheet.
+          // Tap opens existing threads; long-press can start a new one.
           // MessageContent handles mention, channel-link, and media taps.
-          onTap: allMessages == null
+          onTap: !hasReplies || allMessages == null
               ? null
               : () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
