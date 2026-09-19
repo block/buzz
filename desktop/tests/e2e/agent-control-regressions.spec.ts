@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 
 const AGENT_PUBKEY = TEST_IDENTITIES.charlie.pubkey;
 const RESTORED_UNSCOPED_AGENT_PUBKEY = TEST_IDENTITIES.outsider.pubkey;
@@ -258,10 +259,26 @@ test.describe("agent control browser regressions", () => {
         },
       ],
     });
-    await page.clock.install({ time: new Date("2026-08-30T17:00:00.000Z") });
     await openAgentActivity(page, CHANNEL_AGENTS);
 
-    await clickStop(page);
+    // Open the settings menu on real time so the DropdownMenuContent's 150ms
+    // CSS enter-animation (zoom-in-95) can complete before the fake clock is
+    // installed. Once the clock is active, every setTimeout — including those
+    // used by the correlation timeout the test exercises — is fake-controlled.
+    await page.getByTestId("agent-session-settings-menu-trigger").click();
+    const stop = page.getByTestId("agent-session-stop-turn");
+    await expect(stop).toBeVisible();
+    await expect(stop).toBeEnabled();
+    // Settle the enter-animation before installing the fake clock. Real
+    // setTimeout here; waitForAnimations works normally with no fake clock.
+    await waitForAnimations(page);
+
+    // Install the fake clock NOW — after the menu is open and stable. Any
+    // setTimeout scheduled from this point forward (e.g. the 8-second
+    // correlation timeout) will be fake-clock-controlled.
+    await page.clock.install({ time: new Date("2026-08-30T17:00:00.000Z") });
+
+    await stop.click();
     await expect
       .poll(() => readControlRequests(page))
       .toEqual(

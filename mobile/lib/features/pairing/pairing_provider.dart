@@ -94,6 +94,8 @@ final identityExportClockProvider = Provider<DateTime Function()>((ref) {
 class PairingNotifier extends Notifier<PairingState> {
   final PairingSocketFactory _socketFactory;
   final PairingCredentialValidator? _credentialValidator;
+  final RelaySocketFactory _validationSocketFactory;
+  RelaySocket? _validationSocket;
   PairingSocket? _socket;
   Timer? _sessionTimeout;
   Community? _identityExportCommunity;
@@ -102,8 +104,10 @@ class PairingNotifier extends Notifier<PairingState> {
   PairingNotifier({
     PairingSocketFactory? socketFactory,
     PairingCredentialValidator? credentialValidator,
+    RelaySocketFactory validationSocketFactory = RelaySocket.new,
   }) : _socketFactory = socketFactory ?? _createPairingSocket,
-       _credentialValidator = credentialValidator;
+       _credentialValidator = credentialValidator,
+       _validationSocketFactory = validationSocketFactory;
 
   static PairingSocket _createPairingSocket({
     required String wsUrl,
@@ -118,7 +122,10 @@ class PairingNotifier extends Notifier<PairingState> {
   );
 
   @override
-  PairingState build() => const PairingState();
+  PairingState build() {
+    ref.onDispose(_cleanup);
+    return const PairingState();
+  }
 
   Future<void> pair(String rawInput) async {
     if (state.status == PairingStatus.connecting ||
@@ -317,6 +324,8 @@ class PairingNotifier extends Notifier<PairingState> {
 
   void _cleanup() {
     _pairingGeneration++;
+    _validationSocket?.dispose();
+    _validationSocket = null;
     _sessionTimeout?.cancel();
     _sessionTimeout = null;
     _socket?.dispose();
@@ -350,6 +359,7 @@ class PairingNotifier extends Notifier<PairingState> {
   final Set<String> _processedEventIds = {}; // NIP-AB §Duplicate Event Handling
 
   Future<void> _pairNipAb(String uri) async {
+    final generation = _pairingGeneration;
     state = const PairingState(status: PairingStatus.connecting);
 
     try {
@@ -383,11 +393,16 @@ class PairingNotifier extends Notifier<PairingState> {
       final socket = _socketFactory(
         wsUrl: relayWsUrl,
         ephemeralPrivkey: _ephemeralPrivkey!,
-        onMessage: _handleRelayMessage,
-        onDisconnected: _handleDisconnected,
+        onMessage: (message) {
+          if (generation == _pairingGeneration) _handleRelayMessage(message);
+        },
+        onDisconnected: (error) {
+          if (generation == _pairingGeneration) _handleDisconnected(error);
+        },
       );
       _socket = socket;
       await socket.connect();
+      if (generation != _pairingGeneration) return;
 
       if (!socket.isConnected) {
         throw StateError('Pairing socket did not reach the connected state');
@@ -399,6 +414,7 @@ class PairingNotifier extends Notifier<PairingState> {
       // 6. Wait briefly for EOSE, then send offer.
       // (In practice, we send the offer immediately — the relay will buffer it.)
       await Future.delayed(const Duration(milliseconds: 500));
+      if (generation != _pairingGeneration) return;
 
       // 7. Build and send the offer event.
       final offerContent = _encryptMessage({
@@ -435,12 +451,14 @@ class PairingNotifier extends Notifier<PairingState> {
         }
       });
     } on FormatException catch (e) {
+      if (generation != _pairingGeneration) return;
       _cleanup();
       state = PairingState(
         status: PairingStatus.error,
         errorMessage: 'Invalid pairing code: ${e.message}',
       );
     } catch (e) {
+      if (generation != _pairingGeneration) return;
       debugPrint('Pairing connection error: $e');
       _cleanup();
       state = PairingState(
@@ -831,25 +849,28 @@ class PairingNotifier extends Notifier<PairingState> {
   // ── Legacy buzz:// flow ───────────────────────────────────────────────
 
   Future<void> _pairLegacy(String rawInput) async {
+    final generation = _pairingGeneration;
     state = const PairingState(status: PairingStatus.connecting);
 
     try {
       final community = _parseLegacyInput(rawInput);
-      await _validateCredentials(
-        relayUrl: community.relayUrl,
-        nsec: community.nsec,
-      );
+      final validator = _credentialValidator ?? _validateCredentials;
+      await validator(relayUrl: community.relayUrl, nsec: community.nsec);
 
+      if (generation != _pairingGeneration) return;
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
+      if (generation != _pairingGeneration) return;
       state = const PairingState(status: PairingStatus.success);
     } on FormatException catch (e) {
+      if (generation != _pairingGeneration) return;
       state = PairingState(
         status: PairingStatus.error,
         errorMessage: 'Invalid pairing code: ${e.message}',
       );
     } on RelayException catch (e) {
+      if (generation != _pairingGeneration) return;
       state = PairingState(
         status: PairingStatus.error,
         errorMessage:
@@ -857,6 +878,7 @@ class PairingNotifier extends Notifier<PairingState> {
             'Check that the pairing code is valid.',
       );
     } catch (e) {
+      if (generation != _pairingGeneration) return;
       state = PairingState(
         status: PairingStatus.error,
         errorMessage:
@@ -877,16 +899,18 @@ class PairingNotifier extends Notifier<PairingState> {
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     final wsUrl = uri.replace(scheme: scheme).toString();
 
-    final socket = RelaySocket(
+    final socket = _validationSocketFactory(
       wsUrl: wsUrl,
       nsec: nsec,
       onMessage: (_) {},
       onConnected: () {},
       onDisconnected: (_) {},
     );
+    _validationSocket = socket;
     try {
       await socket.connect().timeout(const Duration(seconds: 8));
     } finally {
+      if (identical(_validationSocket, socket)) _validationSocket = null;
       await socket.disconnect();
     }
   }

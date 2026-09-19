@@ -42,6 +42,7 @@ final class BuzzPushTranscriptTests: XCTestCase {
 
     // Deterministic inputs mirroring the fixture's `inputs` block.
     static let challengeId = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+    static let gatewayOrigin = URL(string: "https://push.buzz.xyz")!
     static let installationHandle = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
     static let challenge = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
     static let keyId = "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo="
@@ -70,6 +71,7 @@ final class BuzzPushTranscriptTests: XCTestCase {
 
     func testEnrollVector() throws {
         try assertMatchesVector("enroll", BuzzPushTranscript.enroll(
+            gatewayOrigin: Self.gatewayOrigin,
             challengeId: Self.challengeId,
             challenge: Self.challenge,
             keyId: Self.keyId,
@@ -82,6 +84,7 @@ final class BuzzPushTranscriptTests: XCTestCase {
 
     func testDelegateVector() throws {
         try assertMatchesVector("delegate", BuzzPushTranscript.delegate(
+            gatewayOrigin: Self.gatewayOrigin,
             challengeId: Self.challengeId,
             challenge: Self.challenge,
             installationHandle: Self.installationHandle,
@@ -95,6 +98,7 @@ final class BuzzPushTranscriptTests: XCTestCase {
 
     func testRotateEndpointVector() throws {
         try assertMatchesVector("rotate_endpoint", BuzzPushTranscript.rotateEndpoint(
+            gatewayOrigin: Self.gatewayOrigin,
             challengeId: Self.challengeId,
             challenge: Self.challenge,
             installationHandle: Self.installationHandle,
@@ -106,6 +110,7 @@ final class BuzzPushTranscriptTests: XCTestCase {
 
     func testRevokeDelegationVector() throws {
         try assertMatchesVector("revoke_delegation", BuzzPushTranscript.revokeDelegation(
+            gatewayOrigin: Self.gatewayOrigin,
             challengeId: Self.challengeId,
             challenge: Self.challenge,
             installationHandle: Self.installationHandle,
@@ -116,6 +121,7 @@ final class BuzzPushTranscriptTests: XCTestCase {
 
     func testRevokeInstallationVector() throws {
         try assertMatchesVector("revoke_installation", BuzzPushTranscript.revokeInstallation(
+            gatewayOrigin: Self.gatewayOrigin,
             challengeId: Self.challengeId,
             challenge: Self.challenge,
             installationHandle: Self.installationHandle,
@@ -130,6 +136,41 @@ final class BuzzPushTranscriptTests: XCTestCase {
             ["enroll", "delegate", "rotate_endpoint", "revoke_delegation", "revoke_installation"],
             "fixture gained or lost a vector; add/remove the matching known-answer test"
         )
+    }
+
+    func testConfiguredTransportOriginKeepsRegisteredTranscriptAudience() throws {
+        let bytes = try BuzzPushTranscript.delegate(
+            gatewayOrigin: URL(string: "https://push.example")!,
+            challengeId: Self.challengeId,
+            challenge: Self.challenge,
+            installationHandle: Self.installationHandle,
+            endpointEpoch: 1,
+            generation: 1,
+            relayPubkey: Self.relayPubkey,
+            notBefore: Self.notBefore,
+            expiresAt: Self.expiresAt
+        )
+
+        XCTAssertTrue(
+            String(decoding: bytes, as: UTF8.self)
+                .contains("\"audience\":\"https://push.buzz.xyz/v1/delegations\"")
+        )
+    }
+
+    func testInvalidGatewayOriginRejected() {
+        XCTAssertThrowsError(try BuzzPushTranscript.delegate(
+            gatewayOrigin: URL(string: "https://push.example/path")!,
+            challengeId: Self.challengeId,
+            challenge: Self.challenge,
+            installationHandle: Self.installationHandle,
+            endpointEpoch: 1,
+            generation: 1,
+            relayPubkey: Self.relayPubkey,
+            notBefore: Self.notBefore,
+            expiresAt: Self.expiresAt
+        )) {
+            XCTAssertEqual($0 as? BuzzPushTranscriptError, .invalidGatewayOrigin)
+        }
     }
 
     // MARK: Escaping edges (the exact JSONSerialization failure modes)

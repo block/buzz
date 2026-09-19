@@ -14,6 +14,7 @@ import '../../shared/clipboard_utils.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/push/push_bridge.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/utils/string_utils.dart';
 import '../pairing/pairing_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
@@ -224,7 +225,10 @@ class SettingsPage extends HookConsumerWidget {
             ),
           ),
           if (packageInfo.hasData)
-            _VersionFooter(version: packageInfo.data!.version),
+            _VersionFooter(
+              version: packageInfo.data!.version,
+              buildNumber: packageInfo.data!.buildNumber,
+            ),
         ],
       ),
     );
@@ -232,9 +236,10 @@ class SettingsPage extends HookConsumerWidget {
 }
 
 class _VersionFooter extends StatelessWidget {
-  const _VersionFooter({required this.version});
+  const _VersionFooter({required this.version, required this.buildNumber});
 
   final String version;
+  final String buildNumber;
 
   @override
   Widget build(BuildContext context) {
@@ -244,7 +249,7 @@ class _VersionFooter extends StatelessWidget {
         padding: const EdgeInsets.only(bottom: Grid.xs, top: Grid.xxs),
         child: Center(
           child: Text(
-            'v$version',
+            buildNumber.isEmpty ? 'v$version' : 'v$version ($buildNumber)',
             style: context.textTheme.bodySmall?.copyWith(
               color: context.colors.onSurfaceVariant.withValues(alpha: 0.6),
             ),

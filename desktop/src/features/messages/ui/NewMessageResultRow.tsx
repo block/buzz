@@ -6,7 +6,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 
 import { formatRecipientName } from "./useNewMessageRecipients";
 
@@ -28,7 +28,7 @@ function HoverRecipientIdentity({
   displayName: string;
   pubkey: string;
 }) {
-  const identityLabel = truncatePubkey(pubkey);
+  const identityLabel = truncateNpub(pubkey);
 
   return (
     <span

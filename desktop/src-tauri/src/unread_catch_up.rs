@@ -300,6 +300,7 @@ fn classify_batch(
             let broadcast = has_exact_tag(&event.tags, "broadcast", "1");
             let threaded = reference.parent_id.is_some() && !broadcast;
             let high_priority = item.channel.channel_type == "dm"
+                || threaded
                 || broadcast
                 || has_tag_value(&event.tags, "p", &self_pubkey);
             max_trigger = max_trigger.max(event.created_at);
@@ -518,9 +519,9 @@ mod tests {
         assert_eq!(
             observed_events
                 .iter()
-                .map(|event| event.id.as_str())
+                .map(|event| (event.id.as_str(), event.high_priority))
                 .collect::<Vec<_>>(),
-            ["external-reply"]
+            [("external-reply", true)]
         );
         assert_eq!(discovered.participated, ["root"]);
     }

@@ -1,5 +1,6 @@
 import AVFoundation
 import BuzzPushKit
+import DeclaredAgeRange
 import Flutter
 import UIKit
 import UserNotifications
@@ -16,7 +17,7 @@ import os.log
     accessGroup: Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
   )
   private var enrollmentTask: Task<Void, Never>?
-  private var appGroupIdentifier: String? {
+  var appGroupIdentifier: String? {
     Bundle.main.object(forInfoDictionaryKey: "BuzzAppGroupIdentifier") as? String
   }
   private var pushKeychainAccessGroup: String? {
@@ -29,6 +30,12 @@ import os.log
   )
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
+  private var ageSignalChannel: FlutterMethodChannel?
+  var requestPlatformAgeSignal: @MainActor (UIViewController) async throws -> [String: Any] =
+    AppDelegate.platformAgeSignal
+  private var ageSignalTask: Task<Void, Never>?
+  private var ageSignalRequestID: UUID?
+  private var ageSignalResult: FlutterResult?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
@@ -40,6 +47,8 @@ import os.log
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    // Age checking and notification restoration run asynchronously from
+    // Flutter. No age-related storage or platform request may delay launch.
     UNUserNotificationCenter.current().delegate = self
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
@@ -86,6 +95,21 @@ import os.log
       } else {
         result(false)
       }
+    }
+
+    ageSignalChannel = FlutterMethodChannel(
+      name: "buzz/age_signal",
+      binaryMessenger: messenger
+    )
+    let ageSignalRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzAgeSignal"
+    )
+    ageSignalChannel?.setMethodCallHandler { [weak self] call, result in
+      self?.handleAgeSignalMethodCall(
+        call,
+        viewController: ageSignalRegistrar?.viewController,
+        result: result
+      )
     }
 
     if let inlinePhotoPickerRegistrar = engineBridge.pluginRegistry.registrar(
@@ -224,6 +248,103 @@ import os.log
     }
   }
 
+  func handleAgeSignalMethodCall(
+    _ call: FlutterMethodCall,
+    viewController: UIViewController?,
+    result: @escaping FlutterResult
+  ) {
+    // iOS can retire the request in process. The generation fence prevents
+    // a late result from the cancelled task from completing a fresh request.
+    if call.method == "cancelAgeSignalRequest" || call.method == "restartForAgeSignal" {
+      cancelAgeSignalRequest()
+      result(true)
+      return
+    }
+    guard call.method == "requestAgeSignal" else {
+      result(FlutterMethodNotImplemented)
+      return
+    }
+    guard #available(iOS 26.0, *) else {
+      result(Self.noAgeSignalResponse)
+      return
+    }
+    guard let viewController else {
+      result(
+        FlutterError(
+          code: "age_signal_unavailable",
+          message: "The age signal presenter is unavailable.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    let requestID = UUID()
+    ageSignalRequestID = requestID
+    ageSignalResult = result
+    let request = requestPlatformAgeSignal
+    ageSignalTask = Task { @MainActor [weak self] in
+      do {
+        let payload = try await request(viewController)
+        self?.completeAgeSignalRequest(requestID, value: payload)
+      } catch {
+        self?.completeAgeSignalRequest(
+          requestID,
+          value:
+          FlutterError(
+            code: "age_signal_unavailable",
+            message: "The age signal request failed.",
+            details: String(describing: type(of: error))
+          )
+        )
+      }
+    }
+  }
+
+  @MainActor
+  private static func platformAgeSignal(_ viewController: UIViewController) async throws -> [String: Any] {
+    guard #available(iOS 26.0, *) else { return noAgeSignalResponse }
+    let response = try await AgeRangeService.shared.requestAgeRange(ageGates: 18, in: viewController)
+    switch response {
+    case .declinedSharing:
+      return noAgeSignalResponse
+    case .sharing(let range):
+      return BuzzAgeSignalPayload.sharing(
+        exclusiveUpperBound: range.upperBound, lowerBound: range.lowerBound)
+    @unknown default:
+      throw NSError(domain: "BuzzAgeSignal", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Unsupported age signal response"])
+    }
+  }
+
+  private func completeAgeSignalRequest(_ requestID: UUID, value: Any?) {
+    guard ageSignalRequestID == requestID, let result = ageSignalResult else { return }
+    ageSignalRequestID = nil
+    ageSignalResult = nil
+    ageSignalTask = nil
+    result(value)
+  }
+
+  private func cancelAgeSignalRequest() {
+    let result = ageSignalResult
+    ageSignalRequestID = nil
+    ageSignalResult = nil
+    ageSignalTask?.cancel()
+    ageSignalTask = nil
+    result?(
+      FlutterError(
+        code: "age_signal_cancelled",
+        message: "The age signal request was cancelled.",
+        details: nil
+      )
+    )
+  }
+
+  private static let noAgeSignalResponse: [String: Any] = [
+    "status": "noSignal",
+    "ageUpper": NSNull(),
+  ]
+
   private static func handleQrScannerMethodCall(
     _ call: FlutterMethodCall,
     result: @escaping FlutterResult
@@ -358,7 +479,16 @@ import os.log
       openNotificationSettings(result: result)
     case "endpointGrants":
       do {
-        result(try endpointGrantStore.records().map(\.flutterArguments))
+        guard let arguments = call.arguments as? [String: Any],
+          let gatewayText = arguments["gatewayUrl"] as? String,
+          let gatewayURL = URL(string: gatewayText)
+        else { throw BuzzDevPushEnrollmentError.invalidGatewayURL }
+        let driver = try BuzzDevPushEnrollmentDriver(
+          gatewayBaseURL: gatewayURL,
+          store: endpointGrantStore,
+          appAttestKeychainAccessGroup: pushKeychainAccessGroup
+        )
+        result(try driver.endpointGrants().map(\.flutterArguments))
       } catch {
         result(
           FlutterError(
@@ -625,6 +755,18 @@ import os.log
         return
       }
       transcodeVideoToMp4(sourcePath: sourcePath, result: result)
+    case "packageVoiceNoteForUpload":
+      guard let sourcePath = call.arguments as? String else {
+        result(
+          FlutterError(
+            code: "invalid_arguments",
+            message: "Expected source file path as String.",
+            details: nil
+          )
+        )
+        return
+      }
+      VoiceNotePackager.package(sourcePath: sourcePath, result: result)
     case "generateVideoPoster":
       guard let sourcePath = call.arguments as? String else {
         result(
@@ -773,7 +915,7 @@ import os.log
           // Older Buzz relays mistook that playback-only box for metadata. Keep
           // its size and payload in a `free` box so chunk offsets stay valid and
           // uploads work before those relays receive the validator fix.
-          try Self.neutralizeSampleDependencyBoxes(at: outputURL)
+          try MP4Canonicalizer.neutralizeSampleDependencyBoxes(at: outputURL)
           result(outputURL.path)
         } catch {
           try? FileManager.default.removeItem(at: outputURL)
@@ -882,76 +1024,6 @@ import os.log
         }
       }
     }
-  }
-
-  private static func neutralizeSampleDependencyBoxes(at url: URL) throws {
-    var data = try Data(contentsOf: url)
-    try neutralizeSampleDependencyBoxes(in: &data, start: 0, end: data.count)
-    try data.write(to: url, options: .atomic)
-  }
-
-  private static func neutralizeSampleDependencyBoxes(
-    in data: inout Data,
-    start: Int,
-    end: Int
-  ) throws {
-    let containers: Set<[UInt8]> = [
-      Array("moov".utf8), Array("trak".utf8), Array("mdia".utf8),
-      Array("minf".utf8), Array("stbl".utf8), Array("edts".utf8),
-      Array("dinf".utf8), Array("sinf".utf8), Array("schi".utf8),
-    ]
-    let sampleDependencyType = Array("sdtp".utf8)
-    let freeType = Array("free".utf8)
-    var offset = start
-
-    while offset < end {
-      guard end - offset >= 8 else { throw invalidMp4BoxError() }
-      let compactSize = Int(readBigEndianUInt32(data, at: offset))
-      var headerSize = 8
-      let boxSize: Int
-      if compactSize == 1 {
-        guard end - offset >= 16 else { throw invalidMp4BoxError() }
-        let extendedSize = readBigEndianUInt64(data, at: offset + 8)
-        guard extendedSize <= UInt64(Int.max) else { throw invalidMp4BoxError() }
-        boxSize = Int(extendedSize)
-        headerSize = 16
-      } else if compactSize == 0 {
-        boxSize = end - offset
-      } else {
-        boxSize = compactSize
-      }
-
-      guard boxSize >= headerSize, offset + boxSize <= end else {
-        throw invalidMp4BoxError()
-      }
-      let type = Array(data[(offset + 4)..<(offset + 8)])
-      if type == sampleDependencyType {
-        data.replaceSubrange((offset + 4)..<(offset + 8), with: freeType)
-      } else if containers.contains(type) {
-        try neutralizeSampleDependencyBoxes(
-          in: &data,
-          start: offset + headerSize,
-          end: offset + boxSize
-        )
-      }
-      offset += boxSize
-    }
-  }
-
-  private static func readBigEndianUInt32(_ data: Data, at offset: Int) -> UInt32 {
-    data[offset..<(offset + 4)].reduce(0) { ($0 << 8) | UInt32($1) }
-  }
-
-  private static func readBigEndianUInt64(_ data: Data, at offset: Int) -> UInt64 {
-    data[offset..<(offset + 8)].reduce(0) { ($0 << 8) | UInt64($1) }
-  }
-
-  private static func invalidMp4BoxError() -> NSError {
-    NSError(
-      domain: "BuzzVideoTranscode",
-      code: 1,
-      userInfo: [NSLocalizedDescriptionKey: "Invalid MP4 box structure."]
-    )
   }
 }
 

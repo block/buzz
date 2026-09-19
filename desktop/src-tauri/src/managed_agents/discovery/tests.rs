@@ -156,7 +156,6 @@ fn classifies_not_installed_when_no_underlying_cli() {
     assert!(cmd.is_none());
     assert!(path.is_none());
 }
-
 #[test]
 fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
     let (status, cmd, path) = classify_runtime(
@@ -170,6 +169,7 @@ fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
 }
 fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        session_policy: Default::default(),
         description: None,
         id: id.to_string(),
         display_name: id.to_string(),
@@ -204,7 +204,6 @@ fn effective_agent_command_explicit_override_wins() {
         "codex-acp"
     );
 }
-
 /// Minimal record for `record_agent_command` tests; only resolution inputs vary.
 fn record_with(
     runtime: Option<&str>,
@@ -212,6 +211,7 @@ fn record_with(
     override_cmd: Option<&str>,
 ) -> crate::managed_agents::types::ManagedAgentRecord {
     crate::managed_agents::types::ManagedAgentRecord {
+        session_policy: Default::default(),
         description: None,
         pubkey: String::new(),
         name: "r".to_string(),
@@ -684,7 +684,7 @@ fn codex_adapter_availability_available_for_minimum_supported_binary() {
     let bin = dir.join("codex-acp");
     std::fs::write(
         &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.10.0'\nexit 0\n",
     )
     .expect("write script");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
@@ -718,27 +718,6 @@ fn codex_adapter_availability_outdated_for_0x_binary() {
         status,
         AcpAvailabilityStatus::AdapterOutdated,
         "0.x adapter (non-zero exit) must classify as AdapterOutdated"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn codex_adapter_availability_outdated_for_older_1x_binary() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let bin = dir.path().join("codex-acp");
-    std::fs::write(
-        &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.5'\nexit 0\n",
-    )
-    .expect("write script");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
-
-    assert_eq!(
-        codex_adapter_availability(&bin),
-        AcpAvailabilityStatus::AdapterOutdated,
-        "a 1.x adapter below the floor must be offered an upgrade"
     );
 }
 

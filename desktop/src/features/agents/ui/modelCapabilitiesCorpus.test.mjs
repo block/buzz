@@ -25,10 +25,10 @@ const corpus = JSON.parse(readFileSync(fileURLToPath(corpusUrl), "utf8"));
 // (`_group`) are skipped. Mirrors the Rust corpus filter.
 const executable = corpus.filter((entry) => entry.expect != null);
 
-test("corpus has exactly 140 executable vectors", () => {
+test("corpus has exactly 158 executable vectors", () => {
   // Locks the vector count so a silent corpus edit can't quietly drop coverage;
   // must equal the gate in the Rust suite (model_capabilities.rs).
-  assert.equal(executable.length, 140);
+  assert.equal(executable.length, 158);
 });
 
 test("registry label aliases refuse an unprefixed query", () => {

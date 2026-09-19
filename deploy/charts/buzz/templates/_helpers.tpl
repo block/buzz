@@ -61,6 +61,14 @@ app.kubernetes.io/component: relay
 {{- end -}}
 {{- end -}}
 
+{{- define "buzz.imageRevision" -}}
+{{- if .Values.image.digest -}}
+{{- .Values.image.digest -}}
+{{- else -}}
+{{- default .Chart.AppVersion .Values.image.tag -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 Name of the chart-managed Secret holding relay-identity material and any
 chart-composed connection strings.

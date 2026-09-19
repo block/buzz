@@ -359,7 +359,7 @@ pub(crate) fn mint_media_get_auth(state: &AppState, base_url: &str) -> Option<St
     }
 }
 
-fn sign_blossom_upload_auth(
+pub(crate) fn sign_blossom_upload_auth(
     keys: &Keys,
     sha256: &str,
     expiry_secs: u64,

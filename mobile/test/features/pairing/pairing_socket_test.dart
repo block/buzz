@@ -11,6 +11,38 @@ const _privateKey =
 
 void main() {
   group('PairingSocket', () {
+    for (final ready in [false, true]) {
+      test('dispose settles connection while channel ready=$ready', () async {
+        final readiness = Completer<void>();
+        final channel = _ControlledWebSocketChannel(
+          readiness: readiness.future,
+        );
+        var disconnected = 0;
+        final socket = _socket(
+          'ws://unused',
+          channelFactory: (_) => channel,
+          onDisconnected: (_) => disconnected++,
+        );
+        final connecting = socket.connect();
+        final cancelled = expectLater(
+          connecting,
+          throwsA(isA<PairingAuthException>()),
+        );
+        if (ready) {
+          readiness.complete();
+          await Future<void>.delayed(Duration.zero);
+          channel.emit(jsonEncode(['AUTH', 'pending-auth']));
+          await Future<void>.delayed(Duration.zero);
+        }
+        socket.dispose();
+        await cancelled.timeout(const Duration(seconds: 1));
+        if (!ready) readiness.complete();
+        await Future<void>.delayed(Duration.zero);
+        expect(socket.isConnected, isFalse);
+        expect(disconnected, 0);
+      });
+    }
+
     test('connects when the pairing relay sends no AUTH challenge', () async {
       final server = await _TestRelay.start((_) {});
       addTearDown(server.close);
@@ -195,6 +227,11 @@ PairingSocket _socket(
 );
 
 class _ControlledWebSocketChannel implements WebSocketChannel {
+  _ControlledWebSocketChannel({Future<void>? readiness})
+    : _readiness = readiness ?? Future.value();
+
+  final Future<void> _readiness;
+  void emit(String message) => _streamController.add(message);
   final StreamController<dynamic> _streamController = StreamController();
   final WebSocketSink _sink = _ControlledWebSocketSink();
 
@@ -203,7 +240,7 @@ class _ControlledWebSocketChannel implements WebSocketChannel {
   Future<void> closeStream() => _streamController.close();
 
   @override
-  Future<void> get ready => Future.value();
+  Future<void> get ready => _readiness;
 
   @override
   Stream<dynamic> get stream => _streamController.stream;

@@ -59,6 +59,30 @@ test("describes configured workflow steps on the canvas", () => {
     }),
     "“Build finished” to team-on-call",
   );
+  // A key destination renders its compact npub (npubEncode of the pinned
+  // hex key); a checksum-broken npub renders the neutral label, never the
+  // raw text as if it were a role.
+  const hexKey = "deadbeef".repeat(8);
+  const brokenNpub =
+    "npub1m6kmam774klwlh4dhmhaatd7al02m0h0m6kmam774klwlh4dhmhslezuzy";
+  assert.equal(
+    workflowStepDescription({
+      id: "dm",
+      action: "send_dm",
+      text: "Build finished",
+      to: hexKey,
+    }),
+    "“Build finished” to npub1m6k…zuz0",
+  );
+  assert.equal(
+    workflowStepDescription({
+      id: "dm",
+      action: "send_dm",
+      text: "Build finished",
+      to: brokenNpub,
+    }),
+    "“Build finished” to Unavailable",
+  );
   assert.equal(
     workflowStepDescription({
       id: "approval",
@@ -67,6 +91,15 @@ test("describes configured workflow steps on the canvas", () => {
       from: "release-managers",
     }),
     "“Ship the release?” from release-managers",
+  );
+  assert.equal(
+    workflowStepDescription({
+      id: "approval",
+      action: "request_approval",
+      message: "Ship the release?",
+      from: hexKey,
+    }),
+    "“Ship the release?” from npub1m6k…zuz0",
   );
   assert.equal(
     workflowStepDescription({
