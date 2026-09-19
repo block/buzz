@@ -10,10 +10,16 @@ spec:
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   strategy:
-    type: RollingUpdate
+    type: {{ .Values.strategy.type }}
+    {{- /* Helm deep-merges maps, so `--set strategy.type=Recreate` leaves the
+           default rollingUpdate block in .Values. The API server rejects
+           rollingUpdate alongside Recreate, so only render it when it applies. */}}
+    {{- if eq .Values.strategy.type "RollingUpdate" }}
+    {{- with .Values.strategy.rollingUpdate }}
     rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- end }}
   selector:
     matchLabels:
       {{- include "buzz.relaySelectorLabels" . | nindent 6 }}
