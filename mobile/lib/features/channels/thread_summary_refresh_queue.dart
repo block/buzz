@@ -87,25 +87,17 @@ Map<String, ChannelWindowThreadSummary> lowerBoundSummariesAfterDeletion(
   Map<String, ChannelWindowThreadSummary> summaries,
   List<NostrEvent> events,
   Set<String> targets,
+  Map<String, String> owners,
 ) {
   final byId = {for (final event in events) event.id: event};
-  final knownRoots = {
-    for (final id in targets)
-      if (EventKind.channelTimelineContentKinds.contains(byId[id]?.kind) &&
-          byId[id]?.threadReference.parentId != null)
-        byId[id]!.threadReference.rootId,
-  };
-  final knownTargetsPerRoot = <String?, int>{};
-  for (final id in targets) {
-    final event = byId[id];
-    if (event != null &&
-        EventKind.channelTimelineContentKinds.contains(event.kind) &&
-        event.threadReference.parentId != null) {
-      final root = event.threadReference.rootId;
-      knownTargetsPerRoot[root] = (knownTargetsPerRoot[root] ?? 0) + 1;
-    }
+  final knownRoots = owners.values.toSet();
+  final knownTargetsPerRoot = <String, int>{};
+  for (final root in owners.values) {
+    knownTargetsPerRoot[root] = (knownTargetsPerRoot[root] ?? 0) + 1;
   }
-  final hasUnknownTarget = targets.any((id) => !byId.containsKey(id));
+  final hasUnknownTarget = targets.any(
+    (id) => !owners.containsKey(id) && !byId.containsKey(id),
+  );
   final deleted = {
     ...targets,
     for (final event in events)

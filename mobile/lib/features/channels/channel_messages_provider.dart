@@ -7,6 +7,9 @@ import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
 import 'thread_summary_refresh_queue.dart';
+import 'thread_reply_ownership.dart';
+
+part 'channel_messages_provider/thread_summaries.dart';
 
 // Channel history keeps partial reply evidence; full threads stay route-scoped.
 const _maxCachedRepliesPerRoot = 256;
@@ -38,6 +41,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final Map<String, ChannelWindowThreadSummary> _overflowFloors = {};
   final Map<String, int> _threadQueryVersions = {};
   int _threadQuerySerial = 0;
+  final _replyOwnership = ThreadReplyOwnership();
   bool _hasListeners = true;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
     refresh: _refreshOverflowSummary,
@@ -183,6 +187,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   ) async {
     try {
       _initialWindowQueryInFlight = true;
+      final pageVersion = ++_threadQuerySerial;
       final page = await _fetchWindowPage(session, null);
       _initialWindowQueryInFlight = false;
       _windowStore = replaceNewestChannelWindow(
@@ -193,7 +198,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _liveSummaryRootsDuringInitialWindowQuery.clear();
       _pruneOffWindowReplies();
       _usingChannelWindow = true;
-      _reconcilePageSummaries(page);
+      _reconcilePageSummaries(page, pageVersion);
       _reachedOldest = !channelWindowHasMore(_windowStore);
       return flattenChannelWindowEvents(_windowStore);
     } catch (error) {
@@ -211,13 +216,14 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
   }
 
-  void _reconcilePageSummaries(ChannelWindowPage page) {
+  void _reconcilePageSummaries(ChannelWindowPage page, int pageVersion) {
     for (final row in page.rows) {
       final root = row.event.id;
+      if ((_threadQueryVersions[root] ?? 0) > pageVersion) continue;
       _queryThreadSummaries.remove(root);
       _overflowFloors.remove(root);
       _summaryRefreshes.cancel(root);
-      beginThreadQuery(root);
+      _setThreadQueryVersion(root, pageVersion);
       if (cachedThreadReplyIds(root).length >
           (row.thread?.descendantCount ?? 0)) {
         _queueOverflowSummary(root);
@@ -249,6 +255,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   );
 
   void _handleLiveEvent(NostrEvent event, {bool authoritative = true}) {
+    final before = _lastKnownMessages ?? const <NostrEvent>[];
+    _replyOwnership.record([event]);
     // Invalidate the thread query independently of the selected channel-history
     // path. The websocket fallback does not merge through the window store.
     _invalidateThreadReplies(event);
@@ -293,7 +301,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
             .where((tag) => tag.length > 1 && tag[0] == 'e')
             .map((tag) => tag[1])
             .toSet();
-        _refreshDeletedSummaries(targets, _lastKnownMessages ?? []);
+        _refreshDeletedSummaries(targets, before);
       }
       if (event.kind == EventKind.deletion ||
           event.kind == EventKind.nip29DeleteEvent) {
@@ -483,87 +491,19 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         .confirm(eventIds);
   }
 
-  bool _isVisibleRoot(String root) =>
-      _retainedDeepLinkEventIds.contains(root) ||
-      _windowStore.pages.any(
-        (page) => page.rows.any((row) => row.event.id == root),
-      ) ||
-      _windowStore.liveOverlay.any((event) => event.id == root);
-
-  void _queueOverflowSummary(String root) {
-    if (!_isVisibleRoot(root)) return;
-    final ids = cachedThreadReplyIds(root)..removeAll(_localReplyRoots.keys);
-    final events =
-        _windowStore.liveOverlay
-            .where((event) => ids.contains(event.id))
-            .toList()
-          ..sort(compareThreadRepliesChronologically);
-    final previous = threadSummaries[root];
-    final count = (previous?.descendantCount ?? 0) > ids.length
-        ? previous!.descendantCount
-        : ids.length;
-    _overflowFloors.remove(root);
-    _overflowFloors[root] = ChannelWindowThreadSummary(
-      replyCount: count,
-      descendantCount: count,
-      lastReplyAt:
-          previous?.lastReplyAt ??
-          (events.isEmpty ? null : events.last.createdAt),
-      participantPubkeys:
-          previous?.participantPubkeys ??
-          events.reversed.map((event) => event.pubkey).toSet().take(5).toList(),
-      isLowerBound: true,
-      isCountPending: previous?.isCountPending ?? false,
-    );
-    while (_overflowFloors.length > 2048) {
-      _overflowFloors.remove(_overflowFloors.keys.first);
-    }
-    _summaryRefreshes.enqueue(root);
-  }
-
-  Future<void> _refreshOverflowSummary(String root) async {
-    if (!_isVisibleRoot(root)) return;
-    final generation = _initVersion;
-    final version = beginThreadQuery(root);
-    final snapshot = cachedThreadReplyIds(root);
-    bool current() =>
-        ref.mounted &&
-        _hasListeners &&
-        generation == _initVersion &&
-        _threadQueryVersions[root] == version;
-    try {
-      final replies = await fetchCompleteThreadReplies(
-        ref.read(relaySessionProvider.notifier),
-        ThreadRepliesArgs(channelId: channelId, rootId: root),
-        isCurrent: current,
-      );
-      if (current()) {
-        cacheCompleteThreadQuery(
-          root,
-          snapshot,
-          replies,
-          queryVersion: version,
-        );
-        if (_summaryRefreshes.isDirty(root)) _queueOverflowSummary(root);
-      }
-    } catch (error) {
-      if (current()) {
-        debugPrint(
-          '[ChannelMessagesNotifier] thread recount failed for $root: $error',
-        );
-      }
-    }
-  }
-
   /// Fences older background/route scans from overwriting a newer request.
   int beginThreadQuery(String rootId) {
     final version = ++_threadQuerySerial;
+    _setThreadQueryVersion(rootId, version);
+    return version;
+  }
+
+  void _setThreadQueryVersion(String rootId, int version) {
     _threadQueryVersions.remove(rootId);
     _threadQueryVersions[rootId] = version;
     while (_threadQueryVersions.length > 2048) {
       _threadQueryVersions.remove(_threadQueryVersions.keys.first);
     }
-    return version;
   }
 
   /// Snapshots unacknowledged replies that still require explicit deletion proof.
@@ -595,19 +535,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     };
   }
 
-  void _refreshDeletedSummaries(Set<String> targets, List<NostrEvent> events) {
-    final floors = lowerBoundSummariesAfterDeletion(
-      threadSummaries,
-      events,
-      targets,
-    );
-    for (final entry in floors.entries) {
-      if (!_isVisibleRoot(entry.key)) continue;
-      _overflowFloors[entry.key] = entry.value;
-      _queueOverflowSummary(entry.key);
-    }
-  }
-
   /// Applies explicit deletion evidence fetched for cached replies.
   void cacheThreadDeletions(Iterable<NostrEvent> deletions) {
     var events = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
@@ -617,12 +544,13 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
               event.kind != EventKind.nip29DeleteEvent)) {
         throw StateError('Expected a deletion in channel $channelId.');
       }
+      final before = events;
       _mergeWindowEventIntoStore(event);
       events = _mergeEvent(events, event);
       _refreshDeletedSummaries({
         for (final tag in event.tags)
           if (tag.length > 1 && tag[0] == 'e') tag[1],
-      }, events);
+      }, before);
       _confirmIndexedLocalReplies(
         event.tags
             .where((tag) => tag.length > 1 && tag[0] == 'e')
@@ -732,6 +660,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// Caches confirmed thread replies before their optimistic overlay is cleared.
   /// Thread queries must not invalidate themselves as live relay events do.
   void cacheConfirmedThreadReplies(Iterable<NostrEvent> replies) {
+    _replyOwnership.record(replies);
     var events = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
     for (final reply in _boundedReplies(replies)) {
       if (reply.channelId != channelId ||
@@ -931,9 +860,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         return false;
       }
       try {
+        final pageVersion = ++_threadQuerySerial;
         final page = await _fetchWindowPage(session, cursor);
         _windowStore = appendOlderChannelWindow(_windowStore, page);
-        _reconcilePageSummaries(page);
+        _reconcilePageSummaries(page, pageVersion);
         _reachedOldest = !channelWindowHasMore(_windowStore);
         final flattened = _withDeepLinkEvents(
           flattenChannelWindowEvents(_windowStore),
