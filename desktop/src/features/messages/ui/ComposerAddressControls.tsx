@@ -1,4 +1,5 @@
-import { ArrowUp, AtSign, X } from "lucide-react";
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+import { ArrowUp, AtSign, Square, X } from "lucide-react";
 import {
   AnimatePresence,
   motion,
@@ -69,6 +70,7 @@ function AddressedAgentAvatar({
         avatarUrl={agent.avatarUrl}
         className="h-4.5 w-4.5"
         displayName={agent.displayName}
+        shape="squircle"
         size="xs"
         testId="composer-address-lock-avatar"
       />
@@ -129,6 +131,7 @@ export function ComposerMentionButton({
   confirmationTitle,
   disabled,
   onConfirmationDismiss,
+  onConfirmationHoverChange,
   onConfirmationTurnOff,
   onCaptureSelection,
   onOpen,
@@ -140,6 +143,7 @@ export function ComposerMentionButton({
   confirmationTitle?: string | null;
   disabled: boolean;
   onConfirmationDismiss?: () => void;
+  onConfirmationHoverChange?: (hovered: boolean) => void;
   onConfirmationTurnOff?: () => void;
   onCaptureSelection: () => void;
   onOpen: () => void;
@@ -177,11 +181,7 @@ export function ComposerMentionButton({
           <Tooltip disableHoverableContent>
             <TooltipTrigger asChild>
               <button
-                aria-label={
-                  hasAgents
-                    ? "Manage automatic agent mentions"
-                    : "Mention someone"
-                }
+                aria-label={hasAgents ? "Manage mentions" : "Mention someone"}
                 className={cn(
                   "flex h-8 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
                   showActiveChrome
@@ -192,16 +192,17 @@ export function ComposerMentionButton({
                 data-testid="message-insert-mention"
                 disabled={disabled}
                 onClick={onOpen}
-                onMouseDown={onCaptureSelection}
+                onMouseDown={(event) => {
+                  onCaptureSelection();
+                  event.preventDefault();
+                }}
                 type="button"
               >
                 <AtSign aria-hidden="true" className="h-4 w-4 shrink-0" />
               </button>
             </TooltipTrigger>
             <TooltipContent>
-              {hasAgents
-                ? "Manage automatic agent mentions"
-                : "Mention someone"}
+              {hasAgents ? "Manage mentions" : "Mention someone"}
             </TooltipContent>
           </Tooltip>
           <AnimatePresence
@@ -216,11 +217,11 @@ export function ComposerMentionButton({
                 className="flex items-center gap-1 overflow-hidden"
                 data-testid="composer-address-locks"
                 exit={{ opacity: 0, width: 0 }}
-                initial={false}
+                initial={shouldReduceMotion ? false : { opacity: 0, width: 0 }}
                 transition={
                   shouldReduceMotion
                     ? { duration: 0 }
-                    : { duration: 0.18, ease: "easeOut" }
+                    : { duration: 0.12, ease: "easeOut" }
                 }
               >
                 <AnimatePresence mode="popLayout">
@@ -228,7 +229,7 @@ export function ComposerMentionButton({
                     <Tooltip disableHoverableContent key={agent.pubkey}>
                       <TooltipTrigger asChild>
                         <motion.button
-                          aria-label={`Stop automatically mentioning ${agent.displayName}`}
+                          aria-label={`Don't automatically mention ${agent.displayName} in this thread`}
                           animate={{ opacity: 1, scale: 1 }}
                           className="group/address relative rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                           data-testid={`composer-address-lock-remove-${agent.pubkey}`}
@@ -263,13 +264,14 @@ export function ComposerMentionButton({
                               shakeVersionByPubkey[agent.pubkey] ?? 0
                             }
                           />
-                          <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-full bg-foreground/80 text-background opacity-0 transition-opacity group-hover/address:opacity-100 group-focus-visible/address:opacity-100">
+                          <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover/address:opacity-100 group-focus-visible/address:opacity-100">
                             <X aria-hidden="true" className="h-3 w-3" />
                           </span>
                         </motion.button>
                       </TooltipTrigger>
                       <TooltipContent>
-                        Stop automatically mentioning {agent.displayName}
+                        Don't automatically mention {agent.displayName} in this
+                        thread <AgentManagementMarker pubkey={agent.pubkey} />
                       </TooltipContent>
                     </Tooltip>
                   ))}
@@ -289,6 +291,8 @@ export function ComposerMentionButton({
           data-testid="composer-auto-pin-confirmation"
           onCloseAutoFocus={(event) => event.preventDefault()}
           onOpenAutoFocus={(event) => event.preventDefault()}
+          onPointerEnter={() => onConfirmationHoverChange?.(true)}
+          onPointerLeave={() => onConfirmationHoverChange?.(false)}
           side="right"
           sideOffset={8}
           style={{ width: "max-content" }}
@@ -297,6 +301,7 @@ export function ComposerMentionButton({
           <button
             className="shrink-0 rounded-md px-1.5 py-1 font-medium text-primary outline-hidden hover:bg-primary/10 focus-visible:ring-1 focus-visible:ring-ring"
             onClick={onConfirmationTurnOff}
+            onMouseDown={(event) => event.preventDefault()}
             type="button"
           >
             Turn off
@@ -309,20 +314,32 @@ export function ComposerMentionButton({
 
 export function ComposerSendButton({
   isSending,
+  onFinishVoiceNote,
   sendDisabled,
 }: {
   isSending: boolean;
+  onFinishVoiceNote?: () => void;
   sendDisabled: boolean;
 }) {
+  const isFinishingVoiceNote = onFinishVoiceNote != null;
   return (
     <button
-      aria-label={isSending ? "Sending" : "Send message"}
+      aria-label={
+        isFinishingVoiceNote
+          ? "Finish voice note"
+          : isSending
+            ? "Sending"
+            : "Send message"
+      }
       className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground shadow transition-colors hover:bg-primary/90 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-      data-testid="send-message"
+      data-testid={isFinishingVoiceNote ? "finish-voice-note" : "send-message"}
       disabled={sendDisabled || isSending}
-      type="submit"
+      onClick={onFinishVoiceNote}
+      type={isFinishingVoiceNote ? "button" : "submit"}
     >
-      {isSending ? (
+      {isFinishingVoiceNote ? (
+        <Square aria-hidden className="h-3.5 w-3.5 fill-current" />
+      ) : isSending ? (
         <SendSpinner />
       ) : (
         <ArrowUp aria-hidden className="h-4 w-4" />

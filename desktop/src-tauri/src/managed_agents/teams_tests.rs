@@ -1,6 +1,6 @@
 //! Unit tests for `managed_agents/teams.rs`.
 //!
-//! Kept in a sibling file so `teams.rs` stays under the 1000-line gate;
+//! Kept in a sibling file so `teams.rs` stays under the 1500-line gate;
 //! `#[path]`-included from there.
 
 use super::{
@@ -167,6 +167,8 @@ fn validate_team_deletion_rejects_built_ins() {
 
 fn managed_agent(name: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: name.to_string(),
         name: name.to_string(),
         persona_id: None,
@@ -453,8 +455,10 @@ const D_TAG: &str = "my-team";
 
 fn catalog_copy(id: &str, owner: &str, d_tag: &str) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
         id: id.to_string(),
         display_name: id.to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: String::new(),
         runtime: None,
@@ -692,8 +696,10 @@ fn test_ref_check_preserves_copy_used_by_a_standalone_managed_agent() {
 
 fn catalog_persona(id: &str, owner: &str, d_tag: &str) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
         id: id.to_string(),
         display_name: id.to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: "Do the work.".to_string(),
         runtime: None,

@@ -77,6 +77,7 @@ def test_buzz_task_metadata_defines_the_expected_layers():
             "user-mention",
             "read-named-path-outside-workspace",
             "multiline-message",
+            "memory-retrieval",
             "narrative-agent-names",
         },
         "workflow": {
@@ -167,7 +168,7 @@ def test_explicit_attempts_override_keeps_one_mixed_buzz_job():
     (run,) = benchmark.plan_benchmark_runs(args)
 
     assert run.attempts == 7
-    assert len(run.include_task) == 9
+    assert len(run.include_task) == 10
 
     layered = benchmark.parse_args(
         [

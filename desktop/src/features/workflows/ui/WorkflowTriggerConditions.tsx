@@ -77,10 +77,12 @@ function ExclusionStrike() {
 function AuthorConditionSummary({
   avatarUrl,
   excluded,
+  isAgent,
   label,
 }: {
   avatarUrl: string | null;
   excluded: boolean;
+  isAgent?: boolean;
   label: string;
 }) {
   return (
@@ -91,6 +93,7 @@ function AuthorConditionSummary({
           className="h-6 w-6"
           displayName={label}
           fallbackDelayMs={0}
+          shape={isAgent ? "squircle" : "circle"}
           size="xs"
         />
         {excluded ? <ExclusionStrike /> : null}
@@ -326,6 +329,7 @@ export function WorkflowTriggerConditions({
                     <AuthorConditionSummary
                       avatarUrl={triggerPresentation.avatarUrl}
                       excluded={condition.operator === "not_equals"}
+                      isAgent={triggerPresentation.isAgent}
                       label={authorSummary}
                     />
                   ) : messageSummary ? (

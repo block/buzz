@@ -37,6 +37,7 @@ export type ReminderSource = {
   avatarUrl: string | null;
   channel: Channel | null;
   channelLabel: string;
+  isAgent?: boolean;
 };
 
 export function useReminderSources(reminders: readonly Reminder[]) {
@@ -80,6 +81,9 @@ export function useReminderSources(reminders: readonly Reminder[]) {
         channelLabel: channel
           ? resolveChannelDisplayLabel(channel, currentPubkey, profiles)
           : UNKNOWN_CHANNEL_LABEL,
+        ...(profiles?.[normalizePubkey(target.authorPubkey)]?.isAgent === true
+          ? { isAgent: true }
+          : {}),
       });
     }
     return map;
@@ -194,6 +198,7 @@ function ReminderRow({
               avatarUrl={source.avatarUrl}
               className="h-4 w-4 shrink-0"
               displayName={source.authorLabel}
+              shape={source.isAgent ? "squircle" : "circle"}
               size="xs"
             />
             <span className="truncate font-medium text-foreground">
@@ -444,6 +449,7 @@ export function ReminderDetailPane({
                 avatarUrl={source.avatarUrl}
                 className="h-6 w-6"
                 displayName={source.authorLabel}
+                shape={source.isAgent ? "squircle" : "circle"}
                 size="sm"
               />
               <span className="font-medium text-foreground">

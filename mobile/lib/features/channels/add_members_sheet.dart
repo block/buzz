@@ -191,6 +191,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                                   backgroundColor:
                                       context.colors.primaryContainer,
                                   fallback: Text(user.initial),
+                                  isAgent: user.isAgent,
                                 ),
                                 title: Text(
                                   user.label,

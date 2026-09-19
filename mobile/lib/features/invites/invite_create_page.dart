@@ -9,6 +9,7 @@ import '../../shared/clipboard_utils.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/buzz_action_tile.dart';

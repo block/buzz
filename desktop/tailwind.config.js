@@ -12,6 +12,7 @@ export default {
         "2xs": "calc(var(--buzz-type-rem) * 0.6875)", // 11px at 16px type rem
         "3xs": "calc(var(--buzz-type-rem) * 0.5)", // 8px at 16px type rem
         badge: "calc(var(--buzz-type-rem) * 0.625)", // 10px at 16px type rem
+        "status-indicator": "0.9375rem", // 15px at the default root size
         // Shared channel, DM, thread, and composer type. Variables keep app-wide
         // font size and keyboard zoom consistent without branching components.
         message: [
@@ -30,6 +31,11 @@ export default {
         // 36px at the 16px type rem — backup-step private key.
         "nsec-key": [
           "calc(var(--buzz-type-rem) * 2.25)",
+          { lineHeight: "1.3" },
+        ],
+        // 22px at the 16px type rem — compact onboarding-card private key.
+        "nsec-key-card": [
+          "calc(var(--buzz-type-rem) * 1.375)",
           { lineHeight: "1.3" },
         ],
       },
@@ -65,6 +71,7 @@ export default {
       },
       spacing: {
         4.5: "1.125rem",
+        "status-indicator": "0.9375rem", // 15px at the default root size
         "conversation-body": "var(--conversation-body-gap)",
         "conversation-list": "var(--conversation-list-item-gap)",
         "conversation-paragraph": "var(--conversation-paragraph-gap)",

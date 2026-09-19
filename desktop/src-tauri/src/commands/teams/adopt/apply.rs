@@ -437,6 +437,9 @@ fn member_copy(
     Ok(AgentDefinition {
         id: Uuid::new_v4().to_string(),
         display_name: member.display_name.clone(),
+        // Team catalog members carry no public description; an adopted copy
+        // starts without one.
+        description: None,
         avatar_url: member.avatar_url.clone(),
         system_prompt: member.system_prompt.clone().unwrap_or_default(),
         runtime: member.runtime.clone(),
@@ -479,6 +482,7 @@ fn member_copy(
             .flatten(),
         respond_to_allowlist: Vec::new(),
         parallelism: member.parallelism,
+        session_policy: member.session_policy,
         created_at: now.to_string(),
         updated_at: now.to_string(),
     })

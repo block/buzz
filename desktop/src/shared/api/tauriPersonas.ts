@@ -10,6 +10,8 @@ export type RawPersona = {
   id: string;
   display_name: string;
   avatar_url: string | null;
+  /** Optional short, PUBLIC description (max 280 chars). */
+  description?: string | null;
   system_prompt: string;
   runtime?: string | null;
   model?: string | null;
@@ -29,6 +31,7 @@ export type RawPersona = {
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
+  session_policy?: "channel" | "thread";
   created_at: string;
   updated_at: string;
   /** Non-null when the pack `.persona.md` write-back failed (non-fatal). */
@@ -40,6 +43,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     id: persona.id,
     displayName: persona.display_name,
     avatarUrl: persona.avatar_url,
+    description: persona.description ?? null,
     systemPrompt: persona.system_prompt,
     runtime: persona.runtime ?? null,
     model: persona.model ?? null,
@@ -59,9 +63,26 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     respondTo: (persona.respond_to as RespondToMode | undefined) ?? null,
     respondToAllowlist: persona.respond_to_allowlist ?? [],
     parallelism: persona.parallelism ?? null,
+    sessionPolicy: persona.session_policy ?? "channel",
     createdAt: persona.created_at,
     updatedAt: persona.updated_at,
   };
+}
+
+/**
+ * Normalize only the unambiguous empty/absent cases for the wire. The trusted
+ * Rust boundary validates the authored bytes before applying trim/empty
+ * storage normalization.
+ */
+function normalizeDescription(
+  description: string | null | undefined,
+): string | null {
+  if (description === null || description === undefined || description === "") {
+    return null;
+  }
+  // Preserve the authored bytes for the Rust boundary to validate. Trimming
+  // here could turn a prohibited edge control into apparently valid text.
+  return description;
 }
 
 export async function listPersonas(): Promise<AgentPersona[]> {
@@ -76,6 +97,7 @@ export async function createPersona(
       input: {
         displayName: input.displayName,
         avatarUrl: input.avatarUrl,
+        description: normalizeDescription(input.description),
         systemPrompt: input.systemPrompt,
         runtime: input.runtime,
         model: input.model,
@@ -95,6 +117,7 @@ function updatePersonaPayload(input: UpdatePersonaInput) {
     id: input.id,
     displayName: input.displayName,
     avatarUrl: input.avatarUrl,
+    description: normalizeDescription(input.description),
     systemPrompt: input.systemPrompt,
     runtime: input.runtime,
     model: input.model,

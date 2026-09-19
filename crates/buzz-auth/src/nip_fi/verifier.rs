@@ -49,9 +49,13 @@ use std::fmt;
 /// the key-source trait. Combined with the crate-private [`AssertionKeySet`]
 /// constructor, this makes the accepted issuer→JWKS authority impossible to
 /// synthesize outside the crate's trusted configuration path.
-mod sealed {
+pub(crate) mod sealed {
     /// Private marker preventing external implementations of the key source.
     pub trait Sealed {}
+
+    // Blanket seal for `Arc<S>` so `Arc<ProductionJwksSource>` satisfies
+    // the sealed supertrait without requiring callers to implement it.
+    impl<S: Sealed> Sealed for std::sync::Arc<S> {}
 }
 
 /// One issuer's key source: a JWKS snapshot bound to the exact `iss` it
@@ -64,7 +68,7 @@ mod sealed {
 /// construction seam: [`verify`] takes no snapshot argument, and this type has
 /// no public constructor, so an external consumer cannot build a snapshot that
 /// labels issuer B's JWKS as issuer A. Building a snapshot (and the source that
-/// serves it) is the trusted configuration act PR 3's JWKS runtime performs at
+/// serves it) is the trusted configuration act the `jwks` runtime performs at
 /// startup, not a per-request or external input.
 ///
 /// The crate-private constructor is a live regression: an external crate that
@@ -90,7 +94,7 @@ impl AssertionKeySet {
     /// generation and a required key-snapshot hard deadline. Rejects a zero
     /// generation, an empty issuer, an empty or oversized key set
     /// ([`MAX_JWKS_KEYS`]), or a non-positive deadline. Crate-private: only the
-    /// trusted in-crate configuration path (PR 3's JWKS runtime) may bind key
+    /// trusted in-crate configuration path (the `jwks` runtime) may bind key
     /// material to an issuer.
     ///
     /// Bounding the key count here is the pre-lookup control (NIP-FI.md:166-171):
@@ -101,13 +105,6 @@ impl AssertionKeySet {
     /// finite key-snapshot bound into `revalidation_dependencies`
     /// (NIP-FI.md:240-249).
     ///
-    /// Its only current callers are the in-crate `cfg(test)` verifier suite;
-    /// PR 3's JWKS runtime is the intended non-test consumer. Until it lands the
-    /// non-test lib build sees no caller, so this narrowly allows `dead_code`
-    /// for this one constructor rather than deferring it or widening the lint.
-    /// `expect` would misfire: under `cfg(test)` the lint does not trigger, so
-    /// the expectation would be unfulfilled and fail `-D warnings`.
-    #[allow(dead_code)]
     pub(crate) fn new(
         issuer: String,
         generation: u64,
@@ -139,6 +136,13 @@ impl AssertionKeySet {
     pub const fn generation(&self) -> u64 {
         self.generation
     }
+
+    /// The snapshot hard deadline. Test-only accessor for deadline-crossing
+    /// oracles; not compiled into production builds.
+    #[cfg(test)]
+    pub(crate) fn hard_deadline(&self) -> chrono::DateTime<chrono::Utc> {
+        self.hard_deadline
+    }
 }
 
 impl fmt::Debug for AssertionKeySet {
@@ -153,7 +157,7 @@ impl fmt::Debug for AssertionKeySet {
 /// instead asks this source for the snapshot bound to the token's
 /// signature-authenticated `iss`. A request-path caller therefore cannot
 /// relabel one issuer's JWKS as another's — the cross-issuer bypass at the old
-/// `verify(token, key_set)` seam. Configuring the source (PR 3's JWKS runtime)
+/// `verify(token, key_set)` seam. Configuring the source (the `jwks` runtime)
 /// is a trusted startup act, not per-request input.
 ///
 /// This trait is sealed via a private supertrait, so it cannot be implemented
@@ -180,8 +184,27 @@ pub trait IssuerKeySource: sealed::Sealed {
     fn key_set(&self, issuer: &str) -> Option<AssertionKeySet>;
 }
 
+/// Forwarding implementation so a single `Arc<S>` can be cheaply cloned and
+/// shared across multiple [`FederatedAssertionVerifier`] instances while all
+/// of them observe every refresh committed to the shared source.
+///
+/// This is the canonical sharing path for `ProductionJwksSource`, which is
+/// not itself `Clone` (its internal `RwLock`-protected state is not cheaply
+/// copyable). Wrap it in `Arc` at startup, then pass `Arc::clone(&source)` to
+/// each verifier — all verifiers read from the same underlying cache and see
+/// key rotations as soon as `get_snapshot` commits them.
+///
+/// The blanket seal (`impl<S: Sealed> Sealed for Arc<S>`) in the `sealed`
+/// module ensures this forwarding impl remains crate-owned: an external crate
+/// still cannot implement `IssuerKeySource` for its own type.
+impl<S: IssuerKeySource> IssuerKeySource for std::sync::Arc<S> {
+    fn key_set(&self, issuer: &str) -> Option<AssertionKeySet> {
+        (**self).key_set(issuer)
+    }
+}
+
 /// A fixed issuer→snapshot key source for the in-crate verifier tests,
-/// standing in for PR 3's JWKS runtime. It is `cfg(test)`-only — not behind a
+/// standing in for the `jwks` runtime. It is `cfg(test)`-only — not behind a
 /// downstream-selectable Cargo feature — so no dependent crate can enable it to
 /// reconstruct the authority. An honest source returns only the snapshot bound
 /// to the exact issuer requested, the invariant the real runtime source
@@ -339,7 +362,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         enforce_claim_semantics(policy, &claims)?;
 
         let subject = claim_string(&claims, SUBJECT_CLAIM, MAX_SUBJECT_BYTES)?;
-        let asserted_key = parse_nostr_pubkey_claim(policy, &claims)?;
+        let asserted_key = parse_nostr_pubkey_claim(&claims)?;
 
         let now = Utc::now();
         let deadlines = self.check_time_and_deadlines(policy, &key_set, &claims, now)?;
@@ -352,7 +375,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         // is `evidence_rejected` (403), and this defers a valid one as
         // `authorization_unavailable` (503) so a missing witness never
         // masquerades as rejected evidence, nor invalid input as unavailable
-        // (NIP-FI.md:459-476). PR 3 adds the witness path additively.
+        // (NIP-FI.md:459-476).
         if policy.freshness() == FreshnessClass::CurrentStatus {
             return Err(VerifierError::StatusWitnessUnavailable);
         }
@@ -697,20 +720,13 @@ fn enforce_claim_semantics(
 }
 
 /// Parse the fixed `nostr_pubkey` claim: lowercase hex of exactly one 32-byte
-/// key. Bech32 and other aliases deny. Absence is permitted unless the policy
-/// requires an attested key.
+/// key. Bech32 and other aliases deny. Absence denies; the merged NIP-FI
+/// spec v2 (PR #7214) requires the `nostr_pubkey` claim unconditionally.
 fn parse_nostr_pubkey_claim(
-    policy: &IssuerPolicy,
     claims: &Map<String, Value>,
 ) -> Result<Option<PublicKey>, VerifierError> {
     match claims.get(NOSTR_PUBKEY_CLAIM) {
-        None => {
-            if policy.require_attested_key() {
-                Err(VerifierError::ClaimRejected)
-            } else {
-                Ok(None)
-            }
-        }
+        None => Err(VerifierError::ClaimRejected),
         Some(value) => {
             let raw = value.as_str().ok_or(VerifierError::ClaimRejected)?;
             if raw.len() != 64
@@ -726,8 +742,8 @@ fn parse_nostr_pubkey_claim(
     }
 }
 
-/// Capture only the claim names the policy reads into a canonical set. For PR 1
-/// the closed set is the `scope` claim, split on ASCII space; unchecked claims
+/// Capture only the claim names the policy reads into a canonical set. The
+/// closed set is the `scope` claim, split on ASCII space; unchecked claims
 /// never enter the result.
 fn capture_capabilities(
     _policy: &IssuerPolicy,

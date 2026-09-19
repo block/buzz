@@ -76,6 +76,15 @@ void main() {
 
         expect(find.byType(UiKitView), findsOneWidget);
         expect(
+          find.ancestor(
+            of: find.byType(UiKitView),
+            matching: find.byWidgetPredicate(
+              (widget) => widget is IgnorePointer && widget.ignoring,
+            ),
+          ),
+          findsOneWidget,
+        );
+        expect(
           find.byWidgetPredicate(
             (widget) => widget is Material && widget.color == Colors.red,
           ),
@@ -183,14 +192,16 @@ void main() {
       );
       await tester.pump();
 
-      expect(colorUpdates, hasLength(1));
-      expect(colorUpdates.single.method, 'updateColors');
+      final initialColorUpdates = colorUpdates
+          .where((call) => call.method == 'updateColors')
+          .toList();
+      expect(initialColorUpdates, hasLength(1));
       expect(
-        colorUpdates.single.arguments,
+        initialColorUpdates.single.arguments,
         containsPair('color', darkTheme.colorScheme.surface.toARGB32()),
       );
       expect(
-        colorUpdates.single.arguments,
+        initialColorUpdates.single.arguments,
         containsPair(
           'backdropColor',
           darkTheme.extension<AppColors>()!.huddleDrawerSurface.toARGB32(),
@@ -201,18 +212,84 @@ void main() {
       await tester.pumpWidget(themedSurface(lightTheme));
       await tester.pumpAndSettle();
 
-      expect(colorUpdates.length, greaterThanOrEqualTo(2));
+      final updatedColorCalls = colorUpdates
+          .where((call) => call.method == 'updateColors')
+          .toList();
+      expect(updatedColorCalls.length, greaterThanOrEqualTo(2));
       expect(
-        colorUpdates.last.arguments,
+        updatedColorCalls.last.arguments,
         containsPair('color', lightTheme.colorScheme.surface.toARGB32()),
       );
       expect(
-        colorUpdates.last.arguments,
+        updatedColorCalls.last.arguments,
         containsPair(
           'backdropColor',
           lightTheme.extension<AppColors>()!.huddleDrawerSurface.toARGB32(),
         ),
       );
+    } finally {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        supportChannel,
+        null,
+      );
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        viewChannel,
+        null,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('native glass surfaces receive concentric composer geometry', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    const supportChannel = MethodChannel('buzz/concentric_sheet_surface');
+    const viewChannel = MethodChannel('buzz/concentric_sheet_surface/84');
+    final updates = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      supportChannel,
+      (call) async => call.method == 'isSupported' ? true : null,
+    );
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      viewChannel,
+      (call) async {
+        updates.add(call);
+        return null;
+      },
+    );
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: const ConcentricSheetSurface(
+            enabled: true,
+            usesGlass: true,
+            minimumRadius: 26,
+            contentClipRadius: 18,
+            padding: EdgeInsets.zero,
+            providesSheetSurface: false,
+            child: SizedBox(height: 80, child: Text('Composer')),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final nativeSurface = tester.widget<UiKitView>(find.byType(UiKitView));
+      expect(nativeSurface.creationParams, containsPair('usesGlass', true));
+      expect(nativeSurface.creationParams, containsPair('minimumRadius', 26));
+      final contentClip = tester.widget<ClipRSuperellipse>(
+        find.byKey(const ValueKey('concentric-sheet-content-clip')),
+      );
+      expect(contentClip.borderRadius, BorderRadius.circular(18));
+
+      nativeSurface.onPlatformViewCreated!(84);
+      await tester.pump();
+      final geometryUpdate = updates.singleWhere(
+        (call) => call.method == 'updateGeometry',
+      );
+      expect(geometryUpdate.arguments, containsPair('minimumRadius', 26.0));
+      expect(geometryUpdate.arguments, containsPair('brightness', 'light'));
     } finally {
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         supportChannel,

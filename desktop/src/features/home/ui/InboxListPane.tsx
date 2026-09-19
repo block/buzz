@@ -383,16 +383,19 @@ export function InboxListPane({
                 botIdenticonValue={item.senderLabel}
                 pubkey={item.item.pubkey}
                 role={profileRole}
+                triggerClassName={cn(
+                  "shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                  isSenderAgent ? "rounded-[30%]" : "rounded-full",
+                )}
                 triggerElement="span"
+                triggerTestId={`home-inbox-avatar-${item.id}`}
               >
-                <span
-                  className="inline-flex shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                  data-testid={`home-inbox-avatar-${item.id}`}
-                >
+                <span className="inline-flex shrink-0">
                   <UserAvatar
                     avatarUrl={item.avatarUrl}
                     className="h-9 w-9"
                     displayName={item.senderLabel}
+                    shape={isSenderAgent ? "squircle" : "circle"}
                     size="md"
                   />
                 </span>

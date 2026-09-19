@@ -75,6 +75,7 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
     id: "persona-1",
     displayName: "Solo",
     avatarUrl: "avatar://solo",
+    description: "Reviews desktop changes.",
     systemPrompt: "Be direct.",
     runtime: "provider-a",
     model: "model-a",
@@ -88,6 +89,7 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
   assert.deepEqual(state.initialValues, {
     displayName: "Solo copy",
     avatarUrl: "avatar://solo",
+    description: "Reviews desktop changes.",
     systemPrompt: "Be direct.",
     runtime: "provider-a",
     model: "model-a",
@@ -128,6 +130,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     id: "persona-2",
     displayName: "Kit",
     avatarUrl: null,
+    description: "Finds unusual solutions.",
     systemPrompt: "Keep it weird.",
     runtime: null,
     model: null,
@@ -145,6 +148,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     id: "persona-2",
     displayName: "Kit",
     avatarUrl: "",
+    description: "Finds unusual solutions.",
     systemPrompt: "Keep it weird.",
     runtime: undefined,
     model: undefined,
@@ -250,6 +254,7 @@ test("edit and duplicate seed the behavior group from a quad-bearing persona", (
     respondTo: "allowlist",
     respondToAllowlist: ["a".repeat(64)],
     parallelism: 4,
+    sessionPolicy: "thread",
     createdAt: "2025-01-01T00:00:00Z",
     updatedAt: "2025-01-02T00:00:00Z",
   };
@@ -258,6 +263,7 @@ test("edit and duplicate seed the behavior group from a quad-bearing persona", (
     respondTo: "allowlist",
     respondToAllowlist: ["a".repeat(64)],
     parallelism: 4,
+    sessionPolicy: "thread",
   };
   assert.deepEqual(
     editPersonaDialogState(persona).initialValues.behavior,
@@ -283,6 +289,7 @@ test("a linked instance overrides stale definition access in the edit dialog", (
     respondTo: "owner-only",
     respondToAllowlist: [],
     parallelism: 2,
+    sessionPolicy: "channel",
     createdAt: "2025-01-01T00:00:00Z",
     updatedAt: "2025-01-02T00:00:00Z",
   };
@@ -296,6 +303,7 @@ test("a linked instance overrides stale definition access in the edit dialog", (
     respondTo: "allowlist",
     respondToAllowlist: ["c".repeat(64)],
     parallelism: 2,
+    sessionPolicy: "channel",
   });
 });
 

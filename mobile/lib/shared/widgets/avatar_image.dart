@@ -13,7 +13,7 @@ import '../emoji/native_emoji_glyph.dart';
 import '../push/push_presentation_cache.dart';
 import '../relay/relay.dart';
 
-/// A circular avatar that supports both remote URLs and inline image data.
+/// An avatar that supports both remote URLs and inline image data.
 ///
 /// Flutter's [NetworkImage] only loads network URLs, while desktop browsers also
 /// accept `data:image/*` sources directly. Agent emoji avatars are inline SVGs,
@@ -23,6 +23,7 @@ class AvatarImage extends StatelessWidget {
   final double radius;
   final Color? backgroundColor;
   final Widget fallback;
+  final bool isAgent;
 
   const AvatarImage({
     super.key,
@@ -30,27 +31,32 @@ class AvatarImage extends StatelessWidget {
     required this.radius,
     required this.fallback,
     this.backgroundColor,
+    this.isAgent = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final animatedAvatar = parseAnimatedAvatarUrl(imageUrl);
-    return CircleAvatar(
-      radius: radius,
-      // Animated avatar posters carry their own backdrop disc; preserve their
-      // transparent surroundings on static/list surfaces, matching desktop.
-      backgroundColor: animatedAvatar == null
-          ? backgroundColor
-          : Colors.transparent,
-      child: ClipOval(
-        child: SizedBox.square(
-          dimension: radius * 2,
-          child: AvatarImageContent(
-            imageUrl: animatedAvatar?.posterUrl ?? imageUrl,
-            fallback: fallback,
-          ),
-        ),
+    final color = animatedAvatar == null ? backgroundColor : Colors.transparent;
+    final content = SizedBox.square(
+      dimension: radius * 2,
+      child: AvatarImageContent(
+        imageUrl: animatedAvatar?.posterUrl ?? imageUrl,
+        fallback: fallback,
       ),
+    );
+    if (!isAgent) {
+      return CircleAvatar(
+        radius: radius,
+        backgroundColor: color,
+        child: ClipOval(child: content),
+      );
+    }
+
+    final borderRadius = BorderRadius.circular(radius * 0.6);
+    return DecoratedBox(
+      decoration: BoxDecoration(color: color, borderRadius: borderRadius),
+      child: ClipRRect(borderRadius: borderRadius, child: content),
     );
   }
 }

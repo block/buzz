@@ -16,6 +16,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 type ComposerEmojiPickerProps = {
   disabled?: boolean;
+  gifsDisabled?: boolean;
   gifMediaController: Pick<MediaUploadController, "setPendingImeta">;
   /** Called when the popover closes without an emoji selection (Escape,
    *  click-outside). Use this to restore focus to the editor. */
@@ -33,6 +34,7 @@ const ACTIVE_TAB_OUTER_CORNER_RADIUS = "calc(var(--radius-2xl) - 0.375rem)";
 
 export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
   disabled = false,
+  gifsDisabled = false,
   gifMediaController,
   onClose,
   onEmojiSelect,
@@ -61,7 +63,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
 
   const handleGifSelect = React.useCallback(
     (gif: KlipyGif) => {
-      if (!relayUrl) return;
+      if (!relayUrl || gifsDisabled) return;
       onOpenChange(false);
       gifMediaController.setPendingImeta((current) => [
         ...current,
@@ -72,7 +74,13 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
         // fails; the authenticated relay endpoint keeps provider details hidden.
       });
     },
-    [gifMediaController.setPendingImeta, gifSharePath, onOpenChange, relayUrl],
+    [
+      gifMediaController.setPendingImeta,
+      gifsDisabled,
+      gifSharePath,
+      onOpenChange,
+      relayUrl,
+    ],
   );
 
   return (
@@ -161,6 +169,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
               </TabsTrigger>
               <TabsTrigger
                 className="relative z-10 h-8 gap-1.5 bg-transparent shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+                disabled={gifsDisabled}
                 value="gifs"
               >
                 <Images aria-hidden className="h-4 w-4" />

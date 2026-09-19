@@ -1,11 +1,14 @@
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
+  ONBOARDING_PRIMARY_CTA_CLASS,
   ONBOARDING_SECURITY_PRIMARY_CTA_CLASS,
   ONBOARDING_SECONDARY_CTA_CLASS,
 } from "./OnboardingChrome";
+import { useOnboardingCardLayout } from "./OnboardingCard";
 import { OnboardingFooter } from "./OnboardingFooter";
 import {
   type OnboardingTransitionDirection,
@@ -34,6 +37,7 @@ export function DownloadKeyStep({
   onBack,
 }: DownloadKeyStepProps) {
   const reduceMotion = useReducedMotion() ?? false;
+  const cardLayout = useOnboardingCardLayout();
   // Once the encrypted payload is saved, the creator advances to its guided
   // backup test while this surface keeps its own navigation.
   const hasCreated = session.created;
@@ -41,18 +45,34 @@ export function DownloadKeyStep({
   const hasSelectedBackup = session.test.stage === "password";
   const [primaryActionSlot, setPrimaryActionSlot] =
     React.useState<HTMLElement | null>(null);
+  const headingEntrance = reduceMotion
+    ? false
+    : cardLayout
+      ? { opacity: 0 }
+      : { opacity: 0, y: 10 };
+  const panelEntrance = reduceMotion
+    ? false
+    : cardLayout
+      ? { opacity: 0 }
+      : { opacity: 0, y: 12 };
 
   return (
     <OnboardingSlideTransition
-      className="flex min-h-0 w-full flex-col items-center"
+      className={cn(
+        "flex min-h-0 w-full flex-col",
+        cardLayout ? "items-stretch" : "items-center",
+      )}
       data-testid="onboarding-page-download"
       direction={direction}
       transitionKey={`download-${direction}`}
     >
       <motion.div
-        animate={{ opacity: 1, y: 0 }}
-        className="flex w-full max-w-[500px] shrink-0 flex-col text-center"
-        initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+        animate={cardLayout ? { opacity: 1 } : { opacity: 1, y: 0 }}
+        className={cn(
+          "flex w-full shrink-0 flex-col",
+          cardLayout ? "text-left" : "max-w-[500px] text-center",
+        )}
+        initial={headingEntrance}
         key={
           hasVerifiedBackup
             ? "success-heading"
@@ -68,27 +88,37 @@ export function DownloadKeyStep({
           {hasVerifiedBackup
             ? "Your backup is verified"
             : hasSelectedBackup
-              ? "That’s your backup file"
+              ? "Verify your backup"
               : hasCreated
-                ? "Optionally, test your backup"
-                : "Backup your key with a password"}
+                ? "Your backup is ready"
+                : "Create a secure backup file"}
         </h1>
-        <p className="mt-5 text-sm leading-6 text-foreground/80">
+        <p
+          className={cn(
+            "leading-6 text-foreground/80",
+            cardLayout ? "mt-2 text-base" : "mt-5 text-sm",
+          )}
+        >
           {hasVerifiedBackup
             ? "Your file and password can restore your identity."
             : hasSelectedBackup
-              ? "Now enter your password to prove you can unlock it."
+              ? "Enter your password to make sure you can unlock this file."
               : hasCreated
-                ? "Learn how your backup works. Drop the file you just saved and unlock it with your password."
-                : "Keep the downloaded file private — you need both it and your password to restore your identity. Save the backup password somewhere safe; Buzz cannot reset it if lost."}
+                ? "Test your backup to make sure it works, or continue without testing."
+                : "This creates a password-protected file with your private key. Remember, Buzz can’t recover your key if you lose it."}
         </p>
       </motion.div>
 
-      <div className="flex w-full max-w-[1040px] flex-1 flex-col justify-center py-10">
+      <div
+        className={cn(
+          "flex w-full max-w-[1040px] flex-col",
+          cardLayout ? "py-8" : "flex-1 justify-center py-10",
+        )}
+      >
         <div className="w-full">
           <motion.div
-            animate={{ opacity: 1, y: 0 }}
-            initial={reduceMotion ? false : { opacity: 0, y: 12 }}
+            animate={cardLayout ? { opacity: 1 } : { opacity: 1, y: 0 }}
+            initial={panelEntrance}
             key={hasCreated ? "test-panel" : "password-panel"}
             transition={{
               delay: reduceMotion ? 0 : 0.12,
@@ -97,11 +127,20 @@ export function DownloadKeyStep({
             }}
           >
             <div
-              className="mx-auto w-full max-w-140 px-6 py-5"
+              className={cn(
+                "flex w-full max-w-140",
+                cardLayout
+                  ? "justify-start py-6"
+                  : "mx-auto justify-center px-6 py-5",
+              )}
               data-testid="backup-password-panel"
             >
               <EncryptedBackupCreator
-                createButtonClassName={ONBOARDING_SECURITY_PRIMARY_CTA_CLASS}
+                createButtonClassName={
+                  cardLayout
+                    ? ONBOARDING_PRIMARY_CTA_CLASS
+                    : ONBOARDING_SECURITY_PRIMARY_CTA_CLASS
+                }
                 createButtonPortal={primaryActionSlot}
                 session={session}
                 variant="spotlight"
@@ -124,7 +163,9 @@ export function DownloadKeyStep({
           <Button
             className={
               hasVerifiedBackup
-                ? ONBOARDING_SECURITY_PRIMARY_CTA_CLASS
+                ? cardLayout
+                  ? ONBOARDING_PRIMARY_CTA_CLASS
+                  : ONBOARDING_SECURITY_PRIMARY_CTA_CLASS
                 : ONBOARDING_SECONDARY_CTA_CLASS
             }
             data-testid={
@@ -134,7 +175,7 @@ export function DownloadKeyStep({
             type="button"
             variant="ghost"
           >
-            {hasVerifiedBackup ? "Finish" : "Skip for now"}
+            {hasVerifiedBackup ? "Continue" : "Skip for now"}
           </Button>
         ) : null}
       </OnboardingFooter>

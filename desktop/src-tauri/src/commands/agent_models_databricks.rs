@@ -178,12 +178,23 @@ pub(super) async fn discover_databricks_models(
         parsed_filter.clone(),
     );
     let redaction_env = redaction_env_with_value(env, "DATABRICKS_TOKEN", &api_key);
+    let oauth_cache_dir = crate::build_identity::demo_agent_oauth_cache_dir()?;
 
-    let entries = match buzz_agent_pkg::discover_databricks_models(&config).await {
+    let entries = match buzz_agent_pkg::discover_databricks_models_with_cache_dir(
+        &config,
+        oauth_cache_dir.as_deref(),
+    )
+    .await
+    {
         Ok(entries) => entries,
         Err(buzz_agent_pkg::AgentError::LlmAuth(_)) if should_start_interactive_auth(&api_key) => {
             let _auth = AUTH_GATE.lock().await;
-            match buzz_agent_pkg::discover_databricks_models(&config).await {
+            match buzz_agent_pkg::discover_databricks_models_with_cache_dir(
+                &config,
+                oauth_cache_dir.as_deref(),
+            )
+            .await
+            {
                 // A peer sign-in under the gate already succeeded.
                 Ok(entries) => entries,
                 Err(buzz_agent_pkg::AgentError::LlmAuth(_)) => {
@@ -194,22 +205,28 @@ pub(super) async fn discover_databricks_models(
                         return Err(databricks_sign_in_required_error());
                     }
                     run_interactive_databricks_auth(
-                        buzz_agent_pkg::authenticate_databricks(&host),
+                        buzz_agent_pkg::authenticate_databricks_with_cache_dir(
+                            &host,
+                            oauth_cache_dir.as_deref(),
+                        ),
                         AUTH_FLOW_TIMEOUT,
                         &AUTH_COOLDOWNS,
                         &host,
                         &redaction_env,
                     )
                     .await?;
-                    buzz_agent_pkg::discover_databricks_models(&config)
-                        .await
-                        .map_err(|error| {
-                            format_redacted_error(
-                                "Databricks model discovery failed after sign-in",
-                                &error,
-                                &redaction_env,
-                            )
-                        })?
+                    buzz_agent_pkg::discover_databricks_models_with_cache_dir(
+                        &config,
+                        oauth_cache_dir.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        format_redacted_error(
+                            "Databricks model discovery failed after sign-in",
+                            &error,
+                            &redaction_env,
+                        )
+                    })?
                 }
                 Err(error) => {
                     return Err(format_redacted_error(

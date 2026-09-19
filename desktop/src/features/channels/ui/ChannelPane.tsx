@@ -52,6 +52,7 @@ import {
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
 import {
   mentionsKnownAgent,
+  selectThreadComposerBotTypingPubkeys,
   shouldPrioritizeIdleAuxiliary,
   shouldUseFocusIdleDrawer,
 } from "@/features/channels/ui/ChannelPane.helpers";
@@ -103,7 +104,9 @@ export const ChannelPane = React.memo(function ChannelPane({
   isJoining = false,
   isSinglePanelView = false,
   isSending,
+  isTimelineError = false,
   isTimelineLoading,
+  onRetryTimeline,
   entranceMessageId = null,
   onEntranceMessageComplete,
   welcomeKickoffStage = null,
@@ -198,6 +201,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const [isMainDeferredEditPending, setMainDeferredEditPending] =
     React.useState(false);
+  const [acceptsMainAttachments, setAcceptsMainAttachments] =
+    React.useState(true);
   const isNonMemberView =
     activeChannel !== null &&
     !activeChannel.isMember &&
@@ -325,6 +330,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     hasMainComposerOverlay &&
     !isComposerDisabled &&
     !isMainDeferredEditPending &&
+    acceptsMainAttachments &&
     !isSinglePanelView;
   const hasTypingActivity = typingPubkeys.length > 0;
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
@@ -334,18 +340,11 @@ export const ChannelPane = React.memo(function ChannelPane({
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
     hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
-  const threadComposerBotTypingPubkeys = React.useMemo(() => {
-    if (!openThreadHeadId) return [];
-    return botTypingEntries
-      .filter((entry) => entry.threadHeadId === openThreadHeadId)
-      .map((entry) => entry.pubkey)
-      .filter(
-        (pubkey, index, all) =>
-          all.findIndex(
-            (candidate) => candidate.toLowerCase() === pubkey.toLowerCase(),
-          ) === index,
-      );
-  }, [botTypingEntries, openThreadHeadId]);
+  const threadComposerBotTypingPubkeys = React.useMemo(
+    () =>
+      selectThreadComposerBotTypingPubkeys(botTypingEntries, openThreadHeadId),
+    [botTypingEntries, openThreadHeadId],
+  );
   const hasThreadComposerBotActivity =
     threadComposerBotTypingPubkeys.length > 0;
   const directMessageIntro = React.useMemo(
@@ -662,7 +661,9 @@ export const ChannelPane = React.memo(function ChannelPane({
                     : "No messages yet"
                   : "No channel selected"
               }
+              isError={isTimelineError}
               isLoading={isHuddleTranscript ? false : isTimelineLoading}
+              onRetry={onRetryTimeline}
               entranceMessageId={entranceMessageId}
               onEntranceMessageComplete={onEntranceMessageComplete}
               mainEntries={mainTimelineEntries}
@@ -753,7 +754,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                   ) : null}
                   <ComposerDockBackdrop gutterClassName="inset-x-5" />
                   <MessageComposer
-                    audienceContext={{ type: "channel" }}
                     channelId={activeChannel?.id ?? null}
                     channelName={activeChannel?.name ?? "channel"}
                     channelType={activeChannel?.channelType ?? null}
@@ -765,6 +765,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     onAutoSubmitComplete={handleAutoSubmitComplete}
                     isSending={isSending}
                     mediaController={mainComposerMedia}
+                    onAttachmentAcceptanceChange={setAcceptsMainAttachments}
                     onDeferredEditPendingChange={setMainDeferredEditPending}
                     onCancelEdit={onCancelEdit}
                     onEditLastOwnMessage={handleEditLastOwnMainMessage}
@@ -795,8 +796,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                     }
                     showTopBorder={false}
                   />
-                  {/* The reserved bottom rail keeps accessory fades from moving
-                    the conversation while content remains responsive. */}
                   <ChannelComposerActivityAccessory
                     agents={activityAgents}
                     channel={activeChannel}

@@ -531,11 +531,14 @@ fn resolve_submit_host(host: Option<&str>, relay_url: Option<&str>) -> Result<St
 
 async fn connect_store() -> Result<DeletionStore> {
     let database_url = required_env("DATABASE_URL")?;
-    let db = Db::new(&DbConfig {
-        database_url,
-        max_connections: env_parse("BUZZ_DB_POOL_SIZE", 20),
-        ..DbConfig::default()
-    })
+    let db = Db::new(
+        &DbConfig {
+            database_url,
+            max_connections: env_parse("BUZZ_DB_POOL_SIZE", 20),
+            ..DbConfig::default()
+        }
+        .with_session_timeouts_from_env(),
+    )
     .await?;
     Ok(store(&db))
 }
@@ -1599,7 +1602,7 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
 
     #[test]
@@ -1657,7 +1660,9 @@ mod tests {
             .await
             .expect("connect deletion engine test DB");
         let db = Db::from_pool(pool);
-        db.migrate().await.expect("migrate deletion engine test DB");
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            db.migrate().await.expect("migrate deletion engine test DB");
+        }
         let store = db.deletion_store();
         let host = format!("{prefix}-{}.example", Uuid::new_v4().simple());
         let community = db
@@ -1814,8 +1819,6 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
     async fn approved_stage_allows_post_inventory_row_churn_before_fencing() {
         let (db, services, claim) = claimed_test_deletion("deletion-row-churn").await;
         let frozen: FrozenInventory = serde_json::from_value(
@@ -1877,8 +1880,6 @@ mod tests {
     /// then the worker died before the chunk stamp. Resume must re-delete the
     /// chunk (missing keys report as deleted — idempotent), stamp it, and
     /// finish the stage.
-    #[tokio::test]
-    #[ignore = "requires Postgres and S3-compatible storage"]
     async fn drained_stage_resumes_chunk_deleted_before_stamp() {
         let (_, mut services, claim) = claimed_test_deletion("deletion-chunk-resume").await;
         services.media = deletion_test_media_storage();
@@ -2133,8 +2134,6 @@ mod tests {
         assert!(scan_proves_absence(&[(9, Vec::new()), (0, Vec::new())]));
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and S3-compatible storage"]
     async fn final_storage_verification_rejects_late_target_binding() {
         let (_, mut services, claim) = claimed_test_deletion("deletion-late-binding").await;
         services.media = deletion_test_media_storage();
@@ -2157,6 +2156,26 @@ mod tests {
         verify_storage_absence(&services, &claim.request)
             .await
             .expect("empty tenant prefixes verify clean");
+    }
+
+    mod external_infra_s3_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres and S3-compatible storage"]
+        async fn approved_stage_allows_post_inventory_row_churn_before_fencing() {
+            super::approved_stage_allows_post_inventory_row_churn_before_fencing().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and S3-compatible storage"]
+        async fn drained_stage_resumes_chunk_deleted_before_stamp() {
+            super::drained_stage_resumes_chunk_deleted_before_stamp().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and S3-compatible storage"]
+        async fn final_storage_verification_rejects_late_target_binding() {
+            super::final_storage_verification_rejects_late_target_binding().await;
+        }
     }
 
     #[tokio::test]
@@ -2256,7 +2275,9 @@ mod tests {
             .await
             .expect("connect serving guard test DB");
         let db = Db::from_pool(pool.clone());
-        db.migrate().await.expect("migrate serving guard test DB");
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            db.migrate().await.expect("migrate serving guard test DB");
+        }
         let community = db
             .ensure_configured_community(&format!(
                 "serving-guard-{}.example",

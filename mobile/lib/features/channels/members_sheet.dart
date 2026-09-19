@@ -221,13 +221,22 @@ class _MemberTile extends ConsumerWidget {
         : (profile?.displayName?.trim().isNotEmpty == true
               ? profile!.displayName!.trim()
               : member.labelFor(currentPubkey));
-    final initial = label.substring(0, 1).toUpperCase();
+    // Named members initial from their name; unnamed ones stay keyed to the
+    // hex public key so the compact-npub label doesn't render `N` for all.
+    final hasName = profile?.displayName?.trim().isNotEmpty == true;
+    final initial = isSelf || hasName
+        ? label[0].toUpperCase()
+        : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
     final showManagementActions = canManage && !isSelf && !member.isOwner;
     final showMenu = showManagementActions || onViewActivity != null;
 
     return ListTile(
       contentPadding: EdgeInsets.zero,
-      leading: _MemberAvatar(avatarUrl: profile?.avatarUrl, initial: initial),
+      leading: _MemberAvatar(
+        avatarUrl: profile?.avatarUrl,
+        initial: initial,
+        isAgent: member.isBot || profile?.isAgent == true,
+      ),
       title: Text(label),
       subtitle: isWorking
           ? Row(
@@ -439,8 +448,13 @@ class _RoleSelector extends StatelessWidget {
 class _MemberAvatar extends StatelessWidget {
   final String? avatarUrl;
   final String initial;
+  final bool isAgent;
 
-  const _MemberAvatar({required this.avatarUrl, required this.initial});
+  const _MemberAvatar({
+    required this.avatarUrl,
+    required this.initial,
+    required this.isAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -448,6 +462,7 @@ class _MemberAvatar extends StatelessWidget {
       imageUrl: avatarUrl,
       radius: 20,
       fallback: Text(initial),
+      isAgent: isAgent,
     );
   }
 }

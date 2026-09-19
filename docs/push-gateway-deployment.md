@@ -1,10 +1,10 @@
 # Buzz Push Gateway deployment
 
-`buzz-push-gateway` is the standalone public APNs last hop intended for `push.buzz.xyz`. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs credentials.
+`buzz-push-gateway` is a standalone APNs last hop. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs credentials.
 
 ## Network and health
 
-- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route `https://push.buzz.xyz` to this port.
+- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the configured `BUZZ_PUSH_GATEWAY_ORIGIN` to this port.
 - Private health listener: `BUZZ_PUSH_HEALTH_ADDR` (default `0.0.0.0:8081`). Probe `/_liveness` and `/_readiness`; do not expose this port publicly. The chart has no pod-ingress allowance for 8081; Kubernetes node/kubelet-origin probe traffic is exempt from NetworkPolicy. Add a narrowly selected monitoring source only if the target CNI requires pod-origin health scraping.
 - Readiness fails when PostgreSQL authority is unavailable. Graceful shutdown stops accepting new requests before draining in-flight APNs calls.
 
@@ -13,7 +13,7 @@
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the six gateway tables, not DDL. |
-| `BUZZ_PUSH_PUBLIC_DELIVERY_URL` | Exact externally signed URL, normally `https://push.buzz.xyz/v1/deliveries/apns`. |
+| `BUZZ_PUSH_GATEWAY_ORIGIN` | Exact externally reachable HTTPS origin. No credentials, port, path, query, or fragment. The gateway derives its transport routes from it; NIP-PL v1 App Attest audiences remain the registered `https://push.buzz.xyz/v1/...` constants. |
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
@@ -24,7 +24,7 @@
 | `BUZZ_PUSH_GRANT_KEYS` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
 | `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
 
-The canonical `push.buzz.xyz` MVP serves the dogfood application identity
+The current MVP serves the dogfood application identity
 (`xyz.block.buzz.dogfood.mobile`). App Attest must cryptographically validate
 the configured application ID before enrollment. Assertions and delivery use
 the server-owned APNs topic, certificate-backed connection pool, and
@@ -53,6 +53,27 @@ The gateway stores APNs tokens encrypted in PostgreSQL. Database backups therefo
 
 ## PostgreSQL and replicas
 
+### First deployment, not a legacy upgrade
+
+This gateway has never been deployed outside personal development infrastructure.
+This release supports a fresh dedicated database, not migration of existing
+development authority. Before running any schema migrations, `--migrate-only`
+refuses a non-empty database that has not completed gateway initialization
+(migration 0005). The error names the populated table and tells the operator to
+stop the development gateway and provision a fresh database. It does not delete
+or migrate that data. Normal deployments of an already initialized gateway may
+retain their data.
+
+Do not run a rolling upgrade from a pre-launch development binary. Stop that
+deployment before initialization, use the fresh database, and do not roll back
+to a pre-launch binary against the new database. The rolling strategy is for
+compatible versions after initial deployment; no legacy writer compatibility or
+mobile configured-to-unconfigured migration is supported. Push has no existing
+enabled users. After enabling push, retain gateway configuration in updates to
+that app identity; omitting it is not a push shutdown mechanism.
+
+The gateway's dedicated pool does not consume the relay-oriented `BUZZ_DB_LOCK_TIMEOUT_MS`, `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`, or `BUZZ_DB_STATEMENT_TIMEOUT_MS` settings. Its session-timeout policy remains separate from the `buzz-db` writer policy and must be designed and rolled out independently.
+
 All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the six `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations.
 
 The Helm chart runs a single pre-install/pre-upgrade migration Job using `migration.existingSecret`; that secret contains a DDL-capable `DATABASE_URL`. The URL MUST name a dedicated gateway database, not the relay database: SQLx stores its `_sqlx_migrations` history in `public`, so sharing a database would collide with another application's migration history. `migration.runtimeDatabaseRole` names an existing LOGIN role (the default is `buzz_push_gateway_runtime`) used by runtime `DATABASE_URL`. After scoped migrations, the Job revokes database `CREATE` from that role and schema `CREATE` from both `PUBLIC` and the role, then grants only database `CONNECT`, schema `USAGE`, and `SELECT, INSERT, UPDATE, DELETE` on the six gateway tables. The migration role must own the database/schema objects or otherwise be allowed to issue those grants; it is never provided to runtime replicas. Readiness rejects an empty/partial schema, missing DML, or a runtime role that retains database/schema `CREATE`. Helm waits for the migration hook before updating replicas, so rolling deployments never race unconditional startup migration. Readiness must be removed from load-balancer service endpoints before terminating a pod.
@@ -65,6 +86,7 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
+| `push_gateway_apns_send_attempts_total` | counter | none | Entries into the concrete APNs HTTP send seam. Compare with terminal outcomes to detect work that never reached transport. |
 | `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
 | `push_gateway_apns_delivery_seconds` | histogram | — | APNs send round-trip latency (seconds). |
 | `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
@@ -72,9 +94,38 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
 | `push_gateway_readiness_failures_total` | counter | `cause` = `not_accepting` \| `authority` | Readiness probe failures by cause. |
 
-`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries/apns` handler — `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
+`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries/apns` handler. `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
 
-Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. To enable it, set `podMonitor.enabled=true` (renders a prometheus-operator `PodMonitor` scraping the `health` port `/metrics`) and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper — this adds a single `8081` ingress rule scoped to that source, never a blanket allowance. Node/kubelet-origin probe traffic remains exempt from NetworkPolicy regardless.
+Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. For prometheus-operator, set `podMonitor.enabled=true` and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper. For Datadog Autodiscovery, leave `podMonitor.enabled=false`, supply the OpenMetrics check through `podAnnotations`, and enable the same narrowly selected NetworkPolicy ingress:
+
+```yaml
+podAnnotations:
+  ad.datadoghq.com/gateway.checks: |
+    {
+      "openmetrics": {
+        "init_config": {},
+        "instances": [{
+          "openmetrics_endpoint": "http://%%host%%:8081/metrics",
+          "service": "buzz-push-gateway",
+          "namespace": "block.buzz_push_gateway",
+          "metrics": ["push_gateway_.*"],
+          "histogram_buckets_as_distributions": true,
+          "send_distribution_buckets": true,
+          "send_monotonic_counter": true,
+          "collect_counters_with_distributions": true
+        }]
+      }
+    }
+networkPolicy:
+  monitoring:
+    enabled: true
+    namespaceSelector: # replace with the Datadog Agent namespace labels
+      kubernetes.io/metadata.name: datadog
+    podSelector: # replace with the Datadog Agent pod labels
+      app.kubernetes.io/name: datadog-agent
+```
+
+Both modes add one `8081` ingress rule scoped to the configured source, never a blanket allowance. Node/kubelet-origin probe traffic remains exempt from NetworkPolicy regardless. Do not enable `PodMonitor` in clusters without its CRD.
 
 Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`prometheusRule.enabled=true`). Thresholds and operator actions:
 
@@ -90,10 +141,9 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 
 Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
 the established strict boolean parser rejects unknown values and the default is
-false. When enabled, an absent `BUZZ_PUSH_GATEWAY_DELIVERY_URL` selects the exact
-canonical URL `https://push.buzz.xyz/v1/deliveries/apns`; operators can provide
-another exact HTTPS `/v1/deliveries/apns` URL as an advanced override. An
-explicitly empty URL while enabled is a startup error. Only an enabled relay
+false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
+exact HTTPS `/v1/deliveries/apns` URL. An absent or explicitly empty URL while
+enabled is a startup error. Only an enabled relay
 advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
 matcher and delivery worker. Relays retain lease matching, authorization, durable
 jobs/retries, and generation checks; they receive only opaque capabilities and
@@ -125,7 +175,7 @@ capability—not a raw APNs token—into the encrypted relay lease.
 
 ## Internal dogfood evaluation and rollback
 
-The MVP is ready to enable only when the canonical gateway's sole dogfood
+The MVP is ready to enable only when the configured gateway's sole dogfood
 profile is configured with its server-owned App Attest app ID, APNs topic,
 production certificate identity, and production APNs environment, and only the
 selected internal relay deployments set `BUZZ_PUSH_ENABLED=true`. Every iOS
@@ -146,7 +196,7 @@ publish the next immutable `mobile-vX.Y.Z-rc.N` candidate from the exact current
 and wait for the signed `xyz.block.buzz.dogfood.mobile` artifact to appear in
 Mobile Releases/Comp Portal before installing it on a physical device. Verify
 APNs delivery, fetched and signature-verified notification content, and
-exact-message tap routing against the canonical gateway and a push-enabled
+exact-message tap routing against the configured gateway and a push-enabled
 internal relay before widening the internal evaluation.
 
 Before that first candidate, the private dogfood builder's manual signing and
@@ -187,10 +237,22 @@ The chart defaults to the `main` image tag because `.github/workflows/docker.yml
 ```bash
 gh attestation verify \
   oci://ghcr.io/block/buzz-push-gateway@sha256:<64-lowercase-hex> \
-  --owner block
+  --repo block/buzz \
+  --signer-workflow block/buzz/.github/workflows/docker.yml \
+  --source-digest <40-lowercase-hex-source-commit>
 ```
 
-Only after that command succeeds, set the exact digest as `image.digest`; the chart then renders `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag. `values-production.yaml` is an intentionally invalid production-input contract: deployment CI must inject this verified `image.digest`, the provisioned dogfood Apple application identifier, an environment-owned Gateway parent reference, and the actual PostgreSQL network. Schema validation rejects the artifact when any remains empty; the render guard proves both rejection and a fully injected render.
+Only after that command succeeds, inject the exact digest as `image.digest` in
+the environment's GitOps values; the chart then renders
+`ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
+`values-production.yaml` remains an intentionally invalid production-input
+contract: deployment CI must inject the verified image digest, the provisioned
+dogfood Apple application identifier, `gatewayOrigin`, and the actual PostgreSQL network. In an
+environment with an existing ingress or service mesh route, keep
+`httpRoute.enabled=false`. If this chart owns a Gateway API route, enable it and
+inject an environment-owned `parentRef`; schema validation rejects an enabled
+route with no parent. The render guard proves both rejection of missing required
+inputs and fully injected renders.
 
 Network policy keeps APNs HTTPS and PostgreSQL egress in separate CIDR lists. APNs currently requires broad TCP/443 reachability; `networkPolicy.postgresEgressCidrs` must be narrowed to the production database network, and the DNS namespace/pod selectors must match the cluster DNS deployment. The sample private CIDR is not a claim about the production topology.
 
@@ -199,8 +261,9 @@ Kubernetes does not restart pods when referenced Secret bytes change. AEAD or AP
 ## Gateway chart release
 
 The gateway chart has a collision-free release lane separate from the main
-`buzz` chart. To publish version `X.Y.Z`, update both `version` and `appVersion`
-in `deploy/charts/buzz-push-gateway/Chart.yaml`, validate the chart, and open a
+`buzz` chart. To publish chart version `X.Y.Z`, update `version` in
+`deploy/charts/buzz-push-gateway/Chart.yaml` and keep `appVersion` equal to the
+gateway binary's workspace package version. Validate the chart, then open a
 same-repository PR whose branch is exactly `push-chart-release/X.Y.Z`:
 
 ```bash
@@ -218,3 +281,10 @@ version. The publisher verifies the checked-out commit is the tag target and the
 chart version equals `X.Y.Z` before pushing
 `oci://ghcr.io/block/buzz/charts/buzz-push-gateway`. A manually pushed
 `push-chart-vX.Y.Z` tag is the documented rescue path and runs the same checks.
+After the publisher succeeds, inspect and fetch the published chart version
+before use:
+
+```bash
+helm show chart oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
+helm pull oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
+```

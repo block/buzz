@@ -85,7 +85,10 @@ export function ProjectPeopleStack({
             <UserProfilePopover pubkey={pubkey} triggerElement="span">
               <button
                 aria-label={`View ${label}'s profile`}
-                className="inline-flex rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                className={cn(
+                  "inline-flex focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                  profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+                )}
                 type="button"
               >
                 <UserAvatar
@@ -95,6 +98,7 @@ export function ProjectPeopleStack({
                   avatarUrl={profile?.avatarUrl ?? null}
                   className="ring-2 ring-card"
                   displayName={label}
+                  shape={profile?.isAgent ? "squircle" : "circle"}
                   size="xs"
                 />
               </button>

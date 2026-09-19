@@ -1686,7 +1686,7 @@ impl Db {
 // -- Tests --------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use chrono::TimeZone;
 

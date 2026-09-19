@@ -5,10 +5,13 @@ import { isMacPlatform } from "@/shared/lib/platform";
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
 import {
-  applyCommunity,
   autoConnectDefaultRelayEnabled,
   getDefaultRelayUrl,
 } from "@/shared/api/tauri";
+import {
+  applyCommunity,
+  setAgentAvatarCommunities,
+} from "@/shared/api/tauriWorkspace";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { clearTrayAgentActivity } from "@/shared/api/trayMenu";
 import { getOverrides } from "@/shared/features";
@@ -21,9 +24,14 @@ import {
   initDraftStore,
 } from "@/features/messages/lib/useDrafts";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
+import { resetAudioMediaLoadScheduler } from "@/features/messages/lib/audioMediaLoadScheduler";
 import { resetBackgroundMediaUploads } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { resetLinkPreviewPreparations } from "@/features/messages/lib/linkPreviewPreparationStore";
 import { resetPersistentAgentAudienceStore } from "@/features/messages/lib/persistentAgentAudience";
+import {
+  resetDetachedToastScope,
+  setDetachedToastScope,
+} from "@/features/messages/lib/detachedToastScope";
 import {
   resetActiveAgentTurnsStore,
   saveActiveAgentTurnsForCommunity,
@@ -43,6 +51,7 @@ import {
   shouldAutoConnectDefaultRelay,
 } from "./communityStorage";
 import type { Community } from "./types";
+import { communityRelaySetKey } from "./communityRelaySet";
 
 /**
  * Tear down all community-scoped module singletons so the new
@@ -74,10 +83,20 @@ async function resetCommunityState({
   resetMediaCaches();
   resetLinkPreviewMetadataCache();
   resetVideoPlayerState();
+  resetAudioMediaLoadScheduler();
   resetRenderScopedReactionHydration();
   resetBackgroundMediaUploads();
   resetLinkPreviewPreparations();
   resetPersistentAgentAudienceStore();
+  // Intentionally NOT reset: the in-flight detached agent-start map
+  // (`useDetachedAgentStart`). Its entries are keyed by the scope each start
+  // asserts (relay URL + signer + agent pubkey), so they cannot leak into the
+  // new community, and they self-clean when the start settles. Clearing them
+  // here is what permitted the A→B→A duplicate provider deploy: the backend's
+  // scope assertion is a current-state check, so a start held across a
+  // round-trip is valid again once A is re-applied — the map entry is its only
+  // duplicate guard.
+  resetDetachedToastScope();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
   resetMessageLinkMetadataCache();
@@ -111,12 +130,35 @@ export function useCommunityInit(
   communityKey: string,
   isSharedIdentity: boolean,
   suppressAutoConnect = false,
+  communities: readonly Community[] = [],
 ): CommunityInitResult {
+  const communityRelaysKey = communityRelaySetKey(communities);
   const [result, setResult] = useState<CommunityInitResult>({
     isReady: false,
     needsSetup: false,
     appliedKey: null,
   });
+
+  // Trust-list edits must not reset active drafts, connections, or providers.
+  // Startup waits for this narrow IPC before workspace apply can restore agents.
+  const avatarTrustUpdateRef = useRef(Promise.resolve());
+  useEffect(() => {
+    // Keep native writes ordered too, not just the frontend waiters. A failed
+    // update leaves the chain rejected so restoration stays blocked until reload.
+    const update = avatarTrustUpdateRef.current.then(() =>
+      setAgentAvatarCommunities(JSON.parse(communityRelaysKey) as string[]),
+    );
+    avatarTrustUpdateRef.current = update;
+    void update.catch((error) => {
+      console.error("Failed to refresh avatar source communities:", error);
+      setResult({
+        isReady: false,
+        needsSetup: false,
+        appliedKey: null,
+        error: "Could not refresh avatar source permissions. Reload to retry.",
+      });
+    });
+  }, [communityRelaysKey]);
 
   // Track whether this is the initial mount or a community switch.
   // On the initial mount we skip resetting singletons (they're fresh).
@@ -294,6 +336,14 @@ export function useCommunityInit(
       // imported key. `loadCommunities()` strips lingering `nsec` fields from
       // legacy entries; this site refuses to apply one even if present.
       try {
+        // A list edit can replace the promise while startup is awaiting it.
+        // Only the latest completed allowlist may release agent restoration.
+        let trustUpdate: Promise<void>;
+        do {
+          trustUpdate = avatarTrustUpdateRef.current;
+          await trustUpdate;
+          if (cancelled) return;
+        } while (trustUpdate !== avatarTrustUpdateRef.current);
         await applyCommunity(
           activeCommunity.relayUrl,
           undefined,
@@ -341,6 +391,12 @@ export function useCommunityInit(
         // trip). This runs after applyCommunity succeeds and before the app
         // renders so components see the restored timers on first render.
         restoreActiveAgentTurnsForCommunity(activeCommunity.id);
+        // From here this community's UI is what renders, so warnings from
+        // detached agent wakes captured under this scope may deliver again.
+        setDetachedToastScope({
+          relayUrl: activeCommunity.relayUrl,
+          signerPubkey: identityPubkey,
+        });
         // Prime the ref so the NEXT switch saves this community's state.
         prevCommunityIdRef.current = activeCommunity.id;
         setResult({

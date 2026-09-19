@@ -42,6 +42,22 @@ pub struct UserSearchProfile {
 /// The `true` case is the reliable signal for "user was just registered" — used
 /// by callers to increment `buzz_users_created_total`.
 pub async fn ensure_user(pool: &PgPool, community_id: CommunityId, pubkey: &[u8]) -> Result<bool> {
+    ensure_user_with_operation(
+        pool,
+        community_id,
+        pubkey,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await
+}
+
+async fn ensure_user_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    operation: crate::observability::WriterOperation,
+) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
     let result = sqlx::query(
         r#"
         INSERT INTO users (community_id, pubkey)
@@ -51,7 +67,7 @@ pub async fn ensure_user(pool: &PgPool, community_id: CommunityId, pubkey: &[u8]
     )
     .bind(community_id.as_uuid())
     .bind(pubkey)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
     Ok(result.rows_affected() == 1)
 }
@@ -296,6 +312,24 @@ pub async fn set_agent_owner(
     agent_pubkey: &[u8],
     owner_pubkey: &[u8],
 ) -> Result<bool> {
+    set_agent_owner_with_operation(
+        pool,
+        community_id,
+        agent_pubkey,
+        owner_pubkey,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await
+}
+
+async fn set_agent_owner_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    agent_pubkey: &[u8],
+    owner_pubkey: &[u8],
+    operation: crate::observability::WriterOperation,
+) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
     // Conditional UPDATE: only set owner if currently NULL. This makes
     // "first mint wins" atomic — no TOCTOU race between concurrent mints.
     let result = sqlx::query(
@@ -304,7 +338,7 @@ pub async fn set_agent_owner(
     .bind(owner_pubkey)
     .bind(community_id.as_uuid())
     .bind(agent_pubkey)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
     if result.rows_affected() == 0 {
@@ -313,7 +347,7 @@ pub async fn set_agent_owner(
         let exists = sqlx::query(r#"SELECT 1 FROM users WHERE community_id = $1 AND pubkey = $2"#)
             .bind(community_id.as_uuid())
             .bind(agent_pubkey)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *connection)
             .await?;
         if exists.is_none() {
             return Err(crate::error::DbError::NotFound(
@@ -334,12 +368,17 @@ pub async fn get_agent_channel_policy(
     community_id: CommunityId,
     pubkey: &[u8],
 ) -> Result<Option<(String, Option<Vec<u8>>)>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         r#"SELECT channel_add_policy::text AS channel_add_policy, agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2"#,
     )
     .bind(community_id.as_uuid())
     .bind(pubkey)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     row.map(|r| -> Result<(String, Option<Vec<u8>>)> {
@@ -359,13 +398,18 @@ pub async fn is_agent_owner(
     target_pubkey: &[u8],
     actor_pubkey: &[u8],
 ) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query_scalar::<_, bool>(
         "SELECT agent_owner_pubkey = $3 FROM users WHERE community_id = $1 AND pubkey = $2 AND agent_owner_pubkey IS NOT NULL",
     )
     .bind(community_id.as_uuid())
     .bind(target_pubkey)
     .bind(actor_pubkey)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
     Ok(row.unwrap_or(false))
 }
@@ -409,6 +453,23 @@ impl Db {
     #[datastore_span(name = "ensure_user", system = "postgresql")]
     pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<bool> {
         crate::user::ensure_user(&self.pool, community_id, pubkey).await
+    }
+
+    /// Ensure a principal while materializing an authenticated NIP-OA
+    /// authorization relationship.
+    #[datastore_span(name = "ensure_user_for_authorization", system = "postgresql")]
+    pub async fn ensure_user_for_authorization(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<bool> {
+        ensure_user_with_operation(
+            &self.pool,
+            community_id,
+            pubkey,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await
     }
 
     /// Get a single user record by pubkey.
@@ -478,6 +539,25 @@ impl Db {
         crate::user::set_agent_owner(&self.pool, community_id, agent_pubkey, owner_pubkey).await
     }
 
+    /// Materialize an authenticated NIP-OA agent-owner relationship under
+    /// authorization attribution.
+    #[datastore_span(name = "set_agent_owner_for_authorization", system = "postgresql")]
+    pub async fn set_agent_owner_for_authorization(
+        &self,
+        community_id: CommunityId,
+        agent_pubkey: &[u8],
+        owner_pubkey: &[u8],
+    ) -> Result<bool> {
+        set_agent_owner_with_operation(
+            &self.pool,
+            community_id,
+            agent_pubkey,
+            owner_pubkey,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await
+    }
+
     /// Get the channel_add_policy and agent_owner_pubkey for a user.
     #[datastore_span(name = "get_agent_channel_policy", system = "postgresql")]
     pub async fn get_agent_channel_policy(
@@ -512,15 +592,13 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use crate::Db;
     use nostr::Keys;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
-
     async fn setup_db() -> Db {
-        let pool = PgPool::connect(TEST_DB_URL)
+        let pool = PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to test DB");
         Db::from_pool(pool)
