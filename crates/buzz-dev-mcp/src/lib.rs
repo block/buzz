@@ -16,6 +16,7 @@ mod rg;
 mod shell;
 mod shim;
 mod str_replace;
+mod sweep;
 mod todo;
 mod tree;
 mod view_image;
@@ -175,6 +176,23 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
+
+    // Best-effort startup sweep for temp dirs orphaned by a killed
+    // buzz-dev-mcp process (#6025) — see crate::sweep for the design. Run
+    // before creating this process's own dirs so it never considers them.
+    let temp_root = std::env::temp_dir();
+    let sweep_stats = sweep::sweep_stale_dirs(&temp_root);
+    tracing::debug!(
+        ?sweep_stats,
+        dir = %temp_root.display(),
+        "buzz-dev-mcp: startup temp dir sweep complete"
+    );
+    if sweep_stats.removed > 0 {
+        tracing::info!(
+            removed = sweep_stats.removed,
+            "buzz-dev-mcp: startup sweep removed orphaned temp dir(s) left by killed processes (#6025)"
+        );
+    }
 
     let cwd = std::env::current_dir()?;
     let shim = shim::Shim::install()?;
