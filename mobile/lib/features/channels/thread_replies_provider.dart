@@ -65,17 +65,25 @@ final threadRepliesProvider = FutureProvider.autoDispose
               ) ??
               <String>{};
           final deletions = <NostrEvent>[];
-          if (missingIds.isNotEmpty) {
+          final targets = missingIds.toList();
+          // Each target has its own limit: repeated markers for one reply
+          // cannot crowd another reply out of a shared result cap.
+          for (var start = 0; start < targets.length; start += 20) {
+            final batch = targets.skip(start).take(20);
             deletions.addAll(
               await session.queryRelay([
-                NostrFilter(
-                  kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
-                  tags: {
-                    '#h': [args.channelId],
-                    '#e': missingIds.toList(),
-                  },
-                  limit: 200,
-                ),
+                for (final target in batch)
+                  NostrFilter(
+                    kinds: const [
+                      EventKind.deletion,
+                      EventKind.nip29DeleteEvent,
+                    ],
+                    tags: {
+                      '#h': [args.channelId],
+                      '#e': [target],
+                    },
+                    limit: 1,
+                  ),
               ]),
             );
           }

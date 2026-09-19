@@ -7,6 +7,10 @@ import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
 
+// Channel history keeps partial reply evidence; full threads stay route-scoped.
+const _maxCachedRepliesPerRoot = 256;
+const _maxCachedReplies = 2048;
+
 const _channelLiveEventKinds = [
   ...EventKind.channelEventKinds,
   EventKind.channelThreadSummary,
@@ -28,6 +32,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final Set<String> _liveSummaryRootsDuringInitialWindowQuery = {};
   final Map<String, NostrEvent> _deepLinkEvents = {};
   final Set<String> _retainedDeepLinkEventIds = {};
+  final Map<String, String> _localReplyRoots = {};
 
   ChannelMessagesNotifier(this.channelId);
 
@@ -226,11 +231,20 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _handleWindowLiveEvent(event);
     } else {
       final current = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
-      final merged = _mergeEvent(current, event);
+      final merged = _boundEventReplies(_mergeEvent(current, event));
       _lastKnownMessages = merged;
       state = AsyncData(merged);
     }
     if (authoritative) {
+      if (event.kind == EventKind.deletion ||
+          event.kind == EventKind.nip29DeleteEvent) {
+        _confirmIndexedLocalReplies(
+          event.tags
+              .where((tag) => tag.length > 1 && tag[0] == 'e')
+              .map((tag) => tag[1]),
+        );
+      }
+      _localReplyRoots.remove(event.id);
       // Store the reply first so clearing its overlay cannot disable its root.
       _confirmLocalMessages([event.id]);
       final thread = event.threadReference;
@@ -309,7 +323,77 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     );
     if (identical(next, _windowStore)) return false;
     _windowStore = next;
+    _trimReplyOverlay();
     return true;
+  }
+
+  List<NostrEvent> _boundedReplies(Iterable<NostrEvent> events) {
+    final sorted = events.toList()
+      ..sort((a, b) => compareThreadRepliesChronologically(b, a));
+    final counts = <String?, int>{};
+    final seen = <String>{};
+    final retained = <NostrEvent>[];
+    for (final event in sorted) {
+      if (!seen.add(event.id)) continue;
+      final root = event.threadReference.rootId;
+      final count = counts[root] ?? 0;
+      if (count >= _maxCachedRepliesPerRoot) continue;
+      retained.add(event);
+      counts[root] = count + 1;
+      if (retained.length == _maxCachedReplies) break;
+    }
+    return retained;
+  }
+
+  List<NostrEvent> _boundEventReplies(List<NostrEvent> events) {
+    final replies = events.where(
+      (event) =>
+          EventKind.channelTimelineContentKinds.contains(event.kind) &&
+          event.threadReference.parentId != null,
+    );
+    final retained = _boundedReplies(replies).map((event) => event.id).toSet();
+    return events
+        .where(
+          (event) =>
+              !EventKind.channelTimelineContentKinds.contains(event.kind) ||
+              event.threadReference.parentId == null ||
+              retained.contains(event.id),
+        )
+        .toList();
+  }
+
+  void _trimReplyOverlay() {
+    final replies = _windowStore.liveOverlay
+        .where((event) => event.threadReference.parentId != null)
+        .toList();
+    if (replies.length <= _maxCachedRepliesPerRoot) return;
+    final retained = _boundedReplies(replies).map((event) => event.id).toSet();
+    if (retained.length == replies.length) return;
+    _windowStore = ChannelWindowStore(
+      pages: _windowStore.pages,
+      liveOverlay: _windowStore.liveOverlay
+          .where(
+            (event) =>
+                event.threadReference.parentId == null ||
+                retained.contains(event.id),
+          )
+          .toList(),
+      liveAux: _windowStore.liveAux,
+      liveThreadSummaries: _windowStore.liveThreadSummaries,
+    );
+  }
+
+  void _confirmIndexedLocalReplies(Iterable<String> ids) {
+    final targets = ids.toSet();
+    for (final id in targets) {
+      final root = _localReplyRoots.remove(id);
+      if (root == null) continue;
+      final provider = threadLocalRepliesProvider(
+        ThreadRepliesArgs(channelId: channelId, rootId: root),
+      );
+      if (ref.exists(provider)) ref.read(provider.notifier).confirm({id});
+    }
+    _confirmLocalMessages(targets);
   }
 
   void _confirmLocalMessages(Iterable<String> eventIds) {
@@ -320,6 +404,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   /// Snapshots cached overlay replies covered by a query for this outer root.
   Set<String> cachedThreadReplyIds(String rootId) => {
+    for (final entry in _localReplyRoots.entries)
+      if (entry.value == rootId) entry.key,
     for (final event in _windowStore.liveOverlay)
       if (event.threadReference.parentId != null &&
           event.threadReference.rootId == rootId)
@@ -337,6 +423,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       }
       _mergeWindowEventIntoStore(event);
       events = _mergeEvent(events, event);
+      _confirmIndexedLocalReplies(
+        event.tags
+            .where((tag) => tag.length > 1 && tag[0] == 'e')
+            .map((tag) => tag[1]),
+      );
     }
     _lastKnownMessages = events;
     state = AsyncData(events);
@@ -378,7 +469,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// Thread queries must not invalidate themselves as live relay events do.
   void cacheConfirmedThreadReplies(Iterable<NostrEvent> replies) {
     var events = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
-    for (final reply in replies) {
+    for (final reply in _boundedReplies(replies)) {
       if (reply.channelId != channelId ||
           reply.threadReference.parentId == null) {
         throw StateError('Expected a reply in channel $channelId.');
@@ -391,8 +482,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (_usingChannelWindow) {
       events = _withDeepLinkEvents(flattenChannelWindowEvents(_windowStore));
     }
+    events = _boundEventReplies(events);
     _lastKnownMessages = events;
     state = AsyncData(events);
+    _confirmIndexedLocalReplies(replies.map((event) => event.id));
   }
 
   /// Adds a just-signed outgoing message before the relay acknowledges it.
@@ -405,6 +498,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       if (rootId == null) {
         throw StateError('Reply ${event.id} has a parent but no thread root.');
       }
+      _localReplyRoots[event.id] = rootId;
       ref
           .read(
             threadLocalRepliesProvider(
@@ -442,6 +536,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         .take(eventId);
     if (pending == null) return;
 
+    _localReplyRoots.remove(eventId);
     final thread = pending.threadReference;
     if (thread.parentId != null) {
       final rootId = thread.rootId;

@@ -1232,6 +1232,194 @@ void main() {
     expect(notifier.cachedThreadReplyIds('new-root'), {'new-reply'});
   });
 
+  for (final nested in [false, true]) {
+    for (final fetched in [false, true]) {
+      test(
+        'deletion settles retained local overlay (nested: $nested, fetched: $fetched)',
+        () async {
+          final deletion = NostrEvent(
+            id: 'delete',
+            pubkey: 'alice',
+            createdAt: 30,
+            kind: EventKind.deletion,
+            tags: const [
+              ['h', _channelId],
+              ['e', 'local'],
+            ],
+            content: '',
+            sig: 'sig',
+          );
+          final session = _RecordingRelaySessionNotifier(
+            queryResults: [
+              [_event(id: 'root', createdAt: 10), _bounds()],
+              <NostrEvent>[],
+              [deletion],
+            ],
+          );
+          final container = _buildContainer(session);
+          addTearDown(container.dispose);
+          container.listen(channelMessagesProvider(_channelId), (_, _) {});
+          await _pumpEventQueue();
+          final notifier = container.read(
+            channelMessagesProvider(_channelId).notifier,
+          );
+          notifier.addLocalMessage(
+            _event(
+              id: 'local',
+              createdAt: 20,
+              extraTags: [
+                if (nested) ['e', 'root', '', 'root'],
+                ['e', nested ? 'parent' : 'root', '', 'reply'],
+              ],
+            ),
+          );
+          notifier.completeLocalMessage('local');
+          const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+          if (fetched) {
+            container.listen(threadRepliesProvider(args), (_, _) {});
+            await container.read(threadRepliesProvider(args).future);
+          } else {
+            session.emit(deletion);
+          }
+          await _pumpEventQueue();
+          expect(container.exists(threadLocalRepliesProvider(args)), isFalse);
+          expect(notifier.cachedThreadReplyIds('root'), isEmpty);
+          final entries = buildMainTimelineEntries(
+            formatTimeline(
+              container.read(channelMessagesProvider(_channelId)).value!,
+            ),
+            relaySummaries: notifier.threadSummaries,
+          );
+          expect(entries.single.summary, isNull);
+        },
+      );
+    }
+  }
+
+  test(
+    'large query caches bounded evidence and checks every missing deletion target',
+    () async {
+      final replies = [
+        for (var i = 0; i < 600; i++)
+          _event(
+            id: 'reply-$i',
+            createdAt: 20 + i,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+      ];
+      final retained = replies.skip(344).toList();
+      final deletionPages = <List<NostrEvent>>[];
+      // Cache snapshots are newest first. Return one deletion per requested ID.
+      final ids = retained.reversed.toList();
+      for (var start = 0; start < ids.length; start += 20) {
+        deletionPages.add([
+          for (final reply in ids.skip(start).take(20))
+            NostrEvent(
+              id: 'delete-${reply.id}',
+              pubkey: 'alice',
+              createdAt: 1000,
+              kind: EventKind.deletion,
+              tags: [
+                ['h', _channelId],
+                ['e', reply.id],
+              ],
+              content: '',
+              sig: 'sig',
+            ),
+        ]);
+      }
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+          replies.take(200).toList(),
+          replies.skip(200).take(200).toList(),
+          replies.skip(400).toList(),
+          <NostrEvent>[],
+          <NostrEvent>[],
+          ...deletionPages,
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      container.listen(threadRepliesProvider(args), (_, _) {});
+      expect(
+        await container.read(threadRepliesProvider(args).future),
+        hasLength(600),
+      );
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      expect(notifier.cachedThreadReplyIds('root'), hasLength(256));
+      expect(
+        container.read(channelMessagesProvider(_channelId)).value,
+        hasLength(257),
+      );
+      container.invalidate(threadRepliesProvider(args));
+      await container.read(threadRepliesProvider(args).future);
+      final deletionFilters = session.queryFilters
+          .where((filter) => filter.kinds.contains(EventKind.deletion))
+          .toList();
+      expect(deletionFilters, hasLength(256));
+      expect(
+        deletionFilters.every(
+          (filter) => filter.limit == 1 && filter.tags['#e']?.length == 1,
+        ),
+        isTrue,
+      );
+      expect(
+        formatTimeline(
+          container.read(channelMessagesProvider(_channelId)).value!,
+        ).map((event) => event.id),
+        ['root'],
+      );
+    },
+  );
+
+  test(
+    'reply payload cache has a channel-wide bound across many roots',
+    () async {
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      notifier.cacheConfirmedThreadReplies([
+        for (var root = 0; root < 12; root++)
+          for (var i = 0; i < 300; i++)
+            _event(
+              id: '$root-$i',
+              createdAt: 20 + root * 300 + i,
+              extraTags: [
+                ['e', 'root-$root', '', 'reply'],
+              ],
+            ),
+      ]);
+      final events = container.read(channelMessagesProvider(_channelId)).value!;
+      expect(
+        events.where((event) => event.threadReference.parentId != null),
+        hasLength(2048),
+      );
+      for (var root = 0; root < 12; root++) {
+        expect(
+          notifier.cachedThreadReplyIds('root-$root').length,
+          lessThanOrEqualTo(256),
+        );
+      }
+    },
+  );
+
   test('a reply newer than the relay recount raises the badge', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
