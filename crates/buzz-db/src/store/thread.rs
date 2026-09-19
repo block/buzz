@@ -405,7 +405,7 @@ pub(crate) async fn get_thread_replies_on(
     // Decode cursor bytes -> keyset (timestamp, optional event_id) for the
     // WHERE condition. Layout: 8-byte BE i64 seconds, then the raw event_id.
     // An 8-byte-only cursor is legacy timestamp-only paging (no tiebreak).
-    let cursor_key: Option<(DateTime<Utc>, Option<Vec<u8>>)> = match cursor {
+    let mut cursor_key: Option<(DateTime<Utc>, Option<Vec<u8>>)> = match cursor {
         Some(bytes) if bytes.len() >= 8 => {
             let secs = i64::from_be_bytes(bytes[..8].try_into().expect("length checked"));
             DateTime::from_timestamp(secs, 0).map(|ts| {
@@ -420,11 +420,17 @@ pub(crate) async fn get_thread_replies_on(
         _ => None,
     };
 
-    // Build the query dynamically based on optional filters.
-    // Track the next positional parameter index.
-    let mut param_idx = 3u32; // $1 is community_id, $2 is root_event_id
-    let mut sql = String::from(
-        r#"
+    let mut replies = Vec::new();
+    loop {
+        let remaining = limit.saturating_sub(replies.len() as u32);
+        if remaining == 0 {
+            return Ok(replies);
+        }
+        // Build the query dynamically based on optional filters.
+        // Track the next positional parameter index.
+        let mut param_idx = 3u32; // $1 is community_id, $2 is root_event_id
+        let mut sql = String::from(
+            r#"
         SELECT
             tm.event_id,
             e.id,
@@ -450,91 +456,100 @@ pub(crate) async fn get_thread_replies_on(
           AND tm.root_event_id = $2
           AND e.deleted_at IS NULL
         "#,
-    );
+        );
 
-    if depth_limit.is_some() {
-        sql.push_str(&format!(" AND tm.depth <= ${param_idx}"));
-        param_idx += 1;
-    }
-    match &cursor_key {
-        Some((_, Some(_))) => {
-            // Composite keyset: strict row comparison with an event_id tiebreak
-            // so same-second replies paginate without gaps or duplicates.
-            let ts_idx = param_idx;
-            let id_idx = param_idx + 1;
-            sql.push_str(&format!(
-                " AND (tm.event_created_at, tm.event_id) > (${ts_idx}, ${id_idx})"
-            ));
-            param_idx += 2;
-        }
-        Some((_, None)) => {
-            // Legacy timestamp-only cursor (no tiebreak).
-            sql.push_str(&format!(" AND tm.event_created_at > ${param_idx}"));
+        if depth_limit.is_some() {
+            sql.push_str(&format!(" AND tm.depth <= ${param_idx}"));
             param_idx += 1;
         }
-        None => {}
-    }
-
-    sql.push_str(&format!(
-        " ORDER BY tm.event_created_at ASC, tm.event_id ASC LIMIT ${param_idx}"
-    ));
-
-    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(community_id.as_uuid())
-        .bind(root_event_id);
-
-    if let Some(dl) = depth_limit {
-        q = q.bind(dl as i32);
-    }
-    match &cursor_key {
-        Some((ts, Some(id))) => {
-            q = q.bind(*ts).bind(id.clone());
+        match &cursor_key {
+            Some((_, Some(_))) => {
+                // Composite keyset: strict row comparison with an event_id tiebreak
+                // so same-second replies paginate without gaps or duplicates.
+                let ts_idx = param_idx;
+                let id_idx = param_idx + 1;
+                sql.push_str(&format!(
+                    " AND (tm.event_created_at, tm.event_id) > (${ts_idx}, ${id_idx})"
+                ));
+                param_idx += 2;
+            }
+            Some((_, None)) => {
+                // Legacy timestamp-only cursor (no tiebreak).
+                sql.push_str(&format!(" AND tm.event_created_at > ${param_idx}"));
+                param_idx += 1;
+            }
+            None => {}
         }
-        Some((ts, None)) => {
-            q = q.bind(*ts);
+
+        sql.push_str(&format!(
+            " ORDER BY tm.event_created_at ASC, tm.event_id ASC LIMIT ${param_idx}"
+        ));
+
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community_id.as_uuid())
+            .bind(root_event_id);
+
+        if let Some(dl) = depth_limit {
+            q = q.bind(dl as i32);
         }
-        None => {}
+        match &cursor_key {
+            Some((ts, Some(id))) => {
+                q = q.bind(*ts).bind(id.clone());
+            }
+            Some((ts, None)) => {
+                q = q.bind(*ts);
+            }
+            None => {}
+        }
+        q = q.bind(remaining as i32);
+
+        let rows = q.fetch_all(&mut *conn).await?;
+
+        let raw_count = rows.len();
+        if let Some(last) = rows.last() {
+            cursor_key = Some((
+                last.try_get("event_created_at")?,
+                Some(last.try_get("event_id")?),
+            ));
+        }
+        for row in rows {
+            let event_id: Vec<u8> = row.try_get("event_id")?;
+            let parent_event_id: Option<Vec<u8>> = row.try_get("parent_event_id")?;
+            let root_event_id_col: Option<Vec<u8>> = row.try_get("root_event_id")?;
+            let channel_id: Uuid = row.try_get("channel_id")?;
+            let pubkey: Vec<u8> = row.try_get("pubkey")?;
+            let tags: serde_json::Value = row.try_get("tags")?;
+            let depth: i32 = row.try_get("depth")?;
+            let created_at: DateTime<Utc> = row.try_get("event_created_at")?;
+            let broadcast_val: bool = row.try_get("broadcast")?;
+
+            // Skip rows that fail event reconstruction (e.g. corrupt signature)
+            // while continuing past the raw page boundary to fill the requested
+            // page. A short response must mean SQL EOF, not a skipped stored row.
+            let stored_event = match row_to_stored_event(row)? {
+                Some(se) => se,
+                None => continue,
+            };
+
+            replies.push(ThreadReply {
+                event_id,
+                parent_event_id,
+                root_event_id: root_event_id_col,
+                channel_id,
+                pubkey,
+                tags,
+                content: stored_event.event.content.clone(),
+                stored_event,
+                depth,
+                created_at,
+                broadcast: broadcast_val,
+            });
+        }
+
+        if raw_count < remaining as usize {
+            return Ok(replies);
+        }
     }
-    q = q.bind(limit as i32);
-
-    let rows = q.fetch_all(&mut *conn).await?;
-
-    let mut replies = Vec::with_capacity(rows.len());
-    for row in rows {
-        let event_id: Vec<u8> = row.try_get("event_id")?;
-        let parent_event_id: Option<Vec<u8>> = row.try_get("parent_event_id")?;
-        let root_event_id_col: Option<Vec<u8>> = row.try_get("root_event_id")?;
-        let channel_id: Uuid = row.try_get("channel_id")?;
-        let pubkey: Vec<u8> = row.try_get("pubkey")?;
-        let tags: serde_json::Value = row.try_get("tags")?;
-        let depth: i32 = row.try_get("depth")?;
-        let created_at: DateTime<Utc> = row.try_get("event_created_at")?;
-        let broadcast_val: bool = row.try_get("broadcast")?;
-
-        // Skip rows that fail event reconstruction (e.g. corrupt signature)
-        // rather than failing the whole thread query, matching the
-        // skip-and-continue semantics of the prior get_events_by_ids path.
-        let stored_event = match row_to_stored_event(row)? {
-            Some(se) => se,
-            None => continue,
-        };
-
-        replies.push(ThreadReply {
-            event_id,
-            parent_event_id,
-            root_event_id: root_event_id_col,
-            channel_id,
-            pubkey,
-            tags,
-            content: stored_event.event.content.clone(),
-            stored_event,
-            depth,
-            created_at,
-            broadcast: broadcast_val,
-        });
-    }
-
-    Ok(replies)
 }
 
 /// Fetch aggregated thread stats for a single event, plus up to 10 participant pubkeys.
@@ -1888,7 +1903,10 @@ mod postgres_tests {
             .expect("insert root event");
 
         // Two replies under the same root: one stays valid, one we corrupt.
-        let good = make_stream_event(&author, "good");
+        let good = EventBuilder::new(Kind::Custom(9), "good")
+            .custom_created_at(nostr::Timestamp::from(root.created_at.as_secs() + 2))
+            .sign_with_keys(&author)
+            .expect("good reply");
         let good_id = good.id.to_hex();
         let good_created_at = event_created_at(&good);
         insert_event_with_thread_metadata(
@@ -1911,7 +1929,10 @@ mod postgres_tests {
         .await
         .expect("insert good reply");
 
-        let bad = make_stream_event(&author, "bad");
+        let bad = EventBuilder::new(Kind::Custom(9), "bad")
+            .custom_created_at(nostr::Timestamp::from(root.created_at.as_secs() + 1))
+            .sign_with_keys(&author)
+            .expect("bad reply");
         let bad_created_at = event_created_at(&bad);
         insert_event_with_thread_metadata(
             &pool,
@@ -1954,6 +1975,72 @@ mod postgres_tests {
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].stored_event.event.id.to_hex(), good_id);
         assert_eq!(replies[0].stored_event.event.content, "good");
+
+        let tail = EventBuilder::new(Kind::Custom(9), "tail")
+            .custom_created_at(nostr::Timestamp::from(root.created_at.as_secs() + 3))
+            .sign_with_keys(&author)
+            .expect("tail reply");
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &tail,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: tail.id.as_bytes(),
+                event_created_at: event_created_at(&tail),
+                channel_id: channel.id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert tail");
+        let mut origin = (-1_i64).to_be_bytes().to_vec();
+        origin.extend_from_slice(&[0; 32]);
+        let page = get_thread_replies(
+            &pool,
+            community,
+            root.id.as_bytes(),
+            Some(10),
+            2,
+            Some(&origin),
+        )
+        .await
+        .expect("fill page past corrupt first row");
+        assert_eq!(
+            page.iter()
+                .map(|reply| reply.stored_event.event.id)
+                .collect::<Vec<_>>(),
+            [good.id, tail.id]
+        );
+        let first = get_thread_replies(
+            &pool,
+            community,
+            root.id.as_bytes(),
+            Some(10),
+            1,
+            Some(&origin),
+        )
+        .await
+        .expect("page entirely corrupt must not signal EOF");
+        assert_eq!(first[0].stored_event.event.id, good.id);
+        let mut after = (tail.created_at.as_secs() as i64).to_be_bytes().to_vec();
+        after.extend_from_slice(tail.id.as_bytes());
+        assert!(get_thread_replies(
+            &pool,
+            community,
+            root.id.as_bytes(),
+            Some(10),
+            2,
+            Some(&after)
+        )
+        .await
+        .expect("true EOF")
+        .is_empty());
     }
 
     /// Insert one top-level event (root metadata, broadcast) into a channel.
