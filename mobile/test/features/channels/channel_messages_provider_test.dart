@@ -1512,8 +1512,9 @@ void main() {
             _event(
               id: 'reply-$i',
               createdAt: 20 + i,
-              extraTags: const [
-                ['e', 'root', '', 'reply'],
+              extraTags: [
+                if (count == 600 && i > 0) ['e', 'root', '', 'root'],
+                ['e', count == 600 && i > 0 ? 'reply-0' : 'root', '', 'reply'],
               ],
             ),
         ];
@@ -1563,6 +1564,12 @@ void main() {
         }
 
         checkSummary();
+        if (count == 600) {
+          expect(
+            notifier.cachedThreadReplyIds('root').contains('reply-0'),
+            isFalse,
+          );
+        }
         session.setConnected(false);
         await _pumpEventQueue();
         session.setConnected(true);
