@@ -62,6 +62,16 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
     _reachedOldest = false;
     _windowStore = const ChannelWindowStore.empty();
+    // A reconnect window can lag a confirmed thread query and contains only
+    // top-level rows. Keep known replies as summary evidence, including their
+    // deletion markers so a reset cannot resurrect a deleted reply.
+    for (final event in _lastKnownMessages ?? const <NostrEvent>[]) {
+      if (event.threadReference.parentId != null ||
+          event.kind == EventKind.deletion ||
+          event.kind == EventKind.nip29DeleteEvent) {
+        _mergeWindowEventIntoStore(event);
+      }
+    }
     _usingChannelWindow = false;
     _initialWindowQueryInFlight = false;
     _liveSummaryRootsDuringInitialWindowQuery.clear();

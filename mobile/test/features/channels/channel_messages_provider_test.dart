@@ -951,6 +951,82 @@ void main() {
     },
   );
 
+  for (final deleted in [false, true]) {
+    test(
+      'confirmed reply evidence survives stale reconnect (deleted: $deleted)',
+      () async {
+        final root = _event(id: 'root', createdAt: 10);
+        final reply = _event(
+          id: 'reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        );
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [root, _bounds()],
+            [root, _bounds()],
+          ],
+        );
+        final container = _buildContainer(relaySession);
+        addTearDown(container.dispose);
+        final subscription = container.listen(
+          channelMessagesProvider(_channelId),
+          (_, _) {},
+          fireImmediately: true,
+        );
+        addTearDown(subscription.close);
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        // The thread query confirmed the reply, but its live echo and recount
+        // were missed. A bounded-staleness reconnect window can still omit it.
+        notifier.cacheConfirmedThreadReplies([reply]);
+        if (deleted) {
+          relaySession.emit(
+            NostrEvent(
+              id: 'delete-reply',
+              pubkey: 'alice',
+              createdAt: 30,
+              kind: EventKind.deletion,
+              tags: const [
+                ['h', _channelId],
+                ['e', 'reply'],
+              ],
+              content: '',
+              sig: 'sig',
+            ),
+          );
+          await _pumpEventQueue();
+        }
+        relaySession.setConnected(false);
+        await _pumpEventQueue();
+        relaySession.setConnected(true);
+        await _pumpEventQueue();
+        // A subsequent live event rebuilds state from the window store.
+        relaySession.emit(_event(id: 'unrelated', createdAt: 40));
+        await _pumpEventQueue();
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        final rootEntry = entries.singleWhere(
+          (entry) => entry.message.id == 'root',
+        );
+        if (deleted) {
+          expect(rootEntry.summary, isNull);
+        } else {
+          expect(rootEntry.summary?.replyCount, 1);
+        }
+      },
+    );
+  }
+
   test('a reply newer than the relay recount raises the badge', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
