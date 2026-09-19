@@ -74,7 +74,7 @@ fn frame(value: f32) -> Vec<f32> {
 }
 
 #[test]
-fn german_kroko_waits_about_two_and_a_half_seconds_of_silence() {
+fn german_kroko_waits_about_one_second_of_silence() {
     assert_eq!(silence_flush_frames(AsrBackend::Parakeet), SILENCE_FLUSH_FRAMES);
     assert_eq!(
         silence_flush_frames(AsrBackend::Kroko),
@@ -82,7 +82,7 @@ fn german_kroko_waits_about_two_and_a_half_seconds_of_silence() {
     );
     let flush_ms =
         silence_flush_frames(AsrBackend::Kroko) * VAD_FRAME_SAMPLES * 1000 / 16_000;
-    assert!(flush_ms >= 2_400 && flush_ms <= 2_600);
+    assert!(flush_ms >= 950 && flush_ms <= 1_050);
 }
 
 #[test]

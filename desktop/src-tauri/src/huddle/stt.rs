@@ -215,10 +215,11 @@ impl Drop for SttPipeline {
 /// pauses and confused listening agents.
 const SILENCE_FLUSH_FRAMES: usize = 31;
 
-/// German Kroko huddle: keep a 2–3 s thinking pause in the same transcript line.
-/// Intra-turn silent hesitations are often 0.2–0.8 s; planning pauses commonly
-/// reach 1–2 s, and speakers report 2–3 s. 156 frames × 256 / 16 kHz ≈ 2.5 s.
-const KROKO_SILENCE_FLUSH_FRAMES: usize = 156;
+/// German Kroko huddle: keep a ~1 s thinking pause in the same transcript line.
+/// 500 ms (Parakeet) splits mid-thought; 2.5 s felt sluggish. Azure's typical
+/// segmentation default is 500 ms; 1 s sits between conversational turn-taking
+/// and dictation. 63 frames × 256 / 16 kHz ≈ 1.0 s.
+const KROKO_SILENCE_FLUSH_FRAMES: usize = 63;
 
 fn silence_flush_frames(backend: AsrBackend) -> usize {
     match backend {
