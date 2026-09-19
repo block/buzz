@@ -1027,90 +1027,206 @@ void main() {
     );
   }
 
-  for (final lateArrival in [false, true]) {
-    test(
-      'thread refresh removes offline-deleted replies (late arrival: $lateArrival)',
-      () async {
-        final query = Completer<List<NostrEvent>>();
-        final root = _event(id: 'root', createdAt: 10);
-        final relaySession = _RecordingRelaySessionNotifier(
-          queryResults: [
-            [root, _bounds()],
-            [root, _bounds()],
-            query.future,
-          ],
-        );
-        final container = _buildContainer(relaySession);
-        addTearDown(container.dispose);
-        final channelSubscription = container.listen(
-          channelMessagesProvider(_channelId),
-          (_, _) {},
-          fireImmediately: true,
-        );
-        addTearDown(channelSubscription.close);
-        await _pumpEventQueue();
-        final notifier = container.read(
-          channelMessagesProvider(_channelId).notifier,
-        );
-        notifier.cacheConfirmedThreadReplies([
-          _event(
-            id: 'deleted-offline',
-            createdAt: 20,
-            extraTags: const [
-              ['e', 'root', '', 'reply'],
+  for (final deletedRemotely in [false, true]) {
+    for (final lateArrival in [false, true]) {
+      test(
+        'thread refresh removes offline-deleted replies (deleted: $deletedRemotely, late arrival: $lateArrival)',
+        () async {
+          final query = Completer<List<NostrEvent>>();
+          final root = _event(id: 'root', createdAt: 10);
+          final relaySession = _RecordingRelaySessionNotifier(
+            queryResults: [
+              [root, _bounds()],
+              [root, _bounds()],
+              query.future,
+              <NostrEvent>[
+                if (deletedRemotely)
+                  NostrEvent(
+                    id: 'offline-deletion',
+                    pubkey: 'alice',
+                    createdAt: 25,
+                    kind: EventKind.deletion,
+                    tags: const [
+                      ['h', _channelId],
+                      ['e', 'deleted-offline'],
+                    ],
+                    content: '',
+                    sig: 'sig',
+                  ),
+              ],
             ],
-          ),
-        ]);
-        relaySession.setConnected(false);
-        await _pumpEventQueue();
-        relaySession.setConnected(true);
-        await _pumpEventQueue();
-        const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
-        final threadSubscription = container.listen(
-          threadRepliesProvider(args),
-          (_, _) {},
-        );
-        addTearDown(threadSubscription.close);
-        await _pumpEventQueue();
-        // Another confirmation arrives after the query starts. Its absence from
-        // that query must not erase it along with the old cached reply.
-        if (lateArrival) {
+          );
+          final container = _buildContainer(relaySession);
+          addTearDown(container.dispose);
+          final channelSubscription = container.listen(
+            channelMessagesProvider(_channelId),
+            (_, _) {},
+            fireImmediately: true,
+          );
+          addTearDown(channelSubscription.close);
+          await _pumpEventQueue();
+          final notifier = container.read(
+            channelMessagesProvider(_channelId).notifier,
+          );
           notifier.cacheConfirmedThreadReplies([
             _event(
-              id: 'new-arrival',
-              createdAt: 30,
+              id: 'deleted-offline',
+              createdAt: 20,
               extraTags: const [
                 ['e', 'root', '', 'reply'],
               ],
             ),
           ]);
-        }
-        query.complete([]);
-        await container.read(threadRepliesProvider(args).future);
-        await _pumpEventQueue();
-        relaySession.emit(_event(id: 'unrelated', createdAt: 40));
-        await _pumpEventQueue();
-        final events = container
-            .read(channelMessagesProvider(_channelId))
-            .value!;
-        expect(events.map((event) => event.id), [
-          'root',
-          if (lateArrival) 'new-arrival',
-          'unrelated',
-        ]);
-        final merged = mergeThreadEvents(
-          container.read(threadRepliesProvider(args)).value!,
-          events,
-        );
-        expect(merged.any((event) => event.id == 'deleted-offline'), isFalse);
-        final rootEntry = buildMainTimelineEntries(
-          formatTimeline(events),
-          relaySummaries: notifier.threadSummaries,
-        ).singleWhere((entry) => entry.message.id == 'root');
-        expect(rootEntry.summary?.replyCount, lateArrival ? 1 : null);
-      },
-    );
+          relaySession.setConnected(false);
+          await _pumpEventQueue();
+          relaySession.setConnected(true);
+          await _pumpEventQueue();
+          const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+          final threadSubscription = container.listen(
+            threadRepliesProvider(args),
+            (_, _) {},
+          );
+          addTearDown(threadSubscription.close);
+          await _pumpEventQueue();
+          // Another confirmation arrives after the query starts. Its absence from
+          // that query must not erase it along with the old cached reply.
+          if (lateArrival) {
+            notifier.cacheConfirmedThreadReplies([
+              _event(
+                id: 'new-arrival',
+                createdAt: 30,
+                extraTags: const [
+                  ['e', 'root', '', 'reply'],
+                ],
+              ),
+            ]);
+          }
+          query.complete([]);
+          await container.read(threadRepliesProvider(args).future);
+          await _pumpEventQueue();
+          relaySession.emit(_event(id: 'unrelated', createdAt: 40));
+          await _pumpEventQueue();
+          final events = container
+              .read(channelMessagesProvider(_channelId))
+              .value!;
+          expect(formatTimeline(events).map((event) => event.id), [
+            'root',
+            if (!deletedRemotely) 'deleted-offline',
+            if (lateArrival) 'new-arrival',
+            'unrelated',
+          ]);
+          final merged = mergeThreadEvents(
+            container.read(threadRepliesProvider(args)).value!,
+            events,
+          );
+          expect(
+            formatTimeline(
+              merged,
+            ).any((event) => event.id == 'deleted-offline'),
+            !deletedRemotely,
+          );
+          final rootEntry = buildMainTimelineEntries(
+            formatTimeline(events),
+            relaySummaries: notifier.threadSummaries,
+          ).singleWhere((entry) => entry.message.id == 'root');
+          final expectedCount =
+              (deletedRemotely ? 0 : 1) + (lateArrival ? 1 : 0);
+          expect(
+            rootEntry.summary?.replyCount,
+            expectedCount == 0 ? null : expectedCount,
+          );
+        },
+      );
+    }
   }
+  test(
+    'query-discovered replies enable the root without a local overlay',
+    () async {
+      final reply = _event(
+        id: 'discovered',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+          [reply],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      final thread = container.listen(threadRepliesProvider(args), (_, _) {});
+      await container.read(threadRepliesProvider(args).future);
+      thread.close();
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      final entries = buildMainTimelineEntries(
+        formatTimeline(
+          container.read(channelMessagesProvider(_channelId)).value!,
+        ),
+        relaySummaries: notifier.threadSummaries,
+      );
+      expect(entries.single.summary?.replyCount, 1);
+      expect(container.exists(threadLocalRepliesProvider(args)), isFalse);
+    },
+  );
+
+  test('reconnect evicts reply evidence outside the newest window', () async {
+    final session = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'old-root', createdAt: 10), _bounds()],
+        [_event(id: 'new-root', createdAt: 30), _bounds()],
+        [_event(id: 'new-root', createdAt: 30), _bounds()],
+      ],
+    );
+    final container = _buildContainer(session);
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    notifier.cacheConfirmedThreadReplies([
+      _event(
+        id: 'old-reply',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'old-root', '', 'reply'],
+        ],
+      ),
+    ]);
+    for (var cycle = 0; cycle < 2; cycle++) {
+      session.setConnected(false);
+      await _pumpEventQueue();
+      session.setConnected(true);
+      await _pumpEventQueue();
+      expect(notifier.cachedThreadReplyIds('old-root'), isEmpty);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value!
+            .any((event) => event.id == 'old-reply'),
+        isFalse,
+      );
+      notifier.cacheConfirmedThreadReplies([
+        _event(
+          id: 'new-reply',
+          createdAt: 40,
+          extraTags: const [
+            ['e', 'new-root', '', 'reply'],
+          ],
+        ),
+      ]);
+    }
+    expect(notifier.cachedThreadReplyIds('new-root'), {'new-reply'});
+  });
 
   test('a reply newer than the relay recount raises the badge', () async {
     final relaySession = _RecordingRelaySessionNotifier(

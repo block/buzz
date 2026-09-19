@@ -57,11 +57,32 @@ final threadRepliesProvider = FutureProvider.autoDispose
         ]);
         replies.addAll(events);
         if (events.length < 200) {
-          if (ref.mounted && cachedReplyIds != null) {
-            channelMessages!.reconcileCachedThreadReplies(
-              cachedReplyIds,
-              replies,
+          // A successful head page can be bounded-stale. Missing IDs are
+          // candidates for a deletion lookup, never proof of deletion.
+          final missingIds =
+              cachedReplyIds?.difference(
+                replies.map((event) => event.id).toSet(),
+              ) ??
+              <String>{};
+          final deletions = <NostrEvent>[];
+          if (missingIds.isNotEmpty) {
+            deletions.addAll(
+              await session.queryRelay([
+                NostrFilter(
+                  kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
+                  tags: {
+                    '#h': [args.channelId],
+                    '#e': missingIds.toList(),
+                  },
+                  limit: 200,
+                ),
+              ]),
             );
+          }
+          if (ref.mounted && ref.exists(channelProvider)) {
+            final channel = ref.read(channelProvider.notifier);
+            channel.cacheConfirmedThreadReplies(replies);
+            if (deletions.isNotEmpty) channel.cacheThreadDeletions(deletions);
           }
           return replies;
         }

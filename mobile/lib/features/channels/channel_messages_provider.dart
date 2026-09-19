@@ -117,7 +117,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       if (!_isCurrentInit(initVersion)) return;
       _confirmLocalMessages(history.map((event) => event.id));
 
-      final existing = state.value ?? const <NostrEvent>[];
+      final existing =
+          _lastKnownMessages ?? state.value ?? const <NostrEvent>[];
       final existingIds = existing.map((event) => event.id).toSet();
       final merged = _withDeepLinkEvents([
         ...existing,
@@ -156,6 +157,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         retainLiveSummaryRootIds: _liveSummaryRootsDuringInitialWindowQuery,
       );
       _liveSummaryRootsDuringInitialWindowQuery.clear();
+      _pruneOffWindowReplies();
       _usingChannelWindow = true;
       _reachedOldest = !channelWindowHasMore(_windowStore);
       return flattenChannelWindowEvents(_windowStore);
@@ -325,29 +327,67 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         event.id,
   };
 
-  /// Removes cached replies absent from a completed authoritative thread query.
-  /// Only the pre-query snapshot is eligible; later arrivals remain untouched.
-  void reconcileCachedThreadReplies(
-    Set<String> queriedIds,
-    Iterable<NostrEvent> replies,
-  ) {
-    final missingIds = queriedIds.difference(
-      replies.map((event) => event.id).toSet(),
-    );
-    if (missingIds.isEmpty) return;
-    _windowStore = ChannelWindowStore(
-      pages: _windowStore.pages,
-      liveOverlay: _windowStore.liveOverlay
-          .where((event) => !missingIds.contains(event.id))
-          .toList(),
-      liveAux: _windowStore.liveAux,
-      liveThreadSummaries: _windowStore.liveThreadSummaries,
-    );
-    final events = (state.value ?? _lastKnownMessages ?? const <NostrEvent>[])
-        .where((event) => !missingIds.contains(event.id))
-        .toList();
+  /// Applies explicit deletion evidence fetched for cached replies.
+  void cacheThreadDeletions(Iterable<NostrEvent> deletions) {
+    var events = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
+    for (final event in deletions) {
+      if (event.channelId != channelId ||
+          (event.kind != EventKind.deletion &&
+              event.kind != EventKind.nip29DeleteEvent)) {
+        throw StateError('Expected a deletion in channel $channelId.');
+      }
+      _mergeWindowEventIntoStore(event);
+      events = _mergeEvent(events, event);
+    }
     _lastKnownMessages = events;
     state = AsyncData(events);
+  }
+
+  void _pruneOffWindowReplies() {
+    final roots = {
+      for (final page in _windowStore.pages)
+        for (final row in page.rows) row.event.id,
+      for (final event in _windowStore.liveOverlay)
+        if (event.threadReference.parentId == null) event.id,
+      ..._retainedDeepLinkEventIds,
+    };
+    bool keepReply(NostrEvent event) =>
+        event.threadReference.parentId == null ||
+        roots.contains(event.threadReference.rootId);
+    final overlay = _windowStore.liveOverlay.where(keepReply).toList();
+    final retainedIds = {...roots, ...overlay.map((event) => event.id)};
+    _windowStore = ChannelWindowStore(
+      pages: _windowStore.pages,
+      liveOverlay: overlay,
+      liveAux: _windowStore.liveAux
+          .where(
+            (event) => event.tags.any(
+              (tag) =>
+                  tag.length > 1 &&
+                  tag[0] == 'e' &&
+                  retainedIds.contains(tag[1]),
+            ),
+          )
+          .toList(),
+      liveThreadSummaries: _windowStore.liveThreadSummaries,
+    );
+    final cached = _lastKnownMessages;
+    if (cached != null) {
+      _lastKnownMessages = cached
+          .where(
+            (event) =>
+                EventKind.channelTimelineContentKinds.contains(event.kind)
+                ? keepReply(event)
+                : !EventKind.channelAuxEventKinds.contains(event.kind) ||
+                      event.tags.any(
+                        (tag) =>
+                            tag.length > 1 &&
+                            tag[0] == 'e' &&
+                            retainedIds.contains(tag[1]),
+                      ),
+          )
+          .toList();
+    }
   }
 
   /// Caches confirmed thread replies before their optimistic overlay is cleared.
