@@ -63,10 +63,44 @@ List<MarkdownComponent> _useMessageInlineComponents({
         channelNames: inputs.channelNames,
         onChannelTap: channelTap,
       ),
+      _UnderscoreItalicMd(),
       ...MarkdownComponent.inlineComponents,
     ],
     [inputs],
   );
+}
+
+/// Renders the underscore emphasis syntax emitted by the mobile composer.
+///
+/// gpt_markdown 1.2.1 supports `*emphasis*` only. Word boundaries keep
+/// identifiers such as `snake_case` and escaped underscores literal.
+class _UnderscoreItalicMd extends InlineMd {
+  static final _pattern = RegExp(
+    r'(?<![\\\w])_(?![\s_])(.+?)(?<![\s_])_(?!\w)',
+    dotAll: true,
+  );
+
+  @override
+  RegExp get exp => _pattern;
+
+  @override
+  InlineSpan span(BuildContext context, String text, GptMarkdownConfig config) {
+    final match = exp.firstMatch(text.trim());
+    final emphasisConfig = config.copyWith(
+      style: (config.style ?? const TextStyle()).copyWith(
+        fontStyle: FontStyle.italic,
+      ),
+    );
+    return TextSpan(
+      children: MarkdownComponent.generate(
+        context,
+        match?[1] ?? '',
+        emphasisConfig,
+        false,
+      ),
+      style: emphasisConfig.style,
+    );
+  }
 }
 
 class _InlineComponentInputs {

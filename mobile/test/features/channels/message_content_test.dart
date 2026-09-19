@@ -658,6 +658,37 @@ void main() {
         expect(_hasItalicSpan(tester, 'italic'), isTrue);
       });
 
+      testWidgets('renders composer-style underscore emphasis', (tester) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(content: 'This is _italic on mobile_ text'),
+          ),
+        );
+
+        final allText = _allRichText(tester);
+        expect(allText, contains('italic on mobile'));
+        expect(allText, isNot(contains('_italic on mobile_')));
+        expect(_hasItalicSpan(tester, 'italic on mobile'), isTrue);
+      });
+
+      testWidgets('keeps underscores inside identifiers literal', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Use snake_case and first_name_value as written',
+            ),
+          ),
+        );
+
+        final allText = _allRichText(tester);
+        expect(allText, contains('snake_case'));
+        expect(allText, contains('first_name_value'));
+        expect(_hasItalicSpan(tester, 'snake_case'), isFalse);
+        expect(_hasItalicSpan(tester, 'first_name_value'), isFalse);
+      });
+
       testWidgets('renders strikethrough text', (tester) async {
         await tester.pumpWidget(
           _testable(const MessageContent(content: 'This is ~~struck~~ text')),
