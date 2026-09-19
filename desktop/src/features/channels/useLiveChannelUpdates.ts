@@ -3,10 +3,17 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { updateChannelLastMessageAt } from "@/features/channels/lib/channelRecency";
-import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
-import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
+import {
+  mergeMessages,
+  mergeTimelineCacheMessages,
+} from "@/features/messages/hooks";
+import {
+  channelMessagesKey,
+  threadRepliesKey,
+} from "@/features/messages/lib/messageQueryKeys";
 import {
   getChannelIdFromTags,
+  getThreadReference,
   isThreadReply,
 } from "@/features/messages/lib/threading";
 import {
@@ -333,6 +340,21 @@ export function useLiveChannelUpdates(
           options.onThreadReplyDesktopNotification?.(channelId, event);
         }
       }
+    }
+
+    // Route the event the same way useChannelSubscription's appendMessage
+    // does: a non-broadcast thread reply belongs to its root's thread cache,
+    // never the flat channel timeline. Merging it there renders it as a
+    // top-level row until the next window projection drops it (#7705).
+    if (isThreadedReply) {
+      const rootId = getThreadReference(event.tags).rootId;
+      if (rootId) {
+        queryClient.setQueryData<RelayEvent[]>(
+          threadRepliesKey(channelId, rootId),
+          (current = []) => mergeMessages(current, event),
+        );
+      }
+      return;
     }
 
     // Merge into the timeline cache for the active channel.
