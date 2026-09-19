@@ -2831,6 +2831,68 @@ void main() {
     );
   }
 
+  for (final stillExists in [false, true]) {
+    test(
+      'WebSocket fallback recounts payload-only roots (exists: $stillExists)',
+      () async {
+        final reply = _event(
+          id: 'live-reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        );
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'root', createdAt: 10), _bounds()],
+            Exception('NIP-CW unavailable'),
+            stillExists ? [reply] : <NostrEvent>[],
+          ],
+          historyResults: [
+            [_event(id: 'root', createdAt: 10)],
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        session.emit(reply);
+        expect(
+          notifier.threadSummaries,
+          isEmpty,
+          reason: 'only reply payloads supply the initial badge',
+        );
+        session.setConnected(false);
+        await _pumpEventQueue();
+        session.setConnected(true);
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(
+          entries.singleWhere((e) => e.message.id == 'root').summary == null,
+          !stillExists,
+        );
+        expect(
+          notifier.cachedThreadReplyIds('root').contains('live-reply'),
+          stillExists,
+        );
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions.containsKey('depth_limit'),
+          ),
+          hasLength(1),
+        );
+      },
+    );
+  }
+
   for (final outcome in ['deleted', 'surviving', 'unavailable']) {
     test(
       'WebSocket fallback reconciles cached thread truth: $outcome',

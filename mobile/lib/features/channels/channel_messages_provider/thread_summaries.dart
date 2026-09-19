@@ -22,17 +22,22 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     // The summary may lag a new reply, or its deletion marker may have been
     // missed. A fresh complete query resolves either case without discarding
     // valid local payloads merely because a summary count is lower.
-    (_deletionSummaryUncertainty[root] ??= _DeletionSummaryUncertainty()).begin(
-      _threadQueryVersions[root]!,
-    );
-    _queueOverflowSummary(root);
+    _queueOverflowSummary(root, countPending: true);
   }
 
   void _reconcileFallbackSummaries(int historyVersion) {
     // A bounded WebSocket history is not proof that an absent reply was deleted.
     // Recount visible cached aggregates, marking their old totals uncertain in
     // the meantime. Requests or live summaries newer than this history win.
-    final roots = {..._queryThreadSummaries.keys, ..._overflowFloors.keys};
+    final roots = {
+      ..._queryThreadSummaries.keys,
+      ..._overflowFloors.keys,
+      for (final event in _windowStore.liveOverlay)
+        if (event.threadReference.parentId != null &&
+            event.threadReference.rootId != null &&
+            !_localReplyRoots.containsKey(event.id))
+          event.threadReference.rootId!,
+    };
     for (final root in roots) {
       if ((_threadQueryVersions[root] ?? 0) > historyVersion) continue;
       _setThreadQueryVersion(root, historyVersion);
@@ -43,13 +48,11 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
         _summaryRefreshes.cancel(root);
         continue;
       }
-      (_deletionSummaryUncertainty[root] ??= _DeletionSummaryUncertainty())
-          .begin(historyVersion);
-      _queueOverflowSummary(root);
+      _queueOverflowSummary(root, countPending: true);
     }
   }
 
-  void _queueOverflowSummary(String root) {
+  void _queueOverflowSummary(String root, {bool countPending = false}) {
     if (!_isVisibleRoot(root)) return;
     final ids = cachedThreadReplyIds(root)..removeAll(_localReplyRoots.keys);
     final events =
@@ -72,7 +75,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
           previous?.participantPubkeys ??
           events.reversed.map((event) => event.pubkey).toSet().take(5).toList(),
       isLowerBound: true,
-      isCountPending: previous?.isCountPending ?? false,
+      isCountPending: countPending || (previous?.isCountPending ?? false),
     );
     while (_overflowFloors.length > 2048) {
       _overflowFloors.remove(_overflowFloors.keys.first);
