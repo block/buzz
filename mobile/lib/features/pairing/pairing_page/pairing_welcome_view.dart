@@ -112,7 +112,7 @@ class _PairingWelcomeView extends StatelessWidget {
                           transitionBuilder: (child, animation) {
                             return SizeTransition(
                               sizeFactor: animation,
-                              axisAlignment: -1,
+                              alignment: Alignment(-1.0, -1.0),
                               child: FadeTransition(
                                 opacity: animation,
                                 child: child,
