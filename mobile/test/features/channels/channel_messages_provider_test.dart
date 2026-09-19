@@ -2225,6 +2225,129 @@ void main() {
     },
   );
 
+  for (final olderCount in [0, 3]) {
+    test(
+      'pagination reconciles pinned-root query totals to $olderCount',
+      () async {
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              _event(id: 'newest', createdAt: 100),
+              _bounds(hasMore: true, cursorCreatedAt: 100, cursorId: 'newest'),
+            ],
+            [
+              _event(id: 'old-root', createdAt: 10),
+              if (olderCount > 0)
+                _summary(rootId: 'old-root', replyCount: olderCount),
+              _bounds(dTag: '${_channelId.toLowerCase()}:100:newest'),
+            ],
+            if (olderCount == 0) <NostrEvent>[],
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        final load = notifier.loadEventsById(['old-root']);
+        session.completeTargetHistory([_event(id: 'old-root', createdAt: 10)]);
+        await load;
+        notifier.cacheCompleteThreadQuery('old-root', {}, [
+          _event(
+            id: 'old-reply',
+            createdAt: 20,
+            extraTags: const [
+              ['e', 'old-root', '', 'reply'],
+            ],
+          ),
+        ]);
+        expect(notifier.threadSummaries['old-root']?.descendantCount, 1);
+        expect(await notifier.fetchOlder(), isTrue);
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        expect(
+          notifier.threadSummaries['old-root']?.descendantCount,
+          olderCount,
+        );
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(
+          entries
+              .singleWhere((entry) => entry.message.id == 'old-root')
+              .summary
+              ?.replyCount,
+          olderCount == 0 ? null : olderCount,
+        );
+      },
+    );
+  }
+
+  test(
+    'continued replies do not restart an active paginated recount',
+    () async {
+      final replies = [
+        for (var i = 0; i < 603; i++)
+          _event(
+            id: 'reply-$i',
+            createdAt: 20 + i,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+      ];
+      final gates = [for (var i = 0; i < 4; i++) Completer<List<NostrEvent>>()];
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+          for (final gate in gates) gate.future,
+          for (var i = 0; i < 603; i += 200) replies.skip(i).take(200).toList(),
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      for (final reply in replies.take(300)) {
+        session.emit(reply);
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      for (var page = 0; page < 3; page++) {
+        session.emit(replies[600 + page]);
+        gates[page].complete(replies.skip(page * 200).take(200).toList());
+        await _pumpEventQueue();
+        final scans = session.queryFilters
+            .where((filter) => filter.extensions.containsKey('depth_limit'))
+            .toList();
+        expect(scans, hasLength(page + 2));
+        expect(
+          scans.last.extensions['thread_cursor'],
+          replies[(page + 1) * 200 - 1].createdAt,
+        );
+      }
+      gates.last.complete([]);
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      expect(notifier.threadSummaries['root']?.descendantCount, 603);
+      expect(notifier.threadSummaries['root']?.isLowerBound, isTrue);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(notifier.threadSummaries['root']?.descendantCount, 603);
+      expect(notifier.threadSummaries['root']?.isLowerBound, isFalse);
+      expect(
+        session.queryFilters.where(
+          (filter) => filter.extensions.containsKey('depth_limit'),
+        ),
+        hasLength(8),
+      );
+    },
+  );
+
   test('a reply newer than the relay recount raises the badge', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [

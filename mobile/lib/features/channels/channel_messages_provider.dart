@@ -193,17 +193,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _liveSummaryRootsDuringInitialWindowQuery.clear();
       _pruneOffWindowReplies();
       _usingChannelWindow = true;
-      for (final row in page.rows) {
-        final root = row.event.id;
-        _queryThreadSummaries.remove(root);
-        _overflowFloors.remove(root);
-        _summaryRefreshes.cancel(root);
-        beginThreadQuery(root);
-        if (cachedThreadReplyIds(root).length >
-            (row.thread?.descendantCount ?? 0)) {
-          _queueOverflowSummary(root);
-        }
-      }
+      _reconcilePageSummaries(page);
       _reachedOldest = !channelWindowHasMore(_windowStore);
       return flattenChannelWindowEvents(_windowStore);
     } catch (error) {
@@ -218,6 +208,20 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       );
       history.sort(compareChannelTimelineEventsChronologically);
       return history;
+    }
+  }
+
+  void _reconcilePageSummaries(ChannelWindowPage page) {
+    for (final row in page.rows) {
+      final root = row.event.id;
+      _queryThreadSummaries.remove(root);
+      _overflowFloors.remove(root);
+      _summaryRefreshes.cancel(root);
+      beginThreadQuery(root);
+      if (cachedThreadReplyIds(root).length >
+          (row.thread?.descendantCount ?? 0)) {
+        _queueOverflowSummary(root);
+      }
     }
   }
 
@@ -526,21 +530,21 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ref.mounted &&
         _hasListeners &&
         generation == _initVersion &&
-        _threadQueryVersions[root] == version &&
-        !_summaryRefreshes.isDirty(root);
+        _threadQueryVersions[root] == version;
     try {
       final replies = await fetchCompleteThreadReplies(
         ref.read(relaySessionProvider.notifier),
         ThreadRepliesArgs(channelId: channelId, rootId: root),
         isCurrent: current,
       );
-      if (current() && !_summaryRefreshes.isDirty(root)) {
+      if (current()) {
         cacheCompleteThreadQuery(
           root,
           snapshot,
           replies,
           queryVersion: version,
         );
+        if (_summaryRefreshes.isDirty(root)) _queueOverflowSummary(root);
       }
     } catch (error) {
       if (current()) {
@@ -929,6 +933,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       try {
         final page = await _fetchWindowPage(session, cursor);
         _windowStore = appendOlderChannelWindow(_windowStore, page);
+        _reconcilePageSummaries(page);
         _reachedOldest = !channelWindowHasMore(_windowStore);
         final flattened = _withDeepLinkEvents(
           flattenChannelWindowEvents(_windowStore),
