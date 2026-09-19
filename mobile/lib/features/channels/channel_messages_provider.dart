@@ -33,6 +33,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final Map<String, NostrEvent> _deepLinkEvents = {};
   final Set<String> _retainedDeepLinkEventIds = {};
   final Map<String, String> _localReplyRoots = {};
+  final Map<String, ChannelWindowThreadSummary> _queryThreadSummaries = {};
 
   ChannelMessagesNotifier(this.channelId);
 
@@ -46,8 +47,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// empty value returned while the relay is not yet connected.
   bool get hasLoadedMessages => _lastKnownMessages != null;
 
-  Map<String, ChannelWindowThreadSummary> get threadSummaries =>
-      channelWindowThreadSummaries(_windowStore);
+  Map<String, ChannelWindowThreadSummary> get threadSummaries => {
+    ...channelWindowThreadSummaries(_windowStore),
+    ..._queryThreadSummaries,
+  };
 
   @override
   AsyncValue<List<NostrEvent>> build() {
@@ -327,6 +330,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           _retainedDeepLinkEventIds.contains(thread?.rootId),
     );
     if (identical(next, _windowStore)) return false;
+    if (event.kind == EventKind.channelThreadSummary) {
+      _queryThreadSummaries.remove(event.getTagValue('e'));
+    }
     _windowStore = next;
     _trimReplyOverlay();
     return true;
@@ -407,15 +413,34 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         .confirm(eventIds);
   }
 
-  /// Snapshots cached overlay replies covered by a query for this outer root.
-  Set<String> cachedThreadReplyIds(String rootId) => {
+  /// Snapshots unacknowledged replies that still require explicit deletion proof.
+  Set<String> unconfirmedThreadReplyIds(String rootId) => {
     for (final entry in _localReplyRoots.entries)
       if (entry.value == rootId) entry.key,
-    for (final event in _windowStore.liveOverlay)
-      if (event.threadReference.parentId != null &&
-          event.threadReference.rootId == rootId)
-        event.id,
   };
+
+  /// Snapshots cached overlay replies covered by a query for this outer root.
+  Set<String> cachedThreadReplyIds(String rootId) {
+    final deletedIds = {
+      for (final event in [
+        ..._windowStore.liveAux,
+        for (final page in _windowStore.pages) ...page.aux,
+      ])
+        if (event.kind == EventKind.deletion ||
+            event.kind == EventKind.nip29DeleteEvent)
+          for (final tag in event.tags)
+            if (tag.length > 1 && tag[0] == 'e') tag[1],
+    };
+    return {
+      for (final entry in _localReplyRoots.entries)
+        if (entry.value == rootId && !deletedIds.contains(entry.key)) entry.key,
+      for (final event in _windowStore.liveOverlay)
+        if (event.threadReference.parentId != null &&
+            event.threadReference.rootId == rootId &&
+            !deletedIds.contains(event.id))
+          event.id,
+    };
+  }
 
   /// Applies explicit deletion evidence fetched for cached replies.
   void cacheThreadDeletions(Iterable<NostrEvent> deletions) {
@@ -468,6 +493,63 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     );
     // Keep the currently displayed snapshot intact until the next window
     // publication drops off-window roots and their reply evidence together.
+  }
+
+  /// Publishes an insertion-complete thread scan, preserving aggregate facts
+  /// before payload eviction. Only absent pre-query, accepted IDs are removed;
+  /// in-flight sends and arrivals after the query began remain provisional.
+  void cacheCompleteThreadQuery(
+    String rootId,
+    Set<String> queriedIds,
+    List<NostrEvent> replies,
+  ) {
+    final resultIds = replies.map((event) => event.id).toSet();
+    final missing = queriedIds.difference(resultIds)
+      ..removeAll(_localReplyRoots.keys);
+    final later = _windowStore.liveOverlay
+        .where(
+          (event) =>
+              event.threadReference.rootId == rootId &&
+              !queriedIds.contains(event.id) &&
+              !resultIds.contains(event.id),
+        )
+        .toList();
+    _windowStore = ChannelWindowStore(
+      pages: _windowStore.pages,
+      liveOverlay: _windowStore.liveOverlay
+          .where((event) => !missing.contains(event.id))
+          .toList(),
+      liveAux: _windowStore.liveAux,
+      liveThreadSummaries: _windowStore.liveThreadSummaries,
+    );
+    final current = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
+    final remaining = current
+        .where((event) => !missing.contains(event.id))
+        .toList();
+    _lastKnownMessages = remaining;
+    state = AsyncData(remaining);
+    final aggregate = {
+      ...{for (final event in replies) event.id: event},
+      ...{for (final event in later) event.id: event},
+    }.values.toList()..sort(compareThreadRepliesChronologically);
+    _queryThreadSummaries.remove(rootId);
+    _queryThreadSummaries[rootId] = ChannelWindowThreadSummary(
+      replyCount: aggregate
+          .where((event) => event.threadReference.parentId == rootId)
+          .length,
+      descendantCount: aggregate.length,
+      lastReplyAt: aggregate.isEmpty ? null : aggregate.last.createdAt,
+      participantPubkeys: aggregate.reversed
+          .map((event) => event.pubkey)
+          .toSet()
+          .take(5)
+          .toList(),
+    );
+    // Metadata is small but still bounded independently of payload retention.
+    while (_queryThreadSummaries.length > 2048) {
+      _queryThreadSummaries.remove(_queryThreadSummaries.keys.first);
+    }
+    cacheConfirmedThreadReplies(replies);
   }
 
   /// Caches confirmed thread replies before their optimistic overlay is cleared.
@@ -527,11 +609,16 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _handleLiveEvent(event, authoritative: false);
   }
 
-  /// Releases rollback ownership after the publish future succeeds. The
-  /// optimistic row (and any thread overlay) remains visible until relay data
-  /// replaces it, because OK and EVENT delivery are unordered.
+  /// Releases rollback ownership after the publish future succeeds.
+  /// Accepted replies move into the bounded channel cache even if the relay's
+  /// EVENT echo never arrives, so an unobserved thread overlay can dispose.
   void completeLocalMessage(String eventId) {
-    _confirmLocalMessages([eventId]);
+    final accepted = ref
+        .read(pendingLocalMessagesProvider(channelId).notifier)
+        .take(eventId);
+    if (accepted?.threadReference.parentId != null) {
+      cacheConfirmedThreadReplies([accepted!]);
+    }
   }
 
   /// Rolls back a local message when its publish is rejected or times out.

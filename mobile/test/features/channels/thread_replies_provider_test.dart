@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 class _FakeRelaySession extends RelaySessionNotifier {
   int queryCount = 0;
+  final filtersSeen = <NostrFilter>[];
   List<NostrEvent> replies = const [];
   Completer<List<NostrEvent>>? nextQueryGate;
 
@@ -24,6 +25,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     queryCount++;
+    filtersSeen.addAll(filters);
     final gate = nextQueryGate;
     if (gate != null) {
       nextQueryGate = null;
@@ -48,6 +50,29 @@ NostrEvent _reply(String id, int createdAt) => NostrEvent(
 
 void main() {
   const args = ThreadRepliesArgs(channelId: 'chan', rootId: 'root');
+
+  test(
+    'origin cursor includes epoch-zero events in an exhaustive scan',
+    () async {
+      final session = _FakeRelaySession()..replies = [_reply('epoch', 0)];
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.listen(threadRepliesProvider(args), (_, _) {});
+      expect(
+        (await container.read(
+          threadRepliesProvider(args).future,
+        )).single.createdAt,
+        0,
+      );
+      expect(session.filtersSeen.single.extensions['thread_cursor'], -1);
+      expect(
+        session.filtersSeen.single.extensions['thread_cursor_id'],
+        '0' * 64,
+      );
+    },
+  );
 
   test(
     'disposes empty local overlays after their last listener leaves',

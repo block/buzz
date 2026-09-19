@@ -49,18 +49,28 @@ final threadRepliesProvider = FutureProvider.autoDispose
           ? ref.read(channelProvider.notifier)
           : null;
       final cachedReplyIds = channelMessages?.cachedThreadReplyIds(args.rootId);
+      final unconfirmedIds = channelMessages?.unconfirmedThreadReplyIds(
+        args.rootId,
+      );
       final replies = <NostrEvent>[];
-      _ThreadCursor? cursor;
+      // Start before every valid (nonnegative) Nostr timestamp. A cursor
+      // selects the relay's insertion-complete scan with writer-verified EOF,
+      // unlike a cursor-null head read, which permits bounded stale omissions.
+      _ThreadCursor? cursor = const _ThreadCursor(
+        createdAt: -1,
+        eventId:
+            '0000000000000000000000000000000000000000000000000000000000000000',
+      );
       for (var page = 0; page < 500; page++) {
         final events = await session.queryRelay([
           _threadRepliesFilter(args, cursor),
         ]);
         replies.addAll(events);
         if (events.length < 200) {
-          // A successful head page can be bounded-stale. Missing IDs are
-          // candidates for a deletion lookup, never proof of deletion.
+          // Explicit markers also settle unacknowledged local sends, whose
+          // absence cannot prove deletion even in an insertion-complete scan.
           final missingIds =
-              cachedReplyIds?.difference(
+              unconfirmedIds?.difference(
                 replies.map((event) => event.id).toSet(),
               ) ??
               <String>{};
@@ -89,7 +99,11 @@ final threadRepliesProvider = FutureProvider.autoDispose
           }
           if (ref.mounted && ref.exists(channelProvider)) {
             final channel = ref.read(channelProvider.notifier);
-            channel.cacheConfirmedThreadReplies(replies);
+            channel.cacheCompleteThreadQuery(
+              args.rootId,
+              cachedReplyIds ?? {},
+              replies,
+            );
             if (deletions.isNotEmpty) channel.cacheThreadDeletions(deletions);
           }
           return replies;
