@@ -107,12 +107,14 @@ Map<String, ChannelWindowThreadSummary> lowerBoundSummariesAfterDeletion(
   final remaining = <String?, int>{};
   for (final event in byId.values) {
     if (!EventKind.channelTimelineContentKinds.contains(event.kind) ||
-        event.threadReference.parentId == null)
+        event.threadReference.parentId == null) {
       continue;
+    }
     final root = event.threadReference.rootId;
     cached[root] = (cached[root] ?? 0) + 1;
-    if (!deleted.contains(event.id))
+    if (!deleted.contains(event.id)) {
       remaining[root] = (remaining[root] ?? 0) + 1;
+    }
   }
   return {
     for (final entry in summaries.entries)

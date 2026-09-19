@@ -109,8 +109,9 @@ Future<List<NostrEvent>> fetchCompleteThreadReplies(
     eventId: '0000000000000000000000000000000000000000000000000000000000000000',
   );
   for (var page = 0; page < 500; page++) {
-    if (isCurrent != null && !isCurrent())
+    if (isCurrent != null && !isCurrent()) {
       throw StateError('Thread scan superseded');
+    }
     final events = await session.queryRelay([
       _threadRepliesFilter(args, cursor),
     ]);

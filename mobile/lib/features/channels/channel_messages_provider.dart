@@ -542,10 +542,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         );
       }
     } catch (error) {
-      if (current())
+      if (current()) {
         debugPrint(
           '[ChannelMessagesNotifier] thread recount failed for $root: $error',
         );
+      }
     }
   }
 
@@ -668,8 +669,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     List<NostrEvent> replies, {
     int? queryVersion,
   }) {
-    if (queryVersion != null && _threadQueryVersions[rootId] != queryVersion)
+    if (queryVersion != null && _threadQueryVersions[rootId] != queryVersion) {
       return;
+    }
     _overflowFloors.remove(rootId);
     final resultIds = replies.map((event) => event.id).toSet();
     final missing = queriedIds.difference(resultIds)
@@ -790,8 +792,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       cacheConfirmedThreadReplies([accepted!]);
       final root = accepted.threadReference.rootId;
       if (root != null &&
-          cachedThreadReplyIds(root).length >= _maxCachedRepliesPerRoot)
+          cachedThreadReplyIds(root).length >= _maxCachedRepliesPerRoot) {
         _queueOverflowSummary(root);
+      }
     }
   }
 
