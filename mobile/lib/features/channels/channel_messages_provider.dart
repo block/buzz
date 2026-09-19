@@ -43,6 +43,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   int _threadQuerySerial = 0;
   final _deletionSummaryUncertainty = <String, _DeletionSummaryUncertainty>{};
   final _replyOwnership = ThreadReplyOwnership();
+  final _processedDeletionTargets = <String>{};
   bool _hasListeners = true;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
     refresh: _refreshOverflowSummary,
@@ -609,6 +610,16 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   void _pruneOffWindowReplies() {
+    _rememberDeletionTargets({
+      for (final event in [
+        ..._windowStore.liveAux,
+        for (final page in _windowStore.pages) ...page.aux,
+      ])
+        if (event.kind == EventKind.deletion ||
+            event.kind == EventKind.nip29DeleteEvent)
+          for (final tag in event.tags)
+            if (tag.length > 1 && tag[0] == 'e') tag[1],
+    });
     final roots = {
       for (final page in _windowStore.pages)
         for (final row in page.rows) row.event.id,

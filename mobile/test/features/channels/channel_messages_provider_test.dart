@@ -2779,6 +2779,93 @@ void main() {
     );
   });
 
+  test('reconnect pruning preserves duplicate deletion idempotence', () async {
+    final survivor = _event(
+      id: 'survivor',
+      createdAt: 21,
+      extraTags: const [
+        ['e', 'root', '', 'reply'],
+      ],
+    );
+    final session = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: 'root', createdAt: 10),
+          _summary(rootId: 'root', replyCount: 2),
+          _bounds(),
+        ],
+        [survivor],
+        [
+          _event(id: 'root', createdAt: 10),
+          // A new reply arrived while disconnected; its payload is not cached.
+          _summary(rootId: 'root', replyCount: 2),
+          _bounds(),
+        ],
+        Exception('recount unavailable'),
+      ],
+    );
+    final container = _buildContainer(session);
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    notifier.cacheConfirmedThreadReplies([
+      _event(
+        id: 'target',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      ),
+    ]);
+    NostrEvent deletion(int kind) => NostrEvent(
+      id: 'delete-$kind',
+      pubkey: 'author',
+      createdAt: 100,
+      kind: kind,
+      tags: const [
+        ['h', _channelId],
+        ['e', 'target'],
+      ],
+      content: '',
+      sig: '',
+    );
+    final snapshot = notifier.cachedThreadReplyIds('root');
+    final queryVersion = notifier.beginThreadQuery('root');
+    session.emit(deletion(EventKind.deletion));
+    notifier.cacheCompleteThreadQuery('root', snapshot, [
+      survivor,
+    ], queryVersion: queryVersion);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(notifier.cachedThreadReplyIds('root'), isNot(contains('target')));
+    session.setConnected(false);
+    await _pumpEventQueue();
+    session.setConnected(true);
+    await _pumpEventQueue();
+    session.emit(_event(id: 'after-reconnect', createdAt: 101));
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value!
+          .any((event) => event.id == 'delete-5'),
+      isFalse,
+      reason: 'the marker payload was pruned on reconnect',
+    );
+    expect(notifier.threadSummaries['root']!.descendantCount, 2);
+    session.emit(deletion(EventKind.nip29DeleteEvent));
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(notifier.threadSummaries['root']!.descendantCount, 2);
+    expect(notifier.threadSummaries['root']!.isLowerBound, isFalse);
+    expect(
+      session.queryFilters.where(
+        (filter) => filter.extensions.containsKey('depth_limit'),
+      ),
+      hasLength(1),
+    );
+  });
+
   for (final fetched in [false, true]) {
     test(
       'duplicate deletion markers decrement a partial summary only once (fetched: $fetched)',

@@ -76,6 +76,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
   void _refreshDeletedSummaries(Set<String> targets, List<NostrEvent> before) {
     _replyOwnership.record(before);
     final alreadyDeleted = {
+      ..._processedDeletionTargets,
       for (final event in before)
         if (event.kind == EventKind.deletion ||
             event.kind == EventKind.nip29DeleteEvent)
@@ -83,6 +84,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
             if (tag.length > 1 && tag[0] == 'e') tag[1],
     };
     final fresh = targets.difference(alreadyDeleted);
+    _rememberDeletionTargets(targets);
     if (fresh.isEmpty) return;
     final candidates = _applyDeletedSummaries(fresh, before);
     final unknown = fresh
@@ -94,6 +96,16 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
         .take(100)
         .toSet();
     if (unknown.isNotEmpty) _resolveDeletionOwners(unknown, candidates);
+  }
+
+  void _rememberDeletionTargets(Iterable<String> targets) {
+    for (final target in targets) {
+      _processedDeletionTargets.remove(target);
+      _processedDeletionTargets.add(target);
+    }
+    while (_processedDeletionTargets.length > 8192) {
+      _processedDeletionTargets.remove(_processedDeletionTargets.first);
+    }
   }
 
   Set<String> _applyDeletedSummaries(
