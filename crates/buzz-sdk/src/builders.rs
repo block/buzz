@@ -189,7 +189,12 @@ fn thread_tags(thread_ref: &ThreadRef, tags: &mut Vec<Tag>) -> Result<(), SdkErr
     Ok(())
 }
 
-/// Deduplicate and cap mentions, emitting p-tags.
+/// Deduplicate and cap intentional mentions.
+///
+/// Emits both `["p", hex]` (delivery / subscription fan-out) and
+/// `["mention", hex]` (explicit intent marker). Relay offline-agent notices
+/// (#1743 / #2296) gate on `mention` only so structural reply-author `p`
+/// tags never false-trigger.
 fn mention_tags(mentions: &[&str], tags: &mut Vec<Tag>) -> Result<(), SdkError> {
     if mentions.len() > crate::mentions::MENTION_CAP {
         return Err(SdkError::TooManyMentions);
@@ -199,6 +204,7 @@ fn mention_tags(mentions: &[&str], tags: &mut Vec<Tag>) -> Result<(), SdkError> 
         let lower = hex.to_ascii_lowercase();
         if seen.insert(lower.clone()) {
             tags.push(tag(&["p", &lower])?);
+            tags.push(tag(&["mention", &lower])?);
         }
     }
     Ok(())
@@ -233,7 +239,8 @@ fn nip30_emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(
 /// - `channel_id`: target channel UUID
 /// - `content`: message text (max 64 KiB)
 /// - `thread_ref`: optional NIP-10 reply context
-/// - `mentions`: pubkey hex strings to p-tag (deduped, max 50)
+/// - `mentions`: pubkey hex strings for intentional @mentions (deduped, max 50);
+///   emits both `p` and `mention` tags
 /// - `broadcast`: if true, adds `["broadcast", "1"]` tag
 /// - `media_tags`: raw imeta tag vectors
 /// - `emoji_tags`: NIP-30 `["emoji", shortcode, url]` tag vectors
@@ -2556,6 +2563,18 @@ mod tests {
         let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[], &[]).unwrap());
         let p_tags = tag_values(&ev, "p");
         assert_eq!(p_tags.len(), 1);
+        let mention_tags = tag_values(&ev, "mention");
+        assert_eq!(mention_tags, vec![hex.to_string()]);
+    }
+
+    #[test]
+    fn message_mentions_emit_parallel_p_and_mention() {
+        let cid = uuid();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let ev = sign(build_message(cid, "hi @a @b", None, &[&a, &b], false, &[]).unwrap());
+        assert_eq!(tag_values(&ev, "p"), vec![a.clone(), b.clone()]);
+        assert_eq!(tag_values(&ev, "mention"), vec![a, b]);
     }
 
     #[test]

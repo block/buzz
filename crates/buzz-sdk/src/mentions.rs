@@ -15,7 +15,7 @@
 //!                                                          │
 //! body text ──► strip_code_regions ──► extract_nostr_uris ─┤
 //!                                                          ▼
-//!                            explicit mentions ──► normalize ──► merge_mentions ──► p-tags
+//!                            explicit mentions ──► normalize ──► merge_mentions ──► p + mention tags
 //! ```
 //!
 //! When the set of known member names is available upfront,
@@ -31,7 +31,7 @@ use std::collections::HashSet;
 
 use nostr::{FromBech32, PublicKey};
 
-/// Maximum number of mention p-tags allowed on a single message.
+/// Maximum number of intentional mentions allowed on a single message.
 ///
 /// Matches the cap enforced by Buzz message builders and the legacy MCP
 /// inline implementation.
