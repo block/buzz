@@ -16,11 +16,15 @@ class ChannelWindowThreadSummary {
   final int? lastReplyAt;
   final List<String> participantPubkeys;
 
+  /// True while capped evidence awaits a complete recount.
+  final bool isLowerBound;
+
   const ChannelWindowThreadSummary({
     required this.replyCount,
     required this.descendantCount,
     required this.lastReplyAt,
     required this.participantPubkeys,
+    this.isLowerBound = false,
   });
 }
 

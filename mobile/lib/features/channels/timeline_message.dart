@@ -219,6 +219,9 @@ class ThreadSummary {
   final String threadHeadId;
   final int replyCount;
 
+  /// Whether this count is a minimum pending a complete recount.
+  final bool isLowerBound;
+
   /// Up to 3 most recent unique participant pubkeys.
   final List<String> participantPubkeys;
   final int? lastReplyAt;
@@ -226,6 +229,7 @@ class ThreadSummary {
   const ThreadSummary({
     required this.threadHeadId,
     required this.replyCount,
+    this.isLowerBound = false,
     required this.participantPubkeys,
     this.lastReplyAt,
   });
@@ -576,6 +580,7 @@ ThreadSummary? _buildSummary(
 
   return ThreadSummary(
     threadHeadId: messageId,
+    isLowerBound: relay.isLowerBound,
     replyCount: local.replyCount > relay.replyCount
         ? local.replyCount
         : relay.replyCount,
@@ -688,6 +693,7 @@ ThreadSummary? _buildRelaySummary(
   return ThreadSummary(
     threadHeadId: messageId,
     replyCount: relaySummary.descendantCount,
+    isLowerBound: relaySummary.isLowerBound,
     participantPubkeys: relaySummary.participantPubkeys.take(3).toList(),
     lastReplyAt: relaySummary.lastReplyAt,
   );

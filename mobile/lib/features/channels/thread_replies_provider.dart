@@ -52,67 +52,75 @@ final threadRepliesProvider = FutureProvider.autoDispose
       final unconfirmedIds = channelMessages?.unconfirmedThreadReplyIds(
         args.rootId,
       );
-      final replies = <NostrEvent>[];
-      // Start before every valid (nonnegative) Nostr timestamp. A cursor
-      // selects the relay's insertion-complete scan with writer-verified EOF,
-      // unlike a cursor-null head read, which permits bounded stale omissions.
-      _ThreadCursor? cursor = const _ThreadCursor(
-        createdAt: -1,
-        eventId:
-            '0000000000000000000000000000000000000000000000000000000000000000',
-      );
-      for (var page = 0; page < 500; page++) {
-        final events = await session.queryRelay([
-          _threadRepliesFilter(args, cursor),
-        ]);
-        replies.addAll(events);
-        if (events.length < 200) {
-          // Explicit markers also settle unacknowledged local sends, whose
-          // absence cannot prove deletion even in an insertion-complete scan.
-          final missingIds =
-              unconfirmedIds?.difference(
-                replies.map((event) => event.id).toSet(),
-              ) ??
-              <String>{};
-          final deletions = <NostrEvent>[];
-          final targets = missingIds.toList();
-          // Each target has its own limit: repeated markers for one reply
-          // cannot crowd another reply out of a shared result cap.
-          for (var start = 0; start < targets.length; start += 20) {
-            final batch = targets.skip(start).take(20);
-            deletions.addAll(
-              await session.queryRelay([
-                for (final target in batch)
-                  NostrFilter(
-                    kinds: const [
-                      EventKind.deletion,
-                      EventKind.nip29DeleteEvent,
-                    ],
-                    tags: {
-                      '#h': [args.channelId],
-                      '#e': [target],
-                    },
-                    limit: 1,
-                  ),
-              ]),
-            );
-          }
-          if (ref.mounted && ref.exists(channelProvider)) {
-            final channel = ref.read(channelProvider.notifier);
-            channel.cacheCompleteThreadQuery(
-              args.rootId,
-              cachedReplyIds ?? {},
-              replies,
-            );
-            if (deletions.isNotEmpty) channel.cacheThreadDeletions(deletions);
-          }
-          return replies;
-        }
-        final last = events.last;
-        cursor = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
+      final queryVersion = channelMessages?.beginThreadQuery(args.rootId);
+      final replies = await fetchCompleteThreadReplies(session, args);
+      // Explicit markers also settle unacknowledged local sends, whose
+      // absence cannot prove deletion even in an insertion-complete scan.
+      final missingIds =
+          unconfirmedIds?.difference(
+            replies.map((event) => event.id).toSet(),
+          ) ??
+          <String>{};
+      final deletions = <NostrEvent>[];
+      final targets = missingIds.toList();
+      // Each target has its own limit: repeated markers for one reply
+      // cannot crowd another reply out of a shared result cap.
+      for (var start = 0; start < targets.length; start += 20) {
+        final batch = targets.skip(start).take(20);
+        deletions.addAll(
+          await session.queryRelay([
+            for (final target in batch)
+              NostrFilter(
+                kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
+                tags: {
+                  '#h': [args.channelId],
+                  '#e': [target],
+                },
+                limit: 1,
+              ),
+          ]),
+        );
       }
-      throw Exception('Thread ${args.rootId} exceeded the page safety limit.');
+      if (ref.mounted && ref.exists(channelProvider)) {
+        final channel = ref.read(channelProvider.notifier);
+        channel.cacheCompleteThreadQuery(
+          args.rootId,
+          cachedReplyIds ?? {},
+          replies,
+          queryVersion: queryVersion,
+        );
+        if (deletions.isNotEmpty) channel.cacheThreadDeletions(deletions);
+      }
+      return replies;
     });
+
+/// Exhaustively scans a thread using insertion-complete cursor pages.
+/// [isCurrent] lets a background refresh stop between pages after disposal.
+Future<List<NostrEvent>> fetchCompleteThreadReplies(
+  RelaySessionNotifier session,
+  ThreadRepliesArgs args, {
+  bool Function()? isCurrent,
+}) async {
+  final replies = <NostrEvent>[];
+  // -1 precedes unsigned Nostr timestamps. A non-null cursor selects the
+  // insertion-complete route and writer-verified EOF instead of a stale head.
+  _ThreadCursor? cursor = const _ThreadCursor(
+    createdAt: -1,
+    eventId: '0000000000000000000000000000000000000000000000000000000000000000',
+  );
+  for (var page = 0; page < 500; page++) {
+    if (isCurrent != null && !isCurrent())
+      throw StateError('Thread scan superseded');
+    final events = await session.queryRelay([
+      _threadRepliesFilter(args, cursor),
+    ]);
+    replies.addAll(events);
+    if (events.length < 200) return replies;
+    final last = events.last;
+    cursor = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
+  }
+  throw Exception('Thread ${args.rootId} exceeded the page safety limit.');
+}
 
 NostrFilter _threadRepliesFilter(
   ThreadRepliesArgs args,

@@ -614,7 +614,7 @@ class _ThreadSummaryRow extends ConsumerWidget {
                   children: [
                     TextSpan(
                       text:
-                          '${summary.replyCount} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
+                          '${summary.replyCount}${summary.isLowerBound ? '+' : ''} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
                       style: replyPreviewTextStyle.copyWith(
                         color: context.colors.primary,
                       ),

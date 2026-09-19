@@ -6,6 +6,7 @@ import 'channel_event_order.dart';
 import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
+import 'thread_summary_refresh_queue.dart';
 
 // Channel history keeps partial reply evidence; full threads stay route-scoped.
 const _maxCachedRepliesPerRoot = 256;
@@ -34,6 +35,21 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final Set<String> _retainedDeepLinkEventIds = {};
   final Map<String, String> _localReplyRoots = {};
   final Map<String, ChannelWindowThreadSummary> _queryThreadSummaries = {};
+  final Map<String, ChannelWindowThreadSummary> _overflowFloors = {};
+  final Map<String, int> _threadQueryVersions = {};
+  int _threadQuerySerial = 0;
+  bool _hasListeners = true;
+  late final _summaryRefreshes = ThreadSummaryRefreshQueue(
+    refresh: _refreshOverflowSummary,
+    canRun: () =>
+        ref.mounted &&
+        _hasListeners &&
+        ref.read(relaySessionProvider).status == SessionStatus.connected,
+    onSettled: () {
+      final events = _lastKnownMessages;
+      if (events != null) state = AsyncData(events.toList());
+    },
+  );
 
   ChannelMessagesNotifier(this.channelId);
 
@@ -50,13 +66,23 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   Map<String, ChannelWindowThreadSummary> get threadSummaries => {
     ...channelWindowThreadSummaries(_windowStore),
     ..._queryThreadSummaries,
+    ..._overflowFloors,
   };
 
   @override
   AsyncValue<List<NostrEvent>> build() {
     final sessionState = ref.watch(relaySessionProvider);
+    ref.onCancel(() {
+      _hasListeners = false;
+      _summaryRefreshes.pause();
+    });
+    ref.onResume(() {
+      _hasListeners = true;
+      Future.microtask(_summaryRefreshes.resume);
+    });
     ref.onDispose(() {
       _initVersion++;
+      _summaryRefreshes.pause();
       _clearSubscription();
     });
 
@@ -133,6 +159,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       ]);
       _lastKnownMessages = merged;
       state = AsyncData(merged);
+      _summaryRefreshes.resume();
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
       final fallbackMessages = state.value ?? _lastKnownMessages;
@@ -166,6 +193,17 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _liveSummaryRootsDuringInitialWindowQuery.clear();
       _pruneOffWindowReplies();
       _usingChannelWindow = true;
+      for (final row in page.rows) {
+        if (row.thread == null) continue;
+        final root = row.event.id;
+        _queryThreadSummaries.remove(root);
+        _overflowFloors.remove(root);
+        _summaryRefreshes.cancel(root);
+        beginThreadQuery(root);
+        if (cachedThreadReplyIds(root).length > row.thread!.descendantCount) {
+          _queueOverflowSummary(root);
+        }
+      }
       _reachedOldest = !channelWindowHasMore(_windowStore);
       return flattenChannelWindowEvents(_windowStore);
     } catch (error) {
@@ -238,7 +276,21 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _lastKnownMessages = merged;
       state = AsyncData(merged);
     }
+    final rootId = event.threadReference.rootId;
+    if (event.threadReference.parentId != null &&
+        rootId != null &&
+        cachedThreadReplyIds(rootId).length >= _maxCachedRepliesPerRoot) {
+      _queueOverflowSummary(rootId);
+    }
     if (authoritative) {
+      if (event.kind == EventKind.deletion ||
+          event.kind == EventKind.nip29DeleteEvent) {
+        final targets = event.tags
+            .where((tag) => tag.length > 1 && tag[0] == 'e')
+            .map((tag) => tag[1])
+            .toSet();
+        _refreshDeletedSummaries(targets, _lastKnownMessages ?? []);
+      }
       if (event.kind == EventKind.deletion ||
           event.kind == EventKind.nip29DeleteEvent) {
         _confirmIndexedLocalReplies(
@@ -331,7 +383,13 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     );
     if (identical(next, _windowStore)) return false;
     if (event.kind == EventKind.channelThreadSummary) {
-      _queryThreadSummaries.remove(event.getTagValue('e'));
+      final root = event.getTagValue('e');
+      if (root != null) {
+        _queryThreadSummaries.remove(root);
+        _overflowFloors.remove(root);
+        _summaryRefreshes.cancel(root);
+        beginThreadQuery(root);
+      }
     }
     _windowStore = next;
     _trimReplyOverlay();
@@ -380,6 +438,14 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (replies.length <= _maxCachedRepliesPerRoot) return;
     final retained = _boundedReplies(replies).map((event) => event.id).toSet();
     if (retained.length == replies.length) return;
+    for (final root
+        in replies
+            .where((event) => !retained.contains(event.id))
+            .map((event) => event.threadReference.rootId)
+            .whereType<String>()
+            .toSet()) {
+      if (!_queryThreadSummaries.containsKey(root)) _queueOverflowSummary(root);
+    }
     _windowStore = ChannelWindowStore(
       pages: _windowStore.pages,
       liveOverlay: _windowStore.liveOverlay
@@ -413,6 +479,87 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         .confirm(eventIds);
   }
 
+  bool _isVisibleRoot(String root) =>
+      _retainedDeepLinkEventIds.contains(root) ||
+      _windowStore.pages.any(
+        (page) => page.rows.any((row) => row.event.id == root),
+      ) ||
+      _windowStore.liveOverlay.any((event) => event.id == root);
+
+  void _queueOverflowSummary(String root) {
+    if (!_isVisibleRoot(root)) return;
+    final ids = cachedThreadReplyIds(root)..removeAll(_localReplyRoots.keys);
+    final events =
+        _windowStore.liveOverlay
+            .where((event) => ids.contains(event.id))
+            .toList()
+          ..sort(compareThreadRepliesChronologically);
+    final previous = threadSummaries[root];
+    final count = (previous?.descendantCount ?? 0) > ids.length
+        ? previous!.descendantCount
+        : ids.length;
+    _overflowFloors.remove(root);
+    _overflowFloors[root] = ChannelWindowThreadSummary(
+      replyCount: count,
+      descendantCount: count,
+      lastReplyAt:
+          previous?.lastReplyAt ??
+          (events.isEmpty ? null : events.last.createdAt),
+      participantPubkeys:
+          previous?.participantPubkeys ??
+          events.reversed.map((event) => event.pubkey).toSet().take(5).toList(),
+      isLowerBound: true,
+    );
+    while (_overflowFloors.length > 2048) {
+      _overflowFloors.remove(_overflowFloors.keys.first);
+    }
+    _summaryRefreshes.enqueue(root);
+  }
+
+  Future<void> _refreshOverflowSummary(String root) async {
+    if (!_isVisibleRoot(root)) return;
+    final generation = _initVersion;
+    final version = beginThreadQuery(root);
+    final snapshot = cachedThreadReplyIds(root);
+    bool current() =>
+        ref.mounted &&
+        _hasListeners &&
+        generation == _initVersion &&
+        _threadQueryVersions[root] == version &&
+        !_summaryRefreshes.isDirty(root);
+    try {
+      final replies = await fetchCompleteThreadReplies(
+        ref.read(relaySessionProvider.notifier),
+        ThreadRepliesArgs(channelId: channelId, rootId: root),
+        isCurrent: current,
+      );
+      if (current() && !_summaryRefreshes.isDirty(root)) {
+        cacheCompleteThreadQuery(
+          root,
+          snapshot,
+          replies,
+          queryVersion: version,
+        );
+      }
+    } catch (error) {
+      if (current())
+        debugPrint(
+          '[ChannelMessagesNotifier] thread recount failed for $root: $error',
+        );
+    }
+  }
+
+  /// Fences older background/route scans from overwriting a newer request.
+  int beginThreadQuery(String rootId) {
+    final version = ++_threadQuerySerial;
+    _threadQueryVersions.remove(rootId);
+    _threadQueryVersions[rootId] = version;
+    while (_threadQueryVersions.length > 2048) {
+      _threadQueryVersions.remove(_threadQueryVersions.keys.first);
+    }
+    return version;
+  }
+
   /// Snapshots unacknowledged replies that still require explicit deletion proof.
   Set<String> unconfirmedThreadReplyIds(String rootId) => {
     for (final entry in _localReplyRoots.entries)
@@ -442,6 +589,19 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     };
   }
 
+  void _refreshDeletedSummaries(Set<String> targets, List<NostrEvent> events) {
+    final floors = lowerBoundSummariesAfterDeletion(
+      threadSummaries,
+      events,
+      targets,
+    );
+    for (final entry in floors.entries) {
+      if (!_isVisibleRoot(entry.key)) continue;
+      _overflowFloors[entry.key] = entry.value;
+      _queueOverflowSummary(entry.key);
+    }
+  }
+
   /// Applies explicit deletion evidence fetched for cached replies.
   void cacheThreadDeletions(Iterable<NostrEvent> deletions) {
     var events = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
@@ -453,6 +613,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       }
       _mergeWindowEventIntoStore(event);
       events = _mergeEvent(events, event);
+      _refreshDeletedSummaries({
+        for (final tag in event.tags)
+          if (tag.length > 1 && tag[0] == 'e') tag[1],
+      }, events);
       _confirmIndexedLocalReplies(
         event.tags
             .where((tag) => tag.length > 1 && tag[0] == 'e')
@@ -501,15 +665,21 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   void cacheCompleteThreadQuery(
     String rootId,
     Set<String> queriedIds,
-    List<NostrEvent> replies,
-  ) {
+    List<NostrEvent> replies, {
+    int? queryVersion,
+  }) {
+    if (queryVersion != null && _threadQueryVersions[rootId] != queryVersion)
+      return;
+    _overflowFloors.remove(rootId);
     final resultIds = replies.map((event) => event.id).toSet();
     final missing = queriedIds.difference(resultIds)
       ..removeAll(_localReplyRoots.keys);
+    final retainedIds = cachedThreadReplyIds(rootId);
     final later = _windowStore.liveOverlay
         .where(
           (event) =>
               event.threadReference.rootId == rootId &&
+              retainedIds.contains(event.id) &&
               !queriedIds.contains(event.id) &&
               !resultIds.contains(event.id),
         )
@@ -618,6 +788,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         .take(eventId);
     if (accepted?.threadReference.parentId != null) {
       cacheConfirmedThreadReplies([accepted!]);
+      final root = accepted.threadReference.rootId;
+      if (root != null &&
+          cachedThreadReplyIds(root).length >= _maxCachedRepliesPerRoot)
+        _queueOverflowSummary(root);
     }
   }
 

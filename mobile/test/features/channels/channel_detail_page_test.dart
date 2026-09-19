@@ -10317,6 +10317,40 @@ void main() {
       expect(findRichText('Waiting for relay echo'), findsOneWidget);
     });
 
+    testWidgets(
+      'pending recount renders a lower-bound count and remains tappable',
+      (tester) async {
+        final root = _textMsg(
+          id: 'overflow-root',
+          pubkey: 'alice',
+          content: 'Overflow thread',
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root],
+            messagesNotifier: _FakeMessagesNotifier(
+              [root],
+              summaries: const {
+                'overflow-root': ChannelWindowThreadSummary(
+                  replyCount: 256,
+                  descendantCount: 256,
+                  lastReplyAt: 1100,
+                  participantPubkeys: ['bob'],
+                  isLowerBound: true,
+                ),
+              },
+            ),
+            threadReplies: const {'overflow-root': []},
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(findRichText('256+ replies'), findsOneWidget);
+        await tester.tap(findRichText('Overflow thread'));
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
+      },
+    );
+
     testWidgets('tapping a message with unloaded replies opens its thread', (
       tester,
     ) async {
