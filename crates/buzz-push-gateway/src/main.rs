@@ -72,6 +72,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&c.database_url)
         .await?;
     let authority = Arc::new(PostgresAuthorityStore::new(pool));
+    // Refuse to open either listener unless the runtime role sees the complete
+    // schema, has the required DML grants, and cannot perform database/schema
+    // DDL. The readiness endpoint repeats this check for ongoing health.
+    authority.ready().await?;
     authority
         .reap_expired(chrono::Utc::now().timestamp())
         .await?;
