@@ -81,7 +81,8 @@ class ThreadSummaryRefreshQueue {
 }
 
 /// Conservatively adjusts known totals after explicit deletions, including
-/// targets whose payloads have been evicted. A complete recount restores exactness.
+/// targets whose payloads have been evicted. Unknown ownership preserves navigation
+/// and hides the stale number until a complete recount restores exactness.
 Map<String, ChannelWindowThreadSummary> lowerBoundSummariesAfterDeletion(
   Map<String, ChannelWindowThreadSummary> summaries,
   List<NostrEvent> events,
@@ -94,6 +95,16 @@ Map<String, ChannelWindowThreadSummary> lowerBoundSummariesAfterDeletion(
           byId[id]?.threadReference.parentId != null)
         byId[id]!.threadReference.rootId,
   };
+  final knownTargetsPerRoot = <String?, int>{};
+  for (final id in targets) {
+    final event = byId[id];
+    if (event != null &&
+        EventKind.channelTimelineContentKinds.contains(event.kind) &&
+        event.threadReference.parentId != null) {
+      final root = event.threadReference.rootId;
+      knownTargetsPerRoot[root] = (knownTargetsPerRoot[root] ?? 0) + 1;
+    }
+  }
   final hasUnknownTarget = targets.any((id) => !byId.containsKey(id));
   final deleted = {
     ...targets,
@@ -122,14 +133,18 @@ Map<String, ChannelWindowThreadSummary> lowerBoundSummariesAfterDeletion(
           (hasUnknownTarget &&
               entry.value.descendantCount > (cached[entry.key] ?? 0)))
         entry.key: ChannelWindowThreadSummary(
-          replyCount: math.max(0, entry.value.replyCount - targets.length),
+          replyCount: math.max(
+            0,
+            entry.value.replyCount - (knownTargetsPerRoot[entry.key] ?? 0),
+          ),
           descendantCount: math.max(
             remaining[entry.key] ?? 0,
-            entry.value.descendantCount - targets.length,
+            entry.value.descendantCount - (knownTargetsPerRoot[entry.key] ?? 0),
           ),
           lastReplyAt: entry.value.lastReplyAt,
           participantPubkeys: entry.value.participantPubkeys,
           isLowerBound: true,
+          isCountPending: hasUnknownTarget || entry.value.isCountPending,
         ),
   };
 }

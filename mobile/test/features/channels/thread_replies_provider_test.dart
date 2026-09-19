@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 class _FakeRelaySession extends RelaySessionNotifier {
   int queryCount = 0;
+  bool honorDepthLimit = false;
   final filtersSeen = <NostrFilter>[];
   List<NostrEvent> replies = const [];
   Completer<List<NostrEvent>>? nextQueryGate;
@@ -31,6 +32,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
       nextQueryGate = null;
       return gate.future;
     }
+    if (honorDepthLimit) {
+      final depth = filters.single.extensions['depth_limit'] as int;
+      return replies.where((event) => event.createdAt <= depth).toList();
+    }
     return replies;
   }
 }
@@ -50,6 +55,36 @@ NostrEvent _reply(String id, int createdAt) => NostrEvent(
 
 void main() {
   const args = ThreadRepliesArgs(channelId: 'chan', rootId: 'root');
+
+  test('complete scan includes a legal 80-deep reply chain', () async {
+    final session = _FakeRelaySession()
+      ..honorDepthLimit = true
+      ..replies = [
+        for (var depth = 1; depth <= 80; depth++)
+          NostrEvent(
+            id: 'reply-$depth',
+            pubkey: 'bob',
+            createdAt: depth,
+            kind: EventKind.streamMessage,
+            tags: [
+              ['h', 'chan'],
+              ['e', 'root', '', 'root'],
+              ['e', depth == 1 ? 'root' : 'reply-${depth - 1}', '', 'reply'],
+            ],
+            content: '',
+            sig: '',
+          ),
+      ];
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.listen(threadRepliesProvider(args), (_, _) {});
+    expect(
+      await container.read(threadRepliesProvider(args).future),
+      hasLength(80),
+    );
+  });
 
   test(
     'origin cursor includes epoch-zero events in an exhaustive scan',

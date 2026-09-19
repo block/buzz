@@ -135,7 +135,8 @@ NostrFilter _threadRepliesFilter(
     },
     limit: 200,
     extensions: {
-      'depth_limit': 64,
+      // The relay binds this as signed i32. Include every representable depth.
+      'depth_limit': 0x7fffffff,
       if (cursor != null) 'thread_cursor': cursor.createdAt,
       if (cursor != null) 'thread_cursor_id': cursor.eventId,
     },

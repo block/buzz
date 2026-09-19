@@ -1525,7 +1525,7 @@ void main() {
         if (count % 200 == 0) pages.add([]);
         final window = [_event(id: 'root', createdAt: 10), _bounds()];
         final session = _RecordingRelaySessionNotifier(
-          queryResults: [window, ...pages, window, ...pages],
+          queryResults: [window, ...pages, window, ...pages, ...pages],
         );
         final container = _buildContainer(session);
         addTearDown(container.dispose);
@@ -1574,6 +1574,7 @@ void main() {
         await _pumpEventQueue();
         session.setConnected(true);
         await _pumpEventQueue();
+        await Future<void>.delayed(const Duration(milliseconds: 300));
         session.emit(_event(id: 'unrelated', createdAt: 1000));
         checkSummary();
         final reopened = container.listen(
@@ -1682,7 +1683,7 @@ void main() {
       ];
       final window = [_event(id: 'root', createdAt: 10), _bounds()];
       final session = _RecordingRelaySessionNotifier(
-        queryResults: [window, ...pages, window, ...pages],
+        queryResults: [window, ...pages, window, ...pages, ...pages],
       );
       final container = _buildContainer(session);
       addTearDown(container.dispose);
@@ -1717,6 +1718,7 @@ void main() {
       await _pumpEventQueue();
       session.setConnected(true);
       await _pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 300));
       session.emit(_event(id: 'unrelated', createdAt: 1000));
       final entries = buildMainTimelineEntries(
         formatTimeline(
@@ -2082,7 +2084,11 @@ void main() {
           } else {
             session.emit(deletion);
           }
-          expect(notifier.threadSummaries['root']?.descendantCount, count - 1);
+          expect(
+            notifier.threadSummaries['root']?.descendantCount,
+            count > 256 ? count : count - 1,
+          );
+          expect(notifier.threadSummaries['root']?.isCountPending, count > 256);
           expect(notifier.threadSummaries['root']?.isLowerBound, isTrue);
           await Future<void>.delayed(const Duration(milliseconds: 300));
           expect(notifier.threadSummaries['root']?.descendantCount, count - 1);
@@ -2105,7 +2111,7 @@ void main() {
     }
   }
 
-  for (final refreshedCount in [0, 300, 700]) {
+  for (final refreshedCount in [-1, 0, 300, 700]) {
     test(
       'reconnect summary replaces queried count with $refreshedCount',
       () async {
@@ -2115,14 +2121,15 @@ void main() {
             [root, _bounds()],
             [
               root,
-              _summary(
-                rootId: 'root',
-                replyCount: refreshedCount,
-                createdAt: 1000,
-              ),
+              if (refreshedCount >= 0)
+                _summary(
+                  rootId: 'root',
+                  replyCount: refreshedCount,
+                  createdAt: 1000,
+                ),
               _bounds(),
             ],
-            if (refreshedCount == 0) <NostrEvent>[],
+            if (refreshedCount <= 0) <NostrEvent>[],
           ],
         );
         final container = _buildContainer(session);
@@ -2149,7 +2156,7 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 300));
         expect(
           notifier.threadSummaries['root']?.descendantCount,
-          refreshedCount,
+          refreshedCount < 0 ? 0 : refreshedCount,
         );
         expect(notifier.threadSummaries['root']?.isLowerBound, isFalse);
         final entries = buildMainTimelineEntries(
@@ -2163,11 +2170,60 @@ void main() {
               .singleWhere((entry) => entry.message.id == 'root')
               .summary
               ?.replyCount,
-          refreshedCount == 0 ? null : refreshedCount,
+          refreshedCount <= 0 ? null : refreshedCount,
         );
       },
     );
   }
+
+  test(
+    'unknown deletion preserves unrelated navigation after recount failure',
+    () async {
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [
+            _event(id: 'unrelated', createdAt: 10),
+            _summary(rootId: 'unrelated', replyCount: 1),
+            _bounds(),
+          ],
+          Exception('recount unavailable'),
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      session.emit(
+        NostrEvent(
+          id: 'deletion',
+          pubkey: 'author',
+          createdAt: 1000,
+          kind: EventKind.deletion,
+          tags: const [
+            ['h', _channelId],
+            ['e', 'unknown-old-reply'],
+          ],
+          content: '',
+          sig: '',
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      final summary = notifier.threadSummaries['unrelated'];
+      expect(summary?.descendantCount, 1);
+      expect(summary?.isCountPending, isTrue);
+      final entries = buildMainTimelineEntries(
+        formatTimeline(
+          container.read(channelMessagesProvider(_channelId)).value!,
+        ),
+        relaySummaries: notifier.threadSummaries,
+      );
+      expect(entries.single.summary?.replyCount, 1);
+      expect(entries.single.summary?.isCountPending, isTrue);
+    },
+  );
 
   test('a reply newer than the relay recount raises the badge', () async {
     final relaySession = _RecordingRelaySessionNotifier(

@@ -194,13 +194,13 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _pruneOffWindowReplies();
       _usingChannelWindow = true;
       for (final row in page.rows) {
-        if (row.thread == null) continue;
         final root = row.event.id;
         _queryThreadSummaries.remove(root);
         _overflowFloors.remove(root);
         _summaryRefreshes.cancel(root);
         beginThreadQuery(root);
-        if (cachedThreadReplyIds(root).length > row.thread!.descendantCount) {
+        if (cachedThreadReplyIds(root).length >
+            (row.thread?.descendantCount ?? 0)) {
           _queueOverflowSummary(root);
         }
       }
@@ -509,6 +509,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           previous?.participantPubkeys ??
           events.reversed.map((event) => event.pubkey).toSet().take(5).toList(),
       isLowerBound: true,
+      isCountPending: previous?.isCountPending ?? false,
     );
     while (_overflowFloors.length > 2048) {
       _overflowFloors.remove(_overflowFloors.keys.first);

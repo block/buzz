@@ -19,12 +19,16 @@ class ChannelWindowThreadSummary {
   /// True while capped evidence awaits a complete recount.
   final bool isLowerBound;
 
+  /// The last known total is awaiting reconciliation and should not be displayed.
+  final bool isCountPending;
+
   const ChannelWindowThreadSummary({
     required this.replyCount,
     required this.descendantCount,
     required this.lastReplyAt,
     required this.participantPubkeys,
     this.isLowerBound = false,
+    this.isCountPending = false,
   });
 }
 
