@@ -10,8 +10,8 @@ use std::path::Path;
 /// ([`AgentDefinition::into_agent_record`]) appended to `managed-agents.json`
 /// via the definition-preserving save; the old file is renamed to
 /// `personas.json.bak` so a second boot is a no-op and the data survives for
-/// manual recovery. Built-ins are skipped — `merge_personas` regenerates them
-/// from code on every load, exactly as before.
+/// manual recovery. Built-ins are folded too: their local activation choices
+/// and authored configuration must survive the store transition.
 ///
 /// Ordering (see `run_boot_migrations`): runs after the JSON-level
 /// `personas.json` migrations (which must see the legacy file) and BEFORE
@@ -63,9 +63,9 @@ fn fold_personas_in_dir(base_dir: &Path) -> Result<Option<usize>, String> {
 
     let mut folded = 0usize;
     for persona in personas {
-        // Built-ins regenerate from code; a slug already in the store means
-        // a previous partial fold got that far — never duplicate.
-        if persona.is_builtin || existing.contains(&persona.id) {
+        // A slug already in the store means a previous partial fold got
+        // that far — never duplicate or overwrite its newer local state.
+        if existing.contains(&persona.id) {
             continue;
         }
         all.push(persona.into_agent_record());
@@ -202,10 +202,10 @@ mod tests {
 
         let base = dir.path().join("agents");
         let folded = fold_personas_in_dir(&base).unwrap();
-        assert_eq!(folded, Some(1), "custom folds, builtin skipped");
+        assert_eq!(folded, Some(2), "custom and built-in choices both fold");
 
         let records = read_agents_json(dir.path());
-        assert_eq!(records.len(), 2, "definition + preserved instance");
+        assert_eq!(records.len(), 3, "definitions + preserved instance");
         let def = records
             .iter()
             .find(|r| r.get("slug").is_some())
@@ -219,6 +219,26 @@ mod tests {
 
         assert!(!base.join("personas.json").exists(), "source retired");
         assert!(base.join("personas.json.bak").exists(), ".bak left behind");
+    }
+
+    #[test]
+    fn fold_preserves_builtin_opt_out_and_customization() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut persona = custom_persona_json("builtin:fizz", "goose");
+        persona["is_builtin"] = serde_json::json!(true);
+        persona["is_active"] = serde_json::json!(false);
+        persona["display_name"] = serde_json::json!("My Fizz");
+        write_personas_json(dir.path(), &serde_json::json!([persona]));
+        let base = dir.path().join("agents");
+        assert_eq!(fold_personas_in_dir(&base).unwrap(), Some(1));
+        let records = read_agents_json(dir.path());
+        let definition: crate::managed_agents::ManagedAgentRecord =
+            serde_json::from_value(records[0].clone()).unwrap();
+        let view = definition.to_definition_view().unwrap();
+        assert!(!view.is_active);
+        assert_eq!(view.display_name, "My Fizz");
+        assert_eq!(view.runtime.as_deref(), Some("goose"));
+        assert_eq!(fold_personas_in_dir(&base).unwrap(), None);
     }
 
     #[test]
