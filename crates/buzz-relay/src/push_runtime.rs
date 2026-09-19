@@ -5,15 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base64::Engine as _;
 use buzz_core::filter::{filters_match, reader_authorized_for_event};
 use chrono::{TimeDelta, Utc};
-use nostr::{EventBuilder, Filter, Kind, Tag};
+use nostr::Filter;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use tracing::{error, warn};
 
-use crate::{handlers::push_lease::Subscription, state::AppState};
+use crate::{handlers::push_lease::Subscription, nip98::nip98_header, state::AppState};
 
 const CLAIM_SECS: i64 = 30;
 const EVENT_USEFUL_SECS: i64 = 3600;
@@ -666,22 +664,6 @@ async fn retry_or_fail(
     }
 }
 
-fn nip98_header(keys: &nostr::Keys, url: &str, body: &[u8]) -> anyhow::Result<String> {
-    let hash = hex::encode(Sha256::digest(body));
-    let event = EventBuilder::new(Kind::HttpAuth, "")
-        .tags([
-            Tag::parse(["u", url])?,
-            Tag::parse(["method", "POST"])?,
-            Tag::parse(["payload", &hash])?,
-            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()])?,
-        ])
-        .sign_with_keys(keys)?;
-    Ok(format!(
-        "Nostr {}",
-        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&event)?)
-    ))
-}
-
 fn class_rank(_: &str) -> u8 {
     1
 }
@@ -690,6 +672,7 @@ fn class_rank(_: &str) -> u8 {
 mod tests {
     use super::*;
     use axum::{extract::State, routing::post, Json, Router};
+    use nostr::{EventBuilder, Kind, Tag};
     use serde_json::Value;
     use std::{future::IntoFuture, sync::Arc};
     use tokio::sync::Mutex;

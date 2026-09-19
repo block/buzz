@@ -1,11 +1,11 @@
 //! Relay configuration from environment variables.
 
-use std::net::SocketAddr;
 use std::time::Duration;
+use std::{collections::HashMap, net::SocketAddr};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Default maximum inbound WebSocket frame size in bytes.
 ///
@@ -272,6 +272,13 @@ pub struct Config {
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
+    /// Operator-listener identities and their webhook endpoints. Each entry
+    /// is `pubkey:delivery_url`, separated by semicolons. These identities are
+    /// deployment principals, not community members. Invalid configuration is
+    /// logged and disables operator-listener delivery without preventing relay
+    /// startup.
+    pub operator_listener_delivery_urls: HashMap<String, url::Url>,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -350,8 +357,10 @@ pub struct Config {
     /// Required while push is enabled. An explicitly empty setting is allowed
     /// only while push is disabled.
     pub push_gateway_delivery_url: Option<url::Url>,
-    /// Hard timeout for one gateway delivery request.
+    /// Hard timeout for one push gateway delivery request.
     pub push_gateway_timeout: Duration,
+    /// Hard timeout for one operator-listener delivery request.
+    pub operator_listener_timeout: Duration,
 
     /// Optional relay-hosted policy shown on join surfaces. Disabled when no
     /// documents or age attestation are configured.
@@ -468,6 +477,52 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
         ));
     }
     Ok(url)
+}
+
+fn parse_operator_listener_delivery_urls(
+    raw: &str,
+) -> Result<HashMap<String, url::Url>, ConfigError> {
+    let mut endpoints = HashMap::new();
+    for entry in raw
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (pubkey, delivery_url) = entry.split_once(':').ok_or_else(|| {
+            ConfigError::InvalidValue(
+                "BUZZ_OPERATOR_LISTENERS entries must be pubkey:delivery_url pairs".to_string(),
+            )
+        })?;
+        let pubkey = pubkey.trim().to_ascii_lowercase();
+        if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS entry has an invalid pubkey: {pubkey:?}"
+            )));
+        }
+        let url = url::Url::parse(delivery_url.trim()).map_err(|e| {
+            ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS endpoint is not a valid URL: {e}"
+            ))
+        })?;
+        if url.scheme() != "https"
+            || url.host().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_OPERATOR_LISTENERS endpoints must be HTTPS URLs without credentials, query, or fragment"
+                    .to_string(),
+            ));
+        }
+        if endpoints.insert(pubkey.clone(), url).is_some() {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS contains duplicate pubkey: {pubkey}"
+            )));
+        }
+    }
+    Ok(endpoints)
 }
 
 fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
@@ -789,6 +844,32 @@ impl Config {
             );
         }
 
+        let operator_listener_delivery_urls = match std::env::var("BUZZ_OPERATOR_LISTENERS") {
+            Ok(raw) => match parse_operator_listener_delivery_urls(&raw) {
+                Ok(urls) => urls,
+                Err(parse_error) => {
+                    error!(
+                        error = %parse_error,
+                        "invalid BUZZ_OPERATOR_LISTENERS; operator-listener mention delivery is disabled"
+                    );
+                    HashMap::new()
+                }
+            },
+            Err(std::env::VarError::NotPresent) => HashMap::new(),
+            Err(error) => {
+                error!(
+                    error = %error,
+                    "BUZZ_OPERATOR_LISTENERS must be valid UTF-8; operator-listener mention delivery is disabled"
+                );
+                HashMap::new()
+            }
+        };
+        if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
+            error!(
+                "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
+            );
+        }
+
         let auth = buzz_auth::AuthConfig {
             rate_limits: rate_limit_config_from_env()?,
         };
@@ -1004,6 +1085,21 @@ impl Config {
             Err(_) => 2_000,
         };
         let push_gateway_timeout = Duration::from_millis(push_gateway_timeout_millis);
+        let operator_listener_timeout_millis =
+            match std::env::var("BUZZ_OPERATOR_LISTENER_TIMEOUT_MS") {
+                Ok(raw) => raw
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|millis| (100..=10_000).contains(millis))
+                    .ok_or_else(|| {
+                        ConfigError::InvalidValue(
+                            "BUZZ_OPERATOR_LISTENER_TIMEOUT_MS must be an integer in 100..=10000"
+                                .to_string(),
+                        )
+                    })?,
+                Err(_) => 5_000,
+            };
+        let operator_listener_timeout = Duration::from_millis(operator_listener_timeout_millis);
 
         const MAX_POLICY_MARKDOWN_BYTES: usize = 256 * 1024;
         let read_policy_markdown = |name: &str| -> Result<Option<String>, ConfigError> {
@@ -1240,6 +1336,7 @@ impl Config {
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
+            operator_listener_delivery_urls,
             allow_nip_oa_auth,
             klipy,
             media,
@@ -1261,6 +1358,7 @@ impl Config {
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
+            operator_listener_timeout,
             join_policy,
             admin,
             web_dir,
@@ -2182,6 +2280,118 @@ mod tests {
     }
 
     #[test]
+    fn operator_listener_missing_api_origin_does_not_block_startup() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_listeners = std::env::var_os("BUZZ_OPERATOR_LISTENERS");
+        let previous_origin = std::env::var_os("RELAY_OPERATOR_API_ORIGIN");
+        std::env::set_var(
+            "BUZZ_OPERATOR_LISTENERS",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:https://listener.example/mentions",
+        );
+        std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
+
+        let result = Config::from_env();
+
+        if let Some(value) = previous_listeners {
+            std::env::set_var("BUZZ_OPERATOR_LISTENERS", value);
+        } else {
+            std::env::remove_var("BUZZ_OPERATOR_LISTENERS");
+        }
+        if let Some(value) = previous_origin {
+            std::env::set_var("RELAY_OPERATOR_API_ORIGIN", value);
+        } else {
+            std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
+        }
+
+        let config = result.expect("missing origin should log and allow startup");
+        assert!(config.relay_operator_api_origin.is_none());
+        assert!(config
+            .operator_listener_delivery_urls
+            .contains_key("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn malformed_operator_listener_config_does_not_block_startup() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_OPERATOR_LISTENERS");
+        std::env::set_var(
+            "BUZZ_OPERATOR_LISTENERS",
+            "not-a-pubkey:https://listener.example/mentions",
+        );
+
+        let config = Config::from_env().expect("malformed operator listeners must not block boot");
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_OPERATOR_LISTENERS", value);
+        } else {
+            std::env::remove_var("BUZZ_OPERATOR_LISTENERS");
+        }
+
+        assert!(config.operator_listener_delivery_urls.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_operator_listener_config_does_not_block_startup() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_OPERATOR_LISTENERS");
+        std::env::set_var(
+            "BUZZ_OPERATOR_LISTENERS",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
+
+        let config =
+            Config::from_env().expect("non-Unicode operator listeners must not block boot");
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_OPERATOR_LISTENERS", value);
+        } else {
+            std::env::remove_var("BUZZ_OPERATOR_LISTENERS");
+        }
+
+        assert!(config.operator_listener_delivery_urls.is_empty());
+    }
+
+    #[test]
+    fn operator_listener_routes_parse_pubkey_url_pairs() {
+        let first = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let second = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        let routes = parse_operator_listener_delivery_urls(&format!(
+            "{first}:https://listener.example/mentions;{second}:https://listener.example/hook"
+        ))
+        .expect("operator listener routes");
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[first].as_str(), "https://listener.example/mentions");
+        assert_eq!(
+            routes[&second.to_ascii_lowercase()].as_str(),
+            "https://listener.example/hook"
+        );
+    }
+
+    #[test]
+    fn operator_listener_routes_reject_duplicate_or_invalid_entries() {
+        let pubkey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(parse_operator_listener_delivery_urls(&format!(
+            "{pubkey}:https://listener.example/a;{pubkey}:https://listener.example/b"
+        ))
+        .is_err());
+        assert!(parse_operator_listener_delivery_urls(
+            "not-a-pubkey:https://listener.example/mentions"
+        )
+        .is_err());
+        assert!(parse_operator_listener_delivery_urls(&format!(
+            "{pubkey}:https://user@listener.example/mentions"
+        ))
+        .is_err());
+        assert!(parse_operator_listener_delivery_urls(&format!(
+            "{pubkey}:http://127.0.0.1:9399/mentions"
+        ))
+        .is_err());
+    }
+
+    #[test]
     fn push_is_opt_in_and_gateway_is_required_when_enabled() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let previous_enabled = std::env::var_os("BUZZ_PUSH_ENABLED");
@@ -2283,6 +2493,19 @@ mod tests {
             result,
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("BUZZ_PUSH_GATEWAY_TIMEOUT_MS")
+        ));
+    }
+
+    #[test]
+    fn invalid_operator_listener_timeout_is_not_silently_defaulted() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_OPERATOR_LISTENER_TIMEOUT_MS", "99");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_OPERATOR_LISTENER_TIMEOUT_MS");
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_OPERATOR_LISTENER_TIMEOUT_MS")
         ));
     }
 

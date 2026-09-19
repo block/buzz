@@ -54,6 +54,44 @@ struct TransferCommunityResponse {
 
 const OPERATOR_REPLAY_SCOPE: &str = "operator-management";
 
+#[derive(Debug, Deserialize)]
+struct ListenerPubkeysRequest {
+    pubkeys: Vec<String>,
+}
+
+fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json<Value>)> {
+    let request: ListenerPubkeysRequest = serde_json::from_slice(body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid operator-listener pubkeys JSON: {e}"),
+        )
+    })?;
+    if request.pubkeys.is_empty() || request.pubkeys.len() > 1_000 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "pubkeys must contain between 1 and 1000 entries",
+        ));
+    }
+    request
+        .pubkeys
+        .into_iter()
+        .map(|value| {
+            let normalized = validate_pubkey_hex(&value).ok_or_else(|| {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "pubkeys must contain 64-char hex public keys",
+                )
+            })?;
+            hex::decode(normalized).map_err(|_| {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "pubkeys must contain 64-char hex public keys",
+                )
+            })
+        })
+        .collect()
+}
+
 /// Shared deployment-global operator auth prelude. The canonical management
 /// origin and replay namespace are configuration, never tenant registry state
 /// or an inbound proxy `Host` header.
@@ -103,6 +141,90 @@ async fn authorize_operator_request(
     }
 
     Ok(pubkey)
+}
+
+/// Authenticate a deployment-global operator listener using the configured
+/// listener identity and its NIP-98 request signature.
+async fn authorize_operator_listener_request(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<nostr::PublicKey, (StatusCode, Json<Value>)> {
+    let origin = state
+        .config
+        .relay_operator_api_origin
+        .as_deref()
+        .ok_or_else(|| internal_error("operator API origin is not configured"))?;
+    let url = format!("{origin}{path}");
+    let bridge::VerifiedBridgeAuth { pubkey, .. } =
+        bridge::verify_bridge_auth_with_options(headers, method, &url, Some(body), true, true)?;
+    if !state
+        .config
+        .operator_listener_delivery_urls
+        .contains_key(&pubkey.to_hex())
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "actor not authorized: not a configured operator listener",
+        ));
+    }
+    Ok(pubkey)
+}
+
+/// Register target pubkeys for the authenticated operator listener.
+///
+/// `POST /operator/listener/pubkeys` is deployment-global and intentionally
+/// does not require the listener identity to belong to any community.
+pub async fn register_listener_pubkeys(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let listener = authorize_operator_listener_request(
+        &state,
+        &headers,
+        "POST",
+        "/operator/listener/pubkeys",
+        &body,
+    )
+    .await?;
+    let target_pubkeys = parse_listener_pubkeys(&body)?;
+    state
+        .db
+        .register_operator_listener_pubkeys(listener.as_bytes(), &target_pubkeys)
+        .await
+        .map_err(|e| internal_error(&format!("register operator-listener pubkeys: {e}")))?;
+    Ok(Json(serde_json::json!({})))
+}
+
+/// Remove target pubkeys for the authenticated operator listener.
+///
+/// `DELETE /operator/listener/pubkeys` is idempotent: already-removed
+/// registrations do not produce an error. Both successful mutations return
+/// `200 OK` with an empty JSON object; callers should use the status code and
+/// not depend on response details.
+pub async fn remove_listener_pubkeys(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let listener = authorize_operator_listener_request(
+        &state,
+        &headers,
+        "DELETE",
+        "/operator/listener/pubkeys",
+        &body,
+    )
+    .await?;
+    let target_pubkeys = parse_listener_pubkeys(&body)?;
+    state
+        .db
+        .remove_operator_listener_pubkeys(listener.as_bytes(), &target_pubkeys)
+        .await
+        .map_err(|e| internal_error(&format!("remove operator-listener pubkeys: {e}")))?;
+    Ok(Json(serde_json::json!({})))
 }
 
 async fn check_operator_replay(
@@ -581,6 +703,17 @@ mod postgres_tests {
             .iter()
             .map(|keys| keys.public_key().to_hex())
             .collect();
+        config.operator_listener_delivery_urls = operator_keys
+            .iter()
+            .map(|keys| {
+                (
+                    keys.public_key().to_hex(),
+                    "https://listener.example/webhook"
+                        .parse()
+                        .expect("listener URL"),
+                )
+            })
+            .collect();
         config.require_relay_membership = true;
 
         let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
@@ -704,6 +837,92 @@ mod postgres_tests {
                 "missing {role} snapshot tag for {pubkey}"
             );
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn register_listener_pubkeys_persists_target_registration() {
+        let listener = Keys::generate();
+        let target = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&listener)).await else {
+            return;
+        };
+        let body = serde_json::json!({
+            "pubkeys": [target.public_key().to_hex()],
+        })
+        .to_string();
+
+        let response = signed_operator_request(
+            Arc::clone(&state),
+            &listener,
+            "POST",
+            "/operator/listener/pubkeys",
+            Some(body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(read_json(response).await, serde_json::json!({}));
+
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to test database");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operator_listener_pubkeys \
+             WHERE listener_pubkey = $1 AND target_pubkey = $2",
+        )
+        .bind(listener.public_key().as_bytes())
+        .bind(target.public_key().as_bytes())
+        .fetch_one(&pool)
+        .await
+        .expect("count listener registration");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn remove_listener_pubkeys_deletes_target_registration() {
+        let listener = Keys::generate();
+        let target = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&listener)).await else {
+            return;
+        };
+        state
+            .db
+            .register_operator_listener_pubkeys(
+                listener.public_key().as_bytes(),
+                &[target.public_key().as_bytes().to_vec()],
+            )
+            .await
+            .expect("seed listener registration");
+        let body = serde_json::json!({
+            "pubkeys": [target.public_key().to_hex()],
+        })
+        .to_string();
+
+        let response = signed_operator_request(
+            Arc::clone(&state),
+            &listener,
+            "DELETE",
+            "/operator/listener/pubkeys",
+            Some(body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(read_json(response).await, serde_json::json!({}));
+
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to test database");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operator_listener_pubkeys \
+             WHERE listener_pubkey = $1 AND target_pubkey = $2",
+        )
+        .bind(listener.public_key().as_bytes())
+        .bind(target.public_key().as_bytes())
+        .fetch_one(&pool)
+        .await
+        .expect("count listener registration");
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
@@ -1313,5 +1532,178 @@ mod postgres_tests {
         );
         let body = read_json(response).await;
         assert_eq!(body["error"], "internal server error");
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use axum::{
+        body::Body,
+        http::{header, Request},
+    };
+    use base64::Engine;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use sha2::{Digest, Sha256};
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::{router::build_router, state::AppState};
+
+    const OPERATOR_API_ORIGIN: &str = "http://operator-ingress.example";
+    const OPERATOR_API_HOST: &str = "operator-ingress.example";
+
+    fn nip98_auth_header(keys: &Keys, url: &str, method: &str, body: &[u8]) -> String {
+        let payload_hash = hex::encode(Sha256::digest(body));
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                Tag::parse(["u", url]).expect("u tag"),
+                Tag::parse(["method", method]).expect("method tag"),
+                Tag::parse(["payload", payload_hash.as_str()]).expect("payload tag"),
+            ])
+            .sign_with_keys(keys)
+            .expect("sign NIP-98 event");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(
+            serde_json::to_string(&event)
+                .expect("serialize NIP-98 event")
+                .as_bytes(),
+        );
+        format!("Nostr {encoded}")
+    }
+
+    async fn test_state(listener: &Keys) -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.database_url = crate::test_support::database_url();
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.relay_operator_api_origin = Some(OPERATOR_API_ORIGIN.to_string());
+        config.operator_listener_delivery_urls = HashMap::from([(
+            listener.public_key().to_hex(),
+            "https://listener.example/webhook"
+                .parse()
+                .expect("listener URL"),
+        )]);
+        config.media.s3_access_key = "test".to_string();
+        config.media.s3_secret_key = "test".to_string();
+
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            None::<buzz_audit::AuditService>,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    #[test]
+    fn parse_listener_pubkeys_accepts_hex_and_rejects_invalid_batches() {
+        let first = Keys::generate().public_key().to_hex();
+        let second = Keys::generate().public_key().to_hex();
+        let body = serde_json::json!({"pubkeys": [first, second.to_uppercase()]}).to_string();
+        let parsed = parse_listener_pubkeys(body.as_bytes()).expect("valid pubkeys");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].len(), 32);
+        assert_eq!(parsed[1].len(), 32);
+
+        for body in [
+            br#"{}"#.as_slice(),
+            br#"{"pubkeys":[]}"#.as_slice(),
+            br#"{"pubkeys":["not-a-pubkey"]}"#.as_slice(),
+        ] {
+            assert_eq!(
+                parse_listener_pubkeys(body).expect_err("invalid pubkeys").0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authorize_operator_listener_request_rejects_unconfigured_signer() {
+        let listener = Keys::generate();
+        let outsider = Keys::generate();
+        let state = test_state(&listener).await;
+        let body =
+            br#"{"pubkeys":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#;
+        let headers = HeaderMap::from_iter([(
+            header::AUTHORIZATION,
+            nip98_auth_header(
+                &outsider,
+                &format!("{OPERATOR_API_ORIGIN}/operator/listener/pubkeys"),
+                "POST",
+                body,
+            )
+            .parse()
+            .expect("authorization header"),
+        )]);
+
+        let error = authorize_operator_listener_request(
+            &state,
+            &headers,
+            "POST",
+            "/operator/listener/pubkeys",
+            body,
+        )
+        .await
+        .expect_err("unconfigured signer must be rejected");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn listener_pubkey_apis_reject_unauthorized_requests_without_db_access() {
+        let listener = Keys::generate();
+        let outsider = Keys::generate();
+        let state = test_state(&listener).await;
+        let body =
+            br#"{"pubkeys":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#;
+
+        for (method, path) in [
+            ("POST", "/operator/listener/pubkeys"),
+            ("DELETE", "/operator/listener/pubkeys"),
+        ] {
+            let auth = nip98_auth_header(
+                &outsider,
+                &format!("{OPERATOR_API_ORIGIN}{path}"),
+                method,
+                body,
+            );
+            let response = build_router(Arc::clone(&state))
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::HOST, OPERATOR_API_HOST)
+                        .header(header::AUTHORIZATION, auth)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(&body[..]))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
     }
 }
