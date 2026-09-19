@@ -656,9 +656,15 @@ mod postgres_tests {
         .execute(&migration_pool)
         .await
         .expect("restore migration role as table owner");
+        // PostgreSQL drops the runtime role's explicit ACL while that role is
+        // the owner. Re-running the idempotent migration path must restore the
+        // least-privilege DML grants before readiness can recover.
+        PostgresAuthorityStore::apply_migrations_and_grants(&migration_pool, &runtime_role)
+            .await
+            .expect("restore runtime grants after ownership repair");
         assert!(
             runtime.ready().await.is_ok(),
-            "restoring least-privilege ownership returns readiness"
+            "restoring ownership and grants returns readiness"
         );
         let legacy_uniqueness_constraints: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_constraint
