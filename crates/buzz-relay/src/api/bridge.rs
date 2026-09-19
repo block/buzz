@@ -21,6 +21,8 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
+mod thread_roots;
+
 pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
@@ -1185,10 +1187,30 @@ async fn query_events_authed(
     let mut events: Vec<Value> = Vec::new();
     let mut handled: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
+    let ownership_targets: usize = raw_filters
+        .iter()
+        .zip(&filters)
+        .filter(|(raw, _)| extension_flag(raw, "resolve_thread_roots"))
+        .map(|(_, filter)| filter.ids.as_ref().map_or(0, |ids| ids.len()))
+        .sum();
+    if ownership_targets > 100 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "resolve_thread_roots permits at most 100 targets per request",
+        ));
+    }
+    // Resolve reply owners from retained thread metadata, including tombstones.
+    for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+        if extension_flag(raw, "resolve_thread_roots") {
+            events.extend(thread_roots::query(state, tenant, filter, &accessible_channels).await?);
+            handled.insert(idx);
+        }
+    }
+
     // Channel-window filters (`top_level: true`) — the GUI read-model surface.
     // Dispatched first: a window filter is never a feed/thread/catchall query.
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
-        if !extension_flag(raw, "top_level") {
+        if handled.contains(&idx) || !extension_flag(raw, "top_level") {
             continue;
         }
         handle_channel_window_filter(

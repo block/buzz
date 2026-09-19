@@ -2477,7 +2477,7 @@ void main() {
     },
   );
 
-  test('resolved deletion ownership recounts only the owning root', () async {
+  test('deleted-target metadata disables only the owning empty root', () async {
     final session = _RecordingRelaySessionNotifier(
       queryResults: [
         [
@@ -2487,16 +2487,7 @@ void main() {
           ],
           _bounds(),
         ],
-        [
-          _event(
-            id: 'unknown',
-            createdAt: 20,
-            extraTags: const [
-              ['e', 'owner', '', 'reply'],
-            ],
-          ),
-        ],
-        <NostrEvent>[],
+        _DeletedTargetSummaryResponse(_summary(rootId: 'owner', replyCount: 0)),
       ],
     );
     final container = _buildContainer(session);
@@ -2521,13 +2512,29 @@ void main() {
     final scans = session.queryFilters
         .where((filter) => filter.extensions.containsKey('depth_limit'))
         .toList();
-    expect(scans, hasLength(1));
-    expect(scans.single.tags['#e'], ['owner']);
+    expect(scans, isEmpty);
     final summaries = container
         .read(channelMessagesProvider(_channelId).notifier)
         .threadSummaries;
     expect(summaries['owner']?.descendantCount, 0);
     expect(summaries['unrelated']?.descendantCount, 1);
+    final entries = buildMainTimelineEntries(
+      formatTimeline(
+        container.read(channelMessagesProvider(_channelId)).value!,
+      ),
+      relaySummaries: summaries,
+    );
+    expect(
+      entries.singleWhere((entry) => entry.message.id == 'owner').summary,
+      isNull,
+    );
+    expect(
+      entries
+          .singleWhere((entry) => entry.message.id == 'unrelated')
+          .summary
+          ?.replyCount,
+      1,
+    );
   });
 
   for (final fetched in [false, true]) {
@@ -2878,6 +2885,11 @@ Future<void> _pumpEventQueue() async {
   await Future<void>.delayed(Duration.zero);
 }
 
+class _DeletedTargetSummaryResponse {
+  final NostrEvent summary;
+  _DeletedTargetSummaryResponse(this.summary);
+}
+
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final bool failSubscribe;
   final Queue<Object> _queryResults;
@@ -2919,6 +2931,12 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     if (_queryResults.isEmpty) throw Exception('unsupported');
     final result = _queryResults.removeFirst();
     if (result is Exception) throw result;
+    if (result is _DeletedTargetSummaryResponse) {
+      // Normal history cannot return soft-deleted reply payloads.
+      return filters.single.extensions['resolve_thread_roots'] == true
+          ? [result.summary]
+          : [];
+    }
     if (result is Future<List<NostrEvent>>) return await result;
     return (result as List<NostrEvent>).toList();
   }

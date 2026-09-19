@@ -205,3 +205,25 @@ A client with neither an authenticated transport nor a verifiable relay identity
 - **NIP-50** and relay-side search: sibling precedent — a relay-computed view requested through extended filter fields, invisible to relays that do not implement it.
 - **NIP-98**: Authenticates the HTTP query surface Buzz serves windows on.
 - **NIP-11**: Names the relay identity that signs overlays and the natural place to advertise support.
+
+## Recovering summaries after deletion
+
+The HTTP bridge additionally supports `resolve_thread_roots: true` with
+`kinds: [39005]`, exactly one accessible `#h` channel, and 1–100 full event
+`ids`. The IDs identify target replies, including soft-deleted replies,
+not the IDs of the returned summary events. The request permits at most
+100 targets across all such filters.
+
+The relay resolves ownership from retained thread metadata on the writer,
+checks both target and root channel scope, and returns one signed
+`kind:39005` summary per distinct owning root, including zero counts.
+It returns no original target content, author, or signature. Missing or
+non-reply targets and inaccessible channels produce no summaries.
+These reads use the writer so deletion recovery does not depend on
+replica replay or the delivery of a live summary. No bounds event is returned.
+
+Clients use this bounded metadata operation when a deletion target has
+left their reply cache. Ordinary event queries exclude tombstones and
+cannot perform this recovery. This extension requires a supporting relay;
+clients must not interpret an unsupported/empty response as proof that an
+unknown target's thread is empty.

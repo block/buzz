@@ -1043,6 +1043,62 @@ impl Db {
         crate::thread::get_thread_summary(&self.pool, community_id, event_id).await
     }
 
+    /// Resolve channel-scoped reply IDs, including tombstones, to current root
+    /// summaries on the writer. Returns metadata only, never target payloads.
+    #[datastore_span(name = "resolve_thread_root_summaries", system = "postgresql")]
+    pub async fn resolve_thread_root_summaries(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        target_ids: &[Vec<u8>],
+    ) -> Result<Vec<(Vec<u8>, ThreadSummary)>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::SubscriptionHistory,
+        )
+        .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT root.event_id, root.reply_count, root.descendant_count, root.last_reply_at,
+                ARRAY(
+                    SELECT e.pubkey
+                    FROM thread_metadata tm
+                    JOIN events e ON e.community_id = tm.community_id
+                        AND e.created_at = tm.event_created_at AND e.id = tm.event_id
+                    WHERE tm.community_id = root.community_id AND tm.root_event_id = root.event_id
+                        AND tm.channel_id = root.channel_id AND e.deleted_at IS NULL
+                    GROUP BY e.pubkey ORDER BY MAX(e.created_at) DESC LIMIT 10
+                ) AS participants
+            FROM thread_metadata root
+            WHERE root.community_id = $1 AND root.channel_id = $2
+                AND root.event_id IN (
+                    SELECT COALESCE(target.root_event_id, target.parent_event_id)
+                    FROM thread_metadata target
+                    WHERE target.community_id = $1 AND target.channel_id = $2
+                        AND target.event_id = ANY($3) AND target.parent_event_id IS NOT NULL
+                )
+        "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(target_ids)
+        .fetch_all(&mut *connection)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get("event_id")?,
+                    ThreadSummary {
+                        reply_count: row.try_get("reply_count")?,
+                        descendant_count: row.try_get("descendant_count")?,
+                        last_reply_at: row.try_get("last_reply_at")?,
+                        participants: row.try_get("participants")?,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     /// One channel window: top-level rows + summaries + server `has_more`.
     ///
     /// Convenience wrapper over [`Db::get_channel_window_with_session`] for
@@ -1288,6 +1344,83 @@ mod postgres_tests {
         crate::channel::get_channel(pool, buzz_core::CommunityId::from_uuid(community_id), id)
             .await
             .map(|channel| (channel, buzz_core::CommunityId::from_uuid(community_id)))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn resolve_deleted_roots_preserves_community_scope_for_colliding_ids() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let author = Keys::generate();
+        let channel = Uuid::new_v4();
+        let communities = [
+            CommunityId::from_uuid(make_test_community(&pool).await),
+            CommunityId::from_uuid(make_test_community(&pool).await),
+        ];
+        let root = make_stream_event(&author, "shared root identity");
+        let reply = make_stream_event(&author, "shared reply identity");
+        for community in communities {
+            crate::channel::create_channel_with_id(
+                &pool,
+                community,
+                channel,
+                &format!("root-scope-{channel}"),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                author.public_key().to_bytes().as_slice(),
+                None,
+            )
+            .await
+            .expect("channel");
+            for (event, parent) in [(&root, None), (&reply, Some(&root))] {
+                insert_event_with_thread_metadata(
+                    &pool,
+                    community,
+                    event,
+                    Some(channel),
+                    Some(ThreadMetadataParams {
+                        event_id: event.id.as_bytes(),
+                        event_created_at: event_created_at(event),
+                        channel_id: channel,
+                        parent_event_id: parent.map(|parent| parent.id.as_bytes().as_slice()),
+                        parent_event_created_at: parent.map(event_created_at),
+                        root_event_id: parent.map(|parent| parent.id.as_bytes().as_slice()),
+                        root_event_created_at: parent.map(event_created_at),
+                        depth: i32::from(parent.is_some()),
+                        broadcast: false,
+                    }),
+                )
+                .await
+                .expect("thread event");
+            }
+        }
+        db.soft_delete_event_and_update_thread(
+            communities[0],
+            reply.id.as_bytes(),
+            Some(root.id.as_bytes()),
+            Some(root.id.as_bytes()),
+        )
+        .await
+        .expect("delete only A");
+        for (community, expected) in [(communities[0], 0), (communities[1], 1)] {
+            let summaries = db
+                .resolve_thread_root_summaries(community, channel, &[reply.id.as_bytes().to_vec()])
+                .await
+                .expect("metadata query");
+            assert_eq!(summaries.len(), 1);
+            assert_eq!(summaries[0].0, root.id.as_bytes());
+            assert_eq!(summaries[0].1.descendant_count, expected);
+        }
+        assert!(db
+            .resolve_thread_root_summaries(
+                communities[0],
+                Uuid::new_v4(),
+                &[reply.id.as_bytes().to_vec()]
+            )
+            .await
+            .expect("wrong channel")
+            .is_empty());
     }
 
     #[tokio::test]

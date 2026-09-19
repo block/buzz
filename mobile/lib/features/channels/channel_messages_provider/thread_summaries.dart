@@ -126,7 +126,8 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       final events = await _summarySession.queryRelay([
         NostrFilter(
           ids: targets.toList(),
-          kinds: EventKind.channelTimelineContentKinds,
+          kinds: const [EventKind.channelThreadSummary],
+          extensions: const {'resolve_thread_roots': true},
           tags: {
             '#h': [channelId],
           },
@@ -134,21 +135,19 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
         ),
       ]);
       if (!_summaryMounted || generation != _initVersion) return;
-      _replyOwnership.record(
-        events.where(
-          (event) => event.channelId == channelId && targets.contains(event.id),
-        ),
-      );
-      final owned = targets.where((id) {
-        final root = _replyOwnership.rootFor(id);
-        return root != null && (_threadQueryVersions[root] ?? 0) <= version;
-      }).toSet();
-      if (owned.isNotEmpty) {
-        _applyDeletedSummaries(owned, _lastKnownMessages ?? []);
+      for (final event in events) {
+        if (event.channelId != channelId ||
+            event.kind != EventKind.channelThreadSummary) {
+          throw StateError('Expected a channel-scoped thread summary.');
+        }
+        final root = event.getTagValue('e');
+        if (root != null && (_threadQueryVersions[root] ?? 0) <= version) {
+          _handleLiveEvent(event);
+        }
       }
     } catch (error) {
-      // Deleted payloads may be unavailable. Keep the count pending until a
-      // window summary or an explicit thread query supplies authoritative data.
+      // Keep pending presentation on query failure; a fresh summary or explicit
+      // thread query can still reconcile it.
       if (_summaryMounted && generation == _initVersion) {
         debugPrint(
           '[ChannelMessagesNotifier] deletion ownership lookup failed: $error',
