@@ -151,14 +151,17 @@ class _ThreadMessageList extends StatelessWidget {
                             child: Row(
                               children: [
                                 Flexible(
-                                  child: Text(
-                                    _replySummary,
-                                    style: context.textTheme.labelMedium
-                                        ?.copyWith(
-                                          color:
-                                              context.colors.onSurfaceVariant,
-                                          fontWeight: FontWeight.w600,
-                                        ),
+                                  child: Semantics(
+                                    liveRegion: true,
+                                    child: Text(
+                                      _replySummary,
+                                      style: context.textTheme.labelMedium
+                                          ?.copyWith(
+                                            color:
+                                                context.colors.onSurfaceVariant,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                    ),
                                   ),
                                 ),
                                 const SizedBox(width: Grid.xxs),

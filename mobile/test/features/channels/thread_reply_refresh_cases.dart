@@ -109,6 +109,7 @@ void threadReplyRefreshTests() {
   testWidgets('thread refresh error keeps cached replies visible', (
     tester,
   ) async {
+    final semantics = tester.ensureSemantics();
     var calls = 0;
     final refresh = Completer<List<NostrEvent>>();
     tester.view.physicalSize = const Size(320, 844);
@@ -132,8 +133,17 @@ void threadReplyRefreshTests() {
     );
     expect(find.text('0 replies'), findsNothing);
     expect(find.text('1 reply · Couldn’t refresh'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(find.text('1 reply · Couldn’t refresh'))
+          .getSemanticsData()
+          .flagsCollection
+          .isLiveRegion,
+      isTrue,
+    );
     expect(tester.takeException(), isNull);
     expect(container.read(threadRepliesProvider(args)).hasError, isTrue);
+    semantics.dispose();
   });
 
   testWidgets('thread reopen shows loading until the fresh query completes', (
