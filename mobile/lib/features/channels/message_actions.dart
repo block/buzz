@@ -821,6 +821,9 @@ void _showEditSheet({
             autofocus: true,
             minLines: 1,
             maxLines: 5,
+            // Prose input: capitalize sentence starts like the platform
+            // keyboard does in Messages/Mail/Notes (issue #7579).
+            textCapitalization: TextCapitalization.sentences,
             decoration: const InputDecoration(hintText: 'Edit message'),
           ),
           const SizedBox(height: Grid.xxs),
