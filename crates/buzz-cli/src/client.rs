@@ -60,17 +60,8 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
-];
-
-/// Maximum file size for image uploads (50 MB).
-const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
+/// Maximum file size for non-video uploads (50 MB).
+const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
@@ -1220,20 +1211,19 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
-        // 2. Detect MIME from magic bytes
+        // 2. Detect MIME from magic bytes. The relay is the authoritative content
+        // validator: its generic-file path accepts inert documents and archives while
+        // rejecting active content and executables. Do not duplicate a media-only
+        // allowlist here or the CLI will reject files the relay intentionally supports.
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
-
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
 
         // 3. Size check
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
         } else {
-            MAX_IMAGE_BYTES
+            MAX_FILE_BYTES
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
@@ -2236,18 +2226,16 @@ mod retry_policy_tests {
     /// body read is inside the retry boundary.  A partial-body drop after 200 headers
     /// must be retried with identical file bytes and a fresh Blossom auth per attempt.
     #[tokio::test]
-    async fn upload_body_loss_is_retried_with_same_file_bytes() {
+    async fn generic_file_upload_body_loss_is_retried_with_same_file_bytes() {
         use std::io::Write;
         use tokio::io::AsyncReadExt;
         use tokio::io::AsyncWriteExt;
 
-        // Write a minimal JPEG file so MIME detection works.
+        // Use a PDF so this also guards against regressing to the old media-only
+        // client allowlist. The relay's generic-file validator remains authoritative.
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        // JPEG magic + JFIF app0 marker: enough for `infer` to detect image/jpeg.
-        let jpeg_header: &[u8] = &[
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
-        ];
-        tmp.write_all(jpeg_header).unwrap();
+        let pdf: &[u8] = b"%PDF-1.7\n%%EOF\n";
+        tmp.write_all(pdf).unwrap();
         let file_path = tmp.path().to_str().unwrap().to_string();
 
         let counter = Arc::new(AtomicU32::new(0));
@@ -2288,7 +2276,7 @@ mod retry_policy_tests {
                     let _ = stream.write_all(partial).await;
                 } else {
                     // Valid BlobDescriptor response.
-                    let ok_body = r#"{"url":"https://relay.test/media/aabbcc.jpg","sha256":"aabbcc","size":12,"type":"image/jpeg","uploaded":0}"#;
+                    let ok_body = r#"{"url":"https://relay.test/media/aabbcc.pdf","sha256":"aabbcc","size":15,"type":"application/pdf","uploaded":0}"#;
                     let ok = format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
                         ok_body.len(),
