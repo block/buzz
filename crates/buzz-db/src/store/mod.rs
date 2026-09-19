@@ -36,6 +36,8 @@ pub mod push;
 pub mod reaction;
 /// HTTP report-resolution enforcement state machine persistence.
 pub mod relay_admin_actions;
+/// Deployment-global relay banner persistence.
+pub mod relay_banners;
 /// Use-limited relay invite persistence (v2 opaque tokens).
 pub mod relay_invite;
 /// Relay-level membership persistence (NIP-43).

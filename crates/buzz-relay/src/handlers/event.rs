@@ -36,7 +36,7 @@ pub(crate) fn bounded_kind_label(kind: u32) -> String {
     match kind {
         0..=9 | 1059 | 1063 => kind.to_string(),
         8000..=8003 | 9000..=9022 | 9030..=9036 => kind.to_string(),
-        13534..=13535 => kind.to_string(),
+        13534..=13536 => kind.to_string(),
         20000..=29999 => kind.to_string(),
         30023 | 30315 | 39000..=39003 => kind.to_string(),
         40002..=40100 => kind.to_string(),
@@ -221,6 +221,88 @@ pub async fn filter_fanout_by_access(
     allowed
 }
 
+/// Fan out a relay banner control event to live banner subscribers whose authenticated
+/// user is eligible for that banner in their bound community.
+pub(crate) async fn fan_out_relay_banner_event(
+    state: &AppState,
+    banner: &buzz_db::RelayBannerRecord,
+    event: &Event,
+    require_active: bool,
+) {
+    let communities: Vec<CommunityId> = if banner.target_all_communities {
+        state
+            .conn_manager
+            .per_community_ws_connections()
+            .keys()
+            .copied()
+            .collect()
+    } else {
+        banner.community_ids.clone()
+    };
+    fan_out_relay_banner_event_to_communities(state, banner, event, require_active, communities)
+        .await;
+}
+
+async fn fan_out_relay_banner_event_to_communities(
+    state: &AppState,
+    banner: &buzz_db::RelayBannerRecord,
+    event: &Event,
+    require_active: bool,
+    communities: Vec<CommunityId>,
+) {
+    let stored = StoredEvent::with_received_at(event.clone(), chrono::Utc::now(), None, true);
+    let mut matches = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for community_id in communities {
+        for (conn_id, sub_id) in state.sub_registry.fan_out_scoped(community_id, &stored) {
+            if !seen.insert((conn_id, sub_id.clone())) {
+                continue;
+            }
+            let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
+                continue;
+            };
+            match state
+                .db
+                .relay_banner_user_eligible(banner.id, community_id, &pubkey, require_active)
+                .await
+            {
+                Ok(true) => matches.push((conn_id, sub_id)),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%community_id, "Relay banner eligibility lookup failed: {error}");
+                }
+            }
+        }
+    }
+    if matches.is_empty() {
+        return;
+    }
+    let event_json = match serde_json::to_string(event) {
+        Ok(json) => json,
+        Err(error) => {
+            error!("Failed to serialize relay banner event for fan-out: {error}");
+            return;
+        }
+    };
+    let frames = fanout_frame_cache(
+        matches.iter().map(|(_, sub_id)| sub_id.as_str()),
+        &event_json,
+    );
+    let drop_count = send_fanout_frames(
+        state,
+        matches
+            .iter()
+            .map(|(conn_id, sub_id)| (*conn_id, sub_id.as_str())),
+        &frames,
+    );
+    if drop_count > 0 {
+        tracing::warn!(
+            drop_count,
+            "relay banner fan-out: {drop_count} connection(s) cancelled due to full/closed buffers"
+        );
+    }
+}
+
 /// Deliver one event to this relay's local subscribers through the access gate.
 ///
 /// This is the single guarded send path for relay-local EVENT delivery. It runs
@@ -303,6 +385,11 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
         return;
     }
 
+    if event_kind_u32(&stored.event) == buzz_core::kind::KIND_RELAY_BANNER {
+        fan_out_pubsub_relay_banner_event(state, community_id, &stored.event).await;
+        return;
+    }
+
     let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
     let matches = filter_fanout_by_access(state, community_id, &stored, matches, None).await;
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
@@ -335,6 +422,38 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
             "multi-node fan-out: {drop_count} connection(s) dropped"
         );
     }
+}
+
+async fn fan_out_pubsub_relay_banner_event(
+    state: &AppState,
+    community_id: CommunityId,
+    event: &Event,
+) {
+    let disabled = event
+        .tags
+        .iter()
+        .any(|tag| tag.kind().to_string() == "status" && tag.content() == Some("disabled"));
+    let banner_id = event
+        .tags
+        .iter()
+        .find(|tag| tag.kind().to_string() == "d")
+        .and_then(|tag| tag.content())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok());
+    let Some(banner_id) = banner_id else {
+        tracing::warn!("Relay banner pubsub event missing valid d tag");
+        return;
+    };
+    let Some(banner) = (match state.db.relay_banner_by_public_id(banner_id).await {
+        Ok(banner) => banner,
+        Err(error) => {
+            tracing::warn!(%banner_id, "Relay banner pubsub lookup failed: {error}");
+            return;
+        }
+    }) else {
+        return;
+    };
+    fan_out_relay_banner_event_to_communities(state, &banner, event, !disabled, vec![community_id])
+        .await;
 }
 
 /// Schedule post-commit delivery/side effects for a stored event.
@@ -2857,5 +2976,262 @@ mod tests {
                  must not receive a community-B event. Got: {out:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod relay_banner_fanout_tests {
+    use super::*;
+    use axum::extract::ws::Message as WsMessage;
+    use std::collections::HashMap;
+    use tokio::sync::{mpsc, Mutex};
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    async fn setup_state() -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<AppState>,
+        sqlx::PgPool,
+    ) {
+        let guard = crate::test_support::RELAY_BANNER_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect test DB");
+        let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+        (guard, state, pool)
+    }
+
+    async fn insert_test_community(pool: &sqlx::PgPool, host_prefix: &str) -> CommunityId {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(format!("{host_prefix}-{}.example", id.simple()))
+            .execute(pool)
+            .await
+            .expect("insert community");
+        CommunityId::from_uuid(id)
+    }
+
+    fn register_banner_sub(
+        state: &AppState,
+        community: CommunityId,
+        pubkey: Vec<u8>,
+    ) -> (Uuid, mpsc::Receiver<WsMessage>) {
+        let conn_id = Uuid::new_v4();
+        let (tx, rx) = mpsc::channel(4);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(4);
+        state.conn_manager.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            None,
+            CancellationToken::new(),
+            community,
+            Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+        state.conn_manager.set_authenticated_pubkey(conn_id, pubkey);
+        state.sub_registry.register_scoped(
+            community,
+            conn_id,
+            "banner".to_owned(),
+            vec![nostr::Filter::new().kind(nostr::Kind::Custom(
+                buzz_core::kind::KIND_RELAY_BANNER as u16,
+            ))],
+            None,
+        );
+        (conn_id, rx)
+    }
+
+    async fn recv_banner_event(rx: &mut mpsc::Receiver<WsMessage>) -> nostr::Event {
+        let frame = rx.recv().await.expect("banner frame");
+        let WsMessage::Text(frame) = frame else {
+            panic!("expected text frame");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&frame).expect("EVENT frame JSON");
+        assert_eq!(frame[0], "EVENT");
+        serde_json::from_value(frame[2].clone()).expect("banner event")
+    }
+
+    fn banner_content(event: &nostr::Event) -> serde_json::Value {
+        serde_json::from_str(&event.content).expect("banner content JSON")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn relay_banner_scope_shrink_clears_old_audience_before_new_active() {
+        let (_guard, state, pool) = setup_state().await;
+        let retained = insert_test_community(&pool, "banner-shrink-retained").await;
+        let removed = insert_test_community(&pool, "banner-shrink-removed").await;
+        let (_retained_conn, mut retained_rx) = register_banner_sub(&state, retained, vec![11; 32]);
+        let (_removed_conn, mut removed_rx) = register_banner_sub(&state, removed, vec![12; 32]);
+
+        let initial = state
+            .db
+            .admin_upsert_relay_banner(buzz_db::RelayBannerUpsert {
+                severity: buzz_db::RelayBannerSeverity::Info,
+                message: "all communities".to_owned(),
+                max_displays: 1,
+                scope: buzz_db::RelayBannerScope::AllCommunities,
+                actor_pubkey: vec![1; 32],
+            })
+            .await
+            .expect("insert initial banner");
+        let replacement = state
+            .db
+            .admin_upsert_relay_banner(buzz_db::RelayBannerUpsert {
+                severity: buzz_db::RelayBannerSeverity::Warning,
+                message: "retained only".to_owned(),
+                max_displays: 1,
+                scope: buzz_db::RelayBannerScope::Communities(vec![retained]),
+                actor_pubkey: vec![1; 32],
+            })
+            .await
+            .expect("replace banner");
+        assert_eq!(
+            replacement.previous.as_ref().map(|banner| banner.id),
+            Some(initial.active.id)
+        );
+        let disabled = replacement.previous.as_ref().expect("disabled previous");
+        let disabled_event =
+            crate::api::banners::banner_disabled_event(&state.relay_keypair, disabled, None)
+                .expect("disabled event");
+        let active_event =
+            crate::api::banners::banner_event(&state.relay_keypair, &replacement.active, None)
+                .expect("active event");
+
+        fan_out_relay_banner_event(&state, disabled, &disabled_event, false).await;
+        fan_out_relay_banner_event(&state, &replacement.active, &active_event, true).await;
+
+        let retained_clear = recv_banner_event(&mut retained_rx).await;
+        assert!(retained_clear
+            .tags
+            .iter()
+            .any(|tag| tag.kind().to_string() == "status" && tag.content() == Some("disabled")));
+        let retained_active = recv_banner_event(&mut retained_rx).await;
+        assert_eq!(banner_content(&retained_active)["text"], "retained only");
+        let removed_clear = recv_banner_event(&mut removed_rx).await;
+        assert!(removed_clear
+            .tags
+            .iter()
+            .any(|tag| tag.kind().to_string() == "status" && tag.content() == Some("disabled")));
+        assert!(removed_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn relay_banner_upsert_live_routes_only_to_eligible_users() {
+        let (_guard, state, pool) = setup_state().await;
+        let included = insert_test_community(&pool, "banner-fanout-included").await;
+        let excluded = insert_test_community(&pool, "banner-fanout-excluded").await;
+        let (_eligible_conn, mut eligible_rx) = register_banner_sub(&state, included, vec![7; 32]);
+        let (_excluded_conn, mut excluded_rx) = register_banner_sub(&state, excluded, vec![8; 32]);
+        let banner = state
+            .db
+            .admin_upsert_relay_banner(buzz_db::RelayBannerUpsert {
+                severity: buzz_db::RelayBannerSeverity::Info,
+                message: "live".to_owned(),
+                max_displays: 1,
+                scope: buzz_db::RelayBannerScope::Communities(vec![included]),
+                actor_pubkey: vec![1; 32],
+            })
+            .await
+            .expect("upsert banner")
+            .active;
+        let event = crate::api::banners::banner_event(&state.relay_keypair, &banner, None)
+            .expect("banner event");
+
+        fan_out_relay_banner_event(&state, &banner, &event, true).await;
+
+        let frame = eligible_rx.recv().await.expect("live banner frame");
+        let WsMessage::Text(frame) = frame else {
+            panic!("expected text frame");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&frame).expect("EVENT frame JSON");
+        assert_eq!(frame[0], "EVENT");
+        assert_eq!(frame[1], "banner");
+        let content: serde_json::Value = serde_json::from_str(
+            frame[2]["content"]
+                .as_str()
+                .expect("banner event content string"),
+        )
+        .expect("banner content JSON");
+        assert_eq!(content["text"], "live");
+        assert!(excluded_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn relay_banner_disable_live_routes_using_pre_disable_eligibility() {
+        let (_guard, state, pool) = setup_state().await;
+        let eligible_community = insert_test_community(&pool, "banner-disable-eligible").await;
+        let excluded_community = insert_test_community(&pool, "banner-disable-excluded").await;
+        let exhausted_user = vec![8; 32];
+        let eligible_user = vec![9; 32];
+        let excluded_user = vec![10; 32];
+        let (_exhausted_conn, mut exhausted_rx) =
+            register_banner_sub(&state, eligible_community, exhausted_user.clone());
+        let (_eligible_conn, mut eligible_rx) =
+            register_banner_sub(&state, eligible_community, eligible_user);
+        let (_excluded_conn, mut excluded_rx) =
+            register_banner_sub(&state, excluded_community, excluded_user);
+        let banner = state
+            .db
+            .admin_upsert_relay_banner(buzz_db::RelayBannerUpsert {
+                severity: buzz_db::RelayBannerSeverity::Warning,
+                message: "clear".to_owned(),
+                max_displays: 1,
+                scope: buzz_db::RelayBannerScope::Communities(vec![eligible_community]),
+                actor_pubkey: vec![1; 32],
+            })
+            .await
+            .expect("upsert banner")
+            .active;
+        assert_eq!(
+            state
+                .db
+                .ack_relay_banner_view(
+                    eligible_community,
+                    banner.public_id,
+                    &exhausted_user,
+                    Uuid::new_v4(),
+                )
+                .await
+                .expect("exhaust user"),
+            buzz_db::RelayBannerViewOutcome::Accepted {
+                display_count: 1,
+                changed: true,
+            }
+        );
+        let disabled = state
+            .db
+            .admin_disable_active_relay_banner(&[1; 32])
+            .await
+            .expect("disable banner")
+            .expect("disabled banner");
+        assert_eq!(disabled.id, banner.id);
+        let event =
+            crate::api::banners::banner_disabled_event(&state.relay_keypair, &disabled, None)
+                .expect("disabled event");
+
+        fan_out_relay_banner_event(&state, &disabled, &event, false).await;
+
+        let frame = exhausted_rx
+            .recv()
+            .await
+            .expect("exhausted user clear frame");
+        let WsMessage::Text(frame) = frame else {
+            panic!("expected text frame");
+        };
+        assert!(frame.contains("\"status\",\"disabled\""));
+        assert!(frame.contains("\"scope\",\"communities\""));
+        let frame = eligible_rx.recv().await.expect("live disable frame");
+        let WsMessage::Text(frame) = frame else {
+            panic!("expected text frame");
+        };
+        assert!(frame.contains("\"status\",\"disabled\""));
+        assert!(frame.contains("\"scope\",\"communities\""));
+        assert!(excluded_rx.try_recv().is_err());
     }
 }
