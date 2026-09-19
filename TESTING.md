@@ -342,6 +342,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_ALLOW_NIP_OA_AUTH`        | `false`                     | Enable NIP-OA owner attestation for membership |
 | `BUZZ_WEB_DIR`                  | unset (source), `/srv/buzz/web` (container) | Directory containing the invite landing bundle; the production container enables it so `/invite/{code}` always works |
 | `BUZZ_SERVE_GIT_WEB_GUI`        | `false`                     | Set to `true` or `1` to expose the bundled Git repository browser at `/` and `/repos/...`; invite routes do not depend on this flag |
+| `BUZZ_MAX_THREAD_DEPTH`         | `100`                       | Maximum NIP-10 reply nesting accepted on ingest; deeper replies are rejected with `thread depth limit exceeded`. Must be a positive integer |
 
 CLI-side, only two matter for testing:
 
