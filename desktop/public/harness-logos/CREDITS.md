@@ -16,6 +16,7 @@ license permits redistribution.
 | `pi.svg` | [earendil-works/pi-website](https://github.com/earendil-works/pi-website) | `2f5e410b97474d0a34ec2500aa1aa58d6c3f992c` | MIT © 2026 Earendil Inc. and contributors | `src/favicon.svg` | None |
 | `kimi.png` | [MoonshotAI/kimi-cli](https://github.com/MoonshotAI/kimi-cli) | `4a550effdfcb29a25a5d325bf935296cc50cd417` | Apache-2.0; NOTICE: Kimi Code CLI © 2025 Moonshot AI | `web/public/logo.png` | None |
 | `grok.svg` | [SpaceXAI brand guidelines](https://x.ai/legal/brand-guidelines) | Retrieved 2026-07-25 | xAI Brand Guidelines: marks may be used to accurately refer to xAI or its services; logos must be used exactly as provided | `SpaceXAI_Grok_Assets.zip` → `Grok_Logomark_Dark.svg` | None |
+| `zcode-acp.svg` | Original placeholder (not derived from a third-party mark) | n/a | CC0-1.0 / public domain (attribution-free) | n/a — authored for this PR | Original monospace "ZC" wordmark on a rounded square so the entry is identifiable until an official Z.ai mark can be bundled under redistribution terms |
 
 ## Inline SVG marks (`RUNTIME_MARKS`)
 
