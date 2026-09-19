@@ -9,8 +9,10 @@ import {
   getReactionTargetId,
   hasInboxThreadContext,
   isInboxThreadContextEvent,
+  filterVisibleInboxItems,
   matchesInboxAllView,
   matchesInboxFilter,
+  matchesUnreadOnlyVisibility,
   toInboxContextMessage,
   toTimelineMessage,
 } from "./inboxViewHelpers.ts";
@@ -62,6 +64,56 @@ test("hasInboxThreadContext keeps standalone and broadcast activity unthreaded",
       groupItems: [broadcastReply],
     }),
     false,
+  );
+});
+
+test("unread-only keeps a done row only for an explicit URL selection", () => {
+  const item = { conversationId: "thread-1", id: "event-1" };
+  const doneSet = new Set(["event-1"]);
+
+  assert.equal(
+    matchesUnreadOnlyVisibility(item, {
+      doneSet,
+      selectedConversationId: "thread-1",
+      unreadOnly: true,
+      urlSelectedItemId: null,
+    }),
+    false,
+  );
+  assert.equal(
+    matchesUnreadOnlyVisibility(item, {
+      doneSet,
+      selectedConversationId: "thread-1",
+      unreadOnly: true,
+      urlSelectedItemId: "event-1",
+    }),
+    true,
+  );
+});
+
+test("filterVisibleInboxItems drops auto-selected done rows in unread-only", () => {
+  const unread = {
+    categories: ["mention"],
+    conversationId: "unread-thread",
+    id: "unread-event",
+    item: { kind: 9 },
+  };
+  const done = {
+    categories: ["mention"],
+    conversationId: "done-thread",
+    id: "done-event",
+    item: { kind: 9 },
+  };
+
+  assert.deepEqual(
+    filterVisibleInboxItems([unread, done], {
+      doneSet: new Set(["done-event"]),
+      filter: "all",
+      selectedConversationId: "done-thread",
+      unreadOnly: true,
+      urlSelectedItemId: null,
+    }).map((item) => item.id),
+    ["unread-event"],
   );
 });
 

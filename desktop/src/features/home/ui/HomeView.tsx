@@ -19,7 +19,7 @@ import { useInboxEditMessage } from "@/features/home/useInboxEditMessage";
 import { useOwnedAgentPubkeys } from "@/features/home/useOwnedAgentPubkeys";
 import {
   filterInboxItems,
-  matchesInboxFilter,
+  filterVisibleInboxItems,
 } from "@/features/home/lib/inboxViewHelpers";
 import { resolveInboxFilterSelection } from "@/features/home/lib/inboxSelection";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
@@ -244,6 +244,7 @@ export function HomeView({
     markThreadRead,
     recordThreadInteraction,
     readStateVersion,
+    isReadStateReady,
   } = useAppShell();
   const { doneSet, markDone, markUnread, undoDone, undoUnread, unreadSet } =
     feedItemState;
@@ -387,6 +388,7 @@ export function HomeView({
       getThreadReadAt,
       getMessageReadAt,
       readStateVersion,
+      isReadStateReady,
       localDoneSet: doneSet,
       localUnreadSet: unreadSet,
       clearChannelUnreadSource,
@@ -418,25 +420,27 @@ export function HomeView({
   const selectedConversationId =
     selectedItemFromAll?.conversationId ?? latchedConversationId;
 
-  const filteredItems = React.useMemo(() => {
-    return inboxItems.filter(
-      (item) =>
-        matchesInboxFilter(item, filter, ownedAgentPubkeys) &&
-        (!unreadOnly ||
-          !effectiveDoneSet.has(item.id) ||
-          item.conversationId === selectedConversationId),
-    );
-  }, [
-    effectiveDoneSet,
-    filter,
-    inboxItems,
-    ownedAgentPubkeys,
-    selectedConversationId,
-    unreadOnly,
-  ]);
-  // A filter change may only retain detail for a conversation that remains
-  // visible. The filter handler selects the next valid row in the same update,
-  // so the detail pane never renders a stale conversation between states.
+  const filteredItems = React.useMemo(
+    () =>
+      filterVisibleInboxItems(inboxItems, {
+        doneSet: effectiveDoneSet,
+        filter,
+        ownedAgentPubkeys,
+        selectedConversationId,
+        unreadOnly,
+        urlSelectedItemId,
+      }),
+    [
+      effectiveDoneSet,
+      filter,
+      inboxItems,
+      ownedAgentPubkeys,
+      selectedConversationId,
+      unreadOnly,
+      urlSelectedItemId,
+    ],
+  );
+  // Filter changes retain detail only for a conversation that stays visible.
   const selectedItem = React.useMemo(() => {
     if (!selectedEventId) return null;
     const fromFiltered = findInboxItemByEventId(filteredItems, selectedEventId);
@@ -534,13 +538,14 @@ export function HomeView({
 
   const handleFilterChange = React.useCallback(
     (nextFilter: InboxFilter) => {
-      const nextItems = inboxItems.filter(
-        (item) =>
-          matchesInboxFilter(item, nextFilter, ownedAgentPubkeys) &&
-          (!unreadOnly ||
-            !effectiveDoneSet.has(item.id) ||
-            item.conversationId === selectedConversationId),
-      );
+      const nextItems = filterVisibleInboxItems(inboxItems, {
+        doneSet: effectiveDoneSet,
+        filter: nextFilter,
+        ownedAgentPubkeys,
+        selectedConversationId,
+        unreadOnly,
+        urlSelectedItemId,
+      });
       const selection = resolveInboxFilterSelection({
         isNarrow: isNarrowHomeViewport,
         items: nextItems,
@@ -577,6 +582,7 @@ export function HomeView({
       setSelectedDraftKey,
       setSelectedReminderId,
       unreadOnly,
+      urlSelectedItemId,
     ],
   );
 
