@@ -577,6 +577,62 @@ void main() {
     );
   });
 
+  for (final nested in [false, true]) {
+    test(
+      'live reply settles a closed thread overlay, nested=$nested',
+      () async {
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              if (nested)
+                _event(
+                  id: 'parent',
+                  createdAt: 15,
+                  extraTags: const [
+                    ['e', 'root', '', 'reply'],
+                  ],
+                ),
+              _event(id: 'root', createdAt: 10),
+              _bounds(),
+            ],
+          ],
+        );
+        final container = _buildContainer(relaySession);
+        addTearDown(container.dispose);
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+        final reply = _event(
+          id: 'reply',
+          createdAt: 20,
+          extraTags: [
+            if (nested) ['e', 'root', '', 'root'],
+            ['e', nested ? 'parent' : 'root', '', 'reply'],
+          ],
+        );
+        notifier.addLocalMessage(reply);
+        notifier.completeLocalMessage(reply.id);
+        relaySession.emit(reply);
+        await _pumpEventQueue();
+        expect(container.exists(threadLocalRepliesProvider(args)), isFalse);
+        expect(
+          container.read(pendingLocalMessagesProvider(_channelId)),
+          isEmpty,
+        );
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+        );
+        expect(entries.single.summary?.replyCount, nested ? 2 : 1);
+      },
+    );
+  }
+
   test(
     'thread replies are inserted, deduped, and rolled back locally',
     () async {
@@ -668,7 +724,7 @@ void main() {
   );
 
   test(
-    'thread live echo keeps ownership until the authoritative refetch succeeds',
+    'thread live echo settles ownership even when the refetch fails',
     () async {
       final relaySession = _RecordingRelaySessionNotifier(
         queryResults: [
@@ -705,21 +761,14 @@ void main() {
       relaySession.emit(reply);
       await _pumpEventQueue();
 
-      expect(container.read(pendingLocalMessagesProvider(_channelId)).keys, [
-        'reply',
-      ]);
+      expect(container.read(pendingLocalMessagesProvider(_channelId)), isEmpty);
+      expect(container.read(threadLocalRepliesProvider(args)), isEmpty);
       expect(
         container
-            .read(threadLocalRepliesProvider(args))
+            .read(channelMessagesProvider(_channelId))
+            .value!
             .map((event) => event.id),
-        ['reply'],
-      );
-      expect(
-        container
-            .read(threadRepliesWithLocalProvider(args))
-            .value
-            ?.map((event) => event.id),
-        ['reply'],
+        ['history', 'reply'],
       );
     },
   );

@@ -211,12 +211,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       return;
     }
 
-    // Reply ownership and its thread-local overlay must transition together.
-    // The authoritative thread query performs both confirmations after it
-    // contains the reply; a live echo only triggers that query below.
-    if (authoritative && event.threadReference.parentId == null) {
-      _confirmLocalMessages([event.id]);
-    }
     if (_usingChannelWindow) {
       _handleWindowLiveEvent(event);
     } else {
@@ -224,6 +218,19 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       final merged = _mergeEvent(current, event);
       _lastKnownMessages = merged;
       state = AsyncData(merged);
+    }
+    if (authoritative) {
+      // Store the reply first so clearing its overlay cannot disable its root.
+      _confirmLocalMessages([event.id]);
+      final thread = event.threadReference;
+      if (thread.parentId != null && thread.rootId != null) {
+        final localReplies = threadLocalRepliesProvider(
+          ThreadRepliesArgs(channelId: channelId, rootId: thread.rootId!),
+        );
+        if (ref.exists(localReplies)) {
+          ref.read(localReplies.notifier).confirm({event.id});
+        }
+      }
     }
   }
 
