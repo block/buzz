@@ -65,6 +65,8 @@ See:
 | `secrets.existingSecret` | Name of pre-created Secret | Production / GitOps |
 | `externalPostgresql.url` / `externalRedis.url` / `s3.endpoint` | External service URLs | Production — when the matching bundled service is disabled (the default) |
 
+Set `relay.nipFiMode=shadow` only when the deployment wants clients to discover and prepare for a federated-identity limitation before relay-side enforcement exists. The chart renders this as `BUZZ_NIP_FI_MODE`. Shadow mode makes NIP-11 advertise only the privacy-safe requirement shape from `docs/nips/NIP-FI.md`: no issuer, audience, JWKS, Auth0/IdP, login, tenant, or other identity details belong in chart values or discovery output. Admission remains unchanged. The default `off` mode omits the discovery fields. The value `enforce` is reserved for the future enforced mode, but the current relay rejects it at startup until NIP-FI validation and protected-ingress enforcement are implemented.
+
 The chart fails at `helm install` / `helm template` time with a clear message if any of these are missing or malformed (see `templates/_validate.tpl`).
 
 ## S3 URL addressing
