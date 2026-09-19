@@ -3,10 +3,33 @@ part of '../channel_messages_provider.dart';
 extension _ThreadSummaryState on ChannelMessagesNotifier {
   bool _isVisibleRoot(String root) =>
       _retainedDeepLinkEventIds.contains(root) ||
+      (!_usingChannelWindow &&
+          (_lastKnownMessages?.any((event) => event.id == root) ?? false)) ||
       _windowStore.pages.any(
         (page) => page.rows.any((row) => row.event.id == root),
       ) ||
       _windowStore.liveOverlay.any((event) => event.id == root);
+
+  void _reconcileFallbackSummaries(int historyVersion) {
+    // A bounded WebSocket history is not proof that an absent reply was deleted.
+    // Recount visible cached aggregates, marking their old totals uncertain in
+    // the meantime. Requests or live summaries newer than this history win.
+    final roots = {..._queryThreadSummaries.keys, ..._overflowFloors.keys};
+    for (final root in roots) {
+      if ((_threadQueryVersions[root] ?? 0) > historyVersion) continue;
+      _setThreadQueryVersion(root, historyVersion);
+      if (!_isVisibleRoot(root)) {
+        _queryThreadSummaries.remove(root);
+        _overflowFloors.remove(root);
+        _deletionSummaryUncertainty.remove(root);
+        _summaryRefreshes.cancel(root);
+        continue;
+      }
+      (_deletionSummaryUncertainty[root] ??= _DeletionSummaryUncertainty())
+          .begin(historyVersion);
+      _queueOverflowSummary(root);
+    }
+  }
 
   void _queueOverflowSummary(String root) {
     if (!_isVisibleRoot(root)) return;

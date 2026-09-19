@@ -2779,6 +2779,130 @@ void main() {
     );
   });
 
+  for (final outcome in ['deleted', 'surviving', 'unavailable']) {
+    test(
+      'WebSocket fallback reconciles cached thread truth: $outcome',
+      () async {
+        final reply = _event(
+          id: 'cached-reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        );
+        final recount = Completer<List<NostrEvent>>();
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'root', createdAt: 10), _bounds()],
+            Exception('NIP-CW unavailable'),
+            recount.future,
+          ],
+          historyResults: [
+            [_event(id: 'root', createdAt: 10)],
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        notifier.cacheCompleteThreadQuery('root', {}, [reply]);
+        session.setConnected(false);
+        await _pumpEventQueue();
+        session.setConnected(true);
+        await _pumpEventQueue();
+        if (outcome != 'deleted') {
+          expect(notifier.threadSummaries['root']!.isCountPending, isTrue);
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        if (outcome == 'unavailable') {
+          recount.completeError(Exception('thread query unavailable'));
+        } else {
+          recount.complete(outcome == 'deleted' ? [] : [reply]);
+        }
+        await _pumpEventQueue();
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        final summary = entries
+            .singleWhere((entry) => entry.message.id == 'root')
+            .summary;
+        if (outcome == 'deleted') {
+          expect(summary, isNull);
+          expect(notifier.cachedThreadReplyIds('root'), isEmpty);
+        } else {
+          expect(summary, isNotNull);
+          expect(summary!.replyCount, 1);
+          expect(
+            notifier.threadSummaries['root']!.isCountPending,
+            outcome == 'unavailable',
+          );
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(
+          session.queryFilters.where(
+            (filter) => filter.extensions.containsKey('depth_limit'),
+          ),
+          hasLength(1),
+        );
+      },
+    );
+  }
+
+  test(
+    'slow fallback history cannot supersede a newer complete thread query',
+    () async {
+      final reply = _event(
+        id: 'cached-reply',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+          Exception('NIP-CW unavailable'),
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      notifier.cacheCompleteThreadQuery('root', {}, [reply]);
+      session.setConnected(false);
+      await _pumpEventQueue();
+      session.setConnected(true);
+      await _pumpEventQueue();
+      final snapshot = notifier.cachedThreadReplyIds('root');
+      final version = notifier.beginThreadQuery('root');
+      notifier.cacheCompleteThreadQuery(
+        'root',
+        snapshot,
+        [],
+        queryVersion: version,
+      );
+      session.completeHistory([_event(id: 'root', createdAt: 10)]);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(notifier.threadSummaries['root']!.descendantCount, 0);
+      expect(notifier.threadSummaries['root']!.isCountPending, isFalse);
+      expect(
+        session.queryFilters.where(
+          (f) => f.extensions.containsKey('depth_limit'),
+        ),
+        isEmpty,
+      );
+    },
+  );
+
   test('reconnect pruning preserves duplicate deletion idempotence', () async {
     final survivor = _event(
       id: 'survivor',
