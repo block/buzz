@@ -1,4 +1,7 @@
 import 'dart:async';
+
+import '../profile/presence_snapshot_test.dart'
+    show PresenceTestRelay, presenceEvent;
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -133,6 +136,57 @@ void main() {
       isMember: true,
     ),
   ];
+
+  testWidgets('DM tile presence observation failure hides the dot', (
+    tester,
+  ) async {
+    final relay = PresenceTestRelay();
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          relaySessionProvider.overrideWith(() => relay),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final dot = find.descendant(
+      of: _dmTileFor('Alice'),
+      matching: find.byWidgetPredicate(
+        (widget) =>
+            widget is Container &&
+            widget.constraints?.maxWidth == 8 &&
+            widget.constraints?.maxHeight == 8,
+      ),
+    );
+    expect(dot, findsNothing);
+    relay.results.removeAt(0).complete([
+      presenceEvent('relay', 'online', subject: 'alice', timestamp: 20),
+    ]);
+    await tester.pumpAndSettle();
+    expect(dot, findsOneWidget);
+    final onlineColor =
+        (tester.widget<Container>(dot).decoration as BoxDecoration).color;
+    await tester.pump(const Duration(seconds: 60));
+    relay.results.removeAt(0).completeError(Exception('unavailable'));
+    await tester.pumpAndSettle();
+    expect(dot, findsNothing);
+    await tester.pump(const Duration(seconds: 60));
+    relay.results.removeAt(0).complete([]);
+    await tester.pumpAndSettle();
+    expect(dot, findsOneWidget);
+    expect(
+      (tester.widget<Container>(dot).decoration as BoxDecoration).color,
+      isNot(onlineColor),
+    );
+    relay.emit(presenceEvent('alice', 'online', timestamp: 21));
+    await tester.pumpAndSettle();
+    expect(
+      (tester.widget<Container>(dot).decoration as BoxDecoration).color,
+      onlineColor,
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets('shows grouped channel list when data loads', (tester) async {
     // Valid fixture keys whose npub encodings were verified against the
@@ -2654,6 +2708,14 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async => [];
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus) onStatusChanged,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
 
   @override
   Future<void Function()> subscribe(

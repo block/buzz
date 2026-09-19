@@ -1,4 +1,7 @@
 import 'dart:async';
+
+import '../profile/presence_snapshot_test.dart'
+    show PresenceTestRelay, presenceEvent;
 import 'dart:collection';
 import 'dart:convert';
 
@@ -588,6 +591,101 @@ void main() {
       },
     );
 
+    for (final profile in [false, true]) {
+      testWidgets('presence observation failure is unknown: profile=$profile', (
+        tester,
+      ) async {
+        final relay = PresenceTestRelay();
+        final semantics = tester.ensureSemantics();
+        final dm = Channel(
+          id: _channelId,
+          name: 'DM',
+          channelType: 'dm',
+          visibility: 'private',
+          description: '',
+          createdBy: 'self',
+          createdAt: DateTime(2025),
+          memberCount: 2,
+          participants: const ['Self', 'Alice'],
+          participantPubkeys: const ['self', 'alice'],
+          isMember: true,
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            channel: dm,
+            relaySessionNotifier: relay,
+            home: profile ? const UserProfileSheet(pubkey: 'alice') : null,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+        void check(String label) {
+          if (profile) {
+            expect(find.text(label), findsOneWidget);
+            expect(find.bySemanticsLabel('Presence: $label'), findsOneWidget);
+            expect(find.bySemanticsLabel(label), findsNothing);
+          } else {
+            expect(
+              tester
+                  .widget<Text>(
+                    find.byKey(const ValueKey('dm-header-presence')),
+                  )
+                  .data,
+              label,
+            );
+            expect(
+              tester
+                  .widget<MaskedAvatarBadge>(
+                    find.byKey(const ValueKey('dm-header-avatar')),
+                  )
+                  .badge,
+              label == 'Unknown' ? isNull : isNotNull,
+            );
+          }
+          if (label != 'Offline') expect(find.text('Offline'), findsNothing);
+        }
+
+        check('Unknown');
+        expect(relay.queries.single.authors, ['alice']);
+        relay.results.removeAt(0).complete([
+          presenceEvent('relay', 'online', subject: 'alice', timestamp: 20),
+        ]);
+        await tester.pumpAndSettle();
+        check('Online');
+        await tester.pump(const Duration(seconds: 60));
+        final stale = relay.results.removeAt(0);
+        relay.emit(presenceEvent('alice', 'offline', timestamp: 10));
+        await tester.pump();
+        check('Online');
+        stale.complete([]);
+        await tester.pumpAndSettle();
+        check('Online');
+        relay.results.removeAt(0).complete([
+          presenceEvent('relay', 'away', subject: 'alice', timestamp: 20),
+        ]);
+        await tester.pumpAndSettle();
+        check('Away');
+        await tester.pump(const Duration(seconds: 60));
+        relay.results.removeAt(0).completeError(Exception('unavailable'));
+        await tester.pumpAndSettle();
+        check('Unknown');
+        await tester.pump(const Duration(seconds: 60));
+        relay.results.removeAt(0).complete([]);
+        await tester.pumpAndSettle();
+        check('Offline');
+        relay.emit(presenceEvent('alice', 'online', timestamp: 21));
+        await tester.pumpAndSettle();
+        check('Online');
+        relay.emit(presenceEvent('alice', 'offline', timestamp: 22));
+        await tester.pumpAndSettle();
+        check('Offline');
+        semantics.dispose();
+      });
+    }
+
     testWidgets('uses the shared 32px masked presence avatar in DM headers', (
       tester,
     ) async {
@@ -608,6 +706,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
+          relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
           channel: dmChannel,
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
@@ -747,6 +846,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
+          relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
           channel: dmChannel,
           loadChannelBotPubkeys: () async => const {'bot'},
         ),
@@ -14523,6 +14623,10 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
         }
       };
     }
+    if (!filter.kinds.contains(39002)) {
+      onStatusChanged(RelaySubscriptionStatus.ready);
+      return () {};
+    }
     _membershipListener = onEvent;
     _membershipStatusListener = onStatusChanged;
     onStatusChanged(RelaySubscriptionStatus.ready);
@@ -14725,8 +14829,9 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
 
 class _FakeProfileNotifier extends ProfileNotifier {
   @override
-  Future<UserProfile?> build() async =>
-      const UserProfile(pubkey: 'self', displayName: 'Self');
+  // Fixed fixture identity must be available before DM presence is tracked.
+  Future<UserProfile?> build() =>
+      SynchronousFuture(const UserProfile(pubkey: 'self', displayName: 'Self'));
 }
 
 class _FakeChannelStarsNotifier extends ChannelStarsNotifier {
