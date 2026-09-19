@@ -21,10 +21,12 @@ void threadReplyRefreshTests() {
     WidgetTester tester,
     Future<List<NostrEvent>> Function() load, {
     bool retry = false,
+    TextScaler textScaler = TextScaler.noScaling,
   }) async {
     await tester.pumpWidget(
       _buildTestable(
         messages: [root],
+        textScaler: textScaler,
         threadReplyLoaders: {args.rootId: load},
         providerRetry: (_, _) =>
             retry ? const Duration(milliseconds: 200) : null,
@@ -109,9 +111,14 @@ void threadReplyRefreshTests() {
   ) async {
     var calls = 0;
     final refresh = Completer<List<NostrEvent>>();
+    tester.view.physicalSize = const Size(320, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     final (navigator, container) = await mount(
       tester,
       () => ++calls == 1 ? Future.value([reply]) : refresh.future,
+      textScaler: const TextScaler.linear(2),
     );
     open(navigator);
     await tester.pumpAndSettle();
@@ -124,6 +131,8 @@ void threadReplyRefreshTests() {
       findsOneWidget,
     );
     expect(find.text('0 replies'), findsNothing);
+    expect(find.text('1 reply · Couldn’t refresh'), findsOneWidget);
+    expect(tester.takeException(), isNull);
     expect(container.read(threadRepliesProvider(args)).hasError, isTrue);
   });
 
