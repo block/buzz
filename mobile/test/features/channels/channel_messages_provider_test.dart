@@ -1208,6 +1208,10 @@ void main() {
       session.setConnected(true);
       await _pumpEventQueue();
       expect(notifier.cachedThreadReplyIds('old-root'), isEmpty);
+      session.emit(
+        _event(id: 'window-publication-$cycle', createdAt: 50 + cycle),
+      );
+      await _pumpEventQueue();
       expect(
         container
             .read(channelMessagesProvider(_channelId))

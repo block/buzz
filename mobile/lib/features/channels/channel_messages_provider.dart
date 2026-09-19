@@ -117,8 +117,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       if (!_isCurrentInit(initVersion)) return;
       _confirmLocalMessages(history.map((event) => event.id));
 
-      final existing =
-          _lastKnownMessages ?? state.value ?? const <NostrEvent>[];
+      final existing = state.value ?? const <NostrEvent>[];
       final existingIds = existing.map((event) => event.id).toSet();
       final merged = _withDeepLinkEvents([
         ...existing,
@@ -371,23 +370,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           .toList(),
       liveThreadSummaries: _windowStore.liveThreadSummaries,
     );
-    final cached = _lastKnownMessages;
-    if (cached != null) {
-      _lastKnownMessages = cached
-          .where(
-            (event) =>
-                EventKind.channelTimelineContentKinds.contains(event.kind)
-                ? keepReply(event)
-                : !EventKind.channelAuxEventKinds.contains(event.kind) ||
-                      event.tags.any(
-                        (tag) =>
-                            tag.length > 1 &&
-                            tag[0] == 'e' &&
-                            retainedIds.contains(tag[1]),
-                      ),
-          )
-          .toList();
-    }
+    // Keep the currently displayed snapshot intact until the next window
+    // publication drops off-window roots and their reply evidence together.
   }
 
   /// Caches confirmed thread replies before their optimistic overlay is cleared.
