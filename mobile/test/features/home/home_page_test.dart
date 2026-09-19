@@ -13,6 +13,7 @@ void main() {
     int unreadInboxCount = 0,
     bool disableAnimations = false,
     Gradient? topSectionGradient,
+    double bottomViewPadding = 0,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -21,9 +22,11 @@ void main() {
       child: MaterialApp(
         theme: AppTheme.light(topSectionGradient: topSectionGradient),
         builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(disableAnimations: disableAnimations),
+          data: MediaQuery.of(context).copyWith(
+            disableAnimations: disableAnimations,
+            viewPadding: EdgeInsets.only(bottom: bottomViewPadding),
+            padding: EdgeInsets.only(bottom: bottomViewPadding),
+          ),
           child: child!,
         ),
         home: HomePage(
@@ -33,6 +36,69 @@ void main() {
       ),
     );
   }
+
+  Future<void> pumpHomeOnPhoneSurface(
+    WidgetTester tester, {
+    required Size surfaceSize,
+    required double bottomViewPadding,
+  }) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = surfaceSize;
+    tester.view.viewPadding = FakeViewPadding(bottom: bottomViewPadding);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      await buildHome(bottomViewPadding: bottomViewPadding),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  void expectQuickActionClearOfHomeTab({required WidgetTester tester}) {
+    final surfaceSize = tester.view.physicalSize / tester.view.devicePixelRatio;
+    final quickAction = find.byTooltip('Create or start conversation');
+    expect(quickAction, findsOneWidget);
+
+    final quickActionRect = tester.getRect(
+      find.byKey(const Key('channel-quick-actions-motion')),
+    );
+    expect(quickActionRect.left, greaterThanOrEqualTo(0));
+    expect(quickActionRect.top, greaterThanOrEqualTo(0));
+    expect(quickActionRect.right, lessThanOrEqualTo(surfaceSize.width));
+    expect(quickActionRect.bottom, lessThanOrEqualTo(surfaceSize.height));
+
+    final homeDestinationRect = tester.getRect(find.bySemanticsLabel('Home'));
+    expect(quickActionRect.overlaps(homeDestinationRect), isFalse);
+  }
+
+  group('phone quick action layout', () {
+    const phoneSurfaces = [Size(360, 800), Size(412, 915)];
+    const bottomInsets = [0.0, 48.0];
+
+    for (final surfaceSize in phoneSurfaces) {
+      for (final bottomInset in bottomInsets) {
+        testWidgets(
+          'keeps the quick action on-screen on ${surfaceSize.width.toInt()}x'
+          '${surfaceSize.height.toInt()} with bottom inset $bottomInset',
+          (tester) async {
+            await pumpHomeOnPhoneSurface(
+              tester,
+              surfaceSize: surfaceSize,
+              bottomViewPadding: bottomInset,
+            );
+
+            expectQuickActionClearOfHomeTab(tester: tester);
+
+            await tester.tap(
+              find.byKey(const Key('channel-quick-actions-motion')),
+            );
+            await tester.pumpAndSettle();
+
+            expect(find.text('Create channel'), findsOneWidget);
+            expect(find.text('New direct message'), findsOneWidget);
+          },
+        );
+      }
+    }
+  });
 
   testWidgets('shows icon-only navigation and an aligned quick action', (
     tester,

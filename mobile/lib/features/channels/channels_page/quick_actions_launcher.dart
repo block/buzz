@@ -5,6 +5,40 @@ const _kQuickActionsTabMotionCurve = Cubic(0.77, 0, 0.175, 1);
 const _kQuickActionsHiddenOverlap = Grid.half;
 const _kQuickActionsHiddenScale = 0.8;
 
+/// Keeps the closed quick-action button beside the tab bar without overlapping
+/// the centered pill on compact phone widths.
+double _effectiveQuickActionsRightInset({
+  required double screenWidth,
+  required double navigationBarWidth,
+  required double rightInset,
+}) {
+  final tabBarLeft = (screenWidth - navigationBarWidth) / 2;
+  final defaultFabRight = screenWidth - rightInset;
+  final defaultFabLeft = defaultFabRight - _kMorphClosedSize;
+  final tabBarRight = tabBarLeft + navigationBarWidth;
+  final overlapsTabBar =
+      defaultFabRight > tabBarLeft && defaultFabLeft < tabBarRight;
+  if (!overlapsTabBar) {
+    return rightInset;
+  }
+
+  final clearanceGap = Grid.half;
+  final shiftedFabRight = tabBarLeft - clearanceGap;
+  final shiftedRightInset = screenWidth - shiftedFabRight;
+  final shiftedFabLeft = shiftedFabRight - _kMorphClosedSize;
+  if (shiftedFabLeft >= 0) {
+    return shiftedRightInset;
+  }
+
+  final flushRightInset = screenWidth - tabBarLeft;
+  final flushFabLeft = tabBarLeft - _kMorphClosedSize;
+  if (flushFabLeft >= 0) {
+    return flushRightInset;
+  }
+
+  return (screenWidth - _kMorphClosedSize).clamp(rightInset, double.infinity);
+}
+
 /// Places the channel quick-actions button beside mobile navigation.
 ///
 /// The button remains available only on Home and moves behind the navigation
@@ -55,8 +89,13 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
         ((navigationBarHeight - _kMorphClosedSize) / 2);
     final effectiveOpen = visible && quickActionsOpen.value;
     final screenWidth = MediaQuery.sizeOf(context).width;
+    final effectiveRightInset = _effectiveQuickActionsRightInset(
+      screenWidth: screenWidth,
+      navigationBarWidth: navigationBarWidth,
+      rightInset: rightInset,
+    );
     final navigationBarRight = (screenWidth + navigationBarWidth) / 2;
-    final launcherRight = screenWidth - rightInset;
+    final launcherRight = screenWidth - effectiveRightInset;
     final hiddenHorizontalOffset =
         navigationBarRight - launcherRight - _kQuickActionsHiddenOverlap;
 
@@ -141,7 +180,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
               ? Duration.zero
               : _kQuickActionsTabMotionDuration,
           curve: _kQuickActionsTabMotionCurve,
-          right: rightInset,
+          right: effectiveRightInset,
           bottom: closedBottomInset + (effectiveOpen ? openLift : 0),
           child: IgnorePointer(
             ignoring: !visible,
@@ -171,7 +210,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
                 ),
                 child: _MorphingQuickActionsButton(
                   open: effectiveOpen,
-                  openEdgeOffset: rightInset - Grid.gutter,
+                  openEdgeOffset: effectiveRightInset - Grid.gutter,
                   onToggle: () {
                     unawaited(HapticFeedback.lightImpact());
                     quickActionsOpen.value = !quickActionsOpen.value;
