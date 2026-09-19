@@ -299,6 +299,93 @@ test("keeps a queued-attachment send locked through upload and send settlement",
   await expect(composerForm).toHaveAttribute("data-submit-locked", "false");
 });
 
+async function seedAvailableSkills(page: Page) {
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ === "function",
+  );
+  await page.evaluate(
+    ({ agentPubkey, channelId, seq, timestamp }) => {
+      window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__?.({
+        agentPubkey,
+        events: [
+          {
+            seq,
+            timestamp,
+            kind: "acp_read",
+            agentIndex: 0,
+            channelId,
+            sessionId: "skill-picker-session",
+            turnId: "skill-picker-turn",
+            payload: {
+              method: "session/update",
+              params: {
+                sessionId: "skill-picker-session",
+                update: {
+                  sessionUpdate: "available_commands_update",
+                  availableCommands: [
+                    {
+                      name: "create_plan",
+                      description: "Create a structured plan for the task",
+                    },
+                    {
+                      name: "research_codebase",
+                      description: "Research and understand the codebase",
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      });
+    },
+    {
+      agentPubkey: AGENT_A,
+      channelId: CHANNEL_ID,
+      seq: Date.now(),
+      timestamp: new Date().toISOString(),
+    },
+  );
+}
+
+test("inserts a selected agent skill into the composer", async ({ page }) => {
+  await installAudienceFixtures(page);
+  await openThread(page);
+
+  const composer = threadComposer(page);
+  await automaticallyMention(composer, "Morgarita");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/skill-picker-before.png` });
+  await seedAvailableSkills(page);
+
+  const input = composer.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.press("End");
+  await input.pressSequentially("Start ");
+  const skillPicker = composer.getByTestId("composer-skill-picker");
+  await expect(skillPicker).toBeVisible();
+  await skillPicker.click();
+
+  const search = page.getByRole("textbox", { name: "Search skills" });
+  await expect(search).toBeFocused();
+  await search.fill("structured");
+  await expect(
+    page.getByRole("option", { name: /\/create_plan/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("option", { name: /\/research_codebase/ }),
+  ).toHaveCount(0);
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/skill-picker-after.png` });
+
+  await page.getByRole("option", { name: /\/create_plan/ }).click();
+  await expect(input).toContainText("/create_plan");
+  await expect(input).toBeFocused();
+});
+
 test("automatically mentions multiple agents from the mention picker", async ({
   page,
 }) => {
