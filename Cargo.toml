@@ -17,6 +17,7 @@ members = [
     "crates/buzz-ws-client",
     "crates/buzz-admin",
     "crates/buzz-deletion",
+    "crates/buzz-feature-flags",
     "crates/buzz-workflow",
     "crates/buzz-media",
     "crates/buzz-cli",
@@ -141,6 +142,7 @@ buzz-core = { path = "crates/buzz-core" }
 buzz-conformance = { path = "crates/buzz-conformance" }
 buzz-db = { path = "crates/buzz-db" }
 buzz-deletion = { path = "crates/buzz-deletion" }
+buzz-feature-flags = { path = "crates/buzz-feature-flags" }
 buzz-auth = { path = "crates/buzz-auth" }
 buzz-pubsub = { path = "crates/buzz-pubsub" }
 buzz-search = { path = "crates/buzz-search" }

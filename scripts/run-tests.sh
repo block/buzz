@@ -124,6 +124,11 @@ run_unit_tests() {
   run_test_step "buzz-backend-kubernetes tests" \
     cargo test -p buzz-backend-kubernetes -- --nocapture
 
+  # Keep fallback parity with `just test-unit`: one LaunchDarkly-feature run
+  # exercises both default and feature-gated buzz-feature-flags tests.
+  run_test_step "buzz-feature-flags tests (launchdarkly)" \
+    cargo test -p buzz-feature-flags --features launchdarkly -- --nocapture
+
   # buzz-agent model-capabilities corpus: the Rust half of the cross-language
   # drift guard. model_capabilities.rs embeds scripts/model-capabilities.json +
   # scripts/normative-corpus.json via include_str! and replays the full locked

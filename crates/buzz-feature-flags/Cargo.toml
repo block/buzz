@@ -1,0 +1,19 @@
+[package]
+name = "buzz-feature-flags"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed feature-flag contracts and evaluators for Buzz"
+
+[features]
+launchdarkly = ["dep:launchdarkly-server-sdk"]
+
+[dependencies]
+buzz-core = { workspace = true }
+launchdarkly-server-sdk = { version = "3", optional = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
