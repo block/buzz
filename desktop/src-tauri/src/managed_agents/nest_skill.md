@@ -161,7 +161,7 @@ buzz mem patch <slug> --base-hash "$HASH" --patch-file diff.patch  # 2. apply wi
 
 Exit code 5 if the value changed since the hash was read (another agent wrote first). Retry by re-reading, re-diffing, and re-patching.
 
-Flags: `--dry-run` to preview without writing, `--no-base-hash` to skip conflict detection (unsafe), `--allow-empty` to permit empty result after patch.
+Flags: `--dry-run` to preview without writing, `--no-base-hash` to skip conflict detection (unsafe), `--allow-empty` to permit an empty result or a near-no-op (byte-identical / ±1-byte delta — refused by default to catch mis-targeted slugs). The write receipt echoes the target slug and the byte delta (`292→293 bytes (Δ+1)`); read it before assuming success.
 
 ## Polling Pattern
 

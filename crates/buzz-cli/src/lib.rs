@@ -1865,7 +1865,9 @@ pub enum MemCmd {
         /// Echo the input patch + resulting sha256 and exit without writing.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
-        /// Allow committing an empty result.
+        /// Allow committing an empty result, or one that is byte-identical
+        /// to / within one byte of the current value (near-no-op guard
+        /// against mis-targeted slugs).
         #[arg(long, default_value_t = false)]
         allow_empty: bool,
         #[arg(long)]
