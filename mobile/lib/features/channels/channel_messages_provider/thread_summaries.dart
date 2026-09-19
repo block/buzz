@@ -10,6 +10,24 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       ) ||
       _windowStore.liveOverlay.any((event) => event.id == root);
 
+  void _reconcileLiveSummaryPayloads(NostrEvent event) {
+    final root = event.getTagValue('e');
+    if (root == null || !_isVisibleRoot(root)) return;
+    final summary = _baseThreadSummaries[root];
+    final confirmedIds = cachedThreadReplyIds(root)
+      ..removeAll(_localReplyRoots.keys);
+    if (summary == null || confirmedIds.length <= summary.descendantCount) {
+      return;
+    }
+    // The summary may lag a new reply, or its deletion marker may have been
+    // missed. A fresh complete query resolves either case without discarding
+    // valid local payloads merely because a summary count is lower.
+    (_deletionSummaryUncertainty[root] ??= _DeletionSummaryUncertainty()).begin(
+      _threadQueryVersions[root]!,
+    );
+    _queueOverflowSummary(root);
+  }
+
   void _reconcileFallbackSummaries(int historyVersion) {
     // A bounded WebSocket history is not proof that an absent reply was deleted.
     // Recount visible cached aggregates, marking their old totals uncertain in

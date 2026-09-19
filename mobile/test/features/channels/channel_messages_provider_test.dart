@@ -2779,6 +2779,58 @@ void main() {
     );
   });
 
+  for (final stillExists in [false, true]) {
+    test(
+      'live summary reconciles contradictory cached replies (exists: $stillExists)',
+      () async {
+        final reply = _event(
+          id: 'cached-reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        );
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'root', createdAt: 10), _bounds()],
+            stillExists ? [reply] : <NostrEvent>[],
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        notifier.cacheCompleteThreadQuery('root', {}, [reply]);
+        session.emit(_summary(rootId: 'root', replyCount: 0));
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(
+          entries.singleWhere((e) => e.message.id == 'root').summary == null,
+          !stillExists,
+        );
+        expect(
+          notifier.cachedThreadReplyIds('root').contains('cached-reply'),
+          stillExists,
+        );
+        expect(notifier.threadSummaries['root']!.isCountPending, isFalse);
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions.containsKey('depth_limit'),
+          ),
+          hasLength(1),
+        );
+      },
+    );
+  }
+
   for (final outcome in ['deleted', 'surviving', 'unavailable']) {
     test(
       'WebSocket fallback reconciles cached thread truth: $outcome',

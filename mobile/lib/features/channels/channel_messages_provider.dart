@@ -441,6 +441,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
     _windowStore = next;
     _trimReplyOverlay();
+    if (event.kind == EventKind.channelThreadSummary) {
+      _reconcileLiveSummaryPayloads(event);
+    }
     return true;
   }
 
