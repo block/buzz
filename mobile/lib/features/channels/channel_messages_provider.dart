@@ -320,6 +320,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _windowStore,
       event,
       isTimelineRow: isTimelineRow,
+      // Deep-link roots stay visible independently of the newest window.
+      // Keep their reply evidence under the same payload bounds as other roots.
+      retainOutsideWindow:
+          thread?.parentId != null &&
+          _retainedDeepLinkEventIds.contains(thread?.rootId),
     );
     if (identical(next, _windowStore)) return false;
     _windowStore = next;

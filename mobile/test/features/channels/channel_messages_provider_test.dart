@@ -1420,6 +1420,55 @@ void main() {
     },
   );
 
+  test(
+    'pinned off-window root retains query-discovered reply evidence',
+    () async {
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'newest', createdAt: 100), _bounds()],
+          [
+            _event(
+              id: 'old-reply',
+              createdAt: 20,
+              extraTags: const [
+                ['e', 'old-root', '', 'reply'],
+              ],
+            ),
+          ],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      final load = notifier.loadEventsById(['old-root']);
+      session.completeTargetHistory([_event(id: 'old-root', createdAt: 10)]);
+      await load;
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'old-root');
+      final thread = container.listen(threadRepliesProvider(args), (_, _) {});
+      await container.read(threadRepliesProvider(args).future);
+      thread.close();
+      await _pumpEventQueue();
+      session.emit(_event(id: 'live', createdAt: 110));
+      final entries = buildMainTimelineEntries(
+        formatTimeline(
+          container.read(channelMessagesProvider(_channelId)).value!,
+        ),
+        relaySummaries: notifier.threadSummaries,
+      );
+      expect(
+        entries
+            .singleWhere((entry) => entry.message.id == 'old-root')
+            .summary
+            ?.replyCount,
+        1,
+      );
+    },
+  );
+
   test('a reply newer than the relay recount raises the badge', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
