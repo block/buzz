@@ -1,6 +1,7 @@
 import type { RelayEvent } from "@/shared/api/types";
 import { CHANNEL_TIMELINE_CONTENT_KINDS } from "@/shared/constants/kinds";
 import {
+  channelWindowThreadRepliesInChannel,
   compareRelayOrder,
   flattenChannelWindowEvents,
   type ChannelWindowStore,
@@ -10,10 +11,14 @@ import { getThreadReference, isBroadcastReply } from "./threading";
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 
-function retainRefetchReconciliationEvents(events: RelayEvent[]) {
+function retainRefetchReconciliationEvents(
+  events: RelayEvent[],
+  threadRepliesInChannel: boolean,
+) {
   return events.filter((event) => {
     if (!CHANNEL_TIMELINE_KINDS.has(event.kind)) return false;
     if (event.pending) return true;
+    if (threadRepliesInChannel) return false;
     const thread = getThreadReference(event.tags);
     return thread.parentId !== null && !isBroadcastReply(event.tags);
   });
@@ -21,13 +26,15 @@ function retainRefetchReconciliationEvents(events: RelayEvent[]) {
 
 /**
  * Project the timeline from the authoritative window while retaining local
- * pending sends and non-broadcast thread replies the window does not contain.
+ * pending sends. When the community does not project thread replies into the
+ * channel timeline, retain non-broadcast thread replies as thread-panel cache.
  */
 export function reconcileChannelWindowMessages(
   window: ChannelWindowStore,
   messages: RelayEvent[],
 ) {
   const windowEvents = flattenChannelWindowEvents(window);
+  const threadRepliesInChannel = channelWindowThreadRepliesInChannel(window);
   if (window.pages.length === 0) {
     // A pageless window is unresolved, not authoritative. This state can exist
     // briefly when the companion window query mounts beside an already-cached
@@ -41,9 +48,10 @@ export function reconcileChannelWindowMessages(
     return [...merged].sort((left, right) => compareRelayOrder(right, left));
   }
   const authoritativeIds = new Set(windowEvents.map((event) => event.id));
-  const retained = retainRefetchReconciliationEvents(messages).filter(
-    (event) => !authoritativeIds.has(event.id),
-  );
+  const retained = retainRefetchReconciliationEvents(
+    messages,
+    threadRepliesInChannel,
+  ).filter((event) => !authoritativeIds.has(event.id));
 
   // Reconcile acknowledgements against cache-only rows without changing the
   // authoritative window's order. The render key moves from an optimistic row
