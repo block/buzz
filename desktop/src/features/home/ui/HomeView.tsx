@@ -1,6 +1,5 @@
 import * as React from "react";
 import { RefreshCcw } from "lucide-react";
-
 import { useAppShell } from "@/app/AppShellContext";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { useChannelsQuery } from "@/features/channels/hooks";
@@ -27,6 +26,7 @@ import { useHomeInboxAutoSelection } from "@/features/home/useHomeInboxAutoSelec
 import { useHomeInboxContextMessages } from "@/features/home/useHomeInboxContextMessages";
 import { useHomePersonalInbox } from "@/features/home/useHomePersonalInbox";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
+import { useInboxMarkdownDoc } from "@/features/home/useInboxMarkdownDoc";
 import { useHiddenDmInboxNavigation } from "@/features/home/useHiddenDmInboxNavigation";
 import {
   type ProfilePanelTab,
@@ -47,6 +47,7 @@ import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
 import { HomePersonalInboxDetail } from "@/features/home/ui/HomePersonalInboxDetail";
+import { HomeMarkdownDocSurfaces } from "@/features/home/ui/HomeMarkdownDocSurfaces";
 import {
   useChannelMessagesQuery,
   useToggleReactionMutation,
@@ -73,14 +74,12 @@ import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { Button } from "@/shared/ui/button";
 import { HomeMembersSidebarOverlay } from "./HomeMembersSidebarOverlay";
-
 const INBOX_SEARCH_KEYS = [
   "item",
   "profile",
   "profileTab",
   "profileView",
 ] as const;
-
 type HomeViewProps = {
   feed?: HomeFeedResponse;
   isLoading?: boolean;
@@ -94,7 +93,6 @@ type HomeViewProps = {
   ) => void;
   onRefresh: () => void;
 };
-
 export function HomeView({
   feed,
   isLoading = false,
@@ -253,7 +251,6 @@ export function HomeView({
       selectedEventId,
       availableChannelIds,
     });
-
   const threadContextFeedItem = activeLatchedItem;
   // Derive the default composer parent from the active anchor's own tags so
   // that InboxDetailPane can recover the original reply target even when the
@@ -282,13 +279,6 @@ export function HomeView({
     return channels.find((channel) => channel.id === managedChannelId) ?? null;
   }, [channels, managedChannelId]);
   const isChannelManagementOpen = managedChannel !== null;
-  const hasAuxiliaryPane =
-    isChannelManagementOpen || profilePanelPubkey !== null;
-  const isSinglePanelAuxiliaryView =
-    hasAuxiliaryPane &&
-    homeInboxWidthPx > 0 &&
-    homeInboxWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
-
   const channelMessagesQuery = useChannelMessagesQuery(selectedChannel);
   const toggleReactionMutation = useToggleReactionMutation();
   const channelMessages = channelMessagesQuery.data;
@@ -307,7 +297,6 @@ export function HomeView({
     selectedChannel,
     threadContext.refreshStructuralEvents,
   );
-
   const feedProfilePubkeys = React.useMemo(
     () => [
       ...new Set([
@@ -349,13 +338,11 @@ export function HomeView({
   const communityAgentPubkeys = useKnownAgentPubkeys();
   const inboxAgentPubkeys = React.useMemo(() => {
     const pubkeys = new Set(communityAgentPubkeys);
-
     for (const [pubkey, profile] of Object.entries(feedProfiles ?? {})) {
       if (profile.isAgent) {
         pubkeys.add(normalizePubkey(pubkey));
       }
     }
-
     return pubkeys;
   }, [feedProfiles, communityAgentPubkeys]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates the stable getChannelReadAt callback
@@ -417,7 +404,25 @@ export function HomeView({
     : null;
   const selectedConversationId =
     selectedItemFromAll?.conversationId ?? latchedConversationId;
-
+  const {
+    besideDetail: inboxDocCanFitBesideDetail,
+    close: closeMarkdownDoc,
+    doc: markdownDoc,
+    open: openMarkdownDoc,
+  } = useInboxMarkdownDoc({
+    conversationId: selectedConversationId,
+    homeWidthPx: homeInboxWidthPx,
+    inboxListWidthPx,
+    panelWidthPx: threadPanelWidthPx,
+  });
+  const hasAuxiliaryPane =
+    isChannelManagementOpen ||
+    profilePanelPubkey !== null ||
+    inboxDocCanFitBesideDetail;
+  const isSinglePanelAuxiliaryView =
+    hasAuxiliaryPane &&
+    homeInboxWidthPx > 0 &&
+    homeInboxWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
   const filteredItems = React.useMemo(() => {
     return inboxItems.filter(
       (item) =>
@@ -523,7 +528,6 @@ export function HomeView({
     setAutoSelectedEventId,
     urlSelectedItemId,
   });
-
   React.useEffect(() => {
     void selectedConversationId;
     setEmptyDeleteId(null);
@@ -531,7 +535,6 @@ export function HomeView({
     setIsDeletingMessage(false);
     setIsSendingReply(false);
   }, [selectedConversationId]);
-
   const handleFilterChange = React.useCallback(
     (nextFilter: InboxFilter) => {
       const nextItems = inboxItems.filter(
@@ -546,12 +549,10 @@ export function HomeView({
         items: nextItems,
         selectedConversationId,
       });
-
       setUnreadBoundary(null);
       setSelectedDraftKey(null);
       setSelectedReminderId(null);
       setFilter(nextFilter);
-
       if (
         nextFilter === "reminders" ||
         nextFilter === "drafts" ||
@@ -563,7 +564,6 @@ export function HomeView({
         }
         return;
       }
-
       applyInboxSearchPatch({ item: null });
       setAutoSelectedEventId(selection.autoSelectedEventId);
     },
@@ -579,11 +579,9 @@ export function HomeView({
       unreadOnly,
     ],
   );
-
   if (isLoading && !feed) {
     return <HomeLoadingState />;
   }
-
   if (!feed) {
     return (
       <div className="flex-1 overflow-hidden px-4 pb-3 pt-4 sm:px-6">
@@ -604,7 +602,6 @@ export function HomeView({
       </div>
     );
   }
-
   const { canDelete, canReact, canReply, disabledReplyReason } =
     getHomeMessageCapabilities(
       selectedItem,
@@ -642,7 +639,6 @@ export function HomeView({
     selectedReminder: selectedReminder !== null,
     threadPanelWidthPx,
   });
-
   return (
     <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
       <DeleteMessageConfirmDialog
@@ -688,7 +684,6 @@ export function HomeView({
               data-testid="home-inbox-shared-header-backdrop"
             />
           ) : null}
-
           {showListPane ? (
             <InboxListPane
               activeReminderEventIds={activeReminderEventIds}
@@ -755,7 +750,6 @@ export function HomeView({
               unreadOnly={unreadOnly}
             />
           ) : null}
-
           <button
             aria-label="Resize inbox list"
             className={cn(
@@ -778,7 +772,6 @@ export function HomeView({
           >
             <span className="absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80 group-focus-visible:bg-border/80" />
           </button>
-
           {showDetailPane && detailMode === "messages" ? (
             <InboxDetailPane
               agentPubkeys={inboxAgentPubkeys}
@@ -822,6 +815,7 @@ export function HomeView({
               onEditSave={editMessage}
               onRequestEmptyEditDelete={setEmptyDeleteId}
               onOpenContext={handleOpenSelectedContext}
+              onOpenMarkdownDoc={openMarkdownDoc}
               reopenPending={isReopenPending(selectedItem?.item.channelId)}
               reopenErrored={isReopenErrored(selectedItem?.item.channelId)}
               onSendReply={async ({
@@ -834,7 +828,6 @@ export function HomeView({
                 if (!selectedItem || !channelId || !canReply) {
                   throw new Error("Replies are not available for this item.");
                 }
-
                 const itemToReply = selectedItem;
                 setIsSendingReply(true);
                 try {
@@ -981,6 +974,16 @@ export function HomeView({
               />
             </RightAuxiliaryPane>
           ) : null}
+          <HomeMarkdownDocSurfaces
+            besideDetail={inboxDocCanFitBesideDetail}
+            canResetWidth={canResetThreadPanelWidth}
+            doc={markdownDoc}
+            onClose={closeMarkdownDoc}
+            onResetWidth={handleThreadPanelWidthReset}
+            onResizeStart={handleThreadPanelResizeStart}
+            showDetail={showDetailPane}
+            widthPx={auxiliaryPaneWidthPx}
+          />
         </div>
       </div>
       <HomeMembersSidebarOverlay
