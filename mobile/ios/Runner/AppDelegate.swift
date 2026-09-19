@@ -481,12 +481,14 @@ import os.log
       do {
         guard let arguments = call.arguments as? [String: Any],
           let gatewayText = arguments["gatewayUrl"] as? String,
-          let gatewayURL = URL(string: gatewayText)
+          let gatewayURL = URL(string: gatewayText),
+          let appProfile = arguments["appProfile"] as? String
         else { throw BuzzDevPushEnrollmentError.invalidGatewayURL }
         let driver = try BuzzDevPushEnrollmentDriver(
           gatewayBaseURL: gatewayURL,
           store: endpointGrantStore,
-          appAttestKeychainAccessGroup: pushKeychainAccessGroup
+          appAttestKeychainAccessGroup: pushKeychainAccessGroup,
+          appProfile: appProfile
         )
         result(try driver.endpointGrants().map(\.flutterArguments))
       } catch {
@@ -595,7 +597,8 @@ import os.log
       let relayText = arguments["relayUrl"] as? String,
       let relayURL = URL(string: relayText),
       let gatewayText = arguments["gatewayUrl"] as? String,
-      let gatewayURL = URL(string: gatewayText)
+      let gatewayURL = URL(string: gatewayText),
+      let appProfile = arguments["appProfile"] as? String
     else {
       result(
         FlutterError(
@@ -613,7 +616,8 @@ import os.log
         store: endpointGrantStore,
         appAttestKeychainAccessGroup: Bundle.main.object(
           forInfoDictionaryKey: "BuzzKeychainAccessGroup"
-        ) as? String
+        ) as? String,
+        appProfile: appProfile
       )
       enrollmentTask = Task { [weak self] in
         defer { self?.enrollmentTask = nil }

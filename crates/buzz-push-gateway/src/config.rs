@@ -1,5 +1,6 @@
+use crate::model::AppProfile;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
+use std::{collections::HashMap, fs, net::SocketAddr, path::PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +33,8 @@ pub struct Config {
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
-    /// Server-owned dogfood application identity and APNs transport.
-    pub profile: AppProfileConfig,
+    /// Server-owned application identities and their isolated APNs transports.
+    pub profiles: HashMap<AppProfile, AppProfileConfig>,
     pub database_url: String,
     pub app_attest_root_cert_path: PathBuf,
     /// Ordered current key first, followed by decrypt-only predecessors.
@@ -101,11 +102,12 @@ fn parse_keyring(
     e: &HashMap<String, String>,
     variable: &'static str,
 ) -> Result<Vec<KeyConfig>, ConfigError> {
-    let value = e
-        .get(variable)
-        .map(String::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or(ConfigError::Missing(variable))?;
+    let file_variable = match variable {
+        "BUZZ_PUSH_GRANT_KEYS" => "BUZZ_PUSH_GRANT_KEYS_FILE",
+        "BUZZ_PUSH_TOKEN_KEYS" => "BUZZ_PUSH_TOKEN_KEYS_FILE",
+        _ => return Err(ConfigError::Invalid(variable)),
+    };
+    let value = secret_value(e, variable, file_variable)?;
     let keys = value
         .split(',')
         .map(|entry| {
@@ -131,31 +133,79 @@ fn parse_keyring(
     Ok(keys)
 }
 
-fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, ConfigError> {
-    let app_id_key = "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID";
-    let cert_key = "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH";
-    let topic_key = "BUZZ_PUSH_DOGFOOD_APNS_TOPIC";
-    let environment_key = "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT";
+fn secret_value(
+    e: &HashMap<String, String>,
+    variable: &'static str,
+    file_variable: &'static str,
+) -> Result<String, ConfigError> {
+    let direct = e.get(variable).filter(|value| !value.is_empty());
+    let path = e.get(file_variable).filter(|value| !value.is_empty());
+    if direct.is_some() && path.is_some() {
+        return Err(ConfigError::Invalid(variable));
+    }
+    if let Some(value) = direct {
+        return Ok(value.clone());
+    }
+    let path = path.ok_or(ConfigError::Missing(variable))?;
+    let value = fs::read_to_string(path).map_err(|_| ConfigError::Invalid(variable))?;
+    let value = value.trim_end_matches(['\r', '\n']);
+    if value.is_empty() {
+        return Err(ConfigError::Invalid(variable));
+    }
+    Ok(value.to_owned())
+}
+
+struct ProfileVariables {
+    app_id: &'static str,
+    cert: &'static str,
+    topic: &'static str,
+    environment: &'static str,
+}
+
+fn parse_profile(
+    e: &HashMap<String, String>,
+    variables: &ProfileVariables,
+    optional: bool,
+) -> Result<Option<AppProfileConfig>, ConfigError> {
+    let any_present = [
+        variables.app_id,
+        variables.cert,
+        variables.topic,
+        variables.environment,
+    ]
+    .iter()
+    .any(|key| e.get(*key).is_some_and(|value| !value.is_empty()));
+    if optional && !any_present {
+        return Ok(None);
+    }
     let required = |key: &'static str| {
         e.get(key)
             .map(String::as_str)
             .filter(|value| !value.is_empty())
             .ok_or(ConfigError::Missing(key))
     };
-    let app_attest_app_id = required(app_id_key)?.to_owned();
-    let apns_topic = required(topic_key)?.to_owned();
-    let apns_cert_path = PathBuf::from(required(cert_key)?);
-    let apns_environment = match e.get(environment_key).map(String::as_str) {
-        None | Some("production") => ApnsEnvironment::Production,
+    let app_attest_app_id = required(variables.app_id)?.to_owned();
+    let apns_topic = required(variables.topic)?.to_owned();
+    if !app_attest_app_id
+        .split_once('.')
+        .is_some_and(|(team_id, bundle_id)| !team_id.is_empty() && bundle_id == apns_topic)
+    {
+        return Err(ConfigError::Invalid(variables.app_id));
+    }
+    let apns_cert_path = PathBuf::from(required(variables.cert)?);
+    let apns_environment = match e.get(variables.environment).map(String::as_str) {
+        None if !optional => ApnsEnvironment::Production,
+        Some("production") => ApnsEnvironment::Production,
         Some("sandbox") => ApnsEnvironment::Sandbox,
-        Some(_) => return Err(ConfigError::Invalid(environment_key)),
+        None => return Err(ConfigError::Missing(variables.environment)),
+        Some(_) => return Err(ConfigError::Invalid(variables.environment)),
     };
-    Ok(AppProfileConfig {
+    Ok(Some(AppProfileConfig {
         app_attest_app_id,
         apns_cert_path,
         apns_topic,
         apns_environment,
-    })
+    }))
 }
 
 impl Config {
@@ -225,7 +275,31 @@ impl Config {
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS", 10, 86_400)?;
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
-        let profile = parse_profile(e)?;
+        let dogfood = parse_profile(
+            e,
+            &ProfileVariables {
+                app_id: "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID",
+                cert: "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH",
+                topic: "BUZZ_PUSH_DOGFOOD_APNS_TOPIC",
+                environment: "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT",
+            },
+            false,
+        )?
+        .ok_or(ConfigError::Missing("BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID"))?;
+        let custom = parse_profile(
+            e,
+            &ProfileVariables {
+                app_id: "BUZZ_PUSH_CUSTOM_APP_ATTEST_APP_ID",
+                cert: "BUZZ_PUSH_CUSTOM_APNS_CERT_PATH",
+                topic: "BUZZ_PUSH_CUSTOM_APNS_TOPIC",
+                environment: "BUZZ_PUSH_CUSTOM_APNS_ENVIRONMENT",
+            },
+            true,
+        )?;
+        let mut profiles = HashMap::from([(AppProfile::BuzzIosDogfood, dogfood)]);
+        if let Some(custom) = custom {
+            profiles.insert(AppProfile::BuzzIosCustom, custom);
+        }
         let bind_addr = e
             .get("BUZZ_PUSH_BIND_ADDR")
             .map(String::as_str)
@@ -246,13 +320,23 @@ impl Config {
             max_installation_lifetime_seconds,
             endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries,
-            profile,
-            database_url: req(e, "DATABASE_URL")?.to_owned(),
+            profiles,
+            database_url: secret_value(e, "DATABASE_URL", "DATABASE_URL_FILE")?,
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
             grant_keys,
             token_keys,
         })
     }
+}
+
+/// Read the runtime database credential from `DATABASE_URL` or its read-only
+/// file-backed counterpart. The error identifies only the setting, never its value.
+pub fn database_url_from_env() -> Result<String, ConfigError> {
+    secret_value(
+        &std::env::vars().collect(),
+        "DATABASE_URL",
+        "DATABASE_URL_FILE",
+    )
 }
 
 #[cfg(test)]
@@ -316,11 +400,12 @@ mod tests {
     #[test]
     fn dogfood_profile_requires_server_owned_identity_and_certificate() {
         let config = Config::from_map(&base()).unwrap();
+        let dogfood = config.profiles.get(&AppProfile::BuzzIosDogfood).unwrap();
         assert_eq!(
-            config.profile.apns_cert_path,
+            dogfood.apns_cert_path,
             PathBuf::from("/dogfood-identity.pem")
         );
-        assert_eq!(config.profile.apns_topic, "xyz.block.buzz.dogfood.mobile");
+        assert_eq!(dogfood.apns_topic, "xyz.block.buzz.dogfood.mobile");
 
         for variable in [
             "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH",
@@ -333,6 +418,84 @@ mod tests {
                 matches!(Config::from_map(&env), Err(ConfigError::Missing(key)) if key == variable)
             );
         }
+    }
+
+    #[test]
+    fn custom_profile_is_optional_but_requires_a_complete_distinct_identity() {
+        let mut env = base();
+        env.extend([
+            (
+                "BUZZ_PUSH_CUSTOM_APP_ATTEST_APP_ID".into(),
+                "CUSTOMTEAM.example.custom.buzz".into(),
+            ),
+            (
+                "BUZZ_PUSH_CUSTOM_APNS_CERT_PATH".into(),
+                "/custom-identity.pem".into(),
+            ),
+            (
+                "BUZZ_PUSH_CUSTOM_APNS_TOPIC".into(),
+                "example.custom.buzz".into(),
+            ),
+            ("BUZZ_PUSH_CUSTOM_APNS_ENVIRONMENT".into(), "sandbox".into()),
+        ]);
+        let config = Config::from_map(&env).unwrap();
+        let custom = config
+            .profiles
+            .get(&crate::model::AppProfile::BuzzIosCustom)
+            .expect("configured custom profile");
+        assert_eq!(custom.apns_topic, "example.custom.buzz");
+        assert_eq!(custom.apns_environment, ApnsEnvironment::Sandbox);
+        assert!(config
+            .profiles
+            .contains_key(&crate::model::AppProfile::BuzzIosDogfood));
+
+        env.remove("BUZZ_PUSH_CUSTOM_APNS_TOPIC");
+        assert!(matches!(
+            Config::from_map(&env),
+            Err(ConfigError::Missing("BUZZ_PUSH_CUSTOM_APNS_TOPIC"))
+        ));
+    }
+
+    #[test]
+    fn security_secrets_can_be_loaded_from_files_without_env_values() {
+        let directory =
+            std::env::temp_dir().join(format!("buzz-push-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("database-url");
+        let grants = directory.join("grant-keys");
+        let tokens = directory.join("token-keys");
+        std::fs::write(&database, "postgres://buzz:test@localhost/buzz\n").unwrap(); // sadscan:disable np.postgres.1
+        std::fs::write(&grants, format!("current:{}\n", STANDARD.encode([1; 32]))).unwrap();
+        std::fs::write(
+            &tokens,
+            format!("current-token:{}\n", STANDARD.encode([3; 32])),
+        )
+        .unwrap();
+
+        let mut env = base();
+        env.remove("DATABASE_URL");
+        env.remove("BUZZ_PUSH_GRANT_KEYS");
+        env.remove("BUZZ_PUSH_TOKEN_KEYS");
+        env.insert("DATABASE_URL_FILE".into(), database.display().to_string());
+        env.insert(
+            "BUZZ_PUSH_GRANT_KEYS_FILE".into(),
+            grants.display().to_string(),
+        );
+        env.insert(
+            "BUZZ_PUSH_TOKEN_KEYS_FILE".into(),
+            tokens.display().to_string(),
+        );
+        let config = Config::from_map(&env).unwrap();
+        assert_eq!(config.database_url, "postgres://buzz:test@localhost/buzz"); // sadscan:disable np.postgres.1
+        assert_eq!(config.grant_keys[0].id, "current");
+        assert_eq!(config.token_keys[0].id, "current-token");
+
+        env.insert("DATABASE_URL".into(), "postgres://duplicate".into()); // sadscan:disable np.postgres.1
+        assert!(matches!(
+            Config::from_map(&env),
+            Err(ConfigError::Invalid("DATABASE_URL"))
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -383,6 +546,10 @@ mod tests {
             ("BUZZ_PUSH_GATEWAY_ORIGIN", "https://push.example?token=x"),
             ("BUZZ_PUSH_GATEWAY_ORIGIN", "https://user@push.example"),
             ("BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID", ""),
+            (
+                "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID",
+                "TEAMID.example.wrong.topic",
+            ),
             ("BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT", "staging"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "31536001"),

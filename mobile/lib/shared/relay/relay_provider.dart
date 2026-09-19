@@ -75,6 +75,12 @@ class Env {
   /// Optional gateway origin. Without it this artifact has no push capability.
   static const pushGatewayUrl = String.fromEnvironment('BUZZ_PUSH_GATEWAY_URL');
 
+  /// Closed application profile selected by this signed artifact.
+  static const pushAppProfile = String.fromEnvironment(
+    'BUZZ_PUSH_APP_PROFILE',
+    defaultValue: 'buzz-ios-dogfood',
+  );
+
   /// Whether this artifact can offer push notification enrollment.
   static const pushGatewayConfigured = pushGatewayUrl != '';
 }

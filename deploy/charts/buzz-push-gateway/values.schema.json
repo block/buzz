@@ -30,6 +30,9 @@
       "properties": {
         "dogfood": {
           "$ref": "#/$defs/enabledProfile"
+        },
+        "custom": {
+          "$ref": "#/$defs/optionalProfile"
         }
       }
     },
@@ -281,6 +284,31 @@
           "required": [
             "apnsCert"
           ]
+        }
+      ]
+    },
+    "optionalProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "appAttestAppId": {"type": "string", "minLength": 1},
+        "apnsTopic": {"type": "string", "minLength": 1},
+        "apnsEnvironment": {"enum": ["production", "sandbox"]},
+        "apnsCert": {"$ref": "#/$defs/apnsCert"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"enabled": {"const": true}}},
+          "then": {
+            "required": [
+              "appAttestAppId",
+              "apnsTopic",
+              "apnsEnvironment",
+              "apnsCert"
+            ]
+          }
         }
       ]
     },

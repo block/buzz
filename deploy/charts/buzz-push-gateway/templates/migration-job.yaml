@@ -28,6 +28,14 @@ spec:
           env:
             - name: BUZZ_PUSH_RUNTIME_DATABASE_ROLE
               value: {{ .Values.migration.runtimeDatabaseRole | quote }}
-            - name: DATABASE_URL
-              valueFrom: { secretKeyRef: { name: {{ .Values.migration.existingSecret }}, key: {{ .Values.migration.databaseUrlKey }} } }
+            - name: DATABASE_URL_FILE
+              value: /run/buzz/migration-secrets/database-url
+          volumeMounts:
+            - { name: migration-secrets, mountPath: /run/buzz/migration-secrets, readOnly: true }
           resources: {{- toYaml .Values.migration.resources | nindent 12 }}
+      volumes:
+        - name: migration-secrets
+          secret:
+            secretName: {{ .Values.migration.existingSecret }}
+            defaultMode: 0400
+            items: [{ key: {{ .Values.migration.databaseUrlKey }}, path: database-url }]

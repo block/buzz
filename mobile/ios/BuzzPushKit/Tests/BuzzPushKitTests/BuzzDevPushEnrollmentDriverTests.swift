@@ -165,6 +165,56 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     XCTAssertEqual(store.saved, [record])
   }
 
+  func testCustomProfileEnrollmentUsesDistinctTranscriptAndGrantIdentity() async throws {
+    let store = MemoryGrantStore()
+    let appAttest = RecordingAppAttest()
+    let driver = try makeDriver(
+      store: store,
+      appAttest: appAttest,
+      appProfile: BuzzDevPushEnrollmentDriver.customAppProfile
+    )
+    var challengeCount = 0
+    URLProtocolStub.handler = { request in
+      switch (request.httpMethod, request.url?.absoluteString) {
+      case ("GET", "https://relay.example/"):
+        return Self.response(request, status: 200, json: [
+          "push": [
+            "keys": [["id": "current", "pubkey": Self.relayPubkey, "current": true]],
+            "app_profiles": [["id": "buzz-ios-custom", "transport": "apns"]],
+          ]
+        ])
+      case ("POST", "http://push.example/v1/installations/challenges"):
+        challengeCount += 1
+        return Self.response(request, status: 200, json: [
+          "challenge_id": challengeCount == 1 ? Self.firstChallengeId : Self.secondChallengeId,
+          "challenge": Self.challenge,
+          "expires_at": Self.now + 300,
+        ])
+      case ("POST", "http://push.example/v1/installations"):
+        XCTAssertEqual(try Self.body(request)["app_profile"] as? String, "buzz-ios-custom")
+        return Self.response(request, status: 201, json: [
+          "installation_handle": Self.installationHandle,
+          "endpoint_epoch": 1,
+          "expires_at": Self.expiresAt,
+        ])
+      case ("POST", "http://push.example/v1/delegations"):
+        return Self.response(request, status: 201, json: ["endpoint_grant": "custom-grant"])
+      default:
+        XCTFail("Unexpected request \(request.url?.absoluteString ?? "nil")")
+        return Self.response(request, status: 500, json: [:])
+      }
+    }
+
+    let record = try await driver.enroll(
+      deviceToken: Data((1...32).map(UInt8.init)),
+      relayURL: Self.relayURL
+    )
+    XCTAssertEqual(record.appProfile, "buzz-ios-custom")
+    XCTAssertTrue(String(decoding: appAttest.clientData[0], as: UTF8.self).contains(
+      #""app_profile":"buzz-ios-custom""#
+    ))
+  }
+
   func testCommittedInstallationRecoversAfterFinalGrantSaveFailure() async throws {
     let store = MemoryGrantStore(grantSaveFailuresRemaining: 1)
     let driver = try makeDriver(store: store, appAttest: RecordingAppAttest())
@@ -1123,6 +1173,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     gatewayBaseURL: URL = BuzzDevPushEnrollmentDriverTests.gatewayURL,
     store: BuzzPushEndpointGrantStore,
     appAttest: BuzzDevAppAttesting,
+    appProfile: String = BuzzDevPushEnrollmentDriver.appProfile,
     installationIdBytes: @escaping () throws -> Data = {
       Data(0..<16)
     }
@@ -1134,6 +1185,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
       store: store,
       session: URLSession(configuration: configuration),
       appAttest: appAttest,
+      appProfile: appProfile,
       now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) },
       lifetimeSeconds: Self.expiresAt - Self.now,
       installationIdBytes: installationIdBytes

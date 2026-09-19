@@ -344,6 +344,9 @@ pub struct Config {
     /// Whether NIP-PL push discovery, lease acceptance, matching, and delivery
     /// are enabled for this deployment. Defaults to false.
     pub push_enabled: bool,
+    /// Whether the operator-owned `buzz-ios-custom` profile is advertised and
+    /// accepted. Defaults to false so legacy gateway deployments stay coherent.
+    pub push_custom_profile_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
     /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
@@ -961,6 +964,7 @@ impl Config {
                 hex::encode(secret)
             });
         let push_enabled = parse_bool("BUZZ_PUSH_ENABLED", false)?;
+        let push_custom_profile_enabled = parse_bool("BUZZ_PUSH_CUSTOM_PROFILE_ENABLED", false)?;
         let push_executor_key_id =
             std::env::var("BUZZ_PUSH_EXECUTOR_KEY_ID").unwrap_or_else(|_| "relay-v1".to_string());
         if push_executor_key_id.is_empty() || push_executor_key_id.len() > 64 {
@@ -1258,6 +1262,7 @@ impl Config {
             git_max_concurrent_ops,
             git_hook_hmac_secret,
             push_enabled,
+            push_custom_profile_enabled,
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,

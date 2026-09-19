@@ -20,12 +20,32 @@ pub const WIRE_VERSION: u8 = 1;
 #[serde(rename_all = "kebab-case")]
 pub enum AppProfile {
     BuzzIosDogfood,
+    BuzzIosCustom,
 }
 impl AppProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BuzzIosDogfood => "buzz-ios-dogfood",
+            Self::BuzzIosCustom => "buzz-ios-custom",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppProfile;
+
+    #[test]
+    fn application_profile_wire_names_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&AppProfile::BuzzIosDogfood).unwrap(),
+            r#""buzz-ios-dogfood""#
+        );
+        assert_eq!(
+            serde_json::to_string(&AppProfile::BuzzIosCustom).unwrap(),
+            r#""buzz-ios-custom""#
+        );
+        assert!(serde_json::from_str::<AppProfile>(r#""unknown""#).is_err());
     }
 }
 

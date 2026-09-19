@@ -11,7 +11,12 @@ import 'push_bridge.dart';
 import 'push_subscription.dart';
 
 const buzzPushLeaseKind = 30350;
-const buzzDevPushAppProfile = 'buzz-ios-dogfood';
+const buzzIosDogfoodAppProfile = 'buzz-ios-dogfood';
+const buzzIosCustomAppProfile = 'buzz-ios-custom';
+const buzzDevPushAppProfile = String.fromEnvironment(
+  'BUZZ_PUSH_APP_PROFILE',
+  defaultValue: buzzIosDogfoodAppProfile,
+);
 const buzzPushTransport = 'apns';
 const _maxSafeJsonInteger = 9007199254740991;
 const _maxLeaseLifetimeSeconds = 2592000;
@@ -22,6 +27,7 @@ class BuzzPushLeaseDescriptor {
   final String origin;
   final String executorKeyId;
   final String executorPubkey;
+  final String appProfile;
   final String transport;
   final int maxLeaseTtlSeconds;
   final int maxContentLength;
@@ -33,6 +39,7 @@ class BuzzPushLeaseDescriptor {
     required this.origin,
     required this.executorKeyId,
     required this.executorPubkey,
+    required this.appProfile,
     required this.transport,
     required this.maxLeaseTtlSeconds,
     required this.maxContentLength,
@@ -43,7 +50,14 @@ class BuzzPushLeaseDescriptor {
 
   factory BuzzPushLeaseDescriptor.fromRelayInformation(
     Map<String, dynamic> information,
+    {String appProfile = buzzDevPushAppProfile},
   ) {
+    if (!const {
+      buzzIosDogfoodAppProfile,
+      buzzIosCustomAppProfile,
+    }.contains(appProfile)) {
+      throw FormatException('Unsupported Buzz push app profile: $appProfile');
+    }
     _requireExactKeys(
       information,
       required: const {},
@@ -154,11 +168,11 @@ class BuzzPushLeaseDescriptor {
         profile['transport'],
         name: 'app profile transport',
       );
-      if (id == buzzDevPushAppProfile) transport = candidate;
+      if (id == appProfile) transport = candidate;
     }
     if (transport != buzzPushTransport) {
       throw const FormatException(
-        'NIP-11 does not advertise the dogfood APNs profile',
+        'NIP-11 does not advertise the selected APNs profile',
       );
     }
 
@@ -241,6 +255,7 @@ class BuzzPushLeaseDescriptor {
       origin: origin,
       executorKeyId: currentKey['id'] as String,
       executorPubkey: currentKey['pubkey'] as String,
+      appProfile: appProfile,
       transport: transport!,
       maxLeaseTtlSeconds: maxLeaseTtl,
       maxContentLength: limitation['max_content_len'] as int,
@@ -528,8 +543,8 @@ void _validateGrant(
       'Stored endpoint grant is delegated to a different relay key',
     );
   }
-  if (grant.appProfile != buzzDevPushAppProfile) {
-    throw const FormatException('Endpoint grant is not for buzz-ios-dogfood');
+  if (grant.appProfile != descriptor.appProfile) {
+    throw const FormatException('Endpoint grant is for a different app profile');
   }
   if (grant.endpointGrant.isEmpty ||
       utf8.encode(grant.endpointGrant).length > descriptor.maxEndpointLength) {
