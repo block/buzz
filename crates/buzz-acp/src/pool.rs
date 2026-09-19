@@ -2269,11 +2269,15 @@ pub async fn run_prompt_task(
     turn_id: String,
 ) {
     // Is this a channel prompt or a heartbeat?
-    let source = match &batch {
+    let source = match batch.as_ref() {
         Some(b) => PromptSource::Channel(b.scope.clone()),
         None => PromptSource::Heartbeat,
     };
     let observer_channel_id = source.channel_id();
+    let observer_thread_root_id = match &source {
+        PromptSource::Channel(scope) => scope.root_event_id().map(str::to_string),
+        PromptSource::Heartbeat => None,
+    };
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -2718,6 +2722,7 @@ pub async fn run_prompt_task(
                         &ctx,
                         usage,
                         Some(*cid),
+                        scope.root_event_id(),
                         &session_id,
                         &format!("{turn_id}:initial"),
                         Some(acp_stop_to_core(&stop_reason)),
@@ -2753,6 +2758,7 @@ pub async fn run_prompt_task(
                                 &ctx,
                                 usage,
                                 Some(*cid),
+                                scope.root_event_id(),
                                 &session_id,
                                 &format!("{turn_id}:initial"),
                                 Some(acp_stop_to_core(&stop_reason)),
@@ -3098,6 +3104,7 @@ pub async fn run_prompt_task(
                                     &ctx,
                                     usage,
                                     observer_channel_id,
+                                    observer_thread_root_id.as_deref(),
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
@@ -3134,6 +3141,7 @@ pub async fn run_prompt_task(
                                     &ctx,
                                     usage,
                                     observer_channel_id,
+                                    observer_thread_root_id.as_deref(),
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -3200,6 +3208,7 @@ pub async fn run_prompt_task(
                             &ctx,
                             usage,
                             observer_channel_id,
+                            observer_thread_root_id.as_deref(),
                             &session_id,
                             &turn_id,
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
@@ -3275,6 +3284,7 @@ pub async fn run_prompt_task(
                 &ctx,
                 usage,
                 observer_channel_id,
+                observer_thread_root_id.as_deref(),
                 &session_id,
                 &turn_id,
                 Some(core_stop),
@@ -3298,6 +3308,7 @@ pub async fn run_prompt_task(
                 &ctx,
                 usage,
                 observer_channel_id,
+                observer_thread_root_id.as_deref(),
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -3330,6 +3341,7 @@ pub async fn run_prompt_task(
                         &ctx,
                         usage,
                         observer_channel_id,
+                        observer_thread_root_id.as_deref(),
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
@@ -3358,6 +3370,7 @@ pub async fn run_prompt_task(
                         &ctx,
                         usage,
                         observer_channel_id,
+                        observer_thread_root_id.as_deref(),
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -3383,6 +3396,7 @@ pub async fn run_prompt_task(
                         &ctx,
                         usage,
                         observer_channel_id,
+                        observer_thread_root_id.as_deref(),
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -3412,6 +3426,7 @@ pub async fn run_prompt_task(
                 &ctx,
                 usage,
                 observer_channel_id,
+                observer_thread_root_id.as_deref(),
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -3439,6 +3454,7 @@ pub async fn run_prompt_task(
                 &ctx,
                 usage,
                 observer_channel_id,
+                observer_thread_root_id.as_deref(),
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -5178,6 +5194,7 @@ async fn publish_agent_turn_metric(
     ctx: &PromptContext,
     usage: Option<crate::usage::TurnUsage>,
     channel_id: Option<uuid::Uuid>,
+    thread_root_id: Option<&str>,
     session_id: &str,
     turn_id: &str,
     stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
@@ -5196,6 +5213,7 @@ async fn publish_agent_turn_metric(
         harness: ctx.harness_name.clone(),
         model: usage.model.clone(),
         channel_id: channel_id.map(|id| id.to_string()),
+        thread_root_id: thread_root_id.map(str::to_string),
         session_id: Some(usage.session_id.clone()),
         turn_id: Some(turn_id.to_string()),
         turn_seq: Some(usage.turn_seq),
@@ -5204,6 +5222,9 @@ async fn publish_agent_turn_metric(
         cumulative: cumulative_counts,
         delta_reliable: usage.delta_reliable,
         stop_reason,
+        context_used_tokens: usage.context_used_tokens,
+        context_limit_tokens: usage.context_limit_tokens,
+        account_usage_windows: Vec::new(),
         pricing_identity: usage.pricing_identity.clone(),
     };
     let ciphertext = match buzz_core::agent_turn_metric::encrypt_agent_turn_metric(
@@ -9542,6 +9563,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &ctx,
             None,
             None,
+            None,
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
@@ -9570,12 +9592,15 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_read_tokens: None,
             cumulative_cache_write_tokens: None,
             model: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
             pricing_identity: None,
         };
         // owner_pubkey = None → early return, no panic.
         publish_agent_turn_metric(
             &ctx,
             Some(usage),
+            None,
             None,
             "sess-1",
             "turn-1",
@@ -9609,6 +9634,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_read_tokens: None,
             cumulative_cache_write_tokens: None,
             model: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
             pricing_identity: None,
         };
         // Will try to publish and fail (no real relay) but must not panic.
@@ -9616,6 +9643,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &ctx,
             Some(usage),
             Some(uuid::Uuid::new_v4()),
+            None,
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
@@ -9649,6 +9677,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_read_tokens: None,
             cumulative_cache_write_tokens: None,
             model: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
             pricing_identity: None,
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
@@ -9656,6 +9686,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &ctx,
             Some(usage),
             Some(uuid::Uuid::new_v4()),
+            None,
             "sess-cancel",
             "turn-cancel",
             Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
@@ -9689,6 +9720,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_read_tokens: None,
             cumulative_cache_write_tokens: None,
             model: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
             pricing_identity: None,
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
@@ -9696,6 +9729,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &ctx,
             Some(usage),
             Some(uuid::Uuid::new_v4()),
+            None,
             "sess-ba",
             "turn-ba",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
@@ -9726,6 +9760,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_read_tokens: None,
             cumulative_cache_write_tokens: None,
             model: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
             pricing_identity: None,
         };
 
@@ -9778,6 +9814,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_read_tokens: None,
             cumulative_cache_write_tokens: None,
             model: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
             pricing_identity: None,
         };
 

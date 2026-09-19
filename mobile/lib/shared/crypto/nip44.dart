@@ -9,6 +9,11 @@ import 'package:pointycastle/stream/chacha7539.dart';
 import 'ecdh.dart';
 import 'hkdf.dart';
 
+/// NIP-44 v2 limits shared with `buzz-core/src/observer.rs`.
+const nip44MinContentLength = 132;
+const nip44MaxContentLength = 87472;
+const nip44MaxPlaintextLength = 65535;
+
 /// NIP-44 v2 conversation key derivation.
 ///
 /// conversation_key = HKDF-Extract(salt="nip44-v2", ikm=ecdh_shared_secret)
@@ -57,6 +62,12 @@ String nip44Encrypt(Uint8List conversationKey, String plaintext) {
 ///
 /// Takes base64-encoded payload, returns plaintext string.
 String nip44Decrypt(Uint8List conversationKey, String payloadBase64) {
+  if (payloadBase64.length < nip44MinContentLength ||
+      payloadBase64.length > nip44MaxContentLength) {
+    throw FormatException(
+      'NIP-44 ciphertext length out of range: ${payloadBase64.length}',
+    );
+  }
   final payload = base64.decode(payloadBase64);
 
   // Minimum: version(1) + nonce(32) + min_ciphertext(32) + mac(32) = 97
@@ -120,7 +131,7 @@ Uint8List _pad(Uint8List plaintext) {
 String _unpad(Uint8List padded) {
   if (padded.length < 2) throw FormatException('Padded data too short');
   final len = (padded[0] << 8) | padded[1];
-  if (len == 0 || 2 + len > padded.length) {
+  if (len == 0 || len > nip44MaxPlaintextLength || 2 + len > padded.length) {
     throw FormatException('Invalid padding length: $len');
   }
   return utf8.decode(padded.sublist(2, 2 + len));

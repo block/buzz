@@ -251,6 +251,10 @@ class _DmAppBarTitle extends ConsumerWidget {
       'away' => 'Away',
       _ => 'Offline',
     };
+    final displayLabel = resolveDmChannelDisplayLabel(
+      channel,
+      currentPubkey: currentPubkey,
+    );
 
     return Row(
       children: [
@@ -306,16 +310,32 @@ class _DmAppBarTitle extends ConsumerWidget {
                 children: [
                   Flexible(
                     child: Text(
-                      resolveDmChannelDisplayLabel(
-                        channel,
-                        currentPubkey: currentPubkey,
-                      ),
+                      displayLabel,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       key: const ValueKey('dm-header-name'),
                       style: context.textTheme.titleSmall,
                     ),
                   ),
+                  if (isAgent && otherPubkey != null) ...[
+                    const SizedBox(width: Grid.half),
+                    AgentUsageIndicator(
+                      agentPubkey: otherPubkey,
+                      agentLabel: displayLabel,
+                      channelId: channel.id,
+                      childDiameter: 16,
+                      child: Icon(
+                        LucideIcons.bot,
+                        size: 12,
+                        color: context.colors.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(width: Grid.quarter),
+                    AgentUsagePercentText(
+                      agentPubkey: otherPubkey,
+                      channelId: channel.id,
+                    ),
+                  ],
                   if (channel.isEphemeral) ...[
                     const SizedBox(width: Grid.quarter),
                     _HeaderEphemeralBadge(channel: channel),

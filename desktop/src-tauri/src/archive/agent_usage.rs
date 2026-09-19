@@ -15,6 +15,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use buzz_core_pkg::agent_turn_metric::{AccountUsageWindow, AgentTurnMetricPayload};
+
 use super::metric_store::AgentMetricIndexRow;
 
 // ── Request ──────────────────────────────────────────────────────────────────
@@ -32,6 +34,36 @@ pub struct AgentUsageSeriesRequest {
     pub agent_pubkey: Option<String>,
 }
 
+/// Request for the latest durable NIP-AM snapshot per agent. An omitted
+/// filter returns every archived agent; an explicit empty list returns none.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatestAgentMetricSnapshotsRequest {
+    pub agent_pubkeys: Option<Vec<String>>,
+    /// Optional exact channel scope for context-window fields. Provider
+    /// account windows remain agent-wide.
+    pub channel_id: Option<String>,
+    /// Optional exact Nostr thread-root event id. Requires `channel_id`.
+    pub thread_root_id: Option<String>,
+}
+
+/// Latest valid decrypted NIP-AM status payload for one agent. Full-range
+/// token counters cross IPC as decimal strings to avoid JavaScript precision
+/// loss.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatestAgentMetricSnapshot {
+    pub agent_pubkey: String,
+    pub context_used_tokens: Option<String>,
+    pub context_limit_tokens: Option<String>,
+    pub context_timestamp: Option<String>,
+    pub account_usage_windows: Vec<AccountUsageWindow>,
+    pub account_usage_windows_timestamp: Option<String>,
+    pub timestamp: String,
+    pub model: Option<String>,
+    pub harness: String,
+}
+
 /// Widest interval NIP-AM query validation admits (A9): wide enough to admit
 /// every real civil-day transition (ordinary DST, 30-minute-offset zones,
 /// historical calendar skips) while still rejecting arbitrary bins.
@@ -47,6 +79,19 @@ const MAX_BOUNDARIES: usize = 367;
 /// Smallest boundary count that describes a real window: 2 boundaries =
 /// 1 bucket, the `1d` case.
 const MIN_BOUNDARIES: usize = 2;
+
+/// Maximum number of independently configured agents returned by one latest-
+/// snapshot request. This matches the desktop adapter and bounds archive work
+/// even for direct IPC callers.
+pub(super) const MAX_LATEST_SNAPSHOT_AGENTS: usize = 64;
+
+/// Validate one agent pubkey and normalize it for indexed lookup.
+fn normalize_agent_pubkey(pk: &str) -> Result<String, String> {
+    if pk.len() != 64 || !pk.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("agent_pubkey must be exactly 64 hex characters".to_string());
+    }
+    Ok(pk.to_lowercase())
+}
 
 /// Validate a request per the frozen contract + A9 (drops the 23–25h band
 /// for a `> 0 && <= 48h` sanity band) and A13 pubkey normalization.
@@ -84,17 +129,96 @@ pub(super) fn validate_request(req: &AgentUsageSeriesRequest) -> Result<Option<S
         }
     }
 
-    let normalized_pubkey = match &req.agent_pubkey {
-        None => None,
-        Some(pk) => {
-            if pk.len() != 64 || !pk.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err("agent_pubkey must be exactly 64 hex characters".to_string());
-            }
-            Some(pk.to_lowercase())
-        }
-    };
+    req.agent_pubkey
+        .as_deref()
+        .map(normalize_agent_pubkey)
+        .transpose()
+}
 
-    Ok(normalized_pubkey)
+/// Validate, normalize, and deduplicate the optional latest-snapshot filter.
+#[derive(Debug, Clone)]
+pub(super) struct LatestSnapshotContextScope {
+    channel_id: String,
+    thread_root_id: Option<String>,
+}
+
+impl LatestSnapshotContextScope {
+    pub(super) fn matches(&self, payload: &AgentTurnMetricPayload) -> bool {
+        payload.channel_id.as_deref() == Some(self.channel_id.as_str())
+            && payload.thread_root_id.as_deref() == self.thread_root_id.as_deref()
+    }
+}
+
+pub(super) fn validate_snapshot_request(
+    req: &LatestAgentMetricSnapshotsRequest,
+) -> Result<(Option<HashSet<String>>, Option<LatestSnapshotContextScope>), String> {
+    if req
+        .agent_pubkeys
+        .as_ref()
+        .is_some_and(|pubkeys| pubkeys.len() > MAX_LATEST_SNAPSHOT_AGENTS)
+    {
+        return Err(format!(
+            "agentPubkeys must contain at most {MAX_LATEST_SNAPSHOT_AGENTS} entries"
+        ));
+    }
+    let agent_pubkeys = req
+        .agent_pubkeys
+        .as_ref()
+        .map(|pubkeys| {
+            pubkeys
+                .iter()
+                .map(|pk| normalize_agent_pubkey(pk))
+                .collect()
+        })
+        .transpose()?;
+
+    if req.thread_root_id.is_some() && req.channel_id.is_none() {
+        return Err("threadRootId requires channelId".to_string());
+    }
+    let scope = req
+        .channel_id
+        .as_ref()
+        .map(|channel_id| {
+            if channel_id.is_empty() || channel_id.len() > 256 {
+                return Err("channelId must contain 1 to 256 characters".to_string());
+            }
+            if let Some(thread_root_id) = &req.thread_root_id {
+                if thread_root_id.len() != 64
+                    || !thread_root_id.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    return Err("threadRootId must be exactly 64 hex characters".to_string());
+                }
+            }
+            Ok(LatestSnapshotContextScope {
+                channel_id: channel_id.clone(),
+                thread_root_id: req.thread_root_id.clone(),
+            })
+        })
+        .transpose()?;
+
+    Ok((agent_pubkeys, scope))
+}
+
+pub(super) fn latest_snapshot_from_payload(
+    agent_pubkey: String,
+    payload: AgentTurnMetricPayload,
+) -> LatestAgentMetricSnapshot {
+    let context_timestamp = (payload.context_used_tokens.is_some()
+        && payload.context_limit_tokens.is_some())
+    .then(|| payload.timestamp.clone());
+    let account_usage_windows_timestamp =
+        (!payload.account_usage_windows.is_empty()).then(|| payload.timestamp.clone());
+    LatestAgentMetricSnapshot {
+        agent_pubkey,
+        context_used_tokens: payload.context_used_tokens.map(|value| value.to_string()),
+        context_limit_tokens: payload.context_limit_tokens.map(|value| value.to_string()),
+        context_timestamp,
+        account_usage_windows: payload.account_usage_windows,
+        account_usage_windows_timestamp,
+        timestamp: payload.timestamp,
+        model: payload.model,
+        harness: payload.harness,
+    }
 }
 
 // ── Wire types ───────────────────────────────────────────────────────────────
