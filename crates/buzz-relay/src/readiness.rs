@@ -1,43 +1,101 @@
-//! Readiness dependency evaluation and ordered metrics publication.
+//! Readiness-probe telemetry and the dependency diagnostics behind `/_status`.
 //!
-//! [`ReadinessCoordinator`] is process-owned. Its mutex is the linearization
-//! point shared by health-probe commits and terminal shutdown, so an older
-//! evaluation can never overwrite newer gauges or publish ready after shutdown.
+//! Readiness is deliberately *not* a dependency question. A shared Postgres or
+//! Redis failure is shared by every replica, so evaluating it in the probe took
+//! the whole deployment out of the load balancer at once and left a reconnect
+//! burst with nowhere to land. The Kubernetes probe therefore answers from this
+//! process's own lifecycle (see [`crate::router`]), and the same dependency
+//! evaluation is reported on the diagnostic `/_status` endpoint, which is never
+//! wired to a probe.
+//!
+//! Dependency evaluation is also decoupled from requests. One per-pod loop
+//! ([`run_dependency_sampler`]) evaluates on a fixed cadence, publishes the
+//! dependency metrics, and caches the report; `/_status` only reads that cache.
+//! Evaluating per request made the load a pressured dependency sees depend on
+//! how often someone looked at the endpoint, with nothing bounding how many
+//! evaluations could be in flight at once.
 
 use std::future::Future;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use buzz_db::{Db, DbError, DbReadinessOutcome};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
-const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+use crate::state::AppState;
+
+const DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Fixed cadence of the per-pod dependency sampling loop.
+///
+/// Slow enough that a pod adds negligible load to a shared dependency, fast
+/// enough that an operator opening `/_status` during an incident reads
+/// something current. Documented in `deploy/charts/buzz/README.md`.
+pub const DEPENDENCY_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Age past which a cached report is reported stale rather than current.
+///
+/// Two cadences: one full cycle can be missed by an evaluation that consumed
+/// its whole [`DEPENDENCY_TIMEOUT`] budget, so anything older than that means
+/// the sampler itself is not keeping up.
+const DEPENDENCY_SAMPLE_STALE_AFTER: Duration = DEPENDENCY_SAMPLE_INTERVAL.saturating_mul(2);
 
 /// Closed label set exported by `buzz_readiness_checks_total{reason}`.
-#[cfg(test)]
-pub(crate) const READINESS_REASON_LABELS: [&str; 12] = [
-    "ready",
-    "shutting_down",
-    "postgres_pool_timeout",
-    "postgres_pool_error",
-    "postgres_query_timeout",
-    "postgres_query_error",
-    "redis_pool_timeout",
-    "redis_pool_error",
-    "deletion_catalog_timeout",
-    "deletion_catalog_error",
-    "overall_timeout",
-    "multiple_dependencies_failed",
-];
-
-/// Maximum raw Prometheus series emitted by readiness for one pod.
 ///
-/// - 12 overall reasons
+/// Readiness answers a local lifecycle question, so this set cannot grow with
+/// the number of shared dependencies the relay talks to.
+#[cfg(test)]
+pub(crate) const READINESS_REASON_LABELS: [&str; 2] = ["ready", "shutting_down"];
+
+/// Maximum raw Prometheus series emitted by readiness and its dependency
+/// diagnostics for one pod.
+///
+/// - 2 probe reasons
 /// - 11 valid dependency/outcome pairs (Postgres 5, Redis 3, catalog 3)
 /// - 4 histograms x (15 configured buckets + `+Inf` + count + sum) = 72
-/// - 4 current-state gauges
+/// - 1 overall readiness gauge
+/// - 1 sample-completion timestamp gauge
 #[cfg(test)]
-pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 12 + 11 + (4 * 18) + 4;
+pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 2 + 11 + (4 * 18) + 1 + 1;
+
+/// Terminal outcome of one readiness probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadinessReason {
+    Ready,
+    ShuttingDown,
+}
+
+impl ReadinessReason {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::ShuttingDown => "shutting_down",
+        }
+    }
+
+    pub(crate) fn is_ready(self) -> bool {
+        self == Self::Ready
+    }
+}
+
+/// Records one readiness probe served by the private health listener.
+///
+/// The counter and gauge describe the same immutable lifecycle observation.
+/// The gauge is therefore the latest private readiness-probe observation, not
+/// a transition-owned lifecycle mirror.
+pub(crate) fn record_readiness_probe(reason: ReadinessReason) {
+    metrics::counter!(
+        "buzz_readiness_checks_total",
+        "reason" => reason.label(),
+    )
+    .increment(1);
+    metrics::gauge!("buzz_readiness_state", "check" => "overall").set(if reason.is_ready() {
+        1.0
+    } else {
+        0.0
+    });
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PostgresOutcome {
@@ -130,10 +188,14 @@ impl DeletionCatalogOutcome {
     }
 }
 
+/// Aggregate dependency verdict reported in the `/_status` diagnostics body.
+///
+/// This is a diagnostic field, never a metric label: it exists so an operator
+/// reading `/_status` gets the same one-line summary the readiness body used to
+/// carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReadinessReason {
+pub(crate) enum DependencyReason {
     Ready,
-    ShuttingDown,
     PostgresPoolTimeout,
     PostgresPoolError,
     PostgresQueryTimeout,
@@ -146,11 +208,10 @@ pub(crate) enum ReadinessReason {
     MultipleDependenciesFailed,
 }
 
-impl ReadinessReason {
+impl DependencyReason {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Ready => "ready",
-            Self::ShuttingDown => "shutting_down",
             Self::PostgresPoolTimeout => "postgres_pool_timeout",
             Self::PostgresPoolError => "postgres_pool_error",
             Self::PostgresQueryTimeout => "postgres_query_timeout",
@@ -178,26 +239,18 @@ impl<O> TimedOutcome<O> {
     }
 }
 
+/// One completed dependency evaluation. Every dependency always runs, so the
+/// report carries three outcomes and never a partial shape.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ReadinessEvaluation {
-    postgres: Option<TimedOutcome<PostgresOutcome>>,
-    redis: Option<TimedOutcome<RedisOutcome>>,
-    deletion_catalog: Option<TimedOutcome<DeletionCatalogOutcome>>,
-    pub(crate) reason: ReadinessReason,
+pub(crate) struct DependencyReport {
+    postgres: TimedOutcome<PostgresOutcome>,
+    redis: TimedOutcome<RedisOutcome>,
+    deletion_catalog: TimedOutcome<DeletionCatalogOutcome>,
+    pub(crate) reason: DependencyReason,
     total_duration: Duration,
 }
 
-impl ReadinessEvaluation {
-    pub(crate) fn shutting_down() -> Self {
-        Self {
-            postgres: None,
-            redis: None,
-            deletion_catalog: None,
-            reason: ReadinessReason::ShuttingDown,
-            total_duration: Duration::ZERO,
-        }
-    }
-
+impl DependencyReport {
     #[cfg(test)]
     pub(crate) fn from_results(
         postgres: TimedOutcome<PostgresOutcome>,
@@ -216,34 +269,24 @@ impl ReadinessEvaluation {
     ) -> Self {
         let reason = final_reason(postgres.outcome, redis.outcome, deletion_catalog.outcome);
         Self {
-            postgres: Some(postgres),
-            redis: Some(redis),
-            deletion_catalog: Some(deletion_catalog),
+            postgres,
+            redis,
+            deletion_catalog,
             reason,
             total_duration,
         }
     }
 
-    pub(crate) fn is_ready(self) -> bool {
-        self.reason == ReadinessReason::Ready
-    }
-
     pub(crate) fn postgres_ready(self) -> bool {
-        self.postgres
-            .is_some_and(|result| result.outcome.is_success())
+        self.postgres.outcome.is_success()
     }
 
     pub(crate) fn redis_ready(self) -> bool {
-        self.redis.is_some_and(|result| result.outcome.is_success())
+        self.redis.outcome.is_success()
     }
 
     pub(crate) fn deletion_catalog_ready(self) -> bool {
-        self.deletion_catalog
-            .is_some_and(|result| result.outcome.is_success())
-    }
-
-    fn dependencies_ran(self) -> bool {
-        self.postgres.is_some() || self.redis.is_some() || self.deletion_catalog.is_some()
+        self.deletion_catalog.outcome.is_success()
     }
 }
 
@@ -251,37 +294,39 @@ fn final_reason(
     postgres: PostgresOutcome,
     redis: RedisOutcome,
     deletion_catalog: DeletionCatalogOutcome,
-) -> ReadinessReason {
+) -> DependencyReason {
     let failure_count = usize::from(!postgres.is_success())
         + usize::from(!redis.is_success())
         + usize::from(!deletion_catalog.is_success());
 
     if failure_count == 0 {
-        return ReadinessReason::Ready;
+        return DependencyReason::Ready;
     }
     if failure_count > 1 {
         let all_failures_are_timeouts = (postgres.is_success() || postgres.is_timeout())
             && (redis.is_success() || redis.is_timeout())
             && (deletion_catalog.is_success() || deletion_catalog.is_timeout());
         return if all_failures_are_timeouts {
-            ReadinessReason::OverallTimeout
+            DependencyReason::OverallTimeout
         } else {
-            ReadinessReason::MultipleDependenciesFailed
+            DependencyReason::MultipleDependenciesFailed
         };
     }
 
     match postgres {
-        PostgresOutcome::PoolTimeout => ReadinessReason::PostgresPoolTimeout,
-        PostgresOutcome::PoolError => ReadinessReason::PostgresPoolError,
-        PostgresOutcome::QueryTimeout => ReadinessReason::PostgresQueryTimeout,
-        PostgresOutcome::QueryError => ReadinessReason::PostgresQueryError,
+        PostgresOutcome::PoolTimeout => DependencyReason::PostgresPoolTimeout,
+        PostgresOutcome::PoolError => DependencyReason::PostgresPoolError,
+        PostgresOutcome::QueryTimeout => DependencyReason::PostgresQueryTimeout,
+        PostgresOutcome::QueryError => DependencyReason::PostgresQueryError,
         PostgresOutcome::Success => match redis {
-            RedisOutcome::PoolTimeout => ReadinessReason::RedisPoolTimeout,
-            RedisOutcome::PoolError => ReadinessReason::RedisPoolError,
+            RedisOutcome::PoolTimeout => DependencyReason::RedisPoolTimeout,
+            RedisOutcome::PoolError => DependencyReason::RedisPoolError,
             RedisOutcome::Success => match deletion_catalog {
-                DeletionCatalogOutcome::OperationTimeout => ReadinessReason::DeletionCatalogTimeout,
-                DeletionCatalogOutcome::OperationError => ReadinessReason::DeletionCatalogError,
-                DeletionCatalogOutcome::Success => ReadinessReason::Ready,
+                DeletionCatalogOutcome::OperationTimeout => {
+                    DependencyReason::DeletionCatalogTimeout
+                }
+                DeletionCatalogOutcome::OperationError => DependencyReason::DeletionCatalogError,
+                DeletionCatalogOutcome::Success => DependencyReason::Ready,
             },
         },
     }
@@ -303,7 +348,7 @@ async fn evaluate_dependencies<P, R, D>(
     postgres: P,
     redis: R,
     deletion_catalog: D,
-) -> ReadinessEvaluation
+) -> DependencyReport
 where
     P: Future<Output = PostgresOutcome>,
     R: Future<Output = RedisOutcome>,
@@ -312,7 +357,7 @@ where
     let started_at = Instant::now();
     let (postgres, redis, deletion_catalog) =
         tokio::join!(timed(postgres), timed(redis), timed(deletion_catalog),);
-    ReadinessEvaluation::for_dependencies(postgres, redis, deletion_catalog, started_at.elapsed())
+    DependencyReport::for_dependencies(postgres, redis, deletion_catalog, started_at.elapsed())
 }
 
 async fn redis_check(pool: &deadpool_redis::Pool, deadline: Instant) -> RedisOutcome {
@@ -345,16 +390,16 @@ fn classify_deletion_catalog_result(result: buzz_db::Result<()>) -> DeletionCata
 }
 
 #[async_trait::async_trait]
-pub(crate) trait ReadinessEvaluator: Send + Sync {
-    async fn evaluate(&self, db: &Db, redis_pool: &deadpool_redis::Pool) -> ReadinessEvaluation;
+pub(crate) trait DependencyEvaluator: Send + Sync {
+    async fn evaluate(&self, db: &Db, redis_pool: &deadpool_redis::Pool) -> DependencyReport;
 }
 
-struct ProductionReadinessEvaluator;
+struct ProductionDependencyEvaluator;
 
 #[async_trait::async_trait]
-impl ReadinessEvaluator for ProductionReadinessEvaluator {
-    async fn evaluate(&self, db: &Db, redis_pool: &deadpool_redis::Pool) -> ReadinessEvaluation {
-        let deadline = Instant::now() + READINESS_TIMEOUT;
+impl DependencyEvaluator for ProductionDependencyEvaluator {
+    async fn evaluate(&self, db: &Db, redis_pool: &deadpool_redis::Pool) -> DependencyReport {
+        let deadline = Instant::now() + DEPENDENCY_TIMEOUT;
         evaluate_dependencies(
             async { db.readiness_check(deadline).await.into() },
             redis_check(redis_pool, deadline),
@@ -364,150 +409,153 @@ impl ReadinessEvaluator for ProductionReadinessEvaluator {
     }
 }
 
+/// One completed evaluation and when it was observed.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ProbeTicket {
-    generation: u64,
+struct DependencySample {
+    report: DependencyReport,
+    observed_at: Instant,
 }
 
+/// What the cache can tell `/_status`.
+///
+/// "No report yet" is a distinct state, not a fabricated healthy one, and a
+/// report is always accompanied by its age: a cached verdict presented without
+/// one would read as authoritative however long ago it was taken.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ProbeStart {
-    Evaluate(ProbeTicket),
-    ShuttingDown,
+pub(crate) enum DependencySnapshot {
+    /// The sampler has not completed its first evaluation yet.
+    NotYetSampled,
+    Sampled {
+        report: DependencyReport,
+        age: Duration,
+        stale: bool,
+    },
 }
 
-#[derive(Debug, Default)]
-struct PublicationState {
-    next_generation: u64,
-    latest_published_generation: u64,
-    shutdown_generation: Option<u64>,
+/// The per-pod owner of shared-dependency evaluation.
+///
+/// [`run_dependency_sampler`] is the only caller of [`Self::sample`], so at
+/// most one evaluation exists at a time and no request path can start another.
+/// `/_status` reads [`Self::snapshot`], which touches no dependency.
+pub(crate) struct DependencyDiagnostics {
+    evaluator: Arc<dyn DependencyEvaluator>,
+    latest: Mutex<Option<DependencySample>>,
 }
 
-/// Serializes readiness result publication with terminal process shutdown.
-pub(crate) struct ReadinessCoordinator {
-    state: Mutex<PublicationState>,
-    evaluator: Arc<dyn ReadinessEvaluator>,
-}
-
-impl Default for ReadinessCoordinator {
+impl Default for DependencyDiagnostics {
     fn default() -> Self {
-        Self {
-            state: Mutex::new(PublicationState::default()),
-            evaluator: Arc::new(ProductionReadinessEvaluator),
-        }
+        Self::with_evaluator(Arc::new(ProductionDependencyEvaluator))
     }
 }
 
-impl ReadinessCoordinator {
-    #[cfg(test)]
-    pub(crate) fn with_evaluator(evaluator: Arc<dyn ReadinessEvaluator>) -> Self {
+impl DependencyDiagnostics {
+    pub(crate) fn with_evaluator(evaluator: Arc<dyn DependencyEvaluator>) -> Self {
         Self {
-            state: Mutex::new(PublicationState::default()),
             evaluator,
+            latest: Mutex::new(None),
         }
     }
 
-    fn lock_state(&self) -> MutexGuard<'_, PublicationState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Runs one bounded evaluation, publishes its telemetry, and replaces the
+    /// cached report.
+    ///
+    /// The completion timestamp is written last, once the cache already serves
+    /// this report, so the gauge can never describe a sample `/_status` is not
+    /// yet answering with.
+    pub(crate) async fn sample(&self, db: &Db, redis_pool: &deadpool_redis::Pool) {
+        let report = self.evaluator.evaluate(db, redis_pool).await;
+        record_dependency_report(&report);
+        let sample = DependencySample {
+            report,
+            observed_at: Instant::now(),
+        };
+        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = Some(sample);
+        record_dependency_sample_completion(SystemTime::now());
     }
 
-    pub(crate) async fn evaluate(
-        &self,
-        db: &Db,
-        redis_pool: &deadpool_redis::Pool,
-    ) -> ReadinessEvaluation {
-        self.evaluator.evaluate(db, redis_pool).await
-    }
-
-    /// Allocates a health-probe generation or records a truthful shutdown fast path.
-    pub(crate) fn begin_probe(&self) -> ProbeStart {
-        let mut state = self.lock_state();
-        if state.shutdown_generation.is_some() {
-            let evaluation = ReadinessEvaluation::shutting_down();
-            record_attempt_metrics(&evaluation, ReadinessReason::ShuttingDown);
-            record_overall_state(false);
-            return ProbeStart::ShuttingDown;
-        }
-
-        state.next_generation = state.next_generation.saturating_add(1);
-        ProbeStart::Evaluate(ProbeTicket {
-            generation: state.next_generation,
-        })
-    }
-
-    /// Commits one completed health probe through the shared publication fence.
-    pub(crate) fn finish_probe(
-        &self,
-        ticket: ProbeTicket,
-        evaluation: ReadinessEvaluation,
-    ) -> ReadinessEvaluation {
-        let mut state = self.lock_state();
-        if state.shutdown_generation.is_some() {
-            record_attempt_metrics(&evaluation, ReadinessReason::ShuttingDown);
-            return ReadinessEvaluation::shutting_down();
-        }
-
-        record_attempt_metrics(&evaluation, evaluation.reason);
-        if ticket.generation > state.latest_published_generation {
-            record_current_state(&evaluation);
-            state.latest_published_generation = ticket.generation;
-        }
-        evaluation
-    }
-
-    /// Returns whether a compatibility/public readiness evaluation may start.
-    pub(crate) fn public_evaluation_allowed(&self) -> bool {
-        self.lock_state().shutdown_generation.is_none()
-    }
-
-    /// Makes shutdown dominate a public request that was already in flight.
-    pub(crate) fn finish_public_evaluation(
-        &self,
-        evaluation: ReadinessEvaluation,
-    ) -> ReadinessEvaluation {
-        if self.lock_state().shutdown_generation.is_some() {
-            ReadinessEvaluation::shutting_down()
-        } else {
-            evaluation
-        }
-    }
-
-    /// Commits terminal shutdown and immediately publishes overall not-ready.
-    pub(crate) fn begin_shutdown(&self) {
-        let mut state = self.lock_state();
-        if state.shutdown_generation.is_none() {
-            let generation = state.next_generation.saturating_add(1);
-            state.shutdown_generation = Some(generation);
-            record_overall_state(false);
+    /// The latest completed evaluation with its age. Starts no dependency work.
+    pub(crate) fn snapshot(&self) -> DependencySnapshot {
+        let latest = *self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        match latest {
+            None => DependencySnapshot::NotYetSampled,
+            Some(sample) => {
+                let age = sample.observed_at.elapsed();
+                DependencySnapshot::Sampled {
+                    report: sample.report,
+                    age,
+                    stale: age > DEPENDENCY_SAMPLE_STALE_AFTER,
+                }
+            }
         }
     }
 }
 
-fn record_attempt_metrics(evaluation: &ReadinessEvaluation, reason: ReadinessReason) {
-    metrics::counter!(
-        "buzz_readiness_checks_total",
-        "reason" => reason.label(),
-    )
-    .increment(1);
-
-    if !evaluation.dependencies_ran() {
-        return;
+/// Runs the per-pod dependency sampling loop until `cancel` fires.
+///
+/// One loop, one fixed cadence, each evaluation awaited before the next tick is
+/// taken, so this pod never has two evaluations in flight. `Skip` matches the
+/// community revalidator: an evaluation that overruns its slot delays the next
+/// cycle instead of queueing a catch-up burst into the dependency that was
+/// already slow. The first tick fires immediately, so the not-yet-sampled
+/// window is one evaluation long.
+pub async fn run_dependency_sampler(state: Arc<AppState>, cancel: CancellationToken) {
+    let mut interval = tokio::time::interval(DEPENDENCY_SAMPLE_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => {
+                state
+                    .dependency_diagnostics
+                    .sample(&state.db, &state.redis_pool)
+                    .await;
+            }
+        }
     }
+}
 
+/// Records one dependency evaluation. Counters and durations only — dependency
+/// health has no publishable "current state" now that no probe consumes it; a
+/// per-dependency gauge would read as an authoritative verdict on infrastructure
+/// this pod only samples every [`DEPENDENCY_SAMPLE_INTERVAL`].
+fn record_dependency_report(report: &DependencyReport) {
     metrics::histogram!(
         "buzz_readiness_check_duration_seconds",
         "check" => "overall",
     )
-    .record(evaluation.total_duration.as_secs_f64());
+    .record(report.total_duration.as_secs_f64());
 
-    if let Some(result) = evaluation.postgres {
-        record_dependency_attempt("postgres", result.outcome.label(), result.duration);
-    }
-    if let Some(result) = evaluation.redis {
-        record_dependency_attempt("redis", result.outcome.label(), result.duration);
-    }
-    if let Some(result) = evaluation.deletion_catalog {
-        record_dependency_attempt("deletion_catalog", result.outcome.label(), result.duration);
-    }
+    record_dependency_attempt(
+        "postgres",
+        report.postgres.outcome.label(),
+        report.postgres.duration,
+    );
+    record_dependency_attempt("redis", report.redis.outcome.label(), report.redis.duration);
+    record_dependency_attempt(
+        "deletion_catalog",
+        report.deletion_catalog.outcome.label(),
+        report.deletion_catalog.duration,
+    );
+}
+
+/// Publishes the Unix time the cached report completed.
+///
+/// A completion timestamp rather than an age, because age then belongs to the
+/// query — `time() - buzz_readiness_dependency_sample_completed_timestamp_seconds`
+/// — and grows on its own while this pod is wedged. A gauge carrying the age
+/// needs a writer to advance it, so the one failure it most needs to expose, a
+/// sampler that stopped running, is the one that would freeze it at its last
+/// value and read as permanently fresh. Nothing but a completed sample writes
+/// this, which also keeps the `buzz_storage_sweep_age_seconds` convention that
+/// absence means "not yet sampled" rather than "fresh".
+fn record_dependency_sample_completion(completed_at: SystemTime) {
+    let epoch_seconds = completed_at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    metrics::gauge!("buzz_readiness_dependency_sample_completed_timestamp_seconds")
+        .set(epoch_seconds);
 }
 
 fn record_dependency_attempt(dependency: &'static str, outcome: &'static str, duration: Duration) {
@@ -524,35 +572,6 @@ fn record_dependency_attempt(dependency: &'static str, outcome: &'static str, du
     .record(duration.as_secs_f64());
 }
 
-fn record_current_state(evaluation: &ReadinessEvaluation) {
-    record_overall_state(evaluation.is_ready());
-    if let Some(result) = evaluation.postgres {
-        record_dependency_state("postgres", result.outcome.is_success());
-    }
-    if let Some(result) = evaluation.redis {
-        record_dependency_state("redis", result.outcome.is_success());
-    }
-    if let Some(result) = evaluation.deletion_catalog {
-        record_dependency_state("deletion_catalog", result.outcome.is_success());
-    }
-}
-
-fn record_overall_state(ready: bool) {
-    metrics::gauge!("buzz_readiness_state", "check" => "overall").set(if ready {
-        1.0
-    } else {
-        0.0
-    });
-}
-
-fn record_dependency_state(dependency: &'static str, ready: bool) {
-    metrics::gauge!("buzz_readiness_state", "check" => dependency).set(if ready {
-        1.0
-    } else {
-        0.0
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
@@ -560,17 +579,15 @@ mod tests {
 
     use super::*;
 
-    fn ready_evaluation() -> ReadinessEvaluation {
-        ReadinessEvaluation::from_results(
-            TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(35)),
-            TimedOutcome::new(RedisOutcome::Success, Duration::from_millis(10)),
-            TimedOutcome::new(DeletionCatalogOutcome::Success, Duration::from_millis(20)),
-            Duration::from_millis(35),
-        )
-    }
+    type Snapshot = Vec<(
+        CompositeKey,
+        Option<metrics::Unit>,
+        Option<metrics::SharedString>,
+        DebugValue,
+    )>;
 
-    fn redis_failure_evaluation() -> ReadinessEvaluation {
-        ReadinessEvaluation::from_results(
+    fn redis_failure_report() -> DependencyReport {
+        DependencyReport::from_results(
             TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(35)),
             TimedOutcome::new(RedisOutcome::PoolTimeout, Duration::from_secs(2)),
             TimedOutcome::new(DeletionCatalogOutcome::Success, Duration::from_millis(20)),
@@ -579,12 +596,7 @@ mod tests {
     }
 
     fn exact_metric<'a>(
-        snapshot: &'a [(
-            CompositeKey,
-            Option<metrics::Unit>,
-            Option<metrics::SharedString>,
-            DebugValue,
-        )],
+        snapshot: &'a Snapshot,
         name: &str,
         labels: &[(&str, &str)],
     ) -> Option<&'a DebugValue> {
@@ -601,15 +613,7 @@ mod tests {
         })
     }
 
-    fn gauge_value(
-        snapshot: &[(
-            CompositeKey,
-            Option<metrics::Unit>,
-            Option<metrics::SharedString>,
-            DebugValue,
-        )],
-        check: &str,
-    ) -> f64 {
+    fn gauge_value(snapshot: &Snapshot, check: &str) -> f64 {
         let value = exact_metric(snapshot, "buzz_readiness_state", &[("check", check)])
             .expect("readiness gauge");
         let DebugValue::Gauge(value) = value else {
@@ -620,7 +624,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn evaluation_preserves_a_completed_check_when_another_times_out() {
-        let evaluation = evaluate_dependencies(
+        let report = evaluate_dependencies(
             async {
                 tokio::time::sleep(Duration::from_millis(35)).await;
                 PostgresOutcome::Success
@@ -636,15 +640,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(evaluation.reason, ReadinessReason::RedisPoolTimeout);
-        assert_eq!(
-            evaluation.postgres.map(|result| result.duration),
-            Some(Duration::from_millis(35))
-        );
-        assert_eq!(
-            evaluation.redis.map(|result| result.duration),
-            Some(Duration::from_secs(2))
-        );
+        assert_eq!(report.reason, DependencyReason::RedisPoolTimeout);
+        assert_eq!(report.postgres.duration, Duration::from_millis(35));
+        assert_eq!(report.redis.duration, Duration::from_secs(2));
     }
 
     #[test]
@@ -655,7 +653,7 @@ mod tests {
                 RedisOutcome::PoolTimeout,
                 DeletionCatalogOutcome::Success,
             ),
-            ReadinessReason::OverallTimeout
+            DependencyReason::OverallTimeout
         );
     }
 
@@ -696,7 +694,7 @@ mod tests {
             .map(DeletionCatalogOutcome::label),
             ["success", "operation_timeout", "operation_error"]
         );
-        assert_eq!(READINESS_RAW_SERIES_PER_POD, 99);
+        assert_eq!(READINESS_RAW_SERIES_PER_POD, 87);
     }
 
     #[test]
@@ -711,111 +709,62 @@ mod tests {
         );
     }
 
+    /// The readiness gauge and counter use the same immutable reason sampled by
+    /// the private probe. A dependency evaluation — however bad — must never
+    /// move them, which is what let a shared outage deroute every replica at
+    /// once.
     #[test]
-    fn slow_older_failure_cannot_overwrite_newer_success_gauges() {
-        let coordinator = ReadinessCoordinator::default();
-        let ProbeStart::Evaluate(slow_a) = coordinator.begin_probe() else {
-            panic!("serving probe A");
-        };
-        let ProbeStart::Evaluate(fast_b) = coordinator.begin_probe() else {
-            panic!("serving probe B");
-        };
+    fn readiness_telemetry_tracks_lifecycle_and_dependency_failure_never_moves_it() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 
         metrics::with_local_recorder(&recorder, || {
-            coordinator.finish_probe(fast_b, ready_evaluation());
-            coordinator.finish_probe(slow_a, redis_failure_evaluation());
+            record_readiness_probe(ReadinessReason::Ready);
+            record_dependency_report(&redis_failure_report());
         });
-        let snapshot = snapshotter.snapshot().into_vec();
+        let after_failure = snapshotter.snapshot().into_vec();
 
-        assert_eq!(gauge_value(&snapshot, "overall"), 1.0);
-        assert_eq!(gauge_value(&snapshot, "redis"), 1.0);
+        assert_eq!(gauge_value(&after_failure, "overall"), 1.0);
         assert!(matches!(
             exact_metric(
-                &snapshot,
+                &after_failure,
                 "buzz_readiness_checks_total",
                 &[("reason", "ready")]
             ),
             Some(DebugValue::Counter(1))
         ));
-        assert!(matches!(
-            exact_metric(
-                &snapshot,
-                "buzz_readiness_checks_total",
-                &[("reason", "redis_pool_timeout")]
-            ),
-            Some(DebugValue::Counter(1))
-        ));
-    }
-
-    #[test]
-    fn slow_older_success_cannot_overwrite_newer_failure_gauges() {
-        let coordinator = ReadinessCoordinator::default();
-        let ProbeStart::Evaluate(slow_a) = coordinator.begin_probe() else {
-            panic!("serving probe A");
-        };
-        let ProbeStart::Evaluate(fast_b) = coordinator.begin_probe() else {
-            panic!("serving probe B");
-        };
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        metrics::with_local_recorder(&recorder, || {
-            coordinator.finish_probe(fast_b, redis_failure_evaluation());
-            coordinator.finish_probe(slow_a, ready_evaluation());
-        });
-        let snapshot = snapshotter.snapshot().into_vec();
-
-        assert_eq!(gauge_value(&snapshot, "overall"), 0.0);
-        assert_eq!(gauge_value(&snapshot, "postgres"), 1.0);
-        assert_eq!(gauge_value(&snapshot, "redis"), 0.0);
-        assert_eq!(gauge_value(&snapshot, "deletion_catalog"), 1.0);
-    }
-
-    #[test]
-    fn shutdown_fast_path_preserves_dependency_state_and_histograms() {
-        let coordinator = ReadinessCoordinator::default();
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        metrics::with_local_recorder(&recorder, || {
-            let ProbeStart::Evaluate(ticket) = coordinator.begin_probe() else {
-                panic!("initial serving probe");
-            };
-            coordinator.finish_probe(ticket, ready_evaluation());
-            coordinator.begin_shutdown();
-            assert!(matches!(
-                coordinator.begin_probe(),
-                ProbeStart::ShuttingDown
-            ));
-        });
-        let after = snapshotter.snapshot().into_vec();
-
-        for dependency in ["postgres", "redis", "deletion_catalog"] {
-            assert_eq!(
-                gauge_value(&after, dependency),
-                1.0,
-                "shutdown must not fabricate {dependency} state"
-            );
-        }
-        for check in ["overall", "postgres", "redis", "deletion_catalog"] {
-            assert!(
-                matches!(
-                    exact_metric(
-                        &after,
-                        "buzz_readiness_check_duration_seconds",
-                        &[("check", check)]
-                    ),
-                    Some(DebugValue::Histogram(values)) if values.len() == 1
+        assert!(
+            matches!(
+                exact_metric(
+                    &after_failure,
+                    "buzz_readiness_dependency_checks_total",
+                    &[("dependency", "redis"), ("outcome", "pool_timeout")]
                 ),
-                "shutdown fast path must not add a {check} duration"
+                Some(DebugValue::Counter(1))
+            ),
+            "dependency diagnostics must still be counted"
+        );
+        for dependency in ["postgres", "redis", "deletion_catalog"] {
+            assert!(
+                exact_metric(
+                    &after_failure,
+                    "buzz_readiness_state",
+                    &[("check", dependency)]
+                )
+                .is_none(),
+                "{dependency} must not publish a readiness gauge"
             );
         }
-        assert_eq!(gauge_value(&after, "overall"), 0.0);
+
+        metrics::with_local_recorder(&recorder, || {
+            record_readiness_probe(ReadinessReason::ShuttingDown);
+        });
+        let after_shutdown = snapshotter.snapshot().into_vec();
+
+        assert_eq!(gauge_value(&after_shutdown, "overall"), 0.0);
         assert!(matches!(
             exact_metric(
-                &after,
+                &after_shutdown,
                 "buzz_readiness_checks_total",
                 &[("reason", "shutting_down")]
             ),
@@ -823,33 +772,198 @@ mod tests {
         ));
     }
 
+    /// A shutdown probe records no dependency attempt or latency sample: it did
+    /// not evaluate anything, and fabricating a sample would misreport the
+    /// dependency's real health during a rollout.
     #[test]
-    fn shutdown_dominates_an_in_flight_success_without_resurrecting_gauges() {
-        let coordinator = ReadinessCoordinator::default();
-        let ProbeStart::Evaluate(ticket) = coordinator.begin_probe() else {
-            panic!("serving probe");
-        };
+    fn a_readiness_probe_never_records_dependency_attempts() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 
-        let response = metrics::with_local_recorder(&recorder, || {
-            coordinator.begin_shutdown();
-            coordinator.finish_probe(ticket, ready_evaluation())
+        metrics::with_local_recorder(&recorder, || {
+            record_readiness_probe(ReadinessReason::Ready);
+            record_readiness_probe(ReadinessReason::ShuttingDown);
         });
         let snapshot = snapshotter.snapshot().into_vec();
 
-        assert_eq!(response.reason, ReadinessReason::ShuttingDown);
-        assert_eq!(gauge_value(&snapshot, "overall"), 0.0);
-        assert!(
-            exact_metric(&snapshot, "buzz_readiness_state", &[("check", "postgres")]).is_none()
-        );
-        assert!(matches!(
-            exact_metric(
-                &snapshot,
-                "buzz_readiness_dependency_checks_total",
-                &[("dependency", "postgres"), ("outcome", "success")]
+        assert!(snapshot.iter().all(|(key, _, _, _)| {
+            key.key().name() != "buzz_readiness_dependency_checks_total"
+                && key.key().name() != "buzz_readiness_check_duration_seconds"
+        }));
+    }
+
+    /// A `Db` and a Redis pool on a closed port. The scripted evaluators below
+    /// never touch either, so no connection is ever attempted; they exist only
+    /// to satisfy the production `sample` signature.
+    fn unreachable_dependencies() -> (Db, deadpool_redis::Pool) {
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/buzz").expect("lazy pg pool");
+        let redis_pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        (Db::from_pool(pool), redis_pool)
+    }
+
+    struct FixedEvaluator(DependencyReport);
+
+    #[async_trait::async_trait]
+    impl DependencyEvaluator for FixedEvaluator {
+        async fn evaluate(&self, _db: &Db, _redis_pool: &deadpool_redis::Pool) -> DependencyReport {
+            self.0
+        }
+    }
+
+    fn ready_diagnostics() -> DependencyDiagnostics {
+        DependencyDiagnostics::with_evaluator(Arc::new(FixedEvaluator(
+            DependencyReport::from_results(
+                TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(3)),
+                TimedOutcome::new(RedisOutcome::Success, Duration::from_millis(2)),
+                TimedOutcome::new(DeletionCatalogOutcome::Success, Duration::from_millis(1)),
+                Duration::from_millis(3),
             ),
-            Some(DebugValue::Counter(1))
-        ));
+        )))
+    }
+
+    fn sampled(snapshot: DependencySnapshot) -> (Duration, bool) {
+        let DependencySnapshot::Sampled { age, stale, .. } = snapshot else {
+            panic!("a completed sample must be reported as sampled");
+        };
+        (age, stale)
+    }
+
+    /// An operator reading `/_status` must be able to tell "nothing has been
+    /// sampled yet" from "this is current" from "this outlived the sampler".
+    /// A cached report presented without its age would read as authoritative
+    /// however old it is.
+    #[tokio::test(start_paused = true)]
+    async fn freshness_separates_not_yet_sampled_from_a_fresh_and_a_stale_report() {
+        let (db, redis_pool) = unreachable_dependencies();
+        let diagnostics = ready_diagnostics();
+
+        assert!(
+            matches!(diagnostics.snapshot(), DependencySnapshot::NotYetSampled),
+            "no evaluation has completed, so there is nothing to report"
+        );
+
+        diagnostics.sample(&db, &redis_pool).await;
+        assert_eq!(sampled(diagnostics.snapshot()), (Duration::ZERO, false));
+
+        tokio::time::advance(DEPENDENCY_SAMPLE_INTERVAL).await;
+        assert_eq!(
+            sampled(diagnostics.snapshot()),
+            (DEPENDENCY_SAMPLE_INTERVAL, false),
+            "one cadence of age is the steady state, not staleness"
+        );
+
+        tokio::time::advance(DEPENDENCY_SAMPLE_INTERVAL + Duration::from_secs(1)).await;
+        let (age, stale) = sampled(diagnostics.snapshot());
+        assert_eq!(age, DEPENDENCY_SAMPLE_INTERVAL * 2 + Duration::from_secs(1));
+        assert!(stale, "a report that outlived two cadences missed a cycle");
+    }
+
+    /// The completion timestamp written since the previous snapshot, if any.
+    ///
+    /// `Snapshotter::snapshot` drains, so a window in which nothing wrote the
+    /// gauge either omits the key entirely or, once registered, replays as
+    /// `0.0`. Zero is not a time any sample could have completed at, so folding
+    /// it into `None` keeps "nobody wrote this in that window" expressible —
+    /// the property a completion timestamp must have and an age cannot.
+    fn sample_completion_gauge(snapshot: &Snapshot) -> Option<f64> {
+        exact_metric(
+            snapshot,
+            "buzz_readiness_dependency_sample_completed_timestamp_seconds",
+            &[],
+        )
+        .map(|value| {
+            let DebugValue::Gauge(value) = value else {
+                panic!("the sample completion timestamp must be a gauge");
+            };
+            value.into_inner()
+        })
+        .filter(|written| *written != 0.0)
+    }
+
+    fn epoch_seconds_now() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock is after the Unix epoch")
+            .as_secs_f64()
+    }
+
+    /// The scrape-side half of the same question. Freshness is published as the
+    /// Unix time the cached report completed, written only by a completed
+    /// sample, so the age belongs to the query
+    /// (`time() - buzz_readiness_dependency_sample_completed_timestamp_seconds`)
+    /// and grows on its own while this pod is wedged. A gauge carrying the age
+    /// instead would need a writer to advance it, so the one failure it most
+    /// needs to expose — a sampler that stopped — is the one that would freeze
+    /// it at its last value and read as permanently fresh.
+    #[test]
+    fn the_completion_timestamp_gauge_is_written_once_per_completed_sample() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused current-thread runtime");
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let (db, redis_pool) = unreachable_dependencies();
+                let diagnostics = ready_diagnostics();
+
+                assert_eq!(
+                    sample_completion_gauge(&snapshotter.snapshot().into_vec()),
+                    None,
+                    "absence is the not-yet-sampled signal, not a fresh zero"
+                );
+
+                let before_first = epoch_seconds_now();
+                diagnostics.sample(&db, &redis_pool).await;
+                let after_first = epoch_seconds_now();
+                let first = sample_completion_gauge(&snapshotter.snapshot().into_vec())
+                    .expect("a completed sample must publish when it completed");
+                assert!(
+                    (before_first..=after_first).contains(&first),
+                    "{first} must be the wall time the sample completed, \
+                     not an age, and not a stale reading"
+                );
+
+                // Paused time: no task, timer, or aging loop can run here.
+                tokio::time::advance(DEPENDENCY_SAMPLE_STALE_AFTER + Duration::from_secs(1)).await;
+                assert_eq!(
+                    sample_completion_gauge(&snapshotter.snapshot().into_vec()),
+                    None,
+                    "only a completed sample may write the gauge, so the age a \
+                     query derives from it grows with no server-side writer"
+                );
+                assert!(
+                    sampled(diagnostics.snapshot()).1,
+                    "the cached `/_status` age reports the same report as stale"
+                );
+
+                let before_second = epoch_seconds_now();
+                diagnostics.sample(&db, &redis_pool).await;
+                let after_second = epoch_seconds_now();
+                let second = sample_completion_gauge(&snapshotter.snapshot().into_vec())
+                    .expect("the next completed sample republishes the timestamp");
+                assert!(
+                    (before_second..=after_second).contains(&second) && second >= first,
+                    "{second} must re-anchor to the second completion, after {first}"
+                );
+                assert!(
+                    !sampled(diagnostics.snapshot()).1,
+                    "a fresh completion clears staleness"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn readiness_reason_labels_are_the_closed_lifecycle_set() {
+        assert_eq!(
+            [ReadinessReason::Ready, ReadinessReason::ShuttingDown].map(ReadinessReason::label),
+            READINESS_REASON_LABELS
+        );
     }
 }

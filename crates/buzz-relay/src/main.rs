@@ -455,7 +455,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
     };
-    let redis_health_pool = redis_pool.clone(); // cheap Arc clone — shared with readiness handler
+    let redis_health_pool = redis_pool.clone(); // cheap Arc clone — shared with AppState
+                                                // One-time bootstrap gate, deliberately before AppState and therefore before
+                                                // the health listener binds. Post-start Redis failures are dependency
+                                                // failures and must never move readiness; never having connected at all is
+                                                // a broken deployment, not a blip.
+    buzz_relay::state::verify_redis_command_path(&redis_health_pool).await?;
+    info!("Redis command path connected");
     let pubsub = Arc::new(
         PubSubManager::new(&config.redis_url, redis_pool)
             .await
@@ -1043,6 +1049,19 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         ));
     }
 
+    // Per-pod dependency sampler: the single owner of Postgres/Redis/deletion-
+    // catalog evaluation. It publishes the dependency metrics and caches the
+    // report `/_status` serves, so neither operator polling nor a quiet endpoint
+    // changes how often a shared dependency is probed.
+    {
+        let sampler_state = Arc::clone(&state);
+        let cancel = sampler_state.dependency_sampler_cancel.clone();
+        tokio::spawn(buzz_relay::readiness::run_dependency_sampler(
+            sampler_state,
+            cancel,
+        ));
+    }
+
     // Cross-pod connection-control consumer: receive disconnect commands from
     // Redis pub/sub (published by the pod that recorded a ban) and close any
     // matching local sockets. A member's live connections may land on any pod,
@@ -1216,6 +1235,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 
     serve(router, health_router, Arc::clone(&state)).await?;
     state.community_revalidator_cancel.cancel();
+    state.dependency_sampler_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
     // exit. Uses a CancellationToken so it works regardless of how many

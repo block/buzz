@@ -110,10 +110,11 @@ SigV4 signing, so do not put the bucket into `s3.endpoint`; pass Railway's base
 
 Object storage is contacted during relay startup only when
 `BUZZ_GIT_CONFORMANCE_PROBE` is enabled (the relay default). A probe failure is
-startup-fatal, so Kubernetes readiness never opens. If an operator explicitly
-disables that probe through `relay.extraEnv`, `/_readiness` does not test object
-storage; configuration is still parsed strictly, but reachability and addressing
-errors surface on the first storage operation.
+startup-fatal, so the process exits and Kubernetes readiness never opens. If an
+operator explicitly disables that probe through `relay.extraEnv`, configuration
+is still parsed strictly, but reachability and addressing errors surface on the
+first storage operation. `/_readiness` tests no external dependency in either
+case — see the readiness contract below.
 
 ### Early-startup telemetry contract
 
@@ -125,26 +126,110 @@ These phases intentionally do not emit metrics. Most run before the Prometheus
 exporter exists, and one uniform log-only contract preserves every phase's real
 event time and failure without assigning an eventual scrape time to earlier work.
 
+### Readiness contract
+
+**`/_readiness` reports local process lifecycle only.** It performs no
+Postgres, Redis, or deletion-catalog I/O: `shutting_down` returns 503, and any
+other state returns 200. Shared dependencies are shared by every replica, so
+gating the probe on them removed the whole deployment from the load balancer at
+once and left a reconnect burst with nowhere to land. There is no separate
+"starting" state — the health listener does not bind until the database,
+migrations, Redis, and pub/sub are up, so a process that can answer has booted.
+
+Shared-dependency health moved to **`/_status`** on the same private health
+listener, under a `dependencies` object carrying the `postgres`, `redis`,
+`deletion_catalog`, and aggregate `reason` fields the readiness body used to
+return. Do not wire `/_status` to a Kubernetes probe.
+
+**`/_status` is a cached read.** It performs no Postgres, Redis, or
+deletion-catalog I/O of its own. One background loop per pod evaluates the
+three dependencies **every 30 seconds**, awaiting each evaluation before taking
+the next tick, so a pod never has more than one evaluation in flight no matter
+how often — or how rarely — the endpoint is read. The loop publishes the
+dependency metrics below and caches the report `/_status` serves. Its first
+cycle runs at startup, and each evaluation is bounded by a two-second budget.
+
+Every `dependencies` object therefore states how old its report is:
+
+| Field | Meaning |
+|-------|---------|
+| `sample: "not_yet_sampled"` | the first cycle has not completed; no `postgres`/`redis`/`deletion_catalog`/`reason` fields are present, because there is no observation to report |
+| `sample: "fresh"` | the report is at most two cadences (60s) old |
+| `sample: "stale"` | the report outlived two cadences, so the sampler missed at least one cycle — read the verdict as history, not as current state |
+| `sample_age_seconds` | age of the report at request time (absent when `not_yet_sampled`) |
+| `sample_interval_seconds` | the sampling cadence, `30` |
+
+Polling `/_status` more often than the cadence returns the same cached report;
+it does not make the data fresher and adds no dependency load.
+
 ### Readiness telemetry contract
 
 Only requests served by the private health listener (`BUZZ_HEALTH_PORT`) emit
-rollout readiness telemetry. The compatibility `/_readiness` route on the public
-app listener returns health but does not change these metrics.
+rollout telemetry. The compatibility `/_readiness` route on the public app
+listener returns the same lifecycle answer but does not change these metrics.
+
+| Metric | Type | Labels | Source |
+|--------|------|--------|--------|
+| `buzz_readiness_checks_total` | counter | `reason` ∈ {`ready`, `shutting_down`} | `/_readiness` |
+| `buzz_readiness_state` | gauge | `check="overall"`; latest private probe observation, 1 ready or 0 shutting down | `/_readiness` |
+| `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` | dependency sampler |
+| `buzz_readiness_check_duration_seconds` | histogram | `check` only | dependency sampler |
+| `buzz_readiness_dependency_sample_completed_timestamp_seconds` | gauge | none; Unix time the cached report completed | dependency sampler |
+
+The three dependency families keep their `buzz_readiness_*` names for dashboard
+continuity, but nothing about them is request-driven any more: the 30-second
+sampler publishes them whether or not anyone reads `/_status`, so a quiet
+endpoint no longer produces a flat dashboard during the outage it exists to
+explain.
+
+`buzz_readiness_dependency_sample_completed_timestamp_seconds` carries **when
+the cached report completed**, in Unix seconds. The relay writes it once per
+completed sample, immediately after the cache is replaced, and nothing else
+writes it — there is no background loop that ages it. So the value stands still
+when sampling stops, and the time elapsed since it was written is whatever the
+reader computes at read time.
+
+Following the `buzz_storage_sweep_age_seconds` convention, the series is not
+emitted until the first sample completes: its absence means "not yet sampled",
+not "fresh".
+
+That is the whole server-side contract. Freshness alerting is built from this
+gauge in the monitoring provider, and the monitor query, thresholds, and
+per-pod tag grouping belong with the deployment's monitor configuration rather
+than in this chart — they depend on the provider's query grammar and on the
+tags its agent attaches, neither of which this repo owns.
+
+Two properties of the neighboring families are worth knowing when building
+that alerting. `buzz_readiness_dependency_checks_total` and
+`buzz_readiness_check_duration_seconds` are cumulative, so a sampler that stops
+leaves their last values exported and scraped indefinitely: those series stay
+present and flat rather than disappearing. And per-report freshness for a human
+reading a single pod is already on the `sample`, `sample_age_seconds`, and
+`sample_interval_seconds` fields of `/_status` above.
+
+The schema has a ceiling of 87 raw Prometheus series per pod: 2 probe reasons,
+11 valid dependency/outcome pairs, 72 histogram series, and 2 gauges. Do not
+add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant, user,
+community, pubkey, header, query, or other request-controlled labels. A
+readiness probe records no dependency attempt or latency sample at all.
+The readiness gauge is not a monotonic lifecycle mirror: shutdown changes the
+authoritative lifecycle flag, and the next private readiness probe observes and
+publishes that state.
+
+### Community admission telemetry
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `buzz_readiness_checks_total` | counter | `reason` from the closed readiness-reason set |
-| `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` |
-| `buzz_readiness_check_duration_seconds` | histogram | `check` only |
-| `buzz_readiness_state` | gauge | `check` only; latest publishable generation |
+| `buzz_community_admission_checks_total` | counter | `outcome` ∈ {`active`, `inactive`, `check_error`} |
 
-The schema has a ceiling of 99 raw Prometheus series per pod: 12 overall
-reasons, 11 valid dependency/outcome pairs, 72 histogram series, and 4 gauges.
-Do not add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant,
-user, community, pubkey, header, query, or other request-controlled labels.
-Shutdown without dependency evaluation increments only
-`buzz_readiness_checks_total{reason="shutting_down"}` and sets the overall
-state to zero; it does not fabricate dependency failures or latency samples.
+Counts the durable community-active check run before a socket is admitted.
+Admission is fail-closed: only `active` serves. `inactive` (a confirmed
+archival answer) and `check_error` (the lookup itself failed, so the tenant
+lifecycle is unknown) both refuse the socket before any AUTH or REQ frame is
+read; the client sees an ordinary dial failure and retries. The two outcomes
+stay distinct so a rise in `check_error` reads as database pressure rather than
+archival. `outcome` is the only dimension — community and error text are
+request-controlled and must never become labels.
 
 ### Operation-aware database pool acquisition contract
 
