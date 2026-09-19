@@ -4077,6 +4077,198 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn compliant_writer_shared_xact_lock_blocks_deletion_exclusive_xact_lock() {
+        let (db, _) = store().await;
+        let community = db
+            .ensure_configured_community(&format!(
+                "community-lock-contract-{}.example",
+                Uuid::new_v4().simple()
+            ))
+            .await
+            .expect("create community")
+            .id;
+
+        let writer = db
+            .begin_community_write_transaction(community)
+            .await
+            .expect("open writer transaction with community lock");
+
+        let mut deleter = db.pool.begin().await.expect("begin deletion contender");
+        let exclusive_taken: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
+                .bind(community.as_uuid())
+                .fetch_one(&mut *deleter)
+                .await
+                .expect("try deletion exclusive lock");
+        assert!(
+            !exclusive_taken,
+            "compliant writer must hold shared community lock that blocks deletion exclusive lock"
+        );
+        deleter
+            .rollback()
+            .await
+            .expect("rollback deletion contender");
+        writer
+            .rollback()
+            .await
+            .expect("rollback writer transaction");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_fence_rejects_fresh_begin_transaction_after_fence() {
+        let (db, store) = store().await;
+        let (request, _) = inventoried_request(&db, &store).await;
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        store.fence(&claim.lease).await.expect("fence");
+
+        let error = db
+            .begin_community_write_transaction(request.community_id)
+            .await
+            .expect_err("fenced community must reject fresh write admission");
+        assert!(
+            matches!(&error, DbError::AccessDenied(message) if message.contains("write-fenced")),
+            "expected write-fenced access denial, got: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_fence_singleton_and_batch_share_fenced_admission_contract() {
+        let (db, store) = store().await;
+        let (request, _) = inventoried_request(&db, &store).await;
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        store.fence(&claim.lease).await.expect("fence");
+
+        let singleton_error = db
+            .begin_community_write_transaction(request.community_id)
+            .await
+            .expect_err("fenced community must reject singleton admission");
+        assert!(
+            matches!(&singleton_error, DbError::AccessDenied(message) if message.contains("write-fenced")),
+            "expected singleton write-fenced denial, got: {singleton_error:#}"
+        );
+
+        let batch_error = db
+            .begin_community_write_transaction_batch(&[request.community_id])
+            .await
+            .expect_err("fenced community must reject singleton batch admission");
+        assert!(
+            matches!(&batch_error, DbError::AccessDenied(message) if message.contains("write-fenced")),
+            "expected batch write-fenced denial, got: {batch_error:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_fence_batch_begin_rejects_empty_input() {
+        let (db, _) = store().await;
+        let error = db
+            .begin_community_write_transaction_batch(&[])
+            .await
+            .expect_err("empty batch must fail closed");
+        assert!(
+            matches!(&error, DbError::InvalidData(message) if message.contains("at least one community")),
+            "expected invalid-data empty-input rejection, got: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_fence_batch_begin_uses_stable_uuid_order() {
+        let (db, _) = store().await;
+        let community_a = db
+            .ensure_configured_community(&format!(
+                "community-fence-batch-a-{}.example",
+                Uuid::new_v4().simple()
+            ))
+            .await
+            .expect("create first community")
+            .id;
+        let community_b = db
+            .ensure_configured_community(&format!(
+                "community-fence-batch-b-{}.example",
+                Uuid::new_v4().simple()
+            ))
+            .await
+            .expect("create second community")
+            .id;
+
+        let (first, second) = if community_a <= community_b {
+            (community_a, community_b)
+        } else {
+            (community_b, community_a)
+        };
+
+        let mut gate = db.pool.begin().await.expect("begin order gate");
+        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
+            .bind(first.as_uuid())
+            .execute(&mut *gate)
+            .await
+            .expect("hold first community exclusively");
+
+        let db_for_batch = db.clone();
+        let batching = tokio::spawn(async move {
+            let tx = db_for_batch
+                .begin_community_write_transaction_batch(&[second, first])
+                .await?;
+            tx.rollback().await?;
+            Result::<()>::Ok(())
+        });
+        let mut batching = batching;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut batching)
+                .await
+                .is_err(),
+            "batch admission should block on the first sorted community lock"
+        );
+
+        let mut second_probe = db.pool.begin().await.expect("begin second-lock probe");
+        let second_exclusive_taken: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
+                .bind(second.as_uuid())
+                .fetch_one(&mut *second_probe)
+                .await
+                .expect("probe second community exclusive lock");
+        assert!(
+            second_exclusive_taken,
+            "stable ordering must block on the lower UUID lock before taking higher UUID lock"
+        );
+        second_probe
+            .rollback()
+            .await
+            .expect("rollback second-lock probe");
+
+        gate.rollback().await.expect("release order gate");
+        tokio::time::timeout(Duration::from_secs(5), batching)
+            .await
+            .expect("batch lock acquisition must not deadlock")
+            .expect("batch task")
+            .expect("batch transaction completes");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn fence_waits_for_open_write_and_rejects_it_after_transition() {
         let (db, store) = store().await;
         let (request, _) = inventoried_request(&db, &store).await;

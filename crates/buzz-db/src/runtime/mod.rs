@@ -1211,6 +1211,58 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Begin an event-write transaction and guard one community through the
+    /// stable multi-community admission path.
+    pub async fn begin_community_write_transaction(
+        &self,
+        community: CommunityId,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        self.begin_community_write_transaction_batch(&[community])
+            .await
+    }
+
+    /// Begin one event-write transaction and guard communities in deterministic
+    /// UUID order under shared deletion/admission locks.
+    ///
+    /// The batch must include every community the transaction may mutate. The
+    /// sorted lock order prevents opposite-order callers from deadlocking when
+    /// overlapping community sets are locked in one transaction.
+    pub async fn begin_community_write_transaction_batch(
+        &self,
+        communities: &[CommunityId],
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        if communities.is_empty() {
+            return Err(DbError::InvalidData(
+                "community write transaction batch requires at least one community".to_string(),
+            ));
+        }
+        let mut tx = self.begin_event_write_transaction().await?;
+        let mut ordered = communities.to_vec();
+        ordered.sort_unstable();
+        ordered.dedup();
+        let store = self.deletion_store();
+        for community in ordered {
+            store.guard_transaction(&mut tx, community).await?;
+        }
+        Ok(tx)
+    }
+
+    /// Begin an event-write transaction that takes the shared replica-floor
+    /// advisory lock.
+    ///
+    /// This is a lock-ordering foundation only. Floor correctness remains
+    /// authoritative at commit time via the existing trigger/GUC contract.
+    pub async fn begin_replica_floor_locked_event_write_transaction(
+        &self,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let mut tx = self.begin_event_write_transaction().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(replica_fence::REPLICA_FLOOR_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
+        Ok(tx)
+    }
+
     /// Begin an event-write transaction through the pre-operation API name.
     ///
     /// New callers should use [`Self::begin_event_write_transaction`] so the

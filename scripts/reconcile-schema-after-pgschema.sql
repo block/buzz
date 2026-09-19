@@ -5,7 +5,6 @@
 -- partition children as standalone CREATE TABLE statements. Every pgschema
 -- apply caller must run this idempotent script so fresh bootstraps converge on
 -- the same live database contract as migration-managed databases.
-
 DO $$
 BEGIN
     IF NOT EXISTS (

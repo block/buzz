@@ -10,10 +10,12 @@
 //!    is armed per session via the `buzz.created_at_floor` GUC, which the
 //!    relay's writer pool sets on every connection.
 //! 2. **Ordered heartbeat handshake** (this module): on one pinned writer
-//!    connection, separately-awaited statements sample
-//!    `S = clock_timestamp()`, then scan `pg_stat_activity` for the oldest
-//!    open transaction, then — **last** — commit heartbeat token `M` via a
-//!    single-row `UPDATE replica_heartbeat ... RETURNING token, epoch`
+//!    connection, one transaction first takes the exclusive replica-floor
+//!    advisory lock (draining compliant shared-lock channel writers), then
+//!    separately-awaited statements sample `S = clock_timestamp()`, scan
+//!    `pg_stat_activity` for the oldest open transaction, and — **last** —
+//!    commit heartbeat token `M` via a single-row
+//!    `UPDATE replica_heartbeat ... RETURNING token, epoch`
 //!    (migration 0026). Because the single-row UPDATE serializes all pods'
 //!    probes, tokens are globally commit-ordered. A reader **session** that
 //!    observes `token >= M` on its own connection has, by WAL/storage replay
@@ -72,6 +74,14 @@ use buzz_datastore_tracing::datastore_span;
 /// slow validation/lock waits. The writer pool arms the guard with this value
 /// and the fence subtracts it; the two uses must never diverge.
 pub const CREATED_AT_FLOOR_SECS: i64 = 960;
+
+/// Deployment-global advisory-lock key ordering compliant channel-event write
+/// transactions against the writer probe handshake.
+///
+/// Shared holders are channel-event write transactions validating `created_at`
+/// under the armed floor contract; the probe takes the exclusive lock before
+/// sampling and publishing its heartbeat token.
+pub const REPLICA_FLOOR_LOCK_KEY: i64 = 0x62757a7a666c6f72;
 
 /// Safety margin subtracted from the fence on top of the floor.
 ///
@@ -550,22 +560,28 @@ pub enum ProbeError {
     HeartbeatRowMissing,
 }
 
-/// Take one ordered writer sample: S, then activity scan, then commit the
-/// heartbeat token **last**.
+/// Take one ordered writer sample: under the exclusive replica-floor lock,
+/// sample S, then activity scan, then commit the heartbeat token **last**.
 ///
-/// The statements are separately awaited on a single pinned connection;
+/// The statements are separately awaited on one pinned writer transaction;
 /// a single SELECT would not guarantee evaluation order across the
 /// subexpressions, reopening the race this ordering exists to close.
 async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
-    let mut conn = crate::observability::acquire_writer(
+    let connection = crate::observability::acquire_writer(
         writer,
         crate::observability::WriterOperation::Maintenance,
     )
     .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(REPLICA_FLOOR_LOCK_KEY)
+        .execute(&mut *tx)
+        .await?;
 
     // 1. S first.
     let sampled_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-        .fetch_one(&mut *conn)
+        .fetch_one(&mut *tx)
         .await?;
 
     // 2. Activity scan. Classification (fail closed on anything unknown):
@@ -612,7 +628,7 @@ async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
             ) AS masked
         "#,
     )
-    .fetch_one(&mut *conn)
+    .fetch_one(&mut *tx)
     .await?;
     let masked: i64 = row.get("masked");
     if masked > 0 {
@@ -629,17 +645,19 @@ async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
     let row = sqlx::query(
         "UPDATE replica_heartbeat SET token = token + 1 WHERE id = 1 RETURNING token, epoch",
     )
-    .fetch_optional(&mut *conn)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or(ProbeError::HeartbeatRowMissing)?;
 
-    Ok(WriterSample {
+    let sample = WriterSample {
         sampled_at,
         oldest_xact_start,
         token: row.get("token"),
         epoch: row.get("epoch"),
         committed_at,
-    })
+    };
+    tx.commit().await?;
+    Ok(sample)
 }
 
 /// The fence wall proved by one handshake:
@@ -1028,10 +1046,60 @@ mod postgres_tests {
         tx.rollback().await.expect("rollback");
     }
 
+    /// The sample must not capture `S` while a compliant shared writer lock is
+    /// still held. It must block until release, then sample.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn sample_writer_waits_for_shared_floor_lock_before_sampling_time() {
+        let (admin, pool, name) = scratch_db().await;
+
+        let mut blocker = pool.begin().await.expect("begin shared-lock blocker");
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(REPLICA_FLOOR_LOCK_KEY)
+            .execute(&mut *blocker)
+            .await
+            .expect("hold shared floor lock");
+
+        let sample_pool = pool.clone();
+        let sampling = tokio::spawn(async move { sample_writer(&sample_pool).await });
+        let mut sampling = sampling;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut sampling)
+                .await
+                .is_err(),
+            "sample_writer should block while a shared floor lock is held"
+        );
+
+        let marker_before_release: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&pool)
+            .await
+            .expect("capture marker while lock held");
+
+        blocker
+            .rollback()
+            .await
+            .expect("release shared-lock blocker");
+
+        let sample = tokio::time::timeout(Duration::from_secs(5), sampling)
+            .await
+            .expect("sample should complete after shared lock release")
+            .expect("sampling task")
+            .expect("sample writer");
+        assert!(
+            sample.sampled_at >= marker_before_release,
+            "sample time {:?} must be at or after marker {:?}",
+            sample.sampled_at,
+            marker_before_release
+        );
+
+        drop_scratch_db(&admin, pool, &name).await;
+    }
+
     /// An unprivileged probe role sees NULL `state`/`xact_start` for other
     /// sessions' rows in `pg_stat_activity`. The oldest-xact term is then
     /// untrustworthy and the sample must fail closed (`MaskedActivity`) —
     /// never silently `MIN()` the hidden row away.
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cluster_global_sample_writer_fails_closed_when_activity_is_masked() {
