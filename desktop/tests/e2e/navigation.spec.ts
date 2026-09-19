@@ -1075,3 +1075,68 @@ test("cold-start message deep link preserves its thread target", async ({
   await expect(page).toHaveURL(/messageId=mock-forum-release-reply/);
   await expect(page).toHaveURL(/threadRootId=mock-forum-release-thread/);
 });
+
+test("reply notification hydration opens the full thread instead of the cached reply", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("message-input")).toBeVisible();
+  const targetId = await page.evaluate(() => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("Mock message fixture unavailable");
+    const input = {
+      channelName: "engineering",
+      pubkey:
+        "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
+    };
+    const root = emit({ ...input, content: "Notification context root" });
+    emit({
+      ...input,
+      parentEventId: root.id,
+      content: "Sibling reply retains context",
+    });
+    const parent = emit({
+      ...input,
+      parentEventId: root.id,
+      content: "Parent reply retains context",
+    });
+    const target = emit({
+      ...input,
+      parentEventId: parent.id,
+      content: "Nested notification reply",
+    });
+    window.__BUZZ_E2E_DEFER_GET_EVENT__ = target.id;
+    window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?.({
+      category: "mention",
+      channel_id: "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9",
+      channel_name: "engineering",
+      content: target.content,
+      created_at: Math.floor(Date.now() / 1000) + 5,
+      id: target.id,
+      kind: target.kind,
+      pubkey: target.pubkey,
+      tags: target.tags.concat([["p", "deadbeef".repeat(8)]]),
+    });
+    return target.id;
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.__BUZZ_E2E_NOTIFICATIONS__?.length ?? 0),
+    )
+    .toBe(1);
+  await page.evaluate(() => window.__BUZZ_E2E_CLICK_NOTIFICATION__?.(0));
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+  // Hold the authoritative lookup until navigation has committed. The cached
+  // notification has no reply tags and must not become the selected thread.
+  await page.evaluate(() => window.__BUZZ_E2E_RELEASE_GET_EVENT__?.());
+  const thread = page.getByTestId("message-thread-panel");
+  await expect(thread.getByTestId("message-thread-head")).toContainText(
+    "Notification context root",
+  );
+  await expect(thread).toContainText("Sibling reply retains context");
+  await expect(thread).toContainText("Parent reply retains context");
+  await expect(thread.locator(`[data-message-id="${targetId}"]`)).toContainText(
+    "Nested notification reply",
+  );
+});
