@@ -45,6 +45,10 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   // Sources: https://github.com/openclaw/openclaw,
   // https://docs.openclaw.ai/start/getting-started
   openclaw: "A personal AI assistant that runs on your own devices.",
+  // Source: https://github.com/agtico/PfTerminal — "an open-source,
+  // multi-provider coding terminal built on the Codex CLI".
+  pfterminal:
+    "An open-source, multi-provider coding terminal built on the Codex CLI.",
 };
 
 /**
