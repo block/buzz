@@ -1244,3 +1244,68 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
 }
+
+// ── restart_eligible tests ──────────────────────────────────────────────
+
+#[test]
+fn restart_eligible_true_when_non_orphan_has_hash_drift() {
+    assert!(super::restart_eligible(false, true, false));
+}
+
+#[test]
+fn restart_eligible_true_when_non_orphan_has_availability_drift() {
+    assert!(super::restart_eligible(false, false, true));
+}
+
+#[test]
+fn restart_eligible_false_when_orphan_has_hash_drift() {
+    // An orphan can never be restarted successfully — spawn refuses it —
+    // so hash drift alone must not surface "Restart required".
+    assert!(!super::restart_eligible(true, true, false));
+}
+
+#[test]
+fn restart_eligible_false_when_orphan_has_availability_drift() {
+    assert!(!super::restart_eligible(true, false, true));
+}
+
+#[test]
+fn restart_eligible_false_when_orphan_has_no_drift() {
+    assert!(!super::restart_eligible(true, false, false));
+}
+
+#[test]
+fn restart_eligible_false_when_non_orphan_has_no_drift() {
+    assert!(!super::restart_eligible(false, false, false));
+}
+
+// ── git credential helper shell-quoting (#3298) ─────────────────────────
+
+#[test]
+fn git_credential_helper_value_quotes_spaced_path() {
+    let helper = super::git_credential_helper_value(std::path::Path::new(
+        "/opt/Buzz Tools/bin/git-credential-nostr",
+    ));
+    assert_eq!(helper, "'/opt/Buzz Tools/bin/git-credential-nostr'");
+}
+
+#[test]
+fn git_credential_helper_value_plain_path_passes_through() {
+    let helper =
+        super::git_credential_helper_value(std::path::Path::new("/usr/bin/git-credential-nostr"));
+    assert_eq!(helper, "/usr/bin/git-credential-nostr");
+}
+
+#[test]
+fn git_credential_helper_value_shell_snippet_not_rewrapped() {
+    let helper = super::git_credential_helper_value(std::path::Path::new("!f() { echo t; }; f"));
+    assert_eq!(helper, "!f() { echo t; }; f");
+}
+
+#[test]
+fn git_credential_helper_value_backslashes_forward_slashed() {
+    let helper = super::git_credential_helper_value(std::path::Path::new(
+        r"C:\Users\x\Buzz\git-credential-nostr.exe",
+    ));
+    assert_eq!(helper, "C:/Users/x/Buzz/git-credential-nostr.exe");
+}
