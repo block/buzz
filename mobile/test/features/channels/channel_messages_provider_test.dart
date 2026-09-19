@@ -2542,6 +2542,74 @@ void main() {
     },
   );
 
+  for (final disposeEarly in [false, true]) {
+    test(
+      'ownership recovery bounds deletion bursts (dispose: $disposeEarly)',
+      () async {
+        final first = Completer<List<NostrEvent>>();
+        final second = Completer<List<NostrEvent>>();
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              _event(id: 'root', createdAt: 10),
+              _summary(rootId: 'root', replyCount: 1),
+              _bounds(),
+            ],
+            first.future,
+            second.future,
+            for (var i = 0; i < 256; i++) <NostrEvent>[],
+          ],
+        );
+        final container = _buildContainer(session);
+        if (!disposeEarly) addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        for (var i = 0; i < 300; i++) {
+          session.emit(
+            NostrEvent(
+              id: 'delete-$i',
+              pubkey: 'author',
+              createdAt: 100 + i,
+              kind: EventKind.deletion,
+              tags: [
+                ['h', _channelId],
+                ['e', 'unknown-$i'],
+              ],
+              content: '',
+              sig: '',
+            ),
+          );
+        }
+        int requests() => session.queryFilters
+            .where((f) => f.extensions['resolve_thread_roots'] == true)
+            .length;
+        await _pumpEventQueue();
+        expect(
+          requests(),
+          2,
+          reason: 'requests share one concurrency budget across events',
+        );
+        if (disposeEarly) container.dispose();
+        first.complete([]);
+        second.complete([]);
+        await _pumpEventQueue();
+        expect(
+          requests(),
+          disposeEarly ? 2 : 258,
+          reason: 'only the bounded backlog can drain',
+        );
+        if (!disposeEarly) {
+          expect(notifier.threadSummaries['root']!.isCountPending, isTrue);
+          session.emit(_summary(rootId: 'root', replyCount: 1));
+          expect(notifier.threadSummaries['root']!.isCountPending, isFalse);
+        }
+      },
+    );
+  }
+
   for (final newestFirst in [false, true]) {
     test(
       'overlapping deletion lookups preserve start order (newest first: $newestFirst)',
@@ -3137,8 +3205,8 @@ void main() {
       sig: '',
     );
     final snapshot = notifier.cachedThreadReplyIds('root');
-    final queryVersion = notifier.beginThreadQuery('root');
     session.emit(deletion(EventKind.deletion));
+    final queryVersion = notifier.beginThreadQuery('root');
     notifier.cacheCompleteThreadQuery('root', snapshot, [
       survivor,
     ], queryVersion: queryVersion);

@@ -44,6 +44,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final _deletionSummaryUncertainty = <String, _DeletionSummaryUncertainty>{};
   final _replyOwnership = ThreadReplyOwnership();
   final _processedDeletionTargets = <String>{};
+  final _deletionOwnerQueue = _DeletionOwnerQueue();
   bool _hasListeners = true;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
     refresh: _refreshOverflowSummary,
@@ -111,6 +112,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     });
     ref.onDispose(() {
       _initVersion++;
+      _deletionOwnerQueue.clear();
       _summaryRefreshes.pause();
       _clearSubscription();
     });

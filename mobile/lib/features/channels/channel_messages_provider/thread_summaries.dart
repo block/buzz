@@ -193,10 +193,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     return candidates;
   }
 
-  Future<void> _resolveDeletionOwners(
-    Set<String> targets,
-    Set<String> candidates,
-  ) async {
+  void _resolveDeletionOwners(Set<String> targets, Set<String> candidates) {
     final generation = _initVersion;
     // Register the whole bounded batch before sending its first query. A
     // successful target must not retire uncertainty from a queued sibling.
@@ -216,16 +213,20 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       );
     }
     _publishSummaryChange();
-    // One target per query correlates the response even when multiple targets
-    // share a root. Sequential reads avoid a burst of up to 100 HTTP requests.
+    // The shared queue bounds work across events as well as within each batch.
     for (final entry in versions.entries) {
-      if (!_summaryMounted || generation != _initVersion) return;
-      await _resolveDeletionOwner(
-        entry.key,
-        candidates,
-        generation,
-        entry.value,
-      );
+      final accepted = _deletionOwnerQueue.enqueue(() async {
+        if (!_summaryMounted || generation != _initVersion) return;
+        await _resolveDeletionOwner(
+          entry.key,
+          candidates,
+          generation,
+          entry.value,
+        );
+      });
+      if (!accepted) {
+        _finishDeletionLookup(candidates, entry.value, resolved: false);
+      }
     }
   }
 
@@ -325,5 +326,36 @@ class _DeletionSummaryUncertainty {
   void clearThrough(int version) {
     _requests.removeWhere((request) => request <= version);
     if ((_unresolvedVersion ?? -1) <= version) _unresolvedVersion = null;
+  }
+}
+
+// Bound retained work and concurrent HTTP requests for the whole channel.
+class _DeletionOwnerQueue {
+  final _pending = <Future<void> Function()>[];
+  int _active = 0;
+
+  bool enqueue(Future<void> Function() request) {
+    if (_pending.length >= 256) return false;
+    _pending.add(request);
+    _drain();
+    return true;
+  }
+
+  void clear() => _pending.clear();
+
+  void _drain() {
+    while (_active < 2 && _pending.isNotEmpty) {
+      _active++;
+      _run(_pending.removeAt(0));
+    }
+  }
+
+  Future<void> _run(Future<void> Function() request) async {
+    try {
+      await request();
+    } finally {
+      _active--;
+      _drain();
+    }
   }
 }
