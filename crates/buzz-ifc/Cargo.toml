@@ -1,0 +1,18 @@
+[package]
+name = "buzz-ifc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Buzz execution-domain derivation for information-flow control"
+
+[dependencies]
+buzz-core = { workspace = true }
+hex = { workspace = true }
+ifc-core = { workspace = true }
+nostr = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
