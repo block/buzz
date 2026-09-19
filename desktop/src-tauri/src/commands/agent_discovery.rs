@@ -145,7 +145,9 @@ pub async fn save_custom_harness(
         command: command_opt,
         binary_path,
         default_args,
-        mcp_command: None,
+        mcp_command: Some(
+            crate::managed_agents::custom_harnesses::CUSTOM_HARNESS_MCP_COMMAND.to_string(),
+        ),
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,

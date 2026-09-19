@@ -18,6 +18,14 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// MCP sidecar mounted for every user-defined custom harness at spawn.
+///
+/// `buzz-acp` injects Buzz CLI auth (`BUZZ_PRIVATE_KEY`) into this sidecar
+/// during `session/new`, so a child ACP sandbox that strips `*_KEY` env still
+/// reaches `buzz` through MCP. Presets and builtins keep their own catalog
+/// `mcp_command` and are not rewritten here.
+pub(crate) const CUSTOM_HARNESS_MCP_COMMAND: &str = "buzz-dev-mcp";
+
 /// Regex-equivalent predicate for a valid harness ID.
 ///
 /// IDs must match `[a-z0-9_][a-z0-9_-]*` — lowercase alphanumeric plus
@@ -290,6 +298,46 @@ pub(crate) fn update_loaded_harness_registry(definitions: Vec<HarnessDefinition>
         }
     };
     *guard = arcs;
+}
+
+fn is_preset_harness_id(id: &str) -> bool {
+    crate::managed_agents::discovery::preset_harness_ids()
+        .iter()
+        .any(|preset| *preset == id)
+}
+
+/// True when `id` is a loaded **user** custom harness, not a preset or builtin.
+pub(crate) fn is_loaded_custom_harness_id(id: &str) -> bool {
+    if id.is_empty() || is_preset_harness_id(id) {
+        return false;
+    }
+    lookup_loaded_harness_by_id(id).is_some()
+}
+
+fn loaded_custom_matches_command(command: &str) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+    let wanted = crate::managed_agents::normalize_command_identity(command);
+    let guard = match loaded_harness_registry().read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.iter().any(|def| {
+        !is_preset_harness_id(&def.id)
+            && (crate::managed_agents::normalize_command_identity(&def.command) == wanted
+                || def.id == command)
+    })
+}
+
+/// True when spawn should mount [`CUSTOM_HARNESS_MCP_COMMAND`].
+///
+/// Matches by catalog id **or** command because create stores the harness
+/// command (`dsh`) and leaves `record.runtime` unset.
+pub(crate) fn is_loaded_custom_harness(runtime_id: &str, command: &str) -> bool {
+    is_loaded_custom_harness_id(runtime_id)
+        || is_loaded_custom_harness_id(command)
+        || loaded_custom_matches_command(command)
 }
 
 /// Look up a loaded (non-builtin) harness by **id**. Returns `None` when the id
@@ -1179,6 +1227,119 @@ mod tests {
             lookup_loaded_harness_by_id("tmp-agent").is_none(),
             "deleted harness must not appear after re-warm"
         );
+    }
+
+    fn custom_def(id: &str, command: &str) -> HarnessDefinition {
+        HarnessDefinition {
+            id: id.to_string(),
+            label: id.to_string(),
+            command: command.to_string(),
+            args: vec![],
+            env: BTreeMap::new(),
+            install_instructions_url: String::new(),
+            install_hint: String::new(),
+        }
+    }
+
+    /// Spawn matches a custom harness by command even when `record.runtime` is
+    /// unset — that is the create-time shape (command pin, no runtime id).
+    #[test]
+    fn loaded_custom_harness_matches_command_without_runtime_id() {
+        let _lock = registry_test_lock();
+        let mut defs = crate::managed_agents::discovery::preset_harness_definitions();
+        defs.push(custom_def("deepseek", "dsh"));
+        update_loaded_harness_registry(defs);
+        assert!(
+            is_loaded_custom_harness("", "dsh"),
+            "create stores the command, not the catalog id"
+        );
+        assert!(is_loaded_custom_harness("deepseek", "something-else"));
+        assert!(
+            is_loaded_custom_harness("", "/opt/homebrew/bin/dsh"),
+            "absolute PATH pins must still match the catalog command"
+        );
+        assert!(
+            !is_loaded_custom_harness("cursor", "cursor-agent"),
+            "presets must not count as custom even when present in the mixed registry"
+        );
+        assert!(!is_loaded_custom_harness("", "dsh-missing"));
+
+        assert_eq!(
+            crate::managed_agents::resolve_harness_mcp_command("", "dsh"),
+            Some(CUSTOM_HARNESS_MCP_COMMAND),
+            "unknown ACP command that is a loaded custom harness must mount the sidecar"
+        );
+        assert_eq!(
+            crate::managed_agents::resolve_harness_mcp_command("deepseek", "dsh"),
+            Some(CUSTOM_HARNESS_MCP_COMMAND)
+        );
+        assert_eq!(
+            crate::managed_agents::resolve_harness_mcp_command("cursor", "cursor-agent"),
+            None,
+            "presets stay sidecar-less"
+        );
+        assert_eq!(
+            crate::managed_agents::resolve_harness_mcp_command("", "goose"),
+            None,
+            "builtin goose must keep catalog mcp_command (none), not the custom mount"
+        );
+        assert_eq!(
+            crate::managed_agents::resolve_harness_mcp_command("", "buzz-agent"),
+            Some("buzz-dev-mcp"),
+            "builtin buzz-agent keeps its own catalog sidecar"
+        );
+        assert_eq!(
+            crate::managed_agents::resolve_harness_mcp_command("", "not-a-harness"),
+            None,
+            "an unknown command with no custom definition must not grow a sidecar"
+        );
+
+        update_loaded_harness_registry(vec![]);
+    }
+
+    /// Phase-3 catalog projection must set mcp_command directly: registry warm
+    /// happens after the custom-entry loop, so spawn lookup is not available yet.
+    #[test]
+    fn custom_catalog_entry_projects_buzz_dev_mcp_sidecar() {
+        use crate::managed_agents::discovery::discover_acp_runtimes_from;
+        use crate::managed_agents::HarnessSource;
+
+        let _path_guard = crate::managed_agents::lock_path_mutex();
+        let _lock = registry_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("deepseek.json"),
+            r#"{
+                "id": "deepseek",
+                "label": "DeepSeek",
+                "command": "dsh",
+                "args": ["--profile", "acp"]
+            }"#,
+        )
+        .unwrap();
+
+        let entries = discover_acp_runtimes_from(Some(dir.path()), true);
+        let custom = entries
+            .iter()
+            .find(|e| e.id == "deepseek")
+            .expect("custom entry must appear in catalog");
+        assert_eq!(custom.source, HarnessSource::Custom);
+        assert_eq!(
+            custom.mcp_command.as_deref(),
+            Some(CUSTOM_HARNESS_MCP_COMMAND),
+            "phase-3 catalog must project the sidecar without waiting on registry warm"
+        );
+
+        let cursor = entries
+            .iter()
+            .find(|e| e.id == "cursor")
+            .expect("cursor preset must exist");
+        assert_eq!(
+            cursor.mcp_command, None,
+            "preset catalog entries stay sidecar-less"
+        );
+
+        update_loaded_harness_registry(vec![]);
     }
 
     // ── Legacy avatarUrl regression (F1) ─────────────────────────────────────
