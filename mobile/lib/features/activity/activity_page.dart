@@ -33,6 +33,7 @@ import '../../shared/profile/user_profile.dart';
 import 'activity_provider.dart';
 import 'compose_drafts_provider.dart';
 import 'dm_resurface.dart';
+import 'feed_item.dart';
 import 'inbox_item.dart';
 import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
@@ -42,6 +43,9 @@ part 'activity_page/header_actions.dart';
 part 'activity_page/inbox_row.dart';
 part 'activity_page/lists.dart';
 part 'activity_page/status_views.dart';
+
+const double _splitInboxMinListWidth = 300;
+const double _splitInboxMaxListWidth = 400;
 
 EdgeInsets _activityScrollPadding(
   BuildContext context, {
@@ -64,10 +68,13 @@ EdgeInsets _activityScrollPadding(
 /// navigation. Row taps deep-link to the represented message (oldest unread
 /// for grouped conversations) rather than just opening the channel.
 class ActivityPage extends HookConsumerWidget {
-  const ActivityPage({this.tabReselection, super.key});
+  const ActivityPage({this.tabReselection, this.splitView = false, super.key});
 
   /// Notifies this page when its already-selected tab is tapped again.
   final ValueListenable<int>? tabReselection;
+
+  /// Keeps the inbox list visible beside its selected conversation.
+  final bool splitView;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -75,6 +82,11 @@ class ActivityPage extends HookConsumerWidget {
     final channelsAsync = ref.watch(channelsProvider);
     final filter = useState(InboxFilter.all);
     final unreadOnly = useState(false);
+    final selectedConversationId = useState<String?>(null);
+    final selectedItemTarget = useState<FeedItem?>(null);
+    final selectedItemForDetail = useState<InboxItem?>(null);
+    final selectedChannelForDetail = useState<Channel?>(null);
+    final selectionGeneration = useState(0);
     final scrollController = useScrollController();
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     useEffect(() {
@@ -139,6 +151,32 @@ class ActivityPage extends HookConsumerWidget {
             (!unreadOnly.value || !isDone(item)))
           item,
     ];
+    final visibleConversationIdsKey = visibleItems
+        .map((item) => item.conversationId)
+        .join('\u0000');
+    useEffect(() {
+      if (!splitView) return null;
+      final hasSelectedItem = visibleItems.any(
+        (item) => item.conversationId == selectedConversationId.value,
+      );
+      final retainsSelectedDetail =
+          unreadOnly.value &&
+          selectedItemForDetail.value?.conversationId ==
+              selectedConversationId.value;
+      if (!hasSelectedItem && !retainsSelectedDetail) {
+        selectedConversationId.value = visibleItems.firstOrNull?.conversationId;
+        selectedItemTarget.value = null;
+        selectedItemForDetail.value = null;
+        selectedChannelForDetail.value = null;
+      }
+      return null;
+    }, [splitView, visibleConversationIdsKey, filter.value, unreadOnly.value]);
+    final selectedItem =
+        visibleItems.cast<InboxItem?>().firstWhere(
+          (item) => item?.conversationId == selectedConversationId.value,
+          orElse: () => null,
+        ) ??
+        (unreadOnly.value ? selectedItemForDetail.value : null);
 
     // Preload sender profiles for visible rows.
     final preloadPubkeys = {
@@ -255,6 +293,16 @@ class ActivityPage extends HookConsumerWidget {
       final threadRootId = isBroadcastReply(target.tags)
           ? null
           : thread.parentId;
+
+      if (splitView) {
+        selectedConversationId.value = item.conversationId;
+        selectedItemTarget.value = target;
+        selectedItemForDetail.value = item;
+        selectedChannelForDetail.value = resolvedChannel;
+        selectionGeneration.value++;
+        markItemRead(item);
+        return;
+      }
 
       if (!context.mounted) return;
       Navigator.of(context).push(
@@ -399,6 +447,10 @@ class ActivityPage extends HookConsumerWidget {
                           channel: channel,
                           currentPubkey: myPk,
                           isDone: isDone(item),
+                          selected:
+                              splitView &&
+                              item.conversationId ==
+                                  selectedConversationId.value,
                           onTap: () => unawaited(openItem(item)),
                           onMarkRead: () => markItemRead(item),
                           onMarkUnread: () => markItemUnread(item),
@@ -414,7 +466,7 @@ class ActivityPage extends HookConsumerWidget {
       );
     }
 
-    return FrostedScaffold(
+    final inboxPane = FrostedScaffold(
       backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
         automaticallyImplyLeading: false,
@@ -428,7 +480,13 @@ class ActivityPage extends HookConsumerWidget {
             filter: filter.value,
             unreadOnly: unreadOnly.value,
             unreadCount: unreadVisibleCount,
-            onFilterChanged: (f) => filter.value = f,
+            onFilterChanged: (f) {
+              filter.value = f;
+              selectedConversationId.value = null;
+              selectedItemTarget.value = null;
+              selectedItemForDetail.value = null;
+              selectedChannelForDetail.value = null;
+            },
             onUnreadOnlyChanged: (v) => unreadOnly.value = v,
             onMarkAllRead: () {
               for (final item in visibleItems) {
@@ -450,6 +508,135 @@ class ActivityPage extends HookConsumerWidget {
                 padding: EdgeInsets.only(top: topSectionHeight),
                 child: body,
               ),
+      ),
+    );
+
+    if (!splitView) return inboxPane;
+
+    final detailTarget =
+        selectedItemTarget.value ??
+        selectedItem?.deepLinkTarget(
+          resolveInboxItemReadAt(selectedItem, markerOf: markerOf),
+        );
+    final retainedChannel = selectedChannelForDetail.value;
+    final detailChannel = detailTarget == null
+        ? null
+        : retainedChannel?.id == detailTarget.channelId
+        ? retainedChannel
+        : channelById[detailTarget.channelId];
+    final detailThreadRootId =
+        detailTarget == null || isBroadcastReply(detailTarget.tags)
+        ? null
+        : threadReferenceOf(detailTarget.tags).parentId;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final listWidth = (constraints.maxWidth / 3)
+            .clamp(_splitInboxMinListWidth, _splitInboxMaxListWidth)
+            .toDouble();
+        return Row(
+          children: [
+            SizedBox(
+              key: const ValueKey('split-activity-inbox-list'),
+              width: listWidth,
+              child: inboxPane,
+            ),
+            VerticalDivider(width: 1, color: context.colors.outlineVariant),
+            Expanded(
+              child: _SplitActivityDetail(
+                item: selectedItem,
+                channel: detailChannel,
+                initialMessageId: detailTarget?.id,
+                initialThreadRootId: detailThreadRootId,
+                selectionGeneration: selectionGeneration.value,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _SplitActivityDetail extends HookWidget {
+  const _SplitActivityDetail({
+    required this.item,
+    required this.channel,
+    required this.initialMessageId,
+    required this.initialThreadRootId,
+    required this.selectionGeneration,
+  });
+
+  final InboxItem? item;
+  final Channel? channel;
+  final String? initialMessageId;
+  final String? initialThreadRootId;
+  final int selectionGeneration;
+
+  @override
+  Widget build(BuildContext context) {
+    if (item == null || channel == null || initialMessageId == null) {
+      return const _SplitActivityEmptyDetail();
+    }
+
+    final navigatorKey = useMemoized(GlobalKey<NavigatorState>.new, [
+      item!.conversationId,
+      selectionGeneration,
+    ]);
+    return NavigatorPopHandler(
+      key: ValueKey(
+        'split-activity-detail-${item!.conversationId}-$selectionGeneration',
+      ),
+      onPopWithResult: (_) => navigatorKey.currentState?.maybePop(),
+      child: Navigator(
+        key: navigatorKey,
+        onGenerateRoute: (_) => MaterialPageRoute<void>(
+          builder: (_) => ChannelDetailPage(
+            channel: channel!,
+            initialMessageId: initialMessageId,
+            initialThreadRootId: initialThreadRootId,
+            initialThreadRouteBehavior:
+                InitialThreadRouteBehavior.replaceCurrentRoute,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SplitActivityEmptyDetail extends StatelessWidget {
+  const _SplitActivityEmptyDetail();
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: context.colors.surface,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              LucideIcons.inbox,
+              color: context.colors.onSurfaceVariant,
+              size: 32,
+            ),
+            const SizedBox(height: Grid.sm),
+            Text(
+              'Select an inbox item',
+              style: context.textTheme.titleMedium?.copyWith(
+                color: context.colors.onSurface,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: Grid.xxs),
+            Text(
+              'Its conversation will open here.',
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

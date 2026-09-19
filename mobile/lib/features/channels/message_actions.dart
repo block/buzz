@@ -572,17 +572,14 @@ class _FastActionsRow extends ConsumerWidget {
           label: 'Reply',
           onTap: () {
             Navigator.of(context).pop();
-            Navigator.of(pageContext).push(
-              MaterialPageRoute<void>(
-                builder: (_) => ThreadDetailPage(
-                  threadHead: message,
-                  allMessages: messages,
-                  channelId: channelId,
-                  currentPubkey: currentPubkey,
-                  isMember: isMember,
-                  isArchived: isArchived,
-                ),
-              ),
+            openThreadDetail(
+              pageContext,
+              threadHead: message,
+              allMessages: messages,
+              channelId: channelId,
+              currentPubkey: currentPubkey,
+              isMember: isMember,
+              isArchived: isArchived,
             );
           },
         ),

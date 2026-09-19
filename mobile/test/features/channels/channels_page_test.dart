@@ -9,6 +9,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
@@ -44,6 +45,9 @@ void main() {
     ValueChanged<double>? onSettingsTransitionProgress,
     ValueListenable<int>? tabReselection,
     _FakeProfileNotifier? profile,
+    ValueChanged<Channel>? onChannelSelected,
+    String? selectedChannelId,
+    Widget? workspaceHeader,
   }) {
     return ProviderScope(
       overrides: [
@@ -79,6 +83,9 @@ void main() {
               onSettingsTransitionProgress:
                   onSettingsTransitionProgress ?? (_) {},
               tabReselection: tabReselection,
+              onChannelSelected: onChannelSelected,
+              selectedChannelId: selectedChannelId,
+              workspaceHeader: workspaceHeader,
             ),
             const Positioned.fill(
               child: ChannelQuickActionsLauncher(
@@ -133,6 +140,50 @@ void main() {
       isMember: true,
     ),
   ];
+
+  testWidgets('workspace header selects and highlights a channel in place', (
+    tester,
+  ) async {
+    Channel? selectedChannel;
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+        selectedChannelId: '1',
+        onChannelSelected: (channel) => selectedChannel = channel,
+        workspaceHeader: const Text('Workspace destinations'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Workspace destinations'), findsOneWidget);
+    final selectedSurface = tester.widget<DecoratedBox>(
+      find
+          .descendant(
+            of: find.byKey(const ValueKey('channel-row-1')),
+            matching: find.byType(DecoratedBox),
+          )
+          .first,
+    );
+    expect(
+      (selectedSurface.decoration as BoxDecoration).color,
+      isNot(Colors.transparent),
+    );
+    expect(
+      tester
+          .getSemantics(find.byKey(const ValueKey('channel-row-1')))
+          .flagsCollection
+          .isSelected
+          .toString(),
+      'Tristate.isTrue',
+    );
+
+    await tester.tap(find.byKey(const ValueKey('channel-row-3')));
+    await tester.pump();
+    expect(selectedChannel?.id, '3');
+    expect(find.byType(ChannelDetailPage), findsNothing);
+  });
 
   testWidgets('shows grouped channel list when data loads', (tester) async {
     // Valid fixture keys whose npub encodings were verified against the

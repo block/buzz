@@ -36,6 +36,7 @@ import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
+import 'package:buzz/features/channels/thread_detail_target.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -547,6 +548,44 @@ void main() {
   }
 
   group('ChannelDetailPage', () {
+    testWidgets('yields a compact channel route to the tablet workspace', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(800, 600);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ChannelDetailPage(
+                      channel: _testChannel,
+                      onTabletWorkspaceActivated: () {},
+                    ),
+                  ),
+                ),
+                child: const Text('Open channel'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open channel'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailPage), findsOneWidget);
+
+      tester.view.physicalSize = const Size(1024, 768);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ChannelDetailPage), findsNothing);
+      expect(find.text('Open channel'), findsOneWidget);
+    });
+
     testWidgets(
       'bot-role author avatars stay squircles in channel and thread',
       (tester) async {
@@ -3754,6 +3793,44 @@ void main() {
           bottom: Grid.xs,
         ),
       );
+    });
+
+    testWidgets('hands thread selection to an enclosing tablet pane', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'pane-root',
+        pubkey: 'alice',
+        content: 'Thread head',
+        createdAt: 1000,
+      );
+      final reply = _textMsg(
+        id: 'pane-reply',
+        pubkey: 'bob',
+        content: 'Reply',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'pane-root', '', 'reply'],
+        ],
+      );
+      ThreadDetailTarget? selectedThread;
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, reply],
+          home: ThreadDetailPaneScope(
+            onOpenThread: (target) => selectedThread = target,
+            child: ChannelDetailPage(channel: _testChannel),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('thread-summary-pane-root')));
+      await tester.pump();
+
+      expect(selectedThread?.threadHead.id, 'pane-root');
+      expect(find.byType(ThreadDetailPage), findsNothing);
     });
 
     testWidgets('constrains reply summaries at accessibility text sizes', (

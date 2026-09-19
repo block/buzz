@@ -119,17 +119,14 @@ class _MessageBubble extends HookConsumerWidget {
           // MessageContent handles mention, channel-link, and media taps.
           onTap: allMessages == null
               ? null
-              : () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => ThreadDetailPage(
-                      threadHead: message,
-                      allMessages: allMessages!,
-                      channelId: currentChannelId,
-                      currentPubkey: currentPubkey,
-                      isMember: isMember,
-                      isArchived: isArchived,
-                    ),
-                  ),
+              : () => openThreadDetail(
+                  context,
+                  threadHead: message,
+                  allMessages: allMessages!,
+                  channelId: currentChannelId,
+                  currentPubkey: currentPubkey,
+                  isMember: isMember,
+                  isArchived: isArchived,
                 ),
           child: Padding(
             padding: EdgeInsets.only(
@@ -231,17 +228,14 @@ class _MessageBubble extends HookConsumerWidget {
                                     ? null
                                     : () {
                                         if (!context.mounted) return;
-                                        Navigator.of(context).push(
-                                          MaterialPageRoute<void>(
-                                            builder: (_) => ThreadDetailPage(
-                                              threadHead: message,
-                                              allMessages: allMessages!,
-                                              channelId: currentChannelId,
-                                              currentPubkey: currentPubkey,
-                                              isMember: isMember,
-                                              isArchived: isArchived,
-                                            ),
-                                          ),
+                                        openThreadDetail(
+                                          context,
+                                          threadHead: message,
+                                          allMessages: allMessages!,
+                                          channelId: currentChannelId,
+                                          currentPubkey: currentPubkey,
+                                          isMember: isMember,
+                                          isArchived: isArchived,
                                         );
                                       },
                                 onMediaMore: (viewerContext, imageUrl) =>
