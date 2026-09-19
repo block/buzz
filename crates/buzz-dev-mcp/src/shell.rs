@@ -165,7 +165,8 @@ pub async fn run(
     };
     let shell_arg = shell_flag(&bash);
     let mut cmd = Command::new(&bash);
-    cmd.arg(shell_arg).arg(&p.command);
+    cmd.arg(shell_arg)
+        .arg(shell_command_string(&bash, &p.command));
     cmd.current_dir(&workdir);
     cmd.env("PATH", &state.shim.path_env);
     // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
@@ -344,6 +345,30 @@ fn shell_flag(shell: &Path) -> &'static str {
         Some("cmd") => "/C",
         Some("powershell" | "pwsh") => "-Command",
         _ => "-c",
+    }
+}
+
+/// Pins BOM-less UTF-8 on a PowerShell session's pipes to a native process.
+const POWERSHELL_UTF8_PREAMBLE: &str =
+    "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ";
+
+/// Build the command string handed to the shell.
+///
+/// Windows PowerShell 5.1 encodes what it writes to a native process with the
+/// legacy console codepage, substituting `?` for every character that codepage
+/// cannot represent. Text piped into `buzz messages send --content -` is
+/// corrupted before the event is built, and the command still reports success,
+/// so the damage is permanent and silent. Pin UTF-8 for the session rather than
+/// relying on each caller to set it (#6527).
+fn shell_command_string(shell: &Path, command: &str) -> String {
+    match shell
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("powershell" | "pwsh") => format!("{POWERSHELL_UTF8_PREAMBLE}{command}"),
+        _ => command.to_string(),
     }
 }
 
@@ -992,6 +1017,33 @@ mod tests {
     fn make_state(cwd: &std::path::Path) -> SharedState {
         let shim = Shim::install().expect("shim install");
         SharedState::new(cwd.to_path_buf(), shim).expect("state new")
+    }
+
+    /// Windows PowerShell 5.1 encodes a native process's pipes with the legacy
+    /// console codepage, which substitutes `?` for anything it cannot represent
+    /// — the command still succeeds and the corrupted text is signed as-is.
+    #[test]
+    fn powershell_command_pins_utf8_before_the_callers_command() {
+        let unicode = "buzz messages send --content 'em dash — café 測試 🐝'";
+        for shell in ["powershell.exe", "pwsh.exe", "pwsh"] {
+            let built = shell_command_string(Path::new(shell), unicode);
+            assert!(
+                built.starts_with(POWERSHELL_UTF8_PREAMBLE),
+                "{shell} should pin UTF-8 first, got: {built}"
+            );
+            assert!(built.ends_with(unicode), "{shell} must keep the command");
+        }
+    }
+
+    /// Shells without the codepage boundary must be handed the command verbatim.
+    #[test]
+    fn other_shells_receive_the_command_unchanged() {
+        for shell in ["bash", "/bin/zsh", "sh", "cmd.exe"] {
+            assert_eq!(
+                shell_command_string(Path::new(shell), "echo hello"),
+                "echo hello"
+            );
+        }
     }
 
     /// Pull the JSON body out of a CallToolResult so tests can assert on fields.
