@@ -156,7 +156,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         id: "grok",
         label: "Grok Build",
         command: "grok",
-        args: &["agent", "--always-approve", "stdio"],
+        args: &["agent", "--always-approve", "--no-leader", "stdio"],
         install_instructions_url: "https://build.x.ai/docs",
         install_hint: "Buzz talks to Grok Build through its CLI's agent stdio mode.",
         underlying_cli: None,
@@ -343,6 +343,28 @@ mod tests {
         underlying_cli_install_hint: Some("Install the Amp Test CLI."),
         underlying_cli_install_instructions_url: Some("https://example.com/amp"),
     };
+
+    #[test]
+    fn grok_preset_uses_headless_stdio_without_leader() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "grok")
+            .expect("Grok Build preset should be present");
+
+        assert_eq!(preset.command, "grok");
+        assert_eq!(
+            preset.args,
+            &["agent", "--always-approve", "--no-leader", "stdio"]
+        );
+
+        let entry = preset_catalog_entry(preset, |command| {
+            (command == "grok").then(|| PathBuf::from("/usr/local/bin/grok"))
+        });
+        assert_eq!(
+            entry.default_args,
+            vec!["agent", "--always-approve", "--no-leader", "stdio"]
+        );
+    }
 
     #[test]
     fn devin_preset_uses_official_native_acp_invocation() {

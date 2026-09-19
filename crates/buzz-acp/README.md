@@ -98,6 +98,41 @@ buzz-acp
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
 
+## Running with Grok Build
+
+Grok Build speaks ACP natively over stdio. Empty `BUZZ_ACP_AGENT_ARGS` must not
+launch the interactive TUI (that fails with `ENXIO` under Desktop). The harness
+defaults to headless ACP and keeps grokShell from dropping `BUZZ_PRIVATE_KEY`
+(`*KEY*` matches Grok's default env denylist).
+
+```bash
+# Install: https://build.x.ai/docs (binary often lands in ~/.grok/bin)
+grok login   # or export XAI_API_KEY=...
+
+export BUZZ_ACP_AGENT_COMMAND="grok"
+# Optional — empty args resolve to the same argv:
+# export BUZZ_ACP_AGENT_ARGS="agent,--always-approve,--no-leader,stdio"
+
+buzz-acp
+```
+
+`--no-leader` keeps a managed agent off the interactive TUI leader socket when
+`[cli] use_leader` is on. An explicit `--leader` in `BUZZ_ACP_AGENT_ARGS` is
+left alone.
+
+`GROK_CONFIG` is injected with `shell_environment_policy.ignore_default_excludes=true`
+so `buzz messages send` can sign. Some Grok security gates read
+`~/.grok/config.toml` instead of that overlay; if grokShell still reports
+`BUZZ_PRIVATE_KEY is required`, pin the same table on disk:
+
+```toml
+[shell_environment_policy]
+inherit = "all"
+ignore_default_excludes = true
+```
+
+That disk table is operator-local. It is not a Buzz config file.
+
 ## Configuration
 
 All configuration is via environment variables (or CLI flags — every env var has a matching flag).
