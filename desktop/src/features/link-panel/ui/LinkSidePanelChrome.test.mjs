@@ -48,7 +48,7 @@ afterEach(async () => {
 after(() => dom.window.close());
 
 async function renderChrome({
-  expanded = false,
+  detached = false,
   url = LONG_URL,
   viewportMode = "desktop",
 } = {}) {
@@ -70,7 +70,7 @@ async function renderChrome({
     path: "/channels/$channelId",
     component: () =>
       createElement(LinkSidePanelChrome, {
-        expanded,
+        detached,
         pinId: "hula-link-side-panel",
         url,
         viewportMode,
@@ -99,12 +99,10 @@ test("chrome keeps URL on row 1 and right-justifies tooling on the mode row", as
   assert.match(url.className, /min-w-0/);
   assert.equal(url.textContent, LONG_URL);
 
-  // URL is a direct child of chrome (row 1), not nested under the mode/tools row.
   assert.equal(url.parentElement, chrome);
   assert.equal(modeRow.parentElement, chrome);
   assert.ok(url.compareDocumentPosition(modeRow) & 4);
 
-  // Device modes and tool icons share row 2; icons are right-justified.
   assert.ok(modeRow.contains(screen.getByTestId("link-side-panel-mode-desktop")));
   assert.ok(modeRow.contains(screen.getByTestId("link-side-panel-mode-responsive")));
   assert.ok(modeRow.contains(screen.getByTestId("link-side-panel-mode-mobile")));
@@ -117,21 +115,24 @@ test("chrome keeps URL on row 1 and right-justifies tooling on the mode row", as
     "link-side-panel-forward",
     "link-side-panel-refresh",
     "link-side-panel-copy-url",
-    "link-side-panel-inspect",
-    "link-side-panel-expand",
+    "link-side-panel-detach",
   ]) {
     assert.ok(tools.contains(screen.getByTestId(id)), id);
   }
 
-  // Tooling must not live on the URL row.
+  assert.equal(screen.queryByTestId("link-side-panel-inspect"), null);
+  assert.equal(screen.queryByTestId("link-side-panel-expand"), null);
+
   assert.equal(url.contains(screen.getByTestId("link-side-panel-back")), false);
-  assert.equal(url.contains(screen.getByTestId("link-side-panel-expand")), false);
+  assert.equal(url.contains(screen.getByTestId("link-side-panel-detach")), false);
 });
 
-test("expand control stays on the tooling row in both expanded states", async () => {
-  const screen = await renderChrome({ expanded: true });
+test("Inspect is visible only when detached; Detach is hidden", async () => {
+  const screen = await renderChrome({ detached: true });
   const tools = screen.getByTestId("link-side-panel-tool-icons");
-  const expand = screen.getByTestId("link-side-panel-expand");
-  assert.ok(tools.contains(expand));
-  assert.equal(expand.getAttribute("aria-label"), "Exit full screen");
+  const inspect = screen.getByTestId("link-side-panel-inspect");
+  assert.ok(tools.contains(inspect));
+  assert.equal(inspect.getAttribute("aria-label"), "Inspect");
+  assert.equal(screen.queryByTestId("link-side-panel-detach"), null);
+  assert.equal(screen.queryByTestId("link-side-panel-expand"), null);
 });

@@ -487,8 +487,10 @@ fn navigate_pin_webview(
 fn remember_bounds(manager: &PinWebviewManager, pin_id: &str, bounds: &PinBounds) {
     if let Ok(mut sessions) = manager.sessions.lock() {
         if let Some(session) = sessions.get_mut(pin_id) {
+            // React page-host is authoritative. While Inspect is open, refresh the
+            // clamp target so fullscreen settle / host resize stay under header.
             if session.pre_inspect_bounds.is_some() {
-                return;
+                session.pre_inspect_bounds = Some(bounds.clone());
             }
             session.last_bounds = Some(bounds.clone());
         }
@@ -965,44 +967,94 @@ pub async fn pin_webview_inspect(
         }
         bounds
     };
-    // Same window-lock posture as playground Inspect so the inspector cannot
-    // grow the Buzz/pop-out frame and hide the left nav or split chat.
+    // Natural attached Inspect (shared with playground open_devtools). Callers
+    // should already be app-wide fullscreen so the dock stays in that surface.
     crate::playground_webview::inspect::lock_main_window_size(&app, &window_label, window_size);
     if let Err(error) = crate::playground_webview::inspect::open_playground_inspector(&webview) {
         crate::playground_webview::inspect::unlock_main_window_size(&app, &window_label);
         return Err(error);
     }
-    // Keep the pin webview inside the last slide-out/host rect (no stretch).
-    if let Some(before) = bounds.as_ref() {
-        let _ = apply_bounds(&app, &pin_id, &window_label, before);
+    // Immediately pin the child to the page-host rect so the first dock split
+    // cannot cover header chrome; continuous re-clamp follows in the scheduler.
+    if let Some(bounds) = bounds.as_ref() {
+        let _ = apply_bounds(&app, &pin_id, &window_label, bounds);
     }
-    // Long-lived restore (parity with playground): do NOT unlock until Inspect
-    // closes, then hard-restore frozen pre-inspect bounds.
     schedule_pin_inspect_bounds_restore(app.clone(), pin_id.clone(), window_label.clone());
     Ok(PinInspectResult { webview_id })
 }
 
+#[tauri::command]
+pub async fn pin_webview_close_inspect(
+    app: AppHandle,
+    manager: State<'_, PinWebviewManager>,
+    pin_id: String,
+    window_label: Option<String>,
+) -> Result<(), String> {
+    let pin_id = sanitize_pin_id(&pin_id)?;
+    let window_label = normalize_window_label(window_label.as_deref());
+    let webview_id = pin_webview_label(&pin_id, &window_label);
+    if !pin_inspect_target_is_safe(&webview_id) {
+        return Err("close inspect must target a pin webview".into());
+    }
+    let Some(webview) = app.get_webview(&webview_id) else {
+        // Already gone — still clear pre-inspect + unlock for parity.
+        clear_pin_pre_inspect_bounds(&app, &pin_id);
+        crate::playground_webview::inspect::unlock_main_window_size(&app, &window_label);
+        let _ = manager;
+        return Ok(());
+    };
+    crate::playground_webview::inspect::close_playground_inspector(&webview)?;
+    // Restore frozen bounds + unlock (same path as natural inspect-close).
+    for delay_ms in [0_u64, 16, 50, 200] {
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        reapply_pin_last_bounds(&app, &pin_id, &window_label);
+    }
+    clear_pin_pre_inspect_bounds(&app, &pin_id);
+    crate::playground_webview::inspect::unlock_main_window_size(&app, &window_label);
+    let _ = manager;
+    Ok(())
+}
+
 fn schedule_pin_inspect_bounds_restore(app: AppHandle, pin_id: String, window_label: String) {
     tauri::async_runtime::spawn(async move {
-        for delay_ms in [16_u64, 50, 200, 500] {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        // Keep the pin webview clamped to the React page-host while Inspect is
+        // open so a docked inspector cannot grow over URL / mode chrome.
+        let mut saw_visible = false;
+        let mut waiting_ticks = 0_u32;
+        for delay_ms in [0_u64, 16, 50, 100, 200] {
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
             reapply_pin_last_bounds(&app, &pin_id, &window_label);
         }
         loop {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            reapply_pin_last_bounds(&app, &pin_id, &window_label);
-            // Probe the pin webview's inspector (not playground-{sid}).
-            if !pin_inspector_is_visible(&app, &pin_id, &window_label) {
-                for delay_ms in [0_u64, 16, 50, 200, 500, 1000] {
-                    if delay_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    }
-                    reapply_pin_last_bounds(&app, &pin_id, &window_label);
+            if pin_inspector_is_visible(&app, &pin_id, &window_label) {
+                saw_visible = true;
+                reapply_pin_last_bounds(&app, &pin_id, &window_label);
+                continue;
+            }
+            if !saw_visible {
+                waiting_ticks += 1;
+                reapply_pin_last_bounds(&app, &pin_id, &window_label);
+                if waiting_ticks < 8 {
+                    continue;
                 }
                 clear_pin_pre_inspect_bounds(&app, &pin_id);
                 crate::playground_webview::inspect::unlock_main_window_size(&app, &window_label);
                 break;
             }
+            for delay_ms in [0_u64, 16, 50, 200, 500, 1000] {
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                reapply_pin_last_bounds(&app, &pin_id, &window_label);
+            }
+            clear_pin_pre_inspect_bounds(&app, &pin_id);
+            crate::playground_webview::inspect::unlock_main_window_size(&app, &window_label);
+            break;
         }
     });
 }

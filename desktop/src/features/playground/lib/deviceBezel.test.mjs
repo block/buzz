@@ -8,6 +8,7 @@ import {
   playgroundDeviceNubGutter,
   readPlaygroundStageBounds,
   rotateBezelEdge,
+  scalePlaygroundDeviceBezel,
 } from "./deviceBezel.ts";
 import { PLAYGROUND_DEVICES, playgroundDeviceViewport } from "./devices.ts";
 
@@ -132,4 +133,13 @@ test("native stage bounds never overlap playground chrome", () => {
     width: 400,
     height: 360,
   });
+});
+
+test("scalePlaygroundDeviceBezel multiplies linear chrome for museum scale", () => {
+  const portrait = playgroundDeviceBezel(device("iphone-16"), "portrait");
+  const scaled = scalePlaygroundDeviceBezel(portrait, 0.5);
+  assert.equal(scaled.padding.top, Math.round(portrait.padding.top * 0.5));
+  assert.equal(scaled.outerRadius, Math.round(portrait.outerRadius * 0.5));
+  assert.equal(scaled.island?.width, Math.round(portrait.island.width * 0.5));
+  assert.equal(scalePlaygroundDeviceBezel(portrait, 1), portrait);
 });

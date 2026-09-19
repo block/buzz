@@ -4,8 +4,12 @@ import test from "node:test";
 import {
   PLAYGROUND_DESKTOP_UA,
   PLAYGROUND_DEVICES,
+  PLAYGROUND_DEVICE_SCALE_DEFAULT,
+  clampPlaygroundDeviceScale,
   playgroundDeviceViewport,
   playgroundUserAgent,
+  scalePlaygroundDeviceViewport,
+  stepPlaygroundDeviceScale,
 } from "./devices.ts";
 import { DESKTOP_STAGE_PRESETS } from "./types.ts";
 
@@ -59,5 +63,30 @@ test("desktop stage presets are locked", () => {
   assert.deepEqual(
     [...DESKTOP_STAGE_PRESETS],
     [375, 390, 768, 1024, 1280, 1440],
+  );
+});
+
+test("device museum scale is 50–200% in 25% steps, default 100%", () => {
+  assert.equal(PLAYGROUND_DEVICE_SCALE_DEFAULT, 100);
+  assert.equal(clampPlaygroundDeviceScale(100), 100);
+  assert.equal(clampPlaygroundDeviceScale(40), 50);
+  assert.equal(clampPlaygroundDeviceScale(210), 200);
+  assert.equal(clampPlaygroundDeviceScale(112), 100);
+  assert.equal(clampPlaygroundDeviceScale(113), 125);
+  assert.equal(stepPlaygroundDeviceScale(100, 1), 125);
+  assert.equal(stepPlaygroundDeviceScale(100, -1), 75);
+  assert.equal(stepPlaygroundDeviceScale(50, -1), 50);
+  assert.equal(stepPlaygroundDeviceScale(200, 1), 200);
+  assert.deepEqual(
+    scalePlaygroundDeviceViewport({ width: 400, height: 800 }, 50),
+    { width: 200, height: 400 },
+  );
+  assert.deepEqual(
+    scalePlaygroundDeviceViewport({ width: 393, height: 852 }, 100),
+    { width: 393, height: 852 },
+  );
+  assert.deepEqual(
+    scalePlaygroundDeviceViewport({ width: 400, height: 800 }, 150),
+    { width: 600, height: 1200 },
   );
 });

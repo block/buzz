@@ -6,15 +6,17 @@ import {
 import { getStorageItem, setStorageItem } from "@/shared/lib/safeStorage";
 
 import type { PlaygroundCard } from "@/features/playground/lib/types";
+import type { PopoutLinkTarget } from "./popoutWindow";
 
 import { isEmbedInMainEnabled } from "./popoutSettings";
 
 export type EmbeddedPayload = {
-  kind: "thread" | "playground" | "split";
+  kind: "thread" | "playground" | "split" | "link";
   title?: string;
   channelId?: string;
   threadId?: string;
   playground?: PlaygroundCard;
+  link?: PopoutLinkTarget;
 };
 
 export const EMBEDDED_WINDOWS_STORAGE_KEY = "hula.popout.embeddedWindows";
@@ -66,7 +68,7 @@ function persist() {
 function isPayload(value: unknown): value is EmbeddedPayload {
   if (!value || typeof value !== "object") return false;
   const kind = (value as EmbeddedPayload).kind;
-  return kind === "thread" || kind === "playground" || kind === "split";
+  return kind === "thread" || kind === "playground" || kind === "split" || kind === "link";
 }
 
 function load() {
@@ -211,6 +213,7 @@ export function closeEmbeddedWindow(label: string) {
 function defaultTitle(kind: EmbeddedPayload["kind"]): string {
   if (kind === "thread") return "Thread";
   if (kind === "split") return "Split";
+  if (kind === "link") return "Link";
   return "Playground";
 }
 

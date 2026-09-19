@@ -7,9 +7,13 @@ import {
   playgroundDeviceBezel,
   playgroundDeviceBezelOuterSize,
   playgroundDeviceNubGutter,
+  scalePlaygroundDeviceBezel,
 } from "../lib/deviceBezel";
 import {
+  PLAYGROUND_DEVICE_SCALE_DEFAULT,
+  playgroundDeviceScaleFactor,
   playgroundDeviceViewport,
+  scalePlaygroundDeviceViewport,
   type PlaygroundDevice,
 } from "../lib/devices";
 
@@ -18,13 +22,23 @@ export function DeviceBezel({
   children,
   device,
   orientation,
+  scalePercent = PLAYGROUND_DEVICE_SCALE_DEFAULT,
 }: {
   children: React.ReactNode;
   device: PlaygroundDevice;
   orientation: "portrait" | "landscape";
+  /** Museum preview scale in 25% steps (50–200). Default 100. */
+  scalePercent?: number;
 }) {
-  const bezel = playgroundDeviceBezel(device, orientation);
-  const viewport = playgroundDeviceViewport(device, orientation);
+  const factor = playgroundDeviceScaleFactor(scalePercent);
+  const bezel = scalePlaygroundDeviceBezel(
+    playgroundDeviceBezel(device, orientation),
+    factor,
+  );
+  const viewport = scalePlaygroundDeviceViewport(
+    playgroundDeviceViewport(device, orientation),
+    scalePercent,
+  );
   const outer = playgroundDeviceBezelOuterSize(viewport, bezel);
   const gutter = playgroundDeviceNubGutter(bezel);
 
@@ -47,6 +61,7 @@ export function DeviceBezel({
           data-chrome={bezel.chrome}
           data-family={bezel.family}
           data-orientation={orientation}
+          data-scale={String(Math.round(factor * 100))}
           data-testid="playground-device-frame"
           style={{
             width: outer.width,

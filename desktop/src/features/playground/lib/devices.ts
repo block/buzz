@@ -113,3 +113,56 @@ export function playgroundDeviceViewport(
   }
   return { width: device.width, height: device.height };
 }
+
+/** Mobile museum visual scale (percent of published CSS viewport). */
+export const PLAYGROUND_DEVICE_SCALE_MIN = 50;
+export const PLAYGROUND_DEVICE_SCALE_MAX = 200;
+export const PLAYGROUND_DEVICE_SCALE_STEP = 25;
+export const PLAYGROUND_DEVICE_SCALE_DEFAULT = 100;
+
+export type PlaygroundDeviceScalePercent =
+  | 50
+  | 75
+  | 100
+  | 125
+  | 150
+  | 175
+  | 200;
+
+export function clampPlaygroundDeviceScale(
+  percent: number,
+): PlaygroundDeviceScalePercent {
+  const stepped =
+    Math.round(percent / PLAYGROUND_DEVICE_SCALE_STEP) *
+    PLAYGROUND_DEVICE_SCALE_STEP;
+  const clamped = Math.min(
+    PLAYGROUND_DEVICE_SCALE_MAX,
+    Math.max(PLAYGROUND_DEVICE_SCALE_MIN, stepped),
+  );
+  return clamped as PlaygroundDeviceScalePercent;
+}
+
+export function stepPlaygroundDeviceScale(
+  percent: number,
+  direction: -1 | 1,
+): PlaygroundDeviceScalePercent {
+  return clampPlaygroundDeviceScale(
+    percent + direction * PLAYGROUND_DEVICE_SCALE_STEP,
+  );
+}
+
+export function playgroundDeviceScaleFactor(percent: number): number {
+  return clampPlaygroundDeviceScale(percent) / 100;
+}
+
+/** Scale a published CSS viewport (or any W×H) by museum scale percent. */
+export function scalePlaygroundDeviceViewport(
+  viewport: { width: number; height: number },
+  scalePercent: number,
+): { width: number; height: number } {
+  const factor = playgroundDeviceScaleFactor(scalePercent);
+  return {
+    width: Math.max(1, Math.round(viewport.width * factor)),
+    height: Math.max(1, Math.round(viewport.height * factor)),
+  };
+}

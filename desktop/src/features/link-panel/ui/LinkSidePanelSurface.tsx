@@ -12,8 +12,11 @@ import {
 } from "@/features/pinned-sites/lib/pinWebview";
 import {
   PLAYGROUND_DEVICES,
+  PLAYGROUND_DEVICE_SCALE_DEFAULT,
   playgroundDeviceViewport,
+  scalePlaygroundDeviceViewport,
   type PlaygroundDeviceId,
+  type PlaygroundDeviceScalePercent,
 } from "@/features/playground/lib/devices";
 import {
   PLAYGROUND_RESIZE_HANDLE_CLASS,
@@ -21,6 +24,7 @@ import {
 } from "@/features/playground/lib/overlayLayout";
 import { DEFAULT_RESPONSIVE_VIEWPORT } from "@/features/playground/lib/types";
 import { DeviceBezel } from "@/features/playground/ui/DeviceBezel";
+import { DeviceMuseumToolbar } from "@/features/playground/ui/DeviceMuseumToolbar";
 import { cn } from "@/shared/lib/cn";
 import { isNativeWebviewModalParked } from "@/shared/lib/nativeWebviewModalPark";
 import { Button } from "@/shared/ui/button";
@@ -207,11 +211,18 @@ function MobileStage({
   const [orientation, setOrientation] = React.useState<
     "portrait" | "landscape"
   >("portrait");
+  const [scalePercent, setScalePercent] =
+    React.useState<PlaygroundDeviceScalePercent>(
+      PLAYGROUND_DEVICE_SCALE_DEFAULT,
+    );
   const hostRef = React.useRef<HTMLDivElement | null>(null);
   const device = PLAYGROUND_DEVICES.find((item) => item.id === deviceId);
-  const viewport = device
-    ? playgroundDeviceViewport(device, orientation)
-    : { width: 393, height: 852 };
+  const viewport = scalePlaygroundDeviceViewport(
+    device
+      ? playgroundDeviceViewport(device, orientation)
+      : { width: 393, height: 852 },
+    scalePercent,
+  );
 
   return (
     <div
@@ -219,44 +230,31 @@ function MobileStage({
       data-testid="link-side-panel-surface"
       data-viewport-mode="mobile"
     >
-      <div className="flex flex-wrap items-center gap-2 px-3 pt-2">
-        <select
-          className="rounded-md border border-border bg-background px-2 py-1 text-xs"
-          data-testid="link-side-panel-device-select"
-          onChange={(event) =>
-            setDeviceId(event.target.value as PlaygroundDeviceId)
-          }
-          value={deviceId}
-        >
-          {PLAYGROUND_DEVICES.map((item) => (
-            <option
-              data-testid={`link-side-panel-device-${item.id}`}
-              key={item.id}
-              value={item.id}
-            >
-              {item.name}
-            </option>
-          ))}
-        </select>
-        <button
-          className="rounded-md border border-border px-2 py-1 text-xs"
-          data-testid="link-side-panel-orientation"
-          onClick={() =>
+      <div className="pt-2">
+        <DeviceMuseumToolbar
+          deviceId={deviceId}
+          onDeviceIdChange={setDeviceId}
+          onOrientationToggle={() =>
             setOrientation((value) =>
               value === "portrait" ? "landscape" : "portrait",
             )
           }
-          type="button"
-        >
-          {orientation === "portrait" ? "Portrait" : "Landscape"}
-        </button>
+          onScalePercentChange={setScalePercent}
+          orientation={orientation}
+          scalePercent={scalePercent}
+          testIdPrefix="link-side-panel"
+        />
       </div>
       <div
         className="flex min-h-0 flex-1 items-start justify-center overflow-auto bg-white p-3"
         data-testid="link-side-panel-mobile-backdrop"
       >
         {device ? (
-          <DeviceBezel device={device} orientation={orientation}>
+          <DeviceBezel
+            device={device}
+            orientation={orientation}
+            scalePercent={scalePercent}
+          >
             <PinStageHost
               hostRef={hostRef}
               keepAlive={keepAlive}

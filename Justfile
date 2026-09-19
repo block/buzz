@@ -674,6 +674,13 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    # Documents is iCloud File Provider backed on this machine; rustc hangs mmap'ing
+    # .rlib metadata when target/ lives there. Keep Cargo output on local disk.
+    if [[ -z "${CARGO_TARGET_DIR:-}" ]] && xattr -p 'com.apple.fileprovider.detached#B' "$HOME/Documents" &>/dev/null; then
+        export CARGO_TARGET_DIR="${HOME}/Library/Caches/buzz-desktop-target"
+        mkdir -p "$CARGO_TARGET_DIR"
+        echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR (Documents is iCloud-synced)"
+    fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")

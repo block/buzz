@@ -15,7 +15,14 @@ import {
 export const POPOUT_STORAGE_PREFIX = "buzz.popout.v1:";
 export const POPOUT_WINDOW_LABEL_PREFIX = "popout-";
 
-export type PopoutKind = "thread" | "playground" | "split";
+export type PopoutKind = "thread" | "playground" | "split" | "link";
+
+export type PopoutLinkTarget = {
+  url: string;
+  pinId: string;
+  viewportMode?: "desktop" | "responsive" | "mobile";
+  keepAlive?: boolean;
+};
 
 export type PopoutPayload = {
   kind: PopoutKind;
@@ -23,6 +30,8 @@ export type PopoutPayload = {
   channelId?: string;
   threadId?: string;
   playground?: PlaygroundCard;
+  /** Link/pin browser surface hosted in its own OS/embedded window. */
+  link?: PopoutLinkTarget;
 };
 
 function sanitizeLabelPart(value: string): string {
@@ -91,7 +100,8 @@ export function readPopoutPayload(
     if (
       parsed?.kind !== "thread" &&
       parsed?.kind !== "playground" &&
-      parsed?.kind !== "split"
+      parsed?.kind !== "split" &&
+      parsed?.kind !== "link"
     ) {
       return null;
     }
@@ -137,6 +147,7 @@ export function popoutPayloadFromInput(input: {
   channelId?: string;
   threadId?: string;
   playground?: PlaygroundCard;
+  link?: PopoutLinkTarget;
 }): PopoutPayload {
   return {
     kind: input.kind,
@@ -144,6 +155,7 @@ export function popoutPayloadFromInput(input: {
     ...(input.channelId ? { channelId: input.channelId } : {}),
     ...(input.threadId ? { threadId: input.threadId } : {}),
     ...(input.playground ? { playground: input.playground } : {}),
+    ...(input.link ? { link: input.link } : {}),
   };
 }
 
@@ -167,6 +179,7 @@ export async function openPopoutWindow(input: {
   channelId?: string;
   threadId?: string;
   playground?: PlaygroundCard;
+  link?: PopoutLinkTarget;
 }): Promise<void> {
   const label = popoutLabel(input.kind, input.seed);
   const payload = popoutPayloadFromInput(input);

@@ -11,6 +11,12 @@ import { cn } from "@/shared/lib/cn";
 type FocusThreadDrawerProps = {
   channelName: string;
   children: React.ReactNode;
+  /**
+   * When true, the overlay is `fixed inset-0` above AppSidebar (`z-[100]`) so
+   * link/pin expand covers the whole Buzz window including the left menu.
+   * When false/omitted, keep channel-local `absolute inset-0 z-41` + leftPx.
+   */
+  coverAppChrome?: boolean;
   /** Prevent a covered drawer from handling Escape before its overlay. */
   escapeEnabled?: boolean;
   /** Accessible name for the drawer. Channel threads leave the default. */
@@ -22,7 +28,7 @@ type FocusThreadDrawerProps = {
   /**
    * Left inset from the channel content edge. Defaults to the Projects/thread
    * focus sliver (`THREAD_FOCUS_SLIVER_WIDTH_PX`). Pass `0` for true full-bleed
-   * (link/pin fullscreen expand).
+   * (link/pin fullscreen expand). Ignored when `coverAppChrome` is true.
    */
   leftPx?: number;
 };
@@ -192,6 +198,7 @@ function useViewportRightInsetPx(
 export function FocusThreadDrawer({
   channelName,
   children,
+  coverAppChrome = false,
   escapeEnabled = true,
   label = "Thread",
   hasActiveEdit = false,
@@ -205,6 +212,9 @@ export function FocusThreadDrawer({
   const overlayRef = React.useRef<HTMLDivElement>(null);
   const previousFocusRef = React.useRef<HTMLElement | null>(null);
   const viewportRightInsetPx = useViewportRightInsetPx(overlayRef);
+  const resolvedLeftPx = coverAppChrome
+    ? 0
+    : (leftPx ?? THREAD_FOCUS_SLIVER_WIDTH_PX);
 
   React.useEffect(() => {
     if (!escapeEnabled) return;
@@ -256,10 +266,15 @@ export function FocusThreadDrawer({
 
   return (
     <div
-      className="absolute inset-0 z-41"
+      className={
+        coverAppChrome
+          ? "fixed inset-0 z-[110]"
+          : "absolute inset-0 z-41"
+      }
+      data-cover-app-chrome={coverAppChrome ? "true" : undefined}
       data-testid="focus-thread-drawer-overlay"
       ref={overlayRef}
-      style={{ right: viewportRightInsetPx }}
+      style={coverAppChrome ? undefined : { right: viewportRightInsetPx }}
     >
       <motion.button
         animate={{ opacity: 1 }}
@@ -310,7 +325,7 @@ export function FocusThreadDrawer({
           x: travelPx,
         }}
         initial={{ opacity: 0, x: travelPx }}
-        style={{ left: leftPx ?? THREAD_FOCUS_SLIVER_WIDTH_PX }}
+        style={{ left: resolvedLeftPx }}
         transition={
           prefersReducedMotion ? REDUCED_MOTION_TRANSITION : ENTER_TRANSITION
         }

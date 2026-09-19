@@ -55,6 +55,11 @@ export type ChannelPaneProps = {
    * Projects omit this prop.
    */
   idleAuxiliaryExpanded?: boolean;
+  /**
+   * Link/pin expand only: lift the focus drawer above AppSidebar so fullscreen
+   * covers the whole Buzz window (not just the channel canvas).
+   */
+  idleAuxiliaryCoverAppChrome?: boolean;
   /** Body class for idle auxiliary (e.g. link webview fill). */
   idleAuxiliaryBodyClassName?: string;
   idleAuxiliaryTitle?: string;

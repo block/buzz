@@ -19,7 +19,7 @@ export const PLAYGROUND_OVERLAY_SURFACE_CLASS = "bg-background";
 
 /** In-app fullscreen covers the viewport, including the AppTopChrome strip. */
 export const PLAYGROUND_FULLSCREEN_OVERLAY_CLASS =
-  "fixed inset-0 z-50 pointer-events-auto";
+  "fixed inset-0 z-[110] pointer-events-auto";
 
 /** Windowed overlay stays inside the channel inset, not the titlebar. */
 export const PLAYGROUND_WINDOWED_OVERLAY_CLASS = "absolute inset-0 z-30";
@@ -155,31 +155,42 @@ export type PlaygroundChromeLayoutFlags = {
   hideDispose: boolean;
   hideDock: boolean;
   hideDismiss: boolean;
+  /** @deprecated Prefer Detach into an OS window; kept false. */
   showFullscreen: boolean;
+  /** Detach into a playground OS/embedded window (in-main overlay only). */
+  showDetach: boolean;
+  /** Inspect only once the playground browser is in its own window. */
+  showInspect: boolean;
 };
 
 /**
  * Locked placement (split/window) hides dispose and dock.
  * OS pop-outs also hide dismiss (close the OS window instead). In-main embeds
  * keep dismiss so chrome X can park React state and the native WKWebView.
- * Split still exposes fullscreen so the playground can cover both panes.
+ * Fullscreen is replaced by Detach; Inspect is only available when detached.
  */
 export function playgroundChromeLayoutFlags(
   lockPlacement?: "window" | "dock",
   options?: { isOsPopout?: boolean },
 ): PlaygroundChromeLayoutFlags {
+  const isOsPopout = options?.isOsPopout === true;
+  const detached = isOsPopout || lockPlacement === "window";
   if (lockPlacement == null) {
     return {
       hideDispose: false,
       hideDock: false,
       hideDismiss: false,
-      showFullscreen: true,
+      showFullscreen: false,
+      showDetach: !isOsPopout,
+      showInspect: detached,
     };
   }
   return {
     hideDispose: true,
     hideDock: true,
-    hideDismiss: options?.isOsPopout === true,
-    showFullscreen: lockPlacement === "dock",
+    hideDismiss: isOsPopout,
+    showFullscreen: false,
+    showDetach: false,
+    showInspect: detached || lockPlacement === "dock",
   };
 }

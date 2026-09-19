@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   Copy,
   Inspect,
+  AppWindow,
   Maximize2,
   Minimize2,
   PanelLeftClose,
@@ -49,6 +50,7 @@ import type { PlaygroundSession } from "../lib/sessions";
 import { playgroundPin } from "../lib/types";
 import type { PlaygroundNavState } from "../lib/types";
 import {
+  closePlaygroundWebviewInspect,
   getPlaygroundWebviewNavState,
   inspectPlaygroundWebview,
   PLAYGROUND_WEBVIEW_RESTORE_EVENT,
@@ -73,9 +75,12 @@ export function PlaygroundChrome({
   onModeChange,
   onStageResync,
   onToggleDock,
+  onDetach,
   onToggleFullscreen,
   session,
-  showFullscreen = true,
+  showDetach = false,
+  showFullscreen = false,
+  showInspect = false,
 }: {
   conversation: PlaygroundConversation | null;
   docked: boolean;
@@ -85,12 +90,15 @@ export function PlaygroundChrome({
   hideDock?: boolean;
   lockPlacement?: "window" | "dock";
   mode: PlaygroundChromeMode;
+  onDetach?: () => void;
   onModeChange: (mode: PlaygroundChromeMode) => void;
   onStageResync?: () => void;
   onToggleDock: () => void;
   onToggleFullscreen: () => void;
   session: PlaygroundSession;
+  showDetach?: boolean;
   showFullscreen?: boolean;
+  showInspect?: boolean;
 }) {
   const locked = splitLockedPlaygroundUrl(session.url);
   const [nav, setNav] = React.useState<PlaygroundNavState>({
@@ -104,6 +112,15 @@ export function PlaygroundChrome({
   const canScreenshot = playgroundScreenshotAvailable(conversation);
   const pin = playgroundPin(session);
   const currentUrl = nav.currentUrl || session.url;
+
+  const wasFullscreenRef = React.useRef(fullscreen);
+  React.useEffect(() => {
+    const was = wasFullscreenRef.current;
+    wasFullscreenRef.current = fullscreen;
+    if (was && !fullscreen) {
+      void closePlaygroundWebviewInspect(session.sid).catch(() => {});
+    }
+  }, [fullscreen, session.sid]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -128,11 +145,10 @@ export function PlaygroundChrome({
   }, [session.sid, session.url]);
 
   async function handleInspect() {
+    if (!showInspect) return;
     try {
       await inspectPlaygroundWebview(session.sid);
       onStageResync?.();
-      // Re-sync host bounds after Inspect so a docked inspector cannot leave
-      // the split/dock pane permanently full-width.
       window.dispatchEvent(new Event(PLAYGROUND_WEBVIEW_RESTORE_EVENT));
     } catch (error) {
       toast.error(
@@ -339,17 +355,19 @@ export function PlaygroundChrome({
             >
               <Copy />
             </ChromeTooltipButton>
-            <ChromeTooltipButton
-              aria-label={playgroundChromeTooltip("inspect")}
-              data-testid="playground-inspect"
-              onClick={() => void handleInspect()}
-              size="icon-xs"
-              tooltip={playgroundChromeTooltip("inspect")}
-              type="button"
-              variant="outline"
-            >
-              <Inspect />
-            </ChromeTooltipButton>
+            {showInspect ? (
+              <ChromeTooltipButton
+                aria-label={playgroundChromeTooltip("inspect")}
+                data-testid="playground-inspect"
+                onClick={() => void handleInspect()}
+                size="icon-xs"
+                tooltip={playgroundChromeTooltip("inspect")}
+                type="button"
+                variant="outline"
+              >
+                <Inspect />
+              </ChromeTooltipButton>
+            ) : null}
             {canScreenshot ? (
               <ChromeTooltipButton
                 aria-label={playgroundChromeTooltip("screenshot")}
@@ -361,6 +379,19 @@ export function PlaygroundChrome({
                 variant="outline"
               >
                 <Camera />
+              </ChromeTooltipButton>
+            ) : null}
+            {showDetach ? (
+              <ChromeTooltipButton
+                aria-label="Detach"
+                data-testid="playground-detach"
+                onClick={() => onDetach?.()}
+                size="icon-xs"
+                tooltip="Detach"
+                type="button"
+                variant="outline"
+              >
+                <AppWindow />
               </ChromeTooltipButton>
             ) : null}
             {showFullscreen ? (

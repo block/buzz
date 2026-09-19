@@ -81,3 +81,19 @@ test("mobile surface paints device museum + hardware bezel", async () => {
   const backdrop = screen.getByTestId("link-side-panel-mobile-backdrop");
   assert.ok(backdrop.className.includes("bg-white"));
 });
+
+test("mobile surface exposes orientation and scale controls on white backdrop", async () => {
+  const screen = await renderSurface("mobile");
+  const { fireEvent } = await import("@testing-library/react");
+  assert.ok(screen.getByTestId("link-side-panel-orientation"));
+  assert.equal(screen.getByTestId("link-side-panel-device-scale-value").textContent, "100%");
+  await fireEvent.click(screen.getByTestId("link-side-panel-device-scale-up"));
+  assert.equal(screen.getByTestId("link-side-panel-device-scale-value").textContent, "125%");
+  assert.equal(
+    screen.getByTestId("playground-device-frame").getAttribute("data-scale"),
+    "125",
+  );
+  assert.ok(
+    screen.getByTestId("link-side-panel-mobile-backdrop").className.includes("bg-white"),
+  );
+});

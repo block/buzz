@@ -17,6 +17,7 @@ export const LINK_SIDE_PANEL_BODY_CLASS =
 
 export type ChannelLinkSidePanelChrome = {
   idleAuxiliaryBodyClassName: string;
+  idleAuxiliaryCoverAppChrome: boolean;
   idleAuxiliaryExpanded: boolean;
   idleAuxiliaryHeaderActions: IdleAuxiliaryHeaderControls;
   idleAuxiliaryOverridesThread: boolean;
@@ -58,7 +59,6 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
     return {
       actions: (
         <LinkSidePanelChrome
-          expanded={panel.expanded}
           pinId={panel.pinId}
           url={panel.url}
           viewportMode={panel.viewportMode}
@@ -71,6 +71,7 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
 
   return {
     idleAuxiliaryBodyClassName: LINK_SIDE_PANEL_BODY_CLASS,
+    idleAuxiliaryCoverAppChrome: panel.expanded,
     idleAuxiliaryExpanded: panel.expanded,
     idleAuxiliaryHeaderActions: headerActions,
     // Match Project workspace sheets: any open link panel covers the

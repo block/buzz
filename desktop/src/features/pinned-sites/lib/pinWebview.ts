@@ -248,6 +248,12 @@ export async function inspectPinWebview(
   );
 }
 
+/** Close the WebKit inspector for a pin (e.g. leaving link-panel fullscreen). */
+export async function closePinWebviewInspect(pinId: string): Promise<void> {
+  if (!isNativePinRuntime()) return;
+  await invoke("pin_webview_close_inspect", withWindowLabel({ pinId }));
+}
+
 export async function screenshotPinWebview(
   pinId: string,
 ): Promise<PinWebviewScreenshotResult> {

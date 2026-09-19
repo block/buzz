@@ -2,6 +2,7 @@ import type * as React from "react";
 import { useSyncExternalStore } from "react";
 import * as BuzzTheme from "@/app/BuzzThemeSurfaces";
 import { HuddleRoomHeader, HuddleStartingView } from "@/features/huddle";
+import { LinkPopoutHost } from "@/features/link-panel/ui/LinkPopoutHost";
 import { PlaygroundHost } from "@/features/playground/ui/PlaygroundHost";
 import {
   getActiveEmbeddedWindow,
@@ -64,18 +65,27 @@ export function AppShellChannelSurface({
     !hasCommunityRail &&
     (isMobile ? !openMobile : sidebarState === "collapsed");
 
+  const isLinkPopout = payload?.kind === "link";
+  // Link pop-outs must be full-bleed. ContentSurface is flex-1 in a row with
+  // LinkPopoutHost, which left an empty left pane (split look) in OS windows.
   const panes = (
     <PopoutLayoutProvider payload={isOsPopout ? null : payload}>
       {isHuddleRoom && !isHuddleRoomStarting ? <HuddleRoomHeader /> : null}
       {isSplit ? <PlaygroundHost /> : null}
-      <BuzzTheme.ContentSurface
-        className={isSplit ? "min-w-0" : undefined}
-        terminal={terminal}
-        unframed={contentUnframed}
-      >
-        {isHuddleRoomStarting ? <HuddleStartingView /> : children}
-      </BuzzTheme.ContentSurface>
-      {isSplit ? null : <PlaygroundHost />}
+      {isLinkPopout ? (
+        <LinkPopoutHost />
+      ) : (
+        <>
+          <BuzzTheme.ContentSurface
+            className={isSplit ? "min-w-0" : undefined}
+            terminal={terminal}
+            unframed={contentUnframed}
+          >
+            {isHuddleRoomStarting ? <HuddleStartingView /> : children}
+          </BuzzTheme.ContentSurface>
+          {isSplit ? null : <PlaygroundHost />}
+        </>
+      )}
     </PopoutLayoutProvider>
   );
 

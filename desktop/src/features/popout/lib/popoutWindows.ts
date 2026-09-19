@@ -38,6 +38,7 @@ export function popoutKindFromLabel(label: string): PopoutKind | null {
   if (rest.startsWith("thread-")) return "thread";
   if (rest.startsWith("playground-")) return "playground";
   if (rest.startsWith("split-")) return "split";
+  if (rest.startsWith("link-")) return "link";
   return null;
 }
 
@@ -67,6 +68,7 @@ export function resolvePopoutTitle(row: {
   if (kind === "thread") return "Thread";
   if (kind === "split") return "Split";
   if (kind === "playground") return "Playground";
+  if (kind === "link") return "Link";
   return "Window";
 }
 

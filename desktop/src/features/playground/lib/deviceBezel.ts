@@ -218,6 +218,58 @@ export function playgroundDeviceBezel(
   };
 }
 
+function scaleLinear(value: number, factor: number): number {
+  return Math.max(0, Math.round(value * factor));
+}
+
+/** Multiply every linear bezel measurement so native bounds stay aligned. */
+export function scalePlaygroundDeviceBezel(
+  bezel: PlaygroundDeviceBezel,
+  factor: number,
+): PlaygroundDeviceBezel {
+  if (factor === 1) return bezel;
+  return {
+    ...bezel,
+    outerRadius: scaleLinear(bezel.outerRadius, factor),
+    innerRadius: scaleLinear(bezel.innerRadius, factor),
+    padding: {
+      top: scaleLinear(bezel.padding.top, factor),
+      right: scaleLinear(bezel.padding.right, factor),
+      bottom: scaleLinear(bezel.padding.bottom, factor),
+      left: scaleLinear(bezel.padding.left, factor),
+    },
+    nubs: bezel.nubs.map((nub) => ({
+      ...nub,
+      length: scaleLinear(nub.length, factor),
+      thickness: scaleLinear(nub.thickness, factor),
+    })),
+    island: bezel.island
+      ? {
+          width: scaleLinear(bezel.island.width, factor),
+          height: scaleLinear(bezel.island.height, factor),
+        }
+      : undefined,
+    punch: bezel.punch
+      ? {
+          width: scaleLinear(bezel.punch.width, factor),
+          height: scaleLinear(bezel.punch.height, factor),
+        }
+      : undefined,
+    homeIndicator: bezel.homeIndicator
+      ? {
+          width: scaleLinear(bezel.homeIndicator.width, factor),
+          height: scaleLinear(bezel.homeIndicator.height, factor),
+        }
+      : undefined,
+    homeButton: bezel.homeButton
+      ? { size: scaleLinear(bezel.homeButton.size, factor) }
+      : undefined,
+    cameraDot: bezel.cameraDot
+      ? { size: scaleLinear(bezel.cameraDot.size, factor) }
+      : undefined,
+  };
+}
+
 export function playgroundDeviceBezelOuterSize(
   viewport: { width: number; height: number },
   bezel: PlaygroundDeviceBezel,

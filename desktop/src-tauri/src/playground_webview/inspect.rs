@@ -1,4 +1,7 @@
-//! Inspect opens a detached inspector for `playground-{sid}` only.
+//! Inspect opens the natural WebKit inspector (`open_devtools` / attached).
+//! Callers should enter app-wide fullscreen first so a docked inspector only
+//! splits within that full-app surface (not a narrow slide-out). Pins and
+//! playgrounds share `open_playground_inspector` / `close_playground_inspector`.
 //! Linux CI cannot compile AppKit; keep presentation policy tests host-free.
 
 use super::{
@@ -14,8 +17,8 @@ const MAIN_WINDOW_MIN_LOGICAL: (f64, f64) = (800.0, 500.0);
 /// How Inspect presents the WebKit inspector relative to the playground stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaygroundInspectPresentation {
-    /// Standalone inspector window. Must not dock into the stage or main window.
-    DetachedWindow,
+    /// Natural WebKit dock (`open_devtools`). Prefer after app-wide fullscreen.
+    AttachedDocked,
 }
 
 /// Inspect must not bounce the Buzz window. Locking min=max is allowed;
@@ -26,7 +29,7 @@ pub enum InspectWindowFrameAction {
 }
 
 pub fn playground_inspect_presentation() -> PlaygroundInspectPresentation {
-    PlaygroundInspectPresentation::DetachedWindow
+    PlaygroundInspectPresentation::AttachedDocked
 }
 
 /// Inspect must leave the main window at its pre-inspector size.
@@ -88,13 +91,60 @@ pub const INSPECTOR_STARTS_ATTACHED_DEFAULTS: &[&str] = &[
 ];
 
 pub fn open_playground_inspector(webview: &Webview) -> Result<(), String> {
+    // Natural / attached WebKit inspector (wry open_devtools → `_inspector` +
+    // `show`). Do not force detach — fullscreen hosts contain the dock split.
+    webview.open_devtools();
+    Ok(())
+}
+
+/// Close the WebKit inspector (wry `close_devtools` → `_inspector` + `close`).
+pub fn close_playground_inspector(webview: &Webview) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        open_detached_macos_inspector(webview)
+        close_inspector_for_webview(webview)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        webview.open_devtools();
+        webview.close_devtools();
+        Ok(())
+    }
+}
+
+/// Shared helper: close inspector via private `_inspector` + `close`.
+pub fn close_inspector_for_webview(webview: &Webview) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        webview
+            .with_webview(|platform| {
+                use objc2::runtime::AnyObject;
+                use objc2::sel;
+                use objc2_web_kit::WKWebView;
+
+                // SAFETY: same child WKWebView / `_inspector` contract wry uses
+                // for close_devtools (`_inspector` then `close`).
+                let view: &WKWebView = unsafe { &*platform.inner().cast::<WKWebView>() };
+                unsafe {
+                    let has_inspector: bool =
+                        objc2::msg_send![view, respondsToSelector: sel!(_inspector)];
+                    if !has_inspector {
+                        return;
+                    }
+                    let inspector: *mut AnyObject = objc2::msg_send![view, _inspector];
+                    if inspector.is_null() {
+                        return;
+                    }
+                    let inspector = &*inspector;
+                    let close = sel!(close);
+                    if objc2::msg_send![inspector, respondsToSelector: close] {
+                        let (): () = objc2::msg_send![inspector, close];
+                    }
+                }
+            })
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        webview.close_devtools();
         Ok(())
     }
 }
@@ -177,34 +227,55 @@ fn clear_pre_inspect_bounds(app: &AppHandle, sid: &str) {
     };
 }
 
+/// Close-path cleanup shared by natural inspect-close and `close_inspect` cmds.
+pub fn finish_inspect_close(app: &AppHandle, sid: &str, window_label: &str) {
+    reapply_last_bounds(app, sid, window_label);
+    clear_pre_inspect_bounds(app, sid);
+    unlock_main_window_size(app, window_label);
+}
+
 pub fn schedule_inspect_stage_restore(app: AppHandle, sid: String, window_label: String) {
     tauri::async_runtime::spawn(async move {
-        // show() creates the frontend asynchronously. detach() is a no-op
-        // until that page exists, so re-detach during the open settle, then
-        // keep pinning the stage for as long as Inspect stays open — including
-        // if the user later docks to the bottom or side. Never set_size the
-        // host window; the frame was locked before show.
-        for delay_ms in [16_u64, 50, 200, 500] {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        // Attached Inspect docks by splitting the child WKWebView. WebKit often
+        // expands that child beyond the React page-host (covering header chrome).
+        // Continuously re-clamp to pre_inspect_bounds so the dock stays under the
+        // header. When the inspector closes, hard-restore and unlock the frame.
+        let mut saw_visible = false;
+        let mut waiting_ticks = 0_u32;
+        // Burst clamp while the inspector frontend is still attaching.
+        for delay_ms in [0_u64, 16, 50, 100, 200] {
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
             reapply_last_bounds(&app, &sid, &window_label);
-            redetach_macos_inspector(&app, &sid, &window_label);
         }
         loop {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            reapply_last_bounds(&app, &sid, &window_label);
-            if !playground_inspector_is_visible(&app, &sid, &window_label) {
-                // Hard-restore after close: WebKit may settle the child frame
-                // a few ticks after isVisible flips false.
-                for delay_ms in [0_u64, 16, 50, 200, 500, 1000] {
-                    if delay_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    }
-                    reapply_last_bounds(&app, &sid, &window_label);
+            if playground_inspector_is_visible(&app, &sid, &window_label) {
+                saw_visible = true;
+                reapply_last_bounds(&app, &sid, &window_label);
+                continue;
+            }
+            if !saw_visible {
+                // open_devtools can lag isVisible — keep page-host clamped briefly.
+                waiting_ticks += 1;
+                reapply_last_bounds(&app, &sid, &window_label);
+                if waiting_ticks < 8 {
+                    continue;
                 }
                 clear_pre_inspect_bounds(&app, &sid);
                 unlock_main_window_size(&app, &window_label);
                 break;
             }
+            for delay_ms in [0_u64, 16, 50, 200, 500, 1000] {
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                reapply_last_bounds(&app, &sid, &window_label);
+            }
+            clear_pre_inspect_bounds(&app, &sid);
+            unlock_main_window_size(&app, &window_label);
+            break;
         }
     });
 }
@@ -233,46 +304,28 @@ fn inspector_is_visible(webview: &Webview) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn redetach_macos_inspector(app: &AppHandle, sid: &str, window_label: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let Some(webview) = app.get_webview(&playground_webview_label(sid, window_label)) else {
-            return;
-        };
-        let _ = webview.with_webview(|platform| {
-            use objc2_web_kit::WKWebView;
-
-            // SAFETY: same child WKWebView / `_inspector` contract as
-            // open_detached_macos_inspector. Called after show settles so
-            // detach is no longer a no-op on a missing frontend page.
-            let view: &WKWebView = unsafe { &*platform.inner().cast::<WKWebView>() };
-            unsafe {
-                prefer_detached_inspector_defaults();
-                let Some(inspector) = macos_inspector_ptr(view) else {
-                    return;
-                };
-                force_inspector_detached(&*inspector);
-            }
-        });
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, sid, window_label);
-    }
+    let Some(webview) = app.get_webview(&playground_webview_label(sid, window_label)) else {
+        return;
+    };
+    redetach_inspector_for_webview(&webview);
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn open_detached_macos_inspector(webview: &Webview) -> Result<(), String> {
     webview
         .with_webview(|platform| {
             use objc2::sel;
             use objc2_web_kit::WKWebView;
 
-            // SAFETY: inner() is the child WKWebView for this playground label.
-            // `_inspector` / `detach` / `show` / `setAttached:` are WebKit
-            // private inspectors (same `_inspector` wry uses for
+            // SAFETY: inner() is the child WKWebView for this playground/pin
+            // label. `_inspector` / `detach` / `show` / `setAttached:` are
+            // WebKit private inspectors (same `_inspector` wry uses for
             // open_devtools). with_webview is already on the AppKit main
-            // thread. Do not call open_devtools() — that show()s attached.
+            // thread. Do not call open_devtools() — that show()s docked and
+            // reparents the host into a split (full-client stretch).
             let view: &WKWebView = unsafe { &*platform.inner().cast::<WKWebView>() };
             unsafe {
                 prefer_detached_inspector_defaults();
@@ -350,9 +403,24 @@ unsafe fn prefer_detached_inspector_on_view(view: &objc2_web_kit::WKWebView) {
 }
 
 #[cfg(target_os = "macos")]
+unsafe fn inspector_is_attached(inspector: &objc2::runtime::AnyObject) -> bool {
+    use objc2::sel;
+
+    let is_attached = sel!(isAttached);
+    if objc2::msg_send![inspector, respondsToSelector: is_attached] {
+        let attached: bool = objc2::msg_send![inspector, isAttached];
+        return attached;
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
 unsafe fn force_inspector_detached(inspector: &objc2::runtime::AnyObject) {
     use objc2::sel;
 
+    // Always prefer undocked. Default `show` docks and reparents the host
+    // WKWebView into a split — that is what blows slide-out/split to full
+    // Buzz client width. Detach must win over any attach preference.
     let set_attached = sel!(setAttached:);
     if objc2::msg_send![inspector, respondsToSelector: set_attached] {
         let (): () = objc2::msg_send![inspector, setAttached: false];
@@ -364,6 +432,42 @@ unsafe fn force_inspector_detached(inspector: &objc2::runtime::AnyObject) {
     let detach = sel!(detach);
     if objc2::msg_send![inspector, respondsToSelector: detach] {
         let (): () = objc2::msg_send![inspector, detach];
+    }
+    // If WebKit still reports attached (race on first show), detach again.
+    if inspector_is_attached(inspector) {
+        if objc2::msg_send![inspector, respondsToSelector: detach] {
+            let (): () = objc2::msg_send![inspector, detach];
+        }
+        if objc2::msg_send![inspector, respondsToSelector: set_attached] {
+            let (): () = objc2::msg_send![inspector, setAttached: false];
+        }
+    }
+}
+
+/// Re-force detached presentation for any pin/playground child webview.
+/// Call while Inspect is open so a user (or WebKit) cannot leave it docked.
+#[allow(dead_code)]
+pub fn redetach_inspector_for_webview(webview: &Webview) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = webview.with_webview(|platform| {
+            use objc2_web_kit::WKWebView;
+
+            // SAFETY: same child WKWebView / `_inspector` contract as
+            // open_detached_macos_inspector.
+            let view: &WKWebView = unsafe { &*platform.inner().cast::<WKWebView>() };
+            unsafe {
+                prefer_detached_inspector_defaults();
+                let Some(inspector) = macos_inspector_ptr(view) else {
+                    return;
+                };
+                force_inspector_detached(&*inspector);
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = webview;
     }
 }
 
@@ -450,7 +554,15 @@ mod tests {
     fn inspect_opens_a_detached_window_not_a_docked_split() {
         assert_eq!(
             playground_inspect_presentation(),
-            PlaygroundInspectPresentation::DetachedWindow
+            PlaygroundInspectPresentation::AttachedDocked
+        );
+    }
+
+    #[test]
+    fn inspect_policy_prefers_attached_docked_presentation() {
+        assert_eq!(
+            playground_inspect_presentation(),
+            PlaygroundInspectPresentation::AttachedDocked
         );
     }
 
@@ -474,7 +586,7 @@ mod tests {
         );
         assert_eq!(
             playground_inspect_presentation(),
-            PlaygroundInspectPresentation::DetachedWindow
+            PlaygroundInspectPresentation::AttachedDocked
         );
     }
 
@@ -516,7 +628,7 @@ mod tests {
         assert!(keep.height <= stage.height);
         assert_eq!(
             playground_inspect_presentation(),
-            PlaygroundInspectPresentation::DetachedWindow
+            PlaygroundInspectPresentation::AttachedDocked
         );
         assert!(INSPECTOR_STARTS_ATTACHED_DEFAULTS.contains(&"WebKit2InspectorStartsAttached"));
         assert!(INSPECTOR_STARTS_ATTACHED_DEFAULTS.contains(&"WebKitInspectorStartsAttached"));

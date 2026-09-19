@@ -6,9 +6,12 @@ import { isNativeWebviewModalParked } from "@/shared/lib/nativeWebviewModalPark"
 import { readPlaygroundStageBounds } from "../lib/deviceBezel";
 import {
   PLAYGROUND_DEVICES,
+  PLAYGROUND_DEVICE_SCALE_DEFAULT,
   playgroundDeviceViewport,
   playgroundUserAgent,
+  scalePlaygroundDeviceViewport,
   type PlaygroundDeviceId,
+  type PlaygroundDeviceScalePercent,
 } from "../lib/devices";
 import {
   PLAYGROUND_RESIZE_HANDLE_CLASS,
@@ -25,6 +28,7 @@ import {
 } from "../lib/webview";
 import type { PlaygroundSession } from "../lib/sessions";
 import { DeviceBezel } from "./DeviceBezel";
+import { DeviceMuseumToolbar } from "./DeviceMuseumToolbar";
 
 export type PlaygroundChromeMode = "desktop" | "responsive" | "mobile";
 
@@ -248,55 +252,47 @@ function MobileDeviceMuseum({
   const [orientation, setOrientation] = React.useState<
     "portrait" | "landscape"
   >("portrait");
+  const [scalePercent, setScalePercent] =
+    React.useState<PlaygroundDeviceScalePercent>(
+      PLAYGROUND_DEVICE_SCALE_DEFAULT,
+    );
   const hostRef = React.useRef<HTMLDivElement | null>(null);
   const device = PLAYGROUND_DEVICES.find((item) => item.id === deviceId);
-  const viewport = device
-    ? playgroundDeviceViewport(device, orientation)
-    : { width: 393, height: 852 };
+  const viewport = scalePlaygroundDeviceViewport(
+    device
+      ? playgroundDeviceViewport(device, orientation)
+      : { width: 393, height: 852 },
+    scalePercent,
+  );
 
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 flex-col gap-2"
       data-testid="playground-mobile-stage"
     >
-      <div className="flex flex-wrap items-center gap-2 px-3">
-        <select
-          className="rounded-md border border-border bg-background px-2 py-1 text-xs"
-          data-testid="playground-device-select"
-          onChange={(event) =>
-            setDeviceId(event.target.value as PlaygroundDeviceId)
-          }
-          value={deviceId}
-        >
-          {PLAYGROUND_DEVICES.map((item) => (
-            <option
-              data-testid={`playground-device-${item.id}`}
-              key={item.id}
-              value={item.id}
-            >
-              {item.name}
-            </option>
-          ))}
-        </select>
-        <button
-          className="rounded-md border border-border px-2 py-1 text-xs"
-          data-testid="playground-orientation"
-          onClick={() =>
-            setOrientation((value) =>
-              value === "portrait" ? "landscape" : "portrait",
-            )
-          }
-          type="button"
-        >
-          {orientation === "portrait" ? "Portrait" : "Landscape"}
-        </button>
-      </div>
+      <DeviceMuseumToolbar
+        deviceId={deviceId}
+        onDeviceIdChange={setDeviceId}
+        onOrientationToggle={() =>
+          setOrientation((value) =>
+            value === "portrait" ? "landscape" : "portrait",
+          )
+        }
+        onScalePercentChange={setScalePercent}
+        orientation={orientation}
+        scalePercent={scalePercent}
+        testIdPrefix="playground"
+      />
       <div
         className="flex min-h-0 flex-1 items-start justify-center overflow-auto bg-white p-3"
         data-testid="playground-mobile-backdrop"
       >
         {device ? (
-          <DeviceBezel device={device} orientation={orientation}>
+          <DeviceBezel
+            device={device}
+            orientation={orientation}
+            scalePercent={scalePercent}
+          >
             <NativeStageHost
               hostRef={hostRef}
               layoutKey={layoutKey}

@@ -98,6 +98,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   idleAuxiliaryHeaderActions,
   idleAuxiliaryOverridesThread = false,
   idleAuxiliaryExpanded,
+  idleAuxiliaryCoverAppChrome = false,
   idleAuxiliaryBodyClassName,
   idleAuxiliaryTitle = "",
   hasOlderMessages,
@@ -555,6 +556,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     useFocusIdleDrawer && onCloseIdleAuxiliaryPanel ? (
       <FocusThreadDrawer
         channelName={activeChannel?.name ?? "channel"}
+        coverAppChrome={idleAuxiliaryCoverAppChrome}
         escapeEnabled={idleAuxiliaryEscapeEnabled}
         // Stable key preserves keep-alive pin webviews across expand/collapse.
         key="idle-auxiliary-focus"

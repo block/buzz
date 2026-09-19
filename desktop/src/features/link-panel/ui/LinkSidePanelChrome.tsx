@@ -1,12 +1,11 @@
 import { useLocation } from "@tanstack/react-router";
 import {
+  AppWindow,
   ArrowLeft,
   ArrowRight,
   Camera,
   Copy,
   Inspect,
-  Maximize2,
-  Minimize2,
   RefreshCw,
 } from "lucide-react";
 import * as React from "react";
@@ -14,6 +13,7 @@ import { toast } from "sonner";
 
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import {
+  closePinWebviewInspect,
   getPinWebviewNavState,
   inspectPinWebview,
   PIN_WEBVIEW_RESTORE_EVENT,
@@ -32,6 +32,10 @@ import {
   playgroundScreenshotFile,
   stagePlaygroundScreenshotDraft,
 } from "@/features/playground/lib/screenshot";
+import {
+  openPopoutWindow,
+  popoutErrorMessage,
+} from "@/features/popout/lib/popoutWindow";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Button, type ButtonProps } from "@/shared/ui/button";
 import {
@@ -42,8 +46,9 @@ import {
 } from "@/shared/ui/tooltip";
 
 import {
+  closeLinkSidePanel,
+  getLinkSidePanel,
   setLinkSidePanelViewportMode,
-  toggleLinkSidePanelExpanded,
   type LinkSidePanelViewportMode,
 } from "../lib/linkSidePanelStore";
 
@@ -90,23 +95,29 @@ function ModeButton({
 }
 
 /**
- * Playground-style web chrome for the link/pin slide-out header actions.
- * Title + close stay on IdleAuxiliaryPanel.
+ * Playground-style web chrome for the link/pin slide-out (and detached OS
+ * window). Title + close stay on IdleAuxiliaryPanel when embedded.
  *
  * Layout (two rows so long URLs cannot push tooling off-screen):
  * 1. URL only — truncates/ellipsis within the available header width
  * 2. Desktop/Responsive/Mobile on the left; nav/tool icons right-justified
+ *
+ * Detach opens the existing pop-out window path (`kind: "link"`). Inspect is
+ * only shown once the browser is detached into its own window.
  */
 export function LinkSidePanelChrome({
-  expanded,
+  detached = false,
   pinId,
   url,
   viewportMode,
+  onViewportModeChange,
 }: {
-  expanded: boolean;
+  /** True when this chrome is hosted in a link pop-out OS/embedded window. */
+  detached?: boolean;
   pinId: string;
   url: string;
   viewportMode: LinkSidePanelViewportMode;
+  onViewportModeChange?: (mode: LinkSidePanelViewportMode) => void;
 }) {
   const location = useLocation();
   const conversation = React.useMemo(() => {
@@ -123,12 +134,14 @@ export function LinkSidePanelChrome({
     });
   }, [location.pathname, location.search]);
   const canScreenshot = playgroundScreenshotAvailable(conversation);
+  const setViewportMode = onViewportModeChange ?? setLinkSidePanelViewportMode;
 
   const [nav, setNav] = React.useState<PinWebviewNavState>({
     canGoBack: false,
     canGoForward: false,
     currentUrl: url,
   });
+  const [detachBusy, setDetachBusy] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -155,30 +168,52 @@ export function LinkSidePanelChrome({
     };
   }, [pinId, url]);
 
+  // Leaving the detached window closes inspect with the pin webview teardown.
+  // While embedded, Inspect is hidden — clear any stray inspector just in case.
   React.useEffect(() => {
-    if (!expanded) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      toggleLinkSidePanelExpanded();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [expanded]);
+    if (detached) return;
+    void closePinWebviewInspect(pinId).catch(() => {});
+  }, [detached, pinId]);
 
   const currentUrl = nav.currentUrl || url;
-  const expandLabel = expanded ? "Exit full screen" : "Expand link panel";
 
   async function handleInspect() {
+    if (!detached) return;
     try {
       await inspectPinWebview(pinId);
-      // Re-apply host bounds so a briefly docked inspector cannot stretch
-      // the pin webview past the slide-out width.
       window.dispatchEvent(new Event(PIN_WEBVIEW_RESTORE_EVENT));
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not open inspector.",
       );
+    }
+  }
+
+  async function handleDetach() {
+    if (detached || detachBusy) return;
+    const panel = getLinkSidePanel();
+    const title = panel?.title?.trim() || "Link";
+    const keepAlive = panel?.keepAlive ?? false;
+    setDetachBusy(true);
+    try {
+      await openPopoutWindow({
+        kind: "link",
+        title,
+        seed: pinId,
+        link: {
+          url: currentUrl || url,
+          pinId,
+          viewportMode,
+          keepAlive,
+        },
+      });
+      // Main slide-out yields to the OS/embedded window (same pattern as
+      // playground pop-out dismissing the in-main overlay).
+      closeLinkSidePanel();
+    } catch (error) {
+      toast.error(popoutErrorMessage(error, "Could not detach browser."));
+    } finally {
+      setDetachBusy(false);
     }
   }
 
@@ -224,19 +259,19 @@ export function LinkSidePanelChrome({
             <ModeButton
               active={viewportMode === "desktop"}
               label="Desktop"
-              onSelect={() => setLinkSidePanelViewportMode("desktop")}
+              onSelect={() => setViewportMode("desktop")}
               testId="link-side-panel-mode-desktop"
             />
             <ModeButton
               active={viewportMode === "responsive"}
               label="Responsive"
-              onSelect={() => setLinkSidePanelViewportMode("responsive")}
+              onSelect={() => setViewportMode("responsive")}
               testId="link-side-panel-mode-responsive"
             />
             <ModeButton
               active={viewportMode === "mobile"}
               label="Mobile"
-              onSelect={() => setLinkSidePanelViewportMode("mobile")}
+              onSelect={() => setViewportMode("mobile")}
               testId="link-side-panel-mode-mobile"
             />
           </div>
@@ -296,17 +331,19 @@ export function LinkSidePanelChrome({
             >
               <Copy />
             </ChromeIconButton>
-            <ChromeIconButton
-              aria-label="Inspect"
-              data-testid="link-side-panel-inspect"
-              onClick={() => void handleInspect()}
-              size="icon-xs"
-              tooltip="Inspect"
-              type="button"
-              variant="outline"
-            >
-              <Inspect />
-            </ChromeIconButton>
+            {detached ? (
+              <ChromeIconButton
+                aria-label="Inspect"
+                data-testid="link-side-panel-inspect"
+                onClick={() => void handleInspect()}
+                size="icon-xs"
+                tooltip="Inspect"
+                type="button"
+                variant="outline"
+              >
+                <Inspect />
+              </ChromeIconButton>
+            ) : null}
             {canScreenshot ? (
               <ChromeIconButton
                 aria-label="Screenshot"
@@ -320,17 +357,20 @@ export function LinkSidePanelChrome({
                 <Camera />
               </ChromeIconButton>
             ) : null}
-            <ChromeIconButton
-              aria-label={expandLabel}
-              data-testid="link-side-panel-expand"
-              onClick={() => toggleLinkSidePanelExpanded()}
-              size="icon-xs"
-              tooltip={expandLabel}
-              type="button"
-              variant="outline"
-            >
-              {expanded ? <Minimize2 /> : <Maximize2 />}
-            </ChromeIconButton>
+            {detached ? null : (
+              <ChromeIconButton
+                aria-label="Detach"
+                data-testid="link-side-panel-detach"
+                disabled={detachBusy}
+                onClick={() => void handleDetach()}
+                size="icon-xs"
+                tooltip="Detach"
+                type="button"
+                variant="outline"
+              >
+                <AppWindow />
+              </ChromeIconButton>
+            )}
           </div>
         </div>
       </div>

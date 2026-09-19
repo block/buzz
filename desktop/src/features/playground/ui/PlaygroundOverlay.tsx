@@ -25,7 +25,16 @@ import {
   playgroundShowsTitlebarGap,
   playgroundStageLayoutKey,
 } from "../lib/overlayLayout";
-import { currentPopoutPayload } from "@/features/popout/lib/popoutWindow";
+import {
+  currentPopoutPayload,
+  openPopoutWindow,
+  popoutErrorMessage,
+} from "@/features/popout/lib/popoutWindow";
+import { toast } from "sonner";
+import {
+  PLAYGROUND_HULA,
+  PLAYGROUND_VERSION,
+} from "@/features/playground/lib/types";
 import type { PlaygroundSession } from "../lib/sessions";
 import { usePlaygroundDockWidth } from "../lib/usePlaygroundDockWidth";
 import { PlaygroundChrome } from "./PlaygroundChrome";
@@ -104,6 +113,28 @@ export function PlaygroundOverlay({
     isOsPopout: currentPopoutPayload() != null,
   });
 
+  async function handleDetach() {
+    try {
+      await openPopoutWindow({
+        kind: "playground",
+        title: session.name,
+        seed: session.sid,
+        playground: {
+          hula: PLAYGROUND_HULA,
+          v: PLAYGROUND_VERSION,
+          name: session.name,
+          url: session.url,
+          sid: session.sid,
+          ...(session.pin ? { pin: session.pin } : {}),
+          ...(session.stack ? { stack: session.stack } : {}),
+          ...(session.expires != null ? { expires: session.expires } : {}),
+        },
+      });
+    } catch (error) {
+      toast.error(popoutErrorMessage(error, "Could not detach playground."));
+    }
+  }
+
   // Exiting fullscreen restores dock when they entered from dock
   // (`docked` stays true). Escape / the fullscreen control do not expand.
   const overlay = (
@@ -146,7 +177,10 @@ export function PlaygroundOverlay({
         onToggleDock={toggleDock}
         onToggleFullscreen={() => setOverlayFullscreen(!fullscreen)}
         session={session}
+        onDetach={() => void handleDetach()}
+        showDetach={chromeLayout.showDetach}
         showFullscreen={chromeLayout.showFullscreen}
+        showInspect={chromeLayout.showInspect}
       />
       <PlaygroundStage
         layoutKey={playgroundStageLayoutKey(fullscreen, layoutEpoch, docked)}

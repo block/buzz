@@ -470,10 +470,11 @@ fn record_navigation(app: &AppHandle, manager: &PlaygroundWebviewManager, sid: &
 fn remember_bounds(manager: &PlaygroundWebviewManager, sid: &str, bounds: &PlaygroundBounds) {
     if let Ok(mut sessions) = manager.sessions.lock() {
         if let Some(session) = sessions.get_mut(sid) {
-            // While Inspect is open, keep the frozen pre-inspect rect authoritative
-            // so a docked inspector cannot permanently stretch last_bounds.
+            // React stage/page-host is authoritative. While Inspect is open, refresh
+            // the clamp target so dock cannot permanently stretch last_bounds and
+            // fullscreen settle stays under header chrome.
             if session.pre_inspect_bounds.is_some() {
-                return;
+                session.pre_inspect_bounds = Some(bounds.clone());
             }
             session.last_bounds = Some(bounds.clone());
         }
@@ -801,24 +802,43 @@ pub async fn playground_webview_inspect(
         }
         bounds
     };
-    // Lock the inspected window *before* show so a briefly docked inspector
-    // cannot grow/shrink it (that flash hides the left menu / split chat).
-    // Detach-then-show on macOS. Do not call open_devtools() or set_size().
+    // Lock the inspected window *before* show so WebKit cannot bounce the
+    // Buzz/pop-out frame. Natural attached inspect (open_devtools). Callers
+    // should already be app-wide fullscreen so the dock stays in that surface.
     inspect::lock_main_window_size(&app, &window_label, window_size);
     if let Err(error) = inspect::open_playground_inspector(&webview) {
         inspect::unlock_main_window_size(&app, &window_label);
         return Err(error);
     }
-    if let Some(before) = bounds.as_ref() {
-        let keep = inspect::resolved_stage_bounds_after_inspect(
-            before,
-            window_size.unwrap_or((0, 0)),
-            window_size.unwrap_or((0, 0)),
-        );
-        apply_bounds(&app, &sid, &window_label, &keep)?;
+    // Clamp to the stage/page-host immediately so the first dock split stays
+    // under header chrome; continuous re-clamp is in schedule_inspect_stage_restore.
+    if let Some(bounds) = bounds.as_ref() {
+        let keep = inspect::clamp_webview_bounds_to_stage(bounds, bounds);
+        let _ = apply_bounds(&app, &sid, &window_label, &keep);
     }
-    inspect::schedule_inspect_stage_restore(app.clone(), sid, window_label);
+    inspect::schedule_inspect_stage_restore(app.clone(), sid.clone(), window_label.clone());
     Ok(PlaygroundInspectResult { webview_id })
+}
+
+#[tauri::command]
+pub async fn playground_webview_close_inspect(
+    app: AppHandle,
+    manager: State<'_, PlaygroundWebviewManager>,
+    sid: String,
+    window_label: Option<String>,
+) -> Result<(), String> {
+    let sid = sanitize_sid(&sid)?;
+    let window_label = normalize_window_label(window_label.as_deref());
+    let webview_id = playground_webview_label(&sid, &window_label);
+    if !inspect_target_is_safe(&webview_id) {
+        return Err("close inspect must target the playground webview".into());
+    }
+    if let Some(webview) = app.get_webview(&webview_id) {
+        inspect::close_playground_inspector(&webview)?;
+    }
+    inspect::finish_inspect_close(&app, &sid, &window_label);
+    let _ = manager;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1143,7 +1163,7 @@ mod tests {
         );
         assert_eq!(
             inspect::playground_inspect_presentation(),
-            inspect::PlaygroundInspectPresentation::DetachedWindow
+            inspect::PlaygroundInspectPresentation::AttachedDocked
         );
     }
 
