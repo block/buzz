@@ -99,6 +99,57 @@ fn test_an_appimage_launch_forces_shared_memory_dmabuf_transport() {
 }
 
 #[test]
+fn test_a_cosmic_wayland_session_disables_the_dmabuf_renderer() {
+    // #4305: Pop!_OS COSMIC ships Wayland by default and its compositor loses
+    // sync with the dmabuf renderer the same way NVIDIA's does — frozen UI,
+    // frames rendered but never handed off, min/max forces a one-frame
+    // redraw. `WEBKIT_DISABLE_DMABUF_RENDERER=1` is the reporter's verified
+    // workaround.
+    let drm = drm(&["0x8086"]);
+    let env = env_from(&[("XDG_CURRENT_DESKTOP", "COSMIC")]);
+    let plan = plan(NO_ARGS, &env, drm.path());
+
+    assert_eq!(
+        applied(&plan),
+        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+    );
+    let Plan::Apply { why, .. } = &plan else {
+        unreachable!()
+    };
+    assert!(why.contains("COSMIC"), "{why}");
+}
+
+#[test]
+fn test_a_cosmic_entry_in_a_multi_desktop_value_still_counts() {
+    // Sessions composed by nested compositors or wrappers report a
+    // colon-separated list (`sway:COSMIC`, `Hyprland:COSMIC`). The workaround
+    // targets the dmabuf desync, not the DE itself, so any COSMIC entry is a
+    // hit.
+    let drm = drm(&["0x8086"]);
+    let env = env_from(&[("XDG_CURRENT_DESKTOP", "sway:COSMIC")]);
+
+    assert_eq!(
+        applied(&plan(NO_ARGS, &env, drm.path())),
+        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+    );
+}
+
+#[test]
+fn test_a_non_cosmic_desktop_alone_changes_nothing() {
+    // KDE/GNOME do not exhibit the freeze — the workaround's real rendering
+    // cost means we apply it only where there is evidence of the desync.
+    let drm = drm(&["0x8086"]);
+
+    for desktop in ["KDE", "GNOME", "sway", "Hyprland"] {
+        let env = env_from(&[("XDG_CURRENT_DESKTOP", desktop)]);
+        assert!(
+            matches!(plan(NO_ARGS, &env, drm.path()), Plan::Leave { .. }),
+            "{desktop} must not trigger the workaround"
+        );
+    }
+}
+
+#[test]
 fn test_a_plain_non_nvidia_launch_changes_nothing() {
     let drm = drm(&["0x8086", "0x1002"]);
 
