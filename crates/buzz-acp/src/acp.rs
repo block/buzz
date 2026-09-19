@@ -3049,6 +3049,32 @@ mod tests {
     }
 
     #[cfg(unix)]
+    async fn spawn_recently_written_test_executable(
+        command: &str,
+        extra_env: &[(String, String)],
+    ) -> AcpClient {
+        const MAX_ATTEMPTS: usize = 8;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match AcpClient::spawn(command, &[], extra_env, false).await {
+                Ok(client) => return client,
+                Err(AcpError::Io(error))
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && attempt < MAX_ATTEMPTS =>
+                {
+                    // Highly parallel Linux test runs can briefly retain a write
+                    // lease after creating an executable script. Retry only that
+                    // transient kernel error; every other spawn failure is final.
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("spawn freshly written test executable: {error:?}"),
+            }
+        }
+
+        unreachable!("the bounded spawn loop returns or panics on every final attempt")
+    }
+
+    #[cfg(unix)]
     async fn spawn_named_script(name: &str, script: &str) -> (AcpClient, std::path::PathBuf) {
         use std::os::unix::fs::PermissionsExt;
 
@@ -3066,9 +3092,8 @@ mod tests {
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&path, permissions).expect("chmod fake adapter");
-        let client = AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], false)
-            .await
-            .expect("spawn named fake adapter");
+        let client =
+            spawn_recently_written_test_executable(path.to_str().expect("utf8 path"), &[]).await;
         (client, dir)
     }
 
@@ -3095,14 +3120,11 @@ mod tests {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).expect("chmod probe");
 
-        let mut client = AcpClient::spawn(
+        let mut client = spawn_recently_written_test_executable(
             path.to_str().expect("probe path is UTF-8"),
-            &[],
             extra_env,
-            false,
         )
-        .await
-        .expect("spawn env probe script");
+        .await;
         let observed = client
             .reader
             .next()
