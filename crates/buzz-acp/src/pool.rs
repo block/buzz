@@ -3427,7 +3427,16 @@ pub async fn run_prompt_task(
             );
         }
         Err(e) => {
-            tracing::error!(target: "pool::prompt", "session_prompt error: {e}");
+            let error_code = match &e {
+                AcpError::AgentError { code, .. } => Some(*code),
+                _ => None,
+            };
+            tracing::error!(
+                target: "pool::prompt",
+                error_class = e.sanitized_class(),
+                error_code,
+                "session_prompt failed"
+            );
             // AgentError means the agent caught a problem before mutating
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.

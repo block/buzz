@@ -46,6 +46,7 @@ use pool::{
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -4495,7 +4496,21 @@ fn dispatch_pending(
                 );
             }
         }
-        tracing::debug!(agent = agent.index, channel = %channel_id, scope = %scope.telemetry_label(), affinity_hit, "agent_claimed");
+        let correlation_id = batch_correlation_id(&batch);
+        let attempt = queue.next_attempt(&scope);
+        tracing::debug!(agent = agent.index, channel = %channel_id, scope = %scope.telemetry_label(), %correlation_id, attempt, affinity_hit, "agent_claimed");
+        if let Some(observer) = observer {
+            observer.emit(
+                "turn_admitted",
+                Some(agent.index),
+                &observer::context_for(Some(channel_id), None, None),
+                serde_json::json!({
+                    "correlationId": correlation_id,
+                    "attempt": attempt,
+                    "eventCount": batch.events.len() + batch.cancelled_events.len(),
+                }),
+            );
+        }
 
         let recoverable_batch = match ctx.dedup_mode {
             DedupMode::Queue => Some(batch.clone()),
@@ -4579,6 +4594,51 @@ fn dispatch_pending(
     dispatched_channels
 }
 
+/// Stable, privacy-safe identity for one admitted batch across retries.
+///
+/// A retry can absorb newer traffic before it is flushed again. Hashing the
+/// complete mutable event set would therefore assign the original work a new
+/// identity. The earliest received event is the immutable admission anchor:
+/// requeue paths preserve its monotonic timestamp, while traffic that joins a
+/// retry necessarily arrived later. Relay timestamps are only second-granular,
+/// so they cannot safely order two events admitted in the same second.
+fn batch_correlation_id(batch: &FlushBatch) -> String {
+    let mut digest = Sha256::new();
+    digest.update(batch.channel_id.as_bytes());
+    let anchor = batch
+        .cancelled_events
+        .iter()
+        .chain(&batch.events)
+        .min_by_key(|event| (event.received_at, event.event.id))
+        .expect("a dispatched batch must contain at least one event");
+    digest.update(anchor.event.id.as_bytes());
+    format!("acp-{}", hex::encode(&digest.finalize()[..12]))
+}
+
+/// User-facing wording for a sanitized error class.
+///
+/// Observer payloads retain the stable machine class; notices use readable
+/// copy and never include the provider's untrusted message.
+fn human_error_reason(error: &acp::AcpError) -> &'static str {
+    match error.sanitized_class() {
+        "transport_io" => "the agent transport failed",
+        "protocol_json" => "the agent returned invalid protocol data",
+        "agent_exited" => "the agent process exited",
+        "idle_timeout" => "the turn timed out",
+        "hard_timeout" => "the turn exceeded the maximum duration",
+        "cancel_drain_timeout" => "the cancelled turn did not stop cleanly",
+        "request_timeout" => "the agent did not respond in time",
+        "transport_write_timeout" => "the agent stopped accepting requests",
+        "protocol_error" => "the agent protocol failed",
+        "provider_rate_limited" => "the provider rate-limited the request",
+        "provider_overloaded" => "the provider was overloaded",
+        "provider_context_limit" => "the request exceeded the provider context limit",
+        "provider_model_not_found" => "the configured model was not found",
+        "provider_authentication" => "provider authentication failed",
+        _ => "the provider could not complete the request",
+    }
+}
+
 /// Returns `true` when `error` is a non-retryable authentication failure.
 ///
 /// Retrying auth errors is harmful: the token won't self-repair between
@@ -4647,6 +4707,14 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
+    let task_batch = pool
+        .task_map()
+        .values()
+        .find(|meta| meta.agent_index == agent_index)
+        .and_then(|meta| meta.recoverable_batch.as_ref());
+    let evidence_batch = result.batch.as_ref().or(task_batch);
+    let correlation_id = evidence_batch.map(batch_correlation_id);
+    let attempt = evidence_batch.map(|batch| queue.next_attempt(&batch.scope));
     let successful_steer_deliveries = pool
         .task_map()
         .values()
@@ -4681,6 +4749,12 @@ fn handle_prompt_result(
     // branch below records what actually happened; only the hard-timeout
     // match arm in the death_message construction reads it.
     let mut hard_timeout_fate_suffix: Option<&'static str> = None;
+    let mut terminal_class = match &result.outcome {
+        // ACP prompt completion is not proof that a signed Buzz event reached
+        // the relay. Delivery is certified separately by signed-event readback.
+        PromptOutcome::Ok(_) => "prompt-completed",
+        _ => "abandoned",
+    };
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -4711,6 +4785,7 @@ fn handle_prompt_result(
                 // accounting, same as a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
+                terminal_class = "requeued";
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -4729,6 +4804,7 @@ fn handle_prompt_result(
                 );
                 spawn_failure_notice(rest_client, &batch, content);
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
+                terminal_class = "dead-lettered";
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -4747,8 +4823,10 @@ fn handle_prompt_result(
                     );
                     spawn_failure_notice(rest_client, &dead, content);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
+                    terminal_class = "dead-lettered";
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
+                    terminal_class = "requeued";
                 }
             } else if matches!(
                 &result.outcome,
@@ -4767,6 +4845,7 @@ fn handle_prompt_result(
                     to apply the new configuration, then re-send your request."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+                terminal_class = "dead-lettered";
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -4782,6 +4861,7 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+                terminal_class = "dead-lettered";
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -4789,7 +4869,7 @@ fn handle_prompt_result(
                         "the turn exceeded the maximum duration".to_string()
                     }
                     PromptOutcome::AgentExited => "the agent process exited".to_string(),
-                    PromptOutcome::Error(e) => format!("{e}"),
+                    PromptOutcome::Error(e) => human_error_reason(e).to_string(),
                     PromptOutcome::ProjectContextIndeterminate(reason) => reason.clone(),
                     _ => "repeated failures".to_string(),
                 };
@@ -4797,6 +4877,9 @@ fn handle_prompt_result(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
                 spawn_failure_notice(rest_client, &dead, content);
+                terminal_class = "dead-lettered";
+            } else {
+                terminal_class = "requeued";
             }
         } else {
             tracing::debug!(
@@ -4847,6 +4930,24 @@ fn handle_prompt_result(
 
     let channel_id = result.source.channel_id();
     let turn_id = result.turn_id.clone();
+    if let Some(ref observer) = observer {
+        let error_class = match &result.outcome {
+            PromptOutcome::Error(error) => Some(error.sanitized_class()),
+            _ => None,
+        };
+        observer.emit(
+            "turn_terminal",
+            Some(agent_index),
+            &observer::context_for(channel_id, None, Some(turn_id.clone())),
+            serde_json::json!({
+                "correlationId": correlation_id,
+                "attempt": attempt,
+                "terminalClass": terminal_class,
+                "errorClass": error_class,
+                "pid": harness_pid,
+            }),
+        );
+    }
     let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
@@ -5010,10 +5111,10 @@ fn handle_prompt_result(
                     outcome = outcome_label,
                     configured_model = %harness_configured_model,
                     pid = harness_pid,
-                    error = %e,
+                    error_class = e.sanitized_class(),
                     "transport/protocol error — respawning agent"
                 );
-                emit_turn_error(&e.to_string(), error_code);
+                emit_turn_error(e.sanitized_class(), error_code);
 
                 let index = result.agent.index;
                 let slot_history = &mut crash_history[index];
@@ -5036,10 +5137,10 @@ fn handle_prompt_result(
                     outcome = outcome_label,
                     configured_model = %harness_configured_model,
                     pid = harness_pid,
-                    error = %e,
+                    error_class = e.sanitized_class(),
                     "agent_returned (application error — pipe intact)"
                 );
-                emit_turn_error(&e.to_string(), error_code);
+                emit_turn_error(e.sanitized_class(), error_code);
                 pool.return_agent(result.agent);
             }
         }
@@ -11045,7 +11146,7 @@ mod error_outcome_emission_tests {
             code: -32002,
             message: raw_error.to_string(),
         };
-        let expected_error = model_error.to_string();
+        let expected_error = model_error.sanitized_class();
         let observer = ObserverHandle::in_process();
 
         let agent = dummy_agent(0).await;
@@ -11191,6 +11292,20 @@ mod error_outcome_emission_tests {
         .await;
     }
 
+    #[test]
+    fn generic_provider_error_has_readable_private_safe_notice_copy() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "opaque provider failure; secret=must-not-escape".into(),
+        };
+        assert_eq!(
+            human_error_reason(&error),
+            "the provider could not complete the request"
+        );
+        assert!(!human_error_reason(&error).contains('_'));
+        assert!(!human_error_reason(&error).contains("must-not-escape"));
+    }
+
     async fn assert_application_error_is_requeued(error: acp::AcpError) {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
@@ -11268,6 +11383,361 @@ mod error_outcome_emission_tests {
             1,
             "non-auth application error must preserve the event for retry"
         );
+    }
+
+    #[tokio::test]
+    async fn application_error_terminal_outcomes_two_workers_three_queues() {
+        fn queued(channel_id: Uuid, content: &str) -> QueuedEvent {
+            let event = EventBuilder::new(Kind::Custom(9), content)
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            QueuedEvent {
+                channel_id,
+                scope: scope::SessionScope::Conversation { channel_id },
+                event,
+                received_at: std::time::Instant::now(),
+                prompt_tag: "ops13".into(),
+            }
+        }
+
+        fn register(pool: &mut AgentPool, agent_index: usize, batch: FlushBatch, turn_id: &str) {
+            let task_id = pool.join_set.spawn(async {}).id();
+            pool.task_map_mut().insert(
+                task_id,
+                crate::pool::TaskMeta {
+                    agent_index,
+                    channel_id: Some(batch.channel_id),
+                    scope: Some(batch.scope.clone()),
+                    turn_id: turn_id.into(),
+                    recoverable_batch: Some(batch),
+                    control_tx: None,
+                    steer_tx: None,
+                    successful_steer_deliveries: HashSet::new(),
+                },
+            );
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn complete(
+            pool: &mut AgentPool,
+            queue: &mut EventQueue,
+            config: &Config,
+            agent: OwnedAgent,
+            batch: Option<FlushBatch>,
+            outcome: PromptOutcome,
+            turn_id: &str,
+            removed_channels: &HashSet<Uuid>,
+            crash_history: &mut [SlotCircuit],
+            respawn_tx: &mpsc::Sender<RespawnResult>,
+            respawn_tasks: &mut tokio::task::JoinSet<()>,
+            observer: &ObserverHandle,
+        ) {
+            let channel_id = batch
+                .as_ref()
+                .map(|batch| batch.channel_id)
+                .or_else(|| {
+                    pool.task_map()
+                        .values()
+                        .find(|meta| meta.agent_index == agent.index)
+                        .and_then(|meta| meta.channel_id)
+                })
+                .unwrap();
+            let mut heartbeat_in_flight = false;
+            handle_prompt_result(
+                pool,
+                queue,
+                config,
+                PromptResult {
+                    agent,
+                    source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
+                    turn_id: turn_id.into(),
+                    outcome,
+                    batch,
+                },
+                &mut heartbeat_in_flight,
+                removed_channels,
+                crash_history,
+                respawn_tx,
+                respawn_tasks,
+                Some(observer.clone()),
+                None,
+            );
+        }
+
+        let channels = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        for (index, channel_id) in channels.iter().enumerate() {
+            assert!(queue.push(queued(*channel_id, &format!("private-prompt-{index}"))));
+        }
+        let batches: Vec<_> = (0..3)
+            .map(|_| queue.flush_next().expect("three independent queues"))
+            .collect();
+        assert_eq!(batches.len(), 3);
+
+        let stable = batch_correlation_id(&batches[0]);
+        assert_eq!(stable, batch_correlation_id(&batches[0].clone()));
+
+        let mut workers = vec![dummy_agent(0).await, dummy_agent(1).await];
+        for (worker, batch) in workers.iter_mut().zip(&batches) {
+            worker
+                .state
+                .sessions
+                .insert(batch.scope.clone(), format!("session-{}", worker.index));
+        }
+        let unaffected_scope = scope::SessionScope::Conversation {
+            channel_id: channels[2],
+        };
+        workers[0]
+            .state
+            .sessions
+            .insert(unaffected_scope.clone(), "session-unaffected".into());
+        let mut pool = AgentPool::from_slots(vec![None, None]);
+        for (worker, batch) in workers.iter_mut().zip(&batches) {
+            let generation = pool.record_scope_owner(batch.scope.clone(), worker.index);
+            worker
+                .state
+                .set_scope_owner_generation(batch.scope.clone(), generation);
+        }
+        let unaffected_generation = pool.record_scope_owner(unaffected_scope.clone(), 0);
+        workers[0]
+            .state
+            .set_scope_owner_generation(unaffected_scope.clone(), unaffected_generation);
+        register(&mut pool, 0, batches[0].clone(), "provider-turn-0");
+        register(&mut pool, 1, batches[1].clone(), "provider-turn-1");
+
+        let config = test_config();
+        let observer = ObserverHandle::in_process();
+        let mut crash_history = vec![
+            SlotCircuit {
+                crash_times: Vec::new(),
+                open_until: None,
+                respawn_in_flight: false,
+            },
+            SlotCircuit {
+                crash_times: Vec::new(),
+                open_until: None,
+                respawn_in_flight: false,
+            },
+        ];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let no_removed = HashSet::new();
+
+        // Both slots are in flight before either application-class failure is
+        // completed. Each pipe stays reusable and only its own queue changes.
+        complete(
+            &mut pool,
+            &mut queue,
+            &config,
+            workers.remove(0),
+            Some(batches[0].clone()),
+            PromptOutcome::Error(AcpError::AgentError {
+                code: -32603,
+                message: "provider overloaded; secret=must-not-escape".into(),
+            }),
+            "provider-turn-0",
+            &no_removed,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            &observer,
+        );
+        complete(
+            &mut pool,
+            &mut queue,
+            &config,
+            workers.remove(0),
+            Some(batches[1].clone()),
+            PromptOutcome::Error(AcpError::AgentError {
+                code: -32603,
+                message: "provider overloaded; token=must-not-escape".into(),
+            }),
+            "provider-turn-1",
+            &no_removed,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            &observer,
+        );
+        assert!(pool.agents_mut().iter().all(Option::is_some));
+        assert!(respawn_tasks.is_empty());
+        assert_eq!(
+            pool.agents_mut()[0]
+                .as_ref()
+                .unwrap()
+                .state
+                .sessions
+                .get(&batches[0].scope)
+                .map(String::as_str),
+            Some("session-0"),
+            "application error with an intact pipe must preserve its scoped session"
+        );
+        assert_eq!(
+            pool.agents_mut()[0]
+                .as_ref()
+                .unwrap()
+                .state
+                .sessions
+                .get(&unaffected_scope)
+                .map(String::as_str),
+            Some("session-unaffected"),
+            "an unrelated session on the same worker must survive"
+        );
+        assert_eq!(
+            pool.agents_mut()[1]
+                .as_ref()
+                .unwrap()
+                .state
+                .sessions
+                .get(&batches[1].scope)
+                .map(String::as_str),
+            Some("session-1"),
+            "the other failed worker's intact scoped session must survive"
+        );
+
+        // Exercise the real retry path. New traffic joins the requeued batch,
+        // but its admission correlation remains anchored to the oldest event.
+        let original_event_id = batches[0].events[0].event.id.to_hex();
+        let joined = queued(channels[0], "newer-private-prompt");
+        let joined_event_id = joined.event.id.to_hex();
+        assert!(queue.push(joined));
+        queue.clear_retry_throttle_for_test(batches[0].scope.clone());
+        let retry_batch = queue.flush_next().expect("requeued batch redispatches");
+        assert_eq!(retry_batch.scope, batches[0].scope);
+        assert_eq!(batch_correlation_id(&retry_batch), stable);
+        let retry_ids: HashSet<_> = retry_batch
+            .events
+            .iter()
+            .map(|event| event.event.id.to_hex())
+            .collect();
+        assert_eq!(retry_ids.len(), 2);
+        assert!(retry_ids.contains(&original_event_id));
+        assert!(retry_ids.contains(&joined_event_id));
+
+        // Exhaustion is explicit and distinct from retry.
+        queue.set_retry_count_for_test(&batches[2].scope, crate::queue::MAX_RETRIES);
+        let mut worker = pool.try_claim(None).expect("reusable worker");
+        let worker_index = worker.index;
+        let generation = pool.record_scope_owner(batches[2].scope.clone(), worker_index);
+        worker
+            .state
+            .set_scope_owner_generation(batches[2].scope.clone(), generation);
+        register(
+            &mut pool,
+            worker_index,
+            batches[2].clone(),
+            "provider-turn-dead",
+        );
+        complete(
+            &mut pool,
+            &mut queue,
+            &config,
+            worker,
+            Some(batches[2].clone()),
+            PromptOutcome::Error(AcpError::AgentError {
+                code: -32603,
+                message: "provider overloaded".into(),
+            }),
+            "provider-turn-dead",
+            &no_removed,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            &observer,
+        );
+
+        // Prompt completion is explicit but is not mislabeled as signed relay
+        // delivery. The removed channel is explicitly abandoned.
+        let worker = pool
+            .try_claim(Some(&retry_batch.scope))
+            .expect("reusable worker");
+        let worker_index = worker.index;
+        register(
+            &mut pool,
+            worker_index,
+            retry_batch.clone(),
+            "provider-turn-retry-completed",
+        );
+        complete(
+            &mut pool,
+            &mut queue,
+            &config,
+            worker,
+            None,
+            PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            "provider-turn-retry-completed",
+            &no_removed,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            &observer,
+        );
+
+        let abandoned_batch = batches[0].clone();
+        let worker = pool.try_claim(None).expect("reusable worker");
+        let worker_index = worker.index;
+        register(
+            &mut pool,
+            worker_index,
+            abandoned_batch.clone(),
+            "provider-turn-abandoned",
+        );
+        complete(
+            &mut pool,
+            &mut queue,
+            &config,
+            worker,
+            Some(abandoned_batch),
+            PromptOutcome::Error(AcpError::AgentError {
+                code: -32603,
+                message: "private body must-not-escape".into(),
+            }),
+            "provider-turn-abandoned",
+            &HashSet::from([channels[0]]),
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            &observer,
+        );
+
+        let terminals: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == "turn_terminal")
+            .collect();
+        assert_eq!(terminals.len(), 5, "one terminal per completed turn");
+        let classes: HashSet<_> = terminals
+            .iter()
+            .filter_map(|event| event.payload["terminalClass"].as_str())
+            .collect();
+        assert_eq!(
+            classes,
+            HashSet::from(["prompt-completed", "requeued", "dead-lettered", "abandoned",])
+        );
+        assert!(terminals.iter().all(|event| {
+            event.payload["correlationId"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("acp-"))
+                && event.payload["attempt"].as_u64().is_some()
+                && event.turn_id.is_some()
+                && event.agent_index.is_some()
+        }));
+        let encoded = serde_json::to_string(
+            &terminals
+                .iter()
+                .map(|event| &event.payload)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(!encoded.contains("must-not-escape"));
+        assert!(!encoded.contains("private-prompt"));
+        assert!(terminals
+            .iter()
+            .filter(|event| event.payload["terminalClass"] == "requeued")
+            .all(|event| event.payload["errorClass"] == "provider_overloaded"));
+        assert!(terminals.iter().any(|event| {
+            event.payload["terminalClass"] == "requeued" && event.payload["correlationId"] == stable
+        }));
     }
 }
 
