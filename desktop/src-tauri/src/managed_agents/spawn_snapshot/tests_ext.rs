@@ -457,3 +457,36 @@ fn unchanged_session_policy_does_not_require_restart() {
     let thread = snapshot_under(AcpSessionPolicy::Thread);
     assert!(policy_transition_diff(&thread, &snapshot_under(AcpSessionPolicy::Thread)).is_empty());
 }
+
+#[test]
+fn custom_harness_spawn_snapshot_mounts_buzz_dev_mcp() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, update_loaded_harness_registry, HarnessDefinition,
+    };
+    use std::collections::BTreeMap;
+
+    let _lock = registry_test_lock();
+    update_loaded_harness_registry(vec![HarnessDefinition {
+        id: "deepseek".into(),
+        label: "DeepSeek".into(),
+        command: "dsh".into(),
+        args: vec![],
+        env: BTreeMap::new(),
+        install_instructions_url: String::new(),
+        install_hint: String::new(),
+    }]);
+
+    // Create stores a command pin and leaves `runtime` unset.
+    let mut rec = record();
+    rec.agent_command_override = Some("dsh".into());
+    rec.agent_command = "dsh".into();
+    rec.runtime = None;
+    let canonical = snap(&rec);
+    assert_eq!(
+        canonical.get("mcp_command").and_then(|v| v.as_str()),
+        Some("buzz-dev-mcp"),
+        "spawn snapshot must record the sidecar so a restart actually injects it"
+    );
+
+    update_loaded_harness_registry(vec![]);
+}

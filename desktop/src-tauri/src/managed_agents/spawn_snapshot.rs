@@ -106,7 +106,8 @@ pub(crate) struct SpawnConfigSnapshot {
     /// The effective agent command the harness drives.
     pub command: String,
     pub args: Vec<String>,
-    /// Catalog-derived from `command`; `""` when the runtime has none.
+    /// Catalog-derived sidecar (`buzz-dev-mcp` for builtins that ship one and
+    /// for every user custom harness); `""` when the runtime has none.
     pub mcp_command: String,
     /// Fully layered process env: baked floor -> runtime metadata ->
     /// definition -> global -> persona -> agent.
@@ -198,10 +199,12 @@ impl SpawnConfigSnapshot {
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),
-            mcp_command: known_acp_runtime(&descriptor.command)
-                .and_then(|runtime| runtime.mcp_command)
-                .unwrap_or("")
-                .to_string(),
+            mcp_command: crate::managed_agents::resolve_harness_mcp_command(
+                record.runtime.as_deref().unwrap_or(""),
+                &descriptor.command,
+            )
+            .unwrap_or("")
+            .to_string(),
             // Effort has ONE representation in the snapshot: `effort_level`
             // below, always holding the projected effective value. The keys
             // stripped here mirror EXACTLY what the launch projection suppressed

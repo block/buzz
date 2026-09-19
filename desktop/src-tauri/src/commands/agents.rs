@@ -522,10 +522,17 @@ pub async fn create_managed_agent(
         // per-record field is never read at spawn time so user-supplied input
         // is silently discarded. Always sourcing from the catalog ensures
         // new agents pick up the correct value without any stored override.
-        let mcp_command = match crate::managed_agents::known_acp_runtime(&agent_command) {
-            Some(p) => p.mcp_command.unwrap_or("").to_string(),
-            None => String::new(),
-        };
+        // Custom harnesses mount buzz-dev-mcp even when `runtime` is unset
+        // (create stores the harness command, not the catalog id).
+        let mcp_runtime_id = requested_persona_id
+            .as_deref()
+            .and_then(|pid| personas.iter().find(|p| p.id == pid))
+            .and_then(|persona| persona.runtime.as_deref())
+            .unwrap_or("");
+        let mcp_command =
+            crate::managed_agents::resolve_harness_mcp_command(mcp_runtime_id, &agent_command)
+                .unwrap_or("")
+                .to_string();
 
         let team_id = input
             .team_id

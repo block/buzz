@@ -157,6 +157,21 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
     KNOWN_ACP_RUNTIMES.iter().find(|p| p.id == id)
 }
 
+/// MCP sidecar for spawn / catalog / snapshot.
+///
+/// Builtins keep their `KnownAcpRuntime::mcp_command`. User custom harnesses
+/// mount `buzz-dev-mcp`. Presets stay sidecar-less even though they share the
+/// loaded-harness registry with customs.
+pub(crate) fn resolve_harness_mcp_command(runtime_id: &str, command: &str) -> Option<&'static str> {
+    if let Some(runtime) = known_acp_runtime(command) {
+        return runtime.mcp_command;
+    }
+    if crate::managed_agents::custom_harnesses::is_loaded_custom_harness(runtime_id, command) {
+        return Some(crate::managed_agents::custom_harnesses::CUSTOM_HARNESS_MCP_COMMAND);
+    }
+    None
+}
+
 /// The agent command a freshly-created agent defaults to when the create
 /// request supplies none. Resolves the bundled `buzz-agent` from the catalog so
 /// the default cannot drift from the provider definition. Falls back to the id
@@ -1176,9 +1191,12 @@ pub fn discover_acp_runtimes_from(
                 command,
                 binary_path,
                 default_args,
-                // Custom harnesses are plain ACP — no MCP sidecar, no env-var
-                // model switching, no thinking knobs.
-                mcp_command: None,
+                // Custom harnesses mount buzz-dev-mcp so session/new can inject
+                // Buzz CLI auth into a sidecar the child ACP sandbox cannot
+                // strip. No env-var model switching or thinking knobs.
+                mcp_command: Some(
+                    crate::managed_agents::custom_harnesses::CUSTOM_HARNESS_MCP_COMMAND.to_string(),
+                ),
                 model_env_var: None,
                 provider_env_var: None,
                 thinking_env_var: None,

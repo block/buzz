@@ -287,10 +287,12 @@ pub fn build_managed_agent_summary(
             env: Default::default(),
         }
     });
-    let effective_mcp_command = known_acp_runtime(&descriptor.command)
-        .and_then(|r| r.mcp_command)
-        .unwrap_or("")
-        .to_string();
+    let effective_mcp_command = crate::managed_agents::resolve_harness_mcp_command(
+        record.runtime.as_deref().unwrap_or(""),
+        &descriptor.command,
+    )
+    .unwrap_or("")
+    .to_string();
 
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
@@ -519,9 +521,11 @@ pub fn spawn_agent_child(
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-    let effective_mcp_command = known_acp_runtime(effective_command)
-        .and_then(|r| r.mcp_command)
-        .unwrap_or("");
+    let effective_mcp_command = crate::managed_agents::resolve_harness_mcp_command(
+        record.runtime.as_deref().unwrap_or(""),
+        effective_command,
+    )
+    .unwrap_or("");
     let resolved_mcp_command: Option<std::path::PathBuf> = if effective_mcp_command.is_empty() {
         None
     } else {
