@@ -554,8 +554,19 @@ class ChannelDetailPage extends HookConsumerWidget {
       ],
     );
 
+    // Gate passive read-state advance on the app being foregrounded.
+    // NIP-RS markers are monotonic and sync across devices, so a
+    // backgrounded app must not mark arriving messages read — that would
+    // silently clear the unread state on the user's other devices (#7470).
+    // When the app is resumed, this effect re-runs with the same
+    // readTimestamp and catches the marker up.
+    final appLifecycle = ref.watch(appLifecycleProvider);
+
     useEffect(() {
       if (!readState.isReady || readTimestamp == null) {
+        return null;
+      }
+      if (appLifecycle != AppLifecycleState.resumed) {
         return null;
       }
       return deferReadStateUpdate(context, () {
@@ -566,7 +577,7 @@ class ChannelDetailPage extends HookConsumerWidget {
             .read(channelsProvider.notifier)
             .clearObservedUnreadCoveredByRead(channel.id, readTimestamp);
       });
-    }, [channel.id, readState.isReady, readTimestamp]);
+    }, [channel.id, readState.isReady, readTimestamp, appLifecycle]);
 
     return FrostedScaffold(
       resizeToAvoidBottomInset:
