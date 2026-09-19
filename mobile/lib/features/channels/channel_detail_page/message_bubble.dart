@@ -30,6 +30,19 @@ class _MessageBubble extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
+    final hasLocalReplies = ref.watch(
+      threadLocalRepliesProvider(
+        ThreadRepliesArgs(
+          channelId: currentChannelId,
+          rootId: message.rootId ?? message.id,
+        ),
+      ).select(
+        (replies) => replies.any((reply) {
+          final thread = reply.threadReference;
+          return thread.parentId == message.id || thread.rootId == message.id;
+        }),
+      ),
+    );
     // Watch only this user's profile to avoid rebuilding on unrelated cache changes.
     final pk = message.pubkey.toLowerCase();
     final profile =
@@ -119,7 +132,7 @@ class _MessageBubble extends HookConsumerWidget {
           snapshotKey: messageSnapshotKey,
           // Tap opens existing threads; long-press can start a new one.
           // MessageContent handles mention, channel-link, and media taps.
-          onTap: !hasReplies || allMessages == null
+          onTap: (!hasReplies && !hasLocalReplies) || allMessages == null
               ? null
               : () => Navigator.of(context).push(
                   MaterialPageRoute<void>(

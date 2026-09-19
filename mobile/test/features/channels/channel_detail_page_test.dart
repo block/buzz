@@ -10265,6 +10265,45 @@ void main() {
   });
 
   group('Message row thread navigation', () {
+    testWidgets('a local reply makes its thread immediately tappable', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'local-root',
+        pubkey: 'alice',
+        content: 'Start a local thread',
+      );
+      final notifier = _FakeMessagesNotifier([root]);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          messagesNotifier: notifier,
+          threadReplies: const {'local-root': []},
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(findRichText('Start a local thread'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsNothing);
+
+      notifier.addLocalMessage(
+        _textMsg(
+          id: 'local-reply',
+          pubkey: 'self',
+          content: 'Waiting for relay echo',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', 'local-root', '', 'reply'],
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(findRichText('Start a local thread'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(findRichText('Waiting for relay echo'), findsOneWidget);
+    });
+
     testWidgets('tapping a message with unloaded replies opens its thread', (
       tester,
     ) async {
