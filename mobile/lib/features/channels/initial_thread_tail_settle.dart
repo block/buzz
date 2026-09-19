@@ -33,6 +33,7 @@ class InitialThreadTailSettle {
     required BuildContext context,
     required ItemScrollController controller,
     required ItemPositionsListener positionsListener,
+    required ScrollPosition? Function() activePosition,
     required int? targetIndex,
     required double hiddenTopFraction,
     required double hiddenBottomFraction,
@@ -68,6 +69,9 @@ class InitialThreadTailSettle {
         // that fully visible target down would only add empty space above the
         // head. A clipped tail still takes the measured correction path.
         if (targetIsFullyVisible) {
+          // A superseded generation's placement may have left the position
+          // overscrolled; never reveal a viewport that is still springing.
+          settleThreadScrollPositionInRange(activePosition());
           _isComplete = true;
           onSettled();
           return;
@@ -83,9 +87,24 @@ class InitialThreadTailSettle {
               duration: const Duration(milliseconds: 1),
             )
             .whenComplete(() {
-              if (generation != _generation) return;
-              _isComplete = true;
-              onSettled();
+              // The package animates to an unclamped offset. When the target
+              // (plus its trailing padding) is shorter than the visible area,
+              // that offset lies past maxScrollExtent; iOS bouncing physics
+              // then lets the 1 ms drive overshoot and springs the whole
+              // thread back over ~600 ms. Settle the active position inside
+              // its range after the placement has laid out, and only then
+              // reveal, so the viewport first paints at rest on the tail.
+              // The clamp runs even for a superseded generation: it is
+              // idempotent, and the newer generation must not inherit a
+              // spring it cannot see.
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!context.mounted) return;
+                settleThreadScrollPositionInRange(activePosition());
+                if (generation != _generation) return;
+                _isComplete = true;
+                onSettled();
+              });
+              WidgetsBinding.instance.scheduleFrame();
             });
       });
       // A post-frame callback does not itself request the frame in which it
@@ -94,4 +113,20 @@ class InitialThreadTailSettle {
       WidgetsBinding.instance.scheduleFrame();
     });
   }
+}
+
+/// Moves an overscrolled thread position back inside its scroll range.
+///
+/// Programmatic placements can leave the position beyond its extents on iOS,
+/// where bouncing physics does not clamp driven scrolls; the resulting spring
+/// is the visible entry bounce. A clamped jump ends the ballistic activity and
+/// leaves the position idle. Returns whether a correction was applied.
+@visibleForTesting
+bool settleThreadScrollPositionInRange(ScrollPosition? position) {
+  if (position == null || !position.hasContentDimensions) return false;
+  if (!position.outOfRange) return false;
+  position.jumpTo(
+    position.pixels.clamp(position.minScrollExtent, position.maxScrollExtent),
+  );
+  return true;
 }
