@@ -1020,6 +1020,12 @@ pub enum WorkflowsCmd {
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
+        /// RFC 3339 timestamp from the previous page's next.before
+        #[arg(long, requires = "before_id")]
+        before: Option<String>,
+        /// Run UUID from the previous page's next.before_id
+        #[arg(long, requires = "before")]
+        before_id: Option<String>,
     },
     /// Approve or deny a workflow step
     #[command(
