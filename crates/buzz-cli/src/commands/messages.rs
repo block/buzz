@@ -600,12 +600,35 @@ fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(Stri
 
 pub struct SendMessageParams {
     pub channel_id: String,
-    pub content: String,
+    pub content: Option<String>,
+    pub content_file: Option<String>,
     pub kind: Option<u16>,
     pub reply_to: Option<String>,
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
+}
+
+fn resolve_message_content(
+    content: Option<String>,
+    content_file: Option<String>,
+) -> Result<String, CliError> {
+    match (content, content_file) {
+        (Some(content), None) => read_or_stdin(&content),
+        (None, Some(path)) => {
+            let bytes = std::fs::read(&path)
+                .map_err(|e| CliError::Usage(format!("failed to read {path:?}: {e}")))?;
+            String::from_utf8(bytes).map_err(|e| {
+                CliError::Usage(format!("message file {path:?} is not valid UTF-8: {e}"))
+            })
+        }
+        (Some(_), Some(_)) => Err(CliError::Usage(
+            "--content and --content-file cannot be used together".into(),
+        )),
+        (None, None) => Err(CliError::Usage(
+            "one of --content or --content-file is required".into(),
+        )),
+    }
 }
 
 pub async fn cmd_send_message(
@@ -616,15 +639,23 @@ pub async fn cmd_send_message(
     // jam shell-metacharacter-heavy text (backticks, $vars, etc.) through argv
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
-    p.content = read_or_stdin(&p.content)?;
-    validate_content_size(&p.content)?;
+    p.content = Some(resolve_message_content(
+        p.content.take(),
+        p.content_file.take(),
+    )?);
+    let Some(content) = p.content.as_ref() else {
+        return Err(CliError::Usage(
+            "one of --content or --content-file is required".into(),
+        ));
+    };
+    validate_content_size(content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
     let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
-    let stripped = strip_code_regions(&p.content);
+    let stripped = strip_code_regions(content);
     let uri_pubkeys = extract_nostr_uris(&stripped);
     // Supplying any identity explicitly authorizes unresolved or ambiguous @Name text
     // as presentation-only, matching Desktop's separate visible-label and p-tag model.
@@ -632,7 +663,7 @@ pub async fn cmd_send_message(
     // every intended identity whose visible label cannot be resolved uniquely.
     let has_explicit_mentions = !explicit_mentions.is_empty() || !uri_pubkeys.is_empty();
     let (member_pubkeys, auto_resolved) =
-        resolve_content_mentions(client, &p.channel_id, &p.content, has_explicit_mentions).await?;
+        resolve_content_mentions(client, &p.channel_id, content, has_explicit_mentions).await?;
     let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
 
     let missing = missing_members(&mention_pubkeys, &member_pubkeys);
@@ -665,9 +696,9 @@ pub async fn cmd_send_message(
         media_content.push(')');
     }
     let final_content = if media_content.is_empty() {
-        p.content.clone()
+        content.to_string()
     } else {
-        format!("{}{media_content}", p.content)
+        format!("{}{media_content}", content)
     };
 
     // Build thread ref if replying. `--reply-to` is the immediate parent; the
@@ -940,6 +971,7 @@ pub async fn dispatch(
         MessagesCmd::Send {
             channel,
             content,
+            content_file,
             kind,
             reply_to,
             broadcast,
@@ -951,6 +983,7 @@ pub async fn dispatch(
                 SendMessageParams {
                     channel_id: channel,
                     content,
+                    content_file,
                     kind,
                     reply_to,
                     broadcast,
@@ -1711,13 +1744,56 @@ mod tests {
     fn send_params(content: &str) -> super::SendMessageParams {
         super::SendMessageParams {
             channel_id: SEND_TEST_CHANNEL.to_string(),
-            content: content.to_string(),
+            content: Some(content.to_string()),
+            content_file: None,
             kind: None,
             reply_to: None,
             broadcast: false,
             files: vec![],
             mentions: vec![],
         }
+    }
+
+    #[test]
+    fn resolve_message_content_reads_utf8_file_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "buzz-message-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let expected = "UTF-8-Test: ä ö ü Ä Ö Ü ß „Anführungszeichen“";
+        std::fs::write(&path, expected.as_bytes()).unwrap();
+
+        let actual =
+            super::resolve_message_content(None, Some(path.to_string_lossy().into_owned()))
+                .unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn resolve_message_content_rejects_non_utf8_file() {
+        let path = std::env::temp_dir().join(format!(
+            "buzz-message-invalid-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+
+        let error = super::resolve_message_content(None, Some(path.to_string_lossy().into_owned()))
+            .unwrap_err();
+        std::fs::remove_file(path).unwrap();
+
+        assert!(
+            matches!(error, crate::error::CliError::Usage(message) if message.contains("not valid UTF-8"))
+        );
     }
 
     #[tokio::test]
