@@ -9,7 +9,13 @@ import {
   resetRenderScopedReactionHydration,
 } from "./renderScopedReactions.ts";
 import { formatTimelineMessages } from "./formatTimelineMessages.ts";
-import { channelMessagesKey } from "./messageQueryKeys.ts";
+import { channelMessagesKey, channelWindowKey } from "./messageQueryKeys.ts";
+
+import {
+  emptyChannelWindowStore,
+  replaceNewestChannelWindow,
+} from "./channelWindowStore.ts";
+import { projectChannelWindowMessages } from "./projectChannelWindow.ts";
 
 const CHANNEL_ID = "36411e44-0e2d-4cfe-bd6e-567eb169db9f";
 
@@ -151,6 +157,41 @@ test("hydrates visible reactions into the channel timeline cache", async () => {
         mine: r.reactedByCurrentUser,
       })),
     [{ count: 1, emoji: "✅", mine: true }],
+  );
+});
+
+test("hydration-only reactions survive a subsequent authoritative page projection", async () => {
+  const message = event(hex("1"), 9);
+  const reaction = event(hex("2"), 7, {
+    content: "✅",
+    tags: [["e", message.id]],
+  });
+  const queryClient = makeQueryClientStub([message]);
+  queryClient.setQueryData(
+    channelWindowKey(CHANNEL_ID),
+    replaceNewestChannelWindow(emptyChannelWindowStore(), {
+      startCursor: null,
+      rows: [{ event: message, thread: null }],
+      aux: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
+  );
+  await hydrateRenderScopedReactions({
+    channelId: CHANNEL_ID,
+    messageIds: [message.id],
+    queryClient,
+    deps: { fetchReactionEventsForMessages: async () => [reaction] },
+  });
+  projectChannelWindowMessages(queryClient, CHANNEL_ID);
+  assert.ok(
+    queryClient
+      .getQueryData(channelMessagesKey(CHANNEL_ID))
+      .some((e) => e.id === reaction.id),
+  );
+  assert.deepEqual(
+    claimUnhydratedRenderScopedReactionIds(CHANNEL_ID, [message.id]),
+    [],
   );
 });
 

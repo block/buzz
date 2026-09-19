@@ -694,12 +694,24 @@ test("timeline-intro-surface: channel intro waits for oldest-history boundary", 
   );
 });
 
-test("timeline-intro-surface: direct-message intro wins over channel intro", () => {
+test("timeline-intro-surface: direct-message intro waits for committed exhaustion", () => {
   assert.equal(
     selectTimelineIntroSurface({
       hasChannelIntro: true,
       hasDirectMessageIntro: true,
       hasReachedChannelStart: false,
+      isSkeletonVisible: false,
+    }),
+    null,
+  );
+});
+
+test("timeline-intro-surface: direct-message intro wins at the channel beginning", () => {
+  assert.equal(
+    selectTimelineIntroSurface({
+      hasChannelIntro: true,
+      hasDirectMessageIntro: true,
+      hasReachedChannelStart: true,
       isSkeletonVisible: false,
     }),
     "direct-message-intro",

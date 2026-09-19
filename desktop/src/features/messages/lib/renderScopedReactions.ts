@@ -1,6 +1,12 @@
 import type { QueryClient } from "@tanstack/react-query";
 
-import { channelMessagesKey, sortMessages } from "./messageQueryKeys";
+import { channelWindowKey } from "./messageQueryKeys";
+import {
+  emptyChannelWindowStore,
+  mergeLiveChannelWindowEvent,
+  type ChannelWindowStore,
+} from "./channelWindowStore";
+import { projectChannelWindowMessages } from "./projectChannelWindow";
 import type { MainTimelineEntry } from "./threadPanel";
 import type { TimelineMessage } from "../types";
 import { relayClient } from "@/shared/api/relayClient";
@@ -125,10 +131,15 @@ export async function hydrateRenderScopedReactions(input: {
       return;
     }
 
-    input.queryClient.setQueryData<RelayEvent[]>(
-      channelMessagesKey(input.channelId),
-      (current = []) => sortMessages([...current, ...reactionEvents]),
-    );
+    const windowKey = channelWindowKey(input.channelId);
+    let window =
+      input.queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+      emptyChannelWindowStore();
+    for (const event of reactionEvents) {
+      window = mergeLiveChannelWindowEvent(window, event, false);
+    }
+    input.queryClient.setQueryData(windowKey, window);
+    projectChannelWindowMessages(input.queryClient, input.channelId);
   } catch (error) {
     releaseRenderScopedReactionIds(input.channelId, messageIds);
     console.error(

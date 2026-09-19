@@ -1,3 +1,5 @@
+import { revalidateChannelWindow } from "./lib/revalidateChannelWindow";
+import { consumeChannelWindowRefreshIntent } from "./lib/channelWindowRefreshIntent";
 import { useEffect, useEffectEvent } from "react";
 import {
   type QueryClient,
@@ -61,6 +63,8 @@ import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 // from the on-render overlay.
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import {
+  appendOlderChannelWindow,
+  type ChannelWindowPage,
   emptyChannelWindowStore,
   mapChannelWindowEvents,
   mergeLiveChannelWindowEvent,
@@ -82,8 +86,6 @@ import {
 
 type MessageQueryContext = {
   optimisticId: string;
-  previousMessages: RelayEvent[];
-  previousWindow: ChannelWindowStore | undefined;
   channelId: string;
   queryKey: ReturnType<typeof channelMessagesKey>;
 };
@@ -263,6 +265,8 @@ export function reconcileFetchedChannelWindow(
   events: Awaited<ReturnType<typeof getChannelWindowEvents>>,
   previousMessages: RelayEvent[],
   signal: AbortSignal,
+  revalidatedPages?: ChannelWindowPage[],
+  retainedBeforeFetch?: ChannelWindowStore,
 ): RelayEvent[] {
   // Tauri invokes cannot be canceled after dispatch. A replacement refetch can
   // therefore win while this older request is still in flight. Never let that
@@ -273,7 +277,24 @@ export function reconcileFetchedChannelWindow(
   const current =
     queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
     emptyChannelWindowStore();
-  const next = replaceNewestChannelWindow(current, page);
+  let next = replaceNewestChannelWindow(current, page);
+  for (const older of revalidatedPages?.slice(1) ?? []) {
+    next = appendOlderChannelWindow(next, older);
+  }
+  if (retainedBeforeFetch) {
+    const freshIds = new Set(
+      (revalidatedPages ?? [page])
+        .filter((candidate) => !current.pages.includes(candidate))
+        .flatMap((candidate) => candidate.rows.map((row) => row.event.id)),
+    );
+    next.liveSummaries = Object.fromEntries(
+      Object.entries(current.liveSummaries).filter(
+        ([id, summary]) =>
+          !freshIds.has(id) ||
+          summary !== retainedBeforeFetch.liveSummaries[id],
+      ),
+    );
+  }
   queryClient.setQueryData(windowKey, next);
   const scope = channelHeadCacheScope(queryClient);
   if (scope) {
@@ -292,23 +313,69 @@ export function useChannelMessagesQuery(channel: Channel | null) {
     queryKey,
     queryFn: async ({ signal }) => {
       if (!channel) throw new Error("No channel selected.");
+      const latestOnly = consumeChannelWindowRefreshIntent(
+        queryClient,
+        channel.id,
+        signal,
+      );
       // Persisted heads seed asynchronously; wait for that seed so a channel
       // opened during boot takes the hydrated path instead of racing it with
       // a cold relay fetch.
       await channelHeadHydration(queryClient);
-      if (consumeHydratedChannel(queryClient, channel.id)) {
+      signal.throwIfAborted();
+      if (consumeHydratedChannel(queryClient, channel.id) && !latestOnly) {
         return queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       }
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const events = await getChannelWindowEvents(channel.id);
-      return reconcileFetchedChannelWindow(
-        queryClient,
-        channel.id,
-        events,
-        previousMessages,
-        signal,
-      );
+      const retained =
+        queryClient.getQueryData<ChannelWindowStore>(
+          channelWindowKey(channel.id),
+        ) ?? emptyChannelWindowStore();
+      try {
+        const events = await getChannelWindowEvents(channel.id);
+        return await revalidateChannelWindow({
+          head: parseChannelWindowResponse(events, channel.id, null),
+          retained: latestOnly ? emptyChannelWindowStore() : retained,
+          readCurrent: () =>
+            latestOnly
+              ? emptyChannelWindowStore()
+              : (queryClient.getQueryData<ChannelWindowStore>(
+                  channelWindowKey(channel.id),
+                ) ?? retained),
+          fetchPage: async (cursor, limitRows) =>
+            parseChannelWindowResponse(
+              await getChannelWindowEvents(channel.id, cursor, limitRows),
+              channel.id,
+              cursor,
+            ),
+          signal,
+          publish: (pages) =>
+            reconcileFetchedChannelWindow(
+              queryClient,
+              channel.id,
+              events,
+              queryClient.getQueryData<RelayEvent[]>(queryKey) ??
+                previousMessages,
+              signal,
+              pages,
+              retained,
+            ),
+        });
+      } catch (error) {
+        if (!signal.aborted) {
+          queryClient.setQueryData<ChannelWindowStore>(
+            channelWindowKey(channel.id),
+            (current) => ({
+              ...(current ?? retained),
+              refreshError: (current ?? retained).pages.length
+                ? "Couldn’t refresh messages. Your loaded history is still available."
+                : "Couldn’t load messages. Try again.",
+            }),
+          );
+        }
+        throw error;
+      }
     },
     staleTime: 5 * 60 * 1_000,
     gcTime: 60 * 60 * 1_000,
@@ -684,9 +751,9 @@ export function useSendMessageMutation(
 
       const queryKey = channelMessagesKey(effectiveChannel.id);
       const windowKey = channelWindowKey(effectiveChannel.id);
-      // The rendered timeline is projected from the channel-window cache. Cancel
-      // both reads before snapshotting either cache so an older window response
-      // cannot replace the optimistic row between onMutate and onSuccess.
+      // Cancel active query refetches before adding the optimistic row. Older
+      // paging and live writes can still commit afterward; rollback must remove
+      // only this operation, never restore these snapshots wholesale.
       await Promise.all([
         queryClient.cancelQueries({ queryKey }),
         queryClient.cancelQueries({ queryKey: windowKey }),
@@ -717,8 +784,6 @@ export function useSendMessageMutation(
 
       return {
         optimisticId: optimisticMessage.id,
-        previousMessages,
-        previousWindow,
         channelId: effectiveChannel.id,
         queryKey,
       };
@@ -732,11 +797,23 @@ export function useSendMessageMutation(
         return;
       }
 
-      queryClient.setQueryData(context.queryKey, context.previousMessages);
-      queryClient.setQueryData(
+      queryClient.setQueryData<ChannelWindowStore>(
         channelWindowKey(context.channelId),
-        context.previousWindow,
+        (current) =>
+          current
+            ? {
+                ...current,
+                liveOverlay: current.liveOverlay.filter(
+                  (event) => event.id !== context.optimisticId,
+                ),
+              }
+            : current,
       );
+      // Remove the cache-only pending copy too, or projection would retain it.
+      queryClient.setQueryData<RelayEvent[]>(context.queryKey, (current = []) =>
+        current.filter((event) => event.id !== context.optimisticId),
+      );
+      projectChannelWindowMessages(queryClient, context.channelId);
     },
     onSuccess: (message, _variables, context) => {
       // An accepted send proves the write-block is lifted; clear any recorded
@@ -807,6 +884,15 @@ export function useDeleteMessageMutation(channel: Channel | null) {
     },
     onSuccess: (_data, { eventId }) => {
       if (!channel) return;
+      queryClient.setQueryData<ChannelWindowStore>(
+        channelWindowKey(channel.id),
+        (current) =>
+          current
+            ? mapChannelWindowEvents(current, (event) =>
+                event.id === eventId ? null : event,
+              )
+            : current,
+      );
       queryClient.setQueryData<RelayEvent[]>(
         channelMessagesKey(channel.id),
         (current = []) => current.filter((message) => message.id !== eventId),
