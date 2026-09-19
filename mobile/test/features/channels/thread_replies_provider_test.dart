@@ -215,6 +215,53 @@ void main() {
     },
   );
 
+  test(
+    'local replies preserve cached authoritative replies after refresh failure',
+    () async {
+      final cached = _reply('cached', 1000);
+      final local = _reply('local', 1001);
+      final session = _FakeRelaySession()..replies = [cached];
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      final combined = container.listen(
+        threadRepliesWithLocalProvider(args),
+        (_, _) {},
+      );
+      await container.read(threadRepliesProvider(args).future);
+      container.read(threadLocalRepliesProvider(args).notifier).add(local);
+      await container.pump();
+      final refresh = Completer<List<NostrEvent>>();
+      session.nextQueryGate = refresh;
+      container.invalidate(threadRepliesProvider(args));
+      await container.pump();
+      expect(combined.read().value?.map((event) => event.id), [
+        'cached',
+        'local',
+      ]);
+      refresh.completeError(Exception('Refresh failed'));
+      await container.pump();
+      expect(container.read(threadRepliesProvider(args)).hasError, isTrue);
+      expect(combined.read().value?.map((event) => event.id), [
+        'cached',
+        'local',
+      ]);
+      expect(container.read(threadLocalRepliesProvider(args)), [local]);
+      session.replies = [cached, local];
+      container.invalidate(threadRepliesProvider(args));
+      await container.read(threadRepliesProvider(args).future);
+      await container.pump();
+      expect(combined.read().value?.map((event) => event.id), [
+        'cached',
+        'local',
+      ]);
+      await Future<void>.delayed(Duration.zero);
+      expect(container.read(threadLocalRepliesProvider(args)), isEmpty);
+    },
+  );
+
   test('reopening a disposed thread performs a fresh load', () async {
     final (container, fakeSession, subscription) = makeHarness([
       _reply('r1', 1000),

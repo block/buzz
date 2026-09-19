@@ -130,11 +130,10 @@ final threadRepliesWithLocalProvider = Provider.autoDispose
         }
       }
       if (localReplies.isEmpty) return relayReplies;
-      return relayReplies.when(
-        data: (events) => AsyncData(_mergeReplies(events, localReplies)),
-        loading: () => AsyncData(localReplies),
-        error: (error, stackTrace) => AsyncData(localReplies),
-      );
+      // This provider supplies display events; the original query remains
+      // the source of loading/error status. Preserve its retained value when
+      // merging optimistic replies during a failed refresh or retry.
+      return AsyncData(_mergeReplies(authoritative ?? const [], localReplies));
     });
 
 /// Union two event lists by id, newest-wins, in timeline order.

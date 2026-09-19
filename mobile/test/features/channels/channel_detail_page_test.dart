@@ -64,6 +64,8 @@ import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+part 'thread_reply_refresh_cases.dart';
+
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
 const _otherChannelId = '22222222-3333-4444-8555-666666666666';
@@ -471,6 +473,7 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  threadReplyRefreshTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
