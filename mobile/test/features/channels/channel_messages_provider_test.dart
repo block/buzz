@@ -1605,7 +1605,6 @@ void main() {
         createdAt: 30,
         kind: EventKind.deletion,
         tags: const [
-          ['h', _channelId],
           ['e', 'pending'],
         ],
         content: '',
@@ -2477,6 +2476,163 @@ void main() {
     },
   );
 
+  for (final newestFirst in [false, true]) {
+    test(
+      'overlapping deletion lookups preserve start order (newest first: $newestFirst)',
+      () async {
+        final first = Completer<List<NostrEvent>>();
+        final second = Completer<List<NostrEvent>>();
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              for (final id in ['owner', 'unrelated']) ...[
+                _event(id: id, createdAt: 10),
+                _summary(rootId: id, replyCount: 2),
+              ],
+              _bounds(),
+            ],
+            first.future,
+            second.future,
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        for (var i = 0; i < 2; i++) {
+          session.emit(
+            NostrEvent(
+              id: 'delete-$i',
+              pubkey: 'author',
+              createdAt: 100 + i,
+              kind: EventKind.deletion,
+              tags: [
+                ['h', _channelId],
+                ['e', 'unknown-$i'],
+              ],
+              content: '',
+              sig: '',
+            ),
+          );
+        }
+        await _pumpEventQueue();
+        expect(notifier.threadSummaries['unrelated']!.isCountPending, isTrue);
+        if (newestFirst) {
+          second.complete([_summary(rootId: 'owner', replyCount: 0)]);
+        } else {
+          first.complete([_summary(rootId: 'owner', replyCount: 1)]);
+        }
+        await _pumpEventQueue();
+        expect(notifier.threadSummaries['unrelated']!.isCountPending, isTrue);
+        if (newestFirst) {
+          first.complete([_summary(rootId: 'owner', replyCount: 1)]);
+        } else {
+          second.complete([_summary(rootId: 'owner', replyCount: 0)]);
+        }
+        await _pumpEventQueue();
+        expect(notifier.threadSummaries['owner']!.descendantCount, 0);
+        expect(notifier.threadSummaries['unrelated']!.descendantCount, 2);
+        expect(notifier.threadSummaries['unrelated']!.isCountPending, isFalse);
+        expect(notifier.threadSummaries['unrelated']!.isLowerBound, isFalse);
+        expect(notifier.threadSummaries['owner']!.isCountPending, isFalse);
+      },
+    );
+  }
+
+  test(
+    'failed overlapping ownership lookup keeps uncertainty until fresh summary',
+    () async {
+      final first = Completer<List<NostrEvent>>();
+      final second = Completer<List<NostrEvent>>();
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [
+            for (final id in ['owner', 'unrelated']) ...[
+              _event(id: id, createdAt: 10),
+              _summary(rootId: id, replyCount: 2),
+            ],
+            _bounds(),
+          ],
+          first.future,
+          second.future,
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      for (var i = 0; i < 2; i++) {
+        session.emit(
+          NostrEvent(
+            id: 'delete-$i',
+            pubkey: 'author',
+            createdAt: 100 + i,
+            kind: EventKind.deletion,
+            tags: [
+              ['h', _channelId],
+              ['e', 'unknown-$i'],
+            ],
+            content: '',
+            sig: '',
+          ),
+        );
+      }
+      first.completeError(Exception('ownership unavailable'));
+      await _pumpEventQueue();
+      second.complete([_summary(rootId: 'owner', replyCount: 0)]);
+      await _pumpEventQueue();
+      expect(notifier.threadSummaries['owner']!.descendantCount, 0);
+      expect(notifier.threadSummaries['unrelated']!.isCountPending, isTrue);
+      session.emit(_summary(rootId: 'unrelated', replyCount: 2));
+      expect(notifier.threadSummaries['unrelated']!.isCountPending, isFalse);
+      expect(notifier.threadSummaries['unrelated']!.isLowerBound, isFalse);
+    },
+  );
+
+  test(
+    'unscoped deletion evidence requires a matching queried target',
+    () async {
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      for (final kind in [EventKind.deletion, EventKind.nip29DeleteEvent]) {
+        final deletion = NostrEvent(
+          id: 'delete-$kind',
+          pubkey: 'author',
+          createdAt: 30,
+          kind: kind,
+          tags: const [
+            ['e', 'other-target'],
+          ],
+          content: '',
+          sig: '',
+        );
+        expect(
+          () => notifier.cacheThreadDeletions(
+            [deletion],
+            scopedTargetIds: {'queried-target'},
+          ),
+          throwsStateError,
+        );
+      }
+    },
+  );
+
   test('deleted-target metadata disables only the owning empty root', () async {
     final session = _RecordingRelaySessionNotifier(
       queryResults: [
@@ -2518,6 +2674,8 @@ void main() {
         .threadSummaries;
     expect(summaries['owner']?.descendantCount, 0);
     expect(summaries['unrelated']?.descendantCount, 1);
+    expect(summaries['unrelated']?.isCountPending, isFalse);
+    expect(summaries['unrelated']?.isLowerBound, isFalse);
     final entries = buildMainTimelineEntries(
       formatTimeline(
         container.read(channelMessagesProvider(_channelId)).value!,

@@ -41,6 +41,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final Map<String, ChannelWindowThreadSummary> _overflowFloors = {};
   final Map<String, int> _threadQueryVersions = {};
   int _threadQuerySerial = 0;
+  final _deletionSummaryUncertainty = <String, _DeletionSummaryUncertainty>{};
   final _replyOwnership = ThreadReplyOwnership();
   bool _hasListeners = true;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
@@ -72,6 +73,25 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   bool get hasLoadedMessages => _lastKnownMessages != null;
 
   Map<String, ChannelWindowThreadSummary> get threadSummaries => {
+    for (final entry in _baseThreadSummaries.entries)
+      entry.key: _deletionSummaryUncertainty.containsKey(entry.key)
+          ? ChannelWindowThreadSummary(
+              replyCount: entry.value.replyCount,
+              descendantCount: entry.value.descendantCount,
+              lastReplyAt: entry.value.lastReplyAt,
+              participantPubkeys: entry.value.participantPubkeys,
+              isLowerBound: true,
+              isCountPending: true,
+            )
+          : entry.value,
+  };
+
+  void _publishSummaryChange() {
+    final events = _lastKnownMessages;
+    if (events != null) state = AsyncData(events.toList());
+  }
+
+  Map<String, ChannelWindowThreadSummary> get _baseThreadSummaries => {
     ...channelWindowThreadSummaries(_windowStore),
     ..._queryThreadSummaries,
     ..._overflowFloors,
@@ -228,6 +248,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _overflowFloors.remove(root);
       _summaryRefreshes.cancel(root);
       _setThreadQueryVersion(root, pageVersion);
+      _clearDeletionUncertainty(root, pageVersion);
       if (cachedThreadReplyIds(root).length >
           (row.thread?.descendantCount ?? 0)) {
         _queueOverflowSummary(root);
@@ -258,7 +279,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     },
   );
 
-  void _handleLiveEvent(NostrEvent event, {bool authoritative = true}) {
+  void _handleLiveEvent(
+    NostrEvent event, {
+    bool authoritative = true,
+    int? summaryVersion,
+  }) {
     final before = _lastKnownMessages ?? const <NostrEvent>[];
     _replyOwnership.record([event]);
     // Invalidate the thread query independently of the selected channel-history
@@ -271,7 +296,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       final rootId = _initialWindowQueryInFlight
           ? event.getTagValue('e')
           : null;
-      if (_mergeWindowEventIntoStore(event)) {
+      if (_mergeWindowEventIntoStore(event, summaryVersion: summaryVersion)) {
         if (rootId != null) {
           _liveSummaryRootsDuringInitialWindowQuery.add(rootId);
         }
@@ -285,7 +310,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
 
     if (_usingChannelWindow) {
-      _handleWindowLiveEvent(event);
+      _handleWindowLiveEvent(event, summaryVersion: summaryVersion);
     } else {
       final current = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
       final merged = _boundEventReplies(_mergeEvent(current, event));
@@ -330,8 +355,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
   }
 
-  void _handleWindowLiveEvent(NostrEvent event) {
-    if (!_mergeWindowEventIntoStore(event)) return;
+  void _handleWindowLiveEvent(NostrEvent event, {int? summaryVersion}) {
+    if (!_mergeWindowEventIntoStore(event, summaryVersion: summaryVersion)) {
+      return;
+    }
     final windowEvents = flattenChannelWindowEvents(_windowStore);
     // Flattening already orders the window. Only merge and sort again when
     // there are retained deep-link events to include.
@@ -365,7 +392,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
   }
 
-  bool _mergeWindowEventIntoStore(NostrEvent event) {
+  bool _mergeWindowEventIntoStore(NostrEvent event, {int? summaryVersion}) {
     final isTimelineRow = EventKind.channelTimelineContentKinds.contains(
       event.kind,
     );
@@ -404,7 +431,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         _queryThreadSummaries.remove(root);
         _overflowFloors.remove(root);
         _summaryRefreshes.cancel(root);
-        beginThreadQuery(root);
+        final version = summaryVersion ?? ++_threadQuerySerial;
+        _setThreadQueryVersion(root, version);
+        _clearDeletionUncertainty(root, version);
       }
     }
     _windowStore = next;
@@ -540,10 +569,24 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   /// Applies explicit deletion evidence fetched for cached replies.
-  void cacheThreadDeletions(Iterable<NostrEvent> deletions) {
+  /// [scopedTargetIds] are targets of the authenticated channel-scoped query;
+  /// they permit standard kind-5 wire events that do not carry an h tag.
+  void cacheThreadDeletions(
+    Iterable<NostrEvent> deletions, {
+    Set<String> scopedTargetIds = const {},
+  }) {
     var events = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
     for (final event in deletions) {
-      if (event.channelId != channelId ||
+      final targets = event.tags
+          .where((tag) => tag.length > 1 && tag[0] == 'e')
+          .map((tag) => tag[1])
+          .toSet();
+      final scopedStandardDeletion =
+          event.kind == EventKind.deletion &&
+          event.channelId == null &&
+          targets.isNotEmpty &&
+          targets.every(scopedTargetIds.contains);
+      if ((!scopedStandardDeletion && event.channelId != channelId) ||
           (event.kind != EventKind.deletion &&
               event.kind != EventKind.nip29DeleteEvent)) {
         throw StateError('Expected a deletion in channel $channelId.');
@@ -610,6 +653,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       return;
     }
     _overflowFloors.remove(rootId);
+    _clearDeletionUncertainty(rootId, queryVersion ?? _threadQuerySerial);
     final resultIds = replies.map((event) => event.id).toSet();
     final missing = queriedIds.difference(resultIds)
       ..removeAll(_localReplyRoots.keys);

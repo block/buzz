@@ -89,7 +89,9 @@ final threadRepliesProvider = FutureProvider.autoDispose
           replies,
           queryVersion: queryVersion,
         );
-        if (deletions.isNotEmpty) channel.cacheThreadDeletions(deletions);
+        if (deletions.isNotEmpty) {
+          channel.cacheThreadDeletions(deletions, scopedTargetIds: missingIds);
+        }
       }
       return replies;
     });

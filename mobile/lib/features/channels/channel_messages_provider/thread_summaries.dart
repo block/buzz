@@ -16,7 +16,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
             .where((event) => ids.contains(event.id))
             .toList()
           ..sort(compareThreadRepliesChronologically);
-    final previous = threadSummaries[root];
+    final previous = _baseThreadSummaries[root];
     final count = (previous?.descendantCount ?? 0) > ids.length
         ? previous!.descendantCount
         : ids.length;
@@ -84,7 +84,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     };
     final fresh = targets.difference(alreadyDeleted);
     if (fresh.isEmpty) return;
-    _applyDeletedSummaries(fresh, before);
+    final candidates = _applyDeletedSummaries(fresh, before);
     final unknown = fresh
         .where(
           (id) =>
@@ -93,19 +93,32 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
         )
         .take(100)
         .toSet();
-    if (unknown.isNotEmpty) _resolveDeletionOwners(unknown);
+    if (unknown.isNotEmpty) _resolveDeletionOwners(unknown, candidates);
   }
 
-  void _applyDeletedSummaries(Set<String> targets, List<NostrEvent> before) {
+  Set<String> _applyDeletedSummaries(
+    Set<String> targets,
+    List<NostrEvent> before,
+  ) {
     final owners = <String, String>{};
     for (final id in targets) {
       final root = _replyOwnership.rootFor(id);
       if (root != null) owners[id] = root;
     }
+    final summaries = _baseThreadSummaries;
+    final candidates =
+        lowerBoundSummariesAfterDeletion(summaries, before, targets, owners)
+            .entries
+            .where(
+              (entry) =>
+                  entry.value.isCountPending && _isVisibleRoot(entry.key),
+            )
+            .map((entry) => entry.key)
+            .toSet();
     final floors = lowerBoundSummariesAfterDeletion(
-      threadSummaries,
+      summaries,
       before,
-      targets,
+      targets.where(owners.containsKey).toSet(),
       owners,
     );
     for (final entry in floors.entries) {
@@ -117,11 +130,25 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     while (_overflowFloors.length > 2048) {
       _overflowFloors.remove(_overflowFloors.keys.first);
     }
+    return candidates;
   }
 
-  Future<void> _resolveDeletionOwners(Set<String> targets) async {
+  Future<void> _resolveDeletionOwners(
+    Set<String> targets,
+    Set<String> candidates,
+  ) async {
     final generation = _initVersion;
-    final version = _threadQuerySerial;
+    final version = ++_threadQuerySerial;
+    for (final root in candidates) {
+      (_deletionSummaryUncertainty[root] ??= _DeletionSummaryUncertainty())
+          .begin(version);
+    }
+    while (_deletionSummaryUncertainty.length > 2048) {
+      _deletionSummaryUncertainty.remove(
+        _deletionSummaryUncertainty.keys.first,
+      );
+    }
+    _publishSummaryChange();
     try {
       final events = await _summarySession.queryRelay([
         NostrFilter(
@@ -142,17 +169,76 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
         }
         final root = event.getTagValue('e');
         if (root != null && (_threadQueryVersions[root] ?? 0) <= version) {
-          _handleLiveEvent(event);
+          _handleLiveEvent(event, summaryVersion: version);
         }
       }
+      // Distinct returned roots prove every target resolved when their count
+      // matches. Partial/empty responses cannot retire unrelated uncertainty.
+      _finishDeletionLookup(
+        candidates,
+        version,
+        resolved: events.length == targets.length,
+      );
     } catch (error) {
       // Keep pending presentation on query failure; a fresh summary or explicit
       // thread query can still reconcile it.
       if (_summaryMounted && generation == _initVersion) {
+        _finishDeletionLookup(candidates, version, resolved: false);
         debugPrint(
           '[ChannelMessagesNotifier] deletion ownership lookup failed: $error',
         );
       }
     }
+  }
+
+  void _clearDeletionUncertainty(String root, int version) {
+    final pending = _deletionSummaryUncertainty[root];
+    if (pending == null) return;
+    pending.clearThrough(version);
+    if (pending.isEmpty) _deletionSummaryUncertainty.remove(root);
+  }
+
+  void _finishDeletionLookup(
+    Set<String> candidates,
+    int version, {
+    required bool resolved,
+  }) {
+    for (final root in candidates) {
+      final pending = _deletionSummaryUncertainty[root];
+      if (pending == null) continue;
+      pending.finish(version, resolved: resolved);
+      if (pending.isEmpty) _deletionSummaryUncertainty.remove(root);
+    }
+    _publishSummaryChange();
+  }
+}
+
+// Track uncertainty independently of counts so resolving one deletion cannot
+// erase another pending deletion, or leave unrelated exact counts downgraded.
+class _DeletionSummaryUncertainty {
+  final _requests = <int>{};
+  int? _unresolvedVersion;
+
+  bool get isEmpty => _requests.isEmpty && _unresolvedVersion == null;
+
+  void begin(int version) {
+    _requests.add(version);
+    if (_requests.length > 256) {
+      final oldest = _requests.first;
+      if (oldest > (_unresolvedVersion ?? -1)) _unresolvedVersion = oldest;
+      _requests.remove(oldest);
+    }
+  }
+
+  void finish(int version, {required bool resolved}) {
+    if (!_requests.remove(version)) return;
+    if (!resolved && version > (_unresolvedVersion ?? -1)) {
+      _unresolvedVersion = version;
+    }
+  }
+
+  void clearThrough(int version) {
+    _requests.removeWhere((request) => request <= version);
+    if ((_unresolvedVersion ?? -1) <= version) _unresolvedVersion = null;
   }
 }
