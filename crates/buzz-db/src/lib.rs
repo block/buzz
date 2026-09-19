@@ -75,6 +75,7 @@ pub use community::{
     CreatedCommunityRecord, EnsuredCommunityRecord, OwnedCommunityRecord,
     UnarchivedCommunityRecord,
 };
+pub use store::task;
 pub use error::{DbError, Result};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
 pub use reaction::ReactionEventInsertOutcome;
