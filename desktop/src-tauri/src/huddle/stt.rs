@@ -541,9 +541,20 @@ fn create_kroko(model_dir: &std::path::Path) -> Option<sherpa_onnx::OnlineRecogn
     }
 }
 
+/// Streaming zipformer needs trailing silence so the last tokens can decode.
+const KROKO_TAIL_SAMPLES: usize = 8_000;
+
+fn with_kroko_tail_padding(speech_buf: &[f32]) -> Vec<f32> {
+    let mut padded = Vec::with_capacity(speech_buf.len() + KROKO_TAIL_SAMPLES);
+    padded.extend_from_slice(speech_buf);
+    padded.resize(speech_buf.len() + KROKO_TAIL_SAMPLES, 0.0);
+    padded
+}
+
 fn decode_kroko(recognizer: &sherpa_onnx::OnlineRecognizer, speech_buf: &[f32]) -> String {
+    let padded = with_kroko_tail_padding(speech_buf);
     let stream = recognizer.create_stream();
-    stream.accept_waveform(16_000, speech_buf);
+    stream.accept_waveform(16_000, &padded);
     stream.input_finished();
     while recognizer.is_ready(&stream) {
         recognizer.decode(&stream);
