@@ -7,16 +7,26 @@ import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   getChannelIdFromTags,
+  isBroadcastReply,
   isThreadReply,
 } from "@/features/messages/lib/threading";
+import { projectChannelWindowMessages } from "@/features/messages/lib/projectChannelWindow";
+import { channelWindowKey } from "@/features/messages/lib/messageQueryKeys";
+import {
+  emptyChannelWindowStore,
+  mergeLiveChannelWindowEvent,
+  type ChannelWindowStore,
+} from "@/features/messages/lib/channelWindowStore";
 import {
   hasMentionForEvent,
   shouldNotifyForEvent,
 } from "@/features/notifications/lib/shouldNotify";
 import { relayClient } from "@/shared/api/relayClient";
 import {
+  CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
+  CHANNEL_TIMELINE_CONTENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
 } from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
@@ -84,6 +94,8 @@ const CHANNELS_INVALIDATE_DEBOUNCE_MS = 500;
 // Only "new content" kinds should bump unread state. Shared with the
 // catch-up query in useUnreadChannels so the two paths stay in lockstep.
 const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
+const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
+const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
 
 export const EMPTY_SET: ReadonlySet<string> = new Set();
 
@@ -349,6 +361,30 @@ export function useLiveChannelUpdates(
         return mergeTimelineCacheMessages(current, event);
       },
     );
+
+    const isTimelineRow = CHANNEL_TIMELINE_KINDS.has(event.kind);
+    const isAuxEvent = CHANNEL_AUX_KINDS.has(event.kind);
+    // channelMessagesKey is derived from this store. Admission here follows
+    // render semantics, not the deliberately narrower unread-kind policy, so
+    // a later projection cannot discard a live row or structural overlay.
+    if (
+      (isTimelineRow && (!isThreadedReply || isBroadcastReply(event.tags))) ||
+      isAuxEvent
+    ) {
+      const windowKey = channelWindowKey(channelId);
+      const currentWindow =
+        queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+        emptyChannelWindowStore();
+      const nextWindow = mergeLiveChannelWindowEvent(
+        currentWindow,
+        event,
+        isTimelineRow,
+      );
+      if (nextWindow !== currentWindow) {
+        queryClient.setQueryData(windowKey, nextWindow);
+        projectChannelWindowMessages(queryClient, channelId);
+      }
+    }
   });
 
   React.useEffect(() => {

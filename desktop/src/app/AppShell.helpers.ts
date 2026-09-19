@@ -1,6 +1,7 @@
 import { isThreadReply } from "@/features/messages/lib/threading";
 import type { DesktopNotificationTarget } from "@/features/notifications/lib/desktop";
 import type { SearchHit } from "@/shared/api/types";
+import { KIND_FORUM_COMMENT, KIND_FORUM_POST } from "@/shared/constants/kinds";
 
 export type AppView =
   | "home"
@@ -183,7 +184,11 @@ export async function activateDesktopNotificationTarget(
   actions: {
     goChannel: (
       channelId: string,
-      options?: { force?: boolean },
+      options?: {
+        force?: boolean;
+        messageId?: string;
+        messageView?: "timeline";
+      },
     ) => Promise<unknown>;
     goHome: () => Promise<unknown>;
     openSearchHit: (
@@ -201,6 +206,17 @@ export async function activateDesktopNotificationTarget(
   let navigation: Promise<unknown>;
   if (!target.channelId) {
     navigation = actions.goHome();
+  } else if (
+    target.eventId &&
+    !target.openInThread &&
+    target.kind !== KIND_FORUM_POST &&
+    target.kind !== KIND_FORUM_COMMENT
+  ) {
+    navigation = actions.goChannel(target.channelId, {
+      force: true,
+      messageId: target.eventId,
+      messageView: "timeline",
+    });
   } else {
     const anchor = toSearchHit(target);
     navigation = anchor

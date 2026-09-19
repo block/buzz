@@ -98,7 +98,7 @@ export function ChannelScreen({
   onAddFiles, onCloseIdleAuxiliaryPanel,
   onCloseForumPost, onSelectForumPost,
   selectedForumPostId, targetForumReplyId,
-  targetMessageEvents, targetMessageId,
+  targetMessageEvents, targetMessageId, targetMessageView,
   ...searchTarget
 }: ChannelScreenProps) {
   const queryClient = useQueryClient();
@@ -657,6 +657,7 @@ export function ChannelScreen({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
     targetMessageId,
+    targetMessageView,
     timelineMessages,
   });
   useThreadTargetSync({
