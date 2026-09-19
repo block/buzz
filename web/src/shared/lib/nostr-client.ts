@@ -6,10 +6,7 @@
  */
 
 import { makeAuthEvent } from "nostr-tools/nip42";
-import {
-  type SignedNostrEvent,
-  signNostrEvent,
-} from "@/shared/lib/nostr-signer";
+import { type SignedNostrEvent, signNostrEvent } from "./nostr-signer.ts";
 
 export interface NostrFilter {
   ids?: string[];
@@ -24,6 +21,19 @@ export interface NostrFilter {
 export type NostrEvent = SignedNostrEvent;
 
 const QUERY_TIMEOUT_MS = 10_000;
+
+/**
+ * The relay disconnected before confirming the query was complete with EOSE.
+ *
+ * Any events received before this error are an incomplete prefix and must not
+ * be treated as a successful query result.
+ */
+export class NostrClosedBeforeEoseError extends Error {
+  constructor() {
+    super("Relay closed the connection before EOSE; results are incomplete.");
+    this.name = "NostrClosedBeforeEoseError";
+  }
+}
 
 /**
  * Open a WebSocket to `wsUrl`, authenticate via NIP-42 if challenged,
@@ -167,8 +177,8 @@ export function queryEvents(
     ws.addEventListener("close", () => {
       if (!settled) {
         settled = true;
-        clearTimeout(timeout);
-        resolve(events);
+        cleanup();
+        reject(new NostrClosedBeforeEoseError());
       }
     });
   });
