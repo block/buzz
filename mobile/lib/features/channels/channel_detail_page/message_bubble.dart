@@ -31,13 +31,8 @@ class _MessageBubble extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
     final hasLocalReplies = ref.watch(
-      threadLocalRepliesProvider(
-        ThreadRepliesArgs(
-          channelId: currentChannelId,
-          rootId: message.rootId ?? message.id,
-        ),
-      ).select(
-        (replies) => replies.any((reply) {
+      pendingLocalMessagesProvider(currentChannelId).select(
+        (messages) => messages.values.any((reply) {
           final thread = reply.threadReference;
           return thread.parentId == message.id || thread.rootId == message.id;
         }),
