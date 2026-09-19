@@ -5505,6 +5505,7 @@ mod tests {
             command: "buzz-dev-mcp".into(),
             args: vec![],
             env: vec![],
+            trusted: true,
         }
     }
 
