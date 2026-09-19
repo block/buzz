@@ -33,7 +33,7 @@ use crate::SdkError;
 /// Empty string is valid. Non-empty must be `clause` or `clause&clause&...`
 /// where each clause is `kind=<0-65535>`, `created_at<<0-4294967295>`, or
 /// `created_at><0-4294967295>`. Canonical decimals only (no leading zeros).
-fn validate_conditions(conditions: &str) -> Result<(), SdkError> {
+pub fn validate_conditions(conditions: &str) -> Result<(), SdkError> {
     if conditions.is_empty() {
         return Ok(());
     }
