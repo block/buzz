@@ -105,6 +105,47 @@ test("embed path does not call OS window create", async () => {
   embedded.resetEmbeddedWindowsForTests();
 });
 
+test("link Detach opens OS window even when embed-in-main is on", async () => {
+  installLocalStorage();
+  const settings = await import("./popoutSettings.ts");
+  const embedded = await import("./embeddedWindows.ts");
+  const { openPopoutWindow } = await import("./popoutWindow.ts");
+  settings.resetPopoutSettingsForTests();
+  embedded.resetEmbeddedWindowsForTests();
+  settings.setShowWindowsSection(true);
+  settings.setEmbedInMain(true);
+
+  const invokes = [];
+  globalThis.__TAURI_INTERNALS__ = {
+    invoke(cmd, args) {
+      invokes.push({ cmd, args });
+      return Promise.resolve();
+    },
+  };
+
+  await openPopoutWindow({
+    kind: "link",
+    title: "Port Hole",
+    seed: "pin-port-hole",
+    forceOsWindow: true,
+    link: {
+      url: "https://hula-port-hole.hulapreview.com",
+      pinId: "pin-port-hole",
+      viewportMode: "desktop",
+      keepAlive: false,
+    },
+  });
+
+  assert.equal(embedded.listEmbeddedWindows().length, 0);
+  assert.equal(invokes.length, 1);
+  assert.equal(invokes[0].cmd, "open_popout_window");
+  assert.match(invokes[0].args.label, /^popout-link-/);
+
+  delete globalThis.__TAURI_INTERNALS__;
+  settings.resetPopoutSettingsForTests();
+  embedded.resetEmbeddedWindowsForTests();
+});
+
 test("OS split parks the main overlay playground", async () => {
   installLocalStorage();
   const settings = await import("./popoutSettings.ts");

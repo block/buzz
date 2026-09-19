@@ -200,6 +200,7 @@ export function LinkSidePanelChrome({
         kind: "link",
         title,
         seed: pinId,
+        forceOsWindow: true,
         link: {
           url: currentUrl || url,
           pinId,
@@ -207,8 +208,8 @@ export function LinkSidePanelChrome({
           keepAlive,
         },
       });
-      // Main slide-out yields to the OS/embedded window (same pattern as
-      // playground pop-out dismissing the in-main overlay).
+      // Main slide-out yields to the OS window (same pattern as playground
+      // pop-out dismissing the in-main overlay).
       closeLinkSidePanel();
     } catch (error) {
       toast.error(popoutErrorMessage(error, "Could not detach browser."));
