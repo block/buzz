@@ -1,0 +1,21 @@
+// Copy this file to AppOverrides.xcconfig, which is gitignored, then replace
+// both placeholders with values from the operator-owned Apple account.
+// Never commit the populated override.
+BUNDLE_IDENTIFIER = REPLACE_WITH_YOUR_BUNDLE_IDENTIFIER
+BUZZ_DEVELOPMENT_TEAM = REPLACE_WITH_YOUR_TEAM_ID
+
+// One custom production identity serves iPhone and iPad. The notification
+// extension bundle identifier remains derived as $(BUNDLE_IDENTIFIER).NotificationService.
+BUZZ_IOS_PUSH_ENVIRONMENT = production
+BUZZ_APP_ATTEST_ENVIRONMENT = production
+BUZZ_PUSH_APP_PROFILE = buzz-ios-custom
+
+// The containing app owns gateway grants and App Attest state. The extension
+// group contains only the owner identity used for authenticated relay fetches.
+BUZZ_APP_GROUP_IDENTIFIER = group.$(BUNDLE_IDENTIFIER)
+BUZZ_APP_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
+BUZZ_EXTENSION_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER).push-extension
+
+// xcconfig treats // as a comment, so keep the empty expansion between the
+// slashes. Replace the example host with the private gateway service hostname.
+BUZZ_PUSH_GATEWAY_URL = https:/$()/push.example

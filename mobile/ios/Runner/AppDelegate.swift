@@ -14,19 +14,22 @@ import os.log
   private let pushNavigationBuffer = BuzzPushNavigationBuffer()
   private var apnsDeviceToken: Data?
   private lazy var endpointGrantStore = BuzzPushEndpointGrantKeychainStore(
-    accessGroup: Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
+    accessGroup: appKeychainAccessGroup
   )
   private var enrollmentTask: Task<Void, Never>?
   var appGroupIdentifier: String? {
     Bundle.main.object(forInfoDictionaryKey: "BuzzAppGroupIdentifier") as? String
   }
-  private var pushKeychainAccessGroup: String? {
-    Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
+  private var appKeychainAccessGroup: String? {
+    Bundle.main.object(forInfoDictionaryKey: "BuzzAppKeychainAccessGroup") as? String
+  }
+  private var extensionKeychainAccessGroup: String? {
+    Bundle.main.object(forInfoDictionaryKey: "BuzzExtensionKeychainAccessGroup") as? String
   }
   private lazy var pushSnapshotBridge = BuzzPushSnapshotBridge(
     appGroupIdentifier: appGroupIdentifier,
     endpointGrantStore: endpointGrantStore,
-    keychainAccessGroup: pushKeychainAccessGroup
+    keychainAccessGroup: extensionKeychainAccessGroup
   )
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
@@ -487,7 +490,7 @@ import os.log
         let driver = try BuzzDevPushEnrollmentDriver(
           gatewayBaseURL: gatewayURL,
           store: endpointGrantStore,
-          appAttestKeychainAccessGroup: pushKeychainAccessGroup,
+          appAttestKeychainAccessGroup: appKeychainAccessGroup,
           appProfile: appProfile
         )
         result(try driver.endpointGrants().map(\.flutterArguments))
@@ -614,9 +617,7 @@ import os.log
       let driver = try BuzzDevPushEnrollmentDriver(
         gatewayBaseURL: gatewayURL,
         store: endpointGrantStore,
-        appAttestKeychainAccessGroup: Bundle.main.object(
-          forInfoDictionaryKey: "BuzzKeychainAccessGroup"
-        ) as? String,
+        appAttestKeychainAccessGroup: appKeychainAccessGroup,
         appProfile: appProfile
       )
       enrollmentTask = Task { [weak self] in

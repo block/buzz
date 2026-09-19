@@ -13,9 +13,11 @@ BUZZ_DEVELOPMENT_TEAM = JMTDPW9CG3
 // Push support is always present in the iOS artifact. The current relay's
 // fully validated NIP-11 descriptor is the runtime activation authority.
 BUZZ_APP_GROUP_IDENTIFIER = group.$(BUNDLE_IDENTIFIER)
-BUZZ_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
+BUZZ_APP_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
+BUZZ_EXTENSION_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER).push-extension
 BUZZ_IOS_PUSH_ENVIRONMENT = development
 BUZZ_APP_ATTEST_ENVIRONMENT = development
+BUZZ_PUSH_APP_PROFILE = buzz-ios-dogfood
 
 // Worktree-aware debug identity (gitignored, written by
 // scripts/mobile-worktree-overrides.sh): a per-worktree bundle identifier

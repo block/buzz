@@ -36,7 +36,7 @@ final class NotificationService: UNNotificationServiceExtension {
   private lazy var resolver: BuzzPushNotificationResolving = {
     let keychainAccessGroup =
       Bundle.main.object(
-        forInfoDictionaryKey: "BuzzKeychainAccessGroup"
+        forInfoDictionaryKey: "BuzzExtensionKeychainAccessGroup"
       ) as? String
     return BuzzPushNotificationResolver(
       session: .shared,

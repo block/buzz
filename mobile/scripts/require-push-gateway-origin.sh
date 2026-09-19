@@ -3,6 +3,8 @@ set -eu
 
 gateway_origin=
 has_dart_define=false
+app_profile=
+has_app_profile_define=false
 old_ifs=$IFS
 IFS=','
 for encoded in ${DART_DEFINES:-}; do
@@ -16,6 +18,14 @@ for encoded in ${DART_DEFINES:-}; do
       has_dart_define=true
       gateway_origin=${decoded#BUZZ_PUSH_GATEWAY_URL=}
       ;;
+    BUZZ_PUSH_APP_PROFILE=*)
+      if [ "$has_app_profile_define" = true ]; then
+        echo "error: BUZZ_PUSH_APP_PROFILE must be supplied at most once." >&2
+        exit 1
+      fi
+      has_app_profile_define=true
+      app_profile=${decoded#BUZZ_PUSH_APP_PROFILE=}
+      ;;
   esac
 done
 IFS=$old_ifs
@@ -26,6 +36,25 @@ if [ "$has_dart_define" = false ] && [ -n "${BUZZ_PUSH_GATEWAY_URL:-}" ]; then
   DART_DEFINES=${DART_DEFINES:+$DART_DEFINES,}$encoded
   export DART_DEFINES
 fi
+
+if [ "$has_app_profile_define" = false ] && [ -n "${BUZZ_PUSH_APP_PROFILE:-}" ]; then
+  app_profile=$BUZZ_PUSH_APP_PROFILE
+  encoded=$(printf '%s' "BUZZ_PUSH_APP_PROFILE=$app_profile" | base64 | tr -d '\n')
+  DART_DEFINES=${DART_DEFINES:+$DART_DEFINES,}$encoded
+  export DART_DEFINES
+elif [ "$has_app_profile_define" = true ] && [ -n "${BUZZ_PUSH_APP_PROFILE:-}" ] \
+  && [ "$app_profile" != "$BUZZ_PUSH_APP_PROFILE" ]; then
+  echo "error: BUZZ_PUSH_APP_PROFILE conflicts with the selected Xcode app profile." >&2
+  exit 1
+fi
+
+case "$app_profile" in
+  ''|buzz-ios-dogfood|buzz-ios-custom) ;;
+  *)
+    echo "error: BUZZ_PUSH_APP_PROFILE must be buzz-ios-dogfood or buzz-ios-custom." >&2
+    exit 1
+    ;;
+esac
 
 if [ "$has_dart_define" = false ] && [ -z "$gateway_origin" ]; then
   # An unconfigured artifact deliberately has no push capability.

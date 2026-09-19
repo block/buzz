@@ -4,8 +4,8 @@
 <dict>
 	<key>BuzzAppGroupIdentifier</key>
 	<string>$(BUZZ_APP_GROUP_IDENTIFIER)</string>
-	<key>BuzzKeychainAccessGroup</key>
-	<string>$(AppIdentifierPrefix)$(BUZZ_KEYCHAIN_ACCESS_GROUP)</string>
+	<key>BuzzExtensionKeychainAccessGroup</key>
+	<string>$(AppIdentifierPrefix)$(BUZZ_EXTENSION_KEYCHAIN_ACCESS_GROUP)</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

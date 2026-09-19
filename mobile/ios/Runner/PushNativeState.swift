@@ -58,7 +58,7 @@ enum BuzzPushKeychain {
     for (communityID, privateKeyHex) in signingKeys {
       query[kSecAttrAccount as String] = communityID
       query[kSecValueData as String] = Data(privateKeyHex.utf8)
-      query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+      query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
       let status = SecItemAdd(query as CFDictionary, nil)
       guard status == errSecSuccess else {
         SecItemDelete(baseQuery(accessGroup: accessGroup) as CFDictionary)

@@ -4,8 +4,10 @@
 <dict>
 	<key>BuzzAppGroupIdentifier</key>
 	<string>$(BUZZ_APP_GROUP_IDENTIFIER)</string>
-	<key>BuzzKeychainAccessGroup</key>
-	<string>$(AppIdentifierPrefix)$(BUZZ_KEYCHAIN_ACCESS_GROUP)</string>
+	<key>BuzzAppKeychainAccessGroup</key>
+	<string>$(AppIdentifierPrefix)$(BUZZ_APP_KEYCHAIN_ACCESS_GROUP)</string>
+	<key>BuzzExtensionKeychainAccessGroup</key>
+	<string>$(AppIdentifierPrefix)$(BUZZ_EXTENSION_KEYCHAIN_ACCESS_GROUP)</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>

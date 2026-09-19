@@ -136,33 +136,35 @@ Relay rollout remains an explicit deployment opt-in. Only deployments with
 `docs/push-gateway-deployment.md` for the canonical gateway profile contract,
 manual physical-device proof, measurements, and rollback procedure.
 
-For local physical-device development, override the identity and sandbox
-environments in the gitignored `mobile/ios/Flutter/AppOverrides.xcconfig`:
+For an operator-owned physical-device build, copy the safe tracked template to
+the gitignored override and replace its placeholders locally:
 
-```xcconfig
-BUNDLE_IDENTIFIER = xyz.block.buzz.mobile
-BUZZ_DEVELOPMENT_TEAM = EYF346PHUG
-BUZZ_IOS_PUSH_ENVIRONMENT = development
-BUZZ_APP_ATTEST_ENVIRONMENT = development
-BUZZ_PUSH_GATEWAY_URL = https:/$()/push.example
+```bash
+cp mobile/ios/Flutter/AppOverrides.xcconfig.example \
+  mobile/ios/Flutter/AppOverrides.xcconfig
 ```
 
-This exercises the client, extension, relay, and gateway integration without
-requiring a dogfood development signing identity. It uses the canonical
-gateway's server-owned App Store profile configured for sandbox in the local
-development gateway; it does not validate the internally distributed dogfood
-artifact or enable the App Store profile in production. Validate dogfood APNs
-end to end by cutting an internal release, waiting for it to reach Mobile
-Releases/Comp Portal, and installing that signed artifact on a physical device.
+The custom template selects the compiled `buzz-ios-custom` application profile,
+production APNs, and production App Attest for one universal iPhone/iPad app.
+It keeps the extension bundle identifier derived from the parent and separates
+the containing app's gateway/App Attest Keychain group from the extension's
+owner-identity-only group. The populated file must never be committed. The
+Apple account must provision the parent App ID, derived extension App ID, App
+Group, and both Keychain groups with matching values before a signed build can
+succeed.
+
+Development App Attest does not prove production enrollment. The phase-zero
+proof therefore requires a production-signed physical-device build; Simulator
+or sandbox APNs runs are useful only for source-level development. The stock
+App Store and dogfood identities remain separate from this custom profile.
 
 Parent app identifiers require Apple's Communication
 Notifications capability and a regenerated app provisioning profile. The
 Notification Service Extension profile does not require that capability.
-Enable it on the personal development App ID for local rich-presentation
-validation. Enabling it on the Block dogfood and eventual App Store App IDs is
-a release follow-up and is not performed by this repository change. Without a
-matching parent profile, source and unit validation still work, but the app
-cannot be signed for a physical device.
+The parent also requires Push Notifications and production App Attest. The
+extension requires the shared App Group and only the dedicated extension
+Keychain group. Without matching parent and extension profiles, source and unit
+validation still work, but the pair cannot be signed for a physical device.
 
 APNs and the gateway continue to carry only the constant opaque wake-up. The
 extension fetches the message from the scoped relay, verifies message, sender

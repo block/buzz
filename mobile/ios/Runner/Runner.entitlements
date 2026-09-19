@@ -16,7 +16,8 @@
 	</array>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>$(AppIdentifierPrefix)$(BUZZ_KEYCHAIN_ACCESS_GROUP)</string>
+		<string>$(AppIdentifierPrefix)$(BUZZ_APP_KEYCHAIN_ACCESS_GROUP)</string>
+		<string>$(AppIdentifierPrefix)$(BUZZ_EXTENSION_KEYCHAIN_ACCESS_GROUP)</string>
 	</array>
 </dict>
 </plist>

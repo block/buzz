@@ -13,7 +13,9 @@ BUZZ_DEVELOPMENT_TEAM = EYF346PHUG
 // Push support is always present in the iOS artifact. Relay advertisement is
 // the rollout authority, so a relay without a valid descriptor remains inert.
 BUZZ_APP_GROUP_IDENTIFIER = group.$(BUNDLE_IDENTIFIER)
-BUZZ_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
+BUZZ_APP_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
+BUZZ_EXTENSION_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER).push-extension
 BUZZ_IOS_PUSH_ENVIRONMENT = production
 BUZZ_APP_ATTEST_ENVIRONMENT = production
+BUZZ_PUSH_APP_PROFILE = buzz-ios-dogfood
 #include? "AppOverrides.xcconfig"
