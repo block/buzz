@@ -97,6 +97,8 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("invalid environment variable {0}")]
     Invalid(&'static str),
+    #[error("at least one complete application profile must be configured")]
+    NoApplicationProfiles,
 }
 fn parse_keyring(
     e: &HashMap<String, String>,
@@ -166,6 +168,7 @@ fn parse_profile(
     e: &HashMap<String, String>,
     variables: &ProfileVariables,
     optional: bool,
+    default_environment: Option<ApnsEnvironment>,
 ) -> Result<Option<AppProfileConfig>, ConfigError> {
     let any_present = [
         variables.app_id,
@@ -194,10 +197,9 @@ fn parse_profile(
     }
     let apns_cert_path = PathBuf::from(required(variables.cert)?);
     let apns_environment = match e.get(variables.environment).map(String::as_str) {
-        None if !optional => ApnsEnvironment::Production,
+        None => default_environment.ok_or(ConfigError::Missing(variables.environment))?,
         Some("production") => ApnsEnvironment::Production,
         Some("sandbox") => ApnsEnvironment::Sandbox,
-        None => return Err(ConfigError::Missing(variables.environment)),
         Some(_) => return Err(ConfigError::Invalid(variables.environment)),
     };
     Ok(Some(AppProfileConfig {
@@ -283,9 +285,9 @@ impl Config {
                 topic: "BUZZ_PUSH_DOGFOOD_APNS_TOPIC",
                 environment: "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT",
             },
-            false,
-        )?
-        .ok_or(ConfigError::Missing("BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID"))?;
+            true,
+            Some(ApnsEnvironment::Production),
+        )?;
         let custom = parse_profile(
             e,
             &ProfileVariables {
@@ -295,10 +297,17 @@ impl Config {
                 environment: "BUZZ_PUSH_CUSTOM_APNS_ENVIRONMENT",
             },
             true,
+            None,
         )?;
-        let mut profiles = HashMap::from([(AppProfile::BuzzIosDogfood, dogfood)]);
+        let mut profiles = HashMap::new();
+        if let Some(dogfood) = dogfood {
+            profiles.insert(AppProfile::BuzzIosDogfood, dogfood);
+        }
         if let Some(custom) = custom {
             profiles.insert(AppProfile::BuzzIosCustom, custom);
+        }
+        if profiles.is_empty() {
+            return Err(ConfigError::NoApplicationProfiles);
         }
         let bind_addr = e
             .get("BUZZ_PUSH_BIND_ADDR")
@@ -454,6 +463,51 @@ mod tests {
             Config::from_map(&env),
             Err(ConfigError::Missing("BUZZ_PUSH_CUSTOM_APNS_TOPIC"))
         ));
+    }
+
+    #[test]
+    fn custom_profile_can_be_the_only_configured_application_identity() {
+        let mut env = base();
+        for key in [
+            "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID",
+            "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH",
+            "BUZZ_PUSH_DOGFOOD_APNS_TOPIC",
+            "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT",
+        ] {
+            env.remove(key);
+        }
+        env.extend([
+            (
+                "BUZZ_PUSH_CUSTOM_APP_ATTEST_APP_ID".into(),
+                "CUSTOMTEAM.example.custom.buzz".into(),
+            ),
+            (
+                "BUZZ_PUSH_CUSTOM_APNS_CERT_PATH".into(),
+                "/custom-identity.pem".into(),
+            ),
+            (
+                "BUZZ_PUSH_CUSTOM_APNS_TOPIC".into(),
+                "example.custom.buzz".into(),
+            ),
+            (
+                "BUZZ_PUSH_CUSTOM_APNS_ENVIRONMENT".into(),
+                "production".into(),
+            ),
+        ]);
+
+        let config = Config::from_map(&env).expect("custom-only gateway profile");
+        assert_eq!(config.profiles.len(), 1);
+        assert!(config.profiles.contains_key(&AppProfile::BuzzIosCustom));
+
+        for key in [
+            "BUZZ_PUSH_CUSTOM_APP_ATTEST_APP_ID",
+            "BUZZ_PUSH_CUSTOM_APNS_CERT_PATH",
+            "BUZZ_PUSH_CUSTOM_APNS_TOPIC",
+            "BUZZ_PUSH_CUSTOM_APNS_ENVIRONMENT",
+        ] {
+            env.remove(key);
+        }
+        assert!(Config::from_map(&env).is_err());
     }
 
     #[test]

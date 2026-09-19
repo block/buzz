@@ -38,8 +38,8 @@ topic.
 The gateway has two closed application profile identifiers:
 `buzz-ios-dogfood` and the optional `buzz-ios-custom`. The chart value
 `profiles.dogfood.appAttestAppId` is rendered as
-`BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID`; the gateway rejects startup when it is
-missing or empty. The exact `TEAMID.bundle-id` is environment-owned,
+`BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID`; the upstream chart rejects a render when
+it is missing or empty. The exact `TEAMID.bundle-id` is environment-owned,
 non-secret deployment configuration. The chart's production values file leaves
 it empty deliberately so a production renderer must supply it from the GitOps
 environment rather than baking a Block team identifier into this repository.
@@ -49,6 +49,11 @@ combined certificate/private-key PEM Secret reference. Those values remain
 environment-owned. The stable custom identifier supports one universal
 iPhone/iPad bundle; sandbox and production credentials must be deployed as
 separate configurations, never silently rebound under a running installation.
+The gateway binary accepts a complete custom profile without dogfood
+credentials for private self-hosted deployments, but still rejects startup
+when neither profile is complete. The upstream Helm chart continues to require
+its dogfood profile unless a deployment-specific chart contract explicitly
+selects custom-only operation.
 
 The chart mounts runtime database and AEAD keyring values as mode-0400,
 read-only files and passes only their paths to the process. The migration Job
