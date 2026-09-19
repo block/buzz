@@ -108,20 +108,52 @@ pub(crate) fn resolve_session_title(display_name: Option<&str>, name: &str) -> O
         .find(|value| !value.is_empty())
 }
 
+/// Level names that, standing alone, set `EnvFilter`'s global default rather
+/// than a target. The parser accepts the numeric forms too.
+const GLOBAL_LEVELS: [&str; 12] = [
+    "off", "error", "warn", "info", "debug", "trace", "0", "1", "2", "3", "4", "5",
+];
+
+/// Whether any directive in `filter` is a bare level, i.e. the operator set a
+/// global default instead of naming targets.
+fn sets_global_level(filter: &str) -> bool {
+    filter.split(',').any(|directive| {
+        let directive = directive.trim();
+        GLOBAL_LEVELS
+            .iter()
+            .any(|level| directive.eq_ignore_ascii_case(level))
+    })
+}
+
 /// Build the `RUST_LOG` value forwarded to the agent child: keep an existing
-/// filter that already mentions `buzz_acp`, append `buzz_acp=info` to any other
-/// non-empty filter, and default to `buzz_acp=info` when unset.
+/// filter that already mentions `buzz_acp` or sets a global level, append
+/// `buzz_acp=info` to any other non-empty filter, and default to
+/// `buzz_acp=info` when unset.
 pub(crate) fn child_rust_log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
+    child_rust_log_filter_from(std::env::var("RUST_LOG").ok())
+}
+
+/// Taking the ambient value as an argument keeps the policy testable without a
+/// test mutating process environment.
+fn child_rust_log_filter_from(existing: Option<String>) -> String {
+    match existing {
+        Some(existing) if existing.contains("buzz_acp") => existing,
+        // A bare level is the global default, and a target directive outranks
+        // it. Appending ours would override the operator in both directions:
+        // `off` would still log this crate at info, and `trace` would be
+        // narrowed to info for the one crate the operator was debugging.
+        Some(existing) if sets_global_level(&existing) => existing,
+        Some(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
         _ => "buzz_acp=info".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_replay_floor_env, resolve_session_title, REPLAY_FLOOR_ENV_VAR};
+    use super::{
+        apply_replay_floor_env, child_rust_log_filter_from, resolve_session_title,
+        REPLAY_FLOOR_ENV_VAR,
+    };
 
     fn replay_floor_of(cmd: &std::process::Command) -> Option<String> {
         cmd.get_envs()
@@ -253,5 +285,43 @@ mod tests {
     #[test]
     fn resolve_session_title_returns_none_when_both_candidates_are_control_chars_only() {
         assert_eq!(resolve_session_title(Some("\u{0}"), "\u{0}"), None);
+    }
+
+    #[test]
+    fn bare_global_level_is_forwarded_untouched() {
+        // `off` must stay silence and `trace` must stay trace: appending a
+        // target directive would outrank the level the operator chose.
+        for value in ["off", "TRACE", " debug ", "0", "5"] {
+            assert_eq!(
+                child_rust_log_filter_from(Some(value.to_string())),
+                value,
+                "global level must reach the child unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn global_level_alongside_targets_is_still_respected() {
+        let filter = child_rust_log_filter_from(Some("debug,hyper=warn".to_string()));
+        assert_eq!(filter, "debug,hyper=warn");
+    }
+
+    #[test]
+    fn target_only_filter_still_gains_the_harness_default() {
+        let filter = child_rust_log_filter_from(Some("hyper=warn".to_string()));
+        assert_eq!(filter, "hyper=warn,buzz_acp=info");
+    }
+
+    #[test]
+    fn explicit_buzz_acp_filter_and_unset_are_unchanged() {
+        assert_eq!(
+            child_rust_log_filter_from(Some("buzz_acp=debug".to_string())),
+            "buzz_acp=debug"
+        );
+        assert_eq!(child_rust_log_filter_from(None), "buzz_acp=info");
+        assert_eq!(
+            child_rust_log_filter_from(Some("  ".to_string())),
+            "buzz_acp=info"
+        );
     }
 }
