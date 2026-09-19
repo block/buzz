@@ -44,6 +44,11 @@ final threadRepliesProvider = FutureProvider.autoDispose
         }
       });
       final session = ref.read(relaySessionProvider.notifier);
+      final channelProvider = channelMessagesProvider(args.channelId);
+      final channelMessages = ref.exists(channelProvider)
+          ? ref.read(channelProvider.notifier)
+          : null;
+      final cachedReplyIds = channelMessages?.cachedThreadReplyIds(args.rootId);
       final replies = <NostrEvent>[];
       _ThreadCursor? cursor;
       for (var page = 0; page < 500; page++) {
@@ -51,7 +56,15 @@ final threadRepliesProvider = FutureProvider.autoDispose
           _threadRepliesFilter(args, cursor),
         ]);
         replies.addAll(events);
-        if (events.length < 200) return replies;
+        if (events.length < 200) {
+          if (ref.mounted && cachedReplyIds != null) {
+            channelMessages!.reconcileCachedThreadReplies(
+              cachedReplyIds,
+              replies,
+            );
+          }
+          return replies;
+        }
         final last = events.last;
         cursor = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
       }

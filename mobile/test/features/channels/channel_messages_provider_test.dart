@@ -1027,6 +1027,91 @@ void main() {
     );
   }
 
+  for (final lateArrival in [false, true]) {
+    test(
+      'thread refresh removes offline-deleted replies (late arrival: $lateArrival)',
+      () async {
+        final query = Completer<List<NostrEvent>>();
+        final root = _event(id: 'root', createdAt: 10);
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [root, _bounds()],
+            [root, _bounds()],
+            query.future,
+          ],
+        );
+        final container = _buildContainer(relaySession);
+        addTearDown(container.dispose);
+        final channelSubscription = container.listen(
+          channelMessagesProvider(_channelId),
+          (_, _) {},
+          fireImmediately: true,
+        );
+        addTearDown(channelSubscription.close);
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        notifier.cacheConfirmedThreadReplies([
+          _event(
+            id: 'deleted-offline',
+            createdAt: 20,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+        ]);
+        relaySession.setConnected(false);
+        await _pumpEventQueue();
+        relaySession.setConnected(true);
+        await _pumpEventQueue();
+        const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+        final threadSubscription = container.listen(
+          threadRepliesProvider(args),
+          (_, _) {},
+        );
+        addTearDown(threadSubscription.close);
+        await _pumpEventQueue();
+        // Another confirmation arrives after the query starts. Its absence from
+        // that query must not erase it along with the old cached reply.
+        if (lateArrival) {
+          notifier.cacheConfirmedThreadReplies([
+            _event(
+              id: 'new-arrival',
+              createdAt: 30,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+          ]);
+        }
+        query.complete([]);
+        await container.read(threadRepliesProvider(args).future);
+        await _pumpEventQueue();
+        relaySession.emit(_event(id: 'unrelated', createdAt: 40));
+        await _pumpEventQueue();
+        final events = container
+            .read(channelMessagesProvider(_channelId))
+            .value!;
+        expect(events.map((event) => event.id), [
+          'root',
+          if (lateArrival) 'new-arrival',
+          'unrelated',
+        ]);
+        final merged = mergeThreadEvents(
+          container.read(threadRepliesProvider(args)).value!,
+          events,
+        );
+        expect(merged.any((event) => event.id == 'deleted-offline'), isFalse);
+        final rootEntry = buildMainTimelineEntries(
+          formatTimeline(events),
+          relaySummaries: notifier.threadSummaries,
+        ).singleWhere((entry) => entry.message.id == 'root');
+        expect(rootEntry.summary?.replyCount, lateArrival ? 1 : null);
+      },
+    );
+  }
+
   test('a reply newer than the relay recount raises the badge', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [

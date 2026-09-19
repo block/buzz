@@ -317,6 +317,39 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         .confirm(eventIds);
   }
 
+  /// Snapshots cached overlay replies covered by a query for this outer root.
+  Set<String> cachedThreadReplyIds(String rootId) => {
+    for (final event in _windowStore.liveOverlay)
+      if (event.threadReference.parentId != null &&
+          event.threadReference.rootId == rootId)
+        event.id,
+  };
+
+  /// Removes cached replies absent from a completed authoritative thread query.
+  /// Only the pre-query snapshot is eligible; later arrivals remain untouched.
+  void reconcileCachedThreadReplies(
+    Set<String> queriedIds,
+    Iterable<NostrEvent> replies,
+  ) {
+    final missingIds = queriedIds.difference(
+      replies.map((event) => event.id).toSet(),
+    );
+    if (missingIds.isEmpty) return;
+    _windowStore = ChannelWindowStore(
+      pages: _windowStore.pages,
+      liveOverlay: _windowStore.liveOverlay
+          .where((event) => !missingIds.contains(event.id))
+          .toList(),
+      liveAux: _windowStore.liveAux,
+      liveThreadSummaries: _windowStore.liveThreadSummaries,
+    );
+    final events = (state.value ?? _lastKnownMessages ?? const <NostrEvent>[])
+        .where((event) => !missingIds.contains(event.id))
+        .toList();
+    _lastKnownMessages = events;
+    state = AsyncData(events);
+  }
+
   /// Caches confirmed thread replies before their optimistic overlay is cleared.
   /// Thread queries must not invalidate themselves as live relay events do.
   void cacheConfirmedThreadReplies(Iterable<NostrEvent> replies) {
