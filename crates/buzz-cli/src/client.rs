@@ -87,13 +87,39 @@ fn sign_nip98(
     url: &str,
     body: Option<&[u8]>,
 ) -> Result<String, CliError> {
+    sign_nip98_request(
+        keys,
+        method,
+        url,
+        body,
+        None,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+}
+
+/// Sign a NIP-98 request with an optional audience and caller-provided nonce.
+///
+/// This is exposed for commands that send a signed request outside the Buzz
+/// relay while keeping the private key and Authorization header inside the CLI.
+pub fn sign_nip98_request(
+    keys: &Keys,
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    audience: Option<&str>,
+    nonce: &str,
+) -> Result<String, CliError> {
     let mut tags = vec![
         Tag::parse(["u", url]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
         Tag::parse(["method", method]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-        // Nonce prevents replay rejection for rapid-fire requests with identical bodies.
-        Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()])
-            .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
+        Tag::parse(["nonce", nonce]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
     ];
+    if let Some(audience) = audience {
+        tags.push(
+            Tag::parse(["aud", audience])
+                .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
+        );
+    }
     if let Some(b) = body {
         let hash = hex::encode(Sha256::digest(b));
         tags.push(
@@ -478,6 +504,47 @@ mod media_download_tests {
         assert!(!tags
             .iter()
             .any(|tag| tag.first().map(String::as_str) == Some("x")));
+    }
+
+    #[test]
+    fn nip98_request_binds_url_method_payload_audience_and_nonce() {
+        let keys = Keys::generate();
+        let body = br#"{"action":"health.inspect"}"#;
+        let header = sign_nip98_request(
+            &keys,
+            "POST",
+            "https://broker.example/health/inspect",
+            Some(body),
+            Some("example-broker"),
+            "test-nonce",
+        )
+        .unwrap();
+        let encoded = header.strip_prefix("Nostr ").unwrap();
+        let json = B64.decode(encoded).unwrap();
+        let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
+        event.verify().unwrap();
+        assert_eq!(event.kind, Kind::Custom(27235));
+
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["u", "https://broker.example/health/inspect"]));
+        assert!(tags.iter().any(|tag| tag.as_slice() == ["method", "POST"]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["aud", "example-broker"]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["nonce", "test-nonce"]));
+        assert!(tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("payload")
+                && tag.get(1).map(String::as_str)
+                    == Some(hex::encode(Sha256::digest(body)).as_str())
+        }));
     }
 
     #[test]
