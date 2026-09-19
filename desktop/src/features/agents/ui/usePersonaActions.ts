@@ -115,7 +115,6 @@ export function usePersonaActions() {
     React.useState<AgentSnapshotImportResult | null>(null);
   const [snapshotImportConfirmError, setSnapshotImportConfirmError] =
     React.useState<string | null>(null);
-  const [isCatalogDialogOpen, setIsCatalogDialogOpen] = React.useState(false);
   const [personaNoticeMessage, setPersonaNoticeMessage] = React.useState<
     string | null
   >(null);
@@ -320,6 +319,7 @@ export function usePersonaActions() {
           updatedPersona = await createPersonaMutation.mutateAsync({
             displayName: persona.displayName,
             avatarUrl: persona.avatarUrl ?? undefined,
+            description: persona.description ?? undefined,
             systemPrompt: persona.systemPrompt,
             runtime: persona.runtime ?? undefined,
             model: persona.model ?? undefined,
@@ -329,6 +329,7 @@ export function usePersonaActions() {
               respondTo:
                 persona.respondTo === "anyone" ? "anyone" : "owner-only",
               parallelism: persona.parallelism ?? undefined,
+              sessionPolicy: persona.sessionPolicy ?? "channel",
             },
             // Provenance on the copy: without it the copy's fresh local id is
             // the only identifier, and the catalog offers "Add" again.
@@ -437,12 +438,6 @@ export function usePersonaActions() {
     clearFeedback("library");
     setShouldLoadAcpRuntimes(true);
     setPersonaDialogState(duplicatePersonaDialogState(persona));
-  }
-
-  function openCatalog() {
-    clearFeedback("catalog");
-    void catalogQuery.refetch();
-    setIsCatalogDialogOpen(true);
   }
 
   function openDelete(persona: AgentPersona) {
@@ -585,8 +580,6 @@ export function usePersonaActions() {
     setPersonaToDelete,
     personaToShare,
     setPersonaToShare,
-    isCatalogDialogOpen,
-    setIsCatalogDialogOpen,
     personaNoticeMessage,
     personaErrorMessage,
     personaFeedbackSurface,
@@ -597,7 +590,6 @@ export function usePersonaActions() {
     prepareCreate,
     openEdit,
     openDuplicate,
-    openCatalog,
     openDelete,
     openShare,
     personaToExportSnapshot,

@@ -15,6 +15,11 @@
       "properties": {
         "repository": { "type": "string", "minLength": 1 },
         "tag": { "type": "string" },
+        "digest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[0-9a-f]{64}$",
+          "description": "Optional immutable OCI image digest. When set, the chart renders repository@digest and ignores tag."
+        },
         "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
         "pullSecrets": {
           "type": "array",
@@ -210,6 +215,23 @@
         },
         "accessKey": { "type": "string" },
         "secretKey": { "type": "string" }
+      }
+    },
+    "storageAccounting": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "schedule": { "type": "string", "minLength": 1 },
+        "maxObjects": { "type": "integer", "minimum": 1 },
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 1 },
+        "successfulJobsHistoryLimit": { "type": "integer", "minimum": 0 },
+        "failedJobsHistoryLimit": { "type": "integer", "minimum": 0 },
+        "relayMode": { "type": "string", "enum": ["inline", "external", "off"] },
+        "serviceAccountName": { "type": "string" },
+        "podLabels": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "resources": { "type": "object" }
       }
     },
     "minio": {

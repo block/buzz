@@ -4,12 +4,23 @@ import {
   KIND_HUDDLE_ENDED,
   KIND_HUDDLE_STARTED,
 } from "../../src/shared/constants/kinds";
+import { truncateNpub } from "../../src/shared/lib/pubkey";
+import { ROUNDED_SQUIRCLE_PATH } from "../../src/shared/ui/AvatarClipPaths";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const HUDDLE_CHANNEL_ID = "11111111-1111-4111-8111-111111111111";
 const HUDDLE_PARENT_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const HUDDLE_THREAD_ROOT_ID = "mock-general-welcome";
+
+/**
+ * Initials a key-fallback avatar shows: the two characters just before the
+ * compact npub label's visible tail — the fragment `getInitials` reads from
+ * a key label, whose unit suite pins the derivation itself.
+ */
+function keyTailInitials(pubkey: string) {
+  return truncateNpub(pubkey).slice(-4, -2).toUpperCase();
+}
 
 async function waitForMockLiveSubscription(
   page: import("@playwright/test").Page,
@@ -262,6 +273,117 @@ test("keeps the drawer open until the huddle is expanded", async ({ page }) => {
     (element) => getComputedStyle(element).backgroundImage,
   );
   expect(closedGradient).toBe(openGradient);
+});
+
+test("floats the in-app huddle tray over the glass background", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+    window.localStorage.setItem("buzz-glass-background", "true");
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
+  await installMockBridge(page, {
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [
+        { pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" },
+        { pubkey: TEST_IDENTITIES.alice.pubkey, role: "bot" },
+      ],
+      transcriptionEnabled: true,
+    },
+  });
+
+  await page.goto("/");
+
+  const root = page.locator("html");
+  const shell = page.locator('.buzz-huddle-shell[data-huddle-window="false"]');
+  const slot = shell.locator(".buzz-huddle-drawer-slot");
+  const drawer = slot.locator(":scope > .buzz-huddle-drawer");
+  const backdrop = shell.locator(".buzz-huddle-drawer-backdrop");
+  const transcriptButton = drawer.getByRole("button", {
+    name: "Stop transcript",
+  });
+
+  await expect(root).toHaveAttribute("data-glass-background", "");
+  await expect(shell).toHaveAttribute("data-huddle-open", "true");
+  await expect(shell).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(backdrop).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(drawer).toHaveCSS("border-top-left-radius", "16px");
+  await expect(drawer).toHaveCSS("border-top-right-radius", "16px");
+  await expect(drawer).toHaveCSS("border-bottom-right-radius", "16px");
+  await expect(drawer).toHaveCSS("border-bottom-left-radius", "16px");
+  await expect(drawer).toHaveCSS("padding-top", "8px");
+  await expect(drawer).toHaveCSS("padding-right", "8px");
+  await expect(drawer).toHaveCSS("padding-bottom", "8px");
+  await expect(drawer).toHaveCSS("padding-left", "8px");
+
+  const geometry = await Promise.all([
+    slot.boundingBox(),
+    drawer.boundingBox(),
+    transcriptButton.boundingBox(),
+  ]);
+  const [slotBox, drawerBox, transcriptButtonBox] = geometry;
+  expect(slotBox).not.toBeNull();
+  expect(drawerBox).not.toBeNull();
+  expect(transcriptButtonBox).not.toBeNull();
+  if (!slotBox || !drawerBox || !transcriptButtonBox) return;
+  expect(drawerBox.x - slotBox.x).toBe(8);
+  expect(drawerBox.y - slotBox.y).toBe(8);
+  expect(slotBox.x + slotBox.width - (drawerBox.x + drawerBox.width)).toBe(8);
+  expect(slotBox.y + slotBox.height - (drawerBox.y + drawerBox.height)).toBe(8);
+  expect(
+    Math.abs(
+      transcriptButtonBox.y +
+        transcriptButtonBox.height / 2 -
+        (drawerBox.y + drawerBox.height / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+});
+
+test("keeps the popped-out huddle dock full-width over glass", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+    window.localStorage.setItem("buzz-glass-background", "true");
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
+  await installMockBridge(page, {
+    windowLabel: `huddle-${HUDDLE_CHANNEL_ID}`,
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [
+        { pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" },
+        { pubkey: TEST_IDENTITIES.alice.pubkey, role: "bot" },
+      ],
+      transcriptionEnabled: true,
+    },
+  });
+
+  await page.goto("/");
+
+  const root = page.locator("html");
+  const shell = page.locator('.buzz-huddle-shell[data-huddle-window="true"]');
+  const slot = shell.locator(".buzz-huddle-drawer-slot");
+  const drawer = slot.locator(":scope > .buzz-huddle-drawer");
+
+  await expect(root).toHaveAttribute("data-glass-background", "");
+  await expect(shell).toHaveAttribute("data-huddle-open", "true");
+  await expect(shell).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(slot).toHaveCSS("padding-top", "0px");
+  await expect(drawer).toHaveCSS("border-top-left-radius", "0px");
+  await expect(drawer).toHaveCSS("border-top-right-radius", "0px");
 });
 
 test("shows speaker identity on every huddle chat message", async ({
@@ -546,6 +668,34 @@ test("animates the responding agent with the shared speaker ring", async ({
       ),
     )
     .toBe("0.890");
+  await expect(agentAvatar).toHaveCSS("clip-path", "none");
+  await expect(agentAvatar).not.toHaveClass(/rounded-squircle/);
+  await expect(agentAvatar).toHaveClass(/buzz-huddle-speaking-avatar-agent/);
+  const speakingRing = agentAvatar.getByTestId("huddle-agent-speaking-ring");
+  await expect(speakingRing).toBeVisible();
+  await expect(speakingRing.locator("path")).toHaveAttribute(
+    "d",
+    ROUNDED_SQUIRCLE_PATH,
+  );
+  await expect(speakingRing.locator("path")).toHaveAttribute("fill", "none");
+  await expect(speakingRing.locator("path")).toHaveAttribute(
+    "stroke-width",
+    "2",
+  );
+  await expect(speakingRing.locator("path")).toHaveAttribute(
+    "vector-effect",
+    "non-scaling-stroke",
+  );
+  await expect(speakingRing).toHaveCSS("opacity", "0.89");
+  await expect(agentAvatar.locator(".rounded-squircle")).toHaveCSS(
+    "clip-path",
+    /rounded-squircle-clip/,
+  );
+
+  const voiceMenuTrigger = page.getByTestId("huddle-agent-voice-menu-trigger");
+  await voiceMenuTrigger.focus();
+  await expect(voiceMenuTrigger).toBeFocused();
+  await expect(voiceMenuTrigger).toHaveCSS("clip-path", "none");
 
   await page.evaluate(async () => {
     await window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__?.({
@@ -964,10 +1114,19 @@ test("returns to the parent channel when leaving a huddle channel in view", asyn
 test("keeps the huddle avatar strip compact and exposes the full roster", async ({
   page,
 }) => {
-  const members = Array.from({ length: 11 }, (_, index) => ({
+  // One named member plus ten key-only members (hex 01..0a + "a"×62), with
+  // the last as the huddle bot. The generated keys' npub tails are what
+  // key-fallback avatars abbreviate: 01… → npub1qx4…x2tc → X2,
+  // 02… → npub1q24…levs → LE, 0a… → npub1p24…sqjt → SQ.
+  const namedMember = "77".repeat(32);
+  const unnamedMembers = Array.from({ length: 10 }, (_, index) => ({
     pubkey: `${(index + 1).toString(16).padStart(2, "0")}${"a".repeat(62)}`,
-    role: index === 10 ? ("bot" as const) : ("member" as const),
+    role: index === 9 ? ("bot" as const) : ("member" as const),
   }));
+  const members = [
+    { pubkey: namedMember, role: "member" as const },
+    ...unnamedMembers,
+  ];
 
   await installMockBridge(page, {
     huddle: {
@@ -975,6 +1134,7 @@ test("keeps the huddle avatar strip compact and exposes the full roster", async 
       ephemeralChannelId: HUDDLE_CHANNEL_ID,
       members,
     },
+    searchProfiles: [{ pubkey: namedMember, displayName: "Ada Lovelace" }],
   });
   await page.goto("/");
 
@@ -989,13 +1149,44 @@ test("keeps the huddle avatar strip compact and exposes the full roster", async 
   await expect(participantTrigger).toContainText("+2");
   await expect(page.getByTestId("profile-huddle-control")).toHaveCount(0);
 
+  // Strip avatars stay distinct: the named member keeps name initials
+  // (AL), and a key-only participant shows its npub's tail (X2), never the
+  // word initials of the "Participant npub1…" label (PN).
+  const stripAvatars = participantStrip.getByTestId(
+    "huddle-participant-avatar",
+  );
+  await expect(stripAvatars.first()).toHaveText("AL");
+  await expect(stripAvatars.nth(1)).toHaveText(
+    keyTailInitials(unnamedMembers[0].pubkey),
+  );
+
   await participantTrigger.click();
+  const roster = page
+    .getByRole("dialog")
+    .filter({ has: page.getByRole("heading", { name: "Participants" }) });
   await expect(
     page.getByRole("heading", { name: "Participants" }),
   ).toBeVisible();
+  const rosterRows = roster.getByRole("listitem");
+  // Visible labels keep their generated forms alongside the avatar initials.
+  await expect(rosterRows.filter({ hasText: "Ada Lovelace" })).toHaveCount(1);
+  await expect(
+    rosterRows.filter({
+      hasText: `Participant ${truncateNpub(unnamedMembers[0].pubkey)}`,
+    }),
+  ).toHaveCount(1);
+  const agentRow = rosterRows.filter({
+    hasText: `Agent ${truncateNpub(unnamedMembers[9].pubkey)}`,
+  });
+  await expect(agentRow).toHaveCount(1);
   await expect(
     page.getByRole("button", { name: /Remove Agent .* from huddle/ }),
   ).toHaveCount(1);
+  // The roster's agent avatar abbreviates its key tail (SQ), never the
+  // "Agent" word initials of the prefixed label (AN).
+  await expect(agentRow.getByTestId("huddle-participant-avatar")).toHaveText(
+    keyTailInitials(unnamedMembers[9].pubkey),
+  );
 });
 
 test("removes an agent from its menu without showing an extra participant control", async ({
@@ -1160,7 +1351,7 @@ test("keeps a starting huddle in the drawer after its companion closes", async (
   ).toBeVisible();
 });
 
-test("starts unmuted with Push to Talk while preserving manual microphone control", async ({
+test("starts muted with Push to Talk while preserving manual microphone control", async ({
   page,
 }) => {
   await installFakeHuddleMicrophone(page);
@@ -1172,17 +1363,35 @@ test("starts unmuted with Push to Talk while preserving manual microphone contro
   await page.getByTestId("channel-alice-tyler").click();
   await page.getByTestId("channel-start-huddle-trigger").click();
 
+  // Push to Talk huddles start muted (matching the Rust
+  // manual_mic_unmuted default) so nothing is hot until the user opts in.
   const muteButton = page.getByRole("button", { name: "Mute microphone" });
+  const unmuteButton = page.getByRole("button", {
+    name: "Unmute microphone",
+  });
+  await expect(unmuteButton).toBeVisible();
+  await expect(unmuteButton).toHaveClass(/bg-destructive\/15/);
+  await expect(unmuteButton).toHaveClass(/text-destructive/);
+
+  // Manually unmuting hands the mic back to the user.
+  await unmuteButton.click();
   await expect(muteButton).toBeVisible();
   await expect(muteButton).not.toHaveClass(/bg-destructive\/15/);
   await expect(
     page.getByRole("button", { name: "Audio settings" }),
   ).not.toHaveClass(/bg-destructive\/15/);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) => entry.command === "set_huddle_manual_mic_unmuted",
+          )?.payload,
+      ),
+    )
+    .toEqual({ enabled: true });
 
   await muteButton.click();
-  const unmuteButton = page.getByRole("button", {
-    name: "Unmute microphone",
-  });
   await expect(unmuteButton).toBeVisible();
   await expect(unmuteButton).toHaveClass(/bg-destructive\/15/);
   await expect(unmuteButton).toHaveClass(/text-destructive/);
@@ -1252,6 +1461,64 @@ test("starts unmuted with Push to Talk while preserving manual microphone contro
       ),
     )
     .toEqual({ enabled: true });
+});
+
+test("toggles the current channel huddle with Control+Shift+Space", async ({
+  page,
+}) => {
+  await installFakeHuddleMicrophone(page);
+  await installMockBridge(page, {
+    openHuddleWindowDelayMs: 10_000,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("channel-start-huddle-trigger")).toBeEnabled();
+  const pressHuddleShortcut = () =>
+    page.evaluate(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          code: "Space",
+          ctrlKey: true,
+          key: " ",
+          shiftKey: true,
+        }),
+      );
+    });
+
+  await pressHuddleShortcut();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+            (entry) => entry.command === "start_huddle",
+          ).length,
+      ),
+    )
+    .toBe(1);
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const state = (await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.(
+          "get_huddle_state",
+        )) as { phase: string };
+        return state.phase;
+      }),
+    )
+    .toBe("active");
+
+  await pressHuddleShortcut();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+            (entry) => entry.command === "leave_huddle",
+          ).length,
+      ),
+    )
+    .toBe(1);
 });
 
 test("starts an agent DM huddle and hides its backing channel after it ends", async ({

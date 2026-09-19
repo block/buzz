@@ -1,0 +1,45 @@
+# Default condition for the local benchmarks/buzz-dataset suite: one production
+# Buzz agent on gpt-5.6-luna at reasoning effort `medium`.
+#
+# buzz-acp supplies crates/buzz-acp/src/base_prompt.md from the checked-out
+# source build; the persona below only establishes that there is no team. The
+# suite scores Buzz product behavior (threading, mentions, exact membership),
+# and that behavior comes from the base prompt — so the cheap model at a
+# middling effort is the right default. A weak result here is a prompt finding,
+# not a model finding.
+#
+# The endpoint name is the literal OpenAI model id: the runtime passes it to
+# the provider as BUZZ_AGENT_MODEL. Resolution to provider/key lives in
+# testbed/endpoints/openai-live.json (OPENAI_COMPAT_API_KEY), which is
+# deployment config and deliberately outside this manifest — pass it with
+# `--endpoint-config`, since the default is anthropic-live.json.
+schema_version: "1"
+condition: buzz-native-solo-luna-medium
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: gpt-5.6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/buzz-native-solo.md
+      sha256: 972950f0e2bfb9bf540c98e70e075479ab80cd596cb5ad405dad0cafdc60840b
+    generation:
+      max_output_tokens: 4096
+      context_window_tokens: 200000
+      # Pinned rather than left implicit even though `medium` is also the
+      # runtime default, so the condition records the level it ran at.
+      thinking_effort: medium
+prices:
+  # Repriced 2026-07-30 (luna 1.0/0.1/6.0 -> 0.20/0.02/1.20). Receipts from
+  # before that date carry the old rates; re-price measured tokens rather than
+  # editing a receipt.
+  gpt-5.6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+trial_budget:
+  # Matches the tasks' own 300s agent timeout: these are single-turn
+  # collaboration checks, not long autonomous runs.
+  timeout_seconds: 300

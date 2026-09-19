@@ -1,15 +1,16 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   deleteManagedAgentWithRules,
   type ManagedAgentActionResult,
 } from "@/features/agents/lib/managedAgentControlActions";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import { removeChannelMember } from "@/shared/api/tauri";
 import type {
   AgentPersona,
   Channel,
   ManagedAgent,
-  PresenceLookup,
   RelayAgent,
 } from "@/shared/api/types";
 import { getRelayAgentChannelIds } from "@/features/profile/ui/UserProfilePanelUtils";
@@ -34,7 +35,7 @@ type UseProfileAgentDeletionInput = {
   deleteManagedAgent: DeleteManagedAgentRulesContext["deleteManagedAgent"];
   managedAgent?: ManagedAgent;
   managedAgents?: readonly ManagedAgent[];
-  presenceLookup?: PresenceLookup | null;
+  getAvailability: DeleteManagedAgentRulesContext["getAvailability"];
   relayAgents?: readonly RelayAgent[];
 };
 
@@ -43,9 +44,10 @@ export function useProfileAgentDeletion({
   deleteManagedAgent,
   managedAgent,
   managedAgents,
-  presenceLookup,
+  getAvailability,
   relayAgents,
 }: UseProfileAgentDeletionInput) {
+  const queryClient = useQueryClient();
   const removeAgentFromAllChannels = React.useCallback(
     async (agentPubkey: string) => {
       const normalizedPubkey = agentPubkey.toLowerCase();
@@ -67,8 +69,12 @@ export function useProfileAgentDeletion({
           removeChannelMember(channelId, agentPubkey),
         ),
       );
+      // Direct writes bypass the member mutations' invalidation; without
+      // this, the deleted agent stays in cached rosters for the freshness
+      // window.
+      await invalidateChannelMembersRosters(queryClient, channelIds);
     },
-    [channels, relayAgents],
+    [channels, queryClient, relayAgents],
   );
 
   const deleteManagedAgentRecord = React.useCallback(
@@ -76,7 +82,7 @@ export function useProfileAgentDeletion({
       deleteProfileManagedAgent(agentToDelete, {
         channels: channels ?? [],
         deleteManagedAgent,
-        presenceLookup,
+        getAvailability,
         relayAgents: relayAgents ?? [],
         removeAgentFromAllChannels,
         skipRemoteDeleteConfirm: true,
@@ -84,7 +90,7 @@ export function useProfileAgentDeletion({
     [
       channels,
       deleteManagedAgent,
-      presenceLookup,
+      getAvailability,
       relayAgents,
       removeAgentFromAllChannels,
     ],
@@ -96,7 +102,7 @@ export function useProfileAgentDeletion({
         channels: channels ?? [],
         deleteManagedAgent,
         managedAgents: managedAgents ?? [],
-        presenceLookup,
+        getAvailability,
         relayAgents: relayAgents ?? [],
         removeAgentFromAllChannels,
         selectedAgent: managedAgent,
@@ -106,7 +112,7 @@ export function useProfileAgentDeletion({
       deleteManagedAgent,
       managedAgent,
       managedAgents,
-      presenceLookup,
+      getAvailability,
       relayAgents,
       removeAgentFromAllChannels,
     ],

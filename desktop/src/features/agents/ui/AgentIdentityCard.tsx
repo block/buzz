@@ -9,9 +9,15 @@ type AgentIdentityCardProps = {
   ariaLabel: string;
   avatar?: ReactNode;
   avatarUrl?: string | null;
+  footerAccessory?: ReactNode;
   dataTestId: string;
   label: string;
-  modelLabel?: string | null;
+  /**
+   * Second line under the agent name: the effective description when one
+   * resolves (owner-authored — see `lib/agentDescription.ts`),
+   * otherwise the model label. Callers compose the fallback.
+   */
+  subtitle?: string | null;
   onClick: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
   statusBadge?: ReactNode;
@@ -23,8 +29,9 @@ export function AgentIdentityCard({
   avatar,
   avatarUrl,
   dataTestId,
+  footerAccessory,
   label,
-  modelLabel,
+  subtitle,
   onClick,
   statusBadge,
 }: AgentIdentityCardProps) {
@@ -53,6 +60,7 @@ export function AgentIdentityCard({
                 className="h-full w-full border-[3px] border-background bg-muted shadow-none"
                 iconClassName="h-8 w-8"
                 label={label}
+                shape="squircle"
               />
             ) : (
               <IdentityInitialsAvatar
@@ -68,20 +76,25 @@ export function AgentIdentityCard({
         <div className="absolute top-3 right-3 z-40">{actions}</div>
       ) : null}
 
-      <div className="pointer-events-none absolute right-3 bottom-3 left-3 z-30 flex min-w-0 flex-col gap-0.5 text-left text-sm leading-5">
-        <span className="min-w-0 truncate font-semibold text-foreground tracking-normal">
-          {label}
-        </span>
-        {modelLabel ? (
-          <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
-            {modelLabel}
+      <div className="pointer-events-none absolute right-3 bottom-3 left-3 z-30 flex min-w-0 items-end gap-2 text-left text-sm leading-5">
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="min-w-0 truncate font-semibold text-foreground tracking-normal">
+            {label}
           </span>
-        ) : null}
-        {/* pointer-events-auto: the overlay button above has pointer-events-none
-            on this container, but the status badge itself (a sibling of the button
-            in z-order) needs hover so the restart diff tooltip can fire. */}
-        {statusBadge ? (
-          <div className="pointer-events-auto">{statusBadge}</div>
+          {subtitle ? (
+            <span className="line-clamp-2 min-w-0 text-xs font-normal text-muted-foreground">
+              {subtitle}
+            </span>
+          ) : null}
+          {/* pointer-events-auto: the overlay button above has pointer-events-none
+              on this container, but the status badge itself (a sibling of the button
+              in z-order) needs hover so the restart diff tooltip can fire. */}
+          {statusBadge ? (
+            <div className="pointer-events-auto">{statusBadge}</div>
+          ) : null}
+        </div>
+        {footerAccessory ? (
+          <div className="shrink-0">{footerAccessory}</div>
         ) : null}
       </div>
     </div>

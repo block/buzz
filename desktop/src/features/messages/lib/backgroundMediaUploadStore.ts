@@ -1,7 +1,11 @@
 import * as React from "react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
-import { cancelMediaUpload, uploadMediaFile } from "@/shared/api/tauriMedia";
+import {
+  cancelMediaUpload,
+  releaseMediaUpload,
+  uploadMediaFile,
+} from "@/shared/api/tauriMedia";
 import {
   type BackgroundMediaUploadPhase,
   isNativeMediaUploadPhase,
@@ -23,6 +27,7 @@ type BackgroundUploadTask = {
   id: number;
   isCompleting: boolean;
   onCancel?: () => void;
+  startedProgressIds: Map<string, Promise<void> | null>;
 };
 
 type BackgroundUploadSnapshot = {
@@ -180,10 +185,41 @@ function cancelTask(
   task.canceled = true;
   task.abortController.abort();
   if (notify) task.onCancel?.();
-  for (let index = 0; index < task.fileProgress.length; index += 1) {
-    void cancelMediaUpload(progressId(task.id, index)).catch(() => undefined);
-  }
+  cancelStartedMediaUploads(task.startedProgressIds);
   finishTask(task.id);
+}
+
+export function cancelStartedMediaUploads(
+  startedProgressIds: Map<string, Promise<void> | null>,
+  cancel: (progressId: string) => Promise<void> = cancelMediaUpload,
+): void {
+  for (const [id, cancellation] of startedProgressIds) {
+    if (cancellation) continue;
+    startedProgressIds.set(
+      id,
+      cancel(id).catch(() => undefined),
+    );
+  }
+}
+
+export async function dispatchTrackedMediaUpload(
+  file: File,
+  id: string,
+  signal: AbortSignal,
+  startedProgressIds: Map<string, Promise<void> | null>,
+  upload: typeof uploadMediaFile = uploadMediaFile,
+  release: (progressId: string) => Promise<void> = releaseMediaUpload,
+): Promise<BlobDescriptor> {
+  try {
+    return await upload(file, id, signal, () =>
+      startedProgressIds.set(id, null),
+    );
+  } finally {
+    const cancellation = startedProgressIds.get(id);
+    startedProgressIds.delete(id);
+    if (cancellation) await cancellation;
+    await release(id).catch(() => undefined);
+  }
 }
 
 function yieldForUploadFeedback(): Promise<void> {
@@ -228,6 +264,7 @@ export function prepareBackgroundMediaUpload(
     })),
     id: taskId,
     isCompleting: false,
+    startedProgressIds: new Map(),
   };
   let started = false;
   tasks.set(taskId, task);
@@ -252,10 +289,12 @@ export function prepareBackgroundMediaUpload(
           for (let index = 0; index < attachments.length; index += 1) {
             if (task.canceled) return;
             const attachment = attachments[index];
-            const descriptor = await uploadMediaFile(
+            const id = progressId(taskId, index);
+            const descriptor = await dispatchTrackedMediaUpload(
               attachment.file,
-              progressId(taskId, index),
+              id,
               task.abortController.signal,
+              task.startedProgressIds,
             );
             if (task.canceled) return;
             task.filePhases[index] = "finishing";

@@ -16,6 +16,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+mod common;
+use common::approve_permission;
+
 async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -77,19 +80,35 @@ async fn spawn_capturing_fake_llm(responses: Vec<Value>) -> (String, Arc<Mutex<V
 async fn spawn_capturing_fake_llm_with_statuses(
     responses: Vec<CannedResponse>,
 ) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let url = spawn_capturing_fake_llm_core(responses, captures.clone(), None).await;
+    (url, captures)
+}
+
+/// Shared connection loop for the capturing fake LLM: reads each request,
+/// records its JSON body into `captures`, and replies with the next canned
+/// response. When `gate` is `Some`, the FIRST request's response is withheld
+/// until the gate fires; when `None`, every response is served immediately.
+async fn spawn_capturing_fake_llm_core(
+    responses: Vec<CannedResponse>,
+    captures: Arc<Mutex<Vec<Value>>>,
+    gate: Option<Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>>,
+) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
-    let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let captures_clone = captures.clone();
     tokio::spawn(async move {
+        let mut request_num = 0usize;
         loop {
             let (mut sock, _) = match listener.accept().await {
                 Ok(p) => p,
                 Err(_) => return,
             };
             let queue = queue.clone();
-            let captures = captures_clone.clone();
+            let captures = captures.clone();
+            let gate = gate.clone();
+            request_num += 1;
+            let req_num = request_num;
             tokio::spawn(async move {
                 // Read headers.
                 let mut buf = Vec::new();
@@ -138,6 +157,15 @@ async fn spawn_capturing_fake_llm_with_statuses(
                     captures.lock().await.push(parsed);
                 }
 
+                // Hold the first request's response until the gate opens.
+                if req_num == 1 {
+                    if let Some(gate) = &gate {
+                        if let Some(rx) = gate.lock().await.take() {
+                            let _ = rx.await;
+                        }
+                    }
+                }
+
                 // Send canned response.
                 let response = queue.lock().await.pop_front().unwrap_or(CannedResponse {
                     status: 500,
@@ -161,6 +189,20 @@ async fn spawn_capturing_fake_llm_with_statuses(
             });
         }
     });
+    url
+}
+
+/// A capturing fake LLM whose FIRST provider response is withheld until
+/// `gate` fires. Later responses are served immediately. Used to make
+/// round-boundary races deterministic: hold round 1 open until a client action
+/// (e.g. a steer) is confirmed, so the second round observes it. Request bodies
+/// are recorded into `captures` exactly as `spawn_capturing_fake_llm` does.
+async fn spawn_gated_capturing_fake_llm(
+    responses: Vec<CannedResponse>,
+    captures: Arc<Mutex<Vec<Value>>>,
+    gate: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let url = spawn_capturing_fake_llm_core(responses, captures.clone(), Some(gate)).await;
     (url, captures)
 }
 
@@ -396,12 +438,7 @@ async fn unsupported_image_response_recovers_without_replaying_image() {
     loop {
         let message = h.recv().await;
         if message.get("method") == Some(&json!("session/request_permission")) {
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": message["id"],
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&message)).await;
         } else if message["id"] == json!(prompt_id) {
             assert_eq!(message["result"]["stopReason"], "end_turn");
             break;
@@ -776,14 +813,37 @@ async fn recv_active_run_id(h: &mut Harness) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_folds_into_active_turn_without_cancelling() {
+    use tokio::sync::oneshot;
+
     // A two-round turn (tool call → text). A steer sent once the run is live
     // must (a) be accepted with the matching runId, (b) NOT cancel the turn —
     // it still ends with end_turn — and (c) reach the provider as a user turn.
-    let (url, captures) = spawn_capturing_fake_llm(vec![
-        openai_tool_call("call_steer", "fake__noop", json!({})),
-        openai_text("acknowledged the steer"),
-    ])
-    .await;
+    //
+    // The steer is drained only at a round boundary (before the next provider
+    // request), so it must be enqueued before round 2 begins. Without
+    // synchronization a fast worker can complete round 1, drain an empty steer
+    // queue at the round-2 boundary, and dispatch round 2 before the steer is
+    // even sent — the steer then lands after the turn ends and never reaches
+    // the provider. To make this deterministic, the FIRST provider response is
+    // gated: it is withheld until the steer has been sent AND observed
+    // accepted, so round 1 cannot complete (and round 2 cannot start its drain)
+    // until the steer is already queued.
+    let (gate_tx, gate_rx) = oneshot::channel::<()>();
+    let gate_rx = Arc::new(Mutex::new(Some(gate_rx)));
+
+    let responses = vec![
+        CannedResponse {
+            status: 200,
+            body: openai_tool_call("call_steer", "fake__noop", json!({})),
+        },
+        CannedResponse {
+            status: 200,
+            body: openai_text("acknowledged the steer"),
+        },
+    ];
+    let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let (url, _) = spawn_gated_capturing_fake_llm(responses, captures.clone(), gate_rx).await;
+
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
 
@@ -797,7 +857,8 @@ async fn steer_folds_into_active_turn_without_cancelling() {
         )
         .await;
 
-    // Learn the run id, then steer into it before the turn finishes.
+    // Learn the run id (advertised before the gated round-1 request), then steer
+    // into the live turn while round 1 is still held.
     let run_id = recv_active_run_id(&mut h).await;
     let steer_text = "STEER-CANARY: also consider the edge case";
     let s_id = h
@@ -811,9 +872,12 @@ async fn steer_folds_into_active_turn_without_cancelling() {
         )
         .await;
 
-    // Steer is accepted and echoes the run id it landed in.
+    // Steer is accepted and echoes the run id it landed in. Only after this
+    // confirmation do we release the gate, so the steer is guaranteed queued
+    // before round 2's boundary drains it.
     let mut steer_ok = false;
     let mut end_turn = false;
+    let mut gate = Some(gate_tx);
     for _ in 0..40 {
         let v = h.recv().await;
         if v["id"] == json!(s_id) {
@@ -829,6 +893,11 @@ async fn steer_folds_into_active_turn_without_cancelling() {
                 "steer reply carries a messageId"
             );
             steer_ok = true;
+            // Steer accepted — release round 1 so the turn proceeds to round 2,
+            // whose boundary now drains the queued steer.
+            if let Some(tx) = gate.take() {
+                let _ = tx.send(());
+            }
         } else if v["id"] == json!(p_id) {
             // The turn was NOT cancelled — it completed normally.
             assert_eq!(v["result"]["stopReason"], "end_turn");
@@ -1251,7 +1320,7 @@ async fn mid_turn_usage_includes_earlier_turns() {
 /// Setup: round 1 is a tool call WITH usage (tokens are captured). After the
 /// tool_call_update notification (proving round 1 is fully processed), we gate
 /// the round-2 LLM response behind a `oneshot` barrier that only releases after
-/// cancel is sent. This guarantees the turn exits with `stopReason: "cancelled"`
+/// cancel is acknowledged. This guarantees the turn exits with `stopReason: "cancelled"`
 /// deterministically, even on a slow CI worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_turn_with_usage_emits_notification_before_response() {
@@ -1266,7 +1335,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     // in-flight TCP request can resolve. The queue is empty for round 2, so the
     // agent receives the fallback "no canned response" body which it treats as
     // an LLM error; the cancel check at the round boundary fires first because
-    // the gate is only released after cancel is enqueued.
+    // the gate is only released after cancel is acknowledged.
     let responses = vec![openai_tool_call_with_usage(
         "call_cancel_test",
         "fake__noop",
@@ -1302,7 +1371,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
                     }
                 }
                 // For request 2+ (round 2), wait for the gate to open before
-                // responding. This ensures cancel is sent before round 2 resolves,
+                // responding. This ensures cancel is processed before round 2 resolves,
                 // making stopReason: cancelled deterministic.
                 if req_num >= 2 {
                     let rx = gate.lock().await.take();
@@ -1346,20 +1415,27 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     })
     .await;
 
-    // Now send cancel and release the round-2 gate. Cancel is enqueued before
-    // round 2 can respond, so the turn exits with stopReason: cancelled.
+    // Writing to stdin does not prove the agent processed cancel. Keep the
+    // provider blocked until the acknowledgement, retaining all earlier frames
+    // so usage/prompt ordering is checked even if the turn finishes before ACK.
     let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
+    let (frames_before_cancel_ack, cancel_ack) =
+        recv_until_with_drain(&mut h, |v| v["id"] == json!(c_id)).await;
+    assert_eq!(cancel_ack.get("result"), Some(&Value::Null), "{cancel_ack}");
+    assert!(cancel_ack.get("error").is_none(), "{cancel_ack}");
     let _ = gate_tx.send(()); // unblock round 2
 
     let mut saw_usage_before_prompt_response = false;
     let mut saw_usage = false;
-    let mut saw_cancel_ok = false;
     let mut saw_prompt_response = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(c_id) {
-            saw_cancel_ok = true;
-        } else if is_usage_update(&v) {
+    let mut pending_frames = VecDeque::from(frames_before_cancel_ack);
+    let frame_budget = 40 + pending_frames.len();
+    for _ in 0..frame_budget {
+        let v = match pending_frames.pop_front() {
+            Some(v) => v,
+            None => h.recv().await,
+        };
+        if is_usage_update(&v) {
             saw_usage = true;
             if !saw_prompt_response {
                 saw_usage_before_prompt_response = true;
@@ -1372,11 +1448,14 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
                 "turn must end with stopReason: cancelled"
             );
         }
-        if saw_usage && saw_prompt_response && saw_cancel_ok {
+        if saw_usage && saw_prompt_response {
             break;
         }
     }
-    assert!(saw_cancel_ok, "session/cancel was not acknowledged");
+    assert!(
+        saw_prompt_response,
+        "session/prompt did not finish after cancel"
+    );
     assert!(
         saw_usage,
         "expected usage_update notification for cancelled turn with observed tokens"

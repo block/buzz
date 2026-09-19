@@ -1,10 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import {
   createMockAgentMemoryListing,
   installMockBridge,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 import { expectEmojiMartStylesInstalled } from "../helpers/css";
 import { openProfileMenu, openSettings } from "../helpers/settings";
 
@@ -71,6 +73,102 @@ async function expectHashSearchParam(
   value: string | null,
 ) {
   await expect.poll(() => getHashSearchParam(page, name)).toBe(value);
+}
+
+async function readVisibleProfileSurface(page: Page) {
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible();
+
+  return panel.evaluate((element) => {
+    const isVisible = (candidate: Element) => {
+      if (!(candidate instanceof HTMLElement)) return false;
+      const style = getComputedStyle(candidate);
+      const rect = candidate.getBoundingClientRect();
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    };
+    const visibleTestIds = Array.from(
+      element.querySelectorAll<HTMLElement>("[data-testid]"),
+    )
+      .filter(isVisible)
+      .map((candidate) => candidate.dataset.testid)
+      .filter((value): value is string => Boolean(value))
+      .filter(
+        (value) =>
+          (value.startsWith("user-profile-") ||
+            value.startsWith("agent-config-")) &&
+          !value.endsWith("resize-handle"),
+      )
+      .sort();
+    const visibleControls = Array.from(
+      element.querySelectorAll<HTMLElement>(
+        'button, [role="button"], [role="tab"], [role="switch"]',
+      ),
+    )
+      .filter(isVisible)
+      .map((candidate) => ({
+        label:
+          candidate.getAttribute("aria-label") ??
+          candidate.textContent?.replace(/\s+/g, " ").trim() ??
+          "",
+        testId: candidate.dataset.testid ?? null,
+      }))
+      .filter(({ label, testId }) => label.length > 0 || testId !== null)
+      .filter(({ testId }) => !testId?.endsWith("resize-handle"))
+      .sort((left, right) =>
+        `${left.testId}:${left.label}`.localeCompare(
+          `${right.testId}:${right.label}`,
+        ),
+      );
+
+    const activityChannelLabel = element
+      .querySelector<HTMLElement>(
+        '[data-testid="user-profile-activity-channel-label"]',
+      )
+      ?.textContent?.replace(/\s+/g, " ")
+      .trim();
+
+    return {
+      activityChannelLabel: activityChannelLabel ?? null,
+      visibleControls,
+      visibleTestIds,
+    };
+  });
+}
+
+async function readOwnedAgentProfileContract(page: Page) {
+  const tabs = ["info", "runtime", "channels", "memories"] as const;
+  const contract: Partial<
+    Record<
+      (typeof tabs)[number],
+      Awaited<ReturnType<typeof readVisibleProfileSurface>>
+    >
+  > = {};
+
+  for (const tab of tabs) {
+    const trigger = page.getByTestId(`user-profile-tab-${tab}`);
+    await expect(trigger).toBeVisible();
+    if ((await trigger.getAttribute("data-state")) !== "active") {
+      await trigger.click();
+    }
+    await expect(trigger).toHaveAttribute("data-state", "active");
+    if (tab === "memories") {
+      await expect(page.getByTestId("agent-memory-section")).toBeVisible();
+    }
+    await waitForAnimations(page);
+    contract[tab] = await readVisibleProfileSurface(page);
+  }
+
+  await page.getByTestId("user-profile-tab-info").click();
+  await expect(page.getByTestId("user-profile-tab-info")).toHaveAttribute(
+    "data-state",
+    "active",
+  );
+  return contract;
 }
 
 async function addGenericAgent(
@@ -154,20 +252,31 @@ async function addGenericAgent(
   );
 }
 
-async function waitForMockLiveSubscription(page: Page, channelName: string) {
+async function waitForMockLiveSubscription(
+  page: Page,
+  channelName: string,
+  kind?: number,
+) {
   await expect
     .poll(async () => {
-      return page.evaluate((channelName) => {
-        return (
-          (
-            window as Window & {
-              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                channelName: string;
-              }) => boolean;
-            }
-          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName }) ?? false
-        );
-      }, channelName);
+      return page.evaluate(
+        ({ channelName, kind }) => {
+          return (
+            (
+              window as Window & {
+                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                  channelName: string;
+                  kind?: number;
+                }) => boolean;
+              }
+            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+              channelName,
+              kind,
+            }) ?? false
+          );
+        },
+        { channelName, kind },
+      );
     })
     .toBe(true);
 }
@@ -242,6 +351,83 @@ test("profile panel shows communication actions as quick action tiles", async ({
   await expect(page.getByTestId("message-wave-attachment")).toBeVisible();
 });
 
+test("owned agent profile stays in parity between Agents and its DM", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    agentMemory: createMockAgentMemoryListing(),
+    oaOwnerIsMe: true,
+  });
+  await page.goto("/");
+  const agentName = "Parity Bot";
+  const agentPubkey = await addGenericAgent(
+    page,
+    "general",
+    agentName,
+    "Keep every profile entry point in sync.",
+  );
+
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByRole("button", { name: `${agentName} agent profile` })
+    .click();
+  await page.getByTestId("user-profile-message").click();
+  await expect(page.getByTestId("chat-header-dm-avatar")).toBeVisible();
+  const dmChannelId = await page.evaluate(() => {
+    const match = window.location.hash.match(/\/channels\/([^?]+)/);
+    if (!match?.[1]) {
+      throw new Error("Could not resolve the agent DM channel id.");
+    }
+    return decodeURIComponent(match[1]);
+  });
+  await page.evaluate(
+    ({ dmChannelId, pubkey }) => {
+      const seed = (
+        window as Window & {
+          __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+            agentPubkey: string;
+            channelId: string;
+            turnId: string;
+          }) => void;
+        }
+      ).__BUZZ_E2E_SEED_ACTIVE_TURNS__;
+      if (!seed) {
+        throw new Error("Active-turn test bridge is unavailable.");
+      }
+      seed({
+        agentPubkey: pubkey,
+        channelId: "00000000-0000-0000-0000-000000000001",
+        turnId: "profile-parity-other-channel",
+      });
+      seed({
+        agentPubkey: pubkey,
+        channelId: dmChannelId,
+        turnId: "profile-parity-dm-channel",
+      });
+    },
+    { dmChannelId, pubkey: agentPubkey },
+  );
+
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByRole("button", { name: `${agentName} agent profile` })
+    .click();
+  const agentsSurface = await readOwnedAgentProfileContract(page);
+
+  await page.getByTestId("user-profile-message").click();
+  await expect(page.getByTestId("chat-header-dm-avatar")).toBeVisible();
+  await page
+    .getByTestId("chat-header")
+    .getByRole("button", { name: `Open profile for ${agentName}` })
+    .click();
+  await expect(page.getByTestId("user-profile-public-key")).toContainText(
+    npubEncode(agentPubkey).slice(0, 8),
+  );
+  const dmSurface = await readOwnedAgentProfileContract(page);
+
+  expect(dmSurface).toEqual(agentsSurface);
+});
+
 test("keeps the saved profile description after a community round trip", async ({
   page,
 }) => {
@@ -305,7 +491,14 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
 
   await expect(page.getByTestId("profile-identity-details")).toBeHidden();
   await expandIdentity(page);
-  await expect(page.getByTestId("profile-pubkey")).toContainText("deadbeef");
+  // The mock identity pubkey is "deadbeef" repeated 8×; its canonical npub
+  // is npub1m6kmam774…zuz0, so the identity row shows the npub, not the hex.
+  await expect(page.getByTestId("profile-pubkey")).toContainText(
+    npubEncode("deadbeef".repeat(8)).slice(0, 8),
+  );
+  await expect(page.getByTestId("profile-pubkey")).not.toContainText(
+    "deadbeefdeadbeef",
+  );
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
 
   await page.getByTestId("profile-metadata-edit").click();
@@ -957,6 +1150,25 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     "Memory Bot",
     longAgentInstruction,
   );
+  // A running process is not presence. Supply this scenario's snapshot and
+  // authored kind-20001 updates through the mock relay, not the query cache.
+  const emitAgentPresence = (status: "online" | "offline") =>
+    page.evaluate(
+      ({ pubkey, status }) => {
+        const emit = (
+          window as Window & {
+            __BUZZ_E2E_EMIT_MOCK_PRESENCE__?: (input: {
+              pubkey: string;
+              status: "online" | "offline";
+            }) => void;
+          }
+        ).__BUZZ_E2E_EMIT_MOCK_PRESENCE__;
+        if (!emit) throw new Error("Mock presence emitter is unavailable.");
+        emit({ pubkey, status });
+      },
+      { pubkey: agentPubkey, status },
+    );
+  await emitAgentPresence("online");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -995,6 +1207,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("user-profile-message")).toBeVisible();
   await expect(page.getByTestId("user-profile-huddle")).toHaveCount(0);
   await expect(page.getByTestId("user-profile-wave")).toHaveCount(0);
+  await expectHashSearchParam(page, "profile", agentPubkey);
   const agentPresenceBadge = page.getByTestId("user-profile-presence-badge");
   await expect(agentPresenceBadge).toBeVisible();
   await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
@@ -1057,9 +1270,13 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   );
   await expect(agentPrimaryAction).toHaveClass(/bg-foreground/);
   await expect(agentPrimaryAction).toHaveClass(/text-background/);
+  await waitForMockLiveSubscription(page, "general", 20001);
   await agentPrimaryAction.click();
   await expect(agentPrimaryAction).toHaveAttribute("aria-label", "Start agent");
+  await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
+  await emitAgentPresence("offline");
   await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Offline");
+  await expectHashSearchParam(page, "profile", agentPubkey);
   await expect(agentPrimaryAction).toHaveClass(/bg-foreground/);
   await expect(agentPrimaryAction).toHaveClass(/text-background/);
   await expect(page.getByTestId("user-profile-agent-restart")).toHaveCount(0);
@@ -1076,6 +1293,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(agentPrimaryAction).toBeEnabled();
   await agentPrimaryAction.click();
   await expect(agentPrimaryAction).toHaveAttribute("aria-label", "Stop");
+  await waitForMockLiveSubscription(page, "general", 20001);
+  await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Offline");
+  await emitAgentPresence("online");
   await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
   await expect(page.getByTestId("user-profile-agent-restart")).toBeVisible();
   await expectHashSearchParam(page, "profileTab", null);
@@ -1224,12 +1444,12 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     page
       .getByTestId("user-profile-public-key")
       .locator('[data-slot="profile-field-icon"]'),
-  ).toHaveCount(0);
+  ).toHaveCount(1);
   await expect(
     page
       .getByTestId("user-profile-managed-by")
       .locator('[data-slot="profile-field-icon"]'),
-  ).toHaveCount(0);
+  ).toHaveCount(1);
   const managedByRow = page.getByTestId("user-profile-managed-by");
   const managedByActionIndicator = page.getByTestId(
     "user-profile-managed-by-action-indicator",
@@ -1249,6 +1469,18 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   const instructionRow = page.getByTestId("user-profile-agent-instruction-row");
   await expect(instructionRow).toContainText("Agent instructions");
   await expect(instructionRow).not.toContainText("View");
+  await expect(
+    instructionRow.locator('[data-slot="profile-ingress-icon"]'),
+  ).toHaveCount(1);
+  for (const rowTestId of [
+    "user-profile-agent-instruction-row",
+    "user-profile-public-key",
+    "user-profile-managed-by",
+  ]) {
+    await expect(
+      page.getByTestId(rowTestId).locator(":scope > span.rounded-full"),
+    ).toHaveCount(0);
+  }
   const publicKeyRow = page.getByTestId("user-profile-public-key");
   const publicKeyCopy = page.getByTestId("user-profile-public-key-copy-status");
   await expect(publicKeyCopy).toHaveCSS("opacity", "0");
@@ -1258,7 +1490,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(publicKeyCopy).toHaveAttribute("data-copied", "true");
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(agentPubkey);
+    .toBe(npubEncode(agentPubkey));
   await expect(page.getByTestId("user-profile-agent-instruction")).toHaveCount(
     0,
   );
@@ -1280,6 +1512,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   expect(managementRowOrder).toEqual([
     "user-profile-duplicate-agent-row",
     "user-profile-export-agent-row",
+    "user-profile-create-card-row",
     "user-profile-archive-agent-row",
     "user-profile-delete-agent-row",
   ]);
@@ -1300,6 +1533,11 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
   await expect(exportDialog).toBeVisible();
   await exportDialog.getByRole("button", { name: "Cancel" }).click();
+  await page.getByTestId("user-profile-create-card-row").click();
+  const cardMintDialog = page.getByTestId("agent-card-mint-dialog");
+  await expect(cardMintDialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(cardMintDialog).toHaveCount(0);
   const archiveAgentRow = page.getByTestId("user-profile-archive-agent-row");
   await expect(archiveAgentRow).toHaveText(/Archive agent/);
   await archiveAgentRow.click();
@@ -1415,6 +1653,11 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     }),
   ).toBeVisible();
   await expect(
+    page
+      .getByTestId("user-profile-agent-status")
+      .locator('[data-slot="profile-field-icon"]'),
+  ).toHaveCount(1);
+  await expect(
     page.getByTestId("user-profile-model-settings-section"),
   ).toBeVisible();
   await expect(
@@ -1428,6 +1671,12 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     page.getByTestId("user-profile-agent-instruction-row"),
   ).toHaveCount(0);
   const modelEditRow = page.getByRole("button", { name: "Edit Model" });
+  await expect(
+    modelEditRow.locator('[data-slot="agent-config-field-icon"]'),
+  ).toHaveCount(1);
+  await expect(modelEditRow.locator(":scope > span.rounded-full")).toHaveCount(
+    0,
+  );
   const modelEditIndicator = page.getByTestId(
     "agent-config-model-edit-indicator",
   );
@@ -1441,14 +1690,44 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     .getByRole("button", { name: "Cancel" })
     .click();
   const acpRow = page.getByTestId("user-profile-acp");
+  await expect(acpRow.locator('[data-slot="profile-field-icon"]')).toHaveCount(
+    1,
+  );
   const acpCopy = page.getByTestId("user-profile-acp-copy-status");
   await expect(acpCopy).toHaveCSS("opacity", "0");
   await acpRow.hover();
   await expect(acpCopy).toHaveCSS("opacity", "1");
   const startOnLaunchRow = page.getByTestId("user-profile-start-on-launch");
+  await expect(
+    startOnLaunchRow.locator('[data-slot="profile-field-icon"]'),
+  ).toHaveCount(1);
   const startOnLaunchToggle = page.getByTestId(
     "user-profile-start-on-launch-toggle",
   );
+  const activitySection = page.getByTestId(
+    "user-profile-runtime-activity-section",
+  );
+  await expect(
+    activitySection.getByTestId("user-profile-agent-status"),
+  ).toBeVisible();
+  await expect(
+    activitySection.getByTestId("user-profile-start-on-launch"),
+  ).toBeVisible();
+  const activityRowOrder = await activitySection
+    .locator("[data-testid^='user-profile-']")
+    .evaluateAll((rows) =>
+      rows
+        .map((row) => row.getAttribute("data-testid"))
+        .filter((testId): testId is string => testId !== null),
+    );
+  expect(activityRowOrder.indexOf("user-profile-start-on-launch")).toBe(
+    activityRowOrder.indexOf("user-profile-agent-status") + 1,
+  );
+  await expect(
+    page
+      .getByTestId("user-profile-agent-configuration-section")
+      .getByTestId("user-profile-start-on-launch"),
+  ).toHaveCount(0);
   await expect(startOnLaunchRow).not.toContainText("Yes");
   await expect(startOnLaunchRow).toBeChecked();
   await expect(startOnLaunchToggle).toHaveAttribute("data-state", "checked");
@@ -1513,6 +1792,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   const diagnosticsIngress = page.getByTestId(
     "user-profile-diagnostics-ingress",
   );
+  await expect(
+    diagnosticsIngress.locator('[data-slot="profile-ingress-icon"]'),
+  ).toHaveCount(1);
   await expect(diagnosticsIngress).not.toContainText("View");
   await expect(
     diagnosticsIngress.locator("svg.lucide-chevron-right"),
@@ -1596,6 +1878,82 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   );
   await page.getByTestId("agent-memory-truncated").click();
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
+});
+
+test("an older agent message stays exact while persona navigation selects the live instance", async ({
+  page,
+}, testInfo) => {
+  const personaId = "profile-parity-agent";
+  const historicalPubkey = TEST_IDENTITIES.charlie.pubkey;
+  const currentPubkey = "d".repeat(64);
+  await installMockBridge(page, {
+    agentMemory: createMockAgentMemoryListing(),
+    managedAgents: [
+      {
+        channelNames: ["agents"],
+        name: "Earlier Parity Agent",
+        personaId,
+        pubkey: historicalPubkey,
+        status: "stopped",
+      },
+      {
+        channelNames: ["agents"],
+        name: "Current Parity Agent",
+        personaId,
+        pubkey: currentPubkey,
+        status: "running",
+      },
+    ],
+    oaOwnerIsMe: true,
+    personas: [
+      {
+        displayName: "Parity Agent",
+        id: personaId,
+        isActive: true,
+        systemPrompt: "Keep every profile entry point in sync.",
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId(`persona-agent-row-${personaId}`).click();
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Stop");
+
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await page.getByTestId("user-profile-instances").click();
+  await page.getByTestId(`user-profile-instance-${historicalPubkey}`).click();
+  await expectHashSearchParam(page, "profile", historicalPubkey);
+  await expectHashSearchParam(page, "profileTab", "runtime");
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Start agent");
+  await expect(
+    page.getByTestId(`user-profile-instance-${historicalPubkey}`),
+  ).toContainText("Current");
+
+  const exactInstanceContract = await readOwnedAgentProfileContract(page);
+
+  await page.getByTestId("auxiliary-panel-close").click();
+  await page.getByTestId("channel-agents").click();
+  const historicalMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Indexing the channel catalog now." });
+  await expect(historicalMessage).toBeVisible();
+  await historicalMessage.locator("button").first().click();
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Start agent");
+  const messageContract = await readOwnedAgentProfileContract(page);
+
+  expect(messageContract).toEqual(exactInstanceContract);
+  await page.getByTestId("user-profile-tab-info").click();
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: testInfo.outputPath("historical-exact-instance.png"),
+  });
 });
 
 test("restored Inbox deep link hides the back arrow", async ({ page }) => {
@@ -1723,12 +2081,50 @@ test("declared owner sees runtime tab without a relay-agent record", async ({
   );
   await expect(panel.getByTestId("user-profile-runtime")).toHaveCount(0);
   await expect(panel.getByTestId("user-profile-respond-to")).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-runtime-preview")).toHaveCount(
+    0,
+  );
+  await expect(
+    panel.getByTestId("user-profile-runtime-preview-notice"),
+  ).toHaveCount(0);
+  await expect(panel.getByText("Harness log", { exact: true })).toHaveCount(0);
 
   // No relay/managed runtime record means no write or management affordance —
   // only the truthful NIP-OA profile signal is rendered in Runtime.
   await expect(panel.getByText("Model")).toHaveCount(0);
   await expect(
     panel.getByRole("button", { name: /Start|Stop|Deploy/ }),
+  ).toHaveCount(0);
+});
+
+test("non-owner agent profile shows only reported public agent data", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Indexing the channel catalog now." });
+  await expect(messageRow).toBeVisible();
+  await messageRow.locator("button").first().click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByTestId("user-profile-agent-type")).toContainText(
+    "codex",
+  );
+  await expect(panel.getByTestId("user-profile-capabilities")).toContainText(
+    "code, reviews",
+  );
+  await expect(panel.getByRole("tab", { name: "Runtime" })).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-runtime-preview")).toHaveCount(
+    0,
+  );
+  await expect(
+    panel.getByTestId("user-profile-runtime-preview-notice"),
   ).toHaveCount(0);
 });
 
@@ -2145,7 +2541,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
 
   const getTextScaleState = () =>
     page.evaluate(() => ({
-      fontSize: getComputedStyle(document.documentElement).fontSize,
+      rootFontSize: getComputedStyle(document.documentElement).fontSize,
       storedScale: localStorage.getItem("buzz:text-scale"),
       webviewZoom: (window as Window & { __BUZZ_E2E_WEBVIEW_ZOOM__?: number })
         .__BUZZ_E2E_WEBVIEW_ZOOM__,
@@ -2176,7 +2572,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("+", "Equal", true);
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "17.6px",
+    rootFontSize: "17.6px",
     storedScale: "1.1",
     webviewZoom: 1,
   });
@@ -2184,7 +2580,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("-", "Minus");
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "16px",
+    rootFontSize: "16px",
     storedScale: null,
     webviewZoom: 1,
   });
@@ -2193,7 +2589,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("+", "Equal", true);
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "19.2px",
+    rootFontSize: "19.2px",
     storedScale: "1.2",
     webviewZoom: 1,
   });
@@ -2201,10 +2597,90 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("0", "Digit0");
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "16px",
+    rootFontSize: "16px",
     storedScale: null,
     webviewZoom: 1,
   });
+});
+
+test("storage clear resets composed font size and keyboard zoom across windows", async ({
+  context,
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, "appearance");
+  await page.getByTestId("font-size-larger").click();
+
+  const dispatchZoomIn = () =>
+    page.evaluate(() => {
+      const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "Equal",
+          ctrlKey: !isMac,
+          key: "+",
+          metaKey: isMac,
+          shiftKey: true,
+        }),
+      );
+    });
+
+  for (let step = 0; step < 5; step += 1) {
+    await dispatchZoomIn();
+  }
+
+  // Zoom scales the real root; the Font size preference layers a text-only
+  // multiplier on top. Resolve the composed type rem through a rendered probe
+  // so the CSS calc is actually evaluated (root px × 15/14 for "larger").
+  const readTypographyState = () =>
+    page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.fontSize = "var(--buzz-type-rem)";
+      document.documentElement.appendChild(probe);
+      const typeRemPx =
+        Math.round(Number.parseFloat(getComputedStyle(probe).fontSize) * 100) /
+        100;
+      probe.remove();
+      return {
+        fontSize: document.documentElement.dataset.fontSize,
+        rootFontSize: getComputedStyle(document.documentElement).fontSize,
+        typeRemPx,
+        textScale: localStorage.getItem("buzz:text-scale"),
+      };
+    });
+
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "larger",
+    rootFontSize: "24px",
+    typeRemPx: 25.71,
+    textScale: "1.5",
+  });
+
+  const peerPage = await context.newPage();
+  await installMockBridge(peerPage);
+  await peerPage.goto("/");
+  await peerPage.evaluate(() => localStorage.clear());
+
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "default",
+    rootFontSize: "16px",
+    typeRemPx: 16,
+    textScale: null,
+  });
+
+  await page.keyboard.press(
+    process.platform === "darwin" ? "Meta+-" : "Control+-",
+  );
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "default",
+    rootFontSize: "14.4px",
+    typeRemPx: 14.4,
+    textScale: "0.9",
+  });
+
+  await peerPage.close();
 });
 
 test("shows agent runtimes in agent settings", async ({ page }) => {
@@ -2222,7 +2698,9 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
     "settings-harnesses",
     "settings-global-agent-config",
   ]) {
-    const section = agentsPage.getByTestId(testId);
+    const section = agentsPage
+      .getByTestId(testId)
+      .locator('[data-slot="settings-section-card"]');
     await expect(section).toBeVisible();
     await expect(section).toHaveCSS("border-radius", "12px");
     await expect(section).toHaveCSS("border-top-width", "1px");
@@ -2246,16 +2724,13 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
   await expect(runtimeRow).toHaveCSS("border-top-width", "0px");
 
   const agentsSecondaryColor = await agentsPage
-    .getByText(
-      "Keep agents you address selected for future messages in the same channel or thread. Remove them from the composer at any time.",
-    )
+    .getByTestId("settings-automatic-agent-mentions")
+    .locator("[data-settings-subcopy]")
     .evaluate((element) => getComputedStyle(element).color);
   await page.getByTestId("settings-nav-appearance").click();
   const appearanceSecondaryColor = await page
-    .getByTestId("link-preview-style-trigger")
-    .locator("..")
-    .locator("p")
-    .nth(1)
+    .getByTestId("link-preview-style-group")
+    .locator("[data-settings-subcopy]")
     .evaluate((element) => getComputedStyle(element).color);
   expect(agentsSecondaryColor).toBe(appearanceSecondaryColor);
 });

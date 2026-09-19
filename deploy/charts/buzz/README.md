@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.7 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.8 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \
@@ -29,11 +29,26 @@ intent marker surfaced in NOTES.txt; the bundled services are opted in via the
 four `*.enabled` flags above (see `ci/quickstart-values.yaml` for the exact set
 CI installs). Eval-only: every bundled service is a single replica with no HA.
 
+For immutable delivery, pin the OCI digest instead of a tag. `image.digest`
+overrides `image.tag` when both are present:
+
+```yaml
+image:
+  repository: ghcr.io/block/buzz
+  digest: sha256:<64-lowercase-hex-characters>
+```
+
 ## Production (GitOps)
 
 The chart is designed for ArgoCD and Flux. Both render charts with `helm template`, in which mode Helm's `lookup` function returns empty — any chart-side `randAlphaNum` call would regenerate secrets on every sync. The chart-managed Secret path is **only** safe for `helm install` / `helm upgrade`.
 
 Production deploys MUST use `secrets.existingSecret:`. The Secret is consumed for any keys present and ignored for keys missing — extras are harmless.
+
+To enable relay-proxied KLIPY search, add `BUZZ_KLIPY_API_KEY` to that Secret.
+The key stays in the relay pod; clients discover the public `buzz-gif`
+extension and `gif` descriptor in NIP-11, then receive KLIPY-hosted media URLs.
+See [`docs/gif-search.md`](../../../docs/gif-search.md) for the protocol and
+security boundaries.
 
 See:
 
@@ -99,6 +114,151 @@ startup-fatal, so Kubernetes readiness never opens. If an operator explicitly
 disables that probe through `relay.extraEnv`, `/_readiness` does not test object
 storage; configuration is still parsed strictly, but reachability and addressing
 errors surface on the first storage operation.
+
+### Early-startup telemetry contract
+
+`buzz_process_lifecycle` JSON records are the authoritative history for the
+fixed phases `crypto_init`, `tracing_init`, `config_load`, `key_load`, and
+`metrics_bind`, plus the aggregate `process_telemetry` result. They use bounded
+status/reason values and never contain raw configuration, keys, URLs, or errors.
+These phases intentionally do not emit metrics. Most run before the Prometheus
+exporter exists, and one uniform log-only contract preserves every phase's real
+event time and failure without assigning an eventual scrape time to earlier work.
+
+### Readiness telemetry contract
+
+Only requests served by the private health listener (`BUZZ_HEALTH_PORT`) emit
+rollout readiness telemetry. The compatibility `/_readiness` route on the public
+app listener returns health but does not change these metrics.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_readiness_checks_total` | counter | `reason` from the closed readiness-reason set |
+| `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` |
+| `buzz_readiness_check_duration_seconds` | histogram | `check` only |
+| `buzz_readiness_state` | gauge | `check` only; latest publishable generation |
+
+The schema has a ceiling of 99 raw Prometheus series per pod: 12 overall
+reasons, 11 valid dependency/outcome pairs, 72 histogram series, and 4 gauges.
+Do not add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant,
+user, community, pubkey, header, query, or other request-controlled labels.
+Shutdown without dependency evaluation increments only
+`buzz_readiness_checks_total{reason="shutting_down"}` and sets the overall
+state to zero; it does not fabricate dependency failures or latency samples.
+
+### Operation-aware database pool acquisition contract
+
+The operation-aware families separate four questions: when an operation asked
+for a connection, who is waiting now, how completed/abandoned attempts ended,
+and how long checkout waits took.
+Outcome remains on the terminal counter for historical deployment comparison;
+it is intentionally absent from the expensive duration histogram.
+
+These families cover the explicitly routed deployment-critical operations
+listed below; they are not a count of every SQLx checkout in Buzz. In
+particular, a zero operation waiter does not prove that the shared SQLx pool
+has no uninstrumented waiter. Interpret it beside the pool active, idle, and
+maximum gauges when diagnosing total capacity pressure.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_pool_acquire_started_total` | counter | `pool_role`, `operation` |
+| `buzz_db_pool_acquire_duration_seconds` | histogram | `pool_role`, `operation` |
+| `buzz_db_pool_acquire_attempts_total` | counter | `pool_role`, `operation`, `outcome` |
+| `buzz_db_pool_waiters` | gauge | `pool_role`, `operation`; tracked operations only, periodically refreshed including zero |
+
+Outcomes are `success`, `timeout`, `error`, and `cancelled`. Operations are
+`bootstrap`, `readiness`, `tenant_resolution`, `authentication`,
+`authorization`, `subscription_history`, `event_write`, and `maintenance`.
+Only the following eleven pairs are valid:
+
+```text
+writer/bootstrap                 reader/bootstrap
+writer/readiness
+writer/tenant_resolution
+writer/authentication
+writer/authorization             reader/authorization
+writer/subscription_history      reader/subscription_history
+writer/event_write
+writer/maintenance
+```
+
+Nine finite checkout buckets plus `+Inf`, sum, and count yield 12 histogram
+series per valid pair. The new contract therefore has a hard ceiling of 198
+raw Prometheus series per pod: `11 × (1 + 12 + 4 + 1)`. The two legacy acquisition
+families remain temporarily for dashboard compatibility and are not part of
+that new-family budget. No `other` operation or request-controlled/sensitive
+label is valid.
+
+### Writer connection setup contract
+
+Writer connection setup is separate from checkout. At boot, SQLx constructs
+the writer pool and creates its minimum physical connections. Later it may
+create more when the pool grows or replaces a broken or expired connection.
+Every connected writer session must install the created-at floor, install the
+session timeouts, verify READ COMMITTED isolation, and reach `ready` before SQLx
+can give it to a caller.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_connection_step_started_total` | counter | `pool_role`, `step` |
+| `buzz_db_connection_step_duration_seconds` | histogram | `pool_role`, `step` |
+| `buzz_db_connection_step_attempts_total` | counter | `pool_role`, `step`, `outcome` |
+
+The fixed steps are `writer_pool`, `physical_connect`, `created_at_floor`,
+`session_timeouts`, `isolation`, and `ready`. Measurable phases emit start,
+duration, and terminal evidence. `physical_connect` and `ready` are success
+milestones: SQLx 0.9 exposes `after_connect` only after DNS, network, TLS, and
+authentication finish, so Buzz does not invent separate timings for those
+internal phases. Raw connect failures before `after_connect` are classified on
+the aggregate `writer_pool` phase during initial construction. Outcomes are
+`succeeded`, `failed`, `timed_out`, and `cancelled` where valid.
+
+For a measurable phase on one pod, subtract all terminal outcomes from its
+start counter to derive the number of attempts currently in progress. The
+session phases run in order, so a later phase start also proves the earlier
+phases succeeded for that attempt.
+
+Four start counters, four 13-series histograms, and fifteen terminal counters
+create a hard ceiling of 71 raw Prometheus series per pod. Connection ordinals,
+database URLs, hosts, usernames, SQL, and raw errors are forbidden as metric
+labels.
+
+When audit logging is enabled, the `buzz_db_connection_*` metric totals combine
+the main writer pool and the separate audit writer pool.
+
+### Physical database pool utilization and configuration contract
+
+Every physical Postgres pool the relay owns reports current utilization,
+capacity, and configuration under role-labelled families. The role vocabulary
+is closed — `writer`, `reader`, `audit`, `search` — and all four roles are always
+present, so a series never appears or disappears when an optional pool is
+enabled or disabled. An unconfigured optional pool reports
+`buzz_db_pool_configured` `0` with zero utilization and capacity rather than
+going missing.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_pool_connections` | gauge | `pool_role`, `state` |
+| `buzz_db_pool_max_connections` | gauge | `pool_role` |
+| `buzz_db_pool_configured` | gauge | `pool_role`; `1` configured, `0` not configured |
+
+States are `idle` and `active`; their sum is the pool's current size.
+`buzz_db_pool_max_connections` reports capacity separately, so summing the
+connections family counts each current connection exactly once. The three
+families are fixed at 16 raw Prometheus series per pod (`4 × 2` current
+utilization plus `4` maximum capacity plus `4` configured). The `audit` and
+`search` roles are statistics-only: pool ownership, capacities, timeouts, and
+query routing are unchanged, and these roles emit no acquisition telemetry.
+
+The pre-existing unlabelled `buzz_db_pool_*` (writer) and `buzz_db_read_pool_*`
+(reader) gauges are still exported unchanged for dashboard compatibility. The
+reader family remains absent when no read replica is configured; use
+`buzz_db_pool_configured{pool_role="reader"}` for the explicit signal.
+
+Pool sizing and the aggregate connection budget across all four roles remain
+deployment configuration concerns. The relay does not enforce a combined
+connection ceiling.
 
 ## Relay Pod extensions
 
@@ -204,6 +364,8 @@ default so long-lived WebSocket connections have time to drain.
 ## Upgrades
 
 Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
+
+Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. The relay verifies the roster-fence trigger catalog and behavior before opening listeners and refuses to start if 0032 is missing or inert. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 

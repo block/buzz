@@ -34,6 +34,15 @@ class GenerationConfig(StrictModel):
     temperature: float = Field(default=0.0, ge=0.0)
     max_output_tokens: int = Field(gt=0)
     context_window_tokens: int = Field(gt=0)
+    # Reasoning effort pinned per condition. buzz-agent clamps an unsupported
+    # level to the nearest one the model accepts and only warns, so a condition
+    # asking for more than the endpoint supports runs silently at less.
+    # Unset means the runtime's default, which is pinned rather than left to
+    # the provider: a provider default is neither recorded nor stable across
+    # endpoints.
+    thinking_effort: (
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -113,6 +122,18 @@ class ExperimentManifest(StrictModel):
     def canonical_bytes(self) -> bytes:
         """Return stable UTF-8 JSON independent of YAML formatting and key order."""
         data = self.model_dump(mode="json", exclude_none=False)
+        # An unpinned `thinking_effort` is dropped rather than serialised as
+        # null: the hash answers "are these two runs the same experiment?", and
+        # a manifest written before this field existed sends a byte-identical
+        # container environment, so opening the effort axis must not
+        # re-identify every condition that does not use it.
+        for entry in data.get("roster", []):
+            generation = entry.get("generation")
+            if (
+                isinstance(generation, dict)
+                and generation.get("thinking_effort") is None
+            ):
+                generation.pop("thinking_effort", None)
         return json.dumps(
             data,
             sort_keys=True,

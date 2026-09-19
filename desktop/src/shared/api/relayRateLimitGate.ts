@@ -1,9 +1,9 @@
 /**
- * Module-level rate-limit gate for the relay WebSocket and HTTP bridge.
+ * Module-level rate-limit gate for relay WebSocket operations.
  *
- * When the relay signals back-pressure via a CLOSED `rate-limited:` message or
- * an HTTP 429 response, callers activate the gate. Operations that must not run
- * while rate-limited call `isRateLimited()` or await `waitForRateLimit()`.
+ * WebSocket back-pressure activates this gate. HTTP 429s are handled by the
+ * native HTTP gate: ApiCalls and WsEvents are separate relay quota budgets.
+ * Callers that must not run while WS-limited await `waitForRateLimit()`.
  *
  * The gate is a singleton: one shared expiry covers all concurrent callers so
  * overlapping hints (multiple CLOSED frames) extend to the latest expiry without
@@ -15,12 +15,10 @@
 const DEFAULT_RATE_LIMIT_SECONDS = 10;
 
 /**
- * Maximum hint the TS gate will honour from a relay 429 response.
+ * Maximum hint the TS gate will honour from a WebSocket rejection.
  *
- * Mirrors `MAX_HINT_SECONDS` in `relay_admission.rs` (Rust). The Rust relay
- * layer clamps the hint before embedding it in the error string, so in practice
- * this TS cap is a defence-in-depth guard against any future Rust path that
- * forgets to clamp, keeping both gates on the same documented bound.
+ * Uses the same cap as the native HTTP gate (`MAX_HINT_SECONDS` in
+ * `relay_admission.rs`), but each transport consumes its own retry hints.
  */
 export const MAX_HINT_SECONDS = 300;
 
@@ -85,6 +83,24 @@ export function activateRateLimit(retryInSeconds: number | null): void {
     gatePromise = null;
     resolve?.();
   }, durationMs);
+}
+
+/**
+ * Arms the gate if `message` is a relay back-pressure signal, and reports
+ * whether it was.
+ *
+ * The relay marks back-pressure with a `rate-limited:` prefix on whichever
+ * frame carries the rejection — `NOTICE` for connection-scoped limits, `OK`
+ * for one addressed to a single event, `CLOSED` for a subscription. Every
+ * inbound path needs the same test, so it lives here with the gate rather than
+ * being re-derived per call site.
+ */
+export function activateRateLimitIfSignalled(message: string): boolean {
+  if (!message.startsWith("rate-limited:")) {
+    return false;
+  }
+  activateRateLimit(parseRateLimitHint(message));
+  return true;
 }
 
 /** Returns `true` when the relay has signalled back-pressure and the gate is active. */

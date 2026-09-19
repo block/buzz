@@ -4,9 +4,17 @@
  * - `formatTime` — short clock time ("2:34 PM"), used in message rows.
  * - `formatFullDateTime` — verbose string for tooltips
  *   ("Wednesday, April 2, 2026 at 2:34 PM").
- * - `formatDayHeading` — label for day dividers / sticky headers.
- *   Returns "Today", "Yesterday", or a date like "Monday, March 31st".
  * - `isSameDay` — compare two unix-second timestamps.
+ *
+ * Relative labels ("Today", "Yesterday", "June 20", "Yesterday at 9:05 AM") are
+ * not here: chat and the Inbox share them from `shared/lib/datetime.ts`. What
+ * stays in this file is the absolute end of the range — a bare clock time, the
+ * verbose tooltip string, and same-day comparison.
+ *
+ * `formatTime` is for places with only enough room for a clock: the hover gutter
+ * that replaces the avatar on continuation rows. A message header uses the
+ * relative ladder instead, because the day divider that supplies its date
+ * scrolls away while the messages under it stay on screen.
  */
 
 const TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -25,16 +33,9 @@ const FULL_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-const WEEKDAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  weekday: "long",
-});
-
-const LONG_MONTH_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  month: "long",
-});
-
-const SHORT_MONTH_FORMATTER = new Intl.DateTimeFormat("en-US", {
+const SHORT_MONTH_DAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
+  day: "numeric",
 });
 
 /** Short clock time, e.g. "2:34 PM". */
@@ -50,34 +51,6 @@ export function formatTimeWithoutDayPeriod(time: string): string {
 /** Full date + time for tooltips, e.g. "Wednesday, April 2, 2026 at 2:34 PM". */
 export function formatFullDateTime(unixSeconds: number): string {
   return FULL_DATE_TIME_FORMATTER.format(new Date(unixSeconds * 1_000));
-}
-
-/**
- * Human-friendly day label for dividers and sticky headers.
- * Returns "Today", "Yesterday", a current-year date like "Monday, March 31st",
- * or a prior-year date like "Monday, March 31st, 2025".
- */
-export function formatDayHeading(unixSeconds: number): string {
-  const date = new Date(unixSeconds * 1_000);
-  const now = new Date();
-
-  if (isSameDayDate(date, now)) {
-    return "Today";
-  }
-
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (isSameDayDate(date, yesterday)) {
-    return "Yesterday";
-  }
-
-  const dateLabel = `${WEEKDAY_FORMATTER.format(date)}, ${formatMonthDayOrdinal(
-    date,
-    LONG_MONTH_FORMATTER,
-  )}`;
-  return date.getFullYear() === now.getFullYear()
-    ? dateLabel
-    : `${dateLabel}, ${date.getFullYear()}`;
 }
 
 /** True when two unix-second timestamps fall on the same calendar day (local time). */
@@ -97,17 +70,14 @@ export function startOfLocalDaySeconds(unixSeconds: number): number {
   return Math.floor(date.getTime() / 1_000);
 }
 
-/** Short month + ordinal day, e.g. "May 19th". */
-export function formatShortMonthDayOrdinal(unixSeconds: number): string {
-  return formatMonthDayOrdinal(
-    new Date(unixSeconds * 1_000),
-    SHORT_MONTH_FORMATTER,
-  );
+/** Short month + day, e.g. "May 19". No ordinal suffix, per the writing standard. */
+export function formatShortMonthDay(unixSeconds: number): string {
+  return SHORT_MONTH_DAY_FORMATTER.format(new Date(unixSeconds * 1_000));
 }
 
 /**
  * Relative thread-summary timestamp with expanded units, e.g. "3 hours ago",
- * falling back to "on May 19th" for older replies.
+ * falling back to "on May 19" for older replies.
  */
 export function formatThreadSummaryLastReplyTime(
   unixSeconds: number,
@@ -120,7 +90,7 @@ export function formatThreadSummaryLastReplyTime(
   if (diff < 86_400) return formatAgo(Math.floor(diff / 3_600), "hour");
   if (diff < 604_800) return formatAgo(Math.floor(diff / 86_400), "day");
 
-  return `on ${formatShortMonthDayOrdinal(unixSeconds)}`;
+  return `on ${formatShortMonthDay(unixSeconds)}`;
 }
 
 function isSameDayDate(a: Date, b: Date): boolean {
@@ -131,33 +101,6 @@ function isSameDayDate(a: Date, b: Date): boolean {
   );
 }
 
-function formatMonthDayOrdinal(
-  date: Date,
-  monthFormatter: Intl.DateTimeFormat,
-): string {
-  return `${monthFormatter.format(date)} ${date.getDate()}${ordinalSuffix(
-    date.getDate(),
-  )}`;
-}
-
 function formatAgo(value: number, unit: string): string {
   return `${value} ${unit}${value === 1 ? "" : "s"} ago`;
-}
-
-function ordinalSuffix(day: number): string {
-  const lastTwoDigits = day % 100;
-  if (lastTwoDigits >= 11 && lastTwoDigits <= 13) {
-    return "th";
-  }
-
-  switch (day % 10) {
-    case 1:
-      return "st";
-    case 2:
-      return "nd";
-    case 3:
-      return "rd";
-    default:
-      return "th";
-  }
 }

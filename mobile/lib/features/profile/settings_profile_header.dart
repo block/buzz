@@ -1,15 +1,19 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/animated_avatar.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/relay/media_image.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
+import '../../shared/widgets/progressive_animated_avatar.dart';
 import 'profile_provider.dart';
 import 'set_status_sheet.dart';
 import 'user_status_provider.dart';
@@ -19,7 +23,7 @@ import 'user_status_provider.dart';
 /// puts an edit-photo pencil in that badge; here it carries the status glyph and
 /// opens the status sheet instead. The notch shape — including the fillets where
 /// it meets the avatar's edge — comes from [AvatarBadgeMaskGeometry.badge].
-class SettingsProfileHeader extends ConsumerWidget {
+class SettingsProfileHeader extends HookConsumerWidget {
   const SettingsProfileHeader({super.key});
 
   static const _avatarSize = 128.0;
@@ -30,26 +34,106 @@ class SettingsProfileHeader extends ConsumerWidget {
     final status = ref.watch(userStatusProvider).asData?.value;
     final hasStatus = status != null && !status.isEmpty;
     final presence = ref.watch(presenceProvider).value ?? 'offline';
+    final animatedAvatar = parseAnimatedAvatarUrl(profile?.avatarUrl);
+    final animatedPosterUrl = animatedAvatar?.posterUrl;
+    final handoff = ref.watch(profileAvatarHandoffProvider);
+    final activeHandoff = handoff?.avatarUrl == profile?.avatarUrl
+        ? handoff
+        : null;
+    final stoppedAnimationUrl = useState<String?>(null);
+    final avatarUrl = animatedAvatar == null
+        ? profile?.avatarUrl
+        : stoppedAnimationUrl.value == animatedAvatar.animationUrl
+        ? animatedAvatar.posterUrl
+        : null;
 
     void openStatusSheet() =>
         showSetStatusSheet(context, currentStatus: status);
 
     return Padding(
-      padding: const EdgeInsets.only(top: Grid.sm, bottom: Grid.sm),
+      key: const ValueKey('settings-profile-header'),
+      padding: const EdgeInsets.only(top: Grid.sm, bottom: Grid.twelve),
       child: Column(
         children: [
           MaskedAvatarBadge(
             size: _avatarSize,
-            avatar: ColoredBox(
-              color: context.colors.primaryContainer,
-              child: AvatarImageContent(
-                imageUrl: profile?.avatarUrl,
-                fallback: Text(
-                  profile?.initial ?? '?',
-                  style: context.textTheme.displaySmall?.copyWith(
-                    color: context.colors.onPrimaryContainer,
-                  ),
-                ),
+            avatar: GestureDetector(
+              key: const ValueKey('settings-profile-avatar'),
+              onTap: animatedAvatar == null
+                  ? null
+                  : () => stoppedAnimationUrl.value =
+                        stoppedAnimationUrl.value == animatedAvatar.animationUrl
+                        ? null
+                        : animatedAvatar.animationUrl,
+              child: ColoredBox(
+                key: const ValueKey('settings-profile-avatar-background'),
+                color: animatedAvatar == null
+                    ? context.colors.primaryContainer
+                    : Colors.transparent,
+                child:
+                    animatedAvatar != null &&
+                        stoppedAnimationUrl.value != animatedAvatar.animationUrl
+                    ? ProgressiveAnimatedAvatar(
+                        key: ValueKey(animatedAvatar.animationUrl),
+                        descriptor: animatedAvatar,
+                        fallback: _AvatarFallback(initial: profile?.initial),
+                        loadingImage: activeHandoff == null
+                            ? null
+                            : MemoryImage(activeHandoff.animation),
+                        onAnimationReady: activeHandoff == null
+                            ? null
+                            : () => ref
+                                  .read(profileAvatarHandoffProvider.notifier)
+                                  .clear(activeHandoff.avatarUrl),
+                      )
+                    : activeHandoff == null || animatedPosterUrl == null
+                    ? AvatarImageContent(
+                        imageUrl: avatarUrl,
+                        fallback: _AvatarFallback(initial: profile?.initial),
+                      )
+                    : Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Image(
+                            image: MemoryImage(activeHandoff.poster),
+                            fit: BoxFit.cover,
+                            gaplessPlayback: true,
+                          ),
+                          Offstage(
+                            offstage: true,
+                            child: MediaImage(
+                              key: ValueKey(
+                                'settings-profile-paused-handoff-${activeHandoff.avatarUrl}',
+                              ),
+                              url: animatedPosterUrl,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) =>
+                                  const SizedBox.shrink(),
+                              frameBuilder:
+                                  (
+                                    context,
+                                    child,
+                                    frame,
+                                    wasSynchronouslyLoaded,
+                                  ) {
+                                    if (wasSynchronouslyLoaded ||
+                                        frame != null) {
+                                      WidgetsBinding.instance
+                                          .addPostFrameCallback((_) {
+                                            ref
+                                                .read(
+                                                  profileAvatarHandoffProvider
+                                                      .notifier,
+                                                )
+                                                .clear(activeHandoff.avatarUrl);
+                                          });
+                                    }
+                                    return child;
+                                  },
+                            ),
+                          ),
+                        ],
+                      ),
               ),
             ),
             badge: _StatusBadge(
@@ -93,6 +177,22 @@ class SettingsProfileHeader extends ConsumerWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _AvatarFallback extends StatelessWidget {
+  const _AvatarFallback({required this.initial});
+
+  final String? initial;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      initial ?? '?',
+      style: context.textTheme.displaySmall?.copyWith(
+        color: context.colors.onPrimaryContainer,
       ),
     );
   }

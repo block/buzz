@@ -87,6 +87,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
         case _QuickAction.createChannel:
           final created = await showBuzzModalBottomSheet<Channel>(
             context: context,
+            title: 'Create a new channel',
             constraints: _quickActionSheetConstraints(context),
             isScrollControlled: true,
             showDragHandle: true,
@@ -98,6 +99,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
         case _QuickAction.newDm:
           final opened = await showBuzzModalBottomSheet<Channel>(
             context: context,
+            title: 'New message',
             constraints: _quickActionSheetConstraints(context),
             isScrollControlled: true,
             showDragHandle: true,
@@ -107,6 +109,15 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
           if (opened != null && context.mounted) {
             await openChannel(opened);
           }
+        case _QuickAction.browseChannels:
+          await showBuzzModalBottomSheet<void>(
+            context: context,
+            title: 'Browse channels',
+            constraints: _quickActionSheetConstraints(context),
+            isScrollControlled: true,
+            showDragHandle: true,
+            builder: (_) => const _BrowseChannelsSheet(),
+          );
       }
     }
 

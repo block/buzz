@@ -7,7 +7,7 @@ typedef RelayTimerFactory =
 
 /// Session-owned gate that pauses relay requests after back-pressure.
 class RelayRateLimitGate {
-  /// Default gate duration when the relay omits a positive retry hint.
+  /// Default gate duration when the relay omits a parseable retry hint.
   static const defaultRetrySeconds = 10;
 
   /// Longest retry hint accepted from a relay response.
@@ -32,10 +32,22 @@ class RelayRateLimitGate {
   }
 
   /// Activates or extends the gate without shrinking an existing window.
+  ///
+  /// A null [retryInSeconds] means the relay sent no parseable hint, so the
+  /// conservative [defaultRetrySeconds] applies. An explicit hint is honored as
+  /// given: the relay sends `retry in 0s` to mean "retry immediately", so a
+  /// non-positive hint opens no window at all. Treating `0` as if it were
+  /// absent previously gated every relay read for [defaultRetrySeconds] — on a
+  /// cold start with many channels that turned the relay's own "go now" into a
+  /// ten-second stall of the whole session.
+  ///
+  /// An already-active window is never shortened, so an immediate hint arriving
+  /// mid-window leaves that window intact.
   void activate(int? retryInSeconds) {
-    final seconds = retryInSeconds != null && retryInSeconds > 0
-        ? min(retryInSeconds, maxRetrySeconds)
-        : defaultRetrySeconds;
+    if (retryInSeconds != null && retryInSeconds <= 0) return;
+    final seconds = retryInSeconds == null
+        ? defaultRetrySeconds
+        : min(retryInSeconds, maxRetrySeconds);
     final duration = Duration(seconds: seconds);
     final newExpiry = _now().add(duration);
     final currentExpiry = _expiresAt;

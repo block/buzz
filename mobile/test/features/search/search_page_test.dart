@@ -4,8 +4,8 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
-import 'package:buzz/features/profile/user_cache_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/search/recent_searches_provider.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/search/search_provider.dart';
@@ -95,9 +95,10 @@ void main() {
     expect(appBar.gradient, isNull);
     expect(appBar.frosted, isTrue);
     expect(appBar.showBottomDivider, isTrue);
-    expect(appBar.bottomDividerOpacity, 0.06);
+    expect(appBar.bottomDividerOpacity, 0.07);
     expect(appBar.bottomHeight, 57);
     expect(appBar.leading, isNull);
+    expect(appBar.centerTitle, isFalse);
     expect(find.text('Search'), findsOneWidget);
     final promptText = find.descendant(
       of: find.byKey(const Key('search-field-container')),
@@ -316,6 +317,14 @@ void main() {
       reason: 'The active field translates upward into the title row.',
     );
     expect(find.byKey(const Key('search-header-filters')), findsOneWidget);
+    final filtersRect = tester.getRect(
+      find.byKey(const Key('search-header-filters')),
+    );
+    expect(
+      filtersRect.top - focusedRect.bottom,
+      Grid.xxs,
+      reason: 'Filters keep one compact spacing token below the controls.',
+    );
     final settledSlide = tester.widget<SlideTransition>(
       find.ancestor(of: cancel, matching: find.byType(SlideTransition)).first,
     );
@@ -330,6 +339,12 @@ void main() {
     expect(iconScale.scale, lessThan(1));
     expect(movingField.top, Grid.half);
     final appBarRect = tester.getRect(find.byType(FrostedAppBar));
+    expect(
+      appBarRect.bottom - filtersRect.bottom,
+      closeTo(Grid.xxs + 1, 0.01),
+      reason:
+          'The filter row keeps the same spacing below it, plus the divider.',
+    );
     expect(
       appBarRect.contains(focusedRect.center),
       isTrue,
@@ -915,6 +930,43 @@ void main() {
     expect(content.mentionNames, const {agentPubkey: 'Helper Bot'});
     expect(content.agentMentionPubkeys, contains(agentPubkey));
     expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+  });
+
+  testWidgets('does not label an unjoined channel as having zero members', (
+    tester,
+  ) async {
+    final state = SearchState(
+      query: 'community',
+      channelResults: [
+        Channel(
+          id: 'community-help',
+          name: 'community-help',
+          channelType: 'stream',
+          visibility: 'open',
+          description: 'Help from the community',
+          createdBy: 'test',
+          createdAt: DateTime(2025),
+          memberCount: 0,
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Open'), findsOneWidget);
+    expect(find.text('0 members'), findsNothing);
   });
 }
 

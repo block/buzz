@@ -1,6 +1,14 @@
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
-import { Archive, ChevronRight, Info, RefreshCw, Wrench } from "lucide-react";
+import {
+  Archive,
+  ChevronRight,
+  Info,
+  MessageSquare,
+  RefreshCw,
+  ScrollText,
+  Wrench,
+} from "lucide-react";
 
 import type { IdentityArchiveActions } from "@/features/identity-archive/hooks";
 import type { ManagedAgent, RestartDiffEntry } from "@/shared/api/types";
@@ -18,6 +26,8 @@ import {
   useProfileActivityFeedScope,
 } from "@/features/profile/lib/profileActivityFeedScope";
 import { UserProfileAgentManagementRows } from "@/features/profile/ui/UserProfileAgentManagementRows";
+import { ProtectedAgentBestieAction } from "@protected-feature-components";
+import { ProfileInstancesSection } from "@/features/profile/ui/ProfileInstancesSection";
 import {
   type ProfileField,
   ProfileFieldRows,
@@ -62,7 +72,10 @@ export function ProfileIngressRow({
   const content = (
     <>
       {Icon ? (
-        <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <Icon
+          className="h-4 w-4 shrink-0 text-muted-foreground"
+          data-slot="profile-ingress-icon"
+        />
       ) : null}
       <span className="min-w-0 flex-1 text-sm font-medium text-foreground">
         {label}
@@ -191,11 +204,11 @@ export function ProfileInfoTabContent({
   archiveActions,
   canArchiveAgent,
   canDeleteAgent,
-  callerChannelId,
   channelIdToName,
   isArchived,
   isDeleteAgentPending,
   managedAgent,
+  onCreateCard,
   onDeleteAgent,
   onDuplicateAgent,
   onExportAgent,
@@ -211,11 +224,12 @@ export function ProfileInfoTabContent({
   archiveActions: IdentityArchiveActions;
   canArchiveAgent: boolean;
   canDeleteAgent: boolean;
-  callerChannelId: string | null;
   channelIdToName: Record<string, string>;
   isArchived: boolean;
   isDeleteAgentPending: boolean;
   managedAgent?: ManagedAgent;
+  /** Mint an agent trading card. Present only for owner-managed personas. */
+  onCreateCard?: () => void;
   onDeleteAgent: () => void;
   onDuplicateAgent?: () => void;
   onExportAgent?: () => void;
@@ -248,6 +262,7 @@ export function ProfileInfoTabContent({
     !hasInfoFields &&
     !showArchiveAction &&
     !canDeleteAgent &&
+    !onCreateCard &&
     !onDuplicateAgent &&
     !onExportAgent &&
     !showActivityIngress &&
@@ -263,7 +278,6 @@ export function ProfileInfoTabContent({
           <ProfileLiveActivityEmbed
             activeTurns={activeTurns}
             activityAgent={activityAgent}
-            callerChannelId={callerChannelId}
             channelIdToName={channelIdToName}
             feedScope={feedScope}
             onOpenActivity={onOpenActivity}
@@ -283,6 +297,7 @@ export function ProfileInfoTabContent({
           {showInstructionBlock ? (
             <ProfileIngressRow
               grouped
+              icon={MessageSquare}
               label="Agent instructions"
               onClick={onEditAgent}
               testId="user-profile-agent-instruction-row"
@@ -297,85 +312,29 @@ export function ProfileInfoTabContent({
         canDeleteAgent={canDeleteAgent}
         isDeletePending={isDeleteAgentPending}
         managedAgent={managedAgent}
+        onCreateCard={onCreateCard}
         onDeleteAgent={onDeleteAgent}
         onDuplicateAgent={onDuplicateAgent}
         onExportAgent={onExportAgent}
+        supplementalAction={
+          managedAgent ? (
+            <ProtectedAgentBestieAction agent={managedAgent} />
+          ) : null
+        }
       />
     </div>
-  );
-}
-
-function ProfileInstancesSection({
-  currentPubkey,
-  instances,
-  onOpenInstance,
-}: {
-  currentPubkey: string | null;
-  instances: ManagedAgent[];
-  onOpenInstance: (pubkey: string) => void;
-}) {
-  const [expanded, setExpanded] = React.useState(false);
-  const instanceCountLabel = `${instances.length} instance${instances.length === 1 ? "" : "s"}`;
-
-  return (
-    <ProfileSectionGroup
-      testId="user-profile-instances-section"
-      title="Instances"
-    >
-      <button
-        aria-expanded={expanded}
-        className="flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-        data-testid="user-profile-instances"
-        onClick={() => setExpanded((value) => !value)}
-        type="button"
-      >
-        <span className="min-w-0 flex-1 text-sm font-medium">
-          {instanceCountLabel}
-        </span>
-        <ChevronRight
-          className={cn(
-            "h-4 w-4 shrink-0 text-muted-foreground transition-transform",
-            expanded && "rotate-90",
-          )}
-        />
-      </button>
-      {expanded
-        ? instances.map((instance) => {
-            const isCurrent = instance.pubkey === currentPubkey;
-            return (
-              <button
-                className="flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                data-testid={`user-profile-instance-${instance.pubkey}`}
-                key={instance.pubkey}
-                onClick={() => onOpenInstance(instance.pubkey)}
-                type="button"
-              >
-                <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                  {instance.name}
-                </span>
-                <span className="text-xs capitalize text-muted-foreground">
-                  {isCurrent ? "Current" : instance.status.replace("_", " ")}
-                </span>
-                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-              </button>
-            );
-          })
-        : null}
-    </ProfileSectionGroup>
   );
 }
 
 function ProfileLiveActivityEmbed({
   activeTurns,
   activityAgent,
-  callerChannelId,
   channelIdToName,
   feedScope,
   onOpenActivity,
 }: {
   activeTurns: ActiveTurnSummary[];
   activityAgent: ProfileActivityAgent;
-  callerChannelId: string | null;
   channelIdToName: Record<string, string>;
   feedScope: ProfileActivityFeedScope;
   onOpenActivity: (channelId?: string | null) => void;
@@ -398,7 +357,7 @@ function ProfileLiveActivityEmbed({
   const activeChannelId = resolveActivityChannelId(
     slides,
     selectedChannelId,
-    callerChannelId ?? feedScope.preferredChannelId,
+    feedScope.preferredChannelId,
   );
   const selectedIndex = activeChannelId ? slides.indexOf(activeChannelId) : 0;
 
@@ -499,7 +458,7 @@ function ProfileLiveActivityEmbed({
         <ManagedAgentSessionPanel
           agent={activityAgent}
           autoTail={true}
-          channelId={callerChannelId}
+          channelId={activeChannelId}
           className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 text-xs shadow-none **:data-message-id:pointer-events-none"
           emptyDescription={emptyDescription}
           emptyState={emptyState}
@@ -753,6 +712,7 @@ function ArchiveStatusTooltip() {
 
 export function ProfileRuntimeTabContent({
   autoRestartEnabled = false,
+  archivedInstances,
   currentPubkey,
   diagnosticsFields,
   diagnosticsSummary,
@@ -767,10 +727,10 @@ export function ProfileRuntimeTabContent({
   onOpenInstance,
   onToggleStartOnLaunch,
   showDiagnosticsIngress,
-  showPreviewHarnessLog = false,
 }: {
   /** Whether the per-agent auto-restart toggle is ON. */
   autoRestartEnabled?: boolean;
+  archivedInstances: ManagedAgent[];
   currentPubkey: string | null;
   diagnosticsFields: ProfileField[];
   diagnosticsSummary: React.ReactNode;
@@ -787,45 +747,31 @@ export function ProfileRuntimeTabContent({
   onOpenInstance: (pubkey: string) => void;
   onToggleStartOnLaunch?: () => void;
   showDiagnosticsIngress: boolean;
-  showPreviewHarnessLog?: boolean;
 }) {
   const startOnLaunchFieldIndex = configurationFields.findIndex(
     (field) => field.label === "Start on launch",
   );
   const startOnLaunchField = configurationFields[startOnLaunchFieldIndex];
-  const configurationFieldsBeforeStartOnLaunch =
-    startOnLaunchFieldIndex >= 0
-      ? configurationFields.slice(0, startOnLaunchFieldIndex)
-      : configurationFields;
-  const configurationFieldsAfterStartOnLaunch =
-    startOnLaunchFieldIndex >= 0
-      ? configurationFields.slice(startOnLaunchFieldIndex + 1)
-      : [];
-  const [previewStartOnLaunchEnabled, setPreviewStartOnLaunchEnabled] =
-    React.useState(startOnLaunchField?.displayValue === "Yes");
-  const isRuntimePreview =
-    startOnLaunchField !== undefined && startOnLaunchEnabled === undefined;
+  const StartOnLaunchIcon = startOnLaunchField?.icon;
+  const remainingConfigurationFields = configurationFields.filter(
+    (_, index) => index !== startOnLaunchFieldIndex,
+  );
   const resolvedStartOnLaunchEnabled =
-    startOnLaunchEnabled ?? previewStartOnLaunchEnabled;
-  const canToggleStartOnLaunch =
-    isRuntimePreview || onToggleStartOnLaunch !== undefined;
+    startOnLaunchEnabled ?? startOnLaunchField?.displayValue === "Yes";
+  const canToggleStartOnLaunch = onToggleStartOnLaunch !== undefined;
   const handleStartOnLaunchToggle = React.useCallback(() => {
     if (startOnLaunchPending) return;
-    if (isRuntimePreview) {
-      setPreviewStartOnLaunchEnabled((enabled) => !enabled);
-      return;
-    }
     onToggleStartOnLaunch?.();
-  }, [isRuntimePreview, onToggleStartOnLaunch, startOnLaunchPending]);
+  }, [onToggleStartOnLaunch, startOnLaunchPending]);
   const statusDiagnosticsFields = diagnosticsFields.filter(
     (field) => field.label === "Status",
   );
   const hasActivityRows =
     statusDiagnosticsFields.length > 0 ||
-    showDiagnosticsIngress ||
-    showPreviewHarnessLog;
-  const hasConfigurationRows = configurationFields.length > 0;
-  const hasInstances = instances.length > 0;
+    startOnLaunchField !== undefined ||
+    showDiagnosticsIngress;
+  const hasConfigurationRows = remainingConfigurationFields.length > 0;
+  const hasInstances = instances.length > 0 || archivedInstances.length > 0;
 
   if (
     statusDiagnosticsFields.length === 0 &&
@@ -872,32 +818,6 @@ export function ProfileRuntimeTabContent({
               variant="runtime"
             />
           ) : null}
-          {showDiagnosticsIngress ? (
-            <ProfileIngressRow
-              grouped
-              label="Harness log"
-              onClick={onOpenDiagnostics}
-              testId="user-profile-diagnostics-ingress"
-              trailing={diagnosticsSummary}
-            />
-          ) : showPreviewHarnessLog ? (
-            <ProfileIngressRow
-              grouped
-              label="Harness log"
-              testId="user-profile-diagnostics-ingress-preview"
-            />
-          ) : null}
-        </ProfileSectionGroup>
-      ) : null}
-      {hasConfigurationRows ? (
-        <ProfileSectionGroup
-          testId="user-profile-agent-configuration-section"
-          title="Agent configuration"
-        >
-          <ProfileFieldRows
-            fields={configurationFieldsBeforeStartOnLaunch}
-            variant="runtime"
-          />
           {startOnLaunchField ? (
             <div
               aria-checked={resolvedStartOnLaunchEnabled}
@@ -920,6 +840,12 @@ export function ProfileRuntimeTabContent({
               role="switch"
               tabIndex={canToggleStartOnLaunch ? 0 : -1}
             >
+              {StartOnLaunchIcon ? (
+                <StartOnLaunchIcon
+                  className="h-4 w-4 shrink-0 text-muted-foreground"
+                  data-slot="profile-field-icon"
+                />
+              ) : null}
               <span className="min-w-0 flex-1 text-sm font-medium text-foreground">
                 {startOnLaunchField.label}
               </span>
@@ -932,8 +858,25 @@ export function ProfileRuntimeTabContent({
               />
             </div>
           ) : null}
+          {showDiagnosticsIngress ? (
+            <ProfileIngressRow
+              grouped
+              icon={ScrollText}
+              label="Harness log"
+              onClick={onOpenDiagnostics}
+              testId="user-profile-diagnostics-ingress"
+              trailing={diagnosticsSummary}
+            />
+          ) : null}
+        </ProfileSectionGroup>
+      ) : null}
+      {hasConfigurationRows ? (
+        <ProfileSectionGroup
+          testId="user-profile-agent-configuration-section"
+          title="Agent configuration"
+        >
           <ProfileFieldRows
-            fields={configurationFieldsAfterStartOnLaunch}
+            fields={remainingConfigurationFields}
             variant="runtime"
           />
         </ProfileSectionGroup>
@@ -941,6 +884,7 @@ export function ProfileRuntimeTabContent({
       {modelSettings}
       {hasInstances ? (
         <ProfileInstancesSection
+          archivedInstances={archivedInstances}
           currentPubkey={currentPubkey}
           instances={instances}
           onOpenInstance={onOpenInstance}

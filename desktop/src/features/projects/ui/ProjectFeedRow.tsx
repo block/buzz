@@ -25,7 +25,7 @@ export function ProjectFeedRow({
 }) {
   return (
     <article
-      className="group/feed-item flex min-w-0 items-center justify-between gap-3 p-3 transition-colors hover:bg-muted/35"
+      className="group/feed-item flex min-w-0 items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-muted/35"
       data-project-event-id={eventId}
       data-testid={testId}
     >

@@ -1,7 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import 'pulse_models.dart';
 
 final globalNotesProvider = FutureProvider<List<UserNote>>((ref) async {

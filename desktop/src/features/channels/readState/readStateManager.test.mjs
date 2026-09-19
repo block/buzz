@@ -841,3 +841,71 @@ test("publishSplitSlots_noopSuppression_skipsWhenUnchanged", async () => {
 
   mgr.destroy();
 });
+
+// ── ReadStateManager — self-echo drop ─────────────────────────────────────────
+
+// The live subscription (authors=[us]) echoes back every event we publish.
+// handleIncomingEvent must drop those echoes by id BEFORE the decrypt/parse
+// step: with hundreds of channels a blob is tens of KB, so decrypting our own
+// echo on every read was a large recurring cost. Strategy mirrors the split-
+// mode test above: stub the private parseEvent seam to count decrypt attempts.
+test("handleIncomingEvent_dropsSelfEchoBeforeDecrypt", async () => {
+  globalThis.window.localStorage = makeLocalStorage();
+
+  const pubkey = "c".repeat(64);
+  const mgr = new ReadStateManager(pubkey, makeFakeRelay());
+
+  let parseCount = 0;
+  mgr.parseEvent = async () => {
+    parseCount++;
+    return null;
+  };
+
+  const makeEvent = (id) => ({
+    id,
+    pubkey,
+    kind: 30078,
+    created_at: 1_000,
+    content: "ciphertext",
+    tags: [
+      ["d", "read-state:slot"],
+      ["t", "read-state"],
+    ],
+  });
+
+  // An event we published ourselves: echo must be dropped without a parse.
+  const ownId = "e".repeat(64);
+  mgr.rememberPublishedId(ownId);
+  await mgr.handleIncomingEvent(makeEvent(ownId));
+  assert.equal(parseCount, 0, "self-echo must not reach decrypt/parse");
+
+  // The drop consumes the remembered id — a replayed duplicate (e.g. from a
+  // reconnect catch-up) goes through the normal parse path.
+  await mgr.handleIncomingEvent(makeEvent(ownId));
+  assert.equal(parseCount, 1, "second delivery of same id must parse");
+
+  // An event from another client of the same pubkey must always parse.
+  await mgr.handleIncomingEvent(makeEvent("f".repeat(64)));
+  assert.equal(parseCount, 2, "foreign-client event must parse");
+
+  mgr.destroy();
+});
+
+// The remembered-id set must stay bounded even if publishes fail (a failed
+// publish leaves an id that is never echoed back, so nothing deletes it).
+test("rememberPublishedId_evictsOldestBeyondCap", () => {
+  globalThis.window.localStorage = makeLocalStorage();
+
+  const mgr = new ReadStateManager("d".repeat(64), makeFakeRelay());
+
+  const total = 100; // beyond the 64-id cap
+  for (let i = 0; i < total; i++) {
+    mgr.rememberPublishedId(`id-${i}`);
+  }
+  const ids = mgr.recentlyPublishedIds;
+  assert.equal(ids.size, 64, "set must be capped");
+  assert.ok(!ids.has("id-0"), "oldest id must be evicted");
+  assert.ok(ids.has(`id-${total - 1}`), "newest id must be retained");
+
+  mgr.destroy();
+});

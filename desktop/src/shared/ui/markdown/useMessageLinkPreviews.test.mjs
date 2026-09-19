@@ -27,7 +27,7 @@ function snapshotTag(href, title, siteName) {
   ];
 }
 
-test("relay-resolved Buzz entities beat conflicting sender snapshots in content order", () => {
+test("Buzz entity links do not create message preview cards", () => {
   const content = `${ENTITY_HREF} then ${EXTERNAL_HREF}`;
   const candidates = extractSupportedLinkPreviews(content, RELAY_ORIGIN);
   const snapshots = parseLinkPreviewSnapshots(
@@ -38,22 +38,12 @@ test("relay-resolved Buzz entities beat conflicting sender snapshots in content 
     content,
     RELAY_ORIGIN,
   );
-  const entity = {
-    ...candidates[0],
-    title: "Relay-authenticated PR title",
-    imageState: "none",
-  };
 
   assert.deepEqual(
-    mergeMessageLinkPreviews(candidates, snapshots, [entity]).map(
+    mergeMessageLinkPreviews(candidates, snapshots).map(
       ({ href, title, provider }) => ({ href, title, provider }),
     ),
     [
-      {
-        href: ENTITY_HREF,
-        title: "Relay-authenticated PR title",
-        provider: "Buzz",
-      },
       {
         href: EXTERNAL_HREF,
         title: "External story",

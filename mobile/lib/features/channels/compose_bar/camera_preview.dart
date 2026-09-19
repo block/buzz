@@ -287,6 +287,16 @@ class _CameraCloseButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (Theme.of(context).platform == TargetPlatform.iOS) {
+      return IosGlassNavigationButton(
+        icon: IosGlassNavigationIcon.back,
+        semanticLabel: 'Back to attachment options',
+        onPressed: () => _runComposerAction(onTap),
+        width: emphasized ? _cameraBackSize : 40,
+        height: emphasized ? _cameraBackSize : 40,
+        foregroundColor: Colors.white,
+      );
+    }
     return SizedBox.square(
       dimension: emphasized ? _cameraBackSize : 36,
       child: IconButton(

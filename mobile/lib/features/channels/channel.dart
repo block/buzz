@@ -82,6 +82,7 @@ class Channel {
   bool get isForum => channelType == 'forum';
   bool get isDm => channelType == 'dm';
   bool get isPrivate => visibility == 'private';
+  bool get canJoin => visibility == 'open' && !isArchived && !isMember && !isDm;
 
   /// Whether [selfRole] may add *another* identity here, mirroring the relay's
   /// kind:9000 authority (`validate_admin_event` + `add_member`): DMs never,
@@ -141,16 +142,18 @@ class Channel {
   );
 
   Channel copyWith({
+    String? name,
+    String? description,
     Object? lastMessageAt = _sentinel,
     Object? archivedAt = _sentinel,
     int? memberCount,
     bool? isMember,
   }) => Channel(
     id: id,
-    name: name,
+    name: name ?? this.name,
     channelType: channelType,
     visibility: visibility,
-    description: description,
+    description: description ?? this.description,
     topic: topic,
     purpose: purpose,
     createdBy: createdBy,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  projectRepoUnavailablePresentation,
   projectRepoUnavailableReason,
   refineRepoUnavailableReason,
 } from "./projectRepoAvailability.ts";
@@ -104,4 +105,12 @@ test("never rewrites non-missing reasons", () => {
     }),
     "network",
   );
+});
+
+test("presents access failures without exposing the relay's masked 404", () => {
+  assert.deepEqual(projectRepoUnavailablePresentation("access"), {
+    description:
+      "Repository access is granted through its channel, and you’re not a member. Ask the repository owner for an invite.",
+    title: "Repository access restricted",
+  });
 });
