@@ -244,6 +244,11 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
           group: _PopoverMessageActionGroup.primary,
           onSelected: () {
             if (!context.mounted) return;
+            final scope = ThreadReplyScope.maybeOf(context);
+            if (scope != null) {
+              scope.onReply(message);
+              return;
+            }
             Navigator.of(context).push(
               MaterialPageRoute<void>(
                 builder: (_) => ThreadDetailPage(

@@ -89,27 +89,6 @@ bool _isDeletedBy(Iterable<NostrEvent> events, String messageId) {
   return false;
 }
 
-/// Build a lightweight summary for a nested thread (reply that has its own
-/// replies). Same logic as the top-level [ThreadSummary] but kept local to
-/// avoid coupling.
-ThreadSummary _buildNestedSummary(
-  String messageId,
-  List<TimelineMessage> children,
-) {
-  final seen = <String>{};
-  final participants = <String>[];
-  for (var i = children.length - 1; i >= 0 && participants.length < 3; i--) {
-    final pk = children[i].pubkey.toLowerCase();
-    if (seen.add(pk)) participants.add(pk);
-  }
-  return ThreadSummary(
-    threadHeadId: messageId,
-    replyCount: children.length,
-    participantPubkeys: participants.reversed.toList(),
-    lastReplyAt: children.last.createdAt,
-  );
-}
-
 /// Serializes deferred tail work behind the latest user scroll intent.
 class _ThreadTailIntent {
   var _generation = 0;

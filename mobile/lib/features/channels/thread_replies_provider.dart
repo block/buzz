@@ -68,7 +68,9 @@ NostrFilter _threadRepliesFilter(
     },
     limit: 200,
     extensions: {
-      'depth_limit': 64,
+      // The relay stores historical depth as a signed 32-bit integer.
+      // Flat presentation must not truncate old branches at a UI depth cap.
+      'depth_limit': 2147483647,
       if (cursor != null) 'thread_cursor': cursor.createdAt,
       if (cursor != null) 'thread_cursor_id': cursor.eventId,
     },
@@ -158,3 +160,18 @@ List<NostrEvent> _mergeReplies(
   }
   return byId.values.toList()..sort(compareThreadRepliesChronologically);
 }
+
+/// Fetch an unloaded original message without broadening the channel scope.
+final threadRootProvider = FutureProvider.autoDispose
+    .family<List<NostrEvent>, ThreadRepliesArgs>((ref, args) async {
+      return ref.read(relaySessionProvider.notifier).queryRelay([
+        NostrFilter(
+          ids: [args.rootId],
+          kinds: EventKind.channelTimelineContentKinds,
+          tags: {
+            '#h': [args.channelId],
+          },
+          limit: 1,
+        ),
+      ]);
+    });

@@ -182,9 +182,9 @@ fn thread_tags(thread_ref: &ThreadRef, tags: &mut Vec<Tag>) -> Result<(), SdkErr
         // Direct reply
         tags.push(tag(&["e", &root, "", "reply"])?);
     } else {
-        // Nested reply
-        tags.push(tag(&["e", &root, "", "root"])?);
-        tags.push(tag(&["e", &parent, "", "reply"])?);
+        // Keep response context separate from the single-level thread parent.
+        tags.push(tag(&["e", &root, "", "reply"])?);
+        tags.push(tag(&["reply-context", &parent])?);
     }
     Ok(())
 }
@@ -2533,13 +2533,10 @@ mod tests {
             .iter()
             .filter(|t| t.as_slice().first().map(|v| v.as_str()) == Some("e"))
             .collect();
-        assert_eq!(e_tags.len(), 2);
-        let markers: Vec<_> = e_tags
-            .iter()
-            .filter_map(|t| t.as_slice().get(3).map(|v| v.as_str()))
-            .collect();
-        assert!(markers.contains(&"root"));
-        assert!(markers.contains(&"reply"));
+        assert_eq!(e_tags.len(), 1);
+        assert_eq!(e_tags[0].as_slice(), &["e", &root.to_hex(), "", "reply"]);
+        assert!(has_tag(&ev, "reply-context", &parent.to_hex()));
+        assert!(ev.verify().is_ok());
     }
 
     #[test]

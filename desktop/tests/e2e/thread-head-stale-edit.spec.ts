@@ -167,3 +167,93 @@ test("thread head reflects the channel-window edit even before thread aux loads"
   await expect(headBody).toContainText("these PRs?");
   await expect(headBody).not.toContainText("these two PRs?");
 });
+
+test("single-level replies expose historical branches and keep reply actions in one panel", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId(`channel-${CHANNEL}`).click();
+  await waitForMockLiveSubscription(page, CHANNEL);
+  const ids = await page.evaluate(() => {
+    const emit = (window as MockMessageWindow).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("mock emitter missing");
+    const root = emit({ channelName: "general", content: "Single level root" });
+    if (!root) throw new Error("root missing");
+    const parent = emit({
+      channelName: "general",
+      content: "Single level first response",
+      parentEventId: root.id,
+    });
+    if (!parent) throw new Error("parent missing");
+    const nested = emit({
+      channelName: "general",
+      content: "Historical deep response",
+      parentEventId: parent.id,
+      extraTags: [["e", root.id, "", "root"]],
+    });
+    if (!nested) throw new Error("nested missing");
+    return { root: root.id, parent: parent.id, nested: nested.id };
+  });
+  const rootRow = page
+    .getByTestId("message-timeline")
+    .locator(`[data-testid="message-row"][data-message-id="${ids.root}"]`);
+  await rootRow.hover();
+  await rootRow.getByRole("button", { name: "Reply", exact: true }).click();
+  const panel = page.getByTestId("message-thread-panel");
+  await expect(panel).toBeVisible();
+  const replies = panel.getByTestId("message-thread-replies");
+  await expect(replies.getByTestId("message-row")).toHaveCount(2);
+  await expect(replies.getByTestId("message-thread-summary")).toHaveCount(0);
+  const nested = replies.locator(`[data-message-id="${ids.nested}"]`);
+  await expect(nested.getByTestId("reply-context")).toBeVisible();
+  await nested.hover();
+  await nested.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(page.getByTestId("message-thread-panel")).toHaveCount(1);
+  await expect(panel).toContainText("Single level root");
+  await panel.getByTestId("message-input").fill("A new flat response");
+  // Reopening must restore both text and selected response context.
+  await rootRow.hover();
+  await rootRow.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(panel).toHaveCount(0);
+  await rootRow.hover();
+  await rootRow.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(panel.getByTestId("message-input")).toHaveText(
+    "A new flat response",
+  );
+  await panel.getByTestId("send-message").click();
+  await expect(replies.getByTestId("message-row")).toHaveCount(3);
+  const sentRow = replies
+    .getByTestId("message-row")
+    .filter({ hasText: "A new flat response" });
+  await expect(sentRow.getByTestId("reply-context")).toBeVisible();
+  const stored = await page.evaluate(async (rootId) => {
+    const invoke = (
+      window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload: unknown,
+        ) => Promise<unknown>;
+      }
+    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    const result = (await invoke?.("get_thread_replies", {
+      rootEventId: rootId,
+    })) as { events: Array<{ content: string; tags: string[][] }> };
+    return result.events.find(
+      (event) => event.content === "A new flat response",
+    );
+  }, ids.root);
+  expect(stored?.tags).toContainEqual(["e", ids.root, "", "reply"]);
+  expect(stored?.tags).toContainEqual(["reply-context", ids.nested]);
+  expect(stored?.tags).not.toContainEqual(["e", ids.nested, "", "reply"]);
+  await nested.getByTestId("reply-context").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("message-thread-panel")).toHaveCount(1);
+  await expect(
+    replies.locator(`[data-message-id="${ids.parent}"]`),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "test-results/single-level-replies.png",
+    fullPage: true,
+  });
+});

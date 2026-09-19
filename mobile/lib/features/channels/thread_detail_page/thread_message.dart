@@ -226,6 +226,14 @@ class _ThreadMessage extends HookConsumerWidget {
                                       ],
                                     ),
                                   ),
+                                if (replyContextId(message)
+                                    case final String contextId)
+                                  TextButton(
+                                    onPressed: () => ThreadReplyScope.maybeOf(
+                                      context,
+                                    )?.onReveal(contextId),
+                                    child: const Text('Replying to message'),
+                                  ),
                                 MessageContent(
                                   content: message.content,
                                   mentionNames: resolvedMentionNames,
@@ -241,6 +249,12 @@ class _ThreadMessage extends HookConsumerWidget {
                                       ? null
                                       : () {
                                           if (!context.mounted) return;
+                                          final scope =
+                                              ThreadReplyScope.maybeOf(context);
+                                          if (scope != null) {
+                                            scope.onReply(message);
+                                            return;
+                                          }
                                           Navigator.of(context).push(
                                             MaterialPageRoute<void>(
                                               builder: (_) => ThreadDetailPage(

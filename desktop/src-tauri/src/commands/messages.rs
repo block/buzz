@@ -254,7 +254,8 @@ pub async fn get_thread_replies(
     let filter = build_thread_replies_filter(
         &root_event_id,
         channel_id.as_deref(),
-        depth_limit.unwrap_or(64),
+        // Read all stored historical depths; the page cap still bounds results.
+        depth_limit.unwrap_or(i32::MAX as u32),
         cap,
         cursor.as_ref(),
     );
@@ -526,12 +527,8 @@ pub async fn send_channel_message(
     let (result, created_at) =
         submit_event_at_created_at(builder, &state, &relay_base, &signing_keys).await?;
 
-    let depth = match (&parent_event_id, &resolved_root) {
-        (None, _) => 0,
-        (Some(pid), Some(root)) if pid == root => 1,
-        (Some(_), Some(_)) => 2,
-        (Some(_), None) => 1,
-    };
+    let depth = if parent_event_id.is_some() { 1 } else { 0 };
+    let parent_event_id = parent_event_id.map(|id| resolved_root.clone().unwrap_or(id));
 
     Ok(SendChannelMessageResponse {
         event_id: result.event_id,
@@ -547,6 +544,30 @@ fn event_has_client_marker(event: &Event, marker: &str) -> bool {
         let parts = tag.as_slice();
         parts.len() >= 2 && parts[0] == "client" && parts[1] == marker
     })
+}
+
+fn stored_message_send_response(event: &Event) -> SendChannelMessageResponse {
+    let ancestry = buzz_core_pkg::nip10::parse_thread_markers(&event.tags).resolve();
+    let (root_event_id, parent_event_id, depth) = match ancestry {
+        Some((root, parent)) => {
+            // Signed markers distinguish direct from historical nested replies;
+            // exact historical depth beyond 2 requires relay thread metadata.
+            let depth = if root.eq_ignore_ascii_case(&parent) {
+                1
+            } else {
+                2
+            };
+            (Some(root), Some(parent), depth)
+        }
+        None => (None, None, 0),
+    };
+    SendChannelMessageResponse {
+        event_id: event.id.to_hex(),
+        root_event_id,
+        parent_event_id,
+        depth,
+        created_at: event.created_at.as_secs() as i64,
+    }
 }
 
 async fn find_managed_agent_channel_message_by_marker(
@@ -765,17 +786,7 @@ pub async fn send_managed_agent_channel_message(
         )
         .await?
         {
-            return Ok(SendChannelMessageResponse {
-                event_id: existing.id.to_hex(),
-                parent_event_id: thread_ref
-                    .as_ref()
-                    .map(|reference| reference.parent_event_id.to_hex()),
-                root_event_id: thread_ref
-                    .as_ref()
-                    .map(|reference| reference.root_event_id.to_hex()),
-                depth: if thread_ref.is_some() { 1 } else { 0 },
-                created_at: existing.created_at.as_secs() as i64,
-            });
+            return Ok(stored_message_send_response(&existing));
         }
     }
 
@@ -805,7 +816,9 @@ pub async fn send_managed_agent_channel_message(
 
     Ok(SendChannelMessageResponse {
         event_id: result.event_id,
-        parent_event_id: parent_event_id.clone(),
+        parent_event_id: thread_ref
+            .as_ref()
+            .map(|reference| reference.root_event_id.to_hex()),
         root_event_id: thread_ref.map(|reference| reference.root_event_id.to_hex()),
         depth: if parent_event_id.is_some() { 1 } else { 0 },
         created_at,

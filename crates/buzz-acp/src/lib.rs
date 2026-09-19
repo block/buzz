@@ -11168,7 +11168,12 @@ mod error_outcome_emission_tests {
             .any(|tag| tag[0] == "h" && tag[1] == channel_id.to_string()));
         let threading = queue::parse_thread_tags(&notice);
         assert_eq!(threading.root_event_id, Some(root.to_hex()));
-        assert_eq!(threading.parent_event_id, Some(parent.to_hex()));
+        assert_eq!(threading.parent_event_id, Some(root.to_hex()));
+        assert!(tags
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag[0] == "reply-context" && tag[1] == parent.to_hex()));
     }
 
     /// A non-auth application error (e.g. usage credits) must still follow the

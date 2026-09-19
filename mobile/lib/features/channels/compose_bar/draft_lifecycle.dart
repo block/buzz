@@ -69,6 +69,7 @@ void _useComposeDraftLifecycle({
   required String draftKey,
   required String channelId,
   required String? threadHeadId,
+  required String? replyContextId,
   required String draftIdentity,
   required ObjectRef<int> draftRevision,
   required ValueNotifier<List<_PendingAttachment>> attachments,
@@ -82,6 +83,9 @@ void _useComposeDraftLifecycle({
   required VoidCallback onDraftIdentityChanged,
 }) {
   final lastDraftIdentity = useRef<String?>(null);
+  final currentReplyContext = useRef(replyContextId)..value = replyContextId;
+  final currentIdentity = useRef((draftKey, draftIdentity))
+    ..value = (draftKey, draftIdentity);
   useEffect(() {
     final identity = '$draftIdentity\u0000$draftKey';
     final shouldHydrate = lastDraftIdentity.value != identity;
@@ -156,6 +160,7 @@ void _useComposeDraftLifecycle({
             key: draftKey,
             channelId: channelId,
             threadHeadId: threadHeadId,
+            replyContextId: currentReplyContext.value,
             text: text,
             mentionKeys: bindings,
           );
@@ -164,4 +169,31 @@ void _useComposeDraftLifecycle({
     controller.addListener(persistDraft);
     return () => controller.removeListener(persistDraft);
   }, [controller, draftKey, draftIdentity, onDraftIdentityChanged]);
+  useEffect(() {
+    // Context changes are meaningful even when the draft text is unchanged.
+    final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
+    if (saved != null && saved.replyContextId != replyContextId) {
+      Future.microtask(() {
+        if (!ref.context.mounted ||
+            currentIdentity.value != (draftKey, draftIdentity)) {
+          return;
+        }
+        final latest = ref
+            .read(composeDraftsProvider.notifier)
+            .draftFor(draftKey);
+        if (latest == null) return;
+        ref
+            .read(composeDraftsProvider.notifier)
+            .save(
+              key: draftKey,
+              channelId: channelId,
+              threadHeadId: threadHeadId,
+              replyContextId: currentReplyContext.value,
+              text: latest.text,
+              mentionKeys: latest.mentionKeys,
+            );
+      });
+    }
+    return null;
+  }, [draftKey, draftIdentity, replyContextId]);
 }

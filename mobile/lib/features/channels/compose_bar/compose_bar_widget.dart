@@ -18,6 +18,8 @@ class ComposeBar extends HookConsumerWidget {
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
   final String? rootId;
+  final String? draftThreadHeadId;
+  final String? replyContextId;
   const ComposeBar({
     super.key,
     required this.channelId,
@@ -25,6 +27,8 @@ class ComposeBar extends HookConsumerWidget {
     this.hintText,
     this.threadHeadId,
     this.rootId,
+    this.draftThreadHeadId,
+    this.replyContextId,
     this.focusNode,
     this.onFocusRestorerChanged,
     this.onFocusRequested,
@@ -38,7 +42,10 @@ class ComposeBar extends HookConsumerWidget {
       () => controller.text,
     );
     useEffect(() => controller.dispose, [controller]);
-    final draftKey = composeDraftKey(channelId, threadHeadId: threadHeadId);
+    final draftKey = composeDraftKey(
+      channelId,
+      threadHeadId: draftThreadHeadId ?? threadHeadId,
+    );
     final draftRevision = useRef(0);
     final draftIdentity = _composerDraftIdentity(ref);
     final isComposerExpanded = useState(false);
@@ -93,7 +100,8 @@ class ComposeBar extends HookConsumerWidget {
       controller: controller,
       draftKey: draftKey,
       channelId: channelId,
-      threadHeadId: threadHeadId,
+      threadHeadId: draftThreadHeadId ?? threadHeadId,
+      replyContextId: replyContextId,
       draftIdentity: draftIdentity,
       draftRevision: draftRevision,
       attachments: attachments,

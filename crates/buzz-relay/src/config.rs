@@ -116,6 +116,8 @@ pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
 /// Relay runtime configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Communities enforcing one reply level; empty until producers are upgraded.
+    pub single_level_reply_communities: Vec<uuid::Uuid>,
     /// Address the relay HTTP/WebSocket server binds to.
     pub bind_addr: SocketAddr,
     /// Postgres database connection URL.
@@ -1208,7 +1210,12 @@ impl Config {
             ));
         }
 
+        let single_level_reply_communities = parse_single_level_reply_communities(
+            &std::env::var("BUZZ_SINGLE_LEVEL_REPLY_COMMUNITIES").unwrap_or_default(),
+        )?;
+
         Ok(Self {
+            single_level_reply_communities,
             bind_addr,
             database_url,
             read_database_url,
@@ -2388,5 +2395,28 @@ mod tests {
             matches!(result, Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_GIT_REPO_PATH")),
             "expected InvalidValue mentioning BUZZ_GIT_REPO_PATH, got {result:?}"
         );
+    }
+}
+
+/// Parse the explicit tenant allowlist; a typo must not silently disable enforcement.
+fn parse_single_level_reply_communities(value: &str) -> Result<Vec<uuid::Uuid>, ConfigError> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    value.split(',').map(|id| uuid::Uuid::parse_str(id.trim()).map_err(|_| {
+        ConfigError::InvalidValue("BUZZ_SINGLE_LEVEL_REPLY_COMMUNITIES must contain comma-separated community UUIDs".into())
+    })).collect()
+}
+
+#[cfg(test)]
+mod single_level_reply_config_tests {
+    use super::*;
+    #[test]
+    fn explicit_allowlist_and_invalid_values() {
+        assert!(parse_single_level_reply_communities("").unwrap().is_empty());
+        let id = "00000000-0000-0000-0000-000000000001";
+        assert_eq!(parse_single_level_reply_communities(id).unwrap().len(), 1);
+        assert!(parse_single_level_reply_communities("*").is_err());
+        assert!(parse_single_level_reply_communities(&format!("{id},")).is_err());
     }
 }

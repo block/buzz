@@ -143,12 +143,12 @@ test("buildThreadPanelData connects direct comments to the thread head", () => {
     })),
     [
       { id: "direct-comment", depth: 1 },
-      { id: "nested-reply", depth: 2 },
+      { id: "nested-reply", depth: 1 },
     ],
   );
 });
 
-test("buildThreadPanelData hides collapsed summaries for expanded replies", () => {
+test("buildThreadPanelData always exposes all replies without branch summaries", () => {
   const root = message({ id: "root", createdAt: 1 });
   const branch = message({
     id: "branch",
@@ -183,7 +183,8 @@ test("buildThreadPanelData hides collapsed summaries for expanded replies", () =
     new Set(["branch"]),
   );
 
-  assert.equal(collapsed.visibleReplies[0].summary?.replyCount, 1);
+  assert.equal(collapsed.visibleReplies.length, 2);
+  assert.equal(collapsed.visibleReplies[0].summary, null);
   assert.equal(expanded.visibleReplies[0].summary, null);
 });
 
@@ -280,7 +281,7 @@ test("hasNestedThreadBranches returns false for flat direct replies", () => {
   assert.equal(hasNestedThreadBranches(panelData.visibleReplies), false);
 });
 
-test("hasNestedThreadBranches returns true for visible nested replies", () => {
+test("hasNestedThreadBranches returns false for flattened historical replies", () => {
   const root = message({ id: "root", createdAt: 1 });
   const branch = message({
     id: "branch",
@@ -304,10 +305,10 @@ test("hasNestedThreadBranches returns true for visible nested replies", () => {
     new Set(["branch"]),
   );
 
-  assert.equal(hasNestedThreadBranches(panelData.visibleReplies), true);
+  assert.equal(hasNestedThreadBranches(panelData.visibleReplies), false);
 });
 
-test("hasNestedThreadBranches returns true for collapsed nested replies", () => {
+test("hasNestedThreadBranches ignores historical collapse state", () => {
   const root = message({ id: "root", createdAt: 1 });
   const branch = message({
     id: "branch",
@@ -331,7 +332,7 @@ test("hasNestedThreadBranches returns true for collapsed nested replies", () => 
     new Set(),
   );
 
-  assert.equal(hasNestedThreadBranches(panelData.visibleReplies), true);
+  assert.equal(hasNestedThreadBranches(panelData.visibleReplies), false);
 });
 
 test("shouldRenderUnreadDivider_firstUnreadIsFirstRendered_suppressesDivider", () => {
@@ -707,4 +708,53 @@ test("buildMainTimelineEntries merges local knowledge over the relay floor", () 
     entry.summary?.participants.map((participant) => participant.id),
     ["relay", "local"],
   );
+});
+
+test("flat replies include missing-parent descendants, stable chronology, and no unrelated thread", () => {
+  const root = message({ id: "root" });
+  const replies = [
+    message({
+      id: "z",
+      createdAt: 4,
+      parentId: "missing",
+      rootId: "root",
+      depth: 8,
+    }),
+    message({ id: "a", createdAt: 4, parentId: "root", rootId: "root" }),
+    message({ id: "early", createdAt: 2, parentId: "z", rootId: "root" }),
+    message({
+      id: "other",
+      createdAt: 3,
+      parentId: "other-root",
+      rootId: "other-root",
+    }),
+  ];
+  const panel = buildThreadPanelData(
+    [root, ...replies],
+    "root",
+    "other",
+    new Set(),
+  );
+  assert.deepEqual(
+    panel.visibleReplies.map(({ message }) => [message.id, message.depth]),
+    [
+      ["early", 1],
+      ["a", 1],
+      ["z", 1],
+    ],
+  );
+  assert.equal(panel.totalReplyCount, 3);
+  assert.equal(panel.replyTargetMessage.id, "root");
+  assert.ok(panel.visibleReplies.every(({ summary }) => summary === null));
+  assert.equal(replies[0].depth, 8, "historical source event is not mutated");
+});
+
+test("opening a historical response resolves to the original root", () => {
+  const root = message({ id: "root" });
+  const a = message({ id: "a", rootId: "root", parentId: "root" });
+  const b = message({ id: "b", rootId: "root", parentId: "a" });
+  const panel = buildThreadPanelData([root, a, b], "a", "b", new Set());
+  assert.equal(panel.threadHead.id, "root");
+  assert.equal(panel.visibleReplies.length, 2);
+  assert.equal(panel.replyTargetMessage.id, "b");
 });

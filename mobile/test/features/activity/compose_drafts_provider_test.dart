@@ -107,6 +107,43 @@ void main() {
     expect(restored.single.text, 'wip');
   });
 
+  test(
+    'reply context survives restart and changes without a text edit',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final first = await containerWithPrefs();
+      final drafts = first.read(composeDraftsProvider.notifier);
+      drafts.save(
+        key: 'ch:root',
+        channelId: 'ch',
+        threadHeadId: 'root',
+        text: 'unfinished',
+        replyContextId: 'response-a',
+      );
+      drafts.save(
+        key: 'ch:root',
+        channelId: 'ch',
+        threadHeadId: 'root',
+        text: 'unfinished',
+        replyContextId: 'response-b',
+      );
+      final restarted = await containerWithPrefs();
+      expect(
+        restarted.read(composeDraftsProvider).single.replyContextId,
+        'response-b',
+      );
+      expect(
+        ComposeDraft.fromJson({
+          'key': 'old',
+          'channel_id': 'ch',
+          'text': 'legacy',
+          'updated_at': 1,
+        })!.replyContextId,
+        isNull,
+      );
+    },
+  );
+
   test('remove deletes by key', () async {
     SharedPreferences.setMockInitialValues({});
     final container = await containerWithPrefs();

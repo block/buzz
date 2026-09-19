@@ -250,7 +250,9 @@ export async function openDraftEntry(
   const threadRootId = getThreadRootId(entry.key);
   await goChannel(
     entry.draft.channelId,
-    threadRootId ? { messageId: threadRootId, threadRootId } : undefined,
+    threadRootId
+      ? { messageId: threadRootId, threadRootId, threadDraftKey: entry.key }
+      : undefined,
   );
 }
 
@@ -278,7 +280,9 @@ export async function sendDraftEntry(
 
   const threadRootId = getThreadRootId(entry.key);
   await goChannel(entry.draft.channelId, {
-    ...(threadRootId ? { messageId: threadRootId, threadRootId } : {}),
+    ...(threadRootId
+      ? { messageId: threadRootId, threadRootId, threadDraftKey: entry.key }
+      : {}),
     autoSend: entry.key,
   });
 }

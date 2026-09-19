@@ -1011,17 +1011,9 @@ impl HarnessRelay {
         let h_tag = Tag::parse(["h", &channel_id.to_string()])
             .map_err(|e| RelayError::AuthFailed(e.to_string()))?;
         let mut tags = vec![h_tag];
-        if let Some(parent) = parent_event_id {
-            if let Some(root) = root_event_id {
-                if root != parent {
-                    tags.push(
-                        Tag::parse(["e", root, "", "root"])
-                            .map_err(|e| RelayError::AuthFailed(e.to_string()))?,
-                    );
-                }
-            }
+        if let Some(root) = root_event_id.or(parent_event_id) {
             tags.push(
-                Tag::parse(["e", parent, "", "reply"])
+                Tag::parse(["e", root, "", "reply"])
                     .map_err(|e| RelayError::AuthFailed(e.to_string()))?,
             );
         }

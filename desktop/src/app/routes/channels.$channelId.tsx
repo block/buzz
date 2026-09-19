@@ -21,6 +21,7 @@ type ChannelRouteSearch = {
    * composer can verify it has the right draft before firing.
    */
   autoSend?: string;
+  threadDraft?: string;
   messageId?: string;
   profile?: string;
   profileTab?: ProfilePanelTab;
@@ -39,6 +40,7 @@ function validateChannelSearch(
   return {
     agentSession: nonEmptyString(search.agentSession),
     autoSend: nonEmptyString(search.autoSend),
+    threadDraft: nonEmptyString(search.threadDraft),
     messageId: nonEmptyString(search.messageId),
     profile: nonEmptyString(search.profile),
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,

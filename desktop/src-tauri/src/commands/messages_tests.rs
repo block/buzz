@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn marker_retry_response_uses_stored_flat_parent_instead_of_reply_context() {
+    let root = EventId::from_hex(&"aa".repeat(32)).unwrap();
+    let selected = EventId::from_hex(&"bb".repeat(32)).unwrap();
+    let event = build_managed_agent_channel_message(
+        uuid::Uuid::new_v4(),
+        "Reply",
+        Some(&events::ThreadRef {
+            root_event_id: root,
+            parent_event_id: selected,
+        }),
+        &[],
+        &[vec!["client".into(), "retry-flat".into()]],
+    )
+    .unwrap()
+    .sign_with_keys(&Keys::generate())
+    .unwrap();
+    assert!(event.verify().is_ok());
+    assert!(event_has_client_marker(&event, "retry-flat"));
+    assert!(event
+        .tags
+        .iter()
+        .any(|tag| { tag.as_slice() == ["reply-context", selected.to_hex().as_str()] }));
+
+    let response = stored_message_send_response(&event);
+    assert_eq!(response.parent_event_id, Some(root.to_hex()));
+    assert_eq!(response.root_event_id, Some(root.to_hex()));
+    assert_eq!(response.depth, 1);
+    assert_eq!(response.event_id, event.id.to_hex());
+    assert_eq!(response.created_at, event.created_at.as_secs() as i64);
+}
+
+#[test]
+fn marker_retry_response_preserves_stored_historical_nested_ancestry() {
+    let root = "aa".repeat(32);
+    let parent = "bb".repeat(32);
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "Historical reply")
+        .tags([
+            nostr::Tag::parse(["e", &root, "", "root"]).unwrap(),
+            nostr::Tag::parse(["e", &parent, "", "reply"]).unwrap(),
+        ])
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+
+    let response = stored_message_send_response(&event);
+    assert_eq!(response.root_event_id, Some(root));
+    assert_eq!(response.parent_event_id, Some(parent));
+    assert_eq!(response.depth, 2);
+    assert_eq!(response.event_id, event.id.to_hex());
+    assert!(event.verify().is_ok());
+}
+
+#[test]
+fn marker_retry_response_keeps_stored_top_level_events_top_level() {
+    for tags in [
+        vec![],
+        vec![nostr::Tag::parse(["e", &"aa".repeat(32), "", "root"]).unwrap()],
+    ] {
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "Stored root")
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let response = stored_message_send_response(&event);
+        assert_eq!(response.root_event_id, None);
+        assert_eq!(response.parent_event_id, None);
+        assert_eq!(response.depth, 0);
+    }
+}
+
+#[test]
 fn search_messages_limit_allows_discussion_discovery_page() {
     assert_eq!(search_messages_limit(None), 20);
     assert_eq!(search_messages_limit(Some(500)), 500);
