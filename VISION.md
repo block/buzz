@@ -108,6 +108,11 @@ Real-time voice runs over a WebSocket Opus relay built into `buzz-relay`. Buzz a
 - Agents join the same audio relay as humans — they bring their own STT/TTS
 - Huddle lifecycle flows as Nostr events: started, joined, left, ended
 
+Desktop transcription can use a local OpenAI-compatible endpoint. Set
+`BUZZ_STT_OPENAI_URL` and `BUZZ_STT_OPENAI_API_KEY`; the endpoint must use
+loopback HTTP. `BUZZ_STT_OPENAI_MODEL`, `BUZZ_STT_OPENAI_LANGUAGE`, and
+`BUZZ_STT_OPENAI_PROMPT` optionally select the model, language, and prompt.
+
 Voice, room lifecycle, and lifecycle events are wired. Recording and per-track publishing are planned.
 
 ---
