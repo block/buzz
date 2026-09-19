@@ -421,7 +421,10 @@ pub(crate) async fn get_thread_replies_on(
     };
 
     let mut replies = Vec::new();
-    loop {
+    // Damaged rows must not cause unbounded work on a held writer connection.
+    // Fail explicitly rather than exposing a partial page as authoritative EOF.
+    const MAX_RAW_PAGES: usize = 64;
+    for _ in 0..MAX_RAW_PAGES {
         let remaining = limit.saturating_sub(replies.len() as u32);
         if remaining == 0 {
             return Ok(replies);
@@ -546,10 +549,13 @@ pub(crate) async fn get_thread_replies_on(
             });
         }
 
-        if raw_count < remaining as usize {
+        if raw_count < remaining as usize || replies.len() == limit as usize {
             return Ok(replies);
         }
     }
+    Err(crate::error::DbError::InvalidData(
+        "thread page exceeded the corrupt-row refill limit".into(),
+    ))
 }
 
 /// Fetch aggregated thread stats for a single event, plus up to 10 participant pubkeys.
@@ -2041,6 +2047,90 @@ mod postgres_tests {
         .await
         .expect("true EOF")
         .is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_replies_bounds_corrupt_row_refills() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("corrupt-bound-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("channel");
+        let root = make_stream_event(&author, "root");
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
+            .await
+            .expect("root");
+        let mut corrupt_ids = Vec::new();
+        for index in 0..65 {
+            let reply = EventBuilder::new(Kind::Custom(9), format!("reply-{index}"))
+                .custom_created_at(nostr::Timestamp::from(
+                    root.created_at.as_secs() + index + 1,
+                ))
+                .sign_with_keys(&author)
+                .expect("reply");
+            insert_event_with_thread_metadata(
+                &pool,
+                community,
+                &reply,
+                Some(channel.id),
+                Some(ThreadMetadataParams {
+                    event_id: reply.id.as_bytes(),
+                    event_created_at: event_created_at(&reply),
+                    channel_id: channel.id,
+                    parent_event_id: Some(root.id.as_bytes()),
+                    parent_event_created_at: Some(event_created_at(&root)),
+                    root_event_id: Some(root.id.as_bytes()),
+                    root_event_created_at: Some(event_created_at(&root)),
+                    depth: 1,
+                    broadcast: false,
+                }),
+            )
+            .await
+            .expect("reply metadata");
+            if index < 64 {
+                corrupt_ids.push(reply.id.as_bytes().to_vec());
+            }
+        }
+        sqlx::query("UPDATE events SET sig = $1 WHERE community_id = $2 AND id = ANY($3)")
+            .bind(vec![0u8; 32])
+            .bind(community.as_uuid())
+            .bind(&corrupt_ids)
+            .execute(&pool)
+            .await
+            .expect("damage first 64 rows");
+        let error = get_thread_replies(&pool, community, root.id.as_bytes(), Some(10), 1, None)
+            .await
+            .expect_err("refill cap must fail, never return partial EOF or scan to the tail");
+        assert!(
+            matches!(error, crate::error::DbError::InvalidData(ref message)
+            if message.contains("corrupt-row refill limit"))
+        );
+        // A larger page needs fewer than 64 raw reads and still finds the tail.
+        let replies = get_thread_replies(&pool, community, root.id.as_bytes(), Some(10), 2, None)
+            .await
+            .expect("bounded skip remains supported");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].stored_event.event.content, "reply-64");
+        // The final permitted raw page may be valid; accept it at the cap.
+        sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(&corrupt_ids[0])
+            .execute(&pool)
+            .await
+            .expect("hide one corrupt row");
+        let boundary = get_thread_replies(&pool, community, root.id.as_bytes(), Some(10), 1, None)
+            .await
+            .expect("valid final refill page must succeed");
+        assert_eq!(boundary[0].stored_event.event.content, "reply-64");
     }
 
     /// Insert one top-level event (root metadata, broadcast) into a channel.
