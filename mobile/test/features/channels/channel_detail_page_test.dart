@@ -556,14 +556,25 @@ void main() {
           pubkey: 'bot',
           content: 'Bot message',
         );
+        final reply = _textMsg(
+          id: 'bot-reply',
+          pubkey: 'alice',
+          content: 'Reply to bot',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', 'bot-message', '', 'reply'],
+          ],
+        );
         await tester.pumpWidget(
           _buildTestable(
-            messages: [message],
+            messages: [message, reply],
             users: const {
               'bot': UserProfile(pubkey: 'bot', displayName: 'Bot'),
             },
             loadChannelBotPubkeys: () async => const {'bot'},
-            threadReplies: const {'bot-message': []},
+            threadReplies: {
+              'bot-message': [reply],
+            },
           ),
         );
         await tester.pumpAndSettle();
