@@ -211,6 +211,10 @@ pub enum ModelStatus {
 pub struct VoiceModelStatus {
     pub stt: ModelStatus,
     pub tts: ModelStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kroko: Option<ModelStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kokoro: Option<ModelStatus>,
 }
 
 // ── Safe archive extraction ───────────────────────────────────────────────────
@@ -438,6 +442,13 @@ impl ModelSlot {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+
+    fn effective_status(&self, models_dir: &Path) -> ModelStatus {
+        if self.is_ready(models_dir) {
+            return ModelStatus::Ready;
+        }
+        self.status()
+    }
     fn set_status(&self, s: ModelStatus) {
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = s;
     }
@@ -602,6 +613,8 @@ pub struct ModelManager {
     models_dir: PathBuf,
     stt: ModelSlot,
     tts: ModelSlot,
+    kroko: ModelSlot,
+    kokoro: ModelSlot,
 }
 
 impl ModelManager {
@@ -614,7 +627,10 @@ impl ModelManager {
             models_dir,
             stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
             tts: tts_model_slot(),
-        };
+            kroko: ModelSlot::new("kroko-de", &[], "1"),
+            kokoro: ModelSlot::new("kokoro-de", &[], "1"),
+        }
+        .with_german_slots();
         manager.tts.recover_interrupted_install(&manager.models_dir);
         Some(manager)
     }
@@ -631,7 +647,7 @@ impl ModelManager {
     }
     /// Current STT download status.
     pub fn stt_status(&self) -> ModelStatus {
-        self.stt.status()
+        self.stt.effective_status(&self.models_dir)
     }
     /// Returns `true` once when the STT model just became ready. Resets the flag.
     pub fn take_stt_ready(&self) -> bool {
@@ -650,7 +666,7 @@ impl ModelManager {
     }
     /// Current TTS download status.
     pub fn tts_status(&self) -> ModelStatus {
-        self.tts.status()
+        self.tts.effective_status(&self.models_dir)
     }
     /// Returns `true` once when TTS just became ready. Resets the flag.
     pub fn take_tts_ready(&self) -> bool {
@@ -991,6 +1007,11 @@ pub fn is_tts_ready() -> bool {
         .map(|m| m.is_tts_ready())
         .unwrap_or(false)
 }
+
+#[path = "models_german.rs"]
+mod german;
+
+pub use german::{is_kokoro_ready, is_kroko_ready, kokoro_model_dir, kroko_model_dir};
 
 #[cfg(test)]
 #[path = "models_tests.rs"]

@@ -23,6 +23,20 @@ test("recognizes the relay error code when present", () => {
   );
 });
 
+test("maps archived huddle channels to ended copy", () => {
+  assert.equal(
+    formatHuddleActionError(
+      "relay returned 400 Bad Request: invalid: channel is archived",
+      "join",
+    ),
+    "This huddle has ended. Start a new one from the original channel.",
+  );
+  assert.equal(
+    formatHuddleActionError(new Error("channel is archived"), "start"),
+    "This huddle has ended. Start a new one from the original channel.",
+  );
+});
+
 test("preserves other string and Error messages", () => {
   assert.equal(
     formatHuddleActionError("Microphone unavailable", "join"),

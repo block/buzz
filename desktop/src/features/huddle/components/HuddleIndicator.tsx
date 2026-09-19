@@ -15,7 +15,10 @@ import { Button } from "@/shared/ui/button";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle } from "../HuddleContext";
-import { formatHuddleActionError } from "../lib/huddleError";
+import {
+  formatHuddleActionError,
+  isArchivedHuddleChannelError,
+} from "../lib/huddleError";
 
 /** Huddle lifecycle event kinds */
 const KIND_HUDDLE_STARTED = 48100;
@@ -241,6 +244,9 @@ export function HuddleIndicator({
           })
           .catch((error) => {
             console.error("Failed to join huddle:", error);
+            if (isArchivedHuddleChannelError(error)) {
+              setActiveHuddle(null);
+            }
             toast.error(formatHuddleActionError(error, "join"));
           })
           .finally(() => setIsJoining(false));
@@ -326,6 +332,9 @@ export function HuddleIndicator({
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
     } catch (e) {
       console.error("Failed to join huddle:", e);
+      if (isArchivedHuddleChannelError(e)) {
+        setActiveHuddle(null);
+      }
       toast.error(formatHuddleActionError(e, "join"));
     } finally {
       setIsJoining(false);
