@@ -14,6 +14,7 @@ import {
   shouldNotifyForEvent,
 } from "@/features/notifications/lib/shouldNotify";
 import { relayClient } from "@/shared/api/relayClient";
+import { isAppFocused } from "@/shared/lib/useDocumentVisible";
 import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
@@ -25,6 +26,7 @@ import {
   type TrailingDebounce,
 } from "@/shared/lib/trailingDebounce";
 
+import { isSuppressedAsActiveChannel } from "./activeChannelSuppression";
 import { isDmNotifiableKind } from "./isDmNotifiableKind";
 import { refreshChannelsWhenIdle } from "./refreshChannelsWhenIdle";
 
@@ -32,7 +34,7 @@ export type UseLiveChannelUpdatesOptions = {
   currentPubkey?: string;
   /**
    * When true, DM notifications also fire for the channel the user is
-   * currently viewing (normally suppressed).
+   * currently viewing (normally suppressed while the app window is focused).
    */
   notifyForActiveChannel?: boolean;
   onDmMessage?: (event: RelayEvent, channel: Channel) => void;
@@ -58,8 +60,8 @@ export type UseLiveChannelUpdatesOptions = {
   /**
    * Fired for replies in threads the user authored, participated in, or
    * follows (non-DM channels only — the DM path owns those). Follows the DM
-   * active-channel rule: suppressed for the channel being viewed unless
-   * notifyForActiveChannel opts in.
+   * active-channel rule: suppressed for the channel being viewed in a focused
+   * window unless notifyForActiveChannel opts in.
    */
   onThreadReplyDesktopNotification?: (
     channelId: string,
@@ -222,8 +224,16 @@ export function useLiveChannelUpdates(
       }
 
       // Don't fire a notification for the channel the user is already viewing,
-      // unless the notify-while-viewing setting opts in.
-      if (channelId === activeChannelId && !options.notifyForActiveChannel) {
+      // unless the notify-while-viewing setting opts in. A selected channel in
+      // an unfocused window doesn't count as viewed.
+      if (
+        isSuppressedAsActiveChannel(
+          channelId,
+          activeChannelId,
+          isAppFocused(),
+          options.notifyForActiveChannel ?? false,
+        )
+      ) {
         return;
       }
 
@@ -328,7 +338,12 @@ export function useLiveChannelUpdates(
       if (shouldNotify && isThreadedReply) {
         if (
           !dmChannelMap.has(channelId) &&
-          (channelId !== activeChannelId || options.notifyForActiveChannel)
+          !isSuppressedAsActiveChannel(
+            channelId,
+            activeChannelId,
+            isAppFocused(),
+            options.notifyForActiveChannel ?? false,
+          )
         ) {
           options.onThreadReplyDesktopNotification?.(channelId, event);
         }
