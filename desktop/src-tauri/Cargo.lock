@@ -1122,6 +1122,7 @@ dependencies = [
  "mesh-llm-sdk",
  "mesh-llm-system",
  "neteq",
+ "nip-am-verify",
  "nostr 0.44.7",
  "notify-rust",
  "objc2",
@@ -6187,6 +6188,16 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+
+[[package]]
+name = "nip-am-verify"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nostr 0.44.7",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "nix"

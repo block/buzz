@@ -58,6 +58,7 @@ export default defineConfig({
         "**/observer-feed-screenshots.spec.ts",
         "**/core-memory-screenshots.spec.ts",
         "**/activity-scope-label-screenshots.spec.ts",
+        "**/mike49-audit-fixture.spec.ts",
         "**/welcome-agent-modal-screenshots.spec.ts",
         "**/local-archive-screenshots.spec.ts",
         "**/voice-settings.spec.ts",

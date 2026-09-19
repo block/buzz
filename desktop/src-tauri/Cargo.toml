@@ -94,6 +94,23 @@ serde_json = "1"
 serde_yaml = "0.9"
 toml = "0.8"
 nostr = { version = "0.44", features = ["nip44", "nip49"] }
+# MIKE-49 checkpoint 1 (desktop fixture-only audit command): path dependency
+# on the private cccareers/buzz-auditor repo's nip-am-verify crate. A git
+# dependency (`rev = "83db37a"`) fails Cargo's built-in libgit2 transport
+# (no ssh-agent auth, even though the system git/ssh CLI authenticates fine)
+# and net.git-fetch-with-cli, vendoring, and registry publishing are all
+# unresolved follow-ups — see docs/superhero/plans/mike-49-owner-interface-
+# decision-brief.md and the checkpoint-1 evidence in MIKE-49 for the
+# licensing/access review those options still need before adoption.
+#
+# `../../.mike49-nip-am-verify-pinned/tools/nip-am-verify` is NOT a checked-in
+# path: run `scripts/mike49-pin-nip-am-verify.sh` first. It materializes the
+# exact commit recorded in `NIP_AM_VERIFY_PINNED_REV` (not "whatever is
+# currently checked out") as a detached-HEAD git worktree at this checkout's
+# own toplevel, so the relative path resolves correctly from both the main
+# checkout and any `.claude/worktrees/<id>/` nested worktree without a manual
+# edit here. NOT CI-portable: still requires a local buzz-auditor clone.
+nip-am-verify = { path = "../../.mike49-nip-am-verify-pinned/tools/nip-am-verify" }
 # OS-entropy source for backup passphrase generation (already in the tree as a
 # transitive dependency; pinned here for direct use).
 getrandom = "0.2"
