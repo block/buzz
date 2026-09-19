@@ -37,7 +37,7 @@ pub struct ObserverHandle {
 }
 
 struct ObserverInner {
-    tx: broadcast::Sender<ObserverEvent>,
+    tx: Mutex<Option<broadcast::Sender<ObserverEvent>>>,
     buffer: Mutex<VecDeque<ObserverEvent>>,
     seq: AtomicU64,
 }
@@ -46,7 +46,7 @@ fn new_observer_handle() -> ObserverHandle {
     let (tx, _) = broadcast::channel(OBSERVER_BUFFER_CAP);
     ObserverHandle {
         inner: Arc::new(ObserverInner {
-            tx,
+            tx: Mutex::new(Some(tx)),
             buffer: Mutex::new(VecDeque::with_capacity(OBSERVER_BUFFER_CAP)),
             seq: AtomicU64::new(1),
         }),
@@ -86,7 +86,26 @@ impl ObserverHandle {
 
     /// Subscribe to live observer events.
     pub fn subscribe(&self) -> broadcast::Receiver<ObserverEvent> {
-        self.inner.tx.subscribe()
+        match self.inner.tx.lock() {
+            Ok(tx) => tx
+                .as_ref()
+                .map_or_else(|| broadcast::channel(1).1, |tx| tx.subscribe()),
+            Err(error) => {
+                tracing::warn!(target: "observer", "observer sender lock poisoned: {error}");
+                broadcast::channel(1).1
+            }
+        }
+    }
+
+    /// Close the live feed across all handle clones, retaining its replay buffer.
+    /// Emissions already holding the sender lock finish before close returns;
+    /// later emissions are ignored so shutdown has a finite backlog to drain.
+    pub(crate) fn close(&self) {
+        let mut tx = match self.inner.tx.lock() {
+            Ok(tx) => tx,
+            Err(error) => error.into_inner(),
+        };
+        tx.take();
     }
 
     /// Return the current replay buffer.
@@ -108,6 +127,16 @@ impl ObserverHandle {
         context: &ObserverContext,
         payload: serde_json::Value,
     ) {
+        let tx = match self.inner.tx.lock() {
+            Ok(tx) => tx,
+            Err(error) => {
+                tracing::warn!(target: "observer", "observer sender lock poisoned: {error}");
+                return;
+            }
+        };
+        let Some(tx) = tx.as_ref() else {
+            return;
+        };
         let event = ObserverEvent {
             seq: self.inner.seq.fetch_add(1, Ordering::Relaxed),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -132,7 +161,7 @@ impl ObserverHandle {
             }
         }
 
-        let _ = self.inner.tx.send(event);
+        let _ = tx.send(event);
     }
 }
 
