@@ -433,6 +433,12 @@ pub fn run() {
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
                 mgr.start_tts_download(state.http_client.clone());
+                if tts_settings.speech_language.should_load_kroko()
+                    || tts_settings.speech_language.should_load_kokoro()
+                {
+                    mgr.start_kroko_download(state.http_client.clone());
+                    mgr.start_kokoro_download(state.http_client.clone());
+                }
             }
 
             // Handle deep link URLs received while the app is running (macOS)

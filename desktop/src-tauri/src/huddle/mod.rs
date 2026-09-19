@@ -819,7 +819,17 @@ pub fn get_model_status(state: State<'_, AppState>) -> Result<models::VoiceModel
         .unwrap_or_default();
     let (stt, tts) = match language {
         crate::huddle::speech_profile::SpeechLanguage::De => {
-            (manager.kroko_status(), manager.kokoro_status())
+            let kokoro_usable = manager
+                .kokoro_model_dir()
+                .is_some_and(|dir| crate::huddle::pocket::KokoroGerman::is_runtime_usable(&dir));
+            (
+                manager.kroko_status(),
+                if kokoro_usable {
+                    manager.kokoro_status()
+                } else {
+                    manager.tts_status()
+                },
+            )
         }
         crate::huddle::speech_profile::SpeechLanguage::En => {
             (manager.stt_status(), manager.tts_status())

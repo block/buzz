@@ -35,6 +35,11 @@ impl KokoroGerman {
             && model_dir.join("espeak-ng-data").join("phontab").is_file()
     }
 
+    pub fn is_runtime_usable(model_dir: &Path) -> bool {
+        Self::is_available(model_dir)
+            && onnx_has_sherpa_kokoro_metadata(&model_dir.join("model.onnx"))
+    }
+
     pub fn load(model_dir: &Path) -> Result<Self, String> {
         eprintln!("buzz-desktop: Loading Kokoro...");
         let voices_bin = ensure_voices_bin(model_dir)?;
@@ -322,6 +327,15 @@ mod tests {
     #[test]
     fn missing_model_is_not_available() {
         assert!(!KokoroGerman::is_available(Path::new("/tmp/missing-kokoro")));
+    }
+
+    #[test]
+    fn installed_martin_onnx_is_not_sherpa_runtime() {
+        let dir = Path::new("/Users/cyberblade/.buzz/models/kokoro-de");
+        if !KokoroGerman::is_available(dir) {
+            return;
+        }
+        assert!(!KokoroGerman::is_runtime_usable(dir));
     }
 
     #[test]

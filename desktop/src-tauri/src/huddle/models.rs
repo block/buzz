@@ -442,6 +442,13 @@ impl ModelSlot {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+
+    fn effective_status(&self, models_dir: &Path) -> ModelStatus {
+        if self.is_ready(models_dir) {
+            return ModelStatus::Ready;
+        }
+        self.status()
+    }
     fn set_status(&self, s: ModelStatus) {
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = s;
     }
@@ -640,7 +647,7 @@ impl ModelManager {
     }
     /// Current STT download status.
     pub fn stt_status(&self) -> ModelStatus {
-        self.stt.status()
+        self.stt.effective_status(&self.models_dir)
     }
     /// Returns `true` once when the STT model just became ready. Resets the flag.
     pub fn take_stt_ready(&self) -> bool {
@@ -659,7 +666,7 @@ impl ModelManager {
     }
     /// Current TTS download status.
     pub fn tts_status(&self) -> ModelStatus {
-        self.tts.status()
+        self.tts.effective_status(&self.models_dir)
     }
     /// Returns `true` once when TTS just became ready. Resets the flag.
     pub fn take_tts_ready(&self) -> bool {

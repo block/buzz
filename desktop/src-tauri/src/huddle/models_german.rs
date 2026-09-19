@@ -94,7 +94,7 @@ impl ModelManager {
     }
 
     pub fn kroko_status(&self) -> ModelStatus {
-        self.kroko.status()
+        self.kroko.effective_status(&self.models_dir)
     }
 
     pub fn take_kroko_ready(&self) -> bool {
@@ -110,7 +110,7 @@ impl ModelManager {
     }
 
     pub fn kokoro_status(&self) -> ModelStatus {
-        self.kokoro.status()
+        self.kokoro.effective_status(&self.models_dir)
     }
 
     pub fn take_kokoro_ready(&self) -> bool {

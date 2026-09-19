@@ -236,9 +236,25 @@ pub(crate) async fn post_connect_setup(
     // Prepare voice models. Agent presence may have auto-enabled transcription;
     // explicit user choices remain authoritative.
     if let Some(mgr) = models::global_model_manager() {
-        mgr.start_tts_download(state.http_client.clone());
+        let language = super::tts_settings::current_speech_language(state);
+        match language.tts_backend() {
+            super::speech_profile::TtsBackend::Kokoro => {
+                mgr.start_kokoro_download(state.http_client.clone());
+                mgr.start_tts_download(state.http_client.clone());
+            }
+            super::speech_profile::TtsBackend::Pocket => {
+                mgr.start_tts_download(state.http_client.clone());
+            }
+        }
         if state.huddle()?.transcription_enabled {
-            mgr.start_stt_download(state.http_client.clone());
+            match language.asr_backend() {
+                super::speech_profile::AsrBackend::Kroko => {
+                    mgr.start_kroko_download(state.http_client.clone());
+                }
+                super::speech_profile::AsrBackend::Parakeet => {
+                    mgr.start_stt_download(state.http_client.clone());
+                }
+            }
         }
     }
 
@@ -449,17 +465,23 @@ pub(crate) async fn start_auto_enabled_transcription(state: &AppState, ephemeral
 /// releasing it for the expensive construction step.
 pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, String> {
     let language = super::tts_settings::current_speech_language(state);
-    let tts_ready = match language.tts_backend() {
-        super::speech_profile::TtsBackend::Pocket => models::is_tts_ready(),
-        super::speech_profile::TtsBackend::Kokoro => models::is_kokoro_ready(),
+    let kokoro_usable = models::kokoro_model_dir()
+        .is_some_and(|dir| super::pocket::KokoroGerman::is_runtime_usable(&dir));
+    let use_kokoro = language.tts_backend() == super::speech_profile::TtsBackend::Kokoro
+        && kokoro_usable;
+    let tts_ready = if use_kokoro {
+        true
+    } else {
+        models::is_tts_ready()
     };
     if !tts_ready {
         return Ok(false); // TTS model not downloaded yet — TTS unavailable.
     }
 
-    let model_dir = match language.tts_backend() {
-        super::speech_profile::TtsBackend::Pocket => models::tts_model_dir(),
-        super::speech_profile::TtsBackend::Kokoro => models::kokoro_model_dir(),
+    let model_dir = if use_kokoro {
+        models::kokoro_model_dir()
+    } else {
+        models::tts_model_dir()
     };
     let Some(model_dir) = model_dir else {
         return Ok(false);
@@ -494,14 +516,13 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
         .lock()
         .map_err(|error| format!("text-to-speech settings lock poisoned: {error}"))
         .map(|settings| settings.voice_preferences.clone())?;
-    let initial_voice = match language.tts_backend() {
-        super::speech_profile::TtsBackend::Kokoro => {
-            super::speech_profile::resolve_german_voice_key(&voice_preferences).to_string()
-        }
-        super::speech_profile::TtsBackend::Pocket => match app.as_ref() {
+    let initial_voice = if use_kokoro {
+        super::speech_profile::resolve_german_voice_key(&voice_preferences).to_string()
+    } else {
+        match app.as_ref() {
             Some(app) => super::tts_settings::pocket_voice_reference(app, &voice_preferences)?,
             None => super::tts_settings::bundled_pocket_voice_reference(&voice_preferences),
-        },
+        }
     };
 
     // Atomically check preconditions and claim the construction slot.
