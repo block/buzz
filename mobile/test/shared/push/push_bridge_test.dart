@@ -80,6 +80,7 @@ void main() {
             expect(call.method, 'syncAgeGatePushSnapshot');
             expect(call.arguments, {
               'section': 'communities',
+              'appProfile': Env.pushAppProfile,
               'communities': <Object?>[],
               'signingKeys': <String, String>{},
               'settleFence': true,
@@ -282,6 +283,7 @@ void main() {
       expect(snapshotArguments, [
         {
           'section': 'communities',
+          'appProfile': Env.pushAppProfile,
           'communities': [
             {
               'id': 'community-id',

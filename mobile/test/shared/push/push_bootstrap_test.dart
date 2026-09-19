@@ -229,6 +229,7 @@ BuzzPushLeaseDescriptor _descriptor({
   origin: 'wss://relay.example',
   executorKeyId: keyId,
   executorPubkey: pubkey,
+  appProfile: buzzIosDogfoodAppProfile,
   transport: 'apns',
   maxLeaseTtlSeconds: 3600,
   maxContentLength: 4096,

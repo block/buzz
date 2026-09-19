@@ -325,6 +325,7 @@ Future<void> _registerBuzzPushCommunitySnapshot(
       strict ? 'syncAgeGatePushSnapshot' : 'syncPushSnapshot',
       {
         'section': 'communities',
+        'appProfile': Env.pushAppProfile,
         'communities': [for (final snapshot in snapshots) snapshot.toJson()],
         'signingKeys': signingKeys,
         if (strict) 'settleFence': settleFence,

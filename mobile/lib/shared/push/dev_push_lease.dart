@@ -49,9 +49,9 @@ class BuzzPushLeaseDescriptor {
   });
 
   factory BuzzPushLeaseDescriptor.fromRelayInformation(
-    Map<String, dynamic> information,
-    {String appProfile = buzzDevPushAppProfile},
-  ) {
+    Map<String, dynamic> information, {
+    String appProfile = buzzDevPushAppProfile,
+  }) {
     if (!const {
       buzzIosDogfoodAppProfile,
       buzzIosCustomAppProfile,
@@ -544,7 +544,9 @@ void _validateGrant(
     );
   }
   if (grant.appProfile != descriptor.appProfile) {
-    throw const FormatException('Endpoint grant is for a different app profile');
+    throw const FormatException(
+      'Endpoint grant is for a different app profile',
+    );
   }
   if (grant.endpointGrant.isEmpty ||
       utf8.encode(grant.endpointGrant).length > descriptor.maxEndpointLength) {
