@@ -2542,6 +2542,90 @@ void main() {
     );
   }
 
+  for (final secondResolves in [true, false]) {
+    test(
+      'multi-target deletion correlates shared roots (second resolves: $secondResolves)',
+      () async {
+        final first = Completer<List<NostrEvent>>();
+        final second = Completer<List<NostrEvent>>();
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              for (final id in ['owner', 'unrelated']) ...[
+                _event(id: id, createdAt: 10),
+                _summary(rootId: id, replyCount: 2),
+              ],
+              _bounds(),
+            ],
+            first.future,
+            second.future,
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        session.emit(
+          NostrEvent(
+            id: 'multi-delete',
+            pubkey: 'author',
+            createdAt: 100,
+            kind: EventKind.nip29DeleteEvent,
+            tags: const [
+              ['h', _channelId],
+              ['e', 'first-target'],
+              ['e', 'second-target'],
+            ],
+            content: '',
+            sig: '',
+          ),
+        );
+        await _pumpEventQueue();
+        first.complete([_summary(rootId: 'owner', replyCount: 1)]);
+        await _pumpEventQueue();
+        expect(
+          notifier.threadSummaries['unrelated']!.isCountPending,
+          isTrue,
+          reason: 'the queued sibling still has unresolved ownership',
+        );
+        expect(notifier.threadSummaries['owner']!.isCountPending, isTrue);
+        second.complete(
+          secondResolves ? [_summary(rootId: 'owner', replyCount: 0)] : [],
+        );
+        await _pumpEventQueue();
+        expect(notifier.threadSummaries['unrelated']!.descendantCount, 2);
+        expect(
+          notifier.threadSummaries['unrelated']!.isCountPending,
+          !secondResolves,
+        );
+        expect(
+          notifier.threadSummaries['owner']!.descendantCount,
+          secondResolves ? 0 : 1,
+        );
+        final requests = session.queryFilters.where(
+          (f) => f.extensions['resolve_thread_roots'] == true,
+        );
+        expect(requests.map((f) => f.ids!.single), [
+          'first-target',
+          'second-target',
+        ]);
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(
+          entries.singleWhere((e) => e.message.id == 'owner').summary == null,
+          secondResolves,
+        );
+      },
+    );
+  }
+
   test(
     'failed overlapping ownership lookup keeps uncertainty until fresh summary',
     () async {

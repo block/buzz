@@ -138,10 +138,17 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     Set<String> candidates,
   ) async {
     final generation = _initVersion;
-    final version = ++_threadQuerySerial;
+    // Register the whole bounded batch before sending its first query. A
+    // successful target must not retire uncertainty from a queued sibling.
+    final versions = {
+      for (final target in targets) target: ++_threadQuerySerial,
+    };
     for (final root in candidates) {
-      (_deletionSummaryUncertainty[root] ??= _DeletionSummaryUncertainty())
-          .begin(version);
+      final pending = _deletionSummaryUncertainty[root] ??=
+          _DeletionSummaryUncertainty();
+      for (final version in versions.values) {
+        pending.begin(version);
+      }
     }
     while (_deletionSummaryUncertainty.length > 2048) {
       _deletionSummaryUncertainty.remove(
@@ -149,19 +156,41 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       );
     }
     _publishSummaryChange();
+    // One target per query correlates the response even when multiple targets
+    // share a root. Sequential reads avoid a burst of up to 100 HTTP requests.
+    for (final entry in versions.entries) {
+      if (!_summaryMounted || generation != _initVersion) return;
+      await _resolveDeletionOwner(
+        entry.key,
+        candidates,
+        generation,
+        entry.value,
+      );
+    }
+  }
+
+  Future<void> _resolveDeletionOwner(
+    String target,
+    Set<String> candidates,
+    int generation,
+    int version,
+  ) async {
     try {
       final events = await _summarySession.queryRelay([
         NostrFilter(
-          ids: targets.toList(),
+          ids: [target],
           kinds: const [EventKind.channelThreadSummary],
           extensions: const {'resolve_thread_roots': true},
           tags: {
             '#h': [channelId],
           },
-          limit: targets.length,
+          limit: 1,
         ),
       ]);
       if (!_summaryMounted || generation != _initVersion) return;
+      if (events.length > 1) {
+        throw StateError('Expected at most one owner for a deletion target.');
+      }
       for (final event in events) {
         if (event.channelId != channelId ||
             event.kind != EventKind.channelThreadSummary) {
@@ -172,13 +201,9 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
           _handleLiveEvent(event, summaryVersion: version);
         }
       }
-      // Distinct returned roots prove every target resolved when their count
-      // matches. Partial/empty responses cannot retire unrelated uncertainty.
-      _finishDeletionLookup(
-        candidates,
-        version,
-        resolved: events.length == targets.length,
-      );
+      // An empty response does not prove ownership (including on old relays).
+      // Only this target's correlated summary can retire its uncertainty.
+      _finishDeletionLookup(candidates, version, resolved: events.length == 1);
     } catch (error) {
       // Keep pending presentation on query failure; a fresh summary or explicit
       // thread query can still reconcile it.
