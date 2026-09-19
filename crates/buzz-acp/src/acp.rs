@@ -113,6 +113,26 @@ pub enum AcpError {
     AgentError { code: i64, message: String },
 }
 
+impl AcpError {
+    /// An adapter may survive after its nested CLI dies. Reusing that pipe
+    /// cannot recover the session. Keep provider/model/auth errors separate.
+    pub(crate) fn requires_respawn(&self) -> bool {
+        match self {
+            Self::AgentExited
+            | Self::Io(_)
+            | Self::WriteTimeout(_)
+            | Self::Timeout(_)
+            | Self::Protocol(_) => true,
+            Self::AgentError { code, message } => {
+                (*code == 1001 && message.starts_with("Codex process has exited"))
+                    || (*code == -32603
+                        && message.contains("The Claude Agent process exited unexpectedly"))
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific
@@ -142,6 +162,7 @@ fn build_initialize_params() -> serde_json::Value {
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
 pub struct AcpClient {
+    pub(crate) retention: crate::worker_retention::WorkerRetention,
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
     /// Write end of the agent's stdin pipe.
@@ -558,6 +579,7 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
         Ok(Self {
+            retention: Default::default(),
             child,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
@@ -690,6 +712,7 @@ impl AcpClient {
             // Merge — _meta may already carry a system prompt from an adapter extension.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
         }
+        self.retention.session_created();
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
             .as_str()
@@ -3040,6 +3063,22 @@ mod tests {
             msg.contains("Hard turn timeout"),
             "HardTimeout display: {msg}"
         );
+    }
+
+    #[test]
+    fn provider_errors_are_not_misclassified_as_dead_processes() {
+        for (code, message) in [
+            (-32603, "Internal error"),
+            (-32603, "Model is not supported"),
+            (-32000, "API Error: 401"),
+            (1001, "A different adapter's application error"),
+        ] {
+            assert!(!AcpError::AgentError {
+                code,
+                message: message.into()
+            }
+            .requires_respawn());
+        }
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
