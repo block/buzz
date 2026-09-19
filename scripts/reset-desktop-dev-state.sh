@@ -53,6 +53,12 @@ case "$(uname -s)" in
     remove_bundle_state "${XDG_CONFIG_HOME:-$HOME/.config}"
     remove_bundle_state "${XDG_CACHE_HOME:-$HOME/.cache}"
     ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT*)
+    appdata_roaming="${APPDATA//\\//}"
+    appdata_local="${LOCALAPPDATA//\\//}"
+    remove_bundle_state "$appdata_roaming"
+    remove_bundle_state "$appdata_local"
+    ;;
   *)
     log "Desktop bundle cleanup is not implemented for $(uname -s); continuing"
     ;;

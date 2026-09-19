@@ -24,7 +24,15 @@ export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
 export PGDATABASE="${PGDATABASE:-buzz}"
 export RELAY_URL="${RELAY_URL:-ws://localhost:3000}"
 
-hosts_sql=$(python3 - <<'PY'
+PYTHON_CMD=""
+if python3 -c "import sys" &>/dev/null; then
+  PYTHON_CMD="python3"
+elif python -c "import sys" &>/dev/null; then
+  PYTHON_CMD="python"
+fi
+
+if [[ -n "${PYTHON_CMD}" ]]; then
+  hosts_sql=$(${PYTHON_CMD} - <<'PY'
 import os
 from urllib.parse import urlparse
 
@@ -74,6 +82,52 @@ for h in seen:
 print(",\n".join(lines))
 PY
 )
+elif command -v node &>/dev/null; then
+  hosts_sql=$(node -e "
+const { URL } = require('url');
+const relayUrl = process.env.RELAY_URL || 'ws://localhost:3000';
+let parsed;
+try { parsed = new URL(relayUrl); } catch (e) { parsed = new URL('ws://localhost:3000'); }
+let host = (parsed.hostname || '').replace(/\.$/, '').toLowerCase();
+let port = parsed.port;
+let scheme = parsed.protocol ? parsed.protocol.replace(':', '').toLowerCase() : 'ws';
+
+function authority(h, p, s) {
+  if (!h) return '';
+  let displayHost = (h.includes(':') && !h.startsWith('[')) ? '[' + h + ']' : h;
+  let defaultPort = (s === 'ws' && p === '80') || (s === 'wss' && p === '443');
+  if (p && !defaultPort) return displayHost + ':' + p;
+  return displayHost;
+}
+
+let primary = authority(host, port, scheme);
+let hosts = [];
+if (primary) hosts.push(primary);
+
+if (host === 'localhost' || host === '127.0.0.1') {
+  hosts.push('localhost', '127.0.0.1');
+  if (port) {
+    hosts.push('localhost:' + port, '127.0.0.1:' + port);
+  }
+}
+
+let seen = [];
+for (let h of hosts) {
+  if (h && !seen.includes(h)) seen.push(h);
+}
+
+if (seen.length === 0) {
+  console.error('could not derive a host from RELAY_URL');
+  process.exit(1);
+}
+
+let lines = seen.map(h => '    (\'' + h.replace(/'/g, '\'\'') + '\')');
+console.log(lines.join(',\n'));
+")
+else
+  echo "error: neither python nor node is available to parse RELAY_URL" >&2
+  exit 1
+fi
 
 sql="
 INSERT INTO communities (host)

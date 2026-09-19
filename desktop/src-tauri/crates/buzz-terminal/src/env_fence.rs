@@ -26,14 +26,21 @@ use portable_pty::CommandBuilder;
 /// Anything not listed here does not reach the child, including keys that do
 /// not exist yet — which is the property a denylist cannot offer.
 const INHERIT_ALLOWLIST: &[&str] = &[
-    "HOME",     // shell startup files, ~ expansion
-    "USER",     // prompt expansion, `whoami`-adjacent tooling
-    "LOGNAME",  // POSIX companion to USER
-    "LANG",     // UTF-8 decoding of the child's own output
-    "LC_ALL",   // explicit locale override, when set
-    "LC_CTYPE", // character classification; wide/emoji handling
-    "TZ",       // timestamps in prompts and logs
-    "TMPDIR",   // per-user temp dir; absence breaks many tools on macOS
+    "HOME",         // shell startup files, ~ expansion
+    "USER",         // prompt expansion, `whoami`-adjacent tooling
+    "LOGNAME",      // POSIX companion to USER
+    "LANG",         // UTF-8 decoding of the child's own output
+    "LC_ALL",       // explicit locale override, when set
+    "LC_CTYPE",     // character classification; wide/emoji handling
+    "TZ",           // timestamps in prompts and logs
+    "TMPDIR",       // per-user temp dir; absence breaks many tools on macOS
+    "SystemRoot",   // Windows system directory path (required to run cmd.exe / load DLLs)
+    "SystemDrive",  // Windows system drive (e.g. C:)
+    "windir",       // Windows directory path (equivalent to SystemRoot)
+    "USERPROFILE",  // Windows user profile directory path (corresponds to HOME)
+    "USERNAME",     // Windows username (corresponds to USER)
+    "TEMP",         // Windows temporary directory (corresponds to TMPDIR)
+    "TMP",          // Windows temporary directory (equivalent to TEMP)
 ];
 
 /// Values Buzz sets on the child unconditionally, overriding any inherited
