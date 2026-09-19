@@ -209,14 +209,23 @@ impl Drop for SttPipeline {
 
 /// How many 16 kHz samples of silence before we flush to STT.
 /// 500 ms × 16 000 Hz / 256 samples-per-frame ≈ 31 frames.
-/// This favors natural conversational pauses over the lower latency of the
-/// previous 19-frame / 304 ms window.
 ///
-/// This window is a turn-taking quality knob, not a latency lever: an earlier
-/// env override (`BUZZ_STT_FLUSH_MS`) let it be lowered to 150 ms, which split
-/// natural mid-sentence pauses into separate messages and confused the
-/// listening agents. Reverted — the window is fixed at the production value.
+/// Original Buzz uses this for English Parakeet: conversational turn-taking.
+/// An earlier env override (`BUZZ_STT_FLUSH_MS`) at 150 ms split mid-sentence
+/// pauses and confused listening agents.
 const SILENCE_FLUSH_FRAMES: usize = 31;
+
+/// German Kroko huddle: keep a 2–3 s thinking pause in the same transcript line.
+/// Intra-turn silent hesitations are often 0.2–0.8 s; planning pauses commonly
+/// reach 1–2 s, and speakers report 2–3 s. 156 frames × 256 / 16 kHz ≈ 2.5 s.
+const KROKO_SILENCE_FLUSH_FRAMES: usize = 156;
+
+fn silence_flush_frames(backend: AsrBackend) -> usize {
+    match backend {
+        AsrBackend::Kroko => KROKO_SILENCE_FLUSH_FRAMES,
+        AsrBackend::Parakeet => SILENCE_FLUSH_FRAMES,
+    }
+}
 
 /// earshot requires exactly 256 samples per frame at 16 kHz.
 const VAD_FRAME_SAMPLES: usize = 256;
@@ -666,6 +675,7 @@ fn stt_worker(
                         local_barge_in_state,
                         output_device.as_deref(),
                         track_local_floor,
+                        silence_flush_frames(backend),
                     );
                 }
             }
@@ -690,6 +700,7 @@ fn process_stt_input(
     local_barge_in_state: &mut local_barge_in::LocalBargeIn,
     output_device: Option<&str>,
     track_local_floor: bool,
+    flush_frames: usize,
 ) {
     stream
         .input_buf_48k
@@ -703,7 +714,7 @@ fn process_stt_input(
             &mut stream.leftover_16k,
             &mut stream.vad,
             &mut stream.endpoint,
-            SILENCE_FLUSH_FRAMES,
+            flush_frames,
             (speculative_enabled, &mut stream.speculative),
             recognizer,
             text_tx,

@@ -1,10 +1,10 @@
 use std::sync::{atomic::AtomicBool, mpsc, Arc, Barrier};
 
 use super::{
-    has_enough_voiced_audio, run_stt_receive_loop, vad_flush_allowed, with_kroko_tail_padding,
-    HumanFloor, SttAudioInput, SttAudioOrigin, SttLoopInput, VadEndpoint, VadFrameAction,
-    KROKO_TAIL_SAMPLES, MIN_VOICED_FRAMES, SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES,
-    VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
+    has_enough_voiced_audio, run_stt_receive_loop, silence_flush_frames, vad_flush_allowed,
+    with_kroko_tail_padding, AsrBackend, HumanFloor, SttAudioInput, SttAudioOrigin, SttLoopInput,
+    VadEndpoint, VadFrameAction, KROKO_SILENCE_FLUSH_FRAMES, KROKO_TAIL_SAMPLES, MIN_VOICED_FRAMES,
+    SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES, VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
 };
 
 #[derive(Clone, Copy)]
@@ -71,6 +71,18 @@ fn worker_channel_disconnect_releases_local_floor_for_replacement() {
 
 fn frame(value: f32) -> Vec<f32> {
     vec![value; VAD_FRAME_SAMPLES]
+}
+
+#[test]
+fn german_kroko_waits_about_two_and_a_half_seconds_of_silence() {
+    assert_eq!(silence_flush_frames(AsrBackend::Parakeet), SILENCE_FLUSH_FRAMES);
+    assert_eq!(
+        silence_flush_frames(AsrBackend::Kroko),
+        KROKO_SILENCE_FLUSH_FRAMES
+    );
+    let flush_ms =
+        silence_flush_frames(AsrBackend::Kroko) * VAD_FRAME_SAMPLES * 1000 / 16_000;
+    assert!(flush_ms >= 2_400 && flush_ms <= 2_600);
 }
 
 #[test]
