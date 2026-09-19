@@ -3526,19 +3526,44 @@ fn jittered_duration(base: Duration) -> Duration {
     base.mul_f64(factor)
 }
 
+/// Windows `getaddrinfo` codes that are transient DNS brownouts.
+///
+/// Kept as a pure `i32` matcher so Linux CI can assert the Windows path.
+/// 11003 (`WSANO_RECOVERY`) is intentionally excluded — that is not retryable DNS.
+pub(crate) fn is_windows_dns_errno(code: i32) -> bool {
+    matches!(code, 11001 | 11002 | 11004)
+}
+
+fn websocket_io_os_error(err: &RelayError) -> Option<i32> {
+    let RelayError::WebSocket(ws) = err else {
+        return None;
+    };
+    match ws.as_ref() {
+        tokio_tungstenite::tungstenite::Error::Io(io) => io.raw_os_error(),
+        _ => None,
+    }
+}
+
 /// Classify a `RelayError` as a DNS resolution failure.
 ///
-/// Matches the OS-level "name not found" strings surfaced by the platform's
-/// resolver, covering macOS (`nodename nor servname`), Linux (`Name or service not
-/// known`), and common BSD/Windows variants (`No such host`,
-/// `failed to lookup address`). These are transient on brownouts and must NOT
-/// consume a backoff ladder rung — they retry on a flat `DNS_RETRY_INTERVAL`.
+/// Prefer `raw_os_error()` on WebSocket I/O errors so Windows display-language
+/// `FormatMessage` strings cannot hide 11002/11004. String matching remains the
+/// fallback for already-flattened `RelayError::Http` and Unix resolver prose.
+/// Transient DNS brownouts must NOT consume a backoff ladder rung — they retry
+/// on a flat `DNS_RETRY_INTERVAL`.
 pub(crate) fn is_dns_error(err: &RelayError) -> bool {
+    if let Some(code) = websocket_io_os_error(err) {
+        if is_windows_dns_errno(code) {
+            return true;
+        }
+    }
     let msg = err.to_string();
     msg.contains("nodename nor servname")
         || msg.contains("Name or service not known")
         || msg.contains("No such host")
         || msg.contains("failed to lookup address")
+        || msg.contains("This is usually a temporary error during hostname resolution")
+        || msg.contains("no data of the requested type was found")
 }
 
 /// Shutdown-aware fixed-duration sleep for REQ pacing in `resubscribe_after_reconnect`.
@@ -6771,6 +6796,35 @@ mod tests {
         assert!(!is_dns_error(&RelayError::Http(
             "connection refused".into()
         )));
+
+        assert!(is_windows_dns_errno(11001));
+        assert!(is_windows_dns_errno(11002));
+        assert!(is_windows_dns_errno(11004));
+        assert!(!is_windows_dns_errno(11003));
+
+        // Production Windows shape: connect_async wraps FormatMessage I/O.
+        // 11004 was misclassified in the field (issue #7512).
+        let ws_11004 = RelayError::WebSocket(Box::new(tungstenite::Error::Io(
+            std::io::Error::from_raw_os_error(11004),
+        )));
+        assert!(
+            is_dns_error(&ws_11004),
+            "WSANO_DATA (11004) must classify as DNS so it does not consume backoff"
+        );
+        let ws_11002 = RelayError::WebSocket(Box::new(tungstenite::Error::Io(
+            std::io::Error::from_raw_os_error(11002),
+        )));
+        assert!(
+            is_dns_error(&ws_11002),
+            "WSATRY_AGAIN (11002) must classify as DNS"
+        );
+        let ws_11003 = RelayError::WebSocket(Box::new(tungstenite::Error::Io(
+            std::io::Error::from_raw_os_error(11003),
+        )));
+        assert!(
+            !is_dns_error(&ws_11003),
+            "WSANO_RECOVERY (11003) must not take the DNS flat-retry path"
+        );
     }
 
     /// resubscribe_retry is populated when a channel REQ fails during partial reconnect.
