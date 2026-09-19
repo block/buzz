@@ -1775,8 +1775,12 @@ fn mcp_servers_with_git_origin(
         (None, _) => None,
     };
     if let Some(origin) = origin {
+        // Stdio servers only: an HTTP server runs elsewhere and has no
+        // subprocess environment to inherit this.
         for server in &mut servers {
-            server.env.push(origin.clone());
+            if let McpServer::Stdio { env, .. } = server {
+                env.push(origin.clone());
+            }
         }
     }
     servers
@@ -5500,7 +5504,7 @@ mod tests {
     }
 
     fn test_mcp_server() -> McpServer {
-        McpServer {
+        McpServer::Stdio {
             name: "dev".into(),
             command: "buzz-dev-mcp".into(),
             args: vec![],
@@ -5562,11 +5566,11 @@ mod tests {
             Some("stream"),
             None,
         );
-        assert!(servers[0].env.iter().any(|entry| {
+        assert!(servers[0].env().iter().any(|entry| {
             entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID" && entry.value == channel_id.to_string()
         }));
         assert!(!servers[0]
-            .env
+            .env()
             .iter()
             .any(|entry| entry.name == "BUZZ_GIT_ORIGIN_AGENT_NAME"));
     }
@@ -5579,11 +5583,11 @@ mod tests {
             Some("dm"),
             Some("Builder"),
         );
-        assert!(servers[0].env.iter().any(|entry| {
+        assert!(servers[0].env().iter().any(|entry| {
             entry.name == "BUZZ_GIT_ORIGIN_AGENT_NAME" && entry.value == "Builder"
         }));
         assert!(!servers[0]
-            .env
+            .env()
             .iter()
             .any(|entry| entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID"));
     }
