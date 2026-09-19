@@ -10273,12 +10273,22 @@ void main() {
         pubkey: 'alice',
         content: 'Start a local thread',
       );
+      final reply = _textMsg(
+        id: 'local-reply',
+        pubkey: 'self',
+        content: 'Waiting for relay echo',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'local-root', '', 'reply'],
+        ],
+      );
+      final query = Completer<List<NostrEvent>>();
       final notifier = _FakeMessagesNotifier([root]);
       await tester.pumpWidget(
         _buildTestable(
           messages: [root],
           messagesNotifier: notifier,
-          threadReplies: const {'local-root': []},
+          pendingThreadReplies: {'local-root': query.future},
         ),
       );
       await tester.pumpAndSettle();
@@ -10286,18 +10296,17 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(ThreadDetailPage), findsNothing);
 
-      notifier.addLocalMessage(
-        _textMsg(
-          id: 'local-reply',
-          pubkey: 'self',
-          content: 'Waiting for relay echo',
-          createdAt: 1100,
-          extraTags: const [
-            ['e', 'local-root', '', 'reply'],
-          ],
-        ),
-      );
+      notifier.addLocalMessage(reply);
       notifier.completeLocalMessage('local-reply');
+      await tester.pumpAndSettle();
+      await tester.tap(findRichText('Start a local thread'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(findRichText('Waiting for relay echo'), findsOneWidget);
+
+      query.complete([reply]);
+      await tester.pumpAndSettle();
+      await tester.pageBack();
       await tester.pumpAndSettle();
       await tester.tap(findRichText('Start a local thread'));
       await tester.pumpAndSettle();

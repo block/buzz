@@ -300,6 +300,27 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         .confirm(eventIds);
   }
 
+  /// Caches confirmed thread replies before their optimistic overlay is cleared.
+  /// Thread queries must not invalidate themselves as live relay events do.
+  void cacheConfirmedThreadReplies(Iterable<NostrEvent> replies) {
+    var events = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
+    for (final reply in replies) {
+      if (reply.channelId != channelId ||
+          reply.threadReference.parentId == null) {
+        throw StateError('Expected a reply in channel $channelId.');
+      }
+      _mergeWindowEventIntoStore(reply);
+      if (!_usingChannelWindow) {
+        events = _mergeEvent(events, reply);
+      }
+    }
+    if (_usingChannelWindow) {
+      events = _withDeepLinkEvents(flattenChannelWindowEvents(_windowStore));
+    }
+    _lastKnownMessages = events;
+    state = AsyncData(events);
+  }
+
   /// Adds a just-signed outgoing message before the relay acknowledges it.
   /// The live relay echo is deduplicated by event id.
   void addLocalMessage(NostrEvent event) {

@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/misc.dart' show KeepAliveLink;
 
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
+import 'channel_messages_provider.dart';
 import 'pending_local_messages_provider.dart';
 
 class ThreadRepliesArgs {
@@ -134,7 +135,16 @@ final threadRepliesWithLocalProvider = Provider.autoDispose
           final pendingMessagesNotifier = ref.read(
             pendingLocalMessagesProvider(args.channelId).notifier,
           );
+          final channelMessages = ref.read(
+            channelMessagesProvider(args.channelId).notifier,
+          );
+          final confirmedReplies = authoritative
+              .where(
+                (event) => localReplies.any((local) => local.id == event.id),
+              )
+              .toList();
           Future.microtask(() {
+            channelMessages.cacheConfirmedThreadReplies(confirmedReplies);
             localRepliesNotifier.confirm(authoritativeIds);
             pendingMessagesNotifier.confirm(authoritativeIds);
           });
