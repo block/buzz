@@ -258,3 +258,21 @@ fn held_push_to_talk_never_silence_flushes() {
     // Manually open mic with the shortcut up: normal VAD behavior.
     assert!(vad_flush_allowed(true, true, false));
 }
+
+#[test]
+fn create_installed_kroko_does_not_abort() {
+    let dir = std::path::Path::new("/Users/cyberblade/.buzz/models/kroko-de");
+    if !dir.join("encoder.onnx").is_file() {
+        return;
+    }
+    let created = super::create_kroko(dir);
+    eprintln!("kroko create: {}", created.is_some());
+    let Some(recognizer) = created else {
+        return;
+    };
+    let samples: Vec<f32> = (0..16_000)
+        .map(|i| ((i as f32) * 0.05).sin() * 0.2)
+        .collect();
+    let text = super::decode_kroko(&recognizer, &samples);
+    eprintln!("kroko decode sine: {text:?}");
+}

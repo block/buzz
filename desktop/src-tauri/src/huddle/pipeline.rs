@@ -247,14 +247,7 @@ pub(crate) async fn post_connect_setup(
             }
         }
         if state.huddle()?.transcription_enabled {
-            match language.asr_backend() {
-                super::speech_profile::AsrBackend::Kroko => {
-                    mgr.start_kroko_download(state.http_client.clone());
-                }
-                super::speech_profile::AsrBackend::Parakeet => {
-                    mgr.start_stt_download(state.http_client.clone());
-                }
-            }
+            start_language_asr_download(mgr, state);
         }
     }
 
@@ -300,6 +293,18 @@ pub(crate) async fn post_connect_setup(
     Ok(PostConnectOutcome::Ready)
 }
 
+fn start_language_asr_download(manager: &models::ModelManager, state: &AppState) {
+    match super::tts_settings::current_speech_language(state).asr_backend() {
+        super::speech_profile::AsrBackend::Kroko => {
+            manager.start_kroko_download(state.http_client.clone());
+            manager.start_stt_download(state.http_client.clone());
+        }
+        super::speech_profile::AsrBackend::Parakeet => {
+            manager.start_stt_download(state.http_client.clone());
+        }
+    }
+}
+
 /// Attempt to start the STT pipeline if models are present.
 ///
 /// Returns `Ok(true)` if the pipeline was started, `Ok(false)` if models are
@@ -320,19 +325,23 @@ pub(crate) async fn maybe_start_stt_pipeline(
     };
 
     let language = super::tts_settings::current_speech_language(state);
-    let asr = language.asr_backend();
-    let stt_ready = match asr {
-        super::speech_profile::AsrBackend::Parakeet => models::is_stt_ready(),
-        super::speech_profile::AsrBackend::Kroko => models::is_kroko_ready(),
+    let (asr, model_dir) = match language.asr_backend() {
+        super::speech_profile::AsrBackend::Kroko => {
+            if let Some(dir) = models::kroko_model_dir() {
+                (super::speech_profile::AsrBackend::Kroko, dir)
+            } else if let Some(dir) = models::stt_model_dir() {
+                (super::speech_profile::AsrBackend::Parakeet, dir)
+            } else {
+                return Ok(false);
+            }
+        }
+        super::speech_profile::AsrBackend::Parakeet => {
+            let Some(dir) = models::stt_model_dir() else {
+                return Ok(false);
+            };
+            (super::speech_profile::AsrBackend::Parakeet, dir)
+        }
     };
-    if !stt_ready {
-        return Ok(false); // Models not downloaded yet — voice-only mode.
-    }
-    let model_dir = match asr {
-        super::speech_profile::AsrBackend::Parakeet => models::stt_model_dir(),
-        super::speech_profile::AsrBackend::Kroko => models::kroko_model_dir(),
-    }
-    .ok_or("STT model directory not found")?;
 
     let channel_uuid = parse_channel_uuid(ephemeral_channel_id)?;
 
@@ -445,7 +454,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
 /// Start STT after agent presence automatically enables transcription.
 pub(crate) async fn start_auto_enabled_transcription(state: &AppState, ephemeral_channel_id: &str) {
     if let Some(manager) = models::global_model_manager() {
-        manager.start_stt_download(state.http_client.clone());
+        start_language_asr_download(manager, state);
     }
     if let Err(error) = maybe_start_stt_pipeline(state, ephemeral_channel_id).await {
         eprintln!("buzz-desktop: auto-enabled STT failed to start: {error}");
