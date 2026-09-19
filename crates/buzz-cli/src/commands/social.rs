@@ -71,6 +71,7 @@ pub async fn cmd_set_contact_list(
 /// Get a single event by ID via POST /query.
 pub async fn cmd_get_event(client: &BuzzClient, event_id: &str) -> Result<(), CliError> {
     validate_hex64(event_id)?;
+    let event_id = event_id.to_ascii_lowercase();
     let filter = serde_json::json!({
         "ids": [event_id]
     });
