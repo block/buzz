@@ -54,7 +54,7 @@ class _ThreadMessageList extends StatelessWidget {
   });
 
   String get _replySummary {
-    if (!relayReplyState.hasValue) {
+    if (!relayReplyState.hasValue && replies.isEmpty) {
       return relayReplyState.isLoading
           ? 'Loading replies…'
           : 'Couldn’t load replies';
