@@ -1,12 +1,12 @@
 # Buzz Push Gateway deployment
 
-`buzz-push-gateway` is a standalone APNs last hop. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs credentials.
+`buzz-push-gateway` is the standalone public APNs and FCM last hop intended for `push.buzz.xyz`. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays provider credentials.
 
 ## Network and health
 
 - Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the configured `BUZZ_PUSH_GATEWAY_ORIGIN` to this port.
 - Private health listener: `BUZZ_PUSH_HEALTH_ADDR` (default `0.0.0.0:8081`). Probe `/_liveness` and `/_readiness`; do not expose this port publicly. The chart has no pod-ingress allowance for 8081; Kubernetes node/kubelet-origin probe traffic is exempt from NetworkPolicy. Add a narrowly selected monitoring source only if the target CNI requires pod-origin health scraping.
-- Readiness fails when PostgreSQL authority is unavailable. Graceful shutdown stops accepting new requests before draining in-flight APNs calls.
+- Readiness fails when PostgreSQL authority is unavailable. Graceful shutdown stops accepting new requests before draining in-flight provider calls.
 
 ## Required configuration
 
@@ -21,6 +21,10 @@
 | `BUZZ_PUSH_DOGFOOD_APNS_TOPIC` | Server-owned APNs topic. Never accepted from a client. |
 | `BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT` | `production` or `sandbox`, selected by deployment configuration. |
 | `BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH` | Read-only certificate/private-key PEM. |
+| `BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_ID` | Firebase project ID used by FCM HTTP v1 and checked against the service account. |
+| `BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_NUMBER` | Numeric project number required by the App Check issuer and audience. |
+| `BUZZ_PUSH_ANDROID_FIREBASE_APP_ID` | Exact Android Firebase application ID required as the App Check subject. |
+| `BUZZ_PUSH_ANDROID_FCM_SERVICE_ACCOUNT_PATH` | Read-only JSON service account with only Firebase Cloud Messaging send permission. |
 | `BUZZ_PUSH_GRANT_KEYS` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
 | `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
 
@@ -31,25 +35,26 @@ the server-owned APNs topic, certificate-backed connection pool, and
 environment. No client request or relay grant can supply or override an APNs
 topic.
 
-This MVP has exactly one compiled-in application profile,
-`buzz-ios-dogfood`. The chart value
+The gateway has two compiled-in application profiles, `buzz-ios-dogfood` and
+`buzz-android-fcm`. The chart value
 `profiles.dogfood.appAttestAppId` is rendered as
 `BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID`; the gateway rejects startup when it is
 missing or empty. The exact `TEAMID.bundle-id` is environment-owned,
 non-secret deployment configuration. The chart's production values file leaves
 it empty deliberately so a production renderer must supply it from the GitOps
 environment rather than baking a Block team identifier into this repository.
-Supporting another application identity requires an explicit code, schema,
-chart, credential, and deployment change; this gateway does not currently
-select among multiple application profiles.
+The Android profile is optional at process startup and enabled by the four
+`BUZZ_PUSH_ANDROID_*` variables as one atomic configuration set. Partial
+configuration fails startup. Supporting another application identity requires
+an explicit code, schema, chart, credential, and deployment change.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 
 ## Secret and key rotation rules
 
-Mount the App Attest root read-only and startup will reject any byte mismatch. The sole accepted artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs certificate identity and both AEAD keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Keep the current AEAD key first and retain decrypt-only predecessors until every capability/token encrypted under them has expired or been re-encrypted. Grant and token key ids and bytes must be distinct. Rotation is an operator rollout: add the new current key while retaining predecessors, deploy, wait through the retention window, then remove the old key.
+Mount the App Attest root and FCM service account read-only. Startup rejects malformed or cross-project FCM credentials. The sole accepted App Attest artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs certificate identity, FCM service account, and both AEAD keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Keep the current AEAD key first and retain decrypt-only predecessors until every capability/token encrypted under them has expired or been re-encrypted. Grant and token key ids and bytes must be distinct. Rotation is an operator rollout: add the new current key while retaining predecessors, deploy, wait through the retention window, then remove the old key.
 
-The gateway stores APNs tokens encrypted in PostgreSQL. Database backups therefore contain ciphertext plus authority metadata and must receive the same access controls and retention treatment as the service secrets.
+The gateway stores APNs and FCM tokens encrypted in PostgreSQL. Database backups therefore contain ciphertext plus authority metadata and must receive the same access controls and retention treatment as the service secrets.
 
 ## PostgreSQL and replicas
 
@@ -89,12 +94,15 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 | `push_gateway_apns_send_attempts_total` | counter | none | Entries into the concrete APNs HTTP send seam. Compare with terminal outcomes to detect work that never reached transport. |
 | `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
 | `push_gateway_apns_delivery_seconds` | histogram | — | APNs send round-trip latency (seconds). |
+| `push_gateway_fcm_send_attempts_total` | counter | none | Entries into the concrete FCM HTTP v1 send seam. |
+| `push_gateway_fcm_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `configuration_fault` \| `permanent_request_fault` | Terminal FCM send outcomes. |
+| `push_gateway_fcm_delivery_seconds` | histogram | — | FCM HTTP v1 send round-trip latency (seconds). |
 | `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
 | `push_gateway_delivery_errors_total` | counter | `class` (static) | Selected delivery-handler exit classes only (see note). |
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
 | `push_gateway_readiness_failures_total` | counter | `cause` = `not_accepting` \| `authority` | Readiness probe failures by cause. |
 
-`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries/apns` handler. `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
+`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries` handler. `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
 
 Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. For prometheus-operator, set `podMonitor.enabled=true` and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper. For Datadog Autodiscovery, leave `podMonitor.enabled=false`, supply the OpenMetrics check through `podAnnotations`, and enable the same narrowly selected NetworkPolicy ingress:
 
@@ -131,23 +139,25 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 
 | Alert | Fires when | Severity | Action |
 |---|---|---|---|
-| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | The APNs certificate/topic/environment is unhealthy. Check `BUZZ_PUSH_DOGFOOD_APNS_*` configuration. No endpoints are being invalidated. |
+| `PushGatewayConfigurationFault` | any provider `configuration_fault` outcomes for 10m | critical | An APNs or FCM credential/profile is unhealthy. Check the matching profile configuration. No endpoints are being invalidated. |
 | `PushGatewayAdmissionUnavailable` | any admission `unavailable` for 5m | critical | PostgreSQL authority store is unreachable. Check DB connectivity and the pod's `postgresEgressCidrs` NetworkPolicy. |
 | `PushGatewayReadinessAuthorityFailing` | readiness `authority` failures for 5m | warning | Replicas are being pulled from the Service on DB check failure. Fix DB health before capacity drops below the PodDisruptionBudget. |
 | `PushGatewayReaperFailing` | reaper failed ≥2 times within 30m (runs every 5m) | warning | Expired reservations aren't being swept, growing the bounded-until-expiry window. Check DB write availability. |
 | `PushGatewayHighApnsRetryRate` | retryable fraction > `prometheusRule.apnsRetryRatioThreshold` (default `0.25`) over a 10m window, above `apnsRetryMinSamples` (default `20`) attempts, held true for 15m | warning | APNs is throttling or degraded (429/500/503). Deliveries are delayed, not lost. |
+| `PushGatewayHighFcmRetryRate` | same retry threshold and sample floor for FCM | warning | FCM is throttling or degraded. Deliveries are delayed, not lost. |
 
 ## Relay configuration
 
 Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
 the established strict boolean parser rejects unknown values and the default is
-false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
-exact HTTPS `/v1/deliveries/apns` URL. An absent or explicitly empty URL while
-enabled is a startup error. Only an enabled relay
+false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and should use
+the gateway's exact HTTPS `/v1/deliveries` route. The legacy exact HTTPS
+`/v1/deliveries/apns` alias remains accepted during rollout. An absent or
+explicitly empty URL while enabled is a startup error. Only an enabled relay
 advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
 matcher and delivery worker. Relays retain lease matching, authorization, durable
 jobs/retries, and generation checks; they receive only opaque capabilities and
-never APNs tokens or provider credentials.
+never APNs/FCM tokens or provider credentials.
 
 An enabled relay exports the following bounded-cardinality series on its
 existing Prometheus endpoint. None carries a community, account, relay key,
@@ -169,9 +179,10 @@ installation, event, or request identifier as a label.
 
 The operational relay integration is complete: per-origin event matching with
 read-authorization checks, durable enqueue, send-time revalidation, and NIP-98
-delivery run only when `BUZZ_PUSH_ENABLED=true`. End-to-end use still requires
-the client App Attest enrollment/delegation flow to place a gateway-issued opaque
-capability—not a raw APNs token—into the encrypted relay lease.
+delivery run only when `BUZZ_PUSH_ENABLED=true`. iOS uses App Attest and Android
+uses Firebase App Check plus an Android Keystore signing key; both flows place a
+gateway-issued opaque capability—not a raw provider token—into the encrypted
+relay lease.
 
 ## Internal dogfood evaluation and rollback
 

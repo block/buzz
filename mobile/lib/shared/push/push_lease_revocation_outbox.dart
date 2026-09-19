@@ -18,14 +18,19 @@ const _maximumRetryDelay = Duration(hours: 6);
 const _lowercaseHex64Pattern = r'^[0-9a-f]{64}$';
 const _installationIdPattern = r'^[0-9a-f]{32}$';
 
-typedef BuzzPushLeaseRevocationPublisher =
-    Future<void> Function(BuzzPushLeaseRevocationRecord record);
+typedef BuzzPushLeaseRevocationPublisher = Future<void> Function(
+  BuzzPushLeaseRevocationRecord record,
+);
 typedef BuzzPushLeaseRevocationClock = DateTime Function();
 typedef BuzzPushLeaseRevocationJitter = double Function();
-typedef BuzzPushLeaseRevocationErrorReporter =
-    void Function(Object error, StackTrace stackTrace);
-typedef BuzzPushLeaseRevocationWakeScheduler =
-    void Function() Function(Duration delay, void Function() wake);
+typedef BuzzPushLeaseRevocationErrorReporter = void Function(
+  Object error,
+  StackTrace stackTrace,
+);
+typedef BuzzPushLeaseRevocationWakeScheduler = void Function() Function(
+  Duration delay,
+  void Function() wake,
+);
 
 /// Durable state for retracting one precise NIP-PL lease address.
 ///
@@ -295,7 +300,7 @@ class BuzzPushLeaseRevocationOutbox {
         .where(
           (grant) =>
               grant.relayOrigin == relayOrigin &&
-              grant.appProfile == buzzDevPushAppProfile,
+              grant.appProfile == buzzCurrentPushAppProfile,
         )
         .toList();
     if (matching.length != 1) {
@@ -511,7 +516,9 @@ Uri _buzzPushRelayUri(String relayUrl) {
 Future<void> publishBuzzPushLeaseRevocation(
   BuzzPushLeaseRevocationRecord record,
 ) async {
-  final descriptor = await fetchBuzzPushLeaseDescriptor(record.relayUrl);
+  final descriptor = await fetchBuzzPushLeaseDescriptorForCurrentPlatform(
+    record.relayUrl,
+  );
   if (descriptor.origin != record.relayOrigin) {
     throw StateError('Relay push origin changed while revocation was pending.');
   }

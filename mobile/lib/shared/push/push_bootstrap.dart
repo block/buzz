@@ -365,7 +365,9 @@ class BuzzPushBootstrap extends HookConsumerWidget {
   ) async {
     final state = community.pushSubscriptionState;
     final desired = state.desired;
-    final descriptor = await fetchBuzzPushLeaseDescriptor(config.baseUrl);
+    final descriptor = await fetchBuzzPushLeaseDescriptorForCurrentPlatform(
+      config.baseUrl,
+    );
     final grant = await enrollBuzzPush(
       config.wsUrl,
       Env.pushGatewayUrl,

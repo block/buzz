@@ -64,7 +64,7 @@ class BuzzPushAuthorizationStatusNotifier
 }
 
 Future<BuzzPushAuthorizationStatus> readBuzzPushAuthorizationStatus() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) {
+  if (!_supportsNativePush) {
     return BuzzPushAuthorizationStatus.authorized;
   }
   final raw = await _channel.invokeMethod<String>(
@@ -83,12 +83,16 @@ Future<BuzzPushAuthorizationStatus> readBuzzPushAuthorizationStatus() async {
 }
 
 Future<bool> openBuzzPushNotificationSettings() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return false;
+  if (!_supportsNativePush) return false;
   return await _channel.invokeMethod<bool>('openNotificationSettings') ?? false;
 }
 
-/// Latest APNs registration state, including callbacks replayed by iOS after
-/// the Flutter method channel attaches.
+bool get _supportsNativePush =>
+    defaultTargetPlatform == TargetPlatform.iOS ||
+    defaultTargetPlatform == TargetPlatform.android;
+
+/// Latest APNs or FCM registration state, including native callbacks replayed
+/// after the Flutter method channel attaches.
 final apnsDeviceToken = ValueNotifier<String?>(null);
 final apnsRegistrationError = ValueNotifier<String?>(null);
 
@@ -124,7 +128,7 @@ MessageDeepLink? _pushNotificationLink(Object? arguments) {
 /// Pulls a notification response that arrived before the Flutter method
 /// handler was installed.
 Future<void> syncPendingBuzzPushNotificationResponse() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (!_supportsNativePush) return;
   try {
     final arguments = await _channel.invokeMapMethod<dynamic, dynamic>(
       'takePendingNotificationResponse',
@@ -136,14 +140,10 @@ Future<void> syncPendingBuzzPushNotificationResponse() async {
   }
 }
 
-/// Starts the independent iOS notification-authorization and APNs-registration
-/// requests. Display authorization is intentionally not returned or persisted:
-/// APNs registration and enrollment remain valid while display is denied.
+/// Starts notification authorization and APNs/FCM registration. Transport token
+/// registration remains independent from whether the user permits display.
 Future<void> startBuzzPushRegistration() async {
-  if (!Env.pushGatewayConfigured ||
-      defaultTargetPlatform != TargetPlatform.iOS) {
-    return;
-  }
+  if (!Env.pushGatewayConfigured || !_supportsNativePush) return;
   try {
     await _channel.invokeMethod<void>('startRegistration');
   } on MissingPluginException {
@@ -191,10 +191,7 @@ class BuzzPushEndpointGrant {
 }
 
 Future<List<BuzzPushEndpointGrant>> readBuzzPushEndpointGrants() async {
-  if (!Env.pushGatewayConfigured ||
-      defaultTargetPlatform != TargetPlatform.iOS) {
-    return const [];
-  }
+  if (!Env.pushGatewayConfigured || !_supportsNativePush) return const [];
   try {
     final raw = await _channel.invokeListMethod<dynamic>('endpointGrants', {
       'gatewayUrl': Env.pushGatewayUrl,
@@ -338,6 +335,7 @@ void installBuzzPushMethodHandler() {
   _channel.setMethodCallHandler((call) async {
     switch (call.method) {
       case 'apnsTokenChanged':
+      case 'fcmTokenChanged':
         final args = call.arguments;
         if (args is Map) {
           final token = args['token'];
@@ -348,12 +346,13 @@ void installBuzzPushMethodHandler() {
         }
         return null;
       case 'apnsRegistrationFailed':
+      case 'fcmRegistrationFailed':
         final args = call.arguments;
         final message = args is Map ? args['message'] : null;
         apnsRegistrationError.value = message is String && message.isNotEmpty
             ? message
-            : 'APNs registration failed';
-        debugPrint('APNs registration failed: ${apnsRegistrationError.value}');
+            : 'Push registration failed';
+        debugPrint('Push registration failed: ${apnsRegistrationError.value}');
         return null;
       case 'notificationOpened':
         final link = _pushNotificationLink(call.arguments);

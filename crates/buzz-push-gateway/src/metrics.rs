@@ -19,7 +19,7 @@
 use crate::apns::DeliveryOutcome;
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 
-/// Seconds-scale buckets for the APNs send round-trip histogram.
+/// Seconds-scale buckets for provider send round-trip histograms.
 const APNS_LATENCY_BUCKETS_S: [f64; 11] = [
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 15.0,
 ];
@@ -33,6 +33,10 @@ pub fn install() -> Result<PrometheusHandle, BuildError> {
     let handle = PrometheusBuilder::new()
         .set_buckets_for_metric(
             Matcher::Full("push_gateway_apns_delivery_seconds".to_owned()),
+            &APNS_LATENCY_BUCKETS_S,
+        )?
+        .set_buckets_for_metric(
+            Matcher::Full("push_gateway_fcm_delivery_seconds".to_owned()),
             &APNS_LATENCY_BUCKETS_S,
         )?
         .install_recorder()?;
@@ -66,6 +70,18 @@ pub fn record_apns_delivery(outcome: DeliveryOutcome, seconds: f64) {
     metrics::histogram!("push_gateway_apns_delivery_seconds").record(seconds);
 }
 
+/// Record entry into the concrete FCM HTTP v1 send seam.
+pub fn record_fcm_send_attempt() {
+    metrics::counter!("push_gateway_fcm_send_attempts_total").increment(1);
+}
+
+/// Record the terminal FCM outcome and its send round-trip latency.
+pub fn record_fcm_delivery(outcome: DeliveryOutcome, seconds: f64) {
+    metrics::counter!("push_gateway_fcm_deliveries_total", "outcome" => outcome_label(outcome))
+        .increment(1);
+    metrics::histogram!("push_gateway_fcm_delivery_seconds").record(seconds);
+}
+
 /// Delivery-admission result at the `authorize_delivery` seam.
 #[derive(Debug, Clone, Copy)]
 pub enum Admission {
@@ -88,7 +104,7 @@ pub fn record_admission(result: Admission) {
 }
 
 /// Record a delivery-path error, tagged by the static failure class. This
-/// counter covers only the `/v1/deliveries/apns` handler's post-admission exit
+/// counter covers only the `/v1/deliveries` handler's post-admission exit
 /// classes (admission rejection/unavailability, profile mismatch, token-custody
 /// open failure, and detached finish/join failure); pre-admission request/auth/
 /// attestation validation on the enrollment and delegation handlers is not
@@ -161,6 +177,8 @@ mod tests {
 
         record_apns_send_attempt();
         record_apns_delivery(DeliveryOutcome::Accepted, 0.012);
+        record_fcm_send_attempt();
+        record_fcm_delivery(DeliveryOutcome::Accepted, 0.014);
         record_apns_delivery(
             DeliveryOutcome::InvalidEndpoint {
                 unregistered_at: None,
@@ -183,6 +201,9 @@ mod tests {
             "push_gateway_apns_send_attempts_total",
             "push_gateway_apns_deliveries_total",
             "push_gateway_apns_delivery_seconds",
+            "push_gateway_fcm_send_attempts_total",
+            "push_gateway_fcm_deliveries_total",
+            "push_gateway_fcm_delivery_seconds",
             "push_gateway_admissions_total",
             "push_gateway_delivery_errors_total",
             "push_gateway_reaper_failures_total",

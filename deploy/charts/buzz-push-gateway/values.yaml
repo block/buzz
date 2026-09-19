@@ -31,6 +31,14 @@ profiles:
     apnsCert:
       secretName: buzz-push-gateway
       secretKey: dogfood-apns-identity.pem
+  android:
+    enabled: false
+    firebaseProjectId: ""
+    firebaseProjectNumber: ""
+    firebaseAppId: ""
+    fcmServiceAccount:
+      secretName: buzz-push-gateway
+      secretKey: android-fcm-service-account.json
 appAttestRoot:
   secretName: buzz-push-gateway
   secretKey: app-attest-root.pem

@@ -5,9 +5,13 @@ class _NotificationsSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
+    if (defaultTargetPlatform != TargetPlatform.iOS &&
+        defaultTargetPlatform != TargetPlatform.android) {
       return const SizedBox.shrink();
     }
+    final platformName = defaultTargetPlatform == TargetPlatform.android
+        ? 'Android'
+        : 'iOS';
     final community = ref.watch(activeCommunityProvider).value;
     if (community == null) return const SizedBox.shrink();
     if (!Env.pushGatewayConfigured) {
@@ -35,16 +39,17 @@ class _NotificationsSection extends ConsumerWidget {
         ? 'Off for this community'
         : switch (status) {
             BuzzPushAuthorizationStatus.notDetermined =>
-              'Waiting for iOS notification permission',
+              'Waiting for $platformName notification permission',
             BuzzPushAuthorizationStatus.denied =>
-              'Enabled in Buzz, but disabled in iOS Settings',
+              'Enabled in Buzz, but disabled in $platformName Settings',
             BuzzPushAuthorizationStatus.authorized ||
             BuzzPushAuthorizationStatus.provisional ||
             BuzzPushAuthorizationStatus.ephemeral =>
               'Receive message notifications from this community',
             null when authorization.isLoading =>
-              'Checking iOS notification permission',
-            null => 'Enabled in Buzz; iOS permission status unavailable',
+              'Checking $platformName notification permission',
+            null =>
+              'Enabled in Buzz; $platformName permission status unavailable',
           };
 
     return AppListCard(
@@ -82,7 +87,7 @@ class _NotificationsSection extends ConsumerWidget {
           AppListRow(
             key: const ValueKey('push-notifications-open-settings'),
             icon: LucideIcons.settings,
-            title: 'Open iOS Notification Settings',
+            title: 'Open $platformName Notification Settings',
             onTap: () => unawaited(
               ref.read(buzzPushNotificationSettingsOpenerProvider)(),
             ),

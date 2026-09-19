@@ -14,17 +14,21 @@ pub const MAX_GRANT_BYTES: usize = 4096;
 pub const MAX_ENDPOINT_HEX_BYTES: usize = 512;
 pub const APNS_RECONNECT_PAYLOAD: &[u8] =
     br#"{"aps":{"alert":{"body":"Reconnect to your relay now"},"mutable-content":1}}"#;
+pub const FCM_RECONNECT_TITLE: &str = "Buzz";
+pub const FCM_RECONNECT_BODY: &str = "Reconnect to your relay now";
 pub const WIRE_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppProfile {
     BuzzIosDogfood,
+    BuzzAndroidFcm,
 }
 impl AppProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BuzzIosDogfood => "buzz-ios-dogfood",
+            Self::BuzzAndroidFcm => "buzz-android-fcm",
         }
     }
 }
@@ -85,6 +89,23 @@ pub struct InstallationEnrollRequest {
     pub endpoint: String,
     pub endpoint_epoch: i64,
     pub expires_at: i64,
+}
+
+/// Android enrollment uses Firebase App Check for application identity and a
+/// non-exportable Android Keystore key for installation authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AndroidInstallationEnrollRequest {
+    pub v: u8,
+    pub challenge_id: uuid::Uuid,
+    pub challenge: String,
+    pub public_key: String,
+    pub app_check_token: String,
+    pub app_profile: AppProfile,
+    pub endpoint: String,
+    pub endpoint_epoch: i64,
+    pub expires_at: i64,
+    pub assertion: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
