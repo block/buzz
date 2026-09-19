@@ -49,6 +49,32 @@ NostrEvent _reply(String id, int createdAt) => NostrEvent(
 void main() {
   const args = ThreadRepliesArgs(channelId: 'chan', rootId: 'root');
 
+  test(
+    'disposes empty local overlays after their last listener leaves',
+    () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final provider = threadLocalRepliesProvider(args);
+      final subscription = container.listen(provider, (_, _) {});
+      subscription.close();
+      await container.pump();
+      expect(container.exists(provider), isFalse);
+    },
+  );
+
+  test('retains local replies without listeners until confirmation', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final provider = threadLocalRepliesProvider(args);
+    final notifier = container.read(provider.notifier);
+    notifier.add(_reply('pending', 1000));
+    await container.pump();
+    expect(container.read(provider).single.id, 'pending');
+    notifier.confirm({'pending'});
+    await container.pump();
+    expect(container.exists(provider), isFalse);
+  });
+
   (ProviderContainer, _FakeRelaySession, ProviderSubscription<Object?>)
   makeHarness(List<NostrEvent> initialReplies) {
     final fakeSession = _FakeRelaySession()..replies = initialReplies;

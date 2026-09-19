@@ -10286,22 +10286,6 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(ThreadDetailPage), findsNothing);
 
-      final container = ProviderScope.containerOf(
-        tester.element(find.byType(ChannelDetailPage)),
-      );
-      expect(
-        container.exists(
-          threadLocalRepliesProvider(
-            const ThreadRepliesArgs(
-              channelId: _channelId,
-              rootId: 'local-root',
-            ),
-          ),
-        ),
-        isFalse,
-        reason: 'Rendering a message must not retain an empty thread overlay',
-      );
-
       notifier.addLocalMessage(
         _textMsg(
           id: 'local-reply',
@@ -10313,6 +10297,7 @@ void main() {
           ],
         ),
       );
+      notifier.completeLocalMessage('local-reply');
       await tester.pumpAndSettle();
       await tester.tap(findRichText('Start a local thread'));
       await tester.pumpAndSettle();

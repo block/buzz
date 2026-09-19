@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show KeepAliveLink;
 
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
@@ -81,7 +82,19 @@ class ThreadLocalRepliesNotifier extends Notifier<List<NostrEvent>> {
   ThreadLocalRepliesNotifier(this.args);
 
   @override
-  List<NostrEvent> build() => const [];
+  List<NostrEvent> build() {
+    // Keep optimistic replies across route disposal, but release empty overlays.
+    KeepAliveLink? retention;
+    listenSelf((previous, next) {
+      if (next.isNotEmpty) {
+        retention ??= ref.keepAlive();
+      } else {
+        retention?.close();
+        retention = null;
+      }
+    });
+    return const [];
+  }
 
   void add(NostrEvent event) {
     state = _mergeReplies(state, [event]);
@@ -97,12 +110,10 @@ class ThreadLocalRepliesNotifier extends Notifier<List<NostrEvent>> {
   }
 }
 
-final threadLocalRepliesProvider =
-    NotifierProvider.family<
-      ThreadLocalRepliesNotifier,
-      List<NostrEvent>,
-      ThreadRepliesArgs
-    >(ThreadLocalRepliesNotifier.new);
+final threadLocalRepliesProvider = NotifierProvider.autoDispose
+    .family<ThreadLocalRepliesNotifier, List<NostrEvent>, ThreadRepliesArgs>(
+      ThreadLocalRepliesNotifier.new,
+    );
 
 /// Relay-backed replies merged with signed local replies that are still
 /// waiting for acknowledgement.
