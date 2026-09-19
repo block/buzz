@@ -1,5 +1,19 @@
 import { sendAgentObserverControl } from "@/shared/api/observerRelay";
 
+/** Exact-session native effort change; relay acceptance is not application. */
+export async function switchManagedAgentEffort(
+  pubkey: string,
+  request: {
+    channelId: string;
+    sessionId: string;
+    sessionToken: string;
+    requestId: string;
+    effort: string;
+  },
+): Promise<void> {
+  await sendAgentObserverControl(pubkey, { type: "switch_effort", ...request });
+}
+
 /** Send a stop request; the harness acknowledges it via control_result. */
 export async function cancelManagedAgentTurn(
   pubkey: string,
