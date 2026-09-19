@@ -45,13 +45,13 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     final version = beginThreadQuery(root);
     final snapshot = cachedThreadReplyIds(root);
     bool current() =>
-        ref.mounted &&
+        _summaryMounted &&
         _hasListeners &&
         generation == _initVersion &&
         _threadQueryVersions[root] == version;
     try {
       final replies = await fetchCompleteThreadReplies(
-        ref.read(relaySessionProvider.notifier),
+        _summarySession,
         ThreadRepliesArgs(channelId: channelId, rootId: root),
         isCurrent: current,
       );
@@ -97,10 +97,11 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
   }
 
   void _applyDeletedSummaries(Set<String> targets, List<NostrEvent> before) {
-    final owners = {
-      for (final id in targets)
-        if (_replyOwnership.rootFor(id) case final root?) id: root,
-    };
+    final owners = <String, String>{};
+    for (final id in targets) {
+      final root = _replyOwnership.rootFor(id);
+      if (root != null) owners[id] = root;
+    }
     final floors = lowerBoundSummariesAfterDeletion(
       threadSummaries,
       before,
@@ -122,7 +123,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     final generation = _initVersion;
     final version = _threadQuerySerial;
     try {
-      final events = await ref.read(relaySessionProvider.notifier).queryRelay([
+      final events = await _summarySession.queryRelay([
         NostrFilter(
           ids: targets.toList(),
           kinds: EventKind.channelTimelineContentKinds,
@@ -132,7 +133,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
           limit: targets.length,
         ),
       ]);
-      if (!ref.mounted || generation != _initVersion) return;
+      if (!_summaryMounted || generation != _initVersion) return;
       _replyOwnership.record(
         events.where(
           (event) => event.channelId == channelId && targets.contains(event.id),
@@ -148,7 +149,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     } catch (error) {
       // Deleted payloads may be unavailable. Keep the count pending until a
       // window summary or an explicit thread query supplies authoritative data.
-      if (ref.mounted && generation == _initVersion) {
+      if (_summaryMounted && generation == _initVersion) {
         debugPrint(
           '[ChannelMessagesNotifier] deletion ownership lookup failed: $error',
         );

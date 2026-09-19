@@ -57,6 +57,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   ChannelMessagesNotifier(this.channelId);
 
+  bool get _summaryMounted => ref.mounted;
+  RelaySessionNotifier get _summarySession =>
+      ref.read(relaySessionProvider.notifier);
+
   /// Last successfully loaded messages, preserved across reconnections so the
   /// UI can show stale data instead of a blank loading spinner.
   List<NostrEvent>? _lastKnownMessages;
