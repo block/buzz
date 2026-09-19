@@ -43,9 +43,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             configured.apns_topic.clone(),
             configured.apns_environment,
         )?);
-        let apple = AppAttestVerifier::new(
+        let apple = AppAttestVerifier::with_environment(
             configured.app_attest_app_id.clone(),
             app_attest_root.clone(),
+            configured.app_attest_environment,
         )?;
         buzz_push_gateway::http::ProfileRuntime {
             app_attest: Arc::new(apple),
