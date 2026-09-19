@@ -751,6 +751,29 @@ pub enum ChannelsCmd {
         #[arg(long)]
         policy: String,
     },
+    /// Publish your complete kind:10100 agent profile: respond_to,
+    /// channel_add_policy, name and status in one replaceable event
+    #[command(name = "set-respond-policy")]
+    SetRespondPolicy {
+        /// Policy: anyone | owner-only | allowlist | nobody
+        #[arg(long)]
+        policy: String,
+        /// Agent display name (defaults to BUZZ_ACP_SESSION_TITLE)
+        #[arg(long)]
+        name: Option<String>,
+        /// Channel addition policy: anyone | owner_only | nobody. Required —
+        /// kind:10100 is replaceable, so omitting it would erase it
+        #[arg(long)]
+        channel_add_policy: String,
+        /// Status: online | offline. Required — Desktop treats a missing
+        /// status as offline and does not attach the activity log
+        #[arg(long)]
+        status: String,
+        /// Pubkey hex allowed to mention the agent; repeatable. Required with
+        /// --policy allowlist, refused otherwise
+        #[arg(long = "allow")]
+        allow: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2423,6 +2446,7 @@ mod tests {
                 "remove-member",
                 "search",
                 "set-add-policy",
+                "set-respond-policy",
                 "topic",
                 "unarchive",
                 "update"
@@ -2533,7 +2557,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 2),
-            ("channels", 16),
+            ("channels", 17),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),

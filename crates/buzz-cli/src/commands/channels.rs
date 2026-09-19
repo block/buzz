@@ -1408,6 +1408,35 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
+/// The deployment gate on `channel_add_policy`: when `allowed_raw` (the value
+/// of `BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES`) names at least one policy, any
+/// other policy is refused. Pure, so the tests can exercise it without touching
+/// the process environment.
+fn check_allowed_channel_add_policy(allowed_raw: &str, policy: &str) -> Result<(), CliError> {
+    let allowed: Vec<&str> = allowed_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !allowed.is_empty() && !allowed.contains(&policy) {
+        return Err(CliError::Usage(format!(
+            "channel_add_policy '{policy}' is not permitted on this deployment \
+             (BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES={allowed_raw})"
+        )));
+    }
+    Ok(())
+}
+
+/// Apply the deployment gate from the environment. Shared by every CLI path
+/// that publishes a `channel_add_policy`, so a second publisher cannot slip
+/// past a restriction the first one honours.
+fn enforce_deployment_channel_add_policy(policy: &str) -> Result<(), CliError> {
+    if let Ok(allowed_raw) = std::env::var("BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES") {
+        check_allowed_channel_add_policy(&allowed_raw, policy)?;
+    }
+    Ok(())
+}
+
 /// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
 pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
     match policy {
@@ -1425,19 +1454,7 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     // this check. Full enforcement requires relay-side validation, which is
     // intentionally out of scope for this change (see team decision: no
     // relay-side enforcement of client behavior).
-    if let Ok(allowed_raw) = std::env::var("BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES") {
-        let allowed: Vec<&str> = allowed_raw
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !allowed.is_empty() && !allowed.contains(&policy) {
-            return Err(CliError::Usage(format!(
-                "channel_add_policy '{policy}' is not permitted on this deployment \
-                 (BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES={allowed_raw})"
-            )));
-        }
-    }
+    enforce_deployment_channel_add_policy(policy)?;
 
     let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
     use nostr::{EventBuilder, Kind};
@@ -1447,6 +1464,153 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     )
     .tags([]);
     let event = client.sign_event(builder)?;
+
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
+/// The fields a complete kind:10100 agent profile carries.
+///
+/// kind:10100 is replaceable: the relay keeps only the newest event per
+/// author, so every publication states the whole profile. A publisher that
+/// sets one field and omits the rest does not "update" a field — it erases the
+/// others (`set-add-policy` alone is the documented instance of that). This
+/// struct exists so the content can only be built with every field present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProfileFields {
+    pub name: String,
+    pub respond_to: String,
+    /// Required when `respond_to == "allowlist"`, forbidden otherwise.
+    pub respond_to_allowlist: Vec<String>,
+    pub channel_add_policy: String,
+    pub status: String,
+}
+
+const RESPOND_TO_VALUES: [&str; 4] = ["anyone", "owner-only", "allowlist", "nobody"];
+const CHANNEL_ADD_POLICY_VALUES: [&str; 3] = ["anyone", "owner_only", "nobody"];
+const STATUS_VALUES: [&str; 2] = ["online", "offline"];
+
+impl AgentProfileFields {
+    /// Validate every field; a profile that fails here is never signed.
+    pub fn validate(&self) -> Result<(), CliError> {
+        if !RESPOND_TO_VALUES.contains(&self.respond_to.as_str()) {
+            return Err(CliError::Usage(format!(
+                "--policy must be one of {} (got: {})",
+                RESPOND_TO_VALUES.join(", "),
+                self.respond_to
+            )));
+        }
+        if !CHANNEL_ADD_POLICY_VALUES.contains(&self.channel_add_policy.as_str()) {
+            return Err(CliError::Usage(format!(
+                "--channel-add-policy must be one of {} (got: {})",
+                CHANNEL_ADD_POLICY_VALUES.join(", "),
+                self.channel_add_policy
+            )));
+        }
+        if !STATUS_VALUES.contains(&self.status.as_str()) {
+            return Err(CliError::Usage(format!(
+                "--status must be one of {} (got: {})",
+                STATUS_VALUES.join(", "),
+                self.status
+            )));
+        }
+        if self.name.trim().is_empty() {
+            return Err(CliError::Usage(
+                "agent name required: pass --name or set BUZZ_ACP_SESSION_TITLE".to_string(),
+            ));
+        }
+        if self.respond_to == "allowlist" {
+            if self.respond_to_allowlist.is_empty() {
+                return Err(CliError::Usage(
+                    "--policy allowlist needs at least one --allow <pubkey-hex>; an empty \
+                     allowlist would let nobody mention the agent"
+                        .to_string(),
+                ));
+            }
+            for entry in &self.respond_to_allowlist {
+                validate_hex64(entry).map_err(|e| CliError::Usage(format!("--allow {e}")))?;
+            }
+        } else if !self.respond_to_allowlist.is_empty() {
+            return Err(CliError::Usage(format!(
+                "--allow only applies to --policy allowlist (policy is {})",
+                self.respond_to
+            )));
+        }
+        Ok(())
+    }
+
+    /// The event content, with every key present. `respond_to_allowlist` is
+    /// emitted only for the allowlist policy, where it is mandatory.
+    pub fn content(&self) -> Result<serde_json::Value, CliError> {
+        self.validate()?;
+        let mut content = serde_json::json!({
+            "name": self.name,
+            "display_name": self.name,
+            "respond_to": self.respond_to,
+            "channel_add_policy": self.channel_add_policy,
+            "status": self.status,
+        });
+        if self.respond_to == "allowlist" {
+            content["respond_to_allowlist"] = serde_json::json!(self.respond_to_allowlist);
+        }
+        Ok(content)
+    }
+}
+
+/// Build and sign the kind:10100 event. Signing goes through
+/// `client.sign_event`, which is where the NIP-OA auth tag is injected — the
+/// owner mapping on a closed relay materialises from that tag, so the profile
+/// must carry it (block/buzz #5581).
+pub fn build_agent_profile_event(
+    client: &BuzzClient,
+    fields: &AgentProfileFields,
+) -> Result<nostr::Event, CliError> {
+    let content = fields.content()?;
+    use nostr::{EventBuilder, Kind};
+    let builder = EventBuilder::new(
+        Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
+        content.to_string(),
+    )
+    .tags([]);
+    client.sign_event(builder)
+}
+
+/// Publish the complete kind:10100 agent profile (agent-signed).
+///
+/// Every field is an explicit argument: this command cannot publish a partial
+/// profile, so it cannot erase a field by omission.
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_set_respond_policy(
+    client: &BuzzClient,
+    policy: &str,
+    name: Option<&str>,
+    channel_add_policy: &str,
+    status: &str,
+    allow: &[String],
+) -> Result<(), CliError> {
+    let display_name = name
+        .map(str::to_string)
+        .or_else(|| std::env::var("BUZZ_ACP_SESSION_TITLE").ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CliError::Usage(
+                "agent name required: pass --name or set BUZZ_ACP_SESSION_TITLE".to_string(),
+            )
+        })?;
+
+    let fields = AgentProfileFields {
+        name: display_name,
+        respond_to: policy.to_string(),
+        respond_to_allowlist: allow.to_vec(),
+        channel_add_policy: channel_add_policy.to_string(),
+        status: status.to_string(),
+    };
+    // Field validation first, so an invalid value is reported as such; then
+    // the same deployment gate `set-add-policy` applies.
+    fields.validate()?;
+    enforce_deployment_channel_add_policy(channel_add_policy)?;
+    let event = build_agent_profile_event(client, &fields)?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -1572,6 +1736,23 @@ pub async fn dispatch(
             cmd_remove_channel_member(client, &channel, &pubkey).await
         }
         ChannelsCmd::SetAddPolicy { policy } => cmd_set_add_policy(client, &policy).await,
+        ChannelsCmd::SetRespondPolicy {
+            policy,
+            name,
+            channel_add_policy,
+            status,
+            allow,
+        } => {
+            cmd_set_respond_policy(
+                client,
+                &policy,
+                name.as_deref(),
+                &channel_add_policy,
+                &status,
+                &allow,
+            )
+            .await
+        }
     }
 }
 
@@ -1587,8 +1768,9 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
-        cmd_set_add_policy, fetch_candidate_hints, finalize_roster_resolution, format_candidate,
-        hints_from_results, join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
+        check_allowed_channel_add_policy, cmd_set_add_policy, cmd_set_respond_policy,
+        fetch_candidate_hints, finalize_roster_resolution, format_candidate, hints_from_results,
+        join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
         validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, CandidateHint,
         ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
@@ -1733,21 +1915,6 @@ mod tests {
 
     // --- BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES gate ---
 
-    fn check_allowed_channel_add_policy(allowed_raw: &str, policy: &str) -> Result<(), CliError> {
-        let allowed: Vec<&str> = allowed_raw
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !allowed.is_empty() && !allowed.contains(&policy) {
-            return Err(CliError::Usage(format!(
-                "channel_add_policy '{policy}' is not permitted on this deployment \
-                 (BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES={allowed_raw})"
-            )));
-        }
-        Ok(())
-    }
-
     #[test]
     fn set_add_policy_rejects_disallowed_policy() {
         let result = check_allowed_channel_add_policy("owner_only,nobody", "anyone");
@@ -1817,6 +1984,23 @@ mod tests {
                 );
             }
             other => panic!("expected CliError::Usage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_respond_policy_env_gate_rejects_disallowed_channel_add_policy() {
+        std::env::set_var("BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES", "owner_only,nobody");
+        let client = make_test_client();
+        let result =
+            cmd_set_respond_policy(&client, "anyone", Some("Agent"), "anyone", "online", &[]).await;
+        std::env::remove_var("BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES");
+
+        match result {
+            Err(crate::CliError::Usage(msg)) => assert!(
+                msg.contains("not permitted"),
+                "the second kind:10100 publisher must honour the same gate: {msg}"
+            ),
+            other => panic!("expected CliError::Usage from the deployment gate, got {other:?}"),
         }
     }
 
@@ -2927,6 +3111,207 @@ mod tests {
         assert!(
             map.values().all(|h| h.profile_updated_at.is_none()),
             "the hung profile query must contribute nothing: {map:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_profile_tests {
+    //! kind:10100 is replaceable. These tests pin the contract of the one
+    //! command that publishes it: the event carries every field at once, the
+    //! NIP-OA auth tag rides on it when the client has one, and no field can
+    //! be dropped by omission — an incomplete profile is a usage error, not a
+    //! smaller event.
+    use super::{build_agent_profile_event, AgentProfileFields};
+    use crate::client::BuzzClient;
+    use crate::{ChannelsCmd, Cli, Cmd};
+    use buzz_sdk::nip_oa;
+    use clap::Parser;
+    use nostr::Keys;
+
+    const OWNER_HEX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
+    fn fields() -> AgentProfileFields {
+        AgentProfileFields {
+            name: "yati-resident".to_string(),
+            respond_to: "anyone".to_string(),
+            respond_to_allowlist: Vec::new(),
+            channel_add_policy: "owner_only".to_string(),
+            status: "online".to_string(),
+        }
+    }
+
+    fn client_with_auth_tag() -> (BuzzClient, String) {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let tag_json = nip_oa::compute_auth_tag(&owner, &agent.public_key(), "").unwrap();
+        let tag = nip_oa::parse_auth_tag(&tag_json).unwrap();
+        let client = BuzzClient::new(
+            "http://localhost:0".to_string(),
+            agent,
+            Some(tag),
+            Some(tag_json),
+        )
+        .unwrap();
+        (client, owner.public_key().to_hex())
+    }
+
+    #[test]
+    fn event_carries_every_field_and_the_auth_tag_at_once() {
+        let (client, owner_hex) = client_with_auth_tag();
+        let event = build_agent_profile_event(&client, &fields()).unwrap();
+
+        assert_eq!(
+            event.kind.as_u16(),
+            buzz_sdk::kind::KIND_AGENT_PROFILE as u16,
+            "must be the replaceable agent profile kind"
+        );
+        let content: serde_json::Value = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(content["respond_to"], "anyone");
+        assert_eq!(content["channel_add_policy"], "owner_only");
+        assert_eq!(content["name"], "yati-resident");
+        assert_eq!(content["display_name"], "yati-resident");
+        assert_eq!(content["status"], "online");
+        assert!(
+            content.get("respond_to_allowlist").is_none(),
+            "no allowlist key outside the allowlist policy"
+        );
+
+        let auth: Vec<_> = event
+            .tags
+            .iter()
+            .map(|t| t.as_slice())
+            .filter(|t| t.first().map(|s| s.as_str()) == Some("auth"))
+            .collect();
+        assert_eq!(auth.len(), 1, "exactly one NIP-OA auth tag");
+        assert_eq!(auth[0][1], owner_hex, "the auth tag names the owner");
+        assert!(event.verify().is_ok(), "signed by the agent key");
+    }
+
+    #[test]
+    fn without_an_auth_tag_the_event_has_none() {
+        let client = BuzzClient::new(
+            "http://localhost:0".to_string(),
+            Keys::generate(),
+            None,
+            None,
+        )
+        .unwrap();
+        let event = build_agent_profile_event(&client, &fields()).unwrap();
+        assert!(!event
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("auth")));
+    }
+
+    #[test]
+    fn allowlist_policy_requires_entries_and_emits_them() {
+        let (client, owner_hex) = client_with_auth_tag();
+        let mut f = fields();
+        f.respond_to = "allowlist".to_string();
+        assert!(
+            build_agent_profile_event(&client, &f).is_err(),
+            "an allowlist without entries would let nobody mention the agent"
+        );
+        f.respond_to_allowlist = vec![owner_hex.clone()];
+        let event = build_agent_profile_event(&client, &f).unwrap();
+        let content: serde_json::Value = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(
+            content["respond_to_allowlist"],
+            serde_json::json!([owner_hex])
+        );
+
+        let mut g = fields();
+        g.respond_to_allowlist = vec![OWNER_HEX.to_string()];
+        assert!(
+            build_agent_profile_event(&client, &g).is_err(),
+            "--allow with a non-allowlist policy is a contradiction, not ignored"
+        );
+    }
+
+    #[test]
+    fn invalid_values_are_refused_before_signing() {
+        let (client, _) = client_with_auth_tag();
+        for (mutate, label) in [
+            (
+                Box::new(|f: &mut AgentProfileFields| f.status = "stopped".to_string())
+                    as Box<dyn Fn(&mut AgentProfileFields)>,
+                "status",
+            ),
+            (
+                Box::new(|f: &mut AgentProfileFields| f.respond_to = "everyone".to_string()),
+                "respond_to",
+            ),
+            (
+                Box::new(|f: &mut AgentProfileFields| {
+                    f.channel_add_policy = "owner-only".to_string()
+                }),
+                "channel_add_policy (hyphen, not underscore)",
+            ),
+            (
+                Box::new(|f: &mut AgentProfileFields| f.name = "  ".to_string()),
+                "blank name",
+            ),
+        ] {
+            let mut f = fields();
+            mutate(&mut f);
+            assert!(
+                build_agent_profile_event(&client, &f).is_err(),
+                "invalid {label} must be refused"
+            );
+        }
+    }
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut argv = vec!["buzz", "channels", "set-respond-policy"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    #[test]
+    fn omitting_a_field_is_a_usage_error_not_a_smaller_event() {
+        // The complete form parses.
+        let full = parse(&[
+            "--policy",
+            "anyone",
+            "--name",
+            "yati-resident",
+            "--channel-add-policy",
+            "owner_only",
+            "--status",
+            "online",
+        ])
+        .expect("complete profile parses");
+        match full.command {
+            Cmd::Channels(ChannelsCmd::SetRespondPolicy {
+                policy,
+                name,
+                channel_add_policy,
+                status,
+                allow,
+            }) => {
+                assert_eq!(policy, "anyone");
+                assert_eq!(name.as_deref(), Some("yati-resident"));
+                assert_eq!(channel_add_policy, "owner_only");
+                assert_eq!(status, "online");
+                assert!(allow.is_empty());
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        // Each omission is refused at the parser: there is no code path that
+        // publishes a kind:10100 without every field.
+        assert!(
+            parse(&["--policy", "anyone", "--channel-add-policy", "owner_only"]).is_err(),
+            "missing --status must not publish a profile without status"
+        );
+        assert!(
+            parse(&["--policy", "anyone", "--status", "online"]).is_err(),
+            "missing --channel-add-policy must not publish a profile that erases it"
+        );
+        assert!(
+            parse(&["--channel-add-policy", "owner_only", "--status", "online"]).is_err(),
+            "missing --policy must not publish a profile that erases respond_to"
         );
     }
 }
