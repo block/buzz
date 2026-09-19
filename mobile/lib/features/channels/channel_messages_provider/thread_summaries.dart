@@ -161,6 +161,10 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       final root = _replyOwnership.rootFor(id);
       if (root != null) owners[id] = root;
     }
+    // Fence responses started before this deletion, including during debounce.
+    for (final root in owners.values.toSet()) {
+      beginThreadQuery(root);
+    }
     final summaries = _baseThreadSummaries;
     final candidates =
         lowerBoundSummariesAfterDeletion(summaries, before, targets, owners)

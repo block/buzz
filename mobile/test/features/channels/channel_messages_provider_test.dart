@@ -2476,6 +2476,72 @@ void main() {
     },
   );
 
+  test(
+    'known deletion fences an older ownership response before recount',
+    () async {
+      final ownership = Completer<List<NostrEvent>>();
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+          ownership.future,
+          <NostrEvent>[],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      notifier.cacheCompleteThreadQuery('root', {}, [
+        _event(
+          id: 'known',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        ),
+      ]);
+      for (final target in ['unknown', 'known']) {
+        session.emit(
+          NostrEvent(
+            id: 'delete-$target',
+            pubkey: 'author',
+            createdAt: 100,
+            kind: EventKind.deletion,
+            tags: [
+              ['h', _channelId],
+              ['e', target],
+            ],
+            content: '',
+            sig: '',
+          ),
+        );
+      }
+      ownership.complete([_summary(rootId: 'root', replyCount: 1)]);
+      await _pumpEventQueue();
+      expect(notifier.threadSummaries['root']!.descendantCount, 0);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(
+        session.queryFilters.where(
+          (f) => f.extensions.containsKey('depth_limit'),
+        ),
+        hasLength(1),
+      );
+      final entries = buildMainTimelineEntries(
+        formatTimeline(
+          container.read(channelMessagesProvider(_channelId)).value!,
+        ),
+        relaySummaries: notifier.threadSummaries,
+      );
+      expect(
+        entries.singleWhere((e) => e.message.id == 'root').summary,
+        isNull,
+      );
+    },
+  );
+
   for (final newestFirst in [false, true]) {
     test(
       'overlapping deletion lookups preserve start order (newest first: $newestFirst)',
