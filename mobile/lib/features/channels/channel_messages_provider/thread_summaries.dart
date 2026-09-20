@@ -1,6 +1,42 @@
 part of '../channel_messages_provider.dart';
 
 extension _ThreadSummaryState on ChannelMessagesNotifier {
+  int _reserveThreadQuery(String root) {
+    final version = ++_threadQuerySerial;
+    _setThreadQueryVersion(root, version, pending: true);
+    return version;
+  }
+
+  void _retireThreadQuery(String root, int version) {
+    if (_threadQueryVersions[root] != version) return;
+    final evidence = _threadEvidenceVersions[root];
+    if (evidence == null) {
+      _threadQueryVersions.remove(root);
+    } else {
+      _threadQueryVersions[root] = evidence;
+    }
+  }
+
+  void _setThreadQueryVersion(
+    String root,
+    int version, {
+    bool pending = false,
+  }) {
+    final current = _threadQueryVersions[root];
+    if (!pending) _threadEvidenceVersions[root] = version;
+    _threadQueryVersions.remove(root);
+    // A page may apply while a newer query is pending. Preserve that query's
+    // reservation so its eventual result can still replace the page evidence.
+    _threadQueryVersions[root] = current != null && current > version
+        ? current
+        : version;
+    while (_threadQueryVersions.length > 2048) {
+      final oldest = _threadQueryVersions.keys.first;
+      _threadQueryVersions.remove(oldest);
+      _threadEvidenceVersions.remove(oldest);
+    }
+  }
+
   bool _isVisibleRoot(String root) =>
       _retainedDeepLinkEventIds.contains(root) ||
       (!_usingChannelWindow &&
@@ -163,7 +199,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     }
     // Fence responses started before this deletion, including during debounce.
     for (final root in owners.values.toSet()) {
-      beginThreadQuery(root);
+      _setThreadQueryVersion(root, ++_threadQuerySerial);
     }
     final summaries = _baseThreadSummaries;
     final candidates =

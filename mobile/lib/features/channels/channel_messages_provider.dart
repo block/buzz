@@ -40,6 +40,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final Map<String, ChannelWindowThreadSummary> _queryThreadSummaries = {};
   final Map<String, ChannelWindowThreadSummary> _overflowFloors = {};
   final Map<String, int> _threadQueryVersions = {};
+  final Map<String, int> _threadEvidenceVersions = {};
   int _threadQuerySerial = 0;
   final _deletionSummaryUncertainty = <String, _DeletionSummaryUncertainty>{};
   final _replyOwnership = ThreadReplyOwnership();
@@ -256,7 +257,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   void _reconcilePageSummaries(ChannelWindowPage page, int pageVersion) {
     for (final row in page.rows) {
       final root = row.event.id;
-      if ((_threadQueryVersions[root] ?? 0) > pageVersion) continue;
+      if ((_threadEvidenceVersions[root] ?? 0) > pageVersion) continue;
       _queryThreadSummaries.remove(root);
       _overflowFloors.remove(root);
       _summaryRefreshes.cancel(root);
@@ -540,20 +541,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         .confirm(eventIds);
   }
 
-  /// Fences older background/route scans from overwriting a newer request.
-  int beginThreadQuery(String rootId) {
-    final version = ++_threadQuerySerial;
-    _setThreadQueryVersion(rootId, version);
-    return version;
-  }
+  /// Reserves a version for a thread query without treating it as evidence.
+  int beginThreadQuery(String rootId) => _reserveThreadQuery(rootId);
 
-  void _setThreadQueryVersion(String rootId, int version) {
-    _threadQueryVersions.remove(rootId);
-    _threadQueryVersions[rootId] = version;
-    while (_threadQueryVersions.length > 2048) {
-      _threadQueryVersions.remove(_threadQueryVersions.keys.first);
-    }
-  }
+  /// Releases a failed or disposed query while preserving newer evidence.
+  void failThreadQuery(String rootId, int version) =>
+      _retireThreadQuery(rootId, version);
 
   /// Snapshots unacknowledged replies that still require explicit deletion proof.
   Set<String> unconfirmedThreadReplyIds(String rootId) => {
@@ -678,8 +671,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (queryVersion != null && _threadQueryVersions[rootId] != queryVersion) {
       return;
     }
+    final evidenceVersion = queryVersion ?? ++_threadQuerySerial;
+    _setThreadQueryVersion(rootId, evidenceVersion);
     _overflowFloors.remove(rootId);
-    _clearDeletionUncertainty(rootId, queryVersion ?? _threadQuerySerial);
+    _clearDeletionUncertainty(rootId, evidenceVersion);
     final resultIds = replies.map((event) => event.id).toSet();
     final missing = queriedIds.difference(resultIds)
       ..removeAll(_localReplyRoots.keys);

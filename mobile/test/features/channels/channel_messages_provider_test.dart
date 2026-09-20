@@ -2542,6 +2542,73 @@ void main() {
     },
   );
 
+  for (final failureFirst in [false, true]) {
+    test(
+      'failed route query does not fence successful page (failure first: $failureFirst)',
+      () async {
+        final page = Completer<List<NostrEvent>>();
+        final route = Completer<List<NostrEvent>>();
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'root', createdAt: 10), _bounds()],
+            page.future,
+            route.future,
+            <NostrEvent>[],
+          ],
+        );
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        notifier.cacheCompleteThreadQuery('root', {}, [
+          _event(
+            id: 'deleted-offline',
+            createdAt: 20,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+        ]);
+        session.setConnected(false);
+        await _pumpEventQueue();
+        session.setConnected(true);
+        await _pumpEventQueue();
+        const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+        container.listen(threadRepliesProvider(args), (_, _) {});
+        final failure = expectLater(
+          container.read(threadRepliesProvider(args).future),
+          throwsException,
+        );
+        await _pumpEventQueue();
+        if (failureFirst) {
+          route.completeError(Exception('route query failed'));
+          await failure;
+        }
+        page.complete([_event(id: 'root', createdAt: 10), _bounds()]);
+        await _pumpEventQueue();
+        if (!failureFirst) {
+          route.completeError(Exception('route query failed'));
+          await failure;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(entries.single.summary, isNull);
+        expect(notifier.cachedThreadReplyIds('root'), isEmpty);
+      },
+    );
+  }
+
   for (final phase in ['queued', 'inflight', 'late', 'backoff', 'exhausted']) {
     test('ownership recovery resumes across reconnect: $phase', () async {
       final first = Completer<List<NostrEvent>>();

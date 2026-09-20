@@ -53,47 +53,62 @@ final threadRepliesProvider = FutureProvider.autoDispose
         args.rootId,
       );
       final queryVersion = channelMessages?.beginThreadQuery(args.rootId);
-      final replies = await fetchCompleteThreadReplies(session, args);
-      // Explicit markers also settle unacknowledged local sends, whose
-      // absence cannot prove deletion even in an insertion-complete scan.
-      final missingIds =
-          unconfirmedIds?.difference(
-            replies.map((event) => event.id).toSet(),
-          ) ??
-          <String>{};
-      final deletions = <NostrEvent>[];
-      final targets = missingIds.toList();
-      // Each target has its own limit: repeated markers for one reply
-      // cannot crowd another reply out of a shared result cap.
-      for (var start = 0; start < targets.length; start += 20) {
-        final batch = targets.skip(start).take(20);
-        deletions.addAll(
-          await session.queryRelay([
-            for (final target in batch)
-              NostrFilter(
-                kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
-                tags: {
-                  '#h': [args.channelId],
-                  '#e': [target],
-                },
-                limit: 1,
-              ),
-          ]),
+      if (queryVersion != null) {
+        ref.onDispose(
+          () => channelMessages?.failThreadQuery(args.rootId, queryVersion),
         );
       }
-      if (ref.mounted && ref.exists(channelProvider)) {
-        final channel = ref.read(channelProvider.notifier);
-        channel.cacheCompleteThreadQuery(
-          args.rootId,
-          cachedReplyIds ?? {},
-          replies,
-          queryVersion: queryVersion,
-        );
-        if (deletions.isNotEmpty) {
-          channel.cacheThreadDeletions(deletions, scopedTargetIds: missingIds);
+      try {
+        final replies = await fetchCompleteThreadReplies(session, args);
+        // Explicit markers also settle unacknowledged local sends, whose
+        // absence cannot prove deletion even in an insertion-complete scan.
+        final missingIds =
+            unconfirmedIds?.difference(
+              replies.map((event) => event.id).toSet(),
+            ) ??
+            <String>{};
+        final deletions = <NostrEvent>[];
+        final targets = missingIds.toList();
+        // Each target has its own limit: repeated markers for one reply
+        // cannot crowd another reply out of a shared result cap.
+        for (var start = 0; start < targets.length; start += 20) {
+          final batch = targets.skip(start).take(20);
+          deletions.addAll(
+            await session.queryRelay([
+              for (final target in batch)
+                NostrFilter(
+                  kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
+                  tags: {
+                    '#h': [args.channelId],
+                    '#e': [target],
+                  },
+                  limit: 1,
+                ),
+            ]),
+          );
         }
+        if (ref.mounted && ref.exists(channelProvider)) {
+          final channel = ref.read(channelProvider.notifier);
+          channel.cacheCompleteThreadQuery(
+            args.rootId,
+            cachedReplyIds ?? {},
+            replies,
+            queryVersion: queryVersion,
+          );
+          if (deletions.isNotEmpty) {
+            channel.cacheThreadDeletions(
+              deletions,
+              scopedTargetIds: missingIds,
+            );
+          }
+        }
+        return replies;
+      } catch (_) {
+        if (queryVersion != null) {
+          channelMessages?.failThreadQuery(args.rootId, queryVersion);
+        }
+        rethrow;
       }
-      return replies;
     });
 
 /// Exhaustively scans a thread using insertion-complete cursor pages.
