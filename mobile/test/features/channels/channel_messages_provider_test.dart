@@ -1084,8 +1084,9 @@ void main() {
           container.listen(threadRepliesProvider(args), (_, _) {});
           final result = container.read(threadRepliesProvider(args).future);
           await _pumpEventQueue();
-          if (acknowledgeDuringQuery)
+          if (acknowledgeDuringQuery) {
             notifier.completeLocalMessage('deleted-local');
+          }
           scan.complete(survivors.take(200).toList());
           expect(await result, survivors);
           expect(notifier.threadSummaries['root']!.descendantCount, count);
@@ -3021,6 +3022,73 @@ void main() {
         expect(notifier.threadSummaries['root']!.isCountPending, isTrue);
       }
     });
+  }
+
+  for (final count in [150, 300]) {
+    test(
+      'large deletion event queues $count targets within shared bounds',
+      () async {
+        final first = Completer<List<NostrEvent>>();
+        final second = Completer<List<NostrEvent>>();
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              _event(id: 'root', createdAt: 10),
+              _summary(rootId: 'root', replyCount: 1),
+              _bounds(),
+            ],
+            first.future,
+            second.future,
+            for (var i = 2; i < count && i < 258; i++)
+              i == count - 1
+                  ? [_summary(rootId: 'root', replyCount: 0)]
+                  : <NostrEvent>[],
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        session.emit(
+          NostrEvent(
+            id: 'large-delete',
+            pubkey: 'author',
+            createdAt: 100,
+            kind: EventKind.deletion,
+            tags: [
+              ['h', _channelId],
+              for (var i = 0; i < count; i++) ['e', 'unknown-$i'],
+            ],
+            content: '',
+            sig: '',
+          ),
+        );
+        int requests() => session.queryFilters
+            .where((f) => f.extensions['resolve_thread_roots'] == true)
+            .length;
+        await _pumpEventQueue();
+        expect(requests(), 2);
+        first.complete([]);
+        second.complete([]);
+        await _pumpEventQueue();
+        expect(requests(), count < 258 ? count : 258);
+        if (count == 150) {
+          expect(notifier.threadSummaries['root']!.descendantCount, 0);
+          final entries = buildMainTimelineEntries(
+            formatTimeline(
+              container.read(channelMessagesProvider(_channelId)).value!,
+            ),
+            relaySummaries: notifier.threadSummaries,
+          );
+          expect(entries.single.summary, isNull);
+        } else {
+          expect(notifier.threadSummaries['root']!.isCountPending, isTrue);
+        }
+      },
+    );
   }
 
   for (final disposeEarly in [false, true]) {

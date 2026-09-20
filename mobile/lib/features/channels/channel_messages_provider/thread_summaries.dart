@@ -183,7 +183,6 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
               _replyOwnership.rootFor(id) == null &&
               !before.any((event) => event.id == id),
         )
-        .take(100)
         .toSet();
     if (unknown.isNotEmpty) _resolveDeletionOwners(unknown, candidates);
   }
@@ -240,7 +239,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
   }
 
   void _resolveDeletionOwners(Set<String> targets, Set<String> candidates) {
-    // Register the whole bounded batch before sending its first query. A
+    // Register every target before sending the first bounded-queue query. A
     // successful target must not retire uncertainty from a queued sibling.
     final versions = {
       for (final target in targets) target: ++_threadQuerySerial,
