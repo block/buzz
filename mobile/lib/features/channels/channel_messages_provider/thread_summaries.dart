@@ -1,6 +1,17 @@
 part of '../channel_messages_provider.dart';
 
 extension _ThreadSummaryState on ChannelMessagesNotifier {
+  List<String> _rotateDeletionProofTargets(Set<String> missingIds) {
+    final targets = missingIds.take(20).toList();
+    // Reuse the pending-send order instead of retaining a second per-root
+    // cursor. It survives route disposal and disappears as sends settle.
+    for (final id in targets) {
+      final root = _localReplyRoots.remove(id);
+      if (root != null) _localReplyRoots[id] = root;
+    }
+    return targets;
+  }
+
   int _reserveThreadQuery(String root) {
     final version = ++_threadQuerySerial;
     _setThreadQueryVersion(root, version, pending: true);

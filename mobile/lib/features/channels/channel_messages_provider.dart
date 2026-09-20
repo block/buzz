@@ -550,6 +550,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       if (entry.value == rootId) entry.key,
   };
 
+  /// Reserves the next bounded proof batch, rotating pending sends fairly.
+  List<String> nextThreadDeletionProofTargets(Set<String> missingIds) =>
+      _rotateDeletionProofTargets(missingIds);
+
   /// Snapshots cached overlay replies covered by a query for this outer root.
   Set<String> cachedThreadReplyIds(String rootId) {
     final deletedIds = {

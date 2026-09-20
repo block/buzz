@@ -1133,6 +1133,85 @@ void main() {
     },
   );
 
+  test(
+    'deletion proof batches progress past persistent pending replies',
+    () async {
+      final deletion = NostrEvent(
+        id: 'deleted-tail',
+        pubkey: 'author',
+        createdAt: 100,
+        kind: EventKind.deletion,
+        tags: const [
+          ['e', 'pending-24'],
+        ],
+        content: '',
+        sig: '',
+      );
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+          <NostrEvent>[],
+          <NostrEvent>[],
+          <NostrEvent>[],
+          [deletion],
+          <NostrEvent>[],
+          <NostrEvent>[],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      for (var i = 0; i < 25; i++) {
+        notifier.addLocalMessage(
+          _event(
+            id: 'pending-$i',
+            createdAt: 20 + i,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+        );
+      }
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      final subscription = container.listen(
+        threadRepliesProvider(args),
+        (_, _) {},
+      );
+      await container.read(threadRepliesProvider(args).future);
+      expect(notifier.unconfirmedThreadReplyIds('root'), hasLength(25));
+      subscription.close();
+      await _pumpEventQueue();
+      container.listen(threadRepliesProvider(args), (_, _) {});
+      await container.read(threadRepliesProvider(args).future);
+      final targets = session.queryFilters
+          .where((f) => f.kinds.contains(EventKind.deletion))
+          .map((f) => f.tags['#e']!.single)
+          .toList();
+      expect(targets, hasLength(40));
+      expect(targets.take(20), isNot(contains('pending-24')));
+      expect(targets.skip(20), contains('pending-24'));
+      expect(notifier.unconfirmedThreadReplyIds('root'), hasLength(24));
+      expect(
+        notifier.cachedThreadReplyIds('root'),
+        isNot(contains('pending-24')),
+      );
+      container.invalidate(threadRepliesProvider(args));
+      await container.read(threadRepliesProvider(args).future);
+      final third = session.queryFilters
+          .where((f) => f.kinds.contains(EventKind.deletion))
+          .skip(40)
+          .map((f) => f.tags['#e']!.single)
+          .toList();
+      expect(third, hasLength(20));
+      expect(third.first, 'pending-15');
+      expect(third, isNot(contains('pending-24')));
+    },
+  );
+
   for (final count in [1, 300]) {
     for (final acknowledgeDuringQuery in [false, true]) {
       test(

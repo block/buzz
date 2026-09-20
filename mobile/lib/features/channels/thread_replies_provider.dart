@@ -70,7 +70,9 @@ final threadRepliesProvider = FutureProvider.autoDispose
         final deletions = <NostrEvent>[];
         // One bounded request per scan keeps opening a thread responsive even
         // when many sends are awaiting ACKs. Excess IDs remain provisional.
-        final targets = missingIds.take(20).toList();
+        final targets =
+            channelMessages?.nextThreadDeletionProofTargets(missingIds) ??
+            const <String>[];
         // Per-target limits keep repeated markers from crowding another ID out.
         if (targets.isNotEmpty) {
           deletions.addAll(
