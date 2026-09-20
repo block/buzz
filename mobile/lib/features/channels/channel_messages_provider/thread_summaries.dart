@@ -194,7 +194,6 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
   }
 
   void _resolveDeletionOwners(Set<String> targets, Set<String> candidates) {
-    final generation = _initVersion;
     // Register the whole bounded batch before sending its first query. A
     // successful target must not retire uncertainty from a queued sibling.
     final versions = {
@@ -216,11 +215,11 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     // The shared queue bounds work across events as well as within each batch.
     for (final entry in versions.entries) {
       final accepted = _deletionOwnerQueue.enqueue(() async {
-        if (!_summaryMounted || generation != _initVersion) return;
-        await _resolveDeletionOwner(
+        if (!_summaryMounted) return true;
+        return _resolveDeletionOwner(
           entry.key,
           candidates,
-          generation,
+          _initVersion,
           entry.value,
         );
       });
@@ -230,7 +229,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     }
   }
 
-  Future<void> _resolveDeletionOwner(
+  Future<bool> _resolveDeletionOwner(
     String target,
     Set<String> candidates,
     int generation,
@@ -249,7 +248,8 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
           limit: 1,
         ),
       ]);
-      if (!_summaryMounted || generation != _initVersion) return;
+      if (!_summaryMounted) return true;
+      if (generation != _initVersion) return false;
       if (events.length > 1) {
         throw StateError('Expected at most one owner for a deletion target.');
       }
@@ -277,20 +277,21 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
         unresolvedRoot: applied ? null : resolvedRoot,
       );
     } catch (error) {
-      if (!_summaryMounted || generation != _initVersion) return;
+      if (!_summaryMounted) return true;
+      if (generation != _initVersion) return false;
       if (error is! StateError && error is! FormatException && attempt < 2) {
         // Keep the queue slot and original version while backing off. Retries
         // cannot exceed the shared concurrency cap or supersede newer evidence.
         await Future<void>.delayed(Duration(milliseconds: 500 << attempt));
-        if (!_summaryMounted || generation != _initVersion) return;
-        await _resolveDeletionOwner(
+        if (!_summaryMounted) return true;
+        if (generation != _initVersion) return false;
+        return _resolveDeletionOwner(
           target,
           candidates,
           generation,
           version,
           attempt: attempt + 1,
         );
-        return;
       }
       // Exhausted or invalid responses remain uncertain until fresh evidence.
       if (_summaryMounted && generation == _initVersion) {
@@ -300,6 +301,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
         );
       }
     }
+    return true;
   }
 
   void _clearDeletionUncertainty(String root, int version) {
@@ -357,28 +359,40 @@ class _DeletionSummaryUncertainty {
 
 // Bound retained work and concurrent HTTP requests for the whole channel.
 class _DeletionOwnerQueue {
-  final _pending = <Future<void> Function()>[];
+  final bool Function() canRun;
+  final _pending = <Future<bool> Function()>[];
   int _active = 0;
+  bool _paused = false;
 
-  bool enqueue(Future<void> Function() request) {
-    if (_pending.length >= 256) return false;
+  _DeletionOwnerQueue({required this.canRun});
+
+  bool enqueue(Future<bool> Function() request) {
+    if (_pending.length + _active >= 258) return false;
     _pending.add(request);
     _drain();
     return true;
   }
 
-  void clear() => _pending.clear();
+  void pause() => _paused = true;
+
+  void resume() {
+    _paused = false;
+    _drain();
+  }
 
   void _drain() {
-    while (_active < 2 && _pending.isNotEmpty) {
+    while (!_paused && canRun() && _active < 2 && _pending.isNotEmpty) {
       _active++;
       _run(_pending.removeAt(0));
     }
   }
 
-  Future<void> _run(Future<void> Function() request) async {
+  Future<void> _run(Future<bool> Function() request) async {
     try {
-      await request();
+      // Interrupted work keeps its place in the same total admission budget.
+      // Reconnect resumes it with a fresh connection generation, but the
+      // original summary version still fences it against newer root evidence.
+      if (!await request()) _pending.insert(0, request);
     } finally {
       _active--;
       _drain();

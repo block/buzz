@@ -44,7 +44,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final _deletionSummaryUncertainty = <String, _DeletionSummaryUncertainty>{};
   final _replyOwnership = ThreadReplyOwnership();
   final _processedDeletionTargets = <String>{};
-  final _deletionOwnerQueue = _DeletionOwnerQueue();
+  late final _deletionOwnerQueue = _DeletionOwnerQueue(
+    canRun: () =>
+        ref.mounted &&
+        _hasListeners &&
+        ref.read(relaySessionProvider).status == SessionStatus.connected,
+  );
   bool _hasListeners = true;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
     refresh: _refreshOverflowSummary,
@@ -104,15 +109,17 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     final sessionState = ref.watch(relaySessionProvider);
     ref.onCancel(() {
       _hasListeners = false;
+      _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
     });
     ref.onResume(() {
       _hasListeners = true;
       Future.microtask(_summaryRefreshes.resume);
+      Future.microtask(_deletionOwnerQueue.resume);
     });
     ref.onDispose(() {
       _initVersion++;
-      _deletionOwnerQueue.clear();
+      _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
       _clearSubscription();
     });
@@ -207,6 +214,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     } finally {
       if (_isCurrentInit(initVersion)) {
         _initInFlight = false;
+        _deletionOwnerQueue.resume();
       }
     }
   }

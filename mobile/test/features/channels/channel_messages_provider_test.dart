@@ -2542,6 +2542,115 @@ void main() {
     },
   );
 
+  for (final phase in ['queued', 'inflight', 'late', 'backoff', 'exhausted']) {
+    test('ownership recovery resumes across reconnect: $phase', () async {
+      final first = Completer<List<NostrEvent>>();
+      final second = Completer<List<NostrEvent>>();
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [
+            _event(id: 'retained', createdAt: 10),
+            _summary(rootId: 'retained', replyCount: 1),
+            _bounds(),
+          ],
+          if (phase == 'backoff')
+            Exception('temporary outage')
+          else
+            first.future,
+          if (phase == 'queued') second.future,
+          [_event(id: 'newest', createdAt: 200), _bounds()],
+          if (phase == 'queued') ...[<NostrEvent>[], <NostrEvent>[]],
+          if (phase == 'exhausted') ...[
+            Exception('unavailable'),
+            Exception('unavailable'),
+            Exception('unavailable'),
+          ] else
+            [_summary(rootId: 'retained', replyCount: 0)],
+          if (phase != 'exhausted') <NostrEvent>[],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      await notifier.loadEventsById(['retained']);
+      notifier.cacheCompleteThreadQuery('retained', {}, [
+        for (var i = 0; i < 257; i++)
+          _event(
+            id: 'old-reply-$i',
+            createdAt: 20 + i,
+            extraTags: const [
+              ['e', 'retained', '', 'reply'],
+            ],
+          ),
+      ]);
+
+      for (var i = 0; i < (phase == 'queued' ? 3 : 1); i++) {
+        session.emit(
+          NostrEvent(
+            id: 'delete-$i',
+            pubkey: 'author',
+            createdAt: 100 + i,
+            kind: EventKind.deletion,
+            tags: [
+              ['h', _channelId],
+              ['e', 'unknown-$i'],
+            ],
+            content: '',
+            sig: '',
+          ),
+        );
+      }
+      await _pumpEventQueue();
+      session.setConnected(false);
+      await _pumpEventQueue();
+      if (phase != 'backoff' && phase != 'late') first.complete([]);
+      if (phase == 'queued') second.complete([]);
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      int requests() => session.queryFilters
+          .where((f) => f.extensions['resolve_thread_roots'] == true)
+          .length;
+      expect(
+        requests(),
+        phase == 'queued' ? 2 : 1,
+        reason: 'no ownership work runs while disconnected',
+      );
+      session.setConnected(true);
+      await _pumpEventQueue();
+      if (phase == 'late') first.complete([]);
+      await Future<void>.delayed(
+        Duration(milliseconds: phase == 'exhausted' ? 3800 : 400),
+      );
+      expect(
+        requests(),
+        phase == 'queued'
+            ? 5
+            : phase == 'exhausted'
+            ? 4
+            : 2,
+      );
+      final entries = buildMainTimelineEntries(
+        formatTimeline(
+          container.read(channelMessagesProvider(_channelId)).value!,
+        ),
+        relaySummaries: notifier.threadSummaries,
+      );
+      final retained = entries.singleWhere((e) => e.message.id == 'retained');
+      if (phase == 'exhausted') {
+        expect(retained.summary!.isCountPending, isTrue);
+      } else {
+        expect(
+          retained.summary,
+          isNull,
+          reason: 'the off-window retained root is reconciled',
+        );
+      }
+    });
+  }
+
   for (final querySucceeds in [false, true]) {
     test(
       'skipped ownership response preserves uncertainty (query succeeds: $querySucceeds)',
