@@ -184,11 +184,13 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       ..removeAll(_localReplyRoots.keys);
     // Relay deletion fan-out updates the outer root only. Its visible broadcast
     // children need the same complete scan to refresh their direct-reply facts.
-    final nestedNeedsRecount = _visibleNestedRows(root).any((row) {
-      final nested = _baseThreadSummaries[row.id];
-      return nested != null &&
-          (nested.replyCount > 0 || nested.descendantCount > 0);
-    });
+    final nestedNeedsRecount =
+        !_queryThreadSummaries.containsKey(root) &&
+        _visibleNestedRows(root).any((row) {
+          final nested = _baseThreadSummaries[row.id];
+          return nested != null &&
+              (nested.replyCount > 0 || nested.descendantCount > 0);
+        });
     if (!nestedNeedsRecount &&
         (summary == null || confirmedIds.length <= summary.descendantCount)) {
       return;

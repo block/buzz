@@ -3958,6 +3958,68 @@ void main() {
     );
   }
 
+  test(
+    'unchanged outer evidence does not repeat an exact nested recount',
+    () async {
+      final broadcast = _event(
+        id: 'broadcast',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'root'],
+          ['e', 'root', '', 'reply'],
+          ['broadcast', '1'],
+        ],
+      );
+      final child = _event(
+        id: 'child',
+        createdAt: 30,
+        extraTags: const [
+          ['e', 'root', '', 'root'],
+          ['e', 'broadcast', '', 'reply'],
+        ],
+      );
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [
+            broadcast,
+            _event(id: 'root', createdAt: 10),
+            _summary(rootId: 'broadcast', replyCount: 1, descendantCount: 0),
+            _bounds(),
+          ],
+          [broadcast, child],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      session.emit(_summary(rootId: 'root', replyCount: 1, descendantCount: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      expect(notifier.threadSummaries['broadcast']?.replyCount, 1);
+      for (var i = 0; i < 3; i++) {
+        session.emit(
+          _summary(
+            rootId: 'root',
+            replyCount: 1,
+            descendantCount: 2,
+            createdAt: 40 + i,
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+      expect(
+        session.queryFilters.where(
+          (f) => f.extensions.containsKey('depth_limit'),
+        ),
+        hasLength(1),
+      );
+      expect(notifier.threadSummaries['broadcast']?.isCountPending, isFalse);
+    },
+  );
+
   for (final rootVisible in [false, true]) {
     for (final source in ['known', 'owner', 'live']) {
       for (final survives in [false, true]) {
