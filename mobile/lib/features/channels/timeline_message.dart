@@ -568,10 +568,10 @@ bool _isBroadcastReply(TimelineMessage message) {
 /// order is mobile's own (see [_mergeParticipants]) because this file already
 /// renders relay participants in the order the relay sent them.
 ///
-/// Both halves count descendants, not direct replies: the relay's
-/// `descendant_count` and the locally assembled [_buildDescendantStats]. A badge
-/// on the main timeline stands for the whole thread under that message, so a
-/// reply to a reply has to raise it.
+/// Both halves represent descendants. The relay only increments descendant
+/// counts on the outer root, so a broadcast reply's direct-reply count is also
+/// positive evidence, and a lower bound on its descendants. Locally assembled
+/// [_buildDescendantStats] includes nested replies under every ancestor.
 ThreadSummary? _buildSummary(
   String messageId,
   Map<String, _DescendantStats> descendantStats,
@@ -694,11 +694,18 @@ ThreadSummary? _buildRelaySummary(
   String messageId,
   ChannelWindowThreadSummary? relaySummary,
 ) {
-  if (relaySummary == null || relaySummary.descendantCount <= 0) return null;
+  if (relaySummary == null) return null;
+  // The relay counts direct children on every parent, but descendants only on
+  // the outer root. Broadcast replies can therefore have valid 1/0 counters.
+  final useDirectCount = relaySummary.replyCount > relaySummary.descendantCount;
+  final count = useDirectCount
+      ? relaySummary.replyCount
+      : relaySummary.descendantCount;
+  if (count <= 0) return null;
   return ThreadSummary(
     threadHeadId: messageId,
-    replyCount: relaySummary.descendantCount,
-    isLowerBound: relaySummary.isLowerBound,
+    replyCount: count,
+    isLowerBound: relaySummary.isLowerBound || useDirectCount,
     isCountPending: relaySummary.isCountPending,
     participantPubkeys: relaySummary.participantPubkeys.take(3).toList(),
     lastReplyAt: relaySummary.lastReplyAt,

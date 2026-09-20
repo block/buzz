@@ -10416,6 +10416,55 @@ void main() {
       expect(find.byType(ThreadDetailPage), findsOneWidget);
     });
 
+    for (final directReplies in [0, 1]) {
+      testWidgets(
+        'cold broadcast row with $directReplies relay-only direct replies',
+        (tester) async {
+          final root = _textMsg(
+            id: 'outer-root',
+            pubkey: 'bob',
+            content: 'Outer root',
+          );
+          final broadcast = _textMsg(
+            id: 'broadcast-reply',
+            pubkey: 'alice',
+            content: 'Broadcast reply with unloaded children',
+            extraTags: const [
+              ['e', 'outer-root', '', 'root'],
+              ['e', 'outer-root', '', 'reply'],
+              ['broadcast', '1'],
+            ],
+          );
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [root, broadcast],
+              messagesNotifier: _FakeMessagesNotifier(
+                [root, broadcast],
+                summaries: {
+                  'broadcast-reply': ChannelWindowThreadSummary(
+                    replyCount: directReplies,
+                    descendantCount: 0,
+                    lastReplyAt: 1100,
+                    participantPubkeys: const ['bob'],
+                  ),
+                },
+              ),
+              threadReplies: const {'broadcast-reply': []},
+            ),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(
+            findRichText('Broadcast reply with unloaded children'),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byType(ThreadDetailPage),
+            directReplies > 0 ? findsOneWidget : findsNothing,
+          );
+        },
+      );
+    }
+
     for (final hasReplies in [false, true]) {
       testWidgets(
         hasReplies
