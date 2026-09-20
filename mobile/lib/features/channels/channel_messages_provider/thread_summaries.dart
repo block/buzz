@@ -81,10 +81,28 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
   bool _hasVisibleThreadRows(String root) =>
       _isVisibleRoot(root) || _visibleNestedRows(root).isNotEmpty;
 
+  ChannelWindowThreadSummary? _emptyPageSummary(String root) {
+    // A page's implicit zero is no longer the only evidence once replies arrive.
+    if (cachedThreadReplyIds(root).isNotEmpty) return null;
+    for (final page in _windowStore.pages) {
+      for (final row in page.rows) {
+        if (row.event.id != root) continue;
+        if (row.thread != null) return null;
+        return const ChannelWindowThreadSummary(
+          replyCount: 0,
+          descendantCount: 0,
+          lastReplyAt: null,
+          participantPubkeys: [],
+        );
+      }
+    }
+    return null;
+  }
+
   void _applyLiveThreadSummary(NostrEvent event, int? summaryVersion) {
     final root = event.getTagValue('e');
     if (root == null) return;
-    final exact = _queryThreadSummaries[root];
+    final exact = _queryThreadSummaries[root] ?? _emptyPageSummary(root);
     if (summaryVersion == null && exact != null) {
       // WebSocket arrival order cannot establish freshness relative to HTTP
       // scans. Preserve the completed scan and reconcile conflicting counts.

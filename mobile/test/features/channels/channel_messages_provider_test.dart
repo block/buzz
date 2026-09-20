@@ -506,7 +506,11 @@ void main() {
     () async {
       final relaySession = _RecordingRelaySessionNotifier(
         queryResults: [
-          [_event(id: 'root', createdAt: 10), _bounds()],
+          [
+            _event(id: 'root', createdAt: 10),
+            _summary(rootId: 'root', replyCount: 1),
+            _bounds(),
+          ],
         ],
       );
       final container = _buildContainer(relaySession);
@@ -4309,6 +4313,69 @@ void main() {
         expect(
           entries.singleWhere((e) => e.message.id == 'old-root').summary,
           isNull,
+        );
+      },
+    );
+  }
+
+  for (final newReplyExists in [false, true]) {
+    test(
+      'live summary after empty older page is reconciled (new reply: $newReplyExists)',
+      () async {
+        final recount = Completer<List<NostrEvent>>();
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              _event(id: 'newest', createdAt: 100),
+              _bounds(hasMore: true, cursorCreatedAt: 100, cursorId: 'newest'),
+            ],
+            [
+              _event(id: 'root', createdAt: 10),
+              _bounds(dTag: '${_channelId.toLowerCase()}:100:newest'),
+            ],
+            recount.future,
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        expect(await notifier.fetchOlder(), isTrue);
+        session.emit(_summary(rootId: 'root', replyCount: 1));
+        expect(notifier.threadSummaries['root']!.descendantCount, 0);
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions.containsKey('depth_limit'),
+          ),
+          hasLength(1),
+        );
+        recount.complete([
+          if (newReplyExists)
+            _event(
+              id: 'new-reply',
+              createdAt: 30,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+        ]);
+        await _pumpEventQueue();
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(
+          entries
+              .singleWhere((e) => e.message.id == 'root')
+              .summary
+              ?.replyCount,
+          newReplyExists ? 1 : null,
         );
       },
     );
