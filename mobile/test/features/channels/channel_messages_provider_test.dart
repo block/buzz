@@ -3073,7 +3073,7 @@ void main() {
         first.complete([]);
         second.complete([]);
         await _pumpEventQueue();
-        expect(requests(), count < 258 ? count : 258);
+        expect(requests(), count);
         if (count == 150) {
           expect(notifier.threadSummaries['root']!.descendantCount, 0);
           final entries = buildMainTimelineEntries(
@@ -3084,10 +3084,6 @@ void main() {
           );
           expect(entries.single.summary, isNull);
         } else {
-          expect(notifier.threadSummaries['root']!.isCountPending, isTrue);
-          session.emit(deletion);
-          await _pumpEventQueue();
-          expect(requests(), count);
           expect(notifier.threadSummaries['root']!.descendantCount, 0);
           expect(notifier.threadSummaries['root']!.isCountPending, isFalse);
           session.emit(deletion);
@@ -3101,6 +3097,57 @@ void main() {
       },
     );
   }
+
+  test('deferred ownership keeps its original evidence version', () async {
+    final first = Completer<List<NostrEvent>>();
+    final second = Completer<List<NostrEvent>>();
+    final session = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: 'root', createdAt: 10),
+          _summary(rootId: 'root', replyCount: 1),
+          _bounds(),
+        ],
+        first.future,
+        second.future,
+        for (var i = 2; i < 258; i++) <NostrEvent>[],
+        [_summary(rootId: 'root', replyCount: 0)],
+      ],
+    );
+    final container = _buildContainer(session);
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await _pumpEventQueue();
+    session.emit(
+      NostrEvent(
+        id: 'large-delete',
+        pubkey: 'author',
+        createdAt: 100,
+        kind: EventKind.deletion,
+        tags: [
+          ['h', _channelId],
+          for (var i = 0; i < 259; i++) ['e', 'unknown-$i'],
+        ],
+        content: '',
+        sig: '',
+      ),
+    );
+    session.emit(_summary(rootId: 'root', replyCount: 1));
+    first.complete([]);
+    second.complete([]);
+    await _pumpEventQueue();
+    expect(
+      session.queryFilters.where(
+        (f) => f.extensions['resolve_thread_roots'] == true,
+      ),
+      hasLength(259),
+    );
+    final summary = container
+        .read(channelMessagesProvider(_channelId).notifier)
+        .threadSummaries['root']!;
+    expect(summary.descendantCount, 1);
+    expect(summary.isCountPending, isFalse);
+  });
 
   for (final disposeEarly in [false, true]) {
     test(
@@ -3117,7 +3164,7 @@ void main() {
             ],
             first.future,
             second.future,
-            for (var i = 0; i < 256; i++) <NostrEvent>[],
+            for (var i = 0; i < 298; i++) <NostrEvent>[],
           ],
         );
         final container = _buildContainer(session);
@@ -3158,8 +3205,8 @@ void main() {
         await _pumpEventQueue();
         expect(
           requests(),
-          disposeEarly ? 2 : 258,
-          reason: 'only the bounded backlog can drain',
+          disposeEarly ? 2 : 300,
+          reason: 'deferred targets drain only while mounted',
         );
         if (!disposeEarly) {
           expect(notifier.threadSummaries['root']!.isCountPending, isTrue);

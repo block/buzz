@@ -45,8 +45,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final _deletionSummaryUncertainty = <String, _DeletionSummaryUncertainty>{};
   final _replyOwnership = ThreadReplyOwnership();
   final _processedDeletionTargets = <String>{};
-  final _deferredDeletionTargets = <String>{};
+  final _deferredDeletionTargets =
+      <String, ({Set<String> candidates, int version})>{};
   late final _deletionOwnerQueue = _DeletionOwnerQueue(
+    onCapacity: _drainDeferredDeletionOwners,
     canRun: () =>
         ref.mounted &&
         _hasListeners &&
@@ -603,7 +605,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
               event.kind != EventKind.nip29DeleteEvent)) {
         throw StateError('Expected a deletion in channel $channelId.');
       }
-      _deferredDeletionTargets.removeAll(reconciledTargetIds);
+      _retireDeferredDeletionTargets(targets.intersection(reconciledTargetIds));
       _rememberDeletionTargets(targets.intersection(reconciledTargetIds));
       final before = events;
       _mergeWindowEventIntoStore(event);

@@ -173,9 +173,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
           for (final tag in event.tags)
             if (tag.length > 1 && tag[0] == 'e') tag[1],
     };
-    final fresh = targets.difference(alreadyDeleted)
-      ..addAll(targets.intersection(_deferredDeletionTargets));
-    _deferredDeletionTargets.removeAll(fresh);
+    final fresh = targets.difference(alreadyDeleted);
     _rememberDeletionTargets(targets);
     if (fresh.isEmpty) return;
     final candidates = _applyDeletedSummaries(fresh, before);
@@ -261,25 +259,48 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     _publishSummaryChange();
     // The shared queue bounds work across events as well as within each batch.
     for (final entry in versions.entries) {
-      final accepted = _deletionOwnerQueue.enqueue(() async {
-        if (!_summaryMounted) return true;
-        return _resolveDeletionOwner(
-          entry.key,
-          candidates,
-          _initVersion,
-          entry.value,
+      if (!_enqueueDeletionOwner(entry.key, candidates, entry.value)) {
+        _deferredDeletionTargets[entry.key] = (
+          candidates: candidates,
+          version: entry.value,
         );
-      });
-      if (accepted) {
-        _deferredDeletionTargets.remove(entry.key);
-      } else {
-        // Keep bounded identity-only evidence so replay can retry rejected work
-        // even when the deletion marker is still in the cached channel window.
-        _deferredDeletionTargets.add(entry.key);
         while (_deferredDeletionTargets.length > 8192) {
-          _deferredDeletionTargets.remove(_deferredDeletionTargets.first);
+          final oldest = _deferredDeletionTargets.keys.first;
+          final dropped = _deferredDeletionTargets.remove(oldest)!;
+          _finishDeletionLookup(
+            dropped.candidates,
+            dropped.version,
+            resolved: false,
+          );
         }
-        _finishDeletionLookup(candidates, entry.value, resolved: false);
+      }
+    }
+  }
+
+  bool _enqueueDeletionOwner(
+    String target,
+    Set<String> candidates,
+    int version,
+  ) => _deletionOwnerQueue.enqueue(() async {
+    if (!_summaryMounted) return true;
+    return _resolveDeletionOwner(target, candidates, _initVersion, version);
+  });
+
+  void _drainDeferredDeletionOwners() {
+    if (!_summaryMounted) return;
+    while (_deletionOwnerQueue.hasCapacity &&
+        _deferredDeletionTargets.isNotEmpty) {
+      final target = _deferredDeletionTargets.keys.first;
+      final work = _deferredDeletionTargets.remove(target)!;
+      _enqueueDeletionOwner(target, work.candidates, work.version);
+    }
+  }
+
+  void _retireDeferredDeletionTargets(Iterable<String> targets) {
+    for (final target in targets) {
+      final work = _deferredDeletionTargets.remove(target);
+      if (work != null) {
+        _finishDeletionLookup(work.candidates, work.version, resolved: true);
       }
     }
   }
@@ -415,14 +436,17 @@ class _DeletionSummaryUncertainty {
 // Bound retained work and concurrent HTTP requests for the whole channel.
 class _DeletionOwnerQueue {
   final bool Function() canRun;
+  final void Function() onCapacity;
   final _pending = <Future<bool> Function()>[];
   int _active = 0;
   bool _paused = false;
 
-  _DeletionOwnerQueue({required this.canRun});
+  _DeletionOwnerQueue({required this.canRun, required this.onCapacity});
+
+  bool get hasCapacity => _pending.length + _active < 258;
 
   bool enqueue(Future<bool> Function() request) {
-    if (_pending.length + _active >= 258) return false;
+    if (!hasCapacity) return false;
     _pending.add(request);
     _drain();
     return true;
@@ -433,6 +457,7 @@ class _DeletionOwnerQueue {
   void resume() {
     _paused = false;
     _drain();
+    onCapacity();
   }
 
   void _drain() {
@@ -451,6 +476,7 @@ class _DeletionOwnerQueue {
     } finally {
       _active--;
       _drain();
+      onCapacity();
     }
   }
 }
