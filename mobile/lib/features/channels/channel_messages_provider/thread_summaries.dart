@@ -246,6 +246,20 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     }
   }
 
+  void _reconcileEvictedReplies(
+    Iterable<NostrEvent> replies,
+    Set<String> retained,
+  ) {
+    for (final root
+        in replies
+            .where((event) => !retained.contains(event.id))
+            .map((event) => event.threadReference.rootId)
+            .whereType<String>()
+            .toSet()) {
+      if (!_queryThreadSummaries.containsKey(root)) _queueOverflowSummary(root);
+    }
+  }
+
   void _queueOverflowSummary(String root, {bool countPending = false}) {
     if (!_hasVisibleThreadRows(root)) return;
     final ids = cachedThreadReplyIds(root)..removeAll(_localReplyRoots.keys);

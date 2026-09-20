@@ -464,6 +464,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           event.threadReference.parentId != null,
     );
     final retained = _boundedReplies(replies).map((event) => event.id).toSet();
+    _reconcileEvictedReplies(replies, retained);
     return events
         .where(
           (event) =>
@@ -481,14 +482,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (replies.length <= _maxCachedRepliesPerRoot) return;
     final retained = _boundedReplies(replies).map((event) => event.id).toSet();
     if (retained.length == replies.length) return;
-    for (final root
-        in replies
-            .where((event) => !retained.contains(event.id))
-            .map((event) => event.threadReference.rootId)
-            .whereType<String>()
-            .toSet()) {
-      if (!_queryThreadSummaries.containsKey(root)) _queueOverflowSummary(root);
-    }
+    _reconcileEvictedReplies(replies, retained);
     _windowStore = ChannelWindowStore(
       pages: _windowStore.pages,
       liveOverlay: _windowStore.liveOverlay

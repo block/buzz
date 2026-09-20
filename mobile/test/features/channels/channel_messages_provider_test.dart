@@ -4545,6 +4545,69 @@ void main() {
     );
   }
 
+  test('fallback global eviction preserves another root summary', () async {
+    final reply = _event(
+      id: 'old-reply',
+      createdAt: 20,
+      extraTags: const [
+        ['e', 'old-root', '', 'reply'],
+      ],
+    );
+    final recount = Completer<List<NostrEvent>>();
+    final session = _RecordingRelaySessionNotifier(
+      queryResults: [Exception('NIP-CW unavailable'), recount.future],
+      historyResults: [
+        [
+          _event(id: 'old-root', createdAt: 10),
+          reply,
+          for (var i = 0; i < 16; i++) _event(id: 'other-$i', createdAt: 10),
+        ],
+      ],
+    );
+    final container = _buildContainer(session);
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    for (var i = 0; i < 2048; i++) {
+      session.emit(
+        _event(
+          id: 'new-$i',
+          createdAt: 100 + i,
+          extraTags: [
+            ['e', 'other-${i ~/ 128}', '', 'reply'],
+          ],
+        ),
+      );
+    }
+    expect(notifier.cachedThreadReplyIds('old-root'), isEmpty);
+    final entries = buildMainTimelineEntries(
+      formatTimeline(
+        container.read(channelMessagesProvider(_channelId)).value!,
+      ),
+      relaySummaries: notifier.threadSummaries,
+    );
+    expect(
+      entries
+          .singleWhere((e) => e.message.id == 'old-root')
+          .summary
+          ?.replyCount,
+      1,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    final scans = session.queryFilters.where(
+      (f) => f.extensions.containsKey('depth_limit'),
+    );
+    expect(scans, hasLength(1));
+    expect(scans.single.tags['#e'], ['old-root']);
+    recount.complete([reply]);
+    await _pumpEventQueue();
+    expect(notifier.threadSummaries['old-root']?.descendantCount, 1);
+    expect(notifier.threadSummaries['old-root']?.isLowerBound, isFalse);
+  });
+
   for (final fromHistory in [false, true]) {
     for (final survives in [false, true]) {
       test(
