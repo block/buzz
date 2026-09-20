@@ -4107,6 +4107,62 @@ void main() {
     );
   }
 
+  for (final fromHistory in [false, true]) {
+    for (final survives in [false, true]) {
+      test(
+        'fallback reply snapshot reconciles (history: $fromHistory, survives: $survives)',
+        () async {
+          final reply = _event(
+            id: 'fallback-reply',
+            createdAt: 20,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          );
+          final scan = Completer<List<NostrEvent>>();
+          final session = _RecordingRelaySessionNotifier(
+            queryResults: [Exception('NIP-CW unavailable'), scan.future],
+            historyResults: [
+              [_event(id: 'root', createdAt: 10), if (fromHistory) reply],
+            ],
+          );
+          final container = _buildContainer(session);
+          addTearDown(container.dispose);
+          container.listen(channelMessagesProvider(_channelId), (_, _) {});
+          await _pumpEventQueue();
+          if (!fromHistory) session.emit(reply);
+          final notifier = container.read(
+            channelMessagesProvider(_channelId).notifier,
+          );
+          const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+          container.listen(threadRepliesProvider(args), (_, _) {});
+          final result = container.read(threadRepliesProvider(args).future);
+          scan.complete([if (survives) reply]);
+          await result;
+          final events = container
+              .read(channelMessagesProvider(_channelId))
+              .value!;
+          expect(events.any((e) => e.id == reply.id), survives);
+          final entries = buildMainTimelineEntries(
+            formatTimeline(events),
+            relaySummaries: notifier.threadSummaries,
+          );
+          expect(
+            entries
+                .singleWhere((e) => e.message.id == 'root')
+                .summary
+                ?.replyCount,
+            survives ? 1 : null,
+          );
+          expect(
+            notifier.cachedThreadReplyIds('root').contains(reply.id),
+            survives,
+          );
+        },
+      );
+    }
+  }
+
   for (final outcome in ['deleted', 'surviving', 'unavailable']) {
     test(
       'WebSocket fallback reconciles cached thread truth: $outcome',

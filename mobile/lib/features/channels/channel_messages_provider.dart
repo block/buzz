@@ -559,6 +559,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     final deletedIds = {
       for (final event in [
         ..._windowStore.liveAux,
+        if (!_usingChannelWindow) ...?_lastKnownMessages,
         for (final page in _windowStore.pages) ...page.aux,
       ])
         if (event.kind == EventKind.deletion ||
@@ -569,7 +570,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     return {
       for (final entry in _localReplyRoots.entries)
         if (entry.value == rootId && !deletedIds.contains(entry.key)) entry.key,
-      for (final event in _windowStore.liveOverlay)
+      for (final event in _cachedThreadEvents)
         if (event.threadReference.parentId != null &&
             event.threadReference.rootId == rootId &&
             !deletedIds.contains(event.id))
@@ -687,7 +688,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       ..removeAll(_localReplyRoots.keys)
       ..removeAll(provisionalReplyIds);
     final retainedIds = cachedThreadReplyIds(rootId);
-    final later = _windowStore.liveOverlay
+    final later = _cachedThreadEvents
         .where(
           (event) =>
               event.threadReference.rootId == rootId &&

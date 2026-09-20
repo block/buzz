@@ -1,6 +1,11 @@
 part of '../channel_messages_provider.dart';
 
 extension _ThreadSummaryState on ChannelMessagesNotifier {
+  Iterable<NostrEvent> get _cachedThreadEvents => [
+    ..._windowStore.liveOverlay,
+    if (!_usingChannelWindow) ...?_lastKnownMessages,
+  ];
+
   List<String> _rotateDeletionProofTargets(Set<String> missingIds) {
     final targets = missingIds.take(20).toList();
     // Reuse the pending-send order instead of retaining a second per-root
@@ -193,9 +198,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     if (!_hasVisibleThreadRows(root)) return;
     final ids = cachedThreadReplyIds(root)..removeAll(_localReplyRoots.keys);
     final events =
-        _windowStore.liveOverlay
-            .where((event) => ids.contains(event.id))
-            .toList()
+        _cachedThreadEvents.where((event) => ids.contains(event.id)).toList()
           ..sort(compareThreadRepliesChronologically);
     final previous = _baseThreadSummaries[root];
     final count = (previous?.descendantCount ?? 0) > ids.length
