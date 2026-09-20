@@ -1288,6 +1288,81 @@ void main() {
     }
   }
 
+  for (final kind in [EventKind.deletion, EventKind.nip29DeleteEvent]) {
+    test(
+      'late live marker does not recount scan-removed reply (kind: $kind)',
+      () async {
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'root', createdAt: 10), _bounds()],
+            Exception('recount unavailable'),
+            Exception('recount unavailable'),
+            Exception('recount unavailable'),
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        notifier.cacheConfirmedThreadReplies([
+          _event(
+            id: 'deleted',
+            createdAt: 20,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+        ]);
+        final snapshot = notifier.cachedThreadReplyIds('root');
+        expect(snapshot, contains('deleted'));
+        notifier.cacheCompleteThreadQuery('root', snapshot, [
+          for (var i = 0; i < 300; i++)
+            _event(
+              id: 'survivor-$i',
+              createdAt: 30 + i,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+        ]);
+        expect(notifier.threadSummaries['root']!.descendantCount, 300);
+        session.emit(
+          NostrEvent(
+            id: 'late-deletion',
+            pubkey: 'author',
+            createdAt: 25,
+            kind: kind,
+            tags: const [
+              ['h', _channelId],
+              ['e', 'deleted'],
+            ],
+            content: '',
+            sig: '',
+          ),
+        );
+        expect(notifier.threadSummaries['root']!.descendantCount, 300);
+        expect(notifier.threadSummaries['root']!.isLowerBound, isFalse);
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions.containsKey('depth_limit'),
+          ),
+          isEmpty,
+        );
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(entries.single.summary!.replyCount, 300);
+      },
+    );
+  }
+
   for (final deletionMarkerAvailable in [false, true]) {
     for (final lateArrival in [false, true]) {
       test(

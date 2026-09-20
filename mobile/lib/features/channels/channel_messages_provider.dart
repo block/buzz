@@ -687,6 +687,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     final missing = queriedIds.difference(resultIds)
       ..removeAll(_localReplyRoots.keys)
       ..removeAll(provisionalReplyIds);
+    _rememberDeletionTargets(missing);
+    _retireDeferredDeletionTargets(missing);
     final retainedIds = cachedThreadReplyIds(rootId);
     final later = _cachedThreadEvents
         .where(
