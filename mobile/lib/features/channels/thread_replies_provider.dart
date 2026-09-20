@@ -104,7 +104,7 @@ final threadRepliesProvider = FutureProvider.autoDispose
           if (deletions.isNotEmpty) {
             channel.cacheThreadDeletions(
               deletions,
-              scopedTargetIds: missingIds,
+              scopedTargetIds: targets.toSet(),
               reconciledTargetIds: applied ? missingIds : const {},
             );
           }

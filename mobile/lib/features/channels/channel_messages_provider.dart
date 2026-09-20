@@ -575,7 +575,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   /// Applies explicit deletion evidence fetched for cached replies.
   /// [scopedTargetIds] are targets of the authenticated channel-scoped query;
-  /// they permit standard kind-5 wire events that do not carry an h tag.
+  /// a matching target permits kind-5 wire events without an h tag, including
+  /// multi-target markers that also name events outside this query.
   /// [reconciledTargetIds] were already excluded by an applied complete scan.
   void cacheThreadDeletions(
     Iterable<NostrEvent> deletions, {
@@ -592,7 +593,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           event.kind == EventKind.deletion &&
           event.channelId == null &&
           targets.isNotEmpty &&
-          targets.every(scopedTargetIds.contains);
+          targets.any(scopedTargetIds.contains);
       if ((!scopedStandardDeletion && event.channelId != channelId) ||
           (event.kind != EventKind.deletion &&
               event.kind != EventKind.nip29DeleteEvent)) {

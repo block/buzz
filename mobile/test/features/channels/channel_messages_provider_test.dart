@@ -1778,70 +1778,76 @@ void main() {
     );
   }
 
-  test(
-    'an unacknowledged reply needs explicit deletion proof after a complete scan',
-    () async {
-      final deletion = NostrEvent(
-        id: 'delete-pending',
-        pubkey: 'alice',
-        createdAt: 30,
-        kind: EventKind.deletion,
-        tags: const [
-          ['e', 'pending'],
-        ],
-        content: '',
-        sig: 'sig',
-      );
-      final session = _RecordingRelaySessionNotifier(
-        queryResults: [
-          [_event(id: 'root', createdAt: 10), _bounds()],
-          <NostrEvent>[],
-          <NostrEvent>[],
-          <NostrEvent>[],
-          [deletion],
-        ],
-      );
-      final container = _buildContainer(session);
-      addTearDown(container.dispose);
-      container.listen(channelMessagesProvider(_channelId), (_, _) {});
-      await _pumpEventQueue();
-      final notifier = container.read(
-        channelMessagesProvider(_channelId).notifier,
-      );
-      notifier.addLocalMessage(
-        _event(
-          id: 'pending',
-          createdAt: 20,
-          extraTags: const [
-            ['e', 'root', '', 'reply'],
+  for (final multiTarget in [false, true]) {
+    test(
+      'unacknowledged reply needs deletion proof (multi-target: $multiTarget)',
+      () async {
+        final deletion = NostrEvent(
+          id: 'delete-pending',
+          pubkey: 'alice',
+          createdAt: 30,
+          kind: EventKind.deletion,
+          tags: [
+            ['e', 'pending'],
+            if (multiTarget) ['e', 'another-target'],
           ],
-        ),
-      );
-      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
-      container.listen(threadRepliesProvider(args), (_, _) {});
-      await container.read(threadRepliesProvider(args).future);
-      expect(
-        container.read(threadLocalRepliesProvider(args)).single.id,
-        'pending',
-      );
-      container.invalidate(threadRepliesProvider(args));
-      await container.read(threadRepliesProvider(args).future);
-      await _pumpEventQueue();
-      expect(container.exists(threadLocalRepliesProvider(args)), isFalse);
-      expect(container.read(pendingLocalMessagesProvider(_channelId)), isEmpty);
-      final filters = session.queryFilters.where(
-        (filter) => filter.kinds.contains(EventKind.deletion),
-      );
-      expect(filters, hasLength(2));
-      expect(
-        filters.every(
-          (filter) =>
-              filter.limit == 1 && filter.tags['#e']!.single == 'pending',
-        ),
-        isTrue,
-      );
-    },
-  );
+          content: '',
+          sig: 'sig',
+        );
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'root', createdAt: 10), _bounds()],
+            <NostrEvent>[],
+            <NostrEvent>[],
+            <NostrEvent>[],
+            [deletion],
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        notifier.addLocalMessage(
+          _event(
+            id: 'pending',
+            createdAt: 20,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+        );
+        const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+        container.listen(threadRepliesProvider(args), (_, _) {});
+        await container.read(threadRepliesProvider(args).future);
+        expect(
+          container.read(threadLocalRepliesProvider(args)).single.id,
+          'pending',
+        );
+        container.invalidate(threadRepliesProvider(args));
+        await container.read(threadRepliesProvider(args).future);
+        await _pumpEventQueue();
+        expect(container.exists(threadLocalRepliesProvider(args)), isFalse);
+        expect(
+          container.read(pendingLocalMessagesProvider(_channelId)),
+          isEmpty,
+        );
+        final filters = session.queryFilters.where(
+          (filter) => filter.kinds.contains(EventKind.deletion),
+        );
+        expect(filters, hasLength(2));
+        expect(
+          filters.every(
+            (filter) =>
+                filter.limit == 1 && filter.tags['#e']!.single == 'pending',
+          ),
+          isTrue,
+        );
+      },
+    );
+  }
 
   test(
     '600 live replies coalesce into one exact recount before reopen',
