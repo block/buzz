@@ -1932,6 +1932,71 @@ void main() {
     );
   }
 
+  test('unscoped proof reconciles other retained channel targets', () async {
+    final session = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: 'root', createdAt: 10),
+          _event(id: 'other-root', createdAt: 9),
+          _event(id: 'unrelated', createdAt: 8),
+          _summary(rootId: 'unrelated', replyCount: 2),
+          _bounds(),
+        ],
+        <NostrEvent>[],
+        <NostrEvent>[],
+      ],
+    );
+    final container = _buildContainer(session);
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    for (final root in ['root', 'other-root']) {
+      notifier.cacheCompleteThreadQuery(root, {}, [
+        _event(
+          id: '$root-reply',
+          createdAt: 20,
+          extraTags: [
+            ['e', root, '', 'reply'],
+          ],
+        ),
+      ]);
+    }
+    final deletion = NostrEvent(
+      id: 'multi-target-proof',
+      pubkey: 'author',
+      createdAt: 30,
+      kind: EventKind.deletion,
+      tags: const [
+        ['e', 'root-reply'],
+        ['e', 'other-root-reply'],
+        ['e', 'outside-channel'],
+      ],
+      content: '',
+      sig: 'original-signature',
+    );
+    notifier.cacheThreadDeletions([deletion], scopedTargetIds: {'root-reply'});
+    expect(notifier.cachedThreadReplyIds('other-root'), isEmpty);
+    expect(notifier.threadSummaries['other-root']?.descendantCount, 0);
+    expect(notifier.threadSummaries['unrelated']!.isCountPending, isFalse);
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    expect(notifier.threadSummaries['other-root']?.descendantCount, 0);
+    expect(notifier.threadSummaries['other-root']?.isLowerBound, isFalse);
+    expect(
+      session.queryFilters.where(
+        (filter) => filter.extensions['resolve_thread_roots'] == true,
+      ),
+      isEmpty,
+    );
+    final cached = container
+        .read(channelMessagesProvider(_channelId))
+        .value!
+        .singleWhere((event) => event.id == deletion.id);
+    expect(cached, same(deletion));
+  });
+
   for (final multiTarget in [false, true]) {
     test(
       'unacknowledged reply needs deletion proof (multi-target: $multiTarget)',

@@ -589,8 +589,16 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
               event.kind != EventKind.nip29DeleteEvent)) {
         throw StateError('Expected a deletion in channel $channelId.');
       }
+      _replyOwnership.record(events);
       final affectedTargets = scopedStandardDeletion
-          ? targets.intersection(scopedTargetIds)
+          ? targets
+                .where(
+                  (id) =>
+                      scopedTargetIds.contains(id) ||
+                      _replyOwnership.rootFor(id) != null ||
+                      events.any((cached) => cached.id == id),
+                )
+                .toSet()
           : targets;
       final reconciled = affectedTargets.intersection(reconciledTargetIds);
       _retireDeferredDeletionTargets(reconciled);
