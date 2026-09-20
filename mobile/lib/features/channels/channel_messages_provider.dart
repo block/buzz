@@ -443,18 +443,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           _retainedDeepLinkEventIds.contains(thread?.rootId),
     );
     if (identical(next, _windowStore)) return false;
-    if (event.kind == EventKind.channelThreadSummary) {
-      final root = event.getTagValue('e');
-      if (root != null) {
-        _queryThreadSummaries.remove(root);
-        _overflowFloors.remove(root);
-        _summaryRefreshes.cancel(root);
-        final version = summaryVersion ?? ++_threadQuerySerial;
-        _setThreadQueryVersion(root, version);
-        _clearDeletionUncertainty(root, version);
-      }
-    }
     _windowStore = next;
+    if (event.kind == EventKind.channelThreadSummary) {
+      _applyLiveThreadSummary(event, summaryVersion);
+    }
     _trimReplyOverlay();
     if (event.kind == EventKind.channelThreadSummary) {
       _reconcileLiveSummaryPayloads(event);

@@ -46,6 +46,28 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       ) ||
       _windowStore.liveOverlay.any((event) => event.id == root);
 
+  void _applyLiveThreadSummary(NostrEvent event, int? summaryVersion) {
+    final root = event.getTagValue('e');
+    if (root == null) return;
+    final exact = _queryThreadSummaries[root];
+    if (summaryVersion == null && exact != null) {
+      // WebSocket arrival order cannot establish freshness relative to HTTP
+      // scans. Preserve the completed scan and reconcile conflicting counts.
+      final incoming = parseChannelWindowThreadSummary(event);
+      if (incoming.replyCount != exact.replyCount ||
+          incoming.descendantCount != exact.descendantCount) {
+        _queueOverflowSummary(root, countPending: true);
+      }
+      return;
+    }
+    _queryThreadSummaries.remove(root);
+    _overflowFloors.remove(root);
+    _summaryRefreshes.cancel(root);
+    final version = summaryVersion ?? ++_threadQuerySerial;
+    _setThreadQueryVersion(root, version);
+    _clearDeletionUncertainty(root, version);
+  }
+
   Iterable<NostrEvent> _visibleNestedRows(String root) =>
       (_lastKnownMessages ?? const <NostrEvent>[]).where(
         (event) =>

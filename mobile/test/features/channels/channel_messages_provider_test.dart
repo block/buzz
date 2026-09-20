@@ -3713,6 +3713,56 @@ void main() {
     );
   });
 
+  for (final newReplyExists in [false, true]) {
+    test(
+      'live summary after empty scan is reconciled (new reply: $newReplyExists)',
+      () async {
+        final recount = Completer<List<NostrEvent>>();
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'root', createdAt: 10), _bounds()],
+            recount.future,
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        notifier.cacheCompleteThreadQuery('root', {}, []);
+        session.emit(_summary(rootId: 'root', replyCount: 1));
+        expect(notifier.threadSummaries['root']!.descendantCount, 0);
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions.containsKey('depth_limit'),
+          ),
+          hasLength(1),
+        );
+        recount.complete([
+          if (newReplyExists)
+            _event(
+              id: 'new-reply',
+              createdAt: 30,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+        ]);
+        await _pumpEventQueue();
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(entries.single.summary?.replyCount, newReplyExists ? 1 : null);
+      },
+    );
+  }
+
   for (final stillExists in [false, true]) {
     test(
       'live summary reconciles contradictory cached replies (exists: $stillExists)',
