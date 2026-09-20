@@ -54,6 +54,17 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       // WebSocket arrival order cannot establish freshness relative to HTTP
       // scans. Preserve the completed scan and reconcile conflicting counts.
       final incoming = parseChannelWindowThreadSummary(event);
+      // Rejected payloads must not regain authority when a later page clears
+      // the query overlay (zero-count page summaries are omitted by the relay).
+      _windowStore = ChannelWindowStore(
+        pages: _windowStore.pages,
+        liveOverlay: _windowStore.liveOverlay,
+        liveAux: _windowStore.liveAux,
+        liveThreadSummaries: {
+          for (final entry in _windowStore.liveThreadSummaries.entries)
+            if (entry.key != root) entry.key: entry.value,
+        },
+      );
       if (incoming.replyCount != exact.replyCount ||
           incoming.descendantCount != exact.descendantCount) {
         _queueOverflowSummary(root, countPending: true);

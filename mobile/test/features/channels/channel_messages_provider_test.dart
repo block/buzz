@@ -3713,6 +3713,45 @@ void main() {
     );
   });
 
+  test('pagination cannot revive a rejected live summary', () async {
+    final session = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: 'newest', createdAt: 100),
+          _bounds(hasMore: true, cursorCreatedAt: 100, cursorId: 'newest'),
+        ],
+        [
+          _event(id: 'old-root', createdAt: 10),
+          _bounds(dTag: '${_channelId.toLowerCase()}:100:newest'),
+        ],
+      ],
+    );
+    final container = _buildContainer(session);
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    final load = notifier.loadEventsById(['old-root']);
+    session.completeTargetHistory([_event(id: 'old-root', createdAt: 10)]);
+    await load;
+    notifier.cacheCompleteThreadQuery('old-root', {}, []);
+    session.emit(_summary(rootId: 'old-root', replyCount: 1));
+    expect(notifier.threadSummaries['old-root']!.descendantCount, 0);
+    expect(await notifier.fetchOlder(), isTrue);
+    final entries = buildMainTimelineEntries(
+      formatTimeline(
+        container.read(channelMessagesProvider(_channelId)).value!,
+      ),
+      relaySummaries: notifier.threadSummaries,
+    );
+    expect(
+      entries.singleWhere((e) => e.message.id == 'old-root').summary,
+      isNull,
+    );
+  });
+
   for (final newReplyExists in [false, true]) {
     test(
       'live summary after empty scan is reconciled (new reply: $newReplyExists)',
