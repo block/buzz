@@ -203,7 +203,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       ]);
       _lastKnownMessages = merged;
       _reconcileRetainedSummaryPayloads(merged);
-      if (!_usingChannelWindow) _reconcileFallbackSummaries(historyVersion);
+      _reconcileRetainedAggregates(historyVersion);
       state = AsyncData(merged);
       _summaryRefreshes.resume();
     } catch (e, st) {

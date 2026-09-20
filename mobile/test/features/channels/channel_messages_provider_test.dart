@@ -3112,6 +3112,56 @@ void main() {
     );
   }
 
+  for (final survives in [false, true]) {
+    test(
+      'successful reconnect refreshes retained root (survives: $survives)',
+      () async {
+        final reply = _event(
+          id: 'old-reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'retained', '', 'reply'],
+          ],
+        );
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'retained', createdAt: 10), _bounds()],
+            [_event(id: 'newest', createdAt: 200), _bounds()],
+            [if (survives) reply],
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        await notifier.loadEventsById(['retained']);
+        notifier.cacheCompleteThreadQuery('retained', {}, [reply]);
+        session.setConnected(false);
+        await _pumpEventQueue();
+        session.setConnected(true);
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions.containsKey('depth_limit'),
+          ),
+          hasLength(1),
+        );
+        expect(
+          notifier.threadSummaries['retained']?.descendantCount,
+          survives ? 1 : 0,
+        );
+        expect(notifier.threadSummaries['retained']?.isCountPending, isFalse);
+        expect(
+          notifier.cachedThreadReplyIds('retained'),
+          survives ? {'old-reply'} : isEmpty,
+        );
+      },
+    );
+  }
+
   for (final phase in ['queued', 'inflight', 'late', 'backoff', 'exhausted']) {
     test('ownership recovery resumes across reconnect: $phase', () async {
       final first = Completer<List<NostrEvent>>();

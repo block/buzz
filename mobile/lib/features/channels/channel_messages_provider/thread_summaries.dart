@@ -199,8 +199,8 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     _queueOverflowSummary(root, countPending: true);
   }
 
-  void _reconcileFallbackSummaries(int historyVersion) {
-    // A bounded WebSocket history is not proof that an absent reply was deleted.
+  void _reconcileRetainedAggregates(int historyVersion) {
+    // Bounded history cannot refresh retained roots outside the newest page.
     // Recount visible cached aggregates, marking their old totals uncertain in
     // the meantime. Requests or live summaries newer than this history win.
     final roots = {
