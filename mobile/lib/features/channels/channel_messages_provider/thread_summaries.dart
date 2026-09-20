@@ -234,8 +234,9 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     String target,
     Set<String> candidates,
     int generation,
-    int version,
-  ) async {
+    int version, {
+    int attempt = 0,
+  }) async {
     try {
       final events = await _summarySession.queryRelay([
         NostrFilter(
@@ -266,8 +267,22 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       // Only this target's correlated summary can retire its uncertainty.
       _finishDeletionLookup(candidates, version, resolved: events.length == 1);
     } catch (error) {
-      // Keep pending presentation on query failure; a fresh summary or explicit
-      // thread query can still reconcile it.
+      if (!_summaryMounted || generation != _initVersion) return;
+      if (error is! StateError && error is! FormatException && attempt < 2) {
+        // Keep the queue slot and original version while backing off. Retries
+        // cannot exceed the shared concurrency cap or supersede newer evidence.
+        await Future<void>.delayed(Duration(milliseconds: 500 << attempt));
+        if (!_summaryMounted || generation != _initVersion) return;
+        await _resolveDeletionOwner(
+          target,
+          candidates,
+          generation,
+          version,
+          attempt: attempt + 1,
+        );
+        return;
+      }
+      // Exhausted or invalid responses remain uncertain until fresh evidence.
       if (_summaryMounted && generation == _initVersion) {
         _finishDeletionLookup(candidates, version, resolved: false);
         debugPrint(

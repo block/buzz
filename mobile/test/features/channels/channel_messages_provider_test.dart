@@ -2542,6 +2542,76 @@ void main() {
     },
   );
 
+  for (final outcome in ['recovered', 'exhausted', 'disposed']) {
+    test('deletion ownership retries are bounded: $outcome', () async {
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [
+            _event(id: 'root', createdAt: 10),
+            _summary(rootId: 'root', replyCount: 1),
+            _bounds(),
+          ],
+          Exception('temporary outage'),
+          if (outcome == 'recovered')
+            [_summary(rootId: 'root', replyCount: 0)]
+          else ...[
+            Exception('still unavailable'),
+            Exception('still unavailable'),
+          ],
+        ],
+      );
+      final container = _buildContainer(session);
+      if (outcome != 'disposed') addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      final deletion = NostrEvent(
+        id: 'delete-unknown',
+        pubkey: 'author',
+        createdAt: 100,
+        kind: EventKind.deletion,
+        tags: const [
+          ['h', _channelId],
+          ['e', 'unknown'],
+        ],
+        content: '',
+        sig: '',
+      );
+      session.emit(deletion);
+      await _pumpEventQueue();
+      int requests() => session.queryFilters
+          .where((f) => f.extensions['resolve_thread_roots'] == true)
+          .length;
+      expect(requests(), 1);
+      expect(notifier.threadSummaries['root']!.isCountPending, isTrue);
+      // A replay is deduplicated, but must not prevent the scheduled recovery.
+      session.emit(deletion);
+      if (outcome == 'disposed') container.dispose();
+      await Future<void>.delayed(
+        Duration(milliseconds: outcome == 'exhausted' ? 3800 : 800),
+      );
+      expect(requests(), switch (outcome) {
+        'recovered' => 2,
+        'disposed' => 1,
+        _ => 3,
+      });
+      if (outcome == 'recovered') {
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(entries.single.summary, isNull);
+        expect(notifier.threadSummaries['root']!.isCountPending, isFalse);
+      } else if (outcome == 'exhausted') {
+        expect(notifier.threadSummaries['root']!.isCountPending, isTrue);
+      }
+    });
+  }
+
   for (final disposeEarly in [false, true]) {
     test(
       'ownership recovery bounds deletion bursts (dispose: $disposeEarly)',
