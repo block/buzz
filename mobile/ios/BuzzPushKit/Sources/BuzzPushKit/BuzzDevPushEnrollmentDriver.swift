@@ -868,7 +868,7 @@ public final class BuzzDevPushEnrollmentDriver {
       Self.isLowercaseHexPubkey(current[0].pubkey),
       document.push.appProfiles?.contains(where: {
         $0.id == configuredAppProfile && $0.transport == "apns"
-      }) ?? configuredAppProfile == Self.appProfile
+      }) ?? (configuredAppProfile == Self.appProfile)
     else {
       throw BuzzDevPushEnrollmentError.invalidRelayDescriptor
     }
