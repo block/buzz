@@ -8,6 +8,7 @@ import 'channel_window.dart';
 import 'thread_replies_provider.dart';
 import 'thread_summary_refresh_queue.dart';
 import 'thread_reply_ownership.dart';
+import 'timeline_message.dart';
 
 part 'channel_messages_provider/thread_summaries.dart';
 
@@ -730,6 +731,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           .take(5)
           .toList(),
     );
+    _reconcileNestedThreadSummaries(rootId, aggregate, evidenceVersion);
     // Metadata is small but still bounded independently of payload retention.
     while (_queryThreadSummaries.length > 2048) {
       _queryThreadSummaries.remove(_queryThreadSummaries.keys.first);

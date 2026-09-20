@@ -3503,6 +3503,93 @@ void main() {
     },
   );
 
+  for (final known in [false, true]) {
+    for (final survives in [false, true]) {
+      test(
+        'nested deletion reconciles broadcast summary (known: $known, survives: $survives)',
+        () async {
+          final broadcast = _event(
+            id: 'broadcast',
+            createdAt: 20,
+            extraTags: const [
+              ['e', 'root', '', 'root'],
+              ['e', 'root', '', 'reply'],
+              ['broadcast', '1'],
+            ],
+          );
+          NostrEvent child(String id) => _event(
+            id: id,
+            createdAt: 30,
+            extraTags: const [
+              ['e', 'root', '', 'root'],
+              ['e', 'broadcast', '', 'reply'],
+            ],
+          );
+          final session = _RecordingRelaySessionNotifier(
+            queryResults: [
+              [
+                broadcast,
+                _event(id: 'root', createdAt: 10),
+                _summary(
+                  rootId: 'root',
+                  replyCount: 1,
+                  descendantCount: survives ? 3 : 2,
+                ),
+                _summary(
+                  rootId: 'broadcast',
+                  replyCount: survives ? 2 : 1,
+                  descendantCount: 0,
+                ),
+                _bounds(),
+              ],
+              if (!known)
+                [_summary(rootId: 'root', replyCount: survives ? 2 : 1)],
+              [broadcast, if (survives) child('survivor')],
+            ],
+          );
+          final container = _buildContainer(session);
+          addTearDown(container.dispose);
+          container.listen(channelMessagesProvider(_channelId), (_, _) {});
+          await _pumpEventQueue();
+          final notifier = container.read(
+            channelMessagesProvider(_channelId).notifier,
+          );
+          if (known) {
+            notifier.cacheConfirmedThreadReplies([child('deleted-child')]);
+          }
+          session.emit(
+            NostrEvent(
+              id: 'delete-child',
+              pubkey: 'author',
+              createdAt: 40,
+              kind: EventKind.deletion,
+              tags: const [
+                ['h', _channelId],
+                ['e', 'deleted-child'],
+              ],
+              content: '',
+              sig: '',
+            ),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 350));
+          final entries = buildMainTimelineEntries(
+            formatTimeline(
+              container.read(channelMessagesProvider(_channelId)).value!,
+            ),
+            relaySummaries: notifier.threadSummaries,
+          );
+          expect(
+            entries
+                .singleWhere((e) => e.message.id == 'broadcast')
+                .summary
+                ?.replyCount,
+            survives ? 1 : null,
+          );
+        },
+      );
+    }
+  }
+
   test('deleted-target metadata disables only the owning empty root', () async {
     final session = _RecordingRelaySessionNotifier(
       queryResults: [
@@ -4188,6 +4275,7 @@ NostrEvent _huddleEvent({
 NostrEvent _summary({
   required String rootId,
   required int replyCount,
+  int? descendantCount,
   int createdAt = 20,
 }) {
   return NostrEvent(
@@ -4201,7 +4289,7 @@ NostrEvent _summary({
     ],
     content: jsonEncode({
       'reply_count': replyCount,
-      'descendant_count': replyCount,
+      'descendant_count': descendantCount ?? replyCount,
       'last_reply_at': 20,
       'participants': ['alice'],
     }),

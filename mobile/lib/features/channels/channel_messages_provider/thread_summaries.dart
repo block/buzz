@@ -46,13 +46,67 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       ) ||
       _windowStore.liveOverlay.any((event) => event.id == root);
 
+  Iterable<NostrEvent> _visibleNestedRows(String root) =>
+      (_lastKnownMessages ?? const <NostrEvent>[]).where(
+        (event) =>
+            event.threadReference.rootId == root &&
+            event.threadReference.parentId != null &&
+            event.tags.any(
+              (tag) => tag.length > 1 && tag[0] == 'broadcast' && tag[1] == '1',
+            ) &&
+            _isVisibleRoot(event.id),
+      );
+
+  void _reconcileNestedThreadSummaries(
+    String root,
+    List<NostrEvent> replies,
+    int version,
+  ) {
+    final rows = _visibleNestedRows(root).toList();
+    if (rows.isEmpty) return;
+    final entries = buildMainTimelineEntries(
+      formatTimeline([
+        ...{
+          for (final event in [...rows, ...replies]) event.id: event,
+        }.values,
+      ]),
+    );
+    for (final row in rows) {
+      if ((_threadQueryVersions[row.id] ?? 0) > version) continue;
+      final summary = entries
+          .where((entry) => entry.message.id == row.id)
+          .firstOrNull
+          ?.summary;
+      _setThreadQueryVersion(row.id, version);
+      _clearDeletionUncertainty(row.id, version);
+      _overflowFloors.remove(row.id);
+      _queryThreadSummaries.remove(row.id);
+      _queryThreadSummaries[row.id] = ChannelWindowThreadSummary(
+        replyCount: replies
+            .where((event) => event.threadReference.parentId == row.id)
+            .length,
+        descendantCount: summary?.replyCount ?? 0,
+        lastReplyAt: summary?.lastReplyAt,
+        participantPubkeys: summary?.participantPubkeys ?? const [],
+      );
+    }
+  }
+
   void _reconcileLiveSummaryPayloads(NostrEvent event) {
     final root = event.getTagValue('e');
     if (root == null || !_isVisibleRoot(root)) return;
     final summary = _baseThreadSummaries[root];
     final confirmedIds = cachedThreadReplyIds(root)
       ..removeAll(_localReplyRoots.keys);
-    if (summary == null || confirmedIds.length <= summary.descendantCount) {
+    // Relay deletion fan-out updates the outer root only. Its visible broadcast
+    // children need the same complete scan to refresh their direct-reply facts.
+    final nestedNeedsRecount = _visibleNestedRows(root).any((row) {
+      final nested = _baseThreadSummaries[row.id];
+      return nested != null &&
+          (nested.replyCount > 0 || nested.descendantCount > 0);
+    });
+    if (!nestedNeedsRecount &&
+        (summary == null || confirmedIds.length <= summary.descendantCount)) {
       return;
     }
     // The summary may lag a new reply, or its deletion marker may have been
