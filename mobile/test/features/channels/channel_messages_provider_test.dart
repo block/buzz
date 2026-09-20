@@ -3039,7 +3039,7 @@ void main() {
             ],
             first.future,
             second.future,
-            for (var i = 2; i < count && i < 258; i++)
+            for (var i = 2; i < count; i++)
               i == count - 1
                   ? [_summary(rootId: 'root', replyCount: 0)]
                   : <NostrEvent>[],
@@ -3052,20 +3052,19 @@ void main() {
         final notifier = container.read(
           channelMessagesProvider(_channelId).notifier,
         );
-        session.emit(
-          NostrEvent(
-            id: 'large-delete',
-            pubkey: 'author',
-            createdAt: 100,
-            kind: EventKind.deletion,
-            tags: [
-              ['h', _channelId],
-              for (var i = 0; i < count; i++) ['e', 'unknown-$i'],
-            ],
-            content: '',
-            sig: '',
-          ),
+        final deletion = NostrEvent(
+          id: 'large-delete',
+          pubkey: 'author',
+          createdAt: 100,
+          kind: EventKind.deletion,
+          tags: [
+            ['h', _channelId],
+            for (var i = 0; i < count; i++) ['e', 'unknown-$i'],
+          ],
+          content: '',
+          sig: '',
         );
+        session.emit(deletion);
         int requests() => session.queryFilters
             .where((f) => f.extensions['resolve_thread_roots'] == true)
             .length;
@@ -3086,6 +3085,18 @@ void main() {
           expect(entries.single.summary, isNull);
         } else {
           expect(notifier.threadSummaries['root']!.isCountPending, isTrue);
+          session.emit(deletion);
+          await _pumpEventQueue();
+          expect(requests(), count);
+          expect(notifier.threadSummaries['root']!.descendantCount, 0);
+          expect(notifier.threadSummaries['root']!.isCountPending, isFalse);
+          session.emit(deletion);
+          await _pumpEventQueue();
+          expect(
+            requests(),
+            count,
+            reason: 'admitted targets stay deduplicated',
+          );
         }
       },
     );

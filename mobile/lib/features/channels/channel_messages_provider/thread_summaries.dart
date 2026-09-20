@@ -173,7 +173,9 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
           for (final tag in event.tags)
             if (tag.length > 1 && tag[0] == 'e') tag[1],
     };
-    final fresh = targets.difference(alreadyDeleted);
+    final fresh = targets.difference(alreadyDeleted)
+      ..addAll(targets.intersection(_deferredDeletionTargets));
+    _deferredDeletionTargets.removeAll(fresh);
     _rememberDeletionTargets(targets);
     if (fresh.isEmpty) return;
     final candidates = _applyDeletedSummaries(fresh, before);
@@ -268,7 +270,15 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
           entry.value,
         );
       });
-      if (!accepted) {
+      if (accepted) {
+        _deferredDeletionTargets.remove(entry.key);
+      } else {
+        // Keep bounded identity-only evidence so replay can retry rejected work
+        // even when the deletion marker is still in the cached channel window.
+        _deferredDeletionTargets.add(entry.key);
+        while (_deferredDeletionTargets.length > 8192) {
+          _deferredDeletionTargets.remove(_deferredDeletionTargets.first);
+        }
         _finishDeletionLookup(candidates, entry.value, resolved: false);
       }
     }
