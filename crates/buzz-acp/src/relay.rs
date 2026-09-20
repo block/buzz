@@ -712,6 +712,10 @@ pub struct HarnessRelay {
     /// Wrapped in `Option` so `shutdown()` can take ownership without conflicting
     /// with `Drop` (which only has `&mut self`).
     bg_handle: Option<tokio::task::JoinHandle<()>>,
+    /// When false, channel and observer REQ subscriptions are not opened.
+    /// Membership REQ is independent (does not start a turn). Outbound
+    /// `PublishEvent` still goes through. Conventions §4 single input path.
+    inbound_subscribe: bool,
 }
 
 /// Cloneable publisher handle for signed events on the relay background socket.
@@ -807,7 +811,16 @@ impl HarnessRelay {
             keys: keys.clone(),
             auth_tag,
             bg_handle: Some(bg_handle),
+            inbound_subscribe: true,
         })
+    }
+
+    /// Disable (or re-enable) inbound relay subscriptions.
+    ///
+    /// Outbound publish is unchanged. Used when `--relay-input false` so a
+    /// forward sidecar is the only intake path.
+    pub fn set_inbound_subscribe(&mut self, enabled: bool) {
+        self.inbound_subscribe = enabled;
     }
 
     /// Discover channels the agent is a member of.
@@ -914,6 +927,10 @@ impl HarnessRelay {
         filter: ChannelFilter,
         replay_since: Option<u64>,
     ) -> Result<(), RelayError> {
+        if !self.inbound_subscribe {
+            debug!("inbound subscribe disabled; skipping channel {channel_id}");
+            return Ok(());
+        }
         self.cmd_tx
             .send(RelayCommand::Subscribe {
                 channel_id,
@@ -927,6 +944,10 @@ impl HarnessRelay {
     }
 
     /// Subscribe to membership notifications for this agent.
+    ///
+    /// Membership REQ stays open even when channel inbound is off (§4
+    /// single input: membership does not start a turn; it only updates
+    /// the subscribed set the forward gate reads).
     pub async fn subscribe_membership_notifications(&mut self) -> Result<(), RelayError> {
         self.cmd_tx
             .send(RelayCommand::SubscribeMembership)
@@ -937,6 +958,10 @@ impl HarnessRelay {
 
     /// Subscribe to encrypted observer control frames addressed to this agent.
     pub async fn subscribe_observer_controls(&mut self) -> Result<(), RelayError> {
+        if !self.inbound_subscribe {
+            debug!("inbound subscribe disabled; skipping observer controls");
+            return Ok(());
+        }
         self.cmd_tx
             .send(RelayCommand::SubscribeObserverControls)
             .await
@@ -6973,5 +6998,77 @@ mod tests {
             !state.channel_dropped_since.contains_key(&channel_id),
             "channel_dropped_since must be cleared on successful drain"
         );
+    }
+
+    fn test_stub_relay(inbound_subscribe: bool) -> (HarnessRelay, mpsc::Receiver<RelayCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let relay = HarnessRelay {
+            event_rx,
+            observer_control_rx: None,
+            cmd_tx,
+            http: reqwest::Client::new(),
+            relay_url: "ws://localhost:3000".into(),
+            keys: Keys::generate(),
+            auth_tag: None,
+            bg_handle: None,
+            inbound_subscribe,
+        };
+        (relay, cmd_rx)
+    }
+
+    #[tokio::test]
+    async fn inbound_off_keeps_membership_req_but_skips_channel_and_observer() {
+        let (mut relay, mut cmd_rx) = test_stub_relay(false);
+        relay
+            .subscribe_membership_notifications()
+            .await
+            .expect("membership stays on");
+        let membership = cmd_rx.try_recv().expect("membership REQ queued");
+        assert!(matches!(membership, RelayCommand::SubscribeMembership));
+        relay
+            .subscribe_observer_controls()
+            .await
+            .expect("noop observer");
+        relay
+            .subscribe_channel(Uuid::nil(), test_channel_filter())
+            .await
+            .expect("noop channel");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "inbound-off must send 0 channel/observer subscribe commands"
+        );
+
+        let event = EventBuilder::new(Kind::TextNote, "outbound")
+            .tags([])
+            .sign_with_keys(&relay.keys)
+            .expect("sign");
+        relay
+            .event_publisher()
+            .publish_event(event)
+            .await
+            .expect("publish still works");
+        let cmd = cmd_rx.try_recv().expect("publish command queued");
+        assert!(
+            matches!(cmd, RelayCommand::PublishEvent { .. }),
+            "outbound publish must still reach the background task"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_on_still_queues_subscribe_commands() {
+        let (mut relay, mut cmd_rx) = test_stub_relay(true);
+        relay
+            .subscribe_membership_notifications()
+            .await
+            .expect("membership");
+        let cmd = cmd_rx.try_recv().expect("membership command queued");
+        assert!(matches!(cmd, RelayCommand::SubscribeMembership));
+        relay
+            .subscribe_channel(Uuid::nil(), test_channel_filter())
+            .await
+            .expect("channel");
+        let cmd = cmd_rx.try_recv().expect("channel command queued");
+        assert!(matches!(cmd, RelayCommand::Subscribe { .. }));
     }
 }
