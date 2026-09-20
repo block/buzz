@@ -1072,6 +1072,67 @@ void main() {
     },
   );
 
+  test(
+    'thread scan bounds pending deletion proofs and retains excess replies',
+    () async {
+      NostrEvent marker(int i) => NostrEvent(
+        id: 'deletion-$i',
+        pubkey: 'author',
+        createdAt: 100,
+        kind: EventKind.deletion,
+        tags: [
+          ['h', _channelId],
+          ['e', 'pending-$i'],
+        ],
+        content: '',
+        sig: '',
+      );
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+          <NostrEvent>[],
+          [for (var i = 0; i < 20; i++) marker(i)],
+          <NostrEvent>[],
+          [for (var i = 20; i < 25; i++) marker(i)],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      for (var i = 0; i < 25; i++) {
+        notifier.addLocalMessage(
+          _event(
+            id: 'pending-$i',
+            createdAt: 20 + i,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+        );
+      }
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      container.listen(threadRepliesProvider(args), (_, _) {});
+      await container.read(threadRepliesProvider(args).future);
+      int proofs() => session.queryFilters
+          .where((f) => f.kinds.contains(EventKind.deletion))
+          .length;
+      expect(proofs(), 20);
+      expect(notifier.unconfirmedThreadReplyIds('root'), {
+        for (var i = 20; i < 25; i++) 'pending-$i',
+      });
+      expect(container.read(threadLocalRepliesProvider(args)), hasLength(5));
+      container.invalidate(threadRepliesProvider(args));
+      await container.read(threadRepliesProvider(args).future);
+      expect(proofs(), 25);
+      expect(notifier.unconfirmedThreadReplyIds('root'), isEmpty);
+      expect(container.read(threadLocalRepliesProvider(args)), isEmpty);
+    },
+  );
+
   for (final count in [1, 300]) {
     for (final acknowledgeDuringQuery in [false, true]) {
       test(

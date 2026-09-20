@@ -68,14 +68,14 @@ final threadRepliesProvider = FutureProvider.autoDispose
             ) ??
             <String>{};
         final deletions = <NostrEvent>[];
-        final targets = missingIds.toList();
-        // Each target has its own limit: repeated markers for one reply
-        // cannot crowd another reply out of a shared result cap.
-        for (var start = 0; start < targets.length; start += 20) {
-          final batch = targets.skip(start).take(20);
+        // One bounded request per scan keeps opening a thread responsive even
+        // when many sends are awaiting ACKs. Excess IDs remain provisional.
+        final targets = missingIds.take(20).toList();
+        // Per-target limits keep repeated markers from crowding another ID out.
+        if (targets.isNotEmpty) {
           deletions.addAll(
             await session.queryRelay([
-              for (final target in batch)
+              for (final target in targets)
                 NostrFilter(
                   kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
                   tags: {
