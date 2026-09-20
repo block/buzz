@@ -3724,6 +3724,113 @@ void main() {
     },
   );
 
+  for (final survives in [false, true]) {
+    test(
+      'initial page reconciles earlier outer evidence (survives: $survives)',
+      () async {
+        final page = Completer<List<NostrEvent>>();
+        final broadcast = _event(
+          id: 'broadcast',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'root'],
+            ['e', 'root', '', 'reply'],
+            ['broadcast', '1'],
+          ],
+        );
+        final outer = _summary(
+          rootId: 'root',
+          replyCount: 1,
+          descendantCount: survives ? 2 : 1,
+        );
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            page.future,
+            [outer],
+            [
+              broadcast,
+              if (survives)
+                _event(
+                  id: 'survivor',
+                  createdAt: 30,
+                  extraTags: const [
+                    ['e', 'root', '', 'root'],
+                    ['e', 'broadcast', '', 'reply'],
+                  ],
+                ),
+            ],
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        session.emit(outer);
+        session.emit(
+          NostrEvent(
+            id: 'delete-child',
+            pubkey: 'author',
+            createdAt: 40,
+            kind: EventKind.deletion,
+            tags: const [
+              ['h', _channelId],
+              ['e', 'deleted-child'],
+            ],
+            content: '',
+            sig: '',
+          ),
+        );
+        await _pumpEventQueue();
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions['resolve_thread_roots'] == true,
+          ),
+          hasLength(1),
+        );
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions.containsKey('depth_limit'),
+          ),
+          isEmpty,
+        );
+        page.complete([
+          broadcast,
+          _summary(
+            rootId: 'broadcast',
+            replyCount: survives ? 2 : 1,
+            descendantCount: 0,
+          ),
+          _bounds(),
+        ]);
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        final events = container
+            .read(channelMessagesProvider(_channelId))
+            .value!;
+        expect(events.any((e) => e.id == 'root'), isFalse);
+        final entries = buildMainTimelineEntries(
+          formatTimeline(events),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(
+          entries
+              .singleWhere((e) => e.message.id == 'broadcast')
+              .summary
+              ?.replyCount,
+          survives ? 1 : null,
+        );
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions.containsKey('depth_limit'),
+          ),
+          hasLength(1),
+        );
+      },
+    );
+  }
+
   for (final rootVisible in [false, true]) {
     for (final source in ['known', 'owner', 'live']) {
       for (final survives in [false, true]) {

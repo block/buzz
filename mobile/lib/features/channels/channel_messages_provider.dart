@@ -202,6 +202,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ...history.where((event) => existingIds.add(event.id)),
       ]);
       _lastKnownMessages = merged;
+      _reconcileRetainedSummaryPayloads(merged);
       if (!_usingChannelWindow) _reconcileFallbackSummaries(historyVersion);
       state = AsyncData(merged);
       _summaryRefreshes.resume();
@@ -255,22 +256,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       );
       history.sort(compareChannelTimelineEventsChronologically);
       return history;
-    }
-  }
-
-  void _reconcilePageSummaries(ChannelWindowPage page, int pageVersion) {
-    for (final row in page.rows) {
-      final root = row.event.id;
-      if ((_threadEvidenceVersions[root] ?? 0) > pageVersion) continue;
-      _queryThreadSummaries.remove(root);
-      _overflowFloors.remove(root);
-      _summaryRefreshes.cancel(root);
-      _setThreadQueryVersion(root, pageVersion);
-      _clearDeletionUncertainty(root, pageVersion);
-      if (cachedThreadReplyIds(root).length >
-          (row.thread?.descendantCount ?? 0)) {
-        _queueOverflowSummary(root);
-      }
     }
   }
 
@@ -913,6 +898,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       state.value ?? _lastKnownMessages ?? const [],
     );
     _lastKnownMessages = merged;
+    _reconcileRetainedSummaryPayloads(events);
     state = AsyncData(merged);
   }
 
@@ -952,6 +938,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           flattenChannelWindowEvents(_windowStore),
         );
         _lastKnownMessages = flattened;
+        _reconcileRetainedSummaryPayloads(page.rows.map((row) => row.event));
         state = AsyncData(flattened);
         return page.rows.isNotEmpty || page.aux.isNotEmpty;
       } catch (error) {

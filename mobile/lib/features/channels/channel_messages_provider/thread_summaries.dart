@@ -1,6 +1,22 @@
 part of '../channel_messages_provider.dart';
 
 extension _ThreadSummaryState on ChannelMessagesNotifier {
+  void _reconcilePageSummaries(ChannelWindowPage page, int pageVersion) {
+    for (final row in page.rows) {
+      final root = row.event.id;
+      if ((_threadEvidenceVersions[root] ?? 0) > pageVersion) continue;
+      _queryThreadSummaries.remove(root);
+      _overflowFloors.remove(root);
+      _summaryRefreshes.cancel(root);
+      _setThreadQueryVersion(root, pageVersion);
+      _clearDeletionUncertainty(root, pageVersion);
+      if (cachedThreadReplyIds(root).length >
+          (row.thread?.descendantCount ?? 0)) {
+        _queueOverflowSummary(root);
+      }
+    }
+  }
+
   Iterable<NostrEvent> get _cachedThreadEvents => [
     ..._windowStore.liveOverlay,
     if (!_usingChannelWindow) ...?_lastKnownMessages,
@@ -146,7 +162,23 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
 
   void _reconcileLiveSummaryPayloads(NostrEvent event) {
     final root = event.getTagValue('e');
-    if (root == null || !_hasVisibleThreadRows(root)) return;
+    if (root != null) _reconcileThreadSummaryPayloads(root);
+  }
+
+  void _reconcileRetainedSummaryPayloads(Iterable<NostrEvent> events) {
+    // Evidence can precede the page that first exposes a broadcast branch.
+    final roots = events
+        .map((event) => event.threadReference.rootId)
+        .whereType<String>()
+        .where(_windowStore.liveThreadSummaries.containsKey)
+        .toSet();
+    for (final root in roots) {
+      _reconcileThreadSummaryPayloads(root);
+    }
+  }
+
+  void _reconcileThreadSummaryPayloads(String root) {
+    if (!_hasVisibleThreadRows(root)) return;
     final summary = _baseThreadSummaries[root];
     final confirmedIds = cachedThreadReplyIds(root)
       ..removeAll(_localReplyRoots.keys);
