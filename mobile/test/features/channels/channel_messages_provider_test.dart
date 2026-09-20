@@ -4024,6 +4024,80 @@ void main() {
     },
   );
 
+  for (final lookupFails in [false, true]) {
+    test(
+      'direct-only broadcast deletion stays uncertain (lookup fails: $lookupFails)',
+      () async {
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              _event(
+                id: 'broadcast',
+                createdAt: 20,
+                extraTags: const [
+                  ['e', 'root', '', 'root'],
+                  ['e', 'root', '', 'reply'],
+                  ['broadcast', '1'],
+                ],
+              ),
+              _summary(rootId: 'broadcast', replyCount: 1, descendantCount: 0),
+              _bounds(),
+            ],
+            if (lookupFails)
+              for (var i = 0; i < 3; i++) Exception('ownership unavailable')
+            else
+              <NostrEvent>[],
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        session.emit(
+          NostrEvent(
+            id: 'delete-evicted-child',
+            pubkey: 'author',
+            createdAt: 30,
+            kind: EventKind.deletion,
+            tags: const [
+              ['h', _channelId],
+              ['e', 'evicted-child'],
+            ],
+            content: '',
+            sig: 'sig',
+          ),
+        );
+        expect(notifier.threadSummaries['broadcast']?.isCountPending, isTrue);
+        await Future<void>.delayed(
+          Duration(milliseconds: lookupFails ? 1800 : 50),
+        );
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(entries.single.summary?.isCountPending, isTrue);
+        expect(entries.single.summary?.isLowerBound, isTrue);
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions['resolve_thread_roots'] == true,
+          ),
+          hasLength(lookupFails ? 3 : 1),
+        );
+        expect(
+          session.queryFilters.where(
+            (f) => f.extensions.containsKey('depth_limit'),
+          ),
+          isEmpty,
+        );
+      },
+    );
+  }
+
   for (final rootVisible in [false, true]) {
     for (final source in ['known', 'owner', 'live']) {
       for (final survives in [false, true]) {

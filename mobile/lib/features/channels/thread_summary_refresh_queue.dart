@@ -123,7 +123,8 @@ Map<String, ChannelWindowThreadSummary> lowerBoundSummariesAfterDeletion(
     for (final entry in summaries.entries)
       if (knownRoots.contains(entry.key) ||
           (hasUnknownTarget &&
-              entry.value.descendantCount > (cached[entry.key] ?? 0)))
+              math.max(entry.value.replyCount, entry.value.descendantCount) >
+                  (cached[entry.key] ?? 0)))
         entry.key: ChannelWindowThreadSummary(
           replyCount: math.max(
             0,
