@@ -1027,6 +1027,81 @@ void main() {
     );
   }
 
+  for (final count in [1, 300]) {
+    for (final acknowledgeDuringQuery in [false, true]) {
+      test(
+        'proof tombstone preserves $count surviving replies (late ACK: $acknowledgeDuringQuery)',
+        () async {
+          final scan = Completer<List<NostrEvent>>();
+          final survivors = [
+            for (var i = 0; i < count; i++)
+              _event(
+                id: 'survivor-$i',
+                createdAt: 30 + i,
+                extraTags: const [
+                  ['e', 'root', '', 'reply'],
+                ],
+              ),
+          ];
+          final session = _RecordingRelaySessionNotifier(
+            queryResults: [
+              [_event(id: 'root', createdAt: 10), _bounds()],
+              scan.future,
+              if (count >= 200) survivors.skip(200).toList(),
+              [
+                NostrEvent(
+                  id: 'offline-deletion',
+                  pubkey: 'author',
+                  createdAt: 25,
+                  kind: EventKind.deletion,
+                  tags: const [
+                    ['h', _channelId],
+                    ['e', 'deleted-local'],
+                  ],
+                  content: '',
+                  sig: '',
+                ),
+              ],
+            ],
+          );
+          final container = _buildContainer(session);
+          addTearDown(container.dispose);
+          container.listen(channelMessagesProvider(_channelId), (_, _) {});
+          await _pumpEventQueue();
+          final notifier = container.read(
+            channelMessagesProvider(_channelId).notifier,
+          );
+          notifier.addLocalMessage(
+            _event(
+              id: 'deleted-local',
+              createdAt: 20,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+          );
+          const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+          container.listen(threadRepliesProvider(args), (_, _) {});
+          final result = container.read(threadRepliesProvider(args).future);
+          await _pumpEventQueue();
+          if (acknowledgeDuringQuery)
+            notifier.completeLocalMessage('deleted-local');
+          scan.complete(survivors.take(200).toList());
+          expect(await result, survivors);
+          expect(notifier.threadSummaries['root']!.descendantCount, count);
+          expect(notifier.unconfirmedThreadReplyIds('root'), isEmpty);
+          final entries = buildMainTimelineEntries(
+            formatTimeline(
+              container.read(channelMessagesProvider(_channelId)).value!,
+            ),
+            relaySummaries: notifier.threadSummaries,
+          );
+          expect(entries.single.summary!.replyCount, count);
+        },
+      );
+    }
+  }
+
   for (final deletionMarkerAvailable in [false, true]) {
     for (final lateArrival in [false, true]) {
       test(

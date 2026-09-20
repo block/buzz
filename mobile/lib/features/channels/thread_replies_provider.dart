@@ -89,7 +89,7 @@ final threadRepliesProvider = FutureProvider.autoDispose
         }
         if (ref.mounted && ref.exists(channelProvider)) {
           final channel = ref.read(channelProvider.notifier);
-          channel.cacheCompleteThreadQuery(
+          final applied = channel.cacheCompleteThreadQuery(
             args.rootId,
             cachedReplyIds ?? {},
             replies,
@@ -99,6 +99,7 @@ final threadRepliesProvider = FutureProvider.autoDispose
             channel.cacheThreadDeletions(
               deletions,
               scopedTargetIds: missingIds,
+              reconciledTargetIds: applied ? missingIds : const {},
             );
           }
         }

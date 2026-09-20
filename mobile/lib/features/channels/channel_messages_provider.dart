@@ -580,9 +580,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// Applies explicit deletion evidence fetched for cached replies.
   /// [scopedTargetIds] are targets of the authenticated channel-scoped query;
   /// they permit standard kind-5 wire events that do not carry an h tag.
+  /// [reconciledTargetIds] were already excluded by an applied complete scan.
   void cacheThreadDeletions(
     Iterable<NostrEvent> deletions, {
     Set<String> scopedTargetIds = const {},
+    Set<String> reconciledTargetIds = const {},
   }) {
     var events = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
     for (final event in deletions) {
@@ -600,6 +602,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
               event.kind != EventKind.nip29DeleteEvent)) {
         throw StateError('Expected a deletion in channel $channelId.');
       }
+      _rememberDeletionTargets(targets.intersection(reconciledTargetIds));
       final before = events;
       _mergeWindowEventIntoStore(event);
       events = _mergeEvent(events, event);
@@ -662,14 +665,15 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// Publishes an insertion-complete thread scan, preserving aggregate facts
   /// before payload eviction. Only absent pre-query, accepted IDs are removed;
   /// in-flight sends and arrivals after the query began remain provisional.
-  void cacheCompleteThreadQuery(
+  /// Returns whether this scan applied, rather than losing to newer evidence.
+  bool cacheCompleteThreadQuery(
     String rootId,
     Set<String> queriedIds,
     List<NostrEvent> replies, {
     int? queryVersion,
   }) {
     if (queryVersion != null && _threadQueryVersions[rootId] != queryVersion) {
-      return;
+      return false;
     }
     final evidenceVersion = queryVersion ?? ++_threadQuerySerial;
     _setThreadQueryVersion(rootId, evidenceVersion);
@@ -724,6 +728,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _queryThreadSummaries.remove(_queryThreadSummaries.keys.first);
     }
     cacheConfirmedThreadReplies(replies);
+    return true;
   }
 
   /// Caches confirmed thread replies before their optimistic overlay is cleared.
