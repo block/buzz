@@ -3651,6 +3651,74 @@ void main() {
     }
   }
 
+  for (final fails in [false, true]) {
+    test('nested broadcast recount remains honest (fails: $fails)', () async {
+      final recount = Completer<List<NostrEvent>>();
+      final broadcast = _event(
+        id: 'broadcast',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'root'],
+          ['e', 'root', '', 'reply'],
+          ['broadcast', '1'],
+        ],
+      );
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [
+            broadcast,
+            _event(id: 'root', createdAt: 10),
+            _summary(rootId: 'root', replyCount: 1, descendantCount: 2),
+            _summary(rootId: 'broadcast', replyCount: 1, descendantCount: 0),
+            _bounds(),
+          ],
+          recount.future,
+          if (fails) ...[Exception('offline'), Exception('offline')],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      // The deleted child was evicted. Only the outer-root update is delivered.
+      session.emit(_summary(rootId: 'root', replyCount: 1, descendantCount: 1));
+      expect(notifier.threadSummaries['broadcast']!.isCountPending, isTrue);
+      expect(notifier.threadSummaries['broadcast']!.isLowerBound, isTrue);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      if (fails) {
+        recount.completeError(Exception('offline'));
+      } else {
+        recount.complete([broadcast]);
+      }
+      await Future<void>.delayed(Duration(milliseconds: fails ? 2000 : 100));
+      final entries = buildMainTimelineEntries(
+        formatTimeline(
+          container.read(channelMessagesProvider(_channelId)).value!,
+        ),
+        relaySummaries: notifier.threadSummaries,
+      );
+      final summary = entries
+          .singleWhere((e) => e.message.id == 'broadcast')
+          .summary;
+      if (fails) {
+        expect(summary!.isCountPending, isTrue);
+        expect(summary.isLowerBound, isTrue);
+      } else {
+        expect(summary, isNull);
+        expect(notifier.threadSummaries['broadcast']!.isCountPending, isFalse);
+      }
+      expect(
+        session.queryFilters.where(
+          (f) => f.extensions.containsKey('depth_limit'),
+        ),
+        hasLength(fails ? 3 : 1),
+      );
+    });
+  }
+
   test('deleted-target metadata disables only the owning empty root', () async {
     final session = _RecordingRelaySessionNotifier(
       queryResults: [

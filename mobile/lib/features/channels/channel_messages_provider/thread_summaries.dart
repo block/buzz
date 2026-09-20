@@ -200,6 +200,20 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       isLowerBound: true,
       isCountPending: countPending || (previous?.isCountPending ?? false),
     );
+    // The outer scan also owns reconciliation of visible broadcast branches.
+    // Their old totals are uncertain for the entire wait, including exhaustion.
+    for (final row in _visibleNestedRows(root)) {
+      final nested = _baseThreadSummaries[row.id];
+      if (nested == null) continue;
+      _overflowFloors[row.id] = ChannelWindowThreadSummary(
+        replyCount: nested.replyCount,
+        descendantCount: nested.descendantCount,
+        lastReplyAt: nested.lastReplyAt,
+        participantPubkeys: nested.participantPubkeys,
+        isLowerBound: true,
+        isCountPending: true,
+      );
+    }
     while (_overflowFloors.length > 2048) {
       _overflowFloors.remove(_overflowFloors.keys.first);
     }
