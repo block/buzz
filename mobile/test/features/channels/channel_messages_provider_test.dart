@@ -2542,6 +2542,82 @@ void main() {
     },
   );
 
+  for (final querySucceeds in [false, true]) {
+    test(
+      'skipped ownership response preserves uncertainty (query succeeds: $querySucceeds)',
+      () async {
+        final ownership = Completer<List<NostrEvent>>();
+        final threadQuery = Completer<List<NostrEvent>>();
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              _event(id: 'root', createdAt: 10),
+              _summary(rootId: 'root', replyCount: 1),
+              _bounds(),
+            ],
+            ownership.future,
+            threadQuery.future,
+          ],
+        );
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        session.emit(
+          NostrEvent(
+            id: 'delete-unknown',
+            pubkey: 'author',
+            createdAt: 100,
+            kind: EventKind.deletion,
+            tags: const [
+              ['h', _channelId],
+              ['e', 'unknown'],
+            ],
+            content: '',
+            sig: '',
+          ),
+        );
+        const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+        container.listen(threadRepliesProvider(args), (_, _) {});
+        final result = container.read(threadRepliesProvider(args).future);
+        await _pumpEventQueue();
+        ownership.complete([_summary(rootId: 'root', replyCount: 0)]);
+        await _pumpEventQueue();
+        expect(notifier.threadSummaries['root']!.isCountPending, isTrue);
+        if (querySucceeds) {
+          threadQuery.complete([]);
+          await result;
+        } else {
+          final failure = expectLater(result, throwsException);
+          threadQuery.completeError(Exception('newer query failed'));
+          await failure;
+        }
+        await _pumpEventQueue();
+        expect(
+          notifier.threadSummaries['root']!.isCountPending,
+          !querySucceeds,
+        );
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        if (querySucceeds) {
+          expect(entries.single.summary, isNull);
+        } else {
+          expect(entries.single.summary!.isCountPending, isTrue);
+        }
+      },
+    );
+  }
+
   for (final outcome in ['recovered', 'exhausted', 'disposed']) {
     test('deletion ownership retries are bounded: $outcome', () async {
       final session = _RecordingRelaySessionNotifier(

@@ -253,19 +253,29 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       if (events.length > 1) {
         throw StateError('Expected at most one owner for a deletion target.');
       }
+      var applied = false;
+      String? resolvedRoot;
       for (final event in events) {
         if (event.channelId != channelId ||
             event.kind != EventKind.channelThreadSummary) {
           throw StateError('Expected a channel-scoped thread summary.');
         }
         final root = event.getTagValue('e');
+        resolvedRoot = root;
         if (root != null && (_threadQueryVersions[root] ?? 0) <= version) {
           _handleLiveEvent(event, summaryVersion: version);
+          applied = _threadQueryVersions[root] == version;
         }
       }
       // An empty response does not prove ownership (including on old relays).
-      // Only this target's correlated summary can retire its uncertainty.
-      _finishDeletionLookup(candidates, version, resolved: events.length == 1);
+      // A response fenced by a newer query is not applied evidence either:
+      // that query can still fail, leaving the old count uncertain.
+      _finishDeletionLookup(
+        candidates,
+        version,
+        resolved: resolvedRoot != null,
+        unresolvedRoot: applied ? null : resolvedRoot,
+      );
     } catch (error) {
       if (!_summaryMounted || generation != _initVersion) return;
       if (error is! StateError && error is! FormatException && attempt < 2) {
@@ -303,11 +313,12 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     Set<String> candidates,
     int version, {
     required bool resolved,
+    String? unresolvedRoot,
   }) {
     for (final root in candidates) {
       final pending = _deletionSummaryUncertainty[root];
       if (pending == null) continue;
-      pending.finish(version, resolved: resolved);
+      pending.finish(version, resolved: resolved && root != unresolvedRoot);
       if (pending.isEmpty) _deletionSummaryUncertainty.remove(root);
     }
     _publishSummaryChange();
