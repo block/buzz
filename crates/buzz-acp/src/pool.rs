@@ -5266,6 +5266,12 @@ async fn publish_agent_turn_metric(
 const REACTION_SEEN: &str = "👀";
 const REACTION_WORKING: &str = "💬";
 
+/// Bound startup cleanup so a long-lived identity with an unexpectedly large
+/// reaction history cannot delay harness readiness without limit. Relay
+/// queries exclude deleted events, so this normally returns zero or a handful
+/// left behind by the immediately preceding process.
+const STALE_WORKING_REACTION_LIMIT: usize = 100;
+
 /// Best-effort timeout for a single reaction REST call.
 const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -5453,6 +5459,77 @@ pub(crate) async fn reaction_remove(rest: &crate::relay::RestClient, event_id: &
     }
 }
 
+/// Best-effort startup cleanup for 💬 reactions left by a process that died
+/// before its [`ReactionGuard`] could unwind.
+///
+/// The query is scoped to this agent's signing key and deletion events target
+/// only reaction events signed by that same key. Cleanup runs before channel
+/// subscriptions are installed, so it cannot remove a reaction created by a
+/// turn in this process. Failures are cosmetic and never block startup.
+pub(crate) async fn clear_stale_working_reactions(rest: &crate::relay::RestClient) -> usize {
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Reaction)
+        .author(rest.keys.public_key())
+        .limit(STALE_WORKING_REACTION_LIMIT);
+    let response = match tokio::time::timeout(REACTION_TIMEOUT, rest.query(&[filter])).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::debug!("startup working-reaction query failed: {error}");
+            return 0;
+        }
+        Err(_) => {
+            tracing::debug!("startup working-reaction query timed out");
+            return 0;
+        }
+    };
+
+    let reaction_ids: Vec<nostr::EventId> = response
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|event| {
+            event.get("content").and_then(serde_json::Value::as_str) == Some(REACTION_WORKING)
+        })
+        .filter_map(|event| event.get("id").and_then(serde_json::Value::as_str))
+        .filter_map(|id| nostr::EventId::from_hex(id).ok())
+        .take(STALE_WORKING_REACTION_LIMIT)
+        .collect();
+
+    let mut cleared = 0;
+    for chunk in reaction_ids.chunks(REACTION_CONCURRENCY) {
+        let results = futures_util::future::join_all(chunk.iter().map(|reaction_id| async move {
+            let builder = match buzz_sdk::build_remove_reaction(*reaction_id) {
+                Ok(builder) => builder,
+                Err(error) => {
+                    tracing::warn!(%reaction_id, "startup reaction cleanup build failed: {error}");
+                    return false;
+                }
+            };
+            let event = match builder.sign_with_keys(&rest.keys) {
+                Ok(event) => event,
+                Err(error) => {
+                    tracing::warn!(%reaction_id, "startup reaction cleanup sign failed: {error}");
+                    return false;
+                }
+            };
+            match tokio::time::timeout(REACTION_TIMEOUT, rest.submit_event(&event)).await {
+                Ok(Ok(_)) => true,
+                Ok(Err(error)) => {
+                    tracing::debug!(%reaction_id, "startup reaction cleanup failed: {error}");
+                    false
+                }
+                Err(_) => {
+                    tracing::debug!(%reaction_id, "startup reaction cleanup timed out");
+                    false
+                }
+            }
+        }))
+        .await;
+        cleared += results.into_iter().filter(|removed| *removed).count();
+    }
+    cleared
+}
+
 /// Maximum concurrent reaction HTTP requests per fan-out call.
 /// Prevents unbounded parallelism when a large batch of events arrives.
 const REACTION_CONCURRENCY: usize = 10;
@@ -5506,6 +5583,124 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn startup_cleanup_queries_and_deletes_only_working_reactions() {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let agent_keys = Keys::generate();
+        let target = EventBuilder::new(Kind::Custom(9), "trigger")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let working = buzz_sdk::build_reaction(target.id, REACTION_WORKING)
+            .unwrap()
+            .sign_with_keys(&agent_keys)
+            .unwrap();
+        let seen = buzz_sdk::build_reaction(target.id, REACTION_SEEN)
+            .unwrap()
+            .sign_with_keys(&agent_keys)
+            .unwrap();
+        let query_response = json!([
+            working,
+            seen,
+            { "content": REACTION_WORKING, "id": "not-a-valid-event-id" }
+        ])
+        .to_string();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind startup cleanup test server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            for response_body in [query_response.as_str(), "{}"] {
+                let (socket, _) = listener.accept().await.expect("accept cleanup request");
+                let mut reader = BufReader::new(socket);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let path = line
+                    .split_whitespace()
+                    .nth(1)
+                    .expect("request path")
+                    .to_string();
+
+                let mut content_length = None;
+                for _ in 0..64 {
+                    line.clear();
+                    assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                }
+                let mut body = vec![0; content_length.expect("request Content-Length")];
+                reader.read_exact(&mut body).await.unwrap();
+                let body = serde_json::from_slice(&body).expect("request JSON");
+                server_requests.lock().unwrap().push((path, body));
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                reader
+                    .into_inner()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let rest = crate::relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: agent_keys.clone(),
+            auth_tag_json: None,
+        };
+        assert_eq!(clear_stale_working_reactions(&rest).await, 1);
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("cleanup server completes")
+            .expect("cleanup server succeeds");
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, "/query");
+        assert_eq!(requests[0].1[0]["kinds"], json!([7]));
+        assert_eq!(
+            requests[0].1[0]["authors"],
+            json!([agent_keys.public_key().to_hex()])
+        );
+        assert_eq!(
+            requests[0].1[0]["limit"],
+            json!(STALE_WORKING_REACTION_LIMIT)
+        );
+
+        assert_eq!(requests[1].0, "/events");
+        let deletion = &requests[1].1;
+        assert_eq!(deletion["kind"], 5);
+        assert_eq!(deletion["pubkey"], agent_keys.public_key().to_hex());
+        assert!(
+            deletion["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tag| tag[0] == "e" && tag[1] == working.id.to_hex()),
+            "deletion must target the working reaction"
+        );
+        assert!(
+            deletion["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tag| tag[0] != "e" || tag[1] != seen.id.to_hex()),
+            "startup cleanup must leave non-working reactions untouched"
+        );
     }
 
     #[test]
