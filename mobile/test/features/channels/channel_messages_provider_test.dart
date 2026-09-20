@@ -1027,6 +1027,51 @@ void main() {
     );
   }
 
+  test(
+    'scan preserves a reply acknowledged after query start without an echo',
+    () async {
+      final scan = Completer<List<NostrEvent>>();
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+          scan.future,
+          <NostrEvent>[],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      notifier.addLocalMessage(
+        _event(
+          id: 'accepted-late',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        ),
+      );
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      container.listen(threadRepliesProvider(args), (_, _) {});
+      final result = container.read(threadRepliesProvider(args).future);
+      await _pumpEventQueue();
+      notifier.completeLocalMessage('accepted-late');
+      scan.complete([]);
+      await result;
+      expect(notifier.cachedThreadReplyIds('root'), contains('accepted-late'));
+      final entries = buildMainTimelineEntries(
+        formatTimeline(
+          container.read(channelMessagesProvider(_channelId)).value!,
+        ),
+        relaySummaries: notifier.threadSummaries,
+      );
+      expect(entries.single.summary!.replyCount, 1);
+    },
+  );
+
   for (final count in [1, 300]) {
     for (final acknowledgeDuringQuery in [false, true]) {
       test(

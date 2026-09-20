@@ -89,10 +89,16 @@ final threadRepliesProvider = FutureProvider.autoDispose
         }
         if (ref.mounted && ref.exists(channelProvider)) {
           final channel = ref.read(channelProvider.notifier);
+          final deletedTargets = {
+            for (final event in deletions)
+              for (final tag in event.tags)
+                if (tag.length > 1 && tag[0] == 'e') tag[1],
+          };
           final applied = channel.cacheCompleteThreadQuery(
             args.rootId,
             cachedReplyIds ?? {},
             replies,
+            provisionalReplyIds: missingIds.difference(deletedTargets),
             queryVersion: queryVersion,
           );
           if (deletions.isNotEmpty) {

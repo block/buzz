@@ -674,6 +674,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     String rootId,
     Set<String> queriedIds,
     List<NostrEvent> replies, {
+    Set<String> provisionalReplyIds = const {},
     int? queryVersion,
   }) {
     if (queryVersion != null && _threadQueryVersions[rootId] != queryVersion) {
@@ -685,14 +686,16 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _clearDeletionUncertainty(rootId, evidenceVersion);
     final resultIds = replies.map((event) => event.id).toSet();
     final missing = queriedIds.difference(resultIds)
-      ..removeAll(_localReplyRoots.keys);
+      ..removeAll(_localReplyRoots.keys)
+      ..removeAll(provisionalReplyIds);
     final retainedIds = cachedThreadReplyIds(rootId);
     final later = _windowStore.liveOverlay
         .where(
           (event) =>
               event.threadReference.rootId == rootId &&
               retainedIds.contains(event.id) &&
-              !queriedIds.contains(event.id) &&
+              (!queriedIds.contains(event.id) ||
+                  provisionalReplyIds.contains(event.id)) &&
               !resultIds.contains(event.id),
         )
         .toList();

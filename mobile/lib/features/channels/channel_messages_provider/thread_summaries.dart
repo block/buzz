@@ -124,6 +124,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     final generation = _initVersion;
     final version = beginThreadQuery(root);
     final snapshot = cachedThreadReplyIds(root);
+    final provisional = unconfirmedThreadReplyIds(root);
     bool current() =>
         _summaryMounted &&
         _hasListeners &&
@@ -140,6 +141,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
           root,
           snapshot,
           replies,
+          provisionalReplyIds: provisional,
           queryVersion: version,
         );
         if (_summaryRefreshes.isDirty(root)) _queueOverflowSummary(root);
