@@ -1852,51 +1852,48 @@ void main() {
     },
   );
 
-  test(
-    'failed overflow recount waits for new activity instead of retrying in a loop',
-    () async {
-      final replies = [
-        for (var i = 0; i < 301; i++)
-          _event(
-            id: 'reply-$i',
-            createdAt: 20 + i,
-            extraTags: const [
-              ['e', 'root', '', 'reply'],
-            ],
-          ),
-      ];
-      final session = _RecordingRelaySessionNotifier(
-        queryResults: [
-          [_event(id: 'root', createdAt: 10), _bounds()],
-          Exception('recount unavailable'),
-          replies.take(200).toList(),
-          replies.skip(200).toList(),
-        ],
-      );
-      final container = _buildContainer(session);
-      addTearDown(container.dispose);
-      container.listen(channelMessagesProvider(_channelId), (_, _) {});
-      await _pumpEventQueue();
-      final notifier = container.read(
-        channelMessagesProvider(_channelId).notifier,
-      );
-      for (final reply in replies.take(300)) {
-        session.emit(reply);
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 500));
-      expect(
-        session.queryFilters.where(
-          (filter) => filter.extensions.containsKey('depth_limit'),
+  test('exhausted overflow recount resumes on new activity', () async {
+    final replies = [
+      for (var i = 0; i < 301; i++)
+        _event(
+          id: 'reply-$i',
+          createdAt: 20 + i,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
         ),
-        hasLength(1),
-      );
-      expect(notifier.threadSummaries['root']?.isLowerBound, isTrue);
-      session.emit(replies.last);
-      await Future<void>.delayed(const Duration(milliseconds: 300));
-      expect(notifier.threadSummaries['root']?.descendantCount, 301);
-      expect(notifier.threadSummaries['root']?.isLowerBound, isFalse);
-    },
-  );
+    ];
+    final session = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'root', createdAt: 10), _bounds()],
+        for (var i = 0; i < 3; i++) Exception('recount unavailable'),
+        replies.take(200).toList(),
+        replies.skip(200).toList(),
+      ],
+    );
+    final container = _buildContainer(session);
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    for (final reply in replies.take(300)) {
+      session.emit(reply);
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 2000));
+    expect(
+      session.queryFilters.where(
+        (filter) => filter.extensions.containsKey('depth_limit'),
+      ),
+      hasLength(3),
+    );
+    expect(notifier.threadSummaries['root']?.isLowerBound, isTrue);
+    session.emit(replies.last);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(notifier.threadSummaries['root']?.descendantCount, 301);
+    expect(notifier.threadSummaries['root']?.isLowerBound, isFalse);
+  });
 
   test('a fresh relay summary cancels the queued overflow scan', () async {
     final session = _RecordingRelaySessionNotifier(
@@ -2541,6 +2538,93 @@ void main() {
       );
     },
   );
+
+  for (final source in ['overflow', 'fallback']) {
+    for (final outcome in ['recovered', 'exhausted', 'disposed']) {
+      test('thread recount retry $source: $outcome', () async {
+        final replies = [
+          for (var i = 0; i < (source == 'overflow' ? 257 : 1); i++)
+            _event(
+              id: 'reply-$i',
+              createdAt: 20 + i,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+        ];
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'root', createdAt: 10), _bounds()],
+            if (source == 'fallback') Exception('NIP-CW unavailable'),
+            Exception('temporary recount outage'),
+            if (outcome == 'recovered') ...[
+              if (source == 'overflow') ...[
+                replies.take(200).toList(),
+                replies.skip(200).toList(),
+              ] else
+                <NostrEvent>[],
+            ] else ...[
+              Exception('still unavailable'),
+              Exception('still unavailable'),
+            ],
+          ],
+          historyResults: [
+            [_event(id: 'root', createdAt: 10)],
+          ],
+        );
+        final container = _buildContainer(session);
+        if (outcome != 'disposed') addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        for (final reply in replies) {
+          session.emit(reply);
+        }
+        if (source == 'fallback') {
+          session.setConnected(false);
+          await _pumpEventQueue();
+          session.setConnected(true);
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        int scans() => session.queryFilters
+            .where((f) => f.extensions.containsKey('depth_limit'))
+            .length;
+        expect(scans(), 1);
+        if (outcome == 'disposed') container.dispose();
+        await Future<void>.delayed(
+          Duration(milliseconds: outcome == 'exhausted' ? 3800 : 800),
+        );
+        expect(
+          scans(),
+          outcome == 'disposed'
+              ? 1
+              : outcome == 'exhausted' || source == 'overflow'
+              ? 3
+              : 2,
+        );
+        if (outcome == 'disposed') return;
+        final summary = notifier.threadSummaries['root']!;
+        if (outcome == 'exhausted') {
+          expect(summary.isLowerBound, isTrue);
+        } else {
+          expect(summary.isLowerBound, isFalse);
+          expect(summary.isCountPending, isFalse);
+          expect(summary.descendantCount, source == 'overflow' ? 257 : 0);
+          if (source == 'fallback') {
+            final entries = buildMainTimelineEntries(
+              formatTimeline(
+                container.read(channelMessagesProvider(_channelId)).value!,
+              ),
+              relaySummaries: notifier.threadSummaries,
+            );
+            expect(entries.single.summary, isNull);
+          }
+        }
+      });
+    }
+  }
 
   for (final failureFirst in [false, true]) {
     test(

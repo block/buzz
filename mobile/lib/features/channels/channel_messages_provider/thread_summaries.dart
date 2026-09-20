@@ -119,7 +119,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     _summaryRefreshes.enqueue(root);
   }
 
-  Future<void> _refreshOverflowSummary(String root) async {
+  Future<void> _refreshOverflowSummary(String root, {int attempt = 0}) async {
     if (!_isVisibleRoot(root)) return;
     final generation = _initVersion;
     final version = beginThreadQuery(root);
@@ -145,11 +145,21 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
         if (_summaryRefreshes.isDirty(root)) _queueOverflowSummary(root);
       }
     } catch (error) {
-      if (current()) {
-        debugPrint(
-          '[ChannelMessagesNotifier] thread recount failed for $root: $error',
-        );
+      if (!current()) return;
+      if (attempt < 2) {
+        // Retain this active queue slot during backoff, so retries share the
+        // same concurrency budget and stop when newer work supersedes them.
+        await Future<void>.delayed(Duration(milliseconds: 500 << attempt));
+        if (current()) {
+          await _refreshOverflowSummary(root, attempt: attempt + 1);
+        }
+        return;
       }
+      debugPrint(
+        '[ChannelMessagesNotifier] thread recount failed for $root: $error',
+      );
+    } finally {
+      _retireThreadQuery(root, version);
     }
   }
 
