@@ -1950,7 +1950,12 @@ void main() {
         );
         final session = _RecordingRelaySessionNotifier(
           queryResults: [
-            [_event(id: 'root', createdAt: 10), _bounds()],
+            [
+              _event(id: 'root', createdAt: 10),
+              _event(id: 'unrelated', createdAt: 9),
+              _summary(rootId: 'unrelated', replyCount: 2),
+              _bounds(),
+            ],
             <NostrEvent>[],
             <NostrEvent>[],
             <NostrEvent>[],
@@ -1986,6 +1991,13 @@ void main() {
         expect(container.exists(threadLocalRepliesProvider(args)), isFalse);
         expect(
           container.read(pendingLocalMessagesProvider(_channelId)),
+          isEmpty,
+        );
+        expect(notifier.threadSummaries['unrelated']!.isCountPending, isFalse);
+        expect(
+          session.queryFilters.where(
+            (filter) => filter.extensions['resolve_thread_roots'] == true,
+          ),
           isEmpty,
         );
         final filters = session.queryFilters.where(

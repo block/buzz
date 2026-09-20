@@ -589,20 +589,17 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
               event.kind != EventKind.nip29DeleteEvent)) {
         throw StateError('Expected a deletion in channel $channelId.');
       }
-      _retireDeferredDeletionTargets(targets.intersection(reconciledTargetIds));
-      _rememberDeletionTargets(targets.intersection(reconciledTargetIds));
+      final affectedTargets = scopedStandardDeletion
+          ? targets.intersection(scopedTargetIds)
+          : targets;
+      final reconciled = affectedTargets.intersection(reconciledTargetIds);
+      _retireDeferredDeletionTargets(reconciled);
+      _rememberDeletionTargets(reconciled);
       final before = events;
       _mergeWindowEventIntoStore(event);
       events = _mergeEvent(events, event);
-      _refreshDeletedSummaries({
-        for (final tag in event.tags)
-          if (tag.length > 1 && tag[0] == 'e') tag[1],
-      }, before);
-      _confirmIndexedLocalReplies(
-        event.tags
-            .where((tag) => tag.length > 1 && tag[0] == 'e')
-            .map((tag) => tag[1]),
-      );
+      _refreshDeletedSummaries(affectedTargets, before);
+      _confirmIndexedLocalReplies(affectedTargets);
     }
     _lastKnownMessages = events;
     state = AsyncData(events);
