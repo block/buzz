@@ -3564,90 +3564,112 @@ void main() {
     },
   );
 
-  for (final known in [false, true]) {
-    for (final survives in [false, true]) {
-      test(
-        'nested deletion reconciles broadcast summary (known: $known, survives: $survives)',
-        () async {
-          final broadcast = _event(
-            id: 'broadcast',
-            createdAt: 20,
-            extraTags: const [
-              ['e', 'root', '', 'root'],
-              ['e', 'root', '', 'reply'],
-              ['broadcast', '1'],
-            ],
-          );
-          NostrEvent child(String id) => _event(
-            id: id,
-            createdAt: 30,
-            extraTags: const [
-              ['e', 'root', '', 'root'],
-              ['e', 'broadcast', '', 'reply'],
-            ],
-          );
-          final session = _RecordingRelaySessionNotifier(
-            queryResults: [
-              [
-                broadcast,
-                _event(id: 'root', createdAt: 10),
-                _summary(
-                  rootId: 'root',
-                  replyCount: 1,
-                  descendantCount: survives ? 3 : 2,
-                ),
-                _summary(
-                  rootId: 'broadcast',
-                  replyCount: survives ? 2 : 1,
-                  descendantCount: 0,
-                ),
-                _bounds(),
+  for (final rootVisible in [false, true]) {
+    for (final source in ['known', 'owner', 'live']) {
+      for (final survives in [false, true]) {
+        test(
+          'nested deletion reconciles broadcast summary (root visible: $rootVisible, source: $source, survives: $survives)',
+          () async {
+            final broadcast = _event(
+              id: 'broadcast',
+              createdAt: 20,
+              extraTags: const [
+                ['e', 'root', '', 'root'],
+                ['e', 'root', '', 'reply'],
+                ['broadcast', '1'],
               ],
-              if (!known)
-                [_summary(rootId: 'root', replyCount: survives ? 2 : 1)],
-              [broadcast, if (survives) child('survivor')],
-            ],
-          );
-          final container = _buildContainer(session);
-          addTearDown(container.dispose);
-          container.listen(channelMessagesProvider(_channelId), (_, _) {});
-          await _pumpEventQueue();
-          final notifier = container.read(
-            channelMessagesProvider(_channelId).notifier,
-          );
-          if (known) {
-            notifier.cacheConfirmedThreadReplies([child('deleted-child')]);
-          }
-          session.emit(
-            NostrEvent(
-              id: 'delete-child',
-              pubkey: 'author',
-              createdAt: 40,
-              kind: EventKind.deletion,
-              tags: const [
-                ['h', _channelId],
-                ['e', 'deleted-child'],
+            );
+            NostrEvent child(String id) => _event(
+              id: id,
+              createdAt: 30,
+              extraTags: const [
+                ['e', 'root', '', 'root'],
+                ['e', 'broadcast', '', 'reply'],
               ],
-              content: '',
-              sig: '',
-            ),
-          );
-          await Future<void>.delayed(const Duration(milliseconds: 350));
-          final entries = buildMainTimelineEntries(
-            formatTimeline(
-              container.read(channelMessagesProvider(_channelId)).value!,
-            ),
-            relaySummaries: notifier.threadSummaries,
-          );
-          expect(
-            entries
-                .singleWhere((e) => e.message.id == 'broadcast')
-                .summary
-                ?.replyCount,
-            survives ? 1 : null,
-          );
-        },
-      );
+            );
+            final session = _RecordingRelaySessionNotifier(
+              queryResults: [
+                [
+                  broadcast,
+                  if (rootVisible) _event(id: 'root', createdAt: 10),
+                  if (rootVisible)
+                    _summary(
+                      rootId: 'root',
+                      replyCount: 1,
+                      descendantCount: survives ? 3 : 2,
+                    ),
+                  _summary(
+                    rootId: 'broadcast',
+                    replyCount: survives ? 2 : 1,
+                    descendantCount: 0,
+                  ),
+                  _bounds(),
+                ],
+                if (source == 'owner')
+                  [_summary(rootId: 'root', replyCount: survives ? 2 : 1)],
+                [broadcast, if (survives) child('survivor')],
+              ],
+            );
+            final container = _buildContainer(session);
+            addTearDown(container.dispose);
+            container.listen(channelMessagesProvider(_channelId), (_, _) {});
+            await _pumpEventQueue();
+            final notifier = container.read(
+              channelMessagesProvider(_channelId).notifier,
+            );
+            if (source == 'known') {
+              notifier.cacheConfirmedThreadReplies([child('deleted-child')]);
+            }
+            expect(
+              container
+                  .read(channelMessagesProvider(_channelId))
+                  .value!
+                  .any((e) => e.id == 'root'),
+              rootVisible,
+            );
+            session.emit(
+              source == 'live'
+                  ? _summary(
+                      rootId: 'root',
+                      replyCount: 1,
+                      descendantCount: survives ? 2 : 1,
+                    )
+                  : NostrEvent(
+                      id: 'delete-child',
+                      pubkey: 'author',
+                      createdAt: 40,
+                      kind: EventKind.deletion,
+                      tags: const [
+                        ['h', _channelId],
+                        ['e', 'deleted-child'],
+                      ],
+                      content: '',
+                      sig: '',
+                    ),
+            );
+            await Future<void>.delayed(const Duration(milliseconds: 350));
+            expect(
+              session.queryFilters.where(
+                (f) => f.extensions.containsKey('depth_limit'),
+              ),
+              hasLength(1),
+            );
+            final entries = buildMainTimelineEntries(
+              formatTimeline(
+                container.read(channelMessagesProvider(_channelId)).value!,
+              ),
+              relaySummaries: notifier.threadSummaries,
+            );
+            expect(
+              entries
+                  .singleWhere((e) => e.message.id == 'broadcast')
+                  .summary
+                  ?.replyCount,
+              survives ? 1 : null,
+            );
+          },
+        );
+      }
     }
   }
 
@@ -3781,44 +3803,60 @@ void main() {
     );
   });
 
-  test('pagination cannot revive a rejected live summary', () async {
-    final session = _RecordingRelaySessionNotifier(
-      queryResults: [
-        [
-          _event(id: 'newest', createdAt: 100),
-          _bounds(hasMore: true, cursorCreatedAt: 100, cursorId: 'newest'),
-        ],
-        [
-          _event(id: 'old-root', createdAt: 10),
-          _bounds(dTag: '${_channelId.toLowerCase()}:100:newest'),
-        ],
-      ],
+  for (final recountFirst in [false, true]) {
+    test(
+      'pagination cannot revive a rejected live summary (recount first: $recountFirst)',
+      () async {
+        final session = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              _event(id: 'newest', createdAt: 100),
+              _bounds(hasMore: true, cursorCreatedAt: 100, cursorId: 'newest'),
+            ],
+            if (recountFirst) <NostrEvent>[],
+            [
+              _event(id: 'old-root', createdAt: 10),
+              _bounds(dTag: '${_channelId.toLowerCase()}:100:newest'),
+            ],
+          ],
+        );
+        final container = _buildContainer(session);
+        addTearDown(container.dispose);
+        container.listen(channelMessagesProvider(_channelId), (_, _) {});
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        final load = notifier.loadEventsById(['old-root']);
+        session.completeTargetHistory([_event(id: 'old-root', createdAt: 10)]);
+        await load;
+        notifier.cacheCompleteThreadQuery('old-root', {}, []);
+        session.emit(_summary(rootId: 'old-root', replyCount: 1));
+        expect(notifier.threadSummaries['old-root']!.descendantCount, 0);
+        if (recountFirst) {
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+          expect(
+            session.queryFilters.where(
+              (f) => f.extensions.containsKey('depth_limit'),
+            ),
+            hasLength(1),
+          );
+          expect(notifier.threadSummaries['old-root']!.descendantCount, 0);
+        }
+        expect(await notifier.fetchOlder(), isTrue);
+        final entries = buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: notifier.threadSummaries,
+        );
+        expect(
+          entries.singleWhere((e) => e.message.id == 'old-root').summary,
+          isNull,
+        );
+      },
     );
-    final container = _buildContainer(session);
-    addTearDown(container.dispose);
-    container.listen(channelMessagesProvider(_channelId), (_, _) {});
-    await _pumpEventQueue();
-    final notifier = container.read(
-      channelMessagesProvider(_channelId).notifier,
-    );
-    final load = notifier.loadEventsById(['old-root']);
-    session.completeTargetHistory([_event(id: 'old-root', createdAt: 10)]);
-    await load;
-    notifier.cacheCompleteThreadQuery('old-root', {}, []);
-    session.emit(_summary(rootId: 'old-root', replyCount: 1));
-    expect(notifier.threadSummaries['old-root']!.descendantCount, 0);
-    expect(await notifier.fetchOlder(), isTrue);
-    final entries = buildMainTimelineEntries(
-      formatTimeline(
-        container.read(channelMessagesProvider(_channelId)).value!,
-      ),
-      relaySummaries: notifier.threadSummaries,
-    );
-    expect(
-      entries.singleWhere((e) => e.message.id == 'old-root').summary,
-      isNull,
-    );
-  });
+  }
 
   for (final newReplyExists in [false, true]) {
     test(

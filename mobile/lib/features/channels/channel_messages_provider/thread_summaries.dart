@@ -46,6 +46,9 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       ) ||
       _windowStore.liveOverlay.any((event) => event.id == root);
 
+  bool _hasVisibleThreadRows(String root) =>
+      _isVisibleRoot(root) || _visibleNestedRows(root).isNotEmpty;
+
   void _applyLiveThreadSummary(NostrEvent event, int? summaryVersion) {
     final root = event.getTagValue('e');
     if (root == null) return;
@@ -127,7 +130,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
 
   void _reconcileLiveSummaryPayloads(NostrEvent event) {
     final root = event.getTagValue('e');
-    if (root == null || !_isVisibleRoot(root)) return;
+    if (root == null || !_hasVisibleThreadRows(root)) return;
     final summary = _baseThreadSummaries[root];
     final confirmedIds = cachedThreadReplyIds(root)
       ..removeAll(_localReplyRoots.keys);
@@ -164,7 +167,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     for (final root in roots) {
       if ((_threadQueryVersions[root] ?? 0) > historyVersion) continue;
       _setThreadQueryVersion(root, historyVersion);
-      if (!_isVisibleRoot(root)) {
+      if (!_hasVisibleThreadRows(root)) {
         _queryThreadSummaries.remove(root);
         _overflowFloors.remove(root);
         _deletionSummaryUncertainty.remove(root);
@@ -176,7 +179,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
   }
 
   void _queueOverflowSummary(String root, {bool countPending = false}) {
-    if (!_isVisibleRoot(root)) return;
+    if (!_hasVisibleThreadRows(root)) return;
     final ids = cachedThreadReplyIds(root)..removeAll(_localReplyRoots.keys);
     final events =
         _windowStore.liveOverlay
@@ -221,7 +224,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
   }
 
   Future<void> _refreshOverflowSummary(String root, {int attempt = 0}) async {
-    if (!_isVisibleRoot(root)) return;
+    if (!_hasVisibleThreadRows(root)) return;
     final generation = _initVersion;
     final version = beginThreadQuery(root);
     final snapshot = cachedThreadReplyIds(root);
@@ -319,7 +322,8 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
             .entries
             .where(
               (entry) =>
-                  entry.value.isCountPending && _isVisibleRoot(entry.key),
+                  entry.value.isCountPending &&
+                  _hasVisibleThreadRows(entry.key),
             )
             .map((entry) => entry.key)
             .toSet();
@@ -330,10 +334,15 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       owners,
     );
     for (final entry in floors.entries) {
-      if (!_isVisibleRoot(entry.key)) continue;
+      if (!_hasVisibleThreadRows(entry.key)) continue;
       _overflowFloors[entry.key] = entry.value;
       // Unknown ownership changes presentation only; never scan every candidate.
       if (owners.containsValue(entry.key)) _queueOverflowSummary(entry.key);
+    }
+    for (final root in owners.values.toSet()) {
+      // An off-window outer root may have no summary, while its broadcast row
+      // still needs reconciliation after a known child's deletion.
+      if (!floors.containsKey(root)) _queueOverflowSummary(root);
     }
     while (_overflowFloors.length > 2048) {
       _overflowFloors.remove(_overflowFloors.keys.first);
