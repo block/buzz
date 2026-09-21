@@ -490,6 +490,9 @@ mod postgres_tests {
             "relay_admin_outbox",
             "relay_operator_audit",
             "storage_accounting_snapshots",
+            "operator_listener_pubkeys",
+            "operator_listener_match_queue",
+            "operator_listener_outbox",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -703,7 +706,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 46);
+        assert_eq!(migrations.len(), 47);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1288,10 +1291,18 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE TABLE storage_accounting_snapshots"));
-        // schema.sql exclusion list must match the restored (pre-0041) body.
+        assert_eq!(migrations[46].version, 47);
+        assert!(migrations[46]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE operator_listener_pubkeys"));
+        // schema.sql exclusion list must retain the restored (pre-0041) body
+        // plus the deployment-global operator-listener queues.
         assert!(
-            desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
-            "schema.sql exclusion list must match the pre-0041 body after ledger removal"
+            desired_schema.contains(
+                "'rate_limit_violations', 'operator_listener_match_queue',\n        'operator_listener_outbox'\n    ]::TEXT[])"
+            ),
+            "schema.sql exclusion list must include operator-listener queues"
         );
     }
 
