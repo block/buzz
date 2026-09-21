@@ -16,6 +16,7 @@ const pendingTimers = new Map();
 let nextTimerId = 1;
 const sendAttempts = [];
 const deliveredFrames = [];
+let invokeError = null;
 let sendTransport = async (args) => {
   deliveredFrames.push(args);
 };
@@ -29,6 +30,7 @@ globalThis.window = {
   clearTimeout: (id) => pendingTimers.delete(id),
   __TAURI_INTERNALS__: {
     invoke: async (command, args) => {
+      if (command === "get_channels" && invokeError) throw invokeError;
       if (command === "plugin:websocket|send") {
         sendAttempts.push(args);
         return sendTransport(args);
@@ -39,12 +41,14 @@ globalThis.window = {
 Date.now = () => fakeNow;
 
 const { RelayClient } = await import("./relayClientSession.ts");
+const { invokeTauri } = await import("./tauri.ts");
 const { activateRateLimit, isRateLimited, resetRateLimitGate } = await import(
   "./relayRateLimitGate.ts"
 );
 
 function reset() {
   resetRateLimitGate();
+  invokeError = null;
   pendingTimers.clear();
   nextTimerId = 1;
   sendAttempts.length = 0;
@@ -292,4 +296,58 @@ test("a community switch after send failure cannot retry through its replacement
     "the replacement socket must not be used",
   );
   assert.equal(eventFrames().length, 0);
+});
+
+// Drive the actual invoke rejection and publisher, not a classifier helper.
+// Restoring HTTP -> WS gate propagation must fail before any timer advances.
+for (const message of [
+  "relay rate-limited: retry in 50s",
+  "relay rate-limited: quota exceeded",
+  "relay rate-limited: retry in 1000000s",
+]) {
+  test(`HTTP backoff does not withhold a WS publish: ${message}`, async () => {
+    reset();
+    invokeError = message;
+    await assert.rejects(invokeTauri("get_channels"), { message });
+    const client = connectedClient();
+    const event = { id: "9".repeat(64), kind: 9 };
+    const published = client.publishEvent(event, "timed out", "send failed");
+    try {
+      await flushUntil(() => eventFrames().length === 1);
+      assert.equal(isRateLimited(), false);
+      await deliver(client, ["OK", event.id, true, ""]);
+      assert.equal(await published, event);
+      assert.equal(client.pendingEvents.size, 0);
+    } finally {
+      // Also drain safely when the pre-fix gate coupling is restored.
+      resetRateLimitGate();
+      await flushUntil(() => eventFrames().length === 1);
+      await deliver(client, ["OK", event.id, true, ""]);
+      await published;
+    }
+  });
+}
+
+test("HTTP failure does not clear an existing WS backoff", async () => {
+  reset();
+  const client = connectedClient();
+  await deliver(client, [
+    "NOTICE",
+    "rate-limited: quota exceeded; retry in 4s",
+  ]);
+  invokeError = "relay rate-limited: retry in 50s";
+  await assert.rejects(invokeTauri("get_channels"), { message: invokeError });
+  const event = { id: "8".repeat(64), kind: 9 };
+  const published = client.publishEvent(event, "timed out", "send failed");
+  await Promise.resolve();
+  assert.equal(eventFrames().length, 0);
+  assert.equal(isRateLimited(), true);
+  assert.ok([...pendingTimers.values()].some(({ fireAt }) => fireAt === 4_000));
+  assert.ok(
+    ![...pendingTimers.values()].some(({ fireAt }) => fireAt === 50_000),
+  );
+  resetRateLimitGate();
+  await flushUntil(() => eventFrames().length === 1);
+  await deliver(client, ["OK", event.id, true, ""]);
+  assert.equal(await published, event);
 });

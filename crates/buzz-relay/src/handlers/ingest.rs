@@ -3144,7 +3144,15 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
+    let (stored_event, was_inserted) = if workflow_deletion {
+        // A single commit owns public acceptance, domain mutation, and dispatch.
+        // Failure rolls everything back; identical concurrent requests cannot
+        // divide insertion and repair ownership between two relay workers.
+        crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
@@ -3211,7 +3219,7 @@ async fn ingest_event_inner(
         });
     }
 
-    if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
+    if !workflow_deletion && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
                 .await

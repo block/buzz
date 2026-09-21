@@ -14,23 +14,8 @@ import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 
-/// Tests for [PairingNotifier]'s legacy `buzz://` payload parsing and
-/// SSRF-prevention validation.
-///
-/// The pairing flow used to validate by calling `GET /api/users/me/profile`
-/// over HTTP. That has been replaced with a NIP-42 WebSocket handshake via
-/// [RelaySocket], which is constructed directly inside the provider with no
-/// dependency-injection hook — so the "happy path" that exercises the
-/// network is no longer mockable in a unit test.
-///
-/// What we still cover here:
-///   - Initial state.
-///   - Parsing every documented payload format (raw base64, `buzz://`
-///     prefix, whitespace).
-///   - Failure modes that return BEFORE any network call: invalid base64,
-///     wrong shape (non-object, missing fields, missing nsec), and SSRF
-///     guards (private IPs, non-http schemes).
-///   - `reset()` returning to idle from an error state.
+/// Exercises payload validation, credential import, and cancellation across
+/// pairing and credential-validation socket lifetimes.
 void main() {
   group('PairingNotifier', () {
     late ProviderContainer container;
@@ -44,6 +29,45 @@ void main() {
     }
 
     tearDown(() => container.dispose());
+
+    test(
+      'reset closes legacy validation and rejects its late success',
+      () async {
+        final socket = _PendingValidationSocket();
+        final auth = FakeAuthNotifier();
+        final notifier = PairingNotifier(
+          validationSocketFactory:
+              ({
+                required wsUrl,
+                required nsec,
+                required onMessage,
+                required onConnected,
+                required onDisconnected,
+              }) => socket,
+        );
+        container = ProviderContainer(
+          overrides: [
+            pairingProvider.overrideWith(() => notifier),
+            authProvider.overrideWith(() => auth),
+          ],
+        );
+        final input = base64Url.encode(
+          utf8.encode(
+            jsonEncode({
+              'relayUrl': 'https://relay.example',
+              'nsec': 'pending-key',
+            }),
+          ),
+        );
+        final pending = container.read(pairingProvider.notifier).pair(input);
+        notifier.reset();
+        expect(socket.disposed, isTrue);
+        socket.connection.complete();
+        await pending;
+        expect(auth.lastCommunity, isNull);
+        expect(container.read(pairingProvider).status, PairingStatus.idle);
+      },
+    );
 
     test('starts in idle state', () {
       container = createContainer();
@@ -77,7 +101,7 @@ void main() {
         expect(container.read(pairingProvider).status, PairingStatus.error);
         expect(
           container.read(pairingProvider).errorMessage,
-          contains('internal error'),
+          contains('Lost connection to pairing relay'),
         );
       },
     );
@@ -312,6 +336,25 @@ void main() {
               .any((message) => message['type'] == 'complete'),
           isFalse,
         );
+      });
+
+      test('reset during NIP-AB connection retires its continuation', () async {
+        final pending = notifier.pair(pairingCode);
+        notifier.reset();
+        await pending;
+        expect(container.read(pairingProvider).status, PairingStatus.idle);
+        expect(socket.isConnected, isFalse);
+        expect(socket.decryptedPublishedMessages(sourceSecret), isEmpty);
+      });
+
+      test('reset during NIP-AB offer delay prevents a late offer', () async {
+        final pending = notifier.pair(pairingCode);
+        await Future<void>.delayed(Duration.zero);
+        notifier.reset();
+        await pending;
+        expect(container.read(pairingProvider).status, PairingStatus.idle);
+        expect(socket.isConnected, isFalse);
+        expect(socket.decryptedPublishedMessages(sourceSecret), isEmpty);
       });
 
       test('stale biometric approval cannot advance a reset import', () async {
@@ -1103,4 +1146,23 @@ class _ControllableSocket extends PairingSocket {
     );
     relayMessageCallback(['EVENT', 'pair', event.toMap()]);
   }
+}
+
+class _PendingValidationSocket extends RelaySocket {
+  _PendingValidationSocket()
+    : super(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+  final connection = Completer<void>();
+  bool disposed = false;
+  @override
+  Future<void> connect() => connection.future;
+  @override
+  void dispose() => disposed = true;
+  @override
+  Future<void> disconnect() async => disposed = true;
 }

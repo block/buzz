@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -14,6 +15,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/mentions/mention_bindings.dart';
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -31,6 +34,7 @@ import 'message_media.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
+part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
 part 'message_content/video_preview.dart';
 
@@ -158,6 +162,12 @@ class MessageContent extends HookConsumerWidget {
         baseStyle ??
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
     final resolvedMentionNames = mentionNames;
+    final signedMentionPubkeys = mentionedPubkeysFromTags(tags);
+    final mentionBindings = renderedMentionBindings(
+      content,
+      mentionNames,
+      signedMentionPubkeys,
+    );
     final resolvedAgentMentionPubkeys = {
       ...agentMentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
     };
@@ -168,13 +178,33 @@ class MessageContent extends HookConsumerWidget {
                 in ref.watch(channelsProvider).asData?.value ?? const [])
               channel.name.toLowerCase(): channel.id,
           };
-    final resolvedChannelTap =
-        onChannelTap ??
-        (String channelId) {
+    final channelHandler = useRef(onChannelTap)..value = onChannelTap;
+    final resolvedChannelTap = useMemoized(
+      () => (String channelId) {
+        final handler = channelHandler.value;
+        if (handler != null) {
+          handler(channelId);
+        } else {
           ref
               .read(pendingDeepLinkProvider.notifier)
               .open(Uri(scheme: 'buzz', host: 'channel', path: channelId));
-        };
+        }
+      },
+      const [],
+    );
+    final replyHandler = useRef(onMediaReply)..value = onMediaReply;
+    final moreHandler = useRef(onMediaMore)..value = onMediaMore;
+    final mediaReply = useMemoized(
+      () =>
+          () => replyHandler.value?.call(),
+      const [],
+    );
+    final mediaMore = useMemoized(
+      () =>
+          (BuildContext context, String url) =>
+              moreHandler.value?.call(context, url),
+      const [],
+    );
     final channelPresentationKey = [
       for (final entry
           in (resolvedChannelNames.entries.toList()
@@ -196,6 +226,7 @@ class MessageContent extends HookConsumerWidget {
             ..sort((a, b) => a.key.compareTo(b.key))))
         '${entry.key}\u0000${entry.value}',
       ...(resolvedAgentMentionPubkeys.toList()..sort()),
+      ...(signedMentionPubkeys.toList()..sort()),
     ].join('\u0001');
 
     // Decided here rather than by the caller: this is where the event's own
@@ -235,14 +266,15 @@ class MessageContent extends HookConsumerWidget {
           mentionBuf.write('`${mentionParts[i]}`');
         } else {
           var segment = mentionParts[i];
-          for (final name in resolvedMentionNames.values) {
-            if (name.contains(' ')) {
-              final normalizedName = _markdownMentionName(name);
-              segment = segment.replaceAllMapped(
-                RegExp('@${RegExp.escape(name)}', caseSensitive: false),
-                (m) => '@$normalizedName',
-              );
-            }
+          for (final range in mentionOccurrences(
+            segment,
+            mentionBindings.keys,
+          ).reversed) {
+            segment = segment.replaceRange(
+              range.start,
+              range.end,
+              '@${_markdownMentionName(range.label)}',
+            );
           }
           mentionBuf.write(segment);
         }
@@ -255,7 +287,23 @@ class MessageContent extends HookConsumerWidget {
         result = '\u200B$result';
       }
       return result;
-    }, [linkNormalizedContent, resolvedMentionNames]);
+    }, [linkNormalizedContent, mentionPresentationKey]);
+
+    final inlineComponents = _useMessageInlineComponents(
+      content: content,
+      finalContent: finalContent,
+      mentionNames: resolvedMentionNames,
+      bindings: mentionBindings,
+      agentPubkeys: resolvedAgentMentionPubkeys,
+      channelNames: resolvedChannelNames,
+      customEmoji: customEmoji,
+      emojiSize: inlineCustomEmojiSize,
+      tags: tags,
+      hasMediaReply: onMediaReply != null,
+      hasMediaMore: onMediaMore != null,
+      onMentionTap: onMentionTap,
+      onChannelTap: resolvedChannelTap,
+    );
 
     final markdown = KeyedSubtree(
       key: ValueKey(
@@ -281,27 +329,16 @@ class MessageContent extends HookConsumerWidget {
           resolvedChannelTap,
           resolvedChannelNames,
         ),
-        imageBuilder: (context, imageUrl, _, _) =>
-            _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
+        imageBuilder: (context, imageUrl, _, _) => _buildMedia(
+          context,
+          imageUrl,
+          imetaByUrl[imageUrl],
+          onReply: onMediaReply == null ? null : mediaReply,
+          onMore: onMediaMore == null ? null : mediaMore,
+        ),
         textAlign: textAlign,
         maxLines: maxLines,
-        inlineComponents: [
-          _MentionMd(
-            mentionNames: resolvedMentionNames,
-            agentMentionPubkeys: resolvedAgentMentionPubkeys,
-            onMentionTap: onMentionTap,
-          ),
-          CustomEmojiMd(
-            customEmoji,
-            content: finalContent,
-            size: inlineCustomEmojiSize,
-          ),
-          _ChannelLinkMd(
-            channelNames: resolvedChannelNames,
-            onChannelTap: resolvedChannelTap,
-          ),
-          ...MarkdownComponent.inlineComponents,
-        ],
+        inlineComponents: inlineComponents,
       ),
     );
     if (trailingGallery == null) return markdown;
@@ -325,7 +362,13 @@ class MessageContent extends HookConsumerWidget {
     );
   }
 
-  Widget _buildMedia(BuildContext context, String imageUrl, ImetaEntry? imeta) {
+  Widget _buildMedia(
+    BuildContext context,
+    String imageUrl,
+    ImetaEntry? imeta, {
+    VoidCallback? onReply,
+    MediaViewerMoreAction? onMore,
+  }) {
     final mediaKind = classifyMediaUrl(imageUrl, imeta: imeta);
     if (mediaKind == MessageMediaKind.audio) {
       return Padding(
@@ -342,15 +385,15 @@ class MessageContent extends HookConsumerWidget {
       return _MessageVideoPreview(
         url: imageUrl,
         imeta: imeta,
-        onReply: onMediaReply,
+        onReply: onReply,
       );
     }
     return _MessageImagePreview(
       url: imageUrl,
       imeta: imeta,
       semanticLabel: imeta?.alt ?? 'Message image',
-      onReply: onMediaReply,
-      onMore: onMediaMore,
+      onReply: onReply,
+      onMore: onMore,
     );
   }
 
@@ -807,16 +850,20 @@ class _MessageCodeBlock extends HookWidget {
 }
 
 class _MentionMd extends InlineMd {
+  final Map<String, Set<String>> bindings;
+  final Map<String, String> displayLabels;
   final Map<String, String> mentionNames;
   final Set<String> agentMentionPubkeys;
   final void Function(String pubkey)? onMentionTap;
   late final RegExp _exp = _buildPrefixPattern(
     prefix: '@',
-    knownNames: _mentionAliases(mentionNames.values),
+    knownNames: bindings.keys.map(_markdownMentionName),
     genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
   );
 
   _MentionMd({
+    required this.bindings,
+    required this.displayLabels,
     required this.mentionNames,
     required this.agentMentionPubkeys,
     this.onMentionTap,
@@ -837,22 +884,25 @@ class _MentionMd extends InlineMd {
     }
 
     final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
-    String? displayName;
-    String? pubkey;
-    for (final entry in mentionNames.entries) {
-      final entryName = entry.value.toLowerCase();
-      final firstName = entryName.split(RegExp(r'\s+')).first;
-      if (entryName == name || firstName == name) {
-        displayName = entry.value;
-        pubkey = entry.key;
-        break;
-      }
+    final matches = bindings[name] ?? const <String>{};
+    final pubkey = matches.length == 1 ? matches.single : null;
+    if (bindings.containsKey(name) && matches.length != 1) {
+      return TextSpan(text: text, style: config.style);
     }
+    final displayName = name.contains(RegExp(r'\([0-9a-f]{64}\)'))
+        ? displayLabels[name]
+        : mentionNames[pubkey];
 
     final isAgent =
         pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
+    final fullLabel = displayName ?? raw.substring(1);
+    final visibleLabel = fullLabel.replaceAllMapped(
+      RegExp(r'\(([0-9a-f]{64})\)'),
+      (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
+    );
     final pill = _MentionPill(
-      label: displayName ?? raw.substring(1),
+      label: visibleLabel,
+      semanticsLabel: fullLabel,
       isAgent: isAgent,
       textStyle: config.style,
     );
@@ -861,7 +911,7 @@ class _MentionMd extends InlineMd {
       alignment: PlaceholderAlignment.baseline,
       baseline: TextBaseline.alphabetic,
       child: pubkey != null && onMentionTap != null
-          ? GestureDetector(onTap: () => onMentionTap!(pubkey!), child: pill)
+          ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
           : pill,
     );
   }
@@ -869,11 +919,13 @@ class _MentionMd extends InlineMd {
 
 class _MentionPill extends StatelessWidget {
   final String label;
+  final String? semanticsLabel;
   final bool isAgent;
   final TextStyle? textStyle;
 
   const _MentionPill({
     required this.label,
+    this.semanticsLabel,
     required this.isAgent,
     this.textStyle,
   });
@@ -920,7 +972,9 @@ class _MentionPill extends StatelessWidget {
               offset: const Offset(0, -Grid.quarter),
               child: Text('@', style: style),
             ),
-          Text(label, style: style),
+          Flexible(
+            child: Text(label, style: style, semanticsLabel: semanticsLabel),
+          ),
         ],
       ),
     );
@@ -928,15 +982,3 @@ class _MentionPill extends StatelessWidget {
 }
 
 String _markdownMentionName(String name) => name.replaceAll(' ', '\u00A0');
-
-Iterable<String> _mentionAliases(Iterable<String> mentionNames) sync* {
-  for (final name in mentionNames) {
-    final trimmed = name.trim();
-    if (trimmed.isEmpty) continue;
-    yield _markdownMentionName(trimmed);
-    final firstName = trimmed.split(RegExp(r'\s+')).first;
-    if (firstName.isNotEmpty) {
-      yield firstName;
-    }
-  }
-}

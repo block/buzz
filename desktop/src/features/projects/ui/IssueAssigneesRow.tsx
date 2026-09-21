@@ -70,7 +70,7 @@ export function IssueAssigneeFacepile({
           <span
             className={cn(
               "inline-flex ring-1 ring-background",
-              profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+              profile?.isAgent ? "rounded-squircle" : "rounded-full",
             )}
             key={pubkey}
             title={`Assigned to ${label}`}
@@ -247,8 +247,7 @@ export function IssueAssigneesRow({
                 <button
                   aria-label={`Unassign ${label}`}
                   className={cn(
-                    "group relative inline-flex",
-                    profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+                    "group relative inline-flex rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
                   )}
                   data-testid={`${testIdPrefix}-unassign-${normalizePubkey(pubkey)}`}
                   disabled={unassignMutation.isPending}
@@ -261,7 +260,7 @@ export function IssueAssigneesRow({
                   <span
                     className={cn(
                       "absolute inset-0 flex items-center justify-center bg-background/80 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100",
-                      profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+                      profile?.isAgent ? "rounded-squircle" : "rounded-full",
                     )}
                   >
                     <X className="h-3 w-3 text-foreground" />

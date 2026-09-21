@@ -64,6 +64,8 @@ import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+part 'thread_reply_refresh_cases.dart';
+
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
 const _otherChannelId = '22222222-3333-4444-8555-666666666666';
@@ -471,10 +473,81 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  threadReplyRefreshTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
   });
+
+  for (final thread in [false, true]) {
+    for (final reverse in [false, true]) {
+      testWidgets('signed qualified caller thread=$thread reverse=$reverse', (
+        tester,
+      ) async {
+        final first = 'a' * 64, second = 'b' * 64, sibling = 'c' * 64;
+        Future<void> tapProfile(String label, String key) async {
+          await tester.tap(find.text(label));
+          await tester.pumpAndSettle();
+          expect(
+            tester
+                .widget<UserProfileSheet>(find.byType(UserProfileSheet))
+                .pubkey,
+            key,
+          );
+          await tester.tap(find.byTooltip('Close sheet'));
+          await tester.pumpAndSettle();
+        }
+
+        for (final firstName in ['Scout', 'Renamed Scout', first, null]) {
+          for (final secondName in [null, 'Scout', 'Renamed Scout', second]) {
+            for (final bystander in [null, 'Bob', 'Scout']) {
+              final names = {
+                first: ?firstName,
+                second: ?secondName,
+                sibling: 'Alice',
+                'd' * 64: ?bystander,
+              };
+              final keys = [
+                first,
+                second.toUpperCase(),
+                sibling,
+                if (bystander != null) 'd' * 64,
+              ];
+              final event = _textMsg(
+                id: 'qualified',
+                pubkey: 'author',
+                content: '@Scout @Scout ($second) @Alice @Other (${'e' * 64})',
+                extraTags: [
+                  for (final key in reverse ? keys.reversed : keys) ['p', key],
+                ],
+              );
+              await tester.pumpWidget(
+                _buildTestable(
+                  messages: [event],
+                  users: {
+                    for (final e in names.entries)
+                      e.key: UserProfile(pubkey: e.key, displayName: e.value),
+                  },
+                  threadReplies: const {'qualified': []},
+                  initialThreadRootId: thread ? 'qualified' : null,
+                ),
+              );
+              await tester.pumpAndSettle();
+              await tapProfile('Scout (bbbbbbbb…bbbb)', second);
+              expect(find.text('Scout'), findsNothing);
+              expect(find.text('Bob'), findsNothing);
+              if (firstName != null) expect(find.text(firstName), findsNothing);
+              expect(find.text('Other (eeeeeeee…eeee)'), findsNothing);
+              await tapProfile('Alice', sibling);
+              expect(tester.takeException(), isNull);
+              await tester.pumpWidget(const SizedBox.shrink());
+              await tester.pumpAndSettle();
+            }
+          }
+        }
+      });
+    }
+  }
 
   group('ChannelDetailPage', () {
     testWidgets(

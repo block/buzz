@@ -1,6 +1,13 @@
+mod connection_observability;
 pub mod migration;
 pub(crate) mod observability;
 pub mod replica_fence;
+
+pub use connection_observability::{DbConnectionOutcome, DbConnectionStep};
+pub(crate) use connection_observability::{
+    CONNECTION_DURATION_STEPS, CONNECTION_RAW_SERIES_PER_POD, CONNECTION_STARTED_STEPS,
+    CONNECTION_TERMINALS,
+};
 
 use crate::{deletion, event, DbError, EventQuery, Result};
 use buzz_datastore_tracing::datastore_span;
@@ -427,6 +434,52 @@ pub struct DbPoolStats {
     pub max: u32,
 }
 
+impl DbPoolStats {
+    /// Read a utilization snapshot from a physical SQLx pool handle.
+    pub fn from_pool(pool: &sqlx::PgPool) -> Self {
+        Self {
+            size: pool.size(),
+            idle: pool.num_idle() as u32,
+            max: pool.options().get_max_connections(),
+        }
+    }
+
+    /// Connections currently checked out from the pool.
+    pub const fn active(self) -> u32 {
+        self.size.saturating_sub(self.idle)
+    }
+}
+
+/// Physical role of a Postgres connection pool owned by the relay.
+///
+/// This vocabulary is intentionally closed so metrics labels remain bounded.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DbPoolRole {
+    /// Primary pool used for authoritative writes and consistency-sensitive reads.
+    Writer,
+    /// Optional read-replica pool used for eligible lag-tolerant reads.
+    Reader,
+    /// Optional independent pool used by the hash-chain audit service.
+    Audit,
+    /// Independent pool used for Postgres full-text search queries.
+    Search,
+}
+
+impl DbPoolRole {
+    /// Every physical pool role, in stable metrics-contract order.
+    pub const ALL: [Self; 4] = [Self::Writer, Self::Reader, Self::Audit, Self::Search];
+
+    /// Stable low-cardinality metrics label for this role.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Writer => "writer",
+            Self::Reader => "reader",
+            Self::Audit => "audit",
+            Self::Search => "search",
+        }
+    }
+}
+
 /// Bounded outcome of the Postgres portion of a relay readiness check.
 ///
 /// The variants deliberately separate waiting for a pooled connection from
@@ -584,6 +637,10 @@ impl Db {
     /// constructor so they inherit the timeout, floor-guard, and isolation
     /// policy installed by [`Db::new`].
     pub async fn connect_writer_pool(config: &DbConfig) -> Result<PgPool> {
+        use connection_observability::{
+            classify_pool_outcome, record_milestone, DbConnectionStep, DbConnectionStepAttempt,
+        };
+
         let lock_timeout_ms = config.lock_timeout_ms;
         let idle_txn_timeout_ms = config.idle_txn_timeout_ms;
         let statement_timeout_ms = config.statement_timeout_ms;
@@ -595,11 +652,27 @@ impl Db {
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
             .after_connect(move |conn, _meta| {
                 Box::pin(async move {
+                    // SQLx 0.9 exposes no callback immediately before each raw
+                    // physical dial. Entering `after_connect` is the truthful
+                    // point at which DNS/network/TLS/authentication succeeded.
+                    record_milestone(DbPoolRole::Writer, DbConnectionStep::PhysicalConnect);
+
                     // `SET` cannot take bind parameters; `set_config` can.
-                    sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
+                    let floor = DbConnectionStepAttempt::start(
+                        DbPoolRole::Writer,
+                        DbConnectionStep::CreatedAtFloor,
+                    );
+                    if let Err(error) =
+                        sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
                         .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
                         .execute(&mut *conn)
-                        .await?;
+                        .await
+                    {
+                        floor.fail();
+                        return Err(error);
+                    }
+                    floor.succeed();
+
                     // `lock_timeout` fails the waiting statement; it does not
                     // cancel the holder. `idle_in_transaction_session_timeout`
                     // reaps only holders idling inside an open transaction,
@@ -608,7 +681,11 @@ impl Db {
                     // milliseconds. Migration/schema-destruction connections
                     // reset lock and statement timeouts before their intentional
                     // long wait (see `with_exclusive_schema_destruction_lock`).
-                    sqlx::query(
+                    let timeouts = DbConnectionStepAttempt::start(
+                        DbPoolRole::Writer,
+                        DbConnectionStep::SessionTimeouts,
+                    );
+                    if let Err(error) = sqlx::query(
                         "SELECT set_config('lock_timeout', $1, false), \
                                 set_config('idle_in_transaction_session_timeout', $2, false), \
                                 set_config('statement_timeout', $3, false)",
@@ -617,11 +694,29 @@ impl Db {
                     .bind(idle_txn_timeout_ms.to_string())
                     .bind(statement_timeout_ms.to_string())
                     .execute(&mut *conn)
-                    .await?;
-                    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+                    .await
+                    {
+                        timeouts.fail();
+                        return Err(error);
+                    }
+                    timeouts.succeed();
+
+                    let isolation_step = DbConnectionStepAttempt::start(
+                        DbPoolRole::Writer,
+                        DbConnectionStep::Isolation,
+                    );
+                    let isolation: String = match sqlx::query_scalar("SHOW transaction_isolation")
                         .fetch_one(&mut *conn)
-                        .await?;
+                        .await
+                    {
+                        Ok(isolation) => isolation,
+                        Err(error) => {
+                            isolation_step.fail();
+                            return Err(error);
+                        }
+                    };
                     if isolation != "read committed" {
+                        isolation_step.fail();
                         return Err(sqlx::Error::Configuration(
                             format!(
                                 "writer pool requires READ COMMITTED transaction isolation, got {isolation}"
@@ -629,10 +724,29 @@ impl Db {
                             .into(),
                         ));
                     }
+                    isolation_step.succeed();
+                    record_milestone(DbPoolRole::Writer, DbConnectionStep::Ready);
                     Ok(())
                 })
             });
-        Ok(options.connect(&config.database_url).await?)
+
+        let pool_attempt =
+            DbConnectionStepAttempt::start(DbPoolRole::Writer, DbConnectionStep::WriterPool);
+        match options.connect(&config.database_url).await {
+            Ok(pool) => {
+                pool_attempt.succeed();
+                Ok(pool)
+            }
+            Err(error) => {
+                let outcome = classify_pool_outcome(&error);
+                if outcome == connection_observability::DbConnectionOutcome::TimedOut {
+                    pool_attempt.time_out();
+                } else {
+                    pool_attempt.fail();
+                }
+                Err(error.into())
+            }
+        }
     }
 
     /// Reader acquire timeout — deliberately far below the writer's
@@ -1073,9 +1187,9 @@ impl Db {
     /// exactly the ratio of the two pool sizes — in the direction that hides
     /// the problem.
     pub fn read_pool_stats(&self) -> Option<DbPoolStats> {
-        self.read_pool.as_ref().map(|p| DbPoolStats {
-            size: p.size(),
-            idle: p.num_idle() as u32,
+        self.read_pool.as_ref().map(|pool| DbPoolStats {
+            size: pool.size(),
+            idle: pool.num_idle() as u32,
             max: self.read_max_connections,
         })
     }
@@ -1242,6 +1356,57 @@ impl Db {
                 RouteDecision::Writer
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pool_role_tests {
+    use super::{DbPoolRole, DbPoolStats};
+
+    #[test]
+    fn database_pool_role_vocabulary_is_exact() {
+        assert_eq!(
+            DbPoolRole::ALL.map(DbPoolRole::as_str),
+            ["writer", "reader", "audit", "search"]
+        );
+    }
+
+    #[test]
+    fn database_pool_active_connections_use_saturating_arithmetic() {
+        assert_eq!(
+            DbPoolStats {
+                size: 12,
+                idle: 5,
+                max: 20,
+            }
+            .active(),
+            7
+        );
+        assert_eq!(
+            DbPoolStats {
+                size: 2,
+                idle: 3,
+                max: 20,
+            }
+            .active(),
+            0
+        );
+    }
+
+    /// `from_pool` must read the live SQLx handle rather than a cached copy.
+    /// A lazy pool never opens a connection, so this stays infrastructure-free.
+    #[tokio::test]
+    async fn database_pool_stats_are_read_from_the_physical_pool_handle() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(7)
+            .connect_lazy(&crate::test_support::database_url())
+            .expect("construct lazy pool");
+
+        let stats = DbPoolStats::from_pool(&pool);
+        assert_eq!(stats.size, 0);
+        assert_eq!(stats.idle, 0);
+        assert_eq!(stats.active(), 0);
+        assert_eq!(stats.max, 7);
     }
 }
 

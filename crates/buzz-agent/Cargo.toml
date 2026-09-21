@@ -73,6 +73,9 @@ fs2 = "0.4"
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 
 [dev-dependencies]
+# Synthetic TLS OAuth/catalog servers exercise the strict HTTPS production path.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 axum = { workspace = true }

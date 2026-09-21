@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { avatarSourceUrlForShape } from "@/features/profile/ui/ProfileAvatarEditor.utils";
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
@@ -68,18 +69,19 @@ export function UserAvatar({
   testId,
 }: UserAvatarProps) {
   const initials = getInitials(initialsLabel ?? displayName);
+  const resolvedShape = shape ?? "circle";
+  const shapedAvatarUrl = avatarSourceUrlForShape(avatarUrl, resolvedShape);
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
-  const animated = parseAnimatedAvatarUrl(avatarUrl);
+  const animated = parseAnimatedAvatarUrl(shapedAvatarUrl);
   const [isHovered, setIsHovered] = React.useState(false);
   const src = animated
     ? rewriteRelayUrl(isHovered ? animated.animationUrl : animated.posterUrl)
-    : avatarUrl
-      ? rewriteRelayUrl(avatarUrl)
+    : shapedAvatarUrl
+      ? rewriteRelayUrl(shapedAvatarUrl)
       : null;
-  const resolvedShape = shape ?? "circle";
   const radiusClass =
-    resolvedShape === "squircle" ? "rounded-[30%]" : "rounded-full";
+    resolvedShape === "squircle" ? "rounded-squircle" : "rounded-full";
 
   return (
     <Avatar
@@ -91,6 +93,7 @@ export function UserAvatar({
         !animated && "shadow-xs",
         className,
       )}
+      data-avatar-shape={resolvedShape}
       data-testid={testId}
       onMouseEnter={animated ? () => setIsHovered(true) : undefined}
       onMouseLeave={animated ? () => setIsHovered(false) : undefined}

@@ -157,6 +157,7 @@ mod tests {
             format: "buzz-agent-snapshot".to_string(),
             version: 1,
             definition: AgentSnapshotDefinition {
+                session_policy: Default::default(),
                 name: "Tree Trunks".to_string(),
                 source_is_builtin: false,
                 system_prompt: Some("You are a helpful agent.".to_string()),

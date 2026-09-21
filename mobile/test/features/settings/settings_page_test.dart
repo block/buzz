@@ -11,9 +11,71 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  setUp(() {
+    PackageInfo.setMockInitialValues(
+      appName: 'Buzz',
+      packageName: 'xyz.block.buzz',
+      version: '0.16.0',
+      buildNumber: '432',
+      buildSignature: '',
+    );
+  });
+
+  for (final buildNumber in ['432', '', '2147483647']) {
+    testWidgets('shows version with build number "$buildNumber"', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(320, 700);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      PackageInfo.setMockInitialValues(
+        appName: 'Buzz',
+        packageName: 'xyz.block.buzz',
+        version: '0.16.0',
+        buildNumber: buildNumber,
+        buildSignature: '',
+      );
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            currentCommunityRoleProvider.overrideWithValue(
+              const AsyncData<CommunityMemberRole?>(CommunityMemberRole.admin),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: SettingsPage(
+              profileHeader: const SizedBox.shrink(),
+              invitePageBuilder: (_) => const SizedBox.shrink(),
+              identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Invite to community'), findsOneWidget);
+      await tester.pumpAndSettle();
+      expect(
+        find.text(buildNumber.isEmpty ? 'v0.16.0' : 'v0.16.0 ($buildNumber)'),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('shows the persisted per-community push opt-in on iOS', (
     tester,
   ) async {

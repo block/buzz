@@ -78,6 +78,7 @@ pub async fn create_persona(
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
             created_at: now.clone(),
             updated_at: now,
         };

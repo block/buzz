@@ -7,6 +7,9 @@ import '../../../shared/utils/string_utils.dart';
 @immutable
 class MentionCandidate {
   final String pubkey;
+
+  /// Restored identity only: eligibility must come from current community state.
+  final bool requiresRevalidation;
   final String? displayName;
   final String? secondaryLabel;
   final String? avatarUrl;
@@ -17,6 +20,7 @@ class MentionCandidate {
 
   const MentionCandidate({
     required this.pubkey,
+    this.requiresRevalidation = false,
     this.displayName,
     this.secondaryLabel,
     this.avatarUrl,

@@ -82,22 +82,26 @@ final channelDirectoryLoadStatusProvider =
 
 Future<List<NostrEvent>> _fetchChannelMemberships(
   RelaySessionNotifier session,
-  String pubkey,
-) => _fetchPaginatedChannelEvents(
+  String pubkey, {
+  void Function()? ensureCurrent,
+}) => _fetchPaginatedChannelEvents(
   session,
   kind: 39002,
   tags: {
     '#p': [pubkey],
   },
   operation: 'Channel memberships',
+  ensureCurrent: ensureCurrent,
 );
 
 Future<List<NostrEvent>> _fetchChannelDirectoryMetas(
-  RelaySessionNotifier session,
-) => _fetchPaginatedChannelEvents(
+  RelaySessionNotifier session, {
+  void Function()? ensureCurrent,
+}) => _fetchPaginatedChannelEvents(
   session,
   kind: 39000,
   operation: 'Channel directory',
+  ensureCurrent: ensureCurrent,
 );
 
 /// Thrown when a channel-list request is retired before it settles.
@@ -391,12 +395,14 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
   required int kind,
   required String operation,
   Map<String, List<String>> tags = const {},
+  void Function()? ensureCurrent,
 }) async {
   final events = <NostrEvent>[];
   final seenEventIds = <String>{};
   int? until;
   String? beforeId;
   for (var pageIndex = 0; pageIndex < _maxChannelDirectoryPages; pageIndex++) {
+    ensureCurrent?.call();
     final page = await session.queryRelay([
       NostrFilter(
         kinds: [kind],
@@ -406,6 +412,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
         extensions: {'before_id': ?beforeId},
       ),
     ]);
+    ensureCurrent?.call();
     if (page.isEmpty) break;
     var madeProgress = false;
     for (final event in page) {

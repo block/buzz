@@ -5,6 +5,7 @@ import {
   KIND_HUDDLE_STARTED,
 } from "../../src/shared/constants/kinds";
 import { truncateNpub } from "../../src/shared/lib/pubkey";
+import { ROUNDED_SQUIRCLE_PATH } from "../../src/shared/ui/AvatarClipPaths";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
@@ -667,6 +668,34 @@ test("animates the responding agent with the shared speaker ring", async ({
       ),
     )
     .toBe("0.890");
+  await expect(agentAvatar).toHaveCSS("clip-path", "none");
+  await expect(agentAvatar).not.toHaveClass(/rounded-squircle/);
+  await expect(agentAvatar).toHaveClass(/buzz-huddle-speaking-avatar-agent/);
+  const speakingRing = agentAvatar.getByTestId("huddle-agent-speaking-ring");
+  await expect(speakingRing).toBeVisible();
+  await expect(speakingRing.locator("path")).toHaveAttribute(
+    "d",
+    ROUNDED_SQUIRCLE_PATH,
+  );
+  await expect(speakingRing.locator("path")).toHaveAttribute("fill", "none");
+  await expect(speakingRing.locator("path")).toHaveAttribute(
+    "stroke-width",
+    "2",
+  );
+  await expect(speakingRing.locator("path")).toHaveAttribute(
+    "vector-effect",
+    "non-scaling-stroke",
+  );
+  await expect(speakingRing).toHaveCSS("opacity", "0.89");
+  await expect(agentAvatar.locator(".rounded-squircle")).toHaveCSS(
+    "clip-path",
+    /rounded-squircle-clip/,
+  );
+
+  const voiceMenuTrigger = page.getByTestId("huddle-agent-voice-menu-trigger");
+  await voiceMenuTrigger.focus();
+  await expect(voiceMenuTrigger).toBeFocused();
+  await expect(voiceMenuTrigger).toHaveCSS("clip-path", "none");
 
   await page.evaluate(async () => {
     await window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__?.({

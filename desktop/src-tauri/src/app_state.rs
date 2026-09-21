@@ -32,6 +32,9 @@ pub struct AppState {
     /// validated relay origin.
     pub media_fetch_client: reqwest::Client,
     pub relay_url_override: Mutex<Option<String>>,
+    /// User-configured communities, supplied by narrow workspace IPC, never learned
+    /// from profile URLs. Only these origins may supply portable agent media.
+    pub agent_avatar_communities: Mutex<Vec<String>>,
     pub workspace_apply_lock: Arc<AsyncMutex<()>>,
     pub workspace_apply_generation: AtomicU64,
     /// Defers managed-agent restore until `apply_workspace` installs relay and identity.
@@ -213,6 +216,7 @@ pub fn build_app_state() -> AppState {
              header across origins (redirect-hop SSRF)",
         ),
         relay_url_override: Mutex::new(None),
+        agent_avatar_communities: Mutex::new(Vec::new()),
         workspace_apply_lock: Arc::new(AsyncMutex::new(())),
         workspace_apply_generation: AtomicU64::new(0),
         managed_agent_restore_pending: AtomicBool::new(false),

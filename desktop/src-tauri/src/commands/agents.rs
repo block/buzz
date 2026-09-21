@@ -628,6 +628,10 @@ pub async fn create_managed_agent(
             idle_timeout_seconds: input.idle_timeout_seconds.filter(|s| *s > 0),
             max_turn_duration_seconds: input.max_turn_duration_seconds.filter(|s| *s > 0),
             parallelism: minted.parallelism.unwrap_or(DEFAULT_AGENT_PARALLELISM),
+            session_policy: linked_persona
+                .as_ref()
+                .map(|persona| persona.session_policy)
+                .unwrap_or_default(),
             system_prompt: snapshot_prompt.or_else(|| {
                 input
                     .system_prompt
