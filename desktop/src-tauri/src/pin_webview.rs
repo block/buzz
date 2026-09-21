@@ -16,8 +16,8 @@ use tauri::{
 use uuid::Uuid;
 
 use policy::{
-    bounds_are_usable, classify_pin_load, is_unusable_document_url, should_navigate_existing,
-    PinLoadVerdict,
+    PinLoadVerdict, bounds_are_usable, classify_pin_load, is_unusable_document_url,
+    should_navigate_existing,
 };
 
 const PIN_LABEL_PREFIX: &str = "pin-";
@@ -279,10 +279,7 @@ fn content_origin_from_inner_outer(
     )
 }
 
-fn pin_webview_position(
-    bounds: &PinBounds,
-    origin: LogicalPosition<f64>,
-) -> LogicalPosition<f64> {
+fn pin_webview_position(bounds: &PinBounds, origin: LogicalPosition<f64>) -> LogicalPosition<f64> {
     LogicalPosition::new(bounds.x + origin.x, bounds.y + origin.y)
 }
 
@@ -930,7 +927,6 @@ pub async fn pin_webview_poll(
     Ok(PinPollResult { changed })
 }
 
-
 #[tauri::command]
 pub async fn pin_webview_inspect(
     app: AppHandle,
@@ -1173,10 +1169,7 @@ mod tests {
             pin_webview_label("hula-link-side-panel", "popout-thread-abc"),
             "pin-hula-link-side-panel--popout-thread-abc"
         );
-        assert_eq!(
-            normalize_window_label(None),
-            "main"
-        );
+        assert_eq!(normalize_window_label(None), "main");
         assert_eq!(
             normalize_window_label(Some("  popout-split-1  ")),
             "popout-split-1"

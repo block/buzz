@@ -818,12 +818,14 @@ export class RelayClient {
     if (type === "NOTICE" && typeof rest[0] === "string") {
       // Connection-scoped back-pressure — arm the gate until it expires.
       activateRateLimitIfSignalled(rest[0]);
-      // Hula-only: OpenClaw workspace MCP capability may arrive as NOTICE JSON.
+      // Hula-only: OpenClaw workspace MCP capability may arrive as NOTICE JSON
+      // (capability may include mcp.headers for CF Access edge tokens).
       void handleProtectedRelayPayload(rest[0]);
       return;
     }
 
     // Hula-only custom frame: ["HULA", { type: "hula.capability", ... }]
+    // Same capability object as NOTICE; see openclawWorkspaceMcp/parseCapability.ts.
     if (type === "HULA" && rest[0] != null) {
       void handleProtectedRelayPayload(rest[0]);
     }

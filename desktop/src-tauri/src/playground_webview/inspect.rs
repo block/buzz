@@ -5,8 +5,8 @@
 //! Linux CI cannot compile AppKit; keep presentation policy tests host-free.
 
 use super::{
-    apply_bounds, playground_webview_label, PlaygroundBounds, PlaygroundWebviewManager,
-    APP_WEBVIEW_LABEL,
+    APP_WEBVIEW_LABEL, PlaygroundBounds, PlaygroundWebviewManager, apply_bounds,
+    playground_webview_label,
 };
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Webview};
@@ -152,11 +152,7 @@ pub fn close_inspector_for_webview(webview: &Webview) -> Result<(), String> {
 /// Pin min=max to the current frame so WebKit cannot grow or shrink the
 /// Buzz window when the inspector frontend appears. Never call `set_size`.
 /// Uses the inspected webview's parent window label (main or pop-out split).
-pub fn lock_main_window_size(
-    app: &AppHandle,
-    window_label: &str,
-    before: Option<(u32, u32)>,
-) {
+pub fn lock_main_window_size(app: &AppHandle, window_label: &str, before: Option<(u32, u32)>) {
     let Some(before) = before else {
         return;
     };
@@ -487,8 +483,8 @@ pub fn redetach_inspector_for_webview(webview: &Webview) {
 
 #[cfg(target_os = "macos")]
 fn macos_inspector_is_visible(webview: &Webview) -> bool {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // with_webview requires FnOnce + Send + 'static. Cell<bool> is not Sync
     // (`&Cell<bool>` is not Send). A stack AtomicBool is Send but not 'static.
@@ -528,8 +524,8 @@ mod tests {
 
     #[test]
     fn inspector_visibility_flag_is_send_static() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         fn take_send_static<F: FnOnce() + Send + 'static>(f: F) {
             f();

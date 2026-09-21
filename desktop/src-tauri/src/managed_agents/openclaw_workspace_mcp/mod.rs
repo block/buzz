@@ -19,6 +19,10 @@ pub struct OpenClawWorkspaceGrant {
     pub url: String,
     pub authorization: String,
     pub expires_at: String,
+    /// Extra HTTP headers for Claude mcpServers (CF Access, etc.). Authorization
+    /// is always taken from `authorization` at apply time.
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     pub relay: Option<String>,
     #[serde(default)]
@@ -45,8 +49,8 @@ pub fn load_grant() -> Result<Option<OpenClawWorkspaceGrant>, String> {
     let Some(raw) = raw else {
         return Ok(None);
     };
-    let grant: OpenClawWorkspaceGrant = serde_json::from_str(&raw)
-        .map_err(|e| format!("corrupt openclaw workspace grant: {e}"))?;
+    let grant: OpenClawWorkspaceGrant =
+        serde_json::from_str(&raw).map_err(|e| format!("corrupt openclaw workspace grant: {e}"))?;
     Ok(Some(grant))
 }
 
@@ -100,6 +104,7 @@ pub fn apply_grant(
         OPENCLAW_WORKSPACE_MCP_NAME,
         &grant.url,
         &grant.authorization,
+        grant.headers.as_ref(),
     )?;
 
     if let Ok(records) = load_managed_agents(app) {
@@ -113,6 +118,7 @@ pub fn apply_grant(
                 OPENCLAW_WORKSPACE_MCP_NAME,
                 &grant.url,
                 &grant.authorization,
+                grant.headers.as_ref(),
             )?;
             agents_updated += 1;
         }

@@ -11,6 +11,7 @@ export async function handleProtectedRelayPayload(
     url: cap.mcp.url,
     authorization: cap.mcp.authorization,
     expiresAt: cap.mcp.expiresAt,
+    headers: cap.mcp.headers,
     relay: cap.relay,
     connectedViaRelay: true,
   });

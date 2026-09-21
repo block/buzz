@@ -11,10 +11,23 @@ export type OpenClawWorkspaceMcpCapability = {
     transport?: string;
     authorization: string;
     expiresAt: string;
+    /** Optional extra HTTP headers (e.g. CF Access). Authorization also lives here when present. */
+    headers?: Record<string, string>;
   };
   hulaBuzzOnly?: boolean;
   relay?: string;
 };
+
+function parseHeaders(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof k !== "string" || !k.trim()) continue;
+    if (typeof v !== "string" || !v.trim()) continue;
+    out[k.trim()] = v.trim();
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 export function parseOpenClawWorkspaceMcpCapability(
   input: unknown,
@@ -37,8 +50,10 @@ export function parseOpenClawWorkspaceMcpCapability(
   if (!mcp || typeof mcp !== "object") return null;
   const m = mcp as Record<string, unknown>;
   if (typeof m.url !== "string" || !m.url.trim()) return null;
-  if (typeof m.authorization !== "string" || !m.authorization.trim()) return null;
+  if (typeof m.authorization !== "string" || !m.authorization.trim())
+    return null;
   if (typeof m.expiresAt !== "string" || !m.expiresAt.trim()) return null;
+  const headers = parseHeaders(m.headers);
   const v = typeof obj.v === "number" ? obj.v : 1;
   return {
     v,
@@ -49,6 +64,7 @@ export function parseOpenClawWorkspaceMcpCapability(
       transport: typeof m.transport === "string" ? m.transport : undefined,
       authorization: m.authorization.trim(),
       expiresAt: m.expiresAt.trim(),
+      ...(headers ? { headers } : {}),
     },
     hulaBuzzOnly: obj.hulaBuzzOnly === true,
     relay: typeof obj.relay === "string" ? obj.relay : undefined,
