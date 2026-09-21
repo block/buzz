@@ -645,6 +645,7 @@ CREATE TABLE archived_identities (
 CREATE TABLE audit_log (
     community_id    UUID NOT NULL REFERENCES communities(id),
     seq             BIGINT NOT NULL,
+    hash_version    SMALLINT NOT NULL DEFAULT 1 CHECK (hash_version IN (1, 2)),
     hash            BYTEA NOT NULL,
     prev_hash       BYTEA,
     action          VARCHAR(64) NOT NULL,
