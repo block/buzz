@@ -381,6 +381,11 @@ CREATE INDEX idx_workflows_channel_active ON workflows (community_id, channel_id
 -- Scheduler scans enabled schedule workflows; community_id returned per row so
 -- side effects run under the owning tenant's context (Lane0 contract §4a.5).
 CREATE INDEX idx_workflows_enabled ON workflows (enabled, status) WHERE enabled;
+CREATE INDEX idx_workflows_schedule_scan
+    ON workflows (created_at, community_id, id)
+    WHERE status = 'active'
+      AND enabled = TRUE
+      AND definition->'trigger'->>'on' = 'schedule';
 
 -- ── Workflow runs ─────────────────────────────────────────────────────────────
 

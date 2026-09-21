@@ -192,6 +192,32 @@ pub struct WorkflowRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Stable keyset cursor for the global scheduled-workflow scan.
+///
+/// The scheduler must visit every enabled schedule across every community
+/// without loading an unbounded result in one query. `created_at` alone is not
+/// unique, and workflow UUIDs may collide across communities, so all three
+/// fields participate in the ordering and cursor comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduledWorkflowCursor {
+    /// Creation timestamp of the last workflow in the previous page.
+    pub created_at: DateTime<Utc>,
+    /// Server-resolved community of the last workflow in the previous page.
+    pub community_id: CommunityId,
+    /// Workflow UUID of the last workflow in the previous page.
+    pub workflow_id: Uuid,
+}
+
+impl From<&WorkflowRecord> for ScheduledWorkflowCursor {
+    fn from(workflow: &WorkflowRecord) -> Self {
+        Self {
+            created_at: workflow.created_at,
+            community_id: workflow.community_id,
+            workflow_id: workflow.id,
+        }
+    }
+}
+
 /// A single execution of a workflow.
 #[derive(Debug, Clone)]
 pub struct WorkflowRunRecord {
@@ -457,12 +483,24 @@ pub async fn list_enabled_channel_workflows(
     rows.into_iter().map(row_to_workflow_record).collect()
 }
 
-/// List all active, enabled workflows with a `schedule` trigger across all channels.
+/// List one keyset page of active, enabled schedule-triggered workflows.
 ///
-/// Used by the cron scheduler. Filters by trigger type in SQL to avoid loading
-/// event-triggered workflows that the cron loop would immediately discard.
-/// Results are bounded to [`LIST_MAX_LIMIT`] rows.
-pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRecord>> {
+/// Used by the cron scheduler, which exhausts pages before completing a scan.
+/// Each query remains bounded to [`LIST_MAX_LIMIT`] rows without permanently
+/// starving workflows ordered after the first page. `scan_through` freezes the
+/// upper edge for both inserts and definition/eligibility updates, so later
+/// pages cannot observe schedule changes made after the scan began.
+pub async fn list_enabled_schedule_workflows_page(
+    pool: &PgPool,
+    cursor: Option<ScheduledWorkflowCursor>,
+    scan_through: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<WorkflowRecord>> {
+    let limit = limit.clamp(1, LIST_MAX_LIMIT);
+    let after_created_at = cursor.map(|value| value.created_at);
+    let after_community_id = cursor.map(|value| *value.community_id.as_uuid());
+    let after_workflow_id = cursor.map(|value| value.workflow_id);
+
     let rows = sqlx::query(
         r#"
         SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash,
@@ -473,11 +511,21 @@ pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRec
           AND w.enabled = TRUE
           AND w.definition->'trigger'->>'on' = 'schedule'
           AND c.archived_at IS NULL
-        ORDER BY w.created_at ASC
-        LIMIT $1
+          AND w.created_at <= $4
+          AND w.updated_at <= $4
+          AND (
+              $1::timestamptz IS NULL
+              OR (w.created_at, w.community_id, w.id) > ($1, $2::uuid, $3::uuid)
+          )
+        ORDER BY w.created_at ASC, w.community_id ASC, w.id ASC
+        LIMIT $5
         "#,
     )
-    .bind(LIST_MAX_LIMIT)
+    .bind(after_created_at)
+    .bind(after_community_id)
+    .bind(after_workflow_id)
+    .bind(scan_through)
+    .bind(limit)
     .fetch_all(pool)
     .await?;
 
@@ -494,7 +542,8 @@ pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRec
 /// can compute different claim keys.
 ///
 /// `community_id` is server provenance — for the global scheduler scan it is
-/// the `workflow.community_id` returned by [`list_all_enabled_workflows`], not
+/// the `workflow.community_id` returned by
+/// [`list_enabled_schedule_workflows_page`], not
 /// any client-supplied value. It is required because `workflows` is keyed
 /// `(community_id, id)`: duplicate workflow UUIDs across communities are
 /// allowed, so resolving the owning community from `id` alone is ambiguous and
@@ -1526,10 +1575,21 @@ impl Db {
         crate::workflow::list_enabled_channel_workflows(&self.pool, community_id, channel_id).await
     }
 
-    /// List all active, enabled schedule-triggered workflows.
-    #[datastore_span(name = "list_all_enabled_workflows", system = "postgresql")]
-    pub async fn list_all_enabled_workflows(&self) -> Result<Vec<crate::workflow::WorkflowRecord>> {
-        crate::workflow::list_all_enabled_workflows(&self.pool).await
+    /// List one keyset page of active, enabled schedule-triggered workflows.
+    #[datastore_span(name = "list_enabled_schedule_workflows_page", system = "postgresql")]
+    pub async fn list_enabled_schedule_workflows_page(
+        &self,
+        cursor: Option<crate::workflow::ScheduledWorkflowCursor>,
+        scan_through: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<crate::workflow::WorkflowRecord>> {
+        crate::workflow::list_enabled_schedule_workflows_page(
+            &self.pool,
+            cursor,
+            scan_through,
+            limit,
+        )
+        .await
     }
 
     /// Claim a scheduled workflow fire for an authoritative schedule instant.
@@ -2175,7 +2235,8 @@ mod postgres_tests {
     // The invariant that survives is NOT "the claim never receives community";
     // it is "the community used for the claim is server provenance, never
     // client-controlled." For the global scheduler scan that provenance is the
-    // `workflow.community_id` returned by `list_all_enabled_workflows()`. The
+    // `workflow.community_id` returned by
+    // `list_enabled_schedule_workflows_page()`. The
     // claim therefore takes `community_id` and binds
     // `WHERE w.community_id = $1 AND w.id = $2`, confining the claim row to the
     // intended tenant.
@@ -2259,6 +2320,93 @@ mod postgres_tests {
         .await
         .expect("create workflow");
         (workflow_id, community)
+    }
+
+    /// A scheduler scan must continue past the global per-query cap. Before
+    /// keyset pagination, the oldest 1,000 schedules were returned on every
+    /// tick and every newer schedule was permanently starved.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scheduled_workflow_pages_include_rows_after_global_limit() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xc3; 32];
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(&pool, community, &owner).await;
+
+        sqlx::query(
+            r#"
+            INSERT INTO workflows
+                (id, community_id, name, owner_pubkey, channel_id, definition,
+                 definition_hash, status, enabled, created_at, updated_at)
+            SELECT gen_random_uuid(), $1, 'scheduled-' || n::text, $2, $3,
+                   CASE WHEN n = 1001
+                        THEN '{"trigger":{"on":"message_posted"},"steps":[]}'::jsonb
+                        ELSE '{"trigger":{"on":"schedule","cron":"* * * * *"},"steps":[]}'::jsonb
+                   END,
+                   decode(repeat('00', 32), 'hex'), 'active', TRUE,
+                   CASE WHEN n = 1003
+                        THEN '2026-01-03T00:00:00Z'::timestamptz
+                        ELSE '2026-01-01T00:00:00Z'::timestamptz
+                             + n * interval '1 microsecond'
+                   END,
+                   CASE WHEN n = 1003
+                        THEN '2026-01-03T00:00:00Z'::timestamptz
+                        ELSE '2026-01-01T00:00:00Z'::timestamptz
+                             + n * interval '1 microsecond'
+                   END
+            FROM generate_series(1, 1003) AS n
+            "#,
+        )
+        .bind(community.as_uuid())
+        .bind(&owner)
+        .bind(channel_id)
+        .execute(&pool)
+        .await
+        .expect("insert scheduled workflows");
+
+        let scan_through = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+            .expect("scan bound")
+            .with_timezone(&Utc);
+        let first = list_enabled_schedule_workflows_page(&pool, None, scan_through, LIST_MAX_LIMIT)
+            .await
+            .expect("first page");
+        assert_eq!(first.len(), LIST_MAX_LIMIT as usize);
+
+        let cursor = first
+            .last()
+            .map(ScheduledWorkflowCursor::from)
+            .expect("first page cursor");
+
+        // Turn an older event workflow into a schedule after the snapshot
+        // boundary. A created_at-only fence would admit it on page two even
+        // though page one was evaluated against an earlier definition set.
+        sqlx::query(
+            r#"
+            UPDATE workflows
+            SET definition = '{"trigger":{"on":"schedule","cron":"* * * * *"},"steps":[]}'::jsonb,
+                updated_at = NOW()
+            WHERE community_id = $1 AND name = 'scheduled-1001'
+            "#,
+        )
+        .bind(community.as_uuid())
+        .execute(&pool)
+        .await
+        .expect("update workflow after scan boundary");
+
+        let second =
+            list_enabled_schedule_workflows_page(&pool, Some(cursor), scan_through, LIST_MAX_LIMIT)
+                .await
+                .expect("second page");
+
+        assert_eq!(
+            second.len(),
+            1,
+            "only the unchanged row beyond the page cap belongs to this frozen scan"
+        );
+        assert_eq!(second[0].name, "scheduled-1002");
     }
 
     /// Confinement: a duplicate workflow UUID existing in both community A and

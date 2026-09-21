@@ -703,7 +703,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 46);
+        assert_eq!(migrations.len(), 47);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1288,6 +1288,10 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE TABLE storage_accounting_snapshots"));
+        assert_eq!(migrations[46].version, 47);
+        let workflow_schedule_scan = migrations[46].sql.as_str();
+        assert!(workflow_schedule_scan.contains("CREATE INDEX idx_workflows_schedule_scan"));
+        assert!(desired_schema.contains("CREATE INDEX idx_workflows_schedule_scan"));
         // schema.sql exclusion list must match the restored (pre-0041) body.
         assert!(
             desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
