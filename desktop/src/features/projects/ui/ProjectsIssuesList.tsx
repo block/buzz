@@ -10,6 +10,7 @@ import type {
 import { issueShareLink } from "@/features/projects/lib/projectShareLinks";
 import { selectionItemFromTask } from "@/features/projects/lib/projectSelection";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
+import { i18n, useTranslation } from "@/i18n";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -55,10 +56,11 @@ type ProjectsIssuesListProps = {
 };
 
 function nextStepLabel(status: ProjectIssue["status"]) {
-  if (status === "Done" || status === "Closed") return "View task";
-  if (status === "In Review") return "Review task";
-  if (status === "Triage") return "Triage task";
-  return "Open task";
+  if (status === "Done" || status === "Closed")
+    return i18n.t("projects.issue.view-task");
+  if (status === "In Review") return i18n.t("projects.issues-list.next-review");
+  if (status === "Triage") return i18n.t("projects.issues-list.next-triage");
+  return i18n.t("projects.issues-list.next-open");
 }
 
 const IssueGridCard = React.memo(function IssueGridCard({
@@ -149,6 +151,7 @@ const IssueListRow = React.memo(function IssueListRow({
   rangeItems: ReturnType<typeof issueSelectionItem>[];
   repository: Repository;
 }) {
+  const { t } = useTranslation();
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
 
   return (
@@ -184,7 +187,7 @@ const IssueListRow = React.memo(function IssueListRow({
           </DropdownMenuItem>
           <CopyShareLinkMenuItem
             link={issueShareLink(issue)}
-            label="Copy task link"
+            label={t("projects.issue.copy-link")}
             testId={`projects-issue-copy-link-${issue.id}`}
           />
         </ProjectListRowMenu>
@@ -206,6 +209,7 @@ export function ProjectsIssuesList({
   profiles,
   viewMode,
 }: ProjectsIssuesListProps) {
+  const { t } = useTranslation();
   // Grouping and per-group selection arrays are identity-stable across
   // re-renders so the memoized rows only re-render when their data changes.
   const allGroups = React.useMemo(
@@ -241,7 +245,7 @@ export function ProjectsIssuesList({
   );
 
   if (isLoading) {
-    return <BuzzLoadingState label="Loading tasks" />;
+    return <BuzzLoadingState label={t("projects.issue.loading")} />;
   }
 
   const loadNotice = (
@@ -264,15 +268,19 @@ export function ProjectsIssuesList({
             size="sm"
             variant="outline"
           >
-            {isRetrying ? "Retrying..." : "Retry"}
+            {isRetrying
+              ? t("projects.work-items-list.retrying")
+              : t("projects.shared.retry")}
           </Button>
         }
         description={
-          error instanceof Error ? error.message : "The relay request failed."
+          error instanceof Error
+            ? error.message
+            : t("projects.work-items-notice.relay-failed")
         }
         error
         panel={false}
-        title="Could not load tasks"
+        title={t("projects.issue.load-error")}
       />
     );
   }

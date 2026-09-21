@@ -1,8 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { initializeI18n } from "@/i18n";
 import { formatMessageNotification } from "./notificationFormat.ts";
 import { senderNameFromSummary } from "./senderName.ts";
+
+// Every assertion below is the English contract, and the copy now resolves
+// through `i18n.t`, which returns nothing until the singleton boots. English
+// is pinned explicitly before init: node's own `navigator.languages` reports
+// the host system locale — which may be zh-CN.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 test("DM title is the sender name when resolved", () => {
   const { title, body } = formatMessageNotification({
@@ -46,6 +57,18 @@ test("DM body falls back when the message is blank", () => {
       content: "   ",
     }).body,
     "New message",
+  );
+});
+
+test("a long body is cut to the budget with the English marker", () => {
+  assert.equal(
+    formatMessageNotification({
+      source: "dm",
+      senderName: "Taylor",
+      channelName: null,
+      content: "a".repeat(200),
+    }).body,
+    `${"a".repeat(137)}...`,
   );
 });
 

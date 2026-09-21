@@ -20,6 +20,7 @@ import {
   PROJECT_HOME_TEMPLATE_ID,
 } from "@/features/projects/lib/projectHomeTemplate";
 import { markProjectDataAuthoritative } from "@/features/projects/projectSnapshot";
+import { useTranslation } from "@/i18n";
 import type { Channel } from "@/shared/api/types";
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 
@@ -27,6 +28,7 @@ export type { CreateProjectInput, CreateProjectResult };
 
 /** Mutation that creates a project home and inserts it into the caches. */
 export function useCreateProjectMutation() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { applyAgents, applyCanvas } = useApplyTemplate();
   const resumeRef = React.useRef<CreateProjectResumeState>({
@@ -75,9 +77,7 @@ export function useCreateProjectMutation() {
             project,
           });
           if (!applied) {
-            toast.warning(
-              "Project created, but its project-home canvas could not be added.",
-            );
+            toast.warning(t("projects.create-project.canvas-warning"));
           }
         } else if (input.templateId) {
           await Promise.all([

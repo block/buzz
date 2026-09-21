@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -129,9 +130,9 @@ function projectRootItem(item: FeedItem, groupItems: readonly FeedItem[]) {
 }
 
 function projectTypeLabel(item: FeedItem) {
-  if (item.kind === 1618) return "Review";
-  if (item.kind === 1621) return "Task";
-  return "Project update";
+  if (item.kind === 1618) return i18n.t("home.inbox.headline-review");
+  if (item.kind === 1621) return i18n.t("home.inbox.headline-task");
+  return i18n.t("home.inbox.headline-project-update");
 }
 
 function feedHeadline(item: FeedItem, groupItems: readonly FeedItem[] = []) {
@@ -145,35 +146,35 @@ function feedHeadline(item: FeedItem, groupItems: readonly FeedItem[] = []) {
 
   switch (item.kind) {
     case 40007:
-      return "Reminder";
+      return i18n.t("home.inbox.headline-reminder");
     case 43001:
-      return "Job requested";
+      return i18n.t("home.inbox.headline-job-requested");
     case 43002:
-      return "Job accepted";
+      return i18n.t("home.inbox.headline-job-accepted");
     case 43003:
-      return "Progress update";
+      return i18n.t("home.inbox.headline-progress-update");
     case 43004:
-      return "Job result";
+      return i18n.t("home.inbox.headline-job-result");
     case 43005:
-      return "Job cancelled";
+      return i18n.t("home.inbox.headline-job-cancelled");
     case 43006:
-      return "Job failed";
+      return i18n.t("home.inbox.headline-job-failed");
     case 45001:
-      return "Forum post";
+      return i18n.t("home.inbox.headline-forum-post");
     case 45003:
-      return "Forum reply";
+      return i18n.t("home.inbox.headline-forum-reply");
     case 46010:
-      return "Approval requested";
+      return i18n.t("home.inbox.headline-approval-requested");
     default:
       if (item.category === "mention") {
-        return "Mention";
+        return i18n.t("home.inbox.headline-mention");
       }
 
       if (item.category === "agent_activity") {
-        return "Agent update";
+        return i18n.t("home.inbox.headline-agent-update");
       }
 
-      return "Channel update";
+      return i18n.t("home.inbox.headline-channel-update");
   }
 }
 
@@ -184,24 +185,24 @@ function feedPreview(item: FeedItem) {
   }
 
   if (item.kind === 46010) {
-    return "A workflow is waiting for approval.";
+    return i18n.t("home.inbox.preview-approval-waiting");
   }
 
   if (item.kind === 40007) {
-    return "A reminder is waiting for you.";
+    return i18n.t("home.inbox.preview-reminder-waiting");
   }
 
-  return "No additional details were attached to this event.";
+  return i18n.t("home.inbox.preview-no-details");
 }
 
 function categoryLabelFor(category: FeedItemCategory) {
   return category === "needs_action"
-    ? "Needs Action"
+    ? i18n.t("home.inbox.category-needs-action")
     : category === "mention"
-      ? "Mention"
+      ? i18n.t("home.inbox.category-mention")
       : category === "agent_activity"
-        ? "Agent update"
-        : "Activity";
+        ? i18n.t("home.inbox.category-agent-update")
+        : i18n.t("home.inbox.category-activity");
 }
 
 export function isThreadActivityItem(item: FeedItem) {
@@ -281,7 +282,9 @@ export function getInboxTypeLabel(item: InboxItem): InboxTypeLabel {
 
   if (item.item.channelType === "dm") {
     return {
-      text: item.senderLabel ? `DM from ${item.senderLabel}` : "DM",
+      text: item.senderLabel
+        ? i18n.t("home.inbox.type-dm-from", { name: item.senderLabel })
+        : i18n.t("home.inbox.type-dm"),
       channelLabel: null,
     };
   }
@@ -289,28 +292,36 @@ export function getInboxTypeLabel(item: InboxItem): InboxTypeLabel {
   const primaryCategory = item.item.category;
   if (primaryCategory === "mention") {
     return {
-      text: channelName ? "Mentioned in" : "Mentioned",
+      text: channelName
+        ? i18n.t("home.inbox.type-mentioned-in")
+        : i18n.t("home.inbox.type-mentioned"),
       channelLabel: channelName,
     };
   }
 
   if (primaryCategory === "needs_action") {
     return {
-      text: channelName ? "Needs action in" : "Needs action",
+      text: channelName
+        ? i18n.t("home.inbox.type-needs-action-in")
+        : i18n.t("home.inbox.type-needs-action"),
       channelLabel: channelName,
     };
   }
 
   if (isThreadActivityItem(item.item)) {
     return {
-      text: channelName ? "Thread in" : "Thread",
+      text: channelName
+        ? i18n.t("home.inbox.type-thread-in")
+        : i18n.t("channels.thread.label"),
       channelLabel: channelName,
     };
   }
 
   return {
     text: channelName
-      ? `${activityHeadline(item.item)} in`
+      ? i18n.t("home.inbox.type-headline-in", {
+          headline: activityHeadline(item.item),
+        })
       : activityHeadline(item.item),
     channelLabel: channelName,
   };

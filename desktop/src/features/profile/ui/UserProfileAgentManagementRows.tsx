@@ -11,6 +11,7 @@ import {
 
 import type { IdentityArchiveActions } from "@/features/identity-archive/hooks";
 import { ArchiveConfirmDialog } from "@/features/profile/ui/ArchiveConfirmDialog";
+import { useTranslation } from "@/i18n";
 import type { ManagedAgent } from "@/shared/api/types";
 import {
   AlertDialog,
@@ -49,6 +50,7 @@ export function UserProfileAgentManagementRows({
   onDuplicateAgent?: () => void;
   onExportAgent?: () => void;
 }) {
+  const { t } = useTranslation();
   if (
     !onCreateCard &&
     !onDuplicateAgent &&
@@ -66,7 +68,7 @@ export function UserProfileAgentManagementRows({
         <ProfileAgentActionRow
           disabled={isDeletePending}
           icon={CopyPlus}
-          label="Duplicate agent"
+          label={t("profile.agent-management.duplicate")}
           onClick={onDuplicateAgent}
           testId="user-profile-duplicate-agent-row"
         />
@@ -75,7 +77,7 @@ export function UserProfileAgentManagementRows({
         <ProfileAgentActionRow
           disabled={isDeletePending}
           icon={Download}
-          label="Export agent"
+          label={t("profile.agent-management.export")}
           onClick={onExportAgent}
           testId="user-profile-export-agent-row"
         />
@@ -84,7 +86,7 @@ export function UserProfileAgentManagementRows({
         <ProfileAgentActionRow
           disabled={isDeletePending}
           icon={Sparkles}
-          label="Create trading card"
+          label={t("profile.agent-management.create-card")}
           onClick={onCreateCard}
           testId="user-profile-create-card-row"
         />
@@ -156,16 +158,17 @@ function ProfileArchiveAgentRow({
 }: {
   archiveActions: IdentityArchiveActions;
 }) {
+  const { t } = useTranslation();
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const isArchived = archiveActions.isArchived === true;
   const Icon = isArchived ? ArchiveRestore : Archive;
   const label = archiveActions.isPending
     ? isArchived
-      ? "Unarchiving…"
-      : "Archiving…"
+      ? t("profile.agent-management.unarchiving")
+      : t("profile.agent-management.archiving")
     : isArchived
-      ? "Unarchive agent"
-      : "Archive agent";
+      ? t("profile.agent-management.unarchive")
+      : t("profile.agent-management.archive");
 
   return (
     <>
@@ -209,6 +212,7 @@ function ProfileDeleteAgentRow({
   managedAgent?: ManagedAgent;
   onDelete: () => void;
 }) {
+  const { t } = useTranslation();
   const [confirmOpen, setConfirmOpen] = React.useState(false);
 
   return (
@@ -217,7 +221,7 @@ function ProfileDeleteAgentRow({
         destructive
         disabled={isPending}
         icon={Trash2}
-        label="Delete agent"
+        label={t("profile.agent-management.delete-agent")}
         onClick={() => {
           if (managedAgent) {
             setConfirmOpen(true);
@@ -256,39 +260,39 @@ function AgentDeleteConfirmDialog({
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
+  const { t } = useTranslation();
   const isProviderAgent = agent.backend.type === "provider";
 
   return (
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent data-testid="agent-delete-confirm-dialog">
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete this agent?</AlertDialogTitle>
+          <AlertDialogTitle>
+            {t("profile.agent-management.delete-title")}
+          </AlertDialogTitle>
           <AlertDialogDescription>
             {isProviderAgent
-              ? "Deleting removes this agent’s local management record, not its remote deployment."
-              : "Deleting this agent stops and removes the agent from this community."}
+              ? t("profile.agent-management.delete-desc-provider")
+              : t("profile.agent-management.delete-desc-local")}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
-          <li>Removes the local management record and saved agent key</li>
-          <li>Removes the agent from every channel it belongs to</li>
-          <li>
-            Archives the agent&apos;s identity on the relay so it no longer
-            appears in member lists or mention suggestions
-          </li>
+          <li>{t("profile.agent-management.delete-list-record")}</li>
+          <li>{t("profile.agent-management.delete-list-channels")}</li>
+          <li>{t("profile.agent-management.delete-list-relay")}</li>
           <li>
             {isProviderAgent
-              ? "Unless the agent is known to be Offline, Buzz first requests shutdown through a channel when available. A failed request cancels deletion. The remote process may still be running even after a successful request."
-              : "Stops any local agent process before deleting the record"}
+              ? t("profile.agent-management.delete-list-provider")
+              : t("profile.agent-management.delete-list-local")}
           </li>
         </ul>
         <p className="text-sm text-muted-foreground">
-          Archive this agent if you want to hide it instead of removing it.
+          {t("profile.agent-management.delete-archive-hint")}
         </p>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {t("profile.agent-management.cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction
@@ -297,7 +301,9 @@ function AgentDeleteConfirmDialog({
             disabled={isPending}
             onClick={onConfirm}
           >
-            {isPending ? "Deleting…" : "Delete agent"}
+            {isPending
+              ? t("profile.agent-management.deleting")
+              : t("profile.agent-management.delete-agent")}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

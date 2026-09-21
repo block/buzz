@@ -2,6 +2,7 @@ import * as React from "react";
 import { ChevronRight, ExternalLink, Plus, Search } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
+import { useTranslation } from "@/i18n";
 import {
   useAcpRuntimesQueryForced,
   useInstallAcpRuntimeMutation,
@@ -61,6 +62,7 @@ export function HarnessCatalogDialog({
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
+  const { t } = useTranslation();
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   // The Settings panel owns this surface's force-on-mount (it renders this
   // dialog always-mounted). Passing `forceOnMount: false` here consumes the
@@ -138,7 +140,7 @@ export function HarnessCatalogDialog({
         scrollAreaClassName="flex min-h-0 overflow-hidden px-0"
         scrollAreaTestId="harness-catalog-dialog-body"
         tabIndex={-1}
-        title="Add runtimes"
+        title={t("settings.runtimes.catalog.title")}
       >
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-sidebar sm:flex-row">
           {/* Left: search + chooser list */}
@@ -147,11 +149,13 @@ export function HarnessCatalogDialog({
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-sidebar-foreground/50" />
                 <Input
-                  aria-label="Search runtimes"
+                  aria-label={t("settings.runtimes.catalog.search-aria")}
                   className="h-8 border-sidebar-border bg-sidebar-accent/40 pl-8 text-sm"
                   data-testid="harness-catalog-search"
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search runtimes…"
+                  placeholder={t(
+                    "settings.runtimes.catalog.search-placeholder",
+                  )}
                   value={query}
                 />
               </div>
@@ -174,21 +178,21 @@ export function HarnessCatalogDialog({
                     data-testid="harness-catalog-refreshing"
                   >
                     <Spinner className="h-2.5 w-2.5" />
-                    Refreshing…
+                    {t("settings.runtimes.catalog.refreshing")}
                   </div>
                 ) : isWarmError ? (
                   <div
                     className="flex items-center justify-between gap-2 px-4 py-1 text-xs text-destructive"
                     data-testid="harness-catalog-refresh-error"
                   >
-                    <span>Couldn't refresh runtimes.</span>
+                    <span>{t("settings.runtimes.catalog.refresh-failed")}</span>
                     <button
                       className="shrink-0 underline underline-offset-2 hover:text-foreground"
                       data-testid="harness-catalog-refresh-retry"
                       onClick={() => void runtimesQuery.forceRefresh()}
                       type="button"
                     >
-                      Retry
+                      {t("settings.common.retry")}
                     </button>
                   </div>
                 ) : null}
@@ -199,26 +203,28 @@ export function HarnessCatalogDialog({
                     className="flex items-center justify-between gap-2 px-4 py-2 text-sm text-sidebar-foreground/60"
                     data-testid="harness-catalog-load-error"
                   >
-                    <span>Couldn't load runtimes.</span>
+                    <span>{t("settings.runtimes.catalog.load-failed")}</span>
                     <button
                       className="shrink-0 text-destructive underline underline-offset-2 hover:text-foreground"
                       data-testid="harness-catalog-load-retry"
                       onClick={() => void runtimesQuery.forceRefresh()}
                       type="button"
                     >
-                      Retry
+                      {t("settings.common.retry")}
                     </button>
                   </div>
                 ) : filtered.length === 0 ? (
                   <p className="px-4 py-2 text-sm text-sidebar-foreground/60">
-                    {isSearching ? "No runtimes match." : "No runtimes found."}
+                    {isSearching
+                      ? t("settings.runtimes.catalog.no-match")
+                      : t("settings.runtimes.catalog.empty")}
                   </p>
                 ) : (
                   <>
                     {groups.setup.length > 0 ? (
                       <CatalogSection
                         count={groups.setup.length}
-                        label="Setup"
+                        label={t("settings.runtimes.catalog.section-setup")}
                         onToggle={() => setSetupOpen((v) => !v)}
                         open={setupExpanded}
                         testId="harness-catalog-section-setup"
@@ -236,7 +242,7 @@ export function HarnessCatalogDialog({
                     {groups.installed.length > 0 ? (
                       <CatalogSection
                         count={groups.installed.length}
-                        label="Installed"
+                        label={t("settings.runtimes.catalog.section-installed")}
                         onToggle={() => setInstalledOpen((v) => !v)}
                         open={installedExpanded}
                         testId="harness-catalog-section-installed"

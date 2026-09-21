@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { initializeI18n } from "@/i18n";
 import {
   getWorkflowActionTiles,
   getWorkflowCardLabel,
@@ -13,6 +14,14 @@ import {
   getWorkflowTriggerType,
   withWorkflowEnabled,
 } from "./workflowDefinition.ts";
+
+// These assertions are the English contract, but node's own `navigator.languages`
+// reports the host system locale (which may be zh-CN), so pin English first.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 test("reads only direct trigger and first-action types for card icons", () => {
   assert.equal(

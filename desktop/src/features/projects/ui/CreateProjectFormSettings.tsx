@@ -4,6 +4,7 @@ import * as React from "react";
 import { ChannelPermissionsSettings } from "@/features/channels/ui/ChannelPermissionsSettings";
 import type { CreateProjectFormSettingsState } from "@/features/projects/ui/useCreateProjectFormSettings";
 import { TemplateFormDialog } from "@/features/settings/ui/ChannelTemplatesSettingsCard";
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -41,6 +42,7 @@ export function CreateProjectFormSettings({
   templates,
   channelVisibility,
 }: CreateProjectFormSettingsState & { disabled: boolean }) {
+  const { t } = useTranslation();
   const [isCreateTemplateOpen, setIsCreateTemplateOpen] = React.useState(false);
   const selectedPersona = personas.find(
     (persona) => persona.id === agentPersonaId,
@@ -49,8 +51,12 @@ export function CreateProjectFormSettings({
   const selectedTemplate = templates.find(
     (template) => template.id === templateId,
   );
-  const listingLabel = projectVisibility === "unlisted" ? "Unlisted" : "Listed";
-  const agentLabel = selectedPersona?.displayName ?? "None";
+  const listingLabel =
+    projectVisibility === "unlisted"
+      ? t("projects.create-project-form.unlisted")
+      : t("projects.create-project-form.listed");
+  const agentLabel =
+    selectedPersona?.displayName ?? t("sidebar.channel-form.none");
   const agentDisabled = disabled || (!runtimesAvailable && personas.length > 0);
   const teamDisabled = disabled || (!runtimesAvailable && teams.length > 0);
 
@@ -65,15 +71,17 @@ export function CreateProjectFormSettings({
 
       <div className={cn(SETTINGS_ROW_CLASS, disabled && "opacity-50")}>
         <span className="text-sm font-medium text-foreground">
-          Template
+          {t("sidebar.channel-form.template")}
           <span className="ml-1 text-xs font-normal text-muted-foreground/50">
-            Project home by default
+            {t("projects.create-project-form.template-home-default")}
           </span>
         </span>
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label={`Template: ${selectedTemplate?.name ?? "None"}`}
+              aria-label={t("projects.create-project-form.template-aria", {
+                value: selectedTemplate?.name ?? t("sidebar.channel-form.none"),
+              })}
               className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[60%] justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
               data-testid="create-project-template"
               disabled={disabled}
@@ -81,7 +89,7 @@ export function CreateProjectFormSettings({
               variant="ghost"
             >
               <span className="truncate text-right">
-                {selectedTemplate?.name ?? "None"}
+                {selectedTemplate?.name ?? t("sidebar.channel-form.none")}
               </span>
               <ChevronDown className="size-4 shrink-0 text-muted-foreground/70" />
             </Button>
@@ -94,7 +102,7 @@ export function CreateProjectFormSettings({
               value={templateId || NO_TEMPLATE_VALUE}
             >
               <DropdownMenuRadioItem value={NO_TEMPLATE_VALUE}>
-                None
+                {t("sidebar.channel-form.none")}
               </DropdownMenuRadioItem>
               {templates.map((template) => (
                 <DropdownMenuRadioItem key={template.id} value={template.id}>
@@ -105,7 +113,7 @@ export function CreateProjectFormSettings({
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => setIsCreateTemplateOpen(true)}>
               <Plus className="size-4" />
-              Create new channel template…
+              {t("sidebar.channel-form.new-template")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -119,15 +127,17 @@ export function CreateProjectFormSettings({
 
       <div className={cn(SETTINGS_ROW_CLASS, teamDisabled && "opacity-50")}>
         <span className="text-sm font-medium text-foreground">
-          Team
+          {t("messages.attachment.snapshot-team")}
           <span className="ml-1 text-xs font-normal text-muted-foreground/50">
-            Optional
+            {t("sidebar.channel-form.optional")}
           </span>
         </span>
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label={`Team: ${selectedTeam?.name ?? "None"}`}
+              aria-label={t("projects.create-project-form.team-aria", {
+                value: selectedTeam?.name ?? t("sidebar.channel-form.none"),
+              })}
               className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[60%] justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
               data-testid="create-project-team"
               disabled={teamDisabled}
@@ -135,7 +145,7 @@ export function CreateProjectFormSettings({
               variant="ghost"
             >
               <span className="truncate text-right">
-                {selectedTeam?.name ?? "None"}
+                {selectedTeam?.name ?? t("sidebar.channel-form.none")}
               </span>
               <ChevronDown className="size-4 shrink-0 text-muted-foreground/70" />
             </Button>
@@ -148,7 +158,7 @@ export function CreateProjectFormSettings({
               value={teamId || NONE_TEAM_VALUE}
             >
               <DropdownMenuRadioItem value={NONE_TEAM_VALUE}>
-                None
+                {t("sidebar.channel-form.none")}
               </DropdownMenuRadioItem>
               {teams.map((team) => (
                 <DropdownMenuRadioItem key={team.id} value={team.id}>
@@ -162,12 +172,14 @@ export function CreateProjectFormSettings({
 
       <div className={cn(SETTINGS_ROW_CLASS, disabled && "opacity-50")}>
         <span className="text-sm font-medium text-foreground">
-          Project list
+          {t("projects.create-project-form.project-list")}
         </span>
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label={`Project list: ${listingLabel}`}
+              aria-label={t("projects.create-project-form.listing-aria", {
+                value: listingLabel,
+              })}
               className="-mr-2.5 ml-auto h-9 w-fit justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
               data-testid="create-project-listing"
               disabled={disabled}
@@ -197,13 +209,13 @@ export function CreateProjectFormSettings({
                 data-testid="create-project-listing-option-listed"
                 value="listed"
               >
-                Listed
+                {t("projects.create-project-form.listed")}
               </DropdownMenuRadioItem>
               <DropdownMenuRadioItem
                 data-testid="create-project-listing-option-unlisted"
                 value="unlisted"
               >
-                Unlisted
+                {t("projects.create-project-form.unlisted")}
               </DropdownMenuRadioItem>
             </DropdownMenuRadioGroup>
           </DropdownMenuContent>
@@ -212,12 +224,14 @@ export function CreateProjectFormSettings({
 
       <div className={cn(SETTINGS_ROW_CLASS, agentDisabled && "opacity-50")}>
         <span className="text-sm font-medium text-foreground">
-          Coding agent
+          {t("projects.create-project-form.coding-agent")}
         </span>
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label={`Coding agent: ${agentLabel}`}
+              aria-label={t("projects.create-project-form.agent-aria", {
+                value: agentLabel,
+              })}
               className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[60%] justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
               data-testid="create-project-agent"
               disabled={agentDisabled}
@@ -245,7 +259,7 @@ export function CreateProjectFormSettings({
                 data-testid="create-project-agent-option-none"
                 value={NONE_AGENT_VALUE}
               >
-                None
+                {t("sidebar.channel-form.none")}
               </DropdownMenuRadioItem>
               {personas.map((persona) => (
                 <DropdownMenuRadioItem

@@ -1,3 +1,5 @@
+import { useTranslation } from "@/i18n";
+
 /**
  * Always-visible cue shown in Agent Defaults when a global `OPENAI_API_KEY`
  * row exists (nonblank).  The Advanced section is collapsed by default, so
@@ -12,6 +14,7 @@ export function CardMintKeyCue({
 }: {
   envVars: Record<string, string>;
 }) {
+  const { t } = useTranslation();
   const isSet =
     "OPENAI_API_KEY" in envVars &&
     (envVars.OPENAI_API_KEY ?? "").trim().length > 0;
@@ -22,8 +25,9 @@ export function CardMintKeyCue({
       className="text-xs text-muted-foreground"
       data-testid="card-mint-key-cue"
     >
-      Card-minting key <span className="font-mono">OPENAI_API_KEY</span> is set
-      under Advanced → Environment variables.
+      {t("agents.card-mint.key-cue-prefix")}{" "}
+      <span className="font-mono">OPENAI_API_KEY</span>{" "}
+      {t("agents.card-mint.key-cue-suffix")}
     </p>
   );
 }

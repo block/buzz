@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+import { useTranslation } from "@/i18n";
+
 import type { PersonaDropdownOption } from "./agentConfigOptions";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import { HarnessCatalogRetryNotice } from "./HarnessCatalogRetryNotice";
@@ -21,13 +23,14 @@ export function AgentHarnessField({
   value: string;
   warning?: ReactNode;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="space-y-1.5">
       <label
         className="text-sm font-medium text-foreground"
         htmlFor="persona-runtime"
       >
-        Agent harness
+        {t("agents.harness.field-label")}
       </label>
       <PersonaDropdownField
         disabled={disabled}

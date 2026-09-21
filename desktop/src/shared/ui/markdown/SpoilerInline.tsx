@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { hasBlockMedia } from "../markdownUtils";
 import { SpoilerParticles } from "../SpoilerParticles";
 
@@ -20,6 +21,7 @@ export function SpoilerInline({
   children?: React.ReactNode;
   interactive?: boolean;
 }) {
+  const { t } = useTranslation();
   const [revealed, setRevealed] = React.useState(false);
   const contentRef = React.useRef<HTMLElement | null>(null);
   const isBlock = block || hasBlockMedia(React.Children.toArray(children));
@@ -68,7 +70,9 @@ export function SpoilerInline({
   );
 
   const revealProps = {
-    "aria-label": revealed ? "Hide spoiler" : "Reveal spoiler",
+    "aria-label": revealed
+      ? t("shared.markdown.spoiler.hide")
+      : t("shared.markdown.spoiler.reveal"),
     "aria-pressed": revealed,
     onClick: handleClick,
     onClickCapture: handleClickCapture,

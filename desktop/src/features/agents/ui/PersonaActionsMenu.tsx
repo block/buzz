@@ -6,6 +6,7 @@ import {
   Trash2,
 } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import {
   DropdownMenu,
@@ -40,6 +41,7 @@ export function PersonaActionsMenu({
   onDeactivate: (persona: AgentPersona) => void;
   onDelete: (persona: AgentPersona) => void;
 }) {
+  const { t } = useTranslation();
   const disabled = isActionPending || isPending;
   const canEdit = !persona.sourceTeam;
 
@@ -47,7 +49,9 @@ export function PersonaActionsMenu({
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <button
-          aria-label={`Open actions for ${persona.displayName}`}
+          aria-label={t("agents.persona-actions.open-aria", {
+            name: persona.displayName,
+          })}
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           type="button"
         >
@@ -61,7 +65,7 @@ export function PersonaActionsMenu({
         {canEdit ? (
           <DropdownMenuItem disabled={disabled} onClick={() => onEdit(persona)}>
             <Pencil className="h-4 w-4" />
-            Edit
+            {t("agents.teams-section.edit")}
           </DropdownMenuItem>
         ) : null}
         <DropdownMenuItem
@@ -69,20 +73,20 @@ export function PersonaActionsMenu({
           onClick={() => onDuplicate(persona)}
         >
           <CopyPlus className="h-4 w-4" />
-          Duplicate
+          {t("agents.teams-section.duplicate")}
         </DropdownMenuItem>
         <DropdownMenuItem
           disabled={disabled}
           onClick={() => onShare(persona, linkedAgent)}
         >
           <Share2 className="h-4 w-4" />
-          Share
+          {t("agents.teams-section.share")}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         {persona.sourceTeam ? (
           <DropdownMenuItem disabled>
             <Trash2 className="h-4 w-4" />
-            Managed by team
+            {t("agents.persona-actions.managed-by-team")}
           </DropdownMenuItem>
         ) : (
           <DropdownMenuItem
@@ -98,7 +102,7 @@ export function PersonaActionsMenu({
             }}
           >
             <Trash2 className="h-4 w-4" />
-            Delete
+            {t("agents.teams-section.delete")}
           </DropdownMenuItem>
         )}
       </DropdownMenuContent>

@@ -10,6 +10,7 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "@/features/onboarding/ui/OnboardingSlideTransition";
+import { useTranslation } from "@/i18n";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
@@ -35,6 +36,7 @@ export function WelcomeSetup({
   initialTransitionMode = "initial",
   onBack,
 }: WelcomeSetupProps) {
+  const { t } = useTranslation();
   const [page, setPage] = React.useState<WelcomeSetupPage>(initialPage);
   const [transitionMode, setTransitionMode] =
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
@@ -52,7 +54,7 @@ export function WelcomeSetup({
   const npubError = identityQuery.error
     ? identityQuery.error instanceof Error
       ? identityQuery.error.message
-      : "Could not load your public key."
+      : t("communities.welcome.npub-error")
     : null;
 
   const showPage = React.useCallback(
@@ -135,11 +137,10 @@ export function WelcomeSetup({
             >
               <div className="w-full max-w-[760px]">
                 <h1 className="text-title font-normal">
-                  Join or create a community
+                  {t("communities.welcome.join-or-create-title")}
                 </h1>
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
-                  Join with an invite, create your own community, or reconnect
-                  one you already have.
+                  {t("communities.welcome.join-or-create-description")}
                 </p>
               </div>
               <div className="flex w-full flex-1 translate-y-16 flex-col items-center justify-center gap-20 py-8">
@@ -153,7 +154,7 @@ export function WelcomeSetup({
                     onClick={() => showPage("join")}
                     type="button"
                   >
-                    Join a community
+                    {t("communities.welcome.join-community")}
                   </button>
                 </Card>
                 <Card
@@ -166,7 +167,7 @@ export function WelcomeSetup({
                     onClick={beginHostedCommunity}
                     type="button"
                   >
-                    Create a community
+                    {t("communities.welcome.create-community")}
                   </button>
                 </Card>
                 <Card
@@ -179,7 +180,7 @@ export function WelcomeSetup({
                     onClick={() => showPage("existing")}
                     type="button"
                   >
-                    I already have a community
+                    {t("communities.welcome.have-community")}
                   </button>
                 </Card>
               </div>
@@ -193,10 +194,10 @@ export function WelcomeSetup({
             >
               <div className="w-full max-w-[760px]">
                 <h1 className="text-title font-normal">
-                  Reconnect to your community
+                  {t("communities.welcome.reconnect-title")}
                 </h1>
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
-                  Tell us your role so we can find the fastest way back in.
+                  {t("communities.welcome.reconnect-description")}
                 </p>
               </div>
               <div className="flex w-full flex-1 translate-y-16 flex-col items-center justify-center gap-20 py-8">
@@ -210,7 +211,7 @@ export function WelcomeSetup({
                     onClick={beginHostedCommunity}
                     type="button"
                   >
-                    I own the community
+                    {t("communities.welcome.own-community")}
                   </button>
                 </Card>
                 <Card
@@ -223,7 +224,7 @@ export function WelcomeSetup({
                     onClick={() => showPage("member")}
                     type="button"
                   >
-                    I’m a member or admin
+                    {t("communities.welcome.member-or-admin")}
                   </button>
                 </Card>
               </div>
@@ -245,13 +246,13 @@ export function WelcomeSetup({
               <div className="w-full max-w-[620px]">
                 <h1 className="text-title font-normal">
                   {page === "member"
-                    ? "Reconnect to your community"
-                    : "Join a community"}
+                    ? t("communities.welcome.reconnect-title")
+                    : t("communities.welcome.join-community")}
                 </h1>
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
                   {page === "member"
-                    ? "Enter the community URL or an invite link. Your role will be restored when you connect."
-                    : "Enter the invite link or community URL you received."}
+                    ? t("communities.welcome.member-description")
+                    : t("communities.welcome.join-description")}
                 </p>
               </div>
               <div className="flex w-full flex-1 flex-col items-center justify-center gap-16">
@@ -263,28 +264,26 @@ export function WelcomeSetup({
                   }
                   onConnect={startConnection}
                   onRedeem={redeemInvite}
-                  placeholder="Invite link or community URL"
+                  placeholder={t("communities.welcome.invite-placeholder")}
                   variant="onboarding-spotlight"
                 />
                 {page === "join" ? (
                   <div className="w-full max-w-[560px] text-left">
                     <p className="text-sm font-medium text-foreground">
-                      Joining a private community?
+                      {t("communities.welcome.private-heading")}
                     </p>
                     <p className="mt-2 text-sm leading-6 text-foreground/75">
-                      Some communities need the owner to add you before you can
-                      join. Copy your public ID and send it to the community
-                      owner.
+                      {t("communities.welcome.private-body")}
                     </p>
                     <div className="mt-4 flex items-center gap-3 rounded-xl border border-foreground/10 bg-background/35 px-4 py-3">
                       <code
                         className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/80"
                         data-testid="welcome-join-npub"
                       >
-                        {npub || "Loading…"}
+                        {npub || t("communities.welcome.loading")}
                       </code>
                       <Button
-                        aria-label="Copy public ID"
+                        aria-label={t("communities.welcome.copy-npub-aria")}
                         className="h-9 shrink-0 rounded-full px-3"
                         disabled={!npub}
                         onClick={() => {
@@ -302,7 +301,11 @@ export function WelcomeSetup({
                         ) : (
                           <Copy className="h-4 w-4" aria-hidden="true" />
                         )}
-                        <span>{copiedNpub ? "Copied" : "Copy"}</span>
+                        <span>
+                          {copiedNpub
+                            ? t("communities.welcome.copied")
+                            : t("communities.welcome.copy")}
+                        </span>
                       </Button>
                     </div>
                     {npubError ? (

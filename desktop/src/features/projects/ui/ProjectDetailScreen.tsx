@@ -24,6 +24,7 @@ import { useProjectRepositoryRefSelection } from "@/features/projects/useProject
 import { useUpdateProjectPullRequestMutation } from "@/features/projects/pullRequestMutations";
 import { useCreateProjectIssueMutation } from "@/features/projects/issueMutations";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
+import { useTranslation } from "@/i18n";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
@@ -85,6 +86,7 @@ import {
 } from "./projectDetailHelpers";
 
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
+  const { t } = useTranslation();
   const {
     commitHash,
     entityNavigationId,
@@ -342,13 +344,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       });
       return;
     }
-    toast.success("Remote state refreshed.");
+    toast.success(t("projects.detail-screen.refreshed"));
   }, [
     memberChannelIds,
     repoSnapshotQuery,
     repoStateQuery,
     repoSyncStatusQuery,
     repository?.channelId,
+    t,
   ]);
   const cloneBlockedByRemote =
     remoteUnavailableReason !== undefined &&
@@ -363,11 +366,13 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     onTagChange: handleTagChange,
     onCreateBranch: () => branchActions.setCreateOpen(true),
     createBranchDisabled: branchActions.createPending || !activeBranchCommit,
-    createBranchTitle: createBranchReason ?? "Create a remote branch",
+    createBranchTitle:
+      createBranchReason ?? t("projects.detail-screen.create-branch-tooltip"),
     onDeleteBranch: () => branchActions.setDeleteOpen(true),
     deleteBranchDisabled:
       branchActions.deletePending || Boolean(deleteBranchReason),
-    deleteBranchTitle: deleteBranchReason ?? "Delete this remote branch",
+    deleteBranchTitle:
+      deleteBranchReason ?? t("projects.detail-screen.delete-branch-tooltip"),
     source: selectedTag ? "remote" : repoSource,
     onSourceChange: setRepoSource,
     localDisabled:
@@ -376,10 +381,10 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         !localRepoSnapshotQuery.data &&
         !localRepoSnapshotQuery.isLoading),
     localLabel: localRepoSnapshotQuery.isLoading
-      ? "Local checking"
+      ? t("projects.detail-screen.local-checking")
       : repoSyncStatusQuery.data?.localPath || localRepoSnapshotQuery.data
-        ? "Local"
-        : "Local missing",
+        ? t("projects.detail-screen.local")
+        : t("projects.detail-screen.local-missing"),
     localPath:
       repoSyncStatusQuery.data?.localPath ?? localRepoSnapshotQuery.data?.path,
     ...repoRemote.controls,
@@ -432,7 +437,8 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       repoStateQuery.isFetching ||
       repoSyncStatusQuery.isFetching,
     fetchTitle:
-      repoSyncStatusQuery.data?.pullBlockReason ?? "Check for remote changes",
+      repoSyncStatusQuery.data?.pullBlockReason ??
+      t("projects.detail-screen.fetch-tooltip"),
   };
   const fileContentSource = useRepositoryFileContentSource({
     activeBranch,
@@ -510,7 +516,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       } else {
         toast.success(
           result.pullRequestUpdate.status === "updated"
-            ? `${result.message} Review updated.`
+            ? t("projects.detail-screen.push-review-updated", {
+                message: result.message,
+              })
             : result.message,
         );
       }
@@ -522,7 +530,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       ]);
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to push repository",
+        error instanceof Error
+          ? error.message
+          : t("projects.detail-screen.push-failed"),
       );
     }
   }, [
@@ -531,6 +541,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoSnapshotQuery,
     repoStateQuery,
     repoSyncStatusQuery,
+    t,
   ]);
   const handleCloneRepo = React.useCallback(async () => {
     try {
@@ -586,11 +597,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const handleCreateIssue = React.useCallback(
     async (input: CreateIssueDialogInput) => {
       const issueId = await createIssueMutation.mutateAsync(input);
-      toast.success("Task created.");
+      toast.success(t("projects.create-task-dialog.created"));
       await issuesQuery.refetch();
       setSelectedIssueId(issueId);
     },
-    [createIssueMutation, issuesQuery],
+    [createIssueMutation, issuesQuery, t],
   );
   const handleUpdatePullRequest = React.useCallback(async () => {
     const commit = repoSyncStatusQuery.data?.remoteHead;
@@ -600,17 +611,24 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         commit,
         mergeBase: repoSyncStatusQuery.data?.mergeBase ?? null,
       });
-      toast.success(updated ? "Review updated." : "Review is already current.");
+      toast.success(
+        updated
+          ? t("projects.detail-screen.review-updated")
+          : t("projects.detail-screen.review-current"),
+      );
       await pullRequestsQuery.refetch();
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to update review",
+        error instanceof Error
+          ? error.message
+          : t("projects.detail-screen.review-update-failed"),
       );
     }
   }, [
     pullRequestsQuery,
     repoSyncStatusQuery.data?.mergeBase,
     repoSyncStatusQuery.data?.remoteHead,
+    t,
     updatePullRequestMutation,
   ]);
   const handlePullLocalRepo = React.useCallback(async () => {
@@ -625,7 +643,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       ]);
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to pull repository",
+        error instanceof Error
+          ? error.message
+          : t("projects.detail-screen.pull-failed"),
       );
     }
   }, [
@@ -634,6 +654,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoSnapshotQuery,
     repoStateQuery,
     repoSyncStatusQuery,
+    t,
   ]);
   const {
     handleOpenLocalRepository,
@@ -651,13 +672,15 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     if (!channelId) return null;
     return {
       channelId,
-      channelName: repository?.name ?? project?.name ?? "Project",
+      channelName:
+        repository?.name ?? project?.name ?? t("projects.shared.project"),
     };
   }, [
     project?.name,
     project?.projectChannelId,
     repository?.channelId,
     repository?.name,
+    t,
   ]);
   useTerminalContextOverride(projectTerminalContext);
   if (projectQuery.isLoading) {

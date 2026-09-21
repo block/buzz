@@ -18,6 +18,7 @@ import {
 } from "@/features/search/ui/SearchScopeControls";
 import { HighlightedSearchText } from "@/features/search/ui/HighlightedSearchText";
 import { useSearchMenuKeyboardNavigation } from "@/features/search/ui/useSearchMenuKeyboardNavigation";
+import { i18n, useTranslation } from "@/i18n";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
@@ -62,7 +63,6 @@ type SearchResultSectionKey = (typeof SEARCH_RESULT_SECTION_ORDER)[number];
 type SearchResultSection = {
   key: SearchResultSectionKey;
   results: SearchResult[];
-  title: string;
 };
 type SearchHitContextLabel = {
   channelLabel: string | null;
@@ -71,19 +71,25 @@ type SearchHitContextLabel = {
 function formatRelativeTime(unixSeconds: number) {
   const diff = Math.floor(Date.now() / 1_000) - unixSeconds;
   if (diff < 60) {
-    return "just now";
+    return i18n.t("channels.activity.just-now");
   }
 
   if (diff < 60 * 60) {
-    return `${Math.floor(diff / 60)}m ago`;
+    return i18n.t("search.relative.minutes-ago", {
+      count: Math.floor(diff / 60),
+    });
   }
 
   if (diff < 60 * 60 * 24) {
-    return `${Math.floor(diff / (60 * 60))}h ago`;
+    return i18n.t("search.relative.hours-ago", {
+      count: Math.floor(diff / (60 * 60)),
+    });
   }
 
   if (diff < 60 * 60 * 24 * 7) {
-    return `${Math.floor(diff / (60 * 60 * 24))}d ago`;
+    return i18n.t("search.relative.days-ago", {
+      count: Math.floor(diff / (60 * 60 * 24)),
+    });
   }
 
   return new Intl.DateTimeFormat("en-US", {
@@ -183,7 +189,7 @@ function getSearchHitContextLabel(
   if (channel?.channelType === "dm") {
     return {
       channelLabel: null,
-      text: "Direct message",
+      text: i18n.t("search.context.direct-message"),
     };
   }
 
@@ -192,10 +198,12 @@ function getSearchHitContextLabel(
   return {
     channelLabel: channelName,
     text: channelName
-      ? `${isThread ? "Thread" : "Message"} in`
+      ? isThread
+        ? i18n.t("search.context.thread-in")
+        : i18n.t("search.context.message-in")
       : isThread
-        ? "Thread"
-        : "Message",
+        ? i18n.t("channels.thread.label")
+        : i18n.t("search.context.message"),
   };
 }
 
@@ -218,17 +226,17 @@ function getResultSectionKey(result: SearchResult): SearchResultSectionKey {
 function getSectionTitle(sectionKey: SearchResultSectionKey) {
   switch (sectionKey) {
     case "channels":
-      return "Channels";
+      return i18n.t("sidebar.shell.channels");
     case "direct-messages":
-      return "Direct messages";
+      return i18n.t("sidebar.shell.direct-messages");
     case "people":
-      return "People";
+      return i18n.t("search.results.people");
     case "agents":
-      return "Agents";
+      return i18n.t("sidebar.nav.agents");
     case "messages":
-      return "Most relevant";
+      return i18n.t("search.results.most-relevant");
     case "actions":
-      return "Actions";
+      return i18n.t("search.results.actions");
   }
 }
 
@@ -277,7 +285,6 @@ function groupSearchResults(results: SearchResult[]): SearchResultSection[] {
       {
         key: sectionKey,
         results: sectionResults,
-        title: getSectionTitle(sectionKey),
       },
     ];
   });
@@ -390,6 +397,7 @@ export function TopbarSearch({
   suggestionChannels,
   variant = "bar",
 }: TopbarSearchProps) {
+  const { t } = useTranslation();
   const [isOpen, setIsOpen] = React.useState(false);
   const [scopeChannelId, setScopeChannelId] = React.useState<string | null>(
     null,
@@ -447,7 +455,7 @@ export function TopbarSearch({
         kind: "action",
         action: {
           id: "browse-channels",
-          title: "Browse channels",
+          title: t("sidebar.channel.browse"),
         },
       });
     }
@@ -457,7 +465,7 @@ export function TopbarSearch({
         kind: "action",
         action: {
           id: "create-channel",
-          title: "Create a new channel",
+          title: t("channels.browser.create-new-channel"),
         },
       });
     }
@@ -467,13 +475,13 @@ export function TopbarSearch({
         kind: "action",
         action: {
           id: "create-agent",
-          title: "Create a new agent",
+          title: t("channels.bot.create-new"),
         },
       });
     }
 
     return actions;
-  }, [onBrowseChannels, onCreateAgent, onCreateChannel]);
+  }, [onBrowseChannels, onCreateAgent, onCreateChannel, t]);
   const suggestionResults = React.useMemo(
     () => [...suggestedResults, ...suggestionActionResults],
     [suggestedResults, suggestionActionResults],
@@ -800,7 +808,9 @@ export function TopbarSearch({
 
     return sections.map((section) => (
       <div data-search-section={section.key} key={section.key}>
-        <div className={SEARCH_SECTION_TITLE_CLASS}>{section.title}</div>
+        <div className={SEARCH_SECTION_TITLE_CLASS}>
+          {getSectionTitle(section.key)}
+        </div>
         {section.results.map((result) =>
           renderSearchResultRow(result, resultIndex++),
         )}
@@ -831,12 +841,12 @@ export function TopbarSearch({
             currentChannelSearchAction ? "pb-5" : "py-5",
           )}
         >
-          <p>No recent activity yet.</p>
+          <p>{t("search.results.no-recent-activity")}</p>
         </div>
       </div>
     ) : (
       <div
-        aria-label="Recent activity"
+        aria-label={t("search.results.recent-activity")}
         className="max-h-96 overflow-y-auto"
         role="listbox"
       >
@@ -850,7 +860,7 @@ export function TopbarSearch({
                 {suggestedResults.length > 0 ? (
                   <div>
                     <div className={SEARCH_SECTION_TITLE_CLASS}>
-                      Recent activity
+                      {t("search.results.recent-activity")}
                     </div>
                     {suggestedResults.map((result) =>
                       renderSearchResultRow(result, resultIndex++),
@@ -859,7 +869,9 @@ export function TopbarSearch({
                 ) : null}
                 {suggestionActionResults.length > 0 ? (
                   <div>
-                    <div className={SEARCH_SECTION_TITLE_CLASS}>Actions</div>
+                    <div className={SEARCH_SECTION_TITLE_CLASS}>
+                      {t("search.results.actions")}
+                    </div>
                     {suggestionActionResults.map((result) =>
                       renderSearchResultRow(result, resultIndex++),
                     )}
@@ -898,15 +910,18 @@ export function TopbarSearch({
           currentChannelSearchAction ? "pb-5" : "py-5",
         )}
       >
-        No {scopeChannel ? "messages" : "matches"} for{" "}
+        {scopeChannel
+          ? t("search.empty.no-messages-for")
+          : t("search.empty.no-matches-for")}{" "}
         <span className="font-semibold">{trimmedQuery}</span>
         {scopeLabel ? (
           <>
             {" "}
-            in <span className="font-semibold">{scopeLabel}</span>
+            {t("search.empty.in-scope")}{" "}
+            <span className="font-semibold">{scopeLabel}</span>
           </>
         ) : null}
-        .
+        {t("search.empty.terminal")}
       </p>
     </div>
   ) : (
@@ -925,7 +940,7 @@ export function TopbarSearch({
     <div className={cn("relative", className)}>
       <Dialog open={isOpen} onOpenChange={handleSearchOpenChange}>
         <button
-          aria-label="Search everything"
+          aria-label={t("search.trigger.search-everything")}
           className={
             isIconVariant
               ? "group/search flex size-6 items-center justify-center rounded p-1 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-border/35 hover:text-sidebar-foreground focus-visible:bg-sidebar-border/35 focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring"
@@ -934,7 +949,7 @@ export function TopbarSearch({
           data-testid="open-search"
           onClick={() => openSearchDialog(null)}
           ref={triggerRef}
-          title="Search everything"
+          title={t("search.trigger.search-everything")}
           type="button"
         >
           <Search
@@ -954,7 +969,7 @@ export function TopbarSearch({
                     : "text-sidebar-foreground/55",
                 )}
               >
-                {query || "Search everything"}
+                {query || t("search.trigger.search-everything")}
               </span>
               <kbd className="shrink-0 text-2xs text-sidebar-foreground/45">
                 &#x2318;K
@@ -977,7 +992,9 @@ export function TopbarSearch({
           showCloseButton={false}
         >
           <DialogTitle className="sr-only">
-            {scopeLabel ? `Search in ${scopeLabel}` : "Search everything"}
+            {scopeLabel
+              ? t("search.scope.search-in", { scopeLabel })
+              : t("search.trigger.search-everything")}
           </DialogTitle>
           <SearchDialogInputRow
             inputRef={dialogInputRef}

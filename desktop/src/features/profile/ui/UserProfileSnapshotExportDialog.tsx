@@ -1,6 +1,7 @@
 import { useExportAgentSnapshotMutation } from "@/features/agents/hooks";
 import { AgentSnapshotExportDialog } from "@/features/agents/ui/AgentSnapshotExportDialog";
 import type { AgentPersona } from "@/shared/api/types";
+import { useTranslation } from "@/i18n";
 import { toast } from "sonner";
 
 export function UserProfileSnapshotExportDialog({
@@ -12,6 +13,7 @@ export function UserProfileSnapshotExportDialog({
   linkedAgentPubkey: string | null;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const exportSnapshotMutation = useExportAgentSnapshotMutation();
 
   return (
@@ -33,7 +35,9 @@ export function UserProfileSnapshotExportDialog({
           {
             onSuccess: (saved) => {
               if (saved) {
-                toast.success(`Exported ${persona.displayName}.`);
+                toast.success(
+                  t("profile.snapshot.exported", { name: persona.displayName }),
+                );
                 onOpenChange(false);
               }
             },
@@ -41,7 +45,7 @@ export function UserProfileSnapshotExportDialog({
               toast.error(
                 error instanceof Error
                   ? error.message
-                  : "Failed to export agent snapshot.",
+                  : t("profile.snapshot.export-failed"),
               );
             },
           },

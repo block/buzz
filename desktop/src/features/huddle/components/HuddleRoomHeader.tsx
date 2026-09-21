@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { useProfileQuery, useSelfProfileCache } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useHuddle, useHuddleLevels } from "../HuddleContext";
@@ -31,6 +32,7 @@ function isVisible(state: HuddleRosterState | null) {
 
 /** Larger, persistent roster for the companion huddle room window. */
 export function HuddleRoomHeader() {
+  const { t } = useTranslation();
   const { interruptAgentSpeech, isMuted, micConnected } = useHuddle();
   const { activeSpeakers, micLevel, speakerLevels } = useHuddleLevels();
   const identityQuery = useIdentityQuery();
@@ -53,29 +55,33 @@ export function HuddleRoomHeader() {
     }
     return levels;
   }, [currentPubkey, isMuted, micConnected, micLevel, speakerLevels]);
-  const handleRemoveAgent = React.useCallback(async (pubkey: string) => {
-    if (!window.confirm("Remove this agent from the huddle?")) return;
-    try {
-      await invoke("remove_agent_from_huddle", {
-        agentPubkey: pubkey,
-      });
-      setState((current) =>
-        current
-          ? {
-              ...current,
-              participants: current.participants.filter(
-                (member) => member !== pubkey,
-              ),
-              agent_pubkeys: current.agent_pubkeys.filter(
-                (agent) => agent !== pubkey,
-              ),
-            }
-          : current,
-      );
-    } catch (error) {
-      console.error("Failed to remove agent from huddle:", error);
-    }
-  }, []);
+  const handleRemoveAgent = React.useCallback(
+    async (pubkey: string) => {
+      if (!window.confirm(t("huddle.participants.remove-agent-confirm")))
+        return;
+      try {
+        await invoke("remove_agent_from_huddle", {
+          agentPubkey: pubkey,
+        });
+        setState((current) =>
+          current
+            ? {
+                ...current,
+                participants: current.participants.filter(
+                  (member) => member !== pubkey,
+                ),
+                agent_pubkeys: current.agent_pubkeys.filter(
+                  (agent) => agent !== pubkey,
+                ),
+              }
+            : current,
+        );
+      } catch (error) {
+        console.error("Failed to remove agent from huddle:", error);
+      }
+    },
+    [t],
+  );
 
   React.useEffect(() => {
     let disposed = false;

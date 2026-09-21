@@ -8,6 +8,7 @@ import {
   persistCurrentIdentity,
 } from "@/shared/api/tauriIdentity";
 import type { IdentityStorage } from "@/shared/api/types";
+import { i18n, useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
@@ -72,6 +73,7 @@ export function MachineOnboardingFlow({
   initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
 }) {
+  const { t } = useTranslation();
   const [page, setPage] = React.useState<MachineOnboardingPage>(
     identityLost ? "key-import" : (initialPage ?? "identity"),
   );
@@ -158,7 +160,9 @@ export function MachineOnboardingFlow({
       setPage("backup");
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Failed to load identity",
+        cause instanceof Error
+          ? cause.message
+          : i18n.t("onboarding.recovery.error-load-identity"),
       );
     } finally {
       setIsPending(false);
@@ -179,7 +183,9 @@ export function MachineOnboardingFlow({
       setPage("setup");
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Failed to load identity",
+        cause instanceof Error
+          ? cause.message
+          : i18n.t("onboarding.recovery.error-load-identity"),
       );
     } finally {
       setIsPending(false);
@@ -188,7 +194,7 @@ export function MachineOnboardingFlow({
 
   const replaceLostIdentity = React.useCallback(async () => {
     const confirmed = window.confirm(
-      "This will create a new identity and abandon your previous key. This cannot be undone. Continue?",
+      i18n.t("onboarding.key-import.confirm-new-identity"),
     );
     if (!confirmed) return;
 
@@ -206,7 +212,9 @@ export function MachineOnboardingFlow({
       setPage("backup");
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Failed to save identity",
+        cause instanceof Error
+          ? cause.message
+          : i18n.t("onboarding.recovery.error-save-identity"),
       );
     } finally {
       setIsPending(false);
@@ -305,7 +313,7 @@ export function MachineOnboardingFlow({
           ? { disabled: isKeyImporting, onClick: backFromKeyImport }
           : page === "backup" && backupSubview !== "created"
             ? {
-                label: "Return to onboarding",
+                label: t("onboarding.footer.return-to-onboarding"),
                 onClick: returnToCreatedKey,
                 testId: "backup-return-to-onboarding",
               }
@@ -346,8 +354,9 @@ export function MachineOnboardingFlow({
                 src="/landing/buzz-wordmark.png"
               />
               <p className="mt-2 max-w-[560px] text-center text-2xl font-normal leading-none text-foreground">
-                Your people, your agents, your projects —<br />
-                all in one place.
+                {t("onboarding.landing.tagline-line1")}
+                <br />
+                {t("onboarding.landing.tagline-line2")}
               </p>
               {error ? (
                 <p className="mt-4 text-sm text-destructive">{error}</p>
@@ -367,10 +376,10 @@ export function MachineOnboardingFlow({
                   type="button"
                 >
                   {isPending
-                    ? "Loading identity…"
+                    ? t("onboarding.landing.loading")
                     : selectedPubkey
-                      ? "Continue setup"
-                      : "Create a new identity key"}
+                      ? t("onboarding.landing.continue-setup")
+                      : t("onboarding.landing.create-key")}
                 </Button>
                 <Button
                   className={`${ONBOARDING_SECONDARY_CTA_CLASS} px-5`}
@@ -385,8 +394,8 @@ export function MachineOnboardingFlow({
                   variant="ghost"
                 >
                   {selectedPubkey
-                    ? "Use a different key instead"
-                    : "Use an existing key"}
+                    ? t("onboarding.landing.use-different-key")
+                    : t("onboarding.landing.use-existing-key")}
                 </Button>
               </div>
               <IdentityKeyHelpDialog
@@ -440,10 +449,10 @@ export function MachineOnboardingFlow({
           {keyImportDialog === "backup" ? (
             <div className="w-full" data-testid="backup-recovery-dialog">
               <h1 className="text-title font-normal text-foreground">
-                Restore from a backup file
+                {t("onboarding.key-import.title-restore-backup")}
               </h1>
               <p className="mt-2 w-full text-base leading-6 text-foreground/80">
-                Choose the encrypted backup file you saved from Buzz.
+                {t("onboarding.key-import.body-restore-backup")}
               </p>
               <NostrKeyImportForm
                 key={keyImportFormKey}
@@ -463,12 +472,14 @@ export function MachineOnboardingFlow({
               data-testid="phone-recovery-dialog"
             >
               <h1 className="text-title font-normal text-foreground">
-                {identityLost ? "Recover from your phone" : "Scan to sign in"}
+                {identityLost
+                  ? t("onboarding.key-import.title-recover-phone")
+                  : t("onboarding.key-import.title-scan-signin")}
               </h1>
               <p className="mt-2 w-full text-base leading-6 text-foreground/80">
                 {phoneRecoveryStep === "loading" || phoneRecoveryStep === "qr"
-                  ? "Scan this code with a device where you’re currently signed in to Buzz."
-                  : "Confirm the code before sharing your identity."}
+                  ? t("onboarding.key-import.body-scan-qr")
+                  : t("onboarding.key-import.body-confirm-code")}
               </p>
               <div
                 className="flex min-h-0 flex-1 items-center justify-center"
@@ -494,16 +505,15 @@ export function MachineOnboardingFlow({
               >
                 <h1 className="text-title font-normal text-foreground">
                   {keyImportStage === "backup-password"
-                    ? "Unlock your account"
-                    : "Enter your private key"}
+                    ? t("onboarding.key-import.title-unlock")
+                    : t("onboarding.key-import.title-enter-key")}
                 </h1>
                 <div className="mt-2 w-full text-base leading-6 text-foreground/80">
                   {keyImportStage === "backup-password" ? (
-                    "Enter your backup password to restore your identity."
+                    t("onboarding.key-import.body-backup-password")
                   ) : (
                     <p>
-                      Paste your private key to sign in to Buzz. You can also
-                      use a{" "}
+                      {t("onboarding.key-import.enter-key-intro")}
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-file-button"
@@ -514,9 +524,9 @@ export function MachineOnboardingFlow({
                         }}
                         type="button"
                       >
-                        backup file
+                        {t("onboarding.key-import.link-backup-file")}
                       </button>
-                      , or{" "}
+                      {t("onboarding.key-import.or")}
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-phone-link"
@@ -527,9 +537,9 @@ export function MachineOnboardingFlow({
                         }}
                         type="button"
                       >
-                        recover from your phone
+                        {t("onboarding.key-import.link-recover-phone")}
                       </button>
-                      .
+                      {t("onboarding.key-import.terminal")}
                     </p>
                   )}
                 </div>
@@ -554,7 +564,7 @@ export function MachineOnboardingFlow({
                       type="button"
                       variant="ghost"
                     >
-                      Start new identity
+                      {t("onboarding.key-import.start-new-identity")}
                     </Button>
                   ) : null}
                 </div>

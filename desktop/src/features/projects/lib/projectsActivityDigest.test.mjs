@@ -55,3 +55,13 @@ test("falls back to current totals when no recent activity is loaded", () => {
   assert.equal(digest.prefix, "Currently tracking");
   assert.deepEqual(digest.highlights, ["2 projects", "5 tasks", "5 reviews"]);
 });
+
+// Boot i18n for the assertions below: Node defines a global `navigator`, so language
+// detection must be pinned to English before initializeI18n() reads it.
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();

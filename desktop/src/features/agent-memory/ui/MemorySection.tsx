@@ -3,6 +3,7 @@ import { AlertTriangle, Brain, ChevronDown, RefreshCw } from "lucide-react";
 
 import { useAgentMemoryGraph } from "@/features/agent-memory/hooks";
 import type { MemoryTreeNode } from "@/features/agent-memory/lib/buildMemoryGraph";
+import { useTranslation } from "@/i18n";
 import type { EngramEntry } from "@/shared/api/tauriEngrams";
 import { cn } from "@/shared/lib/cn";
 import { Button, type ButtonProps } from "@/shared/ui/button";
@@ -11,12 +12,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const MEMORY_LIST_PREVIEW_LIMIT = 3;
 type MemorySectionVariant = "cards" | "grouped";
-
-const MEMORY_TRUNCATED_TOOLTIP =
-  "This list may be incomplete — the relay returned the maximum number of memories.";
-
-const MEMORY_DANGLING_REF_TOOLTIP =
-  "This memory links to a slug that wasn't found in the loaded memory list.";
 
 /**
  * Memory section — IXI-7 phase 1 read-only viewer.
@@ -68,6 +63,7 @@ export function MemoryRefreshButton({
   iconClassName?: string;
   variant?: ButtonProps["variant"];
 }): React.ReactElement | null {
+  const { t } = useTranslation();
   const { query } = useAgentMemoryGraph(agentPubkey, {
     enabled: viewerIsOwner,
   });
@@ -76,7 +72,7 @@ export function MemoryRefreshButton({
 
   return (
     <Button
-      aria-label="Refresh memory"
+      aria-label={t("agent-memory.section.refresh")}
       className={cn(className, query.isFetching && "cursor-wait")}
       data-testid="agent-memory-refetch"
       disabled={query.isFetching}
@@ -153,9 +149,10 @@ function MemorySectionForOwner({
 // ── Subviews ────────────────────────────────────────────────────────────────
 
 function MemorySkeleton({ variant }: { variant: MemorySectionVariant }) {
+  const { t } = useTranslation();
   return (
     <div
-      aria-label="Loading memory"
+      aria-label={t("agent-memory.section.loading")}
       className={cn("space-y-2", variant === "grouped" && "p-4")}
       data-testid="agent-memory-skeleton"
       role="status"
@@ -178,6 +175,7 @@ function MemoryErrorState({
   retrying: boolean;
   variant: MemorySectionVariant;
 }) {
+  const { t } = useTranslation();
   const message =
     error instanceof Error ? error.message : String(error ?? "unknown error");
   return (
@@ -193,7 +191,7 @@ function MemoryErrorState({
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
         <div className="space-y-1">
           <div className="font-medium text-destructive">
-            Couldn't load memory
+            {t("agent-memory.section.error-title")}
           </div>
           <div className="text-muted-foreground">{message}</div>
         </div>
@@ -205,7 +203,9 @@ function MemoryErrorState({
         size="sm"
         variant="outline"
       >
-        {retrying ? "Retrying…" : "Retry"}
+        {retrying
+          ? t("agent-memory.section.retrying")
+          : t("agent-memory.section.retry")}
       </Button>
     </div>
   );
@@ -218,6 +218,7 @@ function MemoryStaleErrorBanner({
   onRetry: () => void;
   variant: MemorySectionVariant;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className={cn(
@@ -227,13 +228,15 @@ function MemoryStaleErrorBanner({
       data-testid="agent-memory-stale-error"
     >
       <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
-      <span className="flex-1 text-muted-foreground">Refresh failed.</span>
+      <span className="flex-1 text-muted-foreground">
+        {t("agent-memory.section.refresh-failed")}
+      </span>
       <button
         className="font-medium text-warning hover:underline"
         onClick={onRetry}
         type="button"
       >
-        Retry
+        {t("agent-memory.section.retry")}
       </button>
     </div>
   );
@@ -248,6 +251,7 @@ function MemoryGraphView({
   truncated: boolean;
   variant: MemorySectionVariant;
 }) {
+  const { t } = useTranslation();
   const { rootedTree, orphans, dangling } = graph;
   const [showAllEntries, setShowAllEntries] = React.useState(false);
   const danglingSlugs = React.useMemo(
@@ -263,9 +267,11 @@ function MemoryGraphView({
         data-testid="agent-memory-empty"
       >
         <Brain className="mx-auto h-4 w-4 text-muted-foreground" />
-        <p className="mt-3 text-sm font-medium">Build this agent's memory</p>
+        <p className="mt-3 text-sm font-medium">
+          {t("agent-memory.empty.title")}
+        </p>
         <p className="mt-1 text-sm text-muted-foreground">
-          Try telling this agent to remember something for next time.
+          {t("agent-memory.empty.description")}
         </p>
       </div>
     );
@@ -292,8 +298,9 @@ function MemoryGraphView({
           )}
           data-testid="agent-memory-no-core"
         >
-          No <code className="font-mono text-2xs">core</code> memory yet — agent
-          identity is unrooted.
+          {t("agent-memory.graph.no-core-prefix")}
+          <code className="font-mono text-2xs">core</code>
+          {t("agent-memory.graph.no-core-suffix")}
         </p>
       ) : null}
 
@@ -338,7 +345,7 @@ function MemoryGraphView({
           onClick={() => setShowAllEntries(false)}
           type="button"
         >
-          Show less
+          {t("agent-memory.graph.show-less")}
         </button>
       ) : null}
     </div>
@@ -356,6 +363,7 @@ function MemoryShowMoreButton({
   truncated: boolean;
   variant: MemorySectionVariant;
 }) {
+  const { t } = useTranslation();
   const button = (
     <button
       className={cn(
@@ -370,7 +378,7 @@ function MemoryShowMoreButton({
       onClick={onClick}
       type="button"
     >
-      View all ({count})
+      {t("agent-memory.graph.view-all", { count })}
     </button>
   );
 
@@ -380,13 +388,14 @@ function MemoryShowMoreButton({
     <Tooltip>
       <TooltipTrigger asChild>{button}</TooltipTrigger>
       <TooltipContent className="max-w-xs text-xs" side="top">
-        {MEMORY_TRUNCATED_TOOLTIP}
+        {t("agent-memory.tooltip.truncated")}
       </TooltipContent>
     </Tooltip>
   );
 }
 
 function MemoryTruncatedHint({ variant }: { variant: MemorySectionVariant }) {
+  const { t } = useTranslation();
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -401,7 +410,7 @@ function MemoryTruncatedHint({ variant }: { variant: MemorySectionVariant }) {
         </div>
       </TooltipTrigger>
       <TooltipContent className="max-w-xs text-xs" side="top">
-        {MEMORY_TRUNCATED_TOOLTIP}
+        {t("agent-memory.tooltip.truncated")}
       </TooltipContent>
     </Tooltip>
   );
@@ -447,6 +456,7 @@ function MemoryBodyText({ body }: { body: string }) {
 }
 
 function MemoryDanglingRefsHint({ slugs }: { slugs: string[] }) {
+  const { t } = useTranslation();
   if (slugs.length === 0) return null;
 
   return (
@@ -456,7 +466,7 @@ function MemoryDanglingRefsHint({ slugs }: { slugs: string[] }) {
     >
       <div className="rounded-xl bg-warning/5 px-2.5 py-2 text-xs leading-5">
         <p className="text-warning">
-          Missing {slugs.length === 1 ? "link" : "links"}:{" "}
+          {t("agent-memory.entry.missing-links", { count: slugs.length })}
           {slugs.map((slug, index) => (
             <React.Fragment key={slug}>
               {index > 0 ? ", " : null}
@@ -470,7 +480,7 @@ function MemoryDanglingRefsHint({ slugs }: { slugs: string[] }) {
           ))}
         </p>
         <p className="mt-0.5 text-foreground/50">
-          {MEMORY_DANGLING_REF_TOOLTIP}
+          {t("agent-memory.entry.dangling-ref-tooltip")}
         </p>
       </div>
     </div>
@@ -532,6 +542,7 @@ function MemoryEntryAccordion({
   entry: EngramEntry;
   variant: MemorySectionVariant;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const [showCaret, setShowCaret] = React.useState(false);
   const articleRef = React.useRef<HTMLElement>(null);
@@ -588,7 +599,9 @@ function MemoryEntryAccordion({
           ref={bodyRef}
         >
           {isEmpty ? (
-            <span className="italic text-foreground/50">(empty)</span>
+            <span className="italic text-foreground/50">
+              {t("agent-memory.entry.empty")}
+            </span>
           ) : (
             <MemoryBodyText body={entry.body} />
           )}

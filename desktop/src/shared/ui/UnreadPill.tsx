@@ -11,10 +11,6 @@ const DEFAULT_UNREAD_PILL_TREATMENT_CLASS =
 const PRIMARY_UNREAD_PILL_TREATMENT_CLASS =
   "border-primary bg-primary text-primary-foreground hover:bg-primary/90";
 
-export function unreadCountLabel(count: number) {
-  return `${count} new message${count === 1 ? "" : "s"}`;
-}
-
 export function UnreadPill({
   accessibleLabel,
   className,

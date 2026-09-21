@@ -12,6 +12,7 @@ import {
 } from "@/features/settings/ui/BackupTestFlow";
 import { EncryptedBackupCreator } from "@/features/settings/ui/EncryptedBackupCreator";
 import { getNsec } from "@/shared/api/tauriIdentity";
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -58,6 +59,7 @@ function BackupAvailabilityFill({
  * while expanded; encrypted backup state lives in the app-level provider.
  */
 export function PrivateKeyBackupRow() {
+  const { t } = useTranslation();
   const [isOpen, setIsOpen] = React.useState(false);
   const [nsec, setNsec] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
@@ -97,7 +99,7 @@ export function PrivateKeyBackupRow() {
           setLoadError(
             err instanceof Error
               ? err.message
-              : "Failed to retrieve private key.",
+              : t("onboarding.backup.error-retrieve-key"),
           );
       } finally {
         if (!fetchCancelledRef.current) setIsLoading(false);
@@ -124,7 +126,9 @@ export function PrivateKeyBackupRow() {
     <>
       <div className="px-4 py-3" data-testid="profile-private-key-row">
         <div className="flex items-center justify-between gap-4">
-          <p className="text-sm font-medium">Private key</p>
+          <p className="text-sm font-medium">
+            {t("onboarding.key-import.label-private-key")}
+          </p>
           <div className="flex shrink-0 items-center gap-2">
             {backupAvailable ? (
               <Button
@@ -137,11 +141,17 @@ export function PrivateKeyBackupRow() {
                 {availableUntil !== null ? (
                   <BackupAvailabilityFill availableUntil={availableUntil} />
                 ) : null}
-                <span className="relative z-10">Download backup</span>
+                <span className="relative z-10">
+                  {t("settings.backup.download-backup")}
+                </span>
               </Button>
             ) : null}
             <Button
-              aria-label={isOpen ? "Hide private key" : "Reveal private key"}
+              aria-label={
+                isOpen
+                  ? t("onboarding.key-import.aria-hide-key")
+                  : t("onboarding.key-import.aria-reveal-key")
+              }
               className="rounded-full"
               data-testid="profile-private-key-toggle"
               onClick={() => void handleReveal()}
@@ -151,12 +161,12 @@ export function PrivateKeyBackupRow() {
               {isOpen ? (
                 <>
                   <EyeOff className="h-4 w-4 shrink-0" />
-                  Hide
+                  {t("settings.backup.hide")}
                 </>
               ) : (
                 <>
                   <Eye className="h-4 w-4 shrink-0" />
-                  Reveal
+                  {t("settings.backup.reveal")}
                 </>
               )}
             </Button>
@@ -165,7 +175,9 @@ export function PrivateKeyBackupRow() {
         {isOpen ? (
           <div className="mt-2">
             {isLoading ? (
-              <p className="text-sm text-muted-foreground">Loading…</p>
+              <p className="text-sm text-muted-foreground">
+                {t("onboarding.setup.loading")}
+              </p>
             ) : loadError ? (
               <p className="text-sm text-destructive">{loadError}</p>
             ) : nsec ? (
@@ -173,13 +185,13 @@ export function PrivateKeyBackupRow() {
                 actions={[
                   {
                     icon: <Download aria-hidden="true" />,
-                    label: "Create backup",
+                    label: t("settings.backup.create-backup-action"),
                     onSelect: handleCreateBackup,
                     testId: "private-key-create-backup",
                   },
                   {
                     icon: <ShieldCheck aria-hidden="true" />,
-                    label: "Test backup",
+                    label: t("settings.backup.test-backup-action"),
                     onSelect: () => setTestOpen(true),
                     testId: "private-key-test-backup",
                   },
@@ -194,10 +206,9 @@ export function PrivateKeyBackupRow() {
       <Dialog onOpenChange={handleTestOpenChange} open={testOpen}>
         <DialogContent className="max-w-lg" data-testid="backup-test-dialog">
           <DialogHeader className="pr-8">
-            <DialogTitle>Test a key backup</DialogTitle>
+            <DialogTitle>{t("settings.backup.test-title")}</DialogTitle>
             <DialogDescription>
-              Confirm that a backup file and its password can unlock an
-              identity.
+              {t("settings.backup.test-description")}
             </DialogDescription>
           </DialogHeader>
           <BackupTestFlow
@@ -205,8 +216,7 @@ export function PrivateKeyBackupRow() {
             progress={testProgress}
           />
           <p className="text-xs leading-5 text-muted-foreground">
-            Backups use the standard NIP-49 format, so this works for backups
-            from compatible Nostr apps too.
+            {t("settings.backup.test-format-note")}
           </p>
         </DialogContent>
       </Dialog>

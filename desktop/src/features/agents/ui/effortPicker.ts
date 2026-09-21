@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type {
   AcpConfigOptionValue,
   ManagedAgentBackend,
@@ -42,7 +43,10 @@ export function effortPickerState({
   const visible = backend.type === "local" && effortConfigId !== undefined;
 
   const options: PersonaDropdownOption[] = [
-    { label: "Adapter default", value: EFFORT_DEFAULT_DROPDOWN_VALUE },
+    {
+      label: i18n.t("agents.harness.adapter-default"),
+      value: EFFORT_DEFAULT_DROPDOWN_VALUE,
+    },
     ...(effortOptions ?? []).map((option) => ({
       label: option.displayName ?? option.value,
       value: option.value,

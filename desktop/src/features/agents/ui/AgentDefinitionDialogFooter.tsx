@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 
 type AgentDefinitionDialogFooterProps = {
@@ -17,6 +18,7 @@ export function AgentDefinitionDialogFooter({
   publishesCatalogUpdates,
   submitLabel,
 }: AgentDefinitionDialogFooterProps) {
+  const { t } = useTranslation();
   return (
     <div className="flex w-full flex-wrap items-center justify-between gap-3">
       <div className="flex min-h-9 min-w-0 flex-wrap items-center gap-3">
@@ -25,8 +27,7 @@ export function AgentDefinitionDialogFooter({
             className="max-w-sm text-xs text-muted-foreground"
             data-testid="persona-dialog-catalog-publish-notice"
           >
-            This agent is in the community catalog. Your changes will be
-            published when you save.
+            {t("agents.definition-footer.catalog-notice")}
           </p>
         ) : null}
       </div>
@@ -38,7 +39,7 @@ export function AgentDefinitionDialogFooter({
           type="button"
           variant="outline"
         >
-          Cancel
+          {t("agents.team-dialog.cancel")}
         </Button>
         <Button
           data-testid="persona-dialog-submit"
@@ -47,11 +48,11 @@ export function AgentDefinitionDialogFooter({
           type="submit"
         >
           {isPending
-            ? "Saving..."
+            ? t("agents.team-dialog.saving")
             : isAvatarUploadPending
-              ? "Uploading..."
+              ? t("agents.definition-footer.uploading")
               : publishesCatalogUpdates
-                ? "Save and publish"
+                ? t("agents.definition-footer.save-and-publish")
                 : submitLabel}
         </Button>
       </div>

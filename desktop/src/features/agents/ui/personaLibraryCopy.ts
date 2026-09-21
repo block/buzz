@@ -1,64 +1,80 @@
-export const personaLibraryCopy = {
-  title: "My agents",
-  description:
-    "The agents you have chosen for this app. Use them to create teams and launch agents.",
-  chooseFromCatalog: "Choose from catalog",
-  createNew: "New agent",
-  import: "Import snapshot",
-  emptyTitle: "No agents yet",
-  emptyDescription:
-    "Choose one from Agent Catalog, create your own, or import one to get started.",
-  emptyImportHint:
-    "Or drop an .agent.json or .agent.png snapshot here to import.",
-} as const;
+import { i18n } from "@/i18n";
 
-export const personaCatalogCopy = {
-  title: "Agent Catalog",
-  description: "Browse agents shared to this relay.",
-  dialogTitle: "Add agent",
-  dialogDescription: "Browse agents shared to this relay.",
-  emptyTitle: "You're all set",
-  emptyDescription: "Everything in Agent Catalog is already in My Agents.",
-  emptyCatalogDescription: "Shared agents will appear here.",
-  emptyCatalogTitle: "No agents are being shared",
-  detailsAction: "View details",
-  selectAction: "Choose",
-  deselectAction: "Deselect",
-  selectedState: "Selected",
-  availableState: "Available",
-  detailSelectedTitle: "Selected for My Agents",
-  detailSelectedDescription:
-    "Turn this off to remove the agent from teams and agent creation in this app.",
-  detailAvailableTitle: "Available in Agent Catalog",
-  detailAvailableDescription:
-    "Turn this on to make the agent available for teams and agent creation.",
-  useAction: "Add agent",
-  addedAction: "Added to My Agents",
-  teamEmptyState:
-    "No agents in My Agents yet. Create one or choose one from Agent Catalog first.",
-} as const;
+/**
+ * Copy for the "My agents" / "Agent Catalog" library surfaces.
+ *
+ * Resolved through `i18n.t` at call time (these are plain functions, not hooks),
+ * so every caller reads the strings while rendering rather than at import.
+ */
+export function personaLibraryCopy() {
+  return {
+    title: i18n.t("agents.persona-library.title"),
+    description: i18n.t("agents.persona-library.description"),
+    chooseFromCatalog: i18n.t("agents.persona-library.choose-from-catalog"),
+    createNew: i18n.t("agents.persona-library.create-new"),
+    import: i18n.t("agents.persona-library.import"),
+    emptyTitle: i18n.t("agents.persona-library.empty-title"),
+    emptyDescription: i18n.t("agents.persona-library.empty-description"),
+    emptyImportHint: i18n.t("agents.persona-library.empty-import-hint"),
+  };
+}
+
+export function personaCatalogCopy() {
+  return {
+    title: i18n.t("agents.persona-catalog.title"),
+    description: i18n.t("agents.persona-catalog.description"),
+    dialogTitle: i18n.t("agents.persona-catalog.add-agent"),
+    dialogDescription: i18n.t("agents.persona-catalog.description"),
+    emptyTitle: i18n.t("agents.persona-catalog.empty-title"),
+    emptyDescription: i18n.t("agents.persona-catalog.empty-description"),
+    emptyCatalogDescription: i18n.t(
+      "agents.persona-catalog.empty-catalog-description",
+    ),
+    emptyCatalogTitle: i18n.t("agents.persona-catalog.empty-catalog-title"),
+    detailsAction: i18n.t("agents.persona-catalog.details-action"),
+    selectAction: i18n.t("agents.persona-catalog.select-action"),
+    deselectAction: i18n.t("agents.persona-catalog.deselect-action"),
+    selectedState: i18n.t("agents.persona-catalog.selected-state"),
+    availableState: i18n.t("agents.persona-catalog.available-state"),
+    detailSelectedTitle: i18n.t("agents.persona-catalog.detail-selected-title"),
+    detailSelectedDescription: i18n.t(
+      "agents.persona-catalog.detail-selected-description",
+    ),
+    detailAvailableTitle: i18n.t(
+      "agents.persona-catalog.detail-available-title",
+    ),
+    detailAvailableDescription: i18n.t(
+      "agents.persona-catalog.detail-available-description",
+    ),
+    useAction: i18n.t("agents.persona-catalog.add-agent"),
+    addedAction: i18n.t("agents.persona-catalog.added-action"),
+    teamEmptyState: i18n.t("agents.persona-catalog.team-empty-state"),
+  };
+}
 
 export function getPersonaCatalogSelectionActionCopy(isActive: boolean) {
-  return isActive
-    ? personaCatalogCopy.deselectAction
-    : personaCatalogCopy.selectAction;
+  const copy = personaCatalogCopy();
+  return isActive ? copy.deselectAction : copy.selectAction;
 }
 
 export function getPersonaCatalogSelectionAriaLabel(
   displayName: string,
   isActive: boolean,
 ) {
-  return `${isActive ? "Deselect" : "Select"} ${displayName} in My Agents`;
+  return isActive
+    ? i18n.t("agents.persona-catalog.deselect-aria", { displayName })
+    : i18n.t("agents.persona-catalog.select-aria", { displayName });
 }
 
 export function getPersonaCatalogDetailSelectionCopy(isActive: boolean) {
+  const copy = personaCatalogCopy();
   return isActive
     ? {
-        title: personaCatalogCopy.detailSelectedTitle,
-        description: personaCatalogCopy.detailSelectedDescription,
+        title: copy.detailSelectedTitle,
+        description: copy.detailSelectedDescription,
       }
     : {
-        title: personaCatalogCopy.detailAvailableTitle,
-        description: personaCatalogCopy.detailAvailableDescription,
+        title: copy.detailAvailableTitle,
+        description: copy.detailAvailableDescription,
       };
 }

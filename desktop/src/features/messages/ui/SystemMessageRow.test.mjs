@@ -2,10 +2,20 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, test } from "node:test";
 
 import { JSDOM } from "jsdom";
+import { initializeI18n } from "@/i18n";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost",
 });
+
+// The row resolves its captions through i18n, and every assertion below is the
+// English contract — but node's own `navigator.languages` reports the host
+// system locale, which may be zh-CN.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 before(() => {
   Object.assign(globalThis, {

@@ -6,6 +6,15 @@ import {
   describeChannelTextFieldChange,
   toInlineName,
 } from "./systemEventCopy.ts";
+import { initializeI18n } from "@/i18n";
+
+// Every assertion below is the English contract, but node's own
+// `navigator.languages` reports the host system locale — which may be zh-CN.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 test("an add to the reader uses passive wording", () => {
   assert.equal(addedByActionPrefix(true), "were added by");

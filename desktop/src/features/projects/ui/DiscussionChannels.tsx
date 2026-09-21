@@ -18,6 +18,7 @@ import {
 import { selectionItemFromChannel } from "@/features/projects/lib/projectSelection";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useSearchMessagesQuery } from "@/features/search/hooks";
+import { useTranslation } from "@/i18n";
 import type { SearchHit } from "@/shared/api/searchTypes";
 import { KIND_FORUM_COMMENT, KIND_FORUM_POST } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
@@ -153,6 +154,7 @@ export function DiscussedInChannels({
   query: string;
   testId?: string;
 }) {
+  const { t } = useTranslation();
   const {
     channels: discussed,
     hits,
@@ -206,7 +208,7 @@ export function DiscussedInChannels({
       data-testid={testId}
     >
       <h4 className="border-b border-border/40 px-3 py-1.5 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-        Related Conversations
+        {t("projects.discussion-channels.related-title")}
       </h4>
       <div className="divide-y divide-border/40">
         {visible.map((channel) => {
@@ -229,15 +231,23 @@ export function DiscussedInChannels({
               <button
                 aria-label={
                   latestHit
-                    ? `Open conversation in #${name}`
-                    : `Open channel #${name}`
+                    ? t("projects.discussion-channels.open-conversation-aria", {
+                        name,
+                      })
+                    : t("projects.discussion-channels.open-channel-aria", {
+                        name,
+                      })
                 }
                 className="absolute inset-0"
                 onClick={openConversation}
                 title={
                   latestHit
-                    ? `Open the latest conversation in #${name}`
-                    : `Open #${name}`
+                    ? t("projects.discussion-channels.open-latest-title", {
+                        name,
+                      })
+                    : t("projects.discussion-channels.open-channel-title", {
+                        name,
+                      })
                 }
                 type="button"
               />
@@ -263,7 +273,10 @@ export function DiscussedInChannels({
                   <button
                     className="pointer-events-auto font-medium text-foreground hover:underline"
                     onClick={() => void goChannel(channel.id)}
-                    title={`Open #${name}`}
+                    title={t(
+                      "projects.discussion-channels.open-channel-title",
+                      { name },
+                    )}
                     type="button"
                   >
                     #{name}
@@ -289,13 +302,12 @@ export function DiscussedInChannels({
           onClick={() => setExpanded(true)}
           type="button"
         >
-          Show {hiddenCount} more{" "}
-          {hiddenCount === 1 ? "conversation" : "conversations"}
+          {t("projects.discussion-channels.show-more", { count: hiddenCount })}
         </button>
       ) : null}
       {isTruncated ? (
         <p className="border-t border-border/40 px-3 py-1.5 text-xs text-muted-foreground">
-          Showing mentions from the 500 most recent search results.
+          {t("projects.discussion-channels.truncated-note")}
         </p>
       ) : null}
     </div>
@@ -379,6 +391,7 @@ export function DiscussionChannelsPanel({
   query: string;
   repositoryName: string;
 }) {
+  const { t } = useTranslation();
   const { channels, hits, isLoading, isTruncated } =
     useDiscussionChannels(query);
   const { goChannel, openSearchHit } = useAppNavigation();
@@ -397,15 +410,17 @@ export function DiscussionChannelsPanel({
   const profiles = profilesQuery.data?.profiles;
 
   if (isLoading) {
-    return <BuzzLoadingState label="Loading channel discussions" />;
+    return (
+      <BuzzLoadingState label={t("projects.discussion-channels.loading")} />
+    );
   }
   if (channels.length === 0) {
     return (
       <ProjectPanelState
         className="px-4"
-        description="Paste this repository, review, or task link in a channel and it will appear here."
+        description={t("projects.discussion-channels.panel-empty-description")}
         testId="project-discussion-channels-panel"
-        title="No linked channels yet"
+        title={t("projects.discussion-channels.panel-empty-title")}
       />
     );
   }
@@ -462,8 +477,12 @@ export function DiscussionChannelsPanel({
                 title={`#${name}`}
                 titleAttr={
                   latestHit
-                    ? `Open the latest conversation in #${name}`
-                    : `Open #${name}`
+                    ? t("projects.discussion-channels.open-latest-title", {
+                        name,
+                      })
+                    : t("projects.discussion-channels.open-channel-title", {
+                        name,
+                      })
                 }
               />
             </li>
@@ -472,8 +491,9 @@ export function DiscussionChannelsPanel({
       </ul>
       {isTruncated ? (
         <p className="border-t border-border/50 px-4 py-2 text-xs text-muted-foreground">
-          Showing the latest {DISCUSSION_SEARCH_LIMIT} mentions; totals may be
-          higher.
+          {t("projects.discussion-channels.latest-note", {
+            limit: DISCUSSION_SEARCH_LIMIT,
+          })}
         </p>
       ) : null}
     </div>

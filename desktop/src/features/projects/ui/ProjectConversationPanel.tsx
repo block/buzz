@@ -19,6 +19,7 @@ import { MessageThreadPanel } from "@/features/messages/ui/MessageThreadPanel";
 import { MessageThreadPanelSkeleton } from "@/features/messages/ui/MessageThreadPanelSkeleton";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
+import { useTranslation } from "@/i18n";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { SearchHit } from "@/shared/api/searchTypes";
 import { getEventById } from "@/shared/api/tauri";
@@ -51,6 +52,7 @@ export function ProjectConversationPanel({
   sharedHeaderBackdrop?: boolean;
   widthPx: number;
 }) {
+  const { t } = useTranslation();
   const { goChannel } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
   const activeChannel =
@@ -195,8 +197,12 @@ export function ProjectConversationPanel({
   const layoutProps = {
     canResetWidth,
     enterMotion: !canShowThread,
-    headerTitle: channelLabel ? `#${channelLabel}` : "Thread",
-    headerTitleAriaLabel: channelLabel ? `Open #${channelLabel}` : undefined,
+    headerTitle: channelLabel ? `#${channelLabel}` : t("channels.thread.label"),
+    headerTitleAriaLabel: channelLabel
+      ? t("projects.discussion-channels.open-channel-title", {
+          name: channelLabel,
+        })
+      : undefined,
     isFocusMode: false,
     isSinglePanelView: !isOverlay,
     layout: "standalone" as const,
@@ -317,10 +323,10 @@ export function ProjectConversationPanel({
   return wrapProjectConversationPane(
     <div className="flex h-full flex-col items-center justify-center gap-3 bg-background p-6 text-center">
       <p className="text-sm text-muted-foreground">
-        This conversation could not be loaded.
+        {t("projects.conversation-panel.load-failed")}
       </p>
       <Button onClick={onClose} size="sm" variant="outline">
-        Close
+        {t("channels.browser.close")}
       </Button>
     </div>,
     {

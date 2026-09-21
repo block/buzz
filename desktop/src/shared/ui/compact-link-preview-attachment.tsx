@@ -1,6 +1,7 @@
 import { ImageOff } from "lucide-react";
 import { useRef, useState } from "react";
 
+import { useTranslation } from "@/i18n";
 import type { ResolvedLinkPreview } from "@/shared/lib/useResolvedLinkPreviews";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -61,6 +62,7 @@ export function CompactLinkPreviewAttachment({
   preview: ResolvedLinkPreview;
   showControls?: boolean;
 }) {
+  const { t } = useTranslation();
   const reserveImage = preview.imageState !== "none";
   const imageSrc =
     preview.imageState === "image" ? (preview.imageDataUrl ?? null) : null;
@@ -104,7 +106,9 @@ export function CompactLinkPreviewAttachment({
           >
             {showImage ? (
               <img
-                alt={`Preview from ${preview.imageDomain}`}
+                alt={t("shared.linkPreview.image.alt", {
+                  domain: preview.imageDomain,
+                })}
                 className="h-full w-full object-cover"
                 onError={() => setFailedImageSrc(imageSrc)}
                 src={imageSrc ?? undefined}
@@ -165,12 +169,20 @@ export function CompactLinkPreviewAttachment({
         </AttachmentContent>
         {onOpen ? (
           <AttachmentTrigger
-            aria-label={`Open ${preview.provider} ${preview.typeLabel}: ${preview.title}`}
+            aria-label={t("shared.linkPreview.open-aria", {
+              provider: preview.provider,
+              title: preview.title,
+              type: preview.typeLabel,
+            })}
             className={reserveImage ? undefined : "rounded-none"}
             onClick={onOpen}
           >
             <span className="sr-only">
-              Open {preview.provider} {preview.typeLabel}: {preview.title}
+              {t("shared.linkPreview.open-aria", {
+                provider: preview.provider,
+                title: preview.title,
+                type: preview.typeLabel,
+              })}
             </span>
           </AttachmentTrigger>
         ) : (
@@ -179,13 +191,21 @@ export function CompactLinkPreviewAttachment({
             className={reserveImage ? undefined : "rounded-none"}
           >
             <a
-              aria-label={`Open ${preview.provider} ${preview.typeLabel}: ${preview.title}`}
+              aria-label={t("shared.linkPreview.open-aria", {
+                provider: preview.provider,
+                title: preview.title,
+                type: preview.typeLabel,
+              })}
               href={preview.href}
               rel="noreferrer"
               target="_blank"
             >
               <span className="sr-only">
-                Open {preview.provider} {preview.typeLabel}: {preview.title}
+                {t("shared.linkPreview.open-aria", {
+                  provider: preview.provider,
+                  title: preview.title,
+                  type: preview.typeLabel,
+                })}
               </span>
             </a>
           </AttachmentTrigger>

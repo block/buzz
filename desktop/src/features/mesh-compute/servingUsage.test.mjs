@@ -2,6 +2,17 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { deriveServingIndicator } from "./servingUsage.ts";
+import { initializeI18n } from "@/i18n";
+
+// `deriveServingIndicator` resolves its copy through the i18n catalog, so this
+// file needs a booted i18n instance. The assertions compare against the
+// English source strings, so pin English rather than inheriting the host's
+// system language.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 function usage(overrides = {}) {
   return {

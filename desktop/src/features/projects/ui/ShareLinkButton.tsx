@@ -1,6 +1,7 @@
 import { Check, Link2 } from "lucide-react";
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -12,7 +13,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
  */
 export function ShareLinkButton({
   className,
-  label = "Copy link",
+  label,
   link,
   testId,
 }: {
@@ -21,6 +22,8 @@ export function ShareLinkButton({
   link: string | null;
   testId?: string;
 }) {
+  const { t } = useTranslation();
+  const copyLabel = label ?? t("projects.selection.action.copy-link");
   const [copied, setCopied] = React.useState(false);
   const timeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -46,7 +49,7 @@ export function ShareLinkButton({
     <Tooltip>
       <TooltipTrigger asChild>
         <button
-          aria-label={label}
+          aria-label={copyLabel}
           className={cn(
             "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
             className,
@@ -62,7 +65,9 @@ export function ShareLinkButton({
           )}
         </button>
       </TooltipTrigger>
-      <TooltipContent>{copied ? "Link copied" : label}</TooltipContent>
+      <TooltipContent>
+        {copied ? t("projects.share-link.copied") : copyLabel}
+      </TooltipContent>
     </Tooltip>
   );
 }

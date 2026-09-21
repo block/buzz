@@ -1,5 +1,7 @@
 /** Clustered overview selection that drives the context pod. */
 
+import { i18n } from "@/i18n";
+
 export type ProjectSelectionKind =
   | "channel"
   | "commit"
@@ -66,7 +68,18 @@ export function projectSelectionTitle(items: ProjectSelectionItem[]) {
   if (items.length === 0) return "";
   const kind = items[0]?.kind;
   if (!kind) return "";
-  return `${items.length} ${projectSelectionNoun(kind, items.length)}`;
+  const count = items.length;
+  if (kind === "channel")
+    return i18n.t("projects.selection.count-channel", { count });
+  if (kind === "commit")
+    return i18n.t("projects.selection.count-commit", { count });
+  if (kind === "project")
+    return i18n.t("projects.selection.count-project", { count });
+  if (kind === "repository")
+    return i18n.t("projects.selection.count-repository", { count });
+  if (kind === "review")
+    return i18n.t("projects.selection.count-review", { count });
+  return i18n.t("projects.selection.count-task", { count });
 }
 
 export function nextProjectSelection(
@@ -217,26 +230,32 @@ export function projectSelectionPresentation(
   const actions: ProjectSelectionAction[] = [
     {
       id: "chat-agent",
-      label: "Chat with an agent",
+      label: i18n.t("projects.selection.action.chat-agent"),
       testId: "projects-selection-chat-agent",
     },
   ];
   actions.push({
     id: "discuss",
-    label: "Discuss in a channel",
+    label: i18n.t("projects.selection.action.discuss"),
     testId: "projects-selection-discuss",
   });
   if (kind === "commit") {
     actions.push({
       id: "create-review",
-      label: items.length === 1 ? "Create review" : "Create reviews",
+      label:
+        items.length === 1
+          ? i18n.t("projects.selection.action.create-review")
+          : i18n.t("projects.selection.action.create-reviews"),
       testId: "projects-selection-create-review",
     });
   }
   if (projectSelectionShareLinks(items).length > 0) {
     actions.push({
       id: "copy",
-      label: items.length === 1 ? "Copy link" : "Copy links",
+      label:
+        items.length === 1
+          ? i18n.t("projects.selection.action.copy-link")
+          : i18n.t("projects.selection.action.copy-links"),
       testId: "projects-selection-copy",
     });
   }

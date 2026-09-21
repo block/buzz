@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 
 // Live kind:20001 events are self-signed by their author; the subject is
@@ -74,11 +75,11 @@ export function resolveAutomaticPresenceStatus(
 export function getPresenceLabel(status: PresenceStatus) {
   switch (status) {
     case "online":
-      return "Online";
+      return i18n.t("presence.status.online");
     case "away":
-      return "Away";
+      return i18n.t("presence.status.away");
     case "offline":
-      return "Offline";
+      return i18n.t("presence.status.offline");
   }
 }
 

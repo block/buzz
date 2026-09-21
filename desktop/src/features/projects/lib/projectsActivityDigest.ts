@@ -5,6 +5,7 @@ import type {
   ProjectPullRequestListItem,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import { i18n } from "@/i18n";
 
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 
@@ -13,10 +14,6 @@ export type ProjectsActivityDigest = {
   prefix: string;
   suffix: string;
 };
-
-function plural(count: number, singular: string, pluralForm = `${singular}s`) {
-  return `${count} ${count === 1 ? singular : pluralForm}`;
-}
 
 /** Builds a short, deterministic sentence from the currently loaded activity. */
 export function buildProjectsActivityDigest({
@@ -55,17 +52,27 @@ export function buildProjectsActivityDigest({
     return recent;
   }).length;
   const highlights = [
-    commitCount > 0 ? `${plural(commitCount, "new commit")}` : null,
-    taskCount > 0 ? `${plural(taskCount, "task")} opened` : null,
-    reviewCount > 0 ? `${plural(reviewCount, "review")} opened` : null,
+    commitCount > 0
+      ? i18n.t("projects.digest.new-commits", { count: commitCount })
+      : null,
+    taskCount > 0
+      ? i18n.t("projects.digest.tasks-opened", { count: taskCount })
+      : null,
+    reviewCount > 0
+      ? i18n.t("projects.digest.reviews-opened", { count: reviewCount })
+      : null,
   ].filter((value): value is string => value !== null);
 
   if (highlights.length > 0) {
-    highlights.push(`${plural(activeProjectIds.size, "active project")}`);
+    highlights.push(
+      i18n.t("projects.digest.active-projects", {
+        count: activeProjectIds.size,
+      }),
+    );
     return {
       highlights,
-      prefix: "This week:",
-      suffix: ".",
+      prefix: i18n.t("projects.digest.prefix-week"),
+      suffix: i18n.t("projects.digest.suffix"),
     };
   }
 
@@ -78,11 +85,11 @@ export function buildProjectsActivityDigest({
   );
   return {
     highlights: [
-      plural(projects.length, "project"),
-      plural(totals.tasks, "task"),
-      plural(totals.reviews, "review"),
+      i18n.t("projects.digest.projects", { count: projects.length }),
+      i18n.t("projects.digest.tasks", { count: totals.tasks }),
+      i18n.t("projects.digest.reviews", { count: totals.reviews }),
     ],
-    prefix: "Currently tracking",
-    suffix: ".",
+    prefix: i18n.t("projects.digest.prefix-currently-tracking"),
+    suffix: i18n.t("projects.digest.suffix"),
   };
 }

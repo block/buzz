@@ -1,5 +1,6 @@
 import { AlertTriangle } from "lucide-react";
 
+import { i18n, useTranslation } from "@/i18n";
 import {
   requestOpenEditAgent,
   type EditAgentFocusTarget,
@@ -75,7 +76,7 @@ export function shouldOpenDoctor(
 }
 
 export function missingBinaryRecoveryMessage(): string {
-  return "not found in PATH — install it or update PATH, then restart Buzz";
+  return i18n.t("shared.ui.config-nudge.missing-binary");
 }
 
 /**
@@ -114,16 +115,17 @@ function cliLoginMessage(
     { surface: "cli_login" }
   >,
 ): string {
-  const harness = req.probe_args[0] ?? "the CLI tool";
+  const harness =
+    req.probe_args[0] ?? i18n.t("shared.ui.config-nudge.cli-tool-fallback");
   switch (req.availability) {
     case "not_installed":
-      return `${harness} isn't installed`;
+      return i18n.t("shared.ui.config-nudge.cli-not-installed", { harness });
     case "cli_missing":
-      return `${harness} CLI is missing`;
+      return i18n.t("shared.ui.config-nudge.cli-missing", { harness });
     case "adapter_missing":
-      return `${harness} ACP adapter isn't installed`;
+      return i18n.t("shared.ui.config-nudge.adapter-missing", { harness });
     case "adapter_outdated":
-      return `${harness} ACP adapter is outdated — reinstall required`;
+      return i18n.t("shared.ui.config-nudge.adapter-outdated", { harness });
     case "available":
       // Tooling is present but authentication is needed — fall back to
       // the backend-supplied copy which has the exact login command.
@@ -198,6 +200,7 @@ export function ConfigNudgeCard({
   className?: string;
   nudge: ConfigNudgePayload;
 }) {
+  const { t } = useTranslation();
   const { openProfilePanel } = useProfilePanel();
   const { onOpenSettings } = useAppShell();
 
@@ -268,7 +271,9 @@ export function ConfigNudgeCard({
       </AttachmentMedia>
       <AttachmentContent>
         <AttachmentTitle className="whitespace-normal text-destructive line-clamp-2">
-          {nudge.agent_name} needs configuration
+          {t("shared.ui.config-nudge.needs-configuration", {
+            agent: nudge.agent_name,
+          })}
         </AttachmentTitle>
         <div className="mt-1 flex flex-col gap-0.5">
           {nudge.requirements.map((req, i) => (
@@ -287,7 +292,7 @@ export function ConfigNudgeCard({
       {opensDoctor && !informationalOnly && (
         <AttachmentActions className="items-end self-end">
           <span className="text-xs text-muted-foreground">
-            Open Agent runtimes →
+            {t("shared.ui.config-nudge.open-agent-runtimes")}
           </span>
         </AttachmentActions>
       )}
@@ -296,8 +301,12 @@ export function ConfigNudgeCard({
         <AttachmentTrigger
           aria-label={
             opensDoctor
-              ? `Open Agent runtimes for ${nudge.agent_name}`
-              : `Open Edit Agent for ${nudge.agent_name}`
+              ? t("shared.ui.config-nudge.open-agent-runtimes-aria", {
+                  agent: nudge.agent_name,
+                })
+              : t("shared.ui.config-nudge.open-edit-agent-aria", {
+                  agent: nudge.agent_name,
+                })
           }
           onClick={handleOpen}
         />
@@ -320,16 +329,17 @@ function RequirementRow({
   ) => void;
   requirement: ConfigNudgePayload["requirements"][number];
 }) {
+  const { t } = useTranslation();
   switch (requirement.surface) {
     case "env_key":
       return (
         <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
           <span className="flex-1 [overflow-wrap:anywhere]">
-            Set{" "}
+            {t("shared.ui.config-nudge.env-key-prefix")}{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
               {requirement.key}
             </code>{" "}
-            in Edit Agent → Environment variables
+            {t("shared.ui.config-nudge.env-key-suffix")}
           </span>
           {!allCliLogin && (
             <button
@@ -339,7 +349,7 @@ function RequirementRow({
               }
               type="button"
             >
-              Edit Agent →
+              {t("shared.ui.config-nudge.edit-agent-cta")}
             </button>
           )}
         </div>
@@ -348,8 +358,9 @@ function RequirementRow({
       return (
         <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
           <span className="flex-1 [overflow-wrap:anywhere]">
-            Set the <strong>{requirement.field}</strong> field in Edit Agent
-            dropdowns
+            {t("shared.ui.config-nudge.field-prefix")}{" "}
+            <strong>{requirement.field}</strong>{" "}
+            {t("shared.ui.config-nudge.field-suffix")}
           </span>
           {!allCliLogin && (
             <button
@@ -359,7 +370,7 @@ function RequirementRow({
               }
               type="button"
             >
-              Edit Agent →
+              {t("shared.ui.config-nudge.edit-agent-cta")}
             </button>
           )}
         </div>
@@ -384,7 +395,7 @@ function RequirementRow({
               onClick={onOpenDoctor}
               type="button"
             >
-              Open Agent runtimes →
+              {t("shared.ui.config-nudge.open-agent-runtimes")}
             </button>
           )}
         </div>
@@ -393,7 +404,7 @@ function RequirementRow({
       return (
         <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
           <span className="flex-1 [overflow-wrap:anywhere]">
-            Git for Windows is required for buzz-agent shell tools
+            {t("shared.ui.config-nudge.git-bash-required")}
           </span>
         </div>
       );
@@ -421,11 +432,13 @@ function RequirementRow({
       return (
         <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
           <span className="flex-1 [overflow-wrap:anywhere]">
-            {configFile} is invalid:{" "}
+            {t("shared.ui.config-nudge.config-invalid-prefix", {
+              file: configFile,
+            })}{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
               {requirement.diagnostic}
             </code>{" "}
-            — fix the config and restart the agent
+            {t("shared.ui.config-nudge.config-invalid-suffix")}
           </span>
         </div>
       );

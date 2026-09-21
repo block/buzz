@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { ChannelVisibility } from "@/shared/api/types";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
+import { useTranslation } from "@/i18n";
 
 import {
   type CreateChannelInput,
@@ -44,6 +45,7 @@ export function CreateChannelDialog({
   testId = "create-channel-dialog",
   title,
 }: CreateChannelDialogProps) {
+  const { t } = useTranslation();
   const open = channelKind !== null;
 
   const form = useCreateChannelForm({
@@ -70,12 +72,14 @@ export function CreateChannelDialog({
         data-testid={testId}
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
-        title={title ?? `Create a new ${kindLabel}`}
+        title={
+          title ?? t("sidebar.channel-dialog.create-new", { kind: kindLabel })
+        }
         description={
           description ??
           (channelKind === "forum"
-            ? "Forums organize threaded discussions around a topic."
-            : "Channels are real-time streams for team conversation.")
+            ? t("sidebar.channel-dialog.description-forums")
+            : t("sidebar.channel-dialog.description-channels"))
         }
         footer={<CreateChannelFormFooter form={form} />}
       >

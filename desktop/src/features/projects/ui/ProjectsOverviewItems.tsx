@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { useTranslation } from "@/i18n";
 import { canDeleteProject } from "@/features/projects/projectDeletion";
 import { FolderGit2, Folders } from "lucide-react";
 import type {
@@ -141,6 +142,7 @@ export function ProjectsOverviewProjectItems({
   viewMode: ProjectsViewMode;
   visibleProjects: Project[];
 }) {
+  const { t } = useTranslation();
   // One selection array shared by every row (was rebuilt per row per render —
   // O(n²) object churn that also defeated row memoization).
   const selectionRangeItems = React.useMemo(
@@ -198,13 +200,13 @@ export function ProjectsOverviewProjectItems({
       items: visibleProjects.filter((project) =>
         isProjectMine(project, currentPubkey),
       ),
-      title: "Mine",
+      title: t("projects.overview-items.mine"),
     },
     {
       items: visibleProjects.filter(
         (project) => !isProjectMine(project, currentPubkey),
       ),
-      title: "Other projects",
+      title: t("projects.overview-items.other-projects"),
     },
   ].filter((group) => group.items.length > 0);
   if (viewMode === "grid") {
@@ -321,6 +323,7 @@ export function ProjectsOverviewRepositoryItems({
   viewMode: ProjectsViewMode;
   visibleRepositories: Array<{ project: Project; repository: Repository }>;
 }) {
+  const { t } = useTranslation();
   // Shared, identity-stable selection array (see ProjectsOverviewProjectItems).
   const selectionRangeItems = React.useMemo(
     () =>
@@ -363,13 +366,13 @@ export function ProjectsOverviewRepositoryItems({
       items: visibleRepositories.filter(({ repository }) =>
         repositoryIsMine(repository, currentPubkey),
       ),
-      title: "Mine",
+      title: t("projects.overview-items.mine"),
     },
     {
       items: visibleRepositories.filter(
         ({ repository }) => !repositoryIsMine(repository, currentPubkey),
       ),
-      title: "Other repositories",
+      title: t("projects.overview-items.other-repositories"),
     },
   ].filter((group) => group.items.length > 0);
   if (viewMode === "grid") {

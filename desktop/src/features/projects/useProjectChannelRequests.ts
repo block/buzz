@@ -15,10 +15,12 @@ import {
   type AcceptedProjectChannelRequest,
 } from "@/features/projects/projectChannelRequestQueue";
 import { useAddProjectChannelMutation } from "@/features/projects/useAddProjectChannel";
+import { useTranslation } from "@/i18n";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export function useProjectChannelRequests() {
+  const { t } = useTranslation();
   const projectsQuery = useProjectsQuery();
   const channelsQuery = useChannelsQuery();
   const identityQuery = useIdentityQuery();
@@ -136,12 +138,14 @@ export function useProjectChannelRequests() {
     const owner = normalizePubkey(project.owner);
     const agent = normalizePubkey(sourceAgentPubkey);
     if ((!identity || normalizePubkey(identity) !== owner) && agent !== owner) {
-      setError("Only the project owner can approve this channel.");
+      setError(t("projects.channel-request-dialog.owner-only"));
       return;
     }
     if (request.request.templateName && !template) {
       setError(
-        `Channel template "${request.request.templateName}" is not available on this device.`,
+        t("projects.channel-request-dialog.template-missing", {
+          name: request.request.templateName,
+        }),
       );
       return;
     }
@@ -157,13 +161,15 @@ export function useProjectChannelRequests() {
         ttlSeconds: request.request.ttlSeconds,
         visibility: request.request.visibility,
       });
-      toast.success(`Channel "#${request.request.name}" created.`);
+      toast.success(
+        t("projects.shared.channel-created", { name: request.request.name }),
+      );
       advanceRequestQueue();
     } catch (nextError) {
       setError(
         nextError instanceof Error
           ? nextError.message
-          : "Failed to create the project channel.",
+          : t("projects.channel-request-dialog.create-failed"),
       );
     }
   }

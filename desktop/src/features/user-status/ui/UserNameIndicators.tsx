@@ -10,6 +10,7 @@ import {
   DEFAULT_USER_STATUS_EMOJI,
   StatusEmoji,
 } from "@/features/user-status/ui/StatusEmoji";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -23,6 +24,7 @@ export function UserNameIndicators({
   pubkey: string | undefined;
   size?: "chat" | "dm";
 }) {
+  const { t } = useTranslation();
   const normalizedPubkey = normalizePubkey(pubkey ?? "");
   const sharedStatus = useUserStatusLookupContext();
   const registerStatus = sharedStatus?.register;
@@ -55,7 +57,7 @@ export function UserNameIndicators({
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <span
-              aria-label="🎧 In a huddle"
+              aria-label={t("status.indicator.in-huddle-aria")}
               className={cn(
                 "inline-flex cursor-default items-center justify-center leading-none",
                 indicatorTextClass,
@@ -66,14 +68,14 @@ export function UserNameIndicators({
               🎧
             </span>
           </TooltipTrigger>
-          <TooltipContent>In a huddle</TooltipContent>
+          <TooltipContent>{t("status.indicator.in-huddle")}</TooltipContent>
         </Tooltip>
       ) : null}
       {status ? (
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <span
-              aria-label={`${statusEmoji} ${status.text || "User status"}`}
+              aria-label={`${statusEmoji} ${status.text || t("status.indicator.user-status")}`}
               className={cn(
                 "inline-flex cursor-default items-center justify-center leading-none",
                 indicatorTextClass,
@@ -88,7 +90,9 @@ export function UserNameIndicators({
               />
             </span>
           </TooltipTrigger>
-          <TooltipContent>{status.text || "Status set"}</TooltipContent>
+          <TooltipContent>
+            {status.text || t("status.indicator.status-set")}
+          </TooltipContent>
         </Tooltip>
       ) : null}
     </span>

@@ -1,5 +1,6 @@
 import { stringify as yamlStringify, parse as yamlParse } from "yaml";
 
+import { i18n } from "@/i18n";
 import {
   parsePubkeyInput as parseCanonicalPubkey,
   safeNpub,
@@ -103,23 +104,45 @@ export const DEFAULT_FORM_STATE: WorkflowFormState = {
   steps: [],
 };
 
-export const TRIGGER_LABELS: Record<TriggerType, string> = {
-  message_posted: "Message Posted",
-  reaction_added: "Reaction Added",
-  diff_posted: "Diff Posted",
-  webhook: "Webhook",
-  schedule: "Schedule",
-};
+/** Trigger-type labels resolve at call time so they follow the live language. */
+export function triggerTypeLabel(triggerType: TriggerType): string {
+  switch (triggerType) {
+    case "message_posted":
+      return i18n.t("workflows.trigger-type.message-posted");
+    case "reaction_added":
+      return i18n.t("workflows.trigger-type.reaction-added");
+    case "diff_posted":
+      return i18n.t("workflows.trigger-type.diff-posted");
+    case "webhook":
+      return i18n.t("workflows.trigger-type.webhook");
+    case "schedule":
+      return i18n.t("workflows.trigger-type.schedule");
+  }
+}
 
-export const ACTION_LABELS: Record<ActionType, string> = {
-  delay: "Delay",
-  send_message: "Send Message",
-  send_dm: "Send DM",
-  call_webhook: "Call Webhook",
-  request_approval: "Request Approval",
-  add_reaction: "Add Reaction",
-  set_channel_topic: "Set Channel Topic",
-};
+export function isKnownActionType(action: string): action is ActionType {
+  return ACTION_TYPES.includes(action as ActionType);
+}
+
+/** Action-type labels resolve at call time so they follow the live language. */
+export function actionTypeLabel(action: ActionType): string {
+  switch (action) {
+    case "delay":
+      return i18n.t("workflows.action-type.delay");
+    case "send_message":
+      return i18n.t("workflows.action-type.send-message");
+    case "send_dm":
+      return i18n.t("workflows.action-type.send-dm");
+    case "call_webhook":
+      return i18n.t("workflows.action-type.call-webhook");
+    case "request_approval":
+      return i18n.t("workflows.action-type.request-approval");
+    case "add_reaction":
+      return i18n.t("workflows.action-type.add-reaction");
+    case "set_channel_topic":
+      return i18n.t("workflows.action-type.set-channel-topic");
+  }
+}
 
 const EXACT_HEX_64 = /^[0-9a-fA-F]{64}$/;
 
@@ -379,6 +402,19 @@ function unknownKey(
   return Object.keys(record).find((key) => !allowed.has(key)) ?? null;
 }
 
+/** Field phrase used by the YAML validation copy: "Step 2 duration". */
+function stepFieldLabel(step: number, field: string): string {
+  return i18n.t("workflows.yaml.step-field", { number: step, field });
+}
+
+/**
+ * The "use the YAML editor" tail, resolved from the catalog so the schedule
+ * branch can test the already-localized message in the same language.
+ */
+function yamlEditorSuffix(): string {
+  return i18n.t("workflows.yaml.use-yaml-editor-suffix");
+}
+
 function requireNonEmptyString(
   record: UnknownRecord,
   key: string,
@@ -386,7 +422,9 @@ function requireNonEmptyString(
 ): string | { error: string } {
   const value = record[key];
   if (typeof value !== "string" || value.length === 0) {
-    return { error: `${label} must be a non-empty string` };
+    return {
+      error: i18n.t("workflows.yaml.field-must-be-non-empty", { field: label }),
+    };
   }
   return value;
 }
@@ -398,9 +436,11 @@ function optionalOwnedStringError(
 ): string | null {
   const value = record[key];
   if (value === undefined) return null;
-  if (typeof value !== "string") return `${label} must be a string`;
+  if (typeof value !== "string") {
+    return i18n.t("workflows.yaml.field-must-be-string", { field: label });
+  }
   if (value.length === 0) {
-    return `${label} cannot be empty in Form mode — use the YAML editor`;
+    return i18n.t("workflows.yaml.field-cannot-be-empty", { field: label });
   }
   return null;
 }
@@ -410,21 +450,35 @@ export function yamlToFormState(
 ): { ok: true; state: WorkflowFormState } | { ok: false; error: string } {
   try {
     const parsed = objectRecord(yamlParse(yaml));
-    if (!parsed) return { ok: false, error: "YAML must be an object" };
+    if (!parsed) {
+      return { ok: false, error: i18n.t("workflows.yaml.must-be-object") };
+    }
 
     const topUnknown = unknownKey(parsed, TOP_LEVEL_KEYS);
     if (topUnknown) {
       return {
         ok: false,
-        error: `Unsupported workflow field "${topUnknown}" — use the YAML editor`,
+        error: i18n.t("workflows.yaml.unsupported-workflow-field", {
+          field: topUnknown,
+        }),
       };
     }
     if (typeof parsed.name !== "string") {
-      return { ok: false, error: "name must be a string" };
+      return {
+        ok: false,
+        error: i18n.t("workflows.yaml.field-must-be-string", {
+          field: "name",
+        }),
+      };
     }
     if (parsed.description !== undefined) {
       if (typeof parsed.description !== "string") {
-        return { ok: false, error: "description must be a string" };
+        return {
+          ok: false,
+          error: i18n.t("workflows.yaml.field-must-be-string", {
+            field: "description",
+          }),
+        };
       }
       if (
         parsed.description.length === 0 ||
@@ -432,23 +486,27 @@ export function yamlToFormState(
       ) {
         return {
           ok: false,
-          error:
-            "description cannot be empty or have surrounding whitespace in Form mode — use the YAML editor",
+          error: i18n.t("workflows.yaml.description-empty-or-padded"),
         };
       }
     }
     if (parsed.enabled !== undefined && typeof parsed.enabled !== "boolean") {
-      return { ok: false, error: "enabled must be a boolean" };
+      return {
+        ok: false,
+        error: i18n.t("workflows.yaml.enabled-must-be-boolean"),
+      };
     }
 
     const rawTrigger = objectRecord(parsed.trigger);
     if (!rawTrigger || typeof rawTrigger.on !== "string") {
-      return { ok: false, error: "trigger.on is required" };
+      return { ok: false, error: i18n.t("workflows.yaml.trigger-on-required") };
     }
     if (!TRIGGER_TYPES.includes(rawTrigger.on as TriggerType)) {
       return {
         ok: false,
-        error: `Unsupported trigger type "${rawTrigger.on}" — use the YAML editor`,
+        error: i18n.t("workflows.yaml.unsupported-trigger-type", {
+          trigger: String(rawTrigger.on),
+        }),
       };
     }
     const triggerOn = rawTrigger.on as TriggerType;
@@ -456,7 +514,10 @@ export function yamlToFormState(
     if (triggerUnknown) {
       return {
         ok: false,
-        error: `Unsupported ${triggerOn} trigger field "${triggerUnknown}" — use the YAML editor`,
+        error: i18n.t("workflows.yaml.unsupported-trigger-field", {
+          trigger: triggerOn,
+          field: triggerUnknown,
+        }),
       };
     }
     for (const key of ["filter", "emoji", "cron", "interval"] as const) {
@@ -465,8 +526,8 @@ export function yamlToFormState(
         return {
           ok: false,
           error:
-            triggerOn === "schedule" && !error.includes("YAML editor")
-              ? `${error} — use the YAML editor`
+            triggerOn === "schedule" && !error.includes(yamlEditorSuffix())
+              ? i18n.t("workflows.yaml.append-use-yaml-editor", { error })
               : error,
         };
       }
@@ -478,8 +539,8 @@ export function yamlToFormState(
         return {
           ok: false,
           error: hasCron
-            ? "Schedule triggers cannot specify both cron and interval — use the YAML editor"
-            : "Schedule triggers require either cron or interval — use the YAML editor",
+            ? i18n.t("workflows.yaml.schedule-both-cron-and-interval")
+            : i18n.t("workflows.yaml.schedule-needs-cron-or-interval"),
         };
       }
       if (typeof rawTrigger.cron === "string") {
@@ -487,7 +548,7 @@ export function yamlToFormState(
         if (error) {
           return {
             ok: false,
-            error: `Unsupported cron expression: ${error} Use the YAML editor`,
+            error: i18n.t("workflows.yaml.unsupported-cron", { error }),
           };
         }
       }
@@ -501,28 +562,34 @@ export function yamlToFormState(
     };
 
     if (!Array.isArray(parsed.steps)) {
-      return { ok: false, error: "steps must be a list" };
+      return { ok: false, error: i18n.t("workflows.yaml.steps-must-be-list") };
     }
     const ids = new Set<string>();
     const steps: StepFormState[] = [];
     for (const [index, value] of parsed.steps.entries()) {
       const number = index + 1;
       const step = objectRecord(value);
-      if (!step)
-        return { ok: false, error: `Step ${number} must be an object` };
+      if (!step) {
+        return {
+          ok: false,
+          error: i18n.t("workflows.yaml.step-must-be-object", {
+            number,
+          }),
+        };
+      }
       if (
         typeof step.id !== "string" ||
         !STEP_ID_PATTERN_STRICT.test(step.id)
       ) {
         return {
           ok: false,
-          error: `Step ${number} requires a unique 1–64 character alphanumeric or underscore ID`,
+          error: i18n.t("workflows.yaml.step-id-invalid", { number }),
         };
       }
       if (ids.has(step.id)) {
         return {
           ok: false,
-          error: `Duplicate step ID "${step.id}" — use the YAML editor`,
+          error: i18n.t("workflows.yaml.duplicate-step-id", { id: step.id }),
         };
       }
       ids.add(step.id);
@@ -533,7 +600,9 @@ export function yamlToFormState(
       ) {
         return {
           ok: false,
-          error: `Unsupported action type "${String(step.action)}" — use the YAML editor`,
+          error: i18n.t("workflows.yaml.unsupported-action-type", {
+            action: String(step.action),
+          }),
         };
       }
       const action = step.action as ActionType;
@@ -541,25 +610,28 @@ export function yamlToFormState(
       if (stepUnknown) {
         return {
           ok: false,
-          error: `Unsupported ${action} step field "${stepUnknown}" — use the YAML editor`,
+          error: i18n.t("workflows.yaml.unsupported-action-field", {
+            action,
+            field: stepUnknown,
+          }),
         };
       }
       if (step.if !== undefined) {
         return {
           ok: false,
-          error: "Step conditions are only available in the YAML editor",
+          error: i18n.t("workflows.yaml.step-conditions-yaml-only"),
         };
       }
       const nameError = optionalOwnedStringError(
         step,
         "name",
-        `Step ${number} name`,
+        stepFieldLabel(number, "name"),
       );
       if (nameError) return { ok: false, error: nameError };
       if (typeof step.name === "string" && step.name.trim() !== step.name) {
         return {
           ok: false,
-          error: `Step ${number} name has surrounding whitespace — use the YAML editor`,
+          error: i18n.t("workflows.yaml.step-name-padded", { number }),
         };
       }
       if (
@@ -569,7 +641,9 @@ export function yamlToFormState(
       ) {
         return {
           ok: false,
-          error: `Step ${number} timeout_secs must be a positive integer`,
+          error: i18n.t("workflows.yaml.step-timeout-not-positive-integer", {
+            number,
+          }),
         };
       }
 
@@ -577,7 +651,7 @@ export function yamlToFormState(
         const required = requireNonEmptyString(
           step,
           key,
-          `Step ${number} ${key}`,
+          stepFieldLabel(number, key),
         );
         if (typeof required !== "string")
           return { ok: false, error: required.error };
@@ -586,7 +660,7 @@ export function yamlToFormState(
         const error = optionalOwnedStringError(
           step,
           key,
-          `Step ${number} ${key}`,
+          stepFieldLabel(number, key),
         );
         if (error) return { ok: false, error };
       }
@@ -597,7 +671,9 @@ export function yamlToFormState(
       ) {
         return {
           ok: false,
-          error: `Unsupported webhook method "${String(step.method)}" — use the YAML editor`,
+          error: i18n.t("workflows.yaml.unsupported-webhook-method", {
+            method: String(step.method),
+          }),
         };
       }
       if (step.headers !== undefined) {
@@ -609,8 +685,7 @@ export function yamlToFormState(
         ) {
           return {
             ok: false,
-            error:
-              "Webhook headers must be a non-empty object containing string values",
+            error: i18n.t("workflows.yaml.webhook-headers-shape"),
           };
         }
         const unsafeHeader = Object.keys(headers).find(
@@ -619,8 +694,7 @@ export function yamlToFormState(
         if (unsafeHeader !== undefined) {
           return {
             ok: false,
-            error:
-              "Webhook header names cannot be empty or have surrounding whitespace in Form mode",
+            error: i18n.t("workflows.yaml.webhook-header-name-padded"),
           };
         }
       }
@@ -629,13 +703,20 @@ export function yamlToFormState(
         if (typeof step.reply_in_thread !== "boolean") {
           return {
             ok: false,
-            error: `Step ${number} reply_in_thread must be a boolean — use the YAML editor`,
+            error: i18n.t(
+              "workflows.yaml.step-reply-in-thread-must-be-boolean",
+              {
+                number,
+              },
+            ),
           };
         }
         if (step.reply_in_thread && !isThreadReplyEligibleTrigger(triggerOn)) {
           return {
             ok: false,
-            error: `reply_in_thread is not supported for ${triggerOn} triggers — use the YAML editor`,
+            error: i18n.t("workflows.yaml.reply-in-thread-unsupported", {
+              trigger: triggerOn,
+            }),
           };
         }
       }
@@ -678,7 +759,10 @@ export function yamlToFormState(
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Invalid YAML",
+      error:
+        error instanceof Error
+          ? error.message
+          : i18n.t("workflows.yaml.invalid-yaml"),
     };
   }
 }

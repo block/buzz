@@ -24,6 +24,7 @@ import { AgentActivityCard } from "@/features/pulse/ui/AgentActivityCard";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import { NoteCard } from "@/features/pulse/ui/NoteCard";
 import { PulseTabBar } from "@/features/pulse/ui/PulseTabBar";
+import { useTranslation } from "@/i18n";
 import type { UserNote } from "@/shared/api/socialTypes";
 import type { ChannelMember, UserProfileSummary } from "@/shared/api/types";
 import { Input } from "@/shared/ui/input";
@@ -73,6 +74,7 @@ function TimelineSkeleton() {
 }
 
 export function PulseView({ currentPubkey }: PulseViewProps) {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = React.useState<PulseTab>("everyone");
   const [searchQuery, setSearchQuery] = React.useState("");
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -225,7 +227,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     : null;
   const currentDisplayName =
     currentProfile?.displayName ??
-    (currentPubkey ? truncateNpub(currentPubkey) : "You");
+    (currentPubkey ? truncateNpub(currentPubkey) : t("messages.drafts.you"));
 
   const pulseMentionMembers = React.useMemo<ChannelMember[]>(() => {
     const members: ChannelMember[] = [];
@@ -255,15 +257,15 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
   const isLoading = activeQuery.isLoading;
 
   const emptyMessages: Record<PulseTab, string> = {
-    search: "Search Pulse notes by author or text.",
-    everyone: "No public notes yet.",
-    people: "No notes yet. Follow people to see their updates here.",
-    liked: "No likes yet — tap the heart on a note to save it here.",
+    search: t("pulse.view.empty-search"),
+    everyone: t("pulse.view.empty-everyone"),
+    people: t("pulse.view.empty-people"),
+    liked: t("pulse.view.empty-liked"),
     agents:
       agentPubkeys.length === 0
-        ? "No agents registered yet."
-        : "No agent notes yet. Agents post here when they publish.",
-    mine: "You haven't posted any notes yet.",
+        ? t("pulse.view.empty-agents-none-registered")
+        : t("pulse.view.empty-agents-no-notes"),
+    mine: t("pulse.view.empty-mine"),
   };
 
   function renderTimeline() {
@@ -350,7 +352,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
             <div className="flex min-h-[calc(100vh-96px)] items-center justify-center">
               <div className="relative flex w-full max-w-xl flex-col items-center px-2">
                 <h2 className="mb-5 text-center text-2xl font-semibold tracking-tight text-foreground">
-                  What are you looking for?
+                  {t("pulse.view.search-heading")}
                 </h2>
                 <div className="relative w-full max-w-lg">
                   <div className="relative rounded-full border border-foreground/10 bg-background/80 p-1 shadow-[0_12px_48px_rgba(0,0,0,0.12)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_16px_70px_rgba(0,0,0,0.55)]">
@@ -359,12 +361,12 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
                       autoFocus
                       className="h-9 rounded-full border-0 bg-transparent pl-10 pr-12 text-sm shadow-none placeholder:text-muted-foreground/80 focus-visible:ring-0 dark:text-white dark:placeholder:text-white/60"
                       onChange={(event) => setSearchQuery(event.target.value)}
-                      placeholder="What would you like to know?"
+                      placeholder={t("pulse.view.search-placeholder")}
                       type="search"
                       value={searchQuery}
                     />
                     <button
-                      aria-label="Search Pulse"
+                      aria-label={t("pulse.search.submit-aria")}
                       className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-foreground/10 text-foreground transition-colors hover:bg-foreground/15 dark:bg-white/85 dark:text-black dark:hover:bg-white"
                       type="button"
                     >
@@ -384,7 +386,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
                 <div className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
                   {publishMutation.error instanceof Error
                     ? publishMutation.error.message
-                    : "Failed to publish note"}
+                    : t("pulse.view.publish-failed")}
                 </div>
               )}
               <ForumComposer
@@ -407,7 +409,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
                   </div>
                 }
                 members={pulseMentionMembers}
-                placeholder="What's on your mind?"
+                placeholder={t("pulse.view.composer-placeholder")}
                 isSending={publishMutation.isPending}
                 onSubmit={(content, mentionPubkeys, mediaTags) =>
                   publishMutation.mutateAsync({

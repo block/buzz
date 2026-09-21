@@ -33,6 +33,7 @@ import {
 import { ChannelActivityPopover } from "@/features/sidebar/ui/ChannelActivityPopover";
 import { useAppShell } from "@/app/AppShellContext";
 import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
+import { useTranslation } from "@/i18n";
 
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
@@ -65,6 +66,7 @@ function UnreadCountBadge({
   className?: string;
   count: number;
 }) {
+  const { t } = useTranslation();
   return (
     <span
       className={cn(
@@ -76,7 +78,7 @@ function UnreadCountBadge({
       {formatUnreadCount(count)}
       <span className="sr-only">
         {" "}
-        unread notification{count === 1 ? "" : "s"}
+        {t("sidebar.shell.unread-count", { count })}
       </span>
     </span>
   );
@@ -425,6 +427,7 @@ export function SidebarSection({
   onUnmuteChannel?: (channelId: string) => void;
   sectionActionsOpen?: boolean;
 }) {
+  const { t } = useTranslation();
   if (items.length === 0 && !action && !emptyState) {
     return null;
   }
@@ -504,7 +507,7 @@ export function SidebarSection({
                     ) : null}
                     {channel.channelType === "dm" && onHideDm ? (
                       <button
-                        aria-label="Close direct message"
+                        aria-label={t("sidebar.shell.close-direct-message")}
                         className={cn(
                           "absolute right-1 top-1/2 z-10 -translate-y-1/2 after:absolute after:-inset-2 after:md:hidden group-data-[collapsible=icon]:hidden",
                           SIDEBAR_ROW_ICON_ACTION_CLASS,

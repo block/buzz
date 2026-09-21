@@ -1,6 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -85,6 +86,7 @@ function AuthorConditionSummary({
   isAgent?: boolean;
   label: string;
 }) {
+  const { t } = useTranslation();
   return (
     <span className="flex shrink-0 items-center">
       <span className="relative shrink-0">
@@ -99,8 +101,9 @@ function AuthorConditionSummary({
         {excluded ? <ExclusionStrike /> : null}
       </span>
       <span className="sr-only">
-        {excluded ? "Excluded author: " : "Selected author: "}
-        {label}
+        {excluded
+          ? t("workflows.trigger-conditions.excluded-author", { label })
+          : t("workflows.trigger-conditions.selected-author", { label })}
       </span>
     </span>
   );
@@ -113,6 +116,7 @@ function EmojiConditionSummary({
   emoji: string;
   excluded: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <span className="relative flex h-6 w-6 shrink-0 items-center justify-center">
       <span aria-hidden="true" className="text-2xl leading-none">
@@ -120,8 +124,9 @@ function EmojiConditionSummary({
       </span>
       {excluded ? <ExclusionStrike /> : null}
       <span className="sr-only">
-        {excluded ? "Excluded reaction emoji: " : "Selected reaction emoji: "}
-        {emoji}
+        {excluded
+          ? t("workflows.trigger-conditions.excluded-emoji", { emoji })
+          : t("workflows.trigger-conditions.selected-emoji", { emoji })}
       </span>
     </span>
   );
@@ -147,6 +152,7 @@ export function WorkflowTriggerConditions({
   value: string;
   workflowChannelId?: string | null;
 }) {
+  const { t } = useTranslation();
   const parsedValue = React.useMemo(
     () => parseConditionExpressions(value, triggerType),
     [triggerType, value],
@@ -215,21 +221,21 @@ export function WorkflowTriggerConditions({
       value={mode}
     >
       <TabsList
-        aria-label="Condition editor mode"
+        aria-label={t("workflows.condition.mode-aria")}
         className="grid h-9 w-full grid-cols-2 p-0.5"
       >
         <TabsTrigger className="h-8" disabled={disabled} value="basic">
-          Basic
+          {t("workflows.condition.basic")}
         </TabsTrigger>
         <TabsTrigger className="h-8" disabled={disabled} value="advanced">
-          Advanced
+          {t("workflows.condition.advanced")}
         </TabsTrigger>
       </TabsList>
 
       {mode === "advanced" ? (
         <div className="space-y-2">
           <Input
-            aria-label="Advanced expression"
+            aria-label={t("workflows.condition.advanced-expression-aria")}
             autoCapitalize="off"
             autoCorrect="off"
             disabled={disabled}
@@ -242,15 +248,13 @@ export function WorkflowTriggerConditions({
             value={value}
           />
           <p className="text-xs text-muted-foreground">
-            Use an evalexpr expression. Existing custom expressions stay
-            unchanged.
+            {t("workflows.trigger-conditions.advanced-hint")}
           </p>
         </div>
       ) : parsedValue === null && value.trim() ? (
         <div className="space-y-3 rounded-md border border-border/70 p-3">
           <p className="text-xs text-muted-foreground">
-            An advanced expression is active. Replacing it with basic filters
-            cannot be undone.
+            {t("workflows.trigger-conditions.replace-warning")}
           </p>
           <button
             className="text-sm font-medium text-destructive hover:underline"
@@ -262,7 +266,7 @@ export function WorkflowTriggerConditions({
             }}
             type="button"
           >
-            Replace with basic filters
+            {t("workflows.trigger-conditions.replace-basic")}
           </button>
         </div>
       ) : (
@@ -369,7 +373,9 @@ export function WorkflowTriggerConditions({
                     )}
                   >
                     <fieldset>
-                      <legend className="sr-only">Match</legend>
+                      <legend className="sr-only">
+                        {t("workflows.condition.match-legend")}
+                      </legend>
                       <div className="grid grid-cols-2 gap-2.5">
                         {conditionOperatorsForField(field.value).map(
                           (operator) => {
@@ -407,8 +413,12 @@ export function WorkflowTriggerConditions({
                     {conditionOperatorNeedsValue(condition.operator) ? (
                       field.value === "trigger_emoji" ? (
                         <WorkflowEmojiField
-                          ariaLabel="Choose trigger emoji"
-                          clearAriaLabel="Clear trigger emoji"
+                          ariaLabel={t(
+                            "workflows.trigger-conditions.choose-emoji-aria",
+                          )}
+                          clearAriaLabel={t(
+                            "workflows.trigger-conditions.clear-emoji-aria",
+                          )}
                           disabled={disabled}
                           id="wf-trigger-emoji"
                           onChange={(emoji) =>
@@ -520,7 +530,7 @@ export function WorkflowTriggerConditions({
                         }
                         type="button"
                       >
-                        Clear filter
+                        {t("workflows.trigger-conditions.clear-filter")}
                       </button>
                     ) : null}
                   </div>

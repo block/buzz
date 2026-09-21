@@ -683,6 +683,17 @@ import { renderEntityLinkAnchor } from "../ui/markdown/entityLinks.tsx";
 import { createMarkdownComponents } from "../ui/markdown.tsx";
 import { renderCachedMarkdown } from "../ui/markdown/nodeCache.ts";
 import { MarkdownRuntimeContext } from "../ui/markdown/runtimeContext.ts";
+import { initializeI18n } from "@/i18n";
+
+// The attachment and link components render their accessible names through
+// `useTranslation`, so this file needs a booted i18n instance. The assertions
+// compare against the English source strings, so pin English rather than
+// inheriting the host's system language.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 const CLONE_URL = `https://relay.example/git/${OWNER_HEX}/my-repo`;
 

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Bot, Download, Loader2, Users } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { invokeTauri } from "@/shared/api/tauri";
 import { fetchSnapshotBytes } from "@/shared/api/tauriMedia";
 import { cn } from "@/shared/lib/cn";
@@ -67,6 +68,7 @@ export function AgentSnapshotCard({
   thumb,
   onImport,
 }: AgentSnapshotCardProps) {
+  const { t } = useTranslation();
   const [importState, setImportState] = React.useState<ImportState>({
     phase: "idle",
   });
@@ -92,7 +94,9 @@ export function AgentSnapshotCard({
         message:
           err instanceof Error
             ? err.message
-            : `Couldn’t load this ${snapshotKind}. Try again.`,
+            : snapshotKind === "team"
+              ? t("shared.markdown.snapshot.load-failed-team")
+              : t("shared.markdown.snapshot.load-failed-agent"),
       });
     } finally {
       inFlightRef.current = false;
@@ -116,7 +120,12 @@ export function AgentSnapshotCard({
         : size < 1024 * 1024
           ? `${(size / 1024).toFixed(1)} KB`
           : `${(size / (1024 * 1024)).toFixed(1)} MB`;
-  const metadata = [sharedBy ? `Shared by ${sharedBy}` : null, formattedSize]
+  const metadata = [
+    sharedBy
+      ? t("shared.markdown.snapshot.shared-by", { sharer: sharedBy })
+      : null,
+    formattedSize,
+  ]
     .filter(Boolean)
     .join(" · ");
 
@@ -177,16 +186,20 @@ export function AgentSnapshotCard({
         ) : null}
       </AttachmentContent>
       <AttachmentActions
-        aria-label={`Actions for ${displayName}`}
+        aria-label={t("shared.markdown.snapshot.actions-aria", {
+          name: displayName,
+        })}
         className="ml-4 gap-2"
         role="group"
       >
         <AttachmentAction
-          aria-label={`Download ${displayName}`}
+          aria-label={t("shared.markdown.snapshot.download-aria", {
+            name: displayName,
+          })}
           data-testid="agent-snapshot-card-download"
           onClick={handleDownload}
           size="icon"
-          title="Download"
+          title={t("shared.markdown.snapshot.download")}
           type="button"
           variant="ghost"
         >
@@ -203,10 +216,10 @@ export function AgentSnapshotCard({
         >
           {isFetching ? <Loader2 className="animate-spin" /> : <SnapshotIcon />}
           {isFetching
-            ? "Loading…"
+            ? t("shared.markdown.snapshot.loading")
             : snapshotKind === "team"
-              ? "Add team"
-              : "Add agent"}
+              ? t("shared.markdown.snapshot.add-team")
+              : t("shared.markdown.snapshot.add-agent")}
         </AttachmentAction>
       </AttachmentActions>
     </Attachment>

@@ -6,6 +6,7 @@ import {
 } from "@/features/agents/hooks";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import type { AgentPersona } from "@/shared/api/types";
+import { useTranslation } from "@/i18n";
 
 type QuickBotDropState = {
   pending: boolean;
@@ -16,6 +17,7 @@ type QuickBotDropState = {
  * Handles creating a new managed agent from a persona with a given instance name.
  */
 export function useQuickBotDrop(channelId: string | null) {
+  const { t } = useTranslation();
   const createMutation = useCreateChannelManagedAgentMutation(channelId);
   const providersQuery = useAvailableAcpRuntimes();
   const [state, setState] = React.useState<QuickBotDropState>({
@@ -42,7 +44,7 @@ export function useQuickBotDrop(channelId: string | null) {
         if (!runtime) {
           setState({
             pending: false,
-            error: "No agent runtime available.",
+            error: t("channels.bot.no-runtime"),
           });
           return;
         }
@@ -60,11 +62,14 @@ export function useQuickBotDrop(channelId: string | null) {
       } catch (err) {
         setState({
           pending: false,
-          error: err instanceof Error ? err.message : "Failed to create agent.",
+          error:
+            err instanceof Error
+              ? err.message
+              : t("channels.bot.create-failed"),
         });
       }
     },
-    [channelId, createMutation, defaultProvider, providers, state.pending],
+    [channelId, createMutation, defaultProvider, providers, state.pending, t],
   );
 
   return { ...state, addBot };

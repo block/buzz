@@ -1076,3 +1076,14 @@ test("auto-restart and inherit checkboxes are disabled while the locked update w
     await new Promise((resolve) => setTimeout(resolve, 5));
   });
 });
+
+// The dialog footer's close button resolves its accessible name through the
+// catalog, so language detection must be pinned to English before
+// initializeI18n() reads it.
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis.navigator, "languages", {
+  configurable: true,
+  value: ["en-US", "en"],
+});
+initializeI18n();

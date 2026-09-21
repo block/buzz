@@ -1,5 +1,7 @@
 import { Component, type ReactNode } from "react";
 
+import { i18n } from "@/i18n";
+
 type RootErrorBoundaryProps = {
   children: ReactNode;
 };
@@ -18,6 +20,10 @@ type RootErrorBoundaryState = {
  * the window blank. This boundary renders a degraded splash instead so the
  * user always sees something actionable, and the throw is logged at least
  * once for diagnosis.
+ *
+ * Its copy resolves in `render()`, not at module scope: a class component has
+ * no hook to take, and the bootstrap boots i18n before it mounts the tree this
+ * fence wraps (the language module fences denied storage on its own).
  */
 export class RootErrorBoundary extends Component<
   RootErrorBoundaryProps,
@@ -38,17 +44,18 @@ export class RootErrorBoundary extends Component<
     if (error) {
       return (
         <div className="flex h-screen w-screen flex-col items-center justify-center gap-3 bg-background px-6 text-foreground">
-          <p className="text-base font-semibold">Buzz failed to start</p>
+          <p className="text-base font-semibold">
+            {i18n.t("shared.app-shell.error-title")}
+          </p>
           <p className="max-w-md text-center text-sm text-muted-foreground">
-            Reload Buzz to try again. If this keeps happening, check that Buzz
-            can access website data, then contact support.
+            {i18n.t("shared.app-shell.error-body")}
           </p>
           <button
             type="button"
             className="rounded-md border border-border bg-secondary px-4 py-2 text-sm hover:bg-secondary/80"
             onClick={() => window.location.reload()}
           >
-            Reload
+            {i18n.t("shared.app-shell.reload")}
           </button>
         </div>
       );

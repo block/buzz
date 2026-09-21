@@ -1,6 +1,7 @@
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import { useTranslation } from "@/i18n";
 
 type CommunityApplyErrorScreenProps = {
   error: string;
@@ -13,6 +14,7 @@ export function CommunityApplyErrorScreen({
   onChangeCommunity,
   onRetry,
 }: CommunityApplyErrorScreenProps) {
+  const { t } = useTranslation();
   const systemColorScheme = useSystemColorScheme();
 
   return (
@@ -24,7 +26,7 @@ export function CommunityApplyErrorScreen({
       <StartupWindowDragRegion />
       <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
         <h1 className="text-3xl font-semibold tracking-tight">
-          Community connection failed
+          {t("communities.apply-error.title")}
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">{error}</p>
         <div className="mt-8 flex w-full max-w-[300px] flex-col gap-3">
@@ -34,7 +36,7 @@ export function CommunityApplyErrorScreen({
             onClick={onRetry}
             type="button"
           >
-            Retry
+            {t("communities.apply-error.retry")}
           </Button>
           <Button
             className="h-10 w-full"
@@ -42,7 +44,7 @@ export function CommunityApplyErrorScreen({
             type="button"
             variant="secondary"
           >
-            Change community
+            {t("communities.change.title")}
           </Button>
         </div>
       </div>

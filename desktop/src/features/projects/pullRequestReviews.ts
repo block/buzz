@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
+import { i18n } from "@/i18n";
 import {
   signProjectPullRequestReviewRequest,
   signProjectPullRequestStatus,
@@ -170,22 +171,16 @@ const REVIEW_DECISION_DETAILS: Record<
   ProjectPullRequestReviewDecision,
   {
     content: string;
-    errorMessage: string;
     label: string;
-    timeoutMessage: string;
   }
 > = {
   approve: {
     content: "Approved these changes",
-    errorMessage: "Failed to approve review.",
     label: PR_APPROVAL_LABEL,
-    timeoutMessage: "Timed out approving review.",
   },
   "request-changes": {
     content: "Requested changes",
-    errorMessage: "Failed to request changes.",
     label: PR_CHANGES_REQUESTED_LABEL,
-    timeoutMessage: "Timed out requesting changes.",
   },
 };
 
@@ -203,7 +198,7 @@ async function submitProjectPullRequestReview({
   pullRequest: ProjectPullRequest;
 }): Promise<void> {
   if (!pullRequest.commit) {
-    throw new Error("The review has no commit to inspect.");
+    throw new Error(i18n.t("projects.review-decision.no-commit"));
   }
   const details = REVIEW_DECISION_DETAILS[decision];
   const recipients = new Set([
@@ -225,8 +220,12 @@ async function submitProjectPullRequestReview({
 
   await relayClient.publishEvent(
     event,
-    details.timeoutMessage,
-    details.errorMessage,
+    decision === "approve"
+      ? i18n.t("projects.review-decision.timeout-approving")
+      : i18n.t("projects.review-decision.timeout-requesting"),
+    decision === "approve"
+      ? i18n.t("projects.review-decision.approve-failed")
+      : i18n.t("projects.review-decision.request-failed"),
   );
 }
 

@@ -10,6 +10,7 @@ import {
   PROJECT_TAB_SELECTED_CLASS,
   PROJECT_TAB_TRIGGER_CLASS,
 } from "@/features/projects/ui/ProjectWorkspaceTabList";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
@@ -37,11 +38,12 @@ export function ProjectsViewModeToggle({
   viewMode: ProjectsViewMode;
   onViewModeChange: (viewMode: ProjectsViewMode) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <fieldset className="flex items-center rounded-lg bg-muted/30 p-0.5">
-      <legend className="sr-only">Project layout</legend>
+      <legend className="sr-only">{t("projects.toolbar.layout-legend")}</legend>
       <Button
-        aria-label="Grid layout"
+        aria-label={t("projects.toolbar.grid-layout")}
         aria-pressed={viewMode === "grid"}
         className="h-7 w-7 px-0"
         onClick={() => onViewModeChange("grid")}
@@ -52,7 +54,7 @@ export function ProjectsViewModeToggle({
         <LayoutGrid className="h-3.5 w-3.5" />
       </Button>
       <Button
-        aria-label="List layout"
+        aria-label={t("projects.toolbar.list-layout")}
         aria-pressed={viewMode === "list"}
         className="h-7 w-7 px-0"
         onClick={() => onViewModeChange("list")}
@@ -108,6 +110,7 @@ export function ProjectsToolbar({
   onFilterChange,
   reduceMotion = false,
 }: ProjectsToolbarProps) {
+  const { t } = useTranslation();
   const scrollRef = React.useRef<HTMLFieldSetElement>(null);
   const overflow = useHorizontalOverflow(scrollRef);
 
@@ -123,12 +126,12 @@ export function ProjectsToolbar({
     label: string;
     value: ProjectsFilter;
   }> = [
-    { label: "Activity", value: "all" },
-    { label: "Projects", value: "projects" },
-    { label: "Repositories", value: "repositories" },
-    { label: "Tasks", value: "issues" },
-    { label: "Reviews", value: "prs" },
-    { label: "Channels", value: "channels" },
+    { label: t("projects.sections.activity"), value: "all" },
+    { label: t("projects.sections.projects"), value: "projects" },
+    { label: t("projects.sections.repositories"), value: "repositories" },
+    { label: t("projects.sections.tasks"), value: "issues" },
+    { label: t("projects.sections.reviews"), value: "prs" },
+    { label: t("projects.sections.channels"), value: "channels" },
   ];
 
   return (
@@ -150,7 +153,9 @@ export function ProjectsToolbar({
           )}
           ref={scrollRef}
         >
-          <legend className="sr-only">Project owner filter</legend>
+          <legend className="sr-only">
+            {t("projects.toolbar.owner-filter-legend")}
+          </legend>
           {filterOptions.map((option) => (
             <motion.span
               className="shrink-0"

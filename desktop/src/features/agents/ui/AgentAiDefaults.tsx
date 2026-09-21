@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import type * as React from "react";
 import type { InheritedDefault } from "./bakedEnvHelpers";
 import { getPersonaProviderOptions } from "./agentConfigOptions";
@@ -44,6 +45,7 @@ export function AgentAiDefaultsNotice({
   inheritedModel: InheritedDefault;
   inheritedProvider: InheritedDefault;
 }) {
+  const { t } = useTranslation();
   const provider = explicitProvider.trim() || inheritedProvider.value;
   const model = explicitModel.trim() || inheritedModel.value;
 
@@ -54,7 +56,7 @@ export function AgentAiDefaultsNotice({
         data-testid="agent-ai-defaults-notice"
       >
         <p className="text-sm font-medium text-foreground">
-          Global defaults not set
+          {t("agents.ai-defaults.global-not-set")}
         </p>
         <Button
           className="shrink-0"
@@ -65,7 +67,7 @@ export function AgentAiDefaultsNotice({
           type="button"
           variant="outline"
         >
-          Set
+          {t("agents.ai-defaults.set")}
         </Button>
       </div>
     );
@@ -76,19 +78,27 @@ export function AgentAiDefaultsNotice({
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 text-sm">
         {harness !== undefined ? (
           <>
-            <dt className="text-muted-foreground">Harness</dt>
+            <dt className="text-muted-foreground">
+              {t("agents.ai-config.harness")}
+            </dt>
             <dd className="truncate text-foreground">
-              {harness || "Not configured"}
+              {harness || t("agents.ai-config.not-configured")}
             </dd>
           </>
         ) : null}
-        <dt className="text-muted-foreground">Provider</dt>
+        <dt className="text-muted-foreground">
+          {t("agents.ai-defaults.provider")}
+        </dt>
         <dd className="truncate text-foreground">
-          {provider ? providerLabel(provider) : "Not configured"}
+          {provider
+            ? providerLabel(provider)
+            : t("agents.ai-config.not-configured")}
         </dd>
-        <dt className="text-muted-foreground">Model</dt>
+        <dt className="text-muted-foreground">
+          {t("mesh-compute.card.model")}
+        </dt>
         <dd className="truncate text-foreground">
-          {model || "Not configured"}
+          {model || t("agents.ai-config.not-configured")}
         </dd>
       </dl>
       <Button
@@ -100,7 +110,7 @@ export function AgentAiDefaultsNotice({
         type="button"
         variant="link"
       >
-        Edit global defaults
+        {t("agents.ai-defaults.edit-global-defaults")}
       </Button>
     </div>
   );

@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { cn } from "@/shared/lib/cn";
+import { useTranslation } from "@/i18n";
 
 export function useCopyFeedback({
   label,
@@ -12,6 +13,7 @@ export function useCopyFeedback({
   label: string;
   value: string;
 }) {
+  const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
   const resetTimerRef = React.useRef<number | null>(null);
 
@@ -35,11 +37,15 @@ export function useCopyFeedback({
         setCopied(false);
         resetTimerRef.current = null;
       }, 1_500);
-      toast.success(`Copied ${label.toLowerCase()}`);
+      toast.success(
+        t("shared.ui.hover-copy.copied", { label: label.toLowerCase() }),
+      );
     } catch {
-      toast.error(`Couldn't copy ${label.toLowerCase()}.`);
+      toast.error(
+        t("shared.ui.hover-copy.copy-failed", { label: label.toLowerCase() }),
+      );
     }
-  }, [label, value]);
+  }, [label, t, value]);
 
   return { copied, copy };
 }

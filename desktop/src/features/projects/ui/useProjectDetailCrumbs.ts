@@ -1,8 +1,9 @@
 import type * as React from "react";
 
+import { i18n } from "@/i18n";
 import type { EntityLinkTab } from "@/shared/lib/entityLink";
 import type { ProjectDetailWorkItemCrumb } from "./ProjectDetailChrome";
-import { PROJECT_TAB_CRUMB_LABELS } from "./projectDetailHelpers";
+import { projectTabCrumbLabel } from "./projectDetailHelpers";
 
 export function buildProjectDetailCrumbs({
   activeTab,
@@ -27,26 +28,26 @@ export function buildProjectDetailCrumbs({
 }) {
   const activeWorkItemCrumb: ProjectDetailWorkItemCrumb | null = pullRequest
     ? {
-        category: "Review",
+        category: i18n.t("projects.tabs.review"),
         clear: () => setSelectedPullRequestId(null),
         title: pullRequest.title,
       }
     : issue
       ? {
-          category: "Tasks",
+          category: i18n.t("projects.tabs.tasks"),
           clear: () => setSelectedIssueId(null),
           title: issue.title,
         }
       : commit
         ? {
-            category: "Commits",
+            category: i18n.t("projects.tabs.commits"),
             clear: () => setSelectedCommitHash(null),
             title: commit.subject || commit.hash.slice(0, 7),
           }
         : null;
   const activeTabCrumb = activeWorkItemCrumb
     ? null
-    : (PROJECT_TAB_CRUMB_LABELS[activeTab] ?? null);
+    : projectTabCrumbLabel(activeTab);
   const handleGoToProjectHome = () => {
     setSelectedPullRequestId(null);
     setSelectedIssueId(null);

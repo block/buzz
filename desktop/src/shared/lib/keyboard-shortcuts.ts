@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import { isMacPlatform } from "@/shared/lib/platform";
 
 export const HUDDLE_SHORTCUT_EVENT = "buzz:huddle-shortcut";
@@ -12,6 +13,26 @@ export type ShortcutCategory =
   | "Formatting"
   | "Zoom";
 
+/** Label + description resolved in whatever language is active right now. */
+export type ShortcutText = {
+  label: string;
+  description: string;
+};
+
+/**
+ * One row of the registry. It deliberately carries no copy: `text()` resolves
+ * the strings at call time, so the list follows a live language switch instead
+ * of freezing the language that happened to be active at module evaluation.
+ */
+export type ShortcutSpec = {
+  id: string;
+  text: () => ShortcutText;
+  keys: string;
+  keysWindows: string;
+  category: ShortcutCategory;
+};
+
+/** A registry row with its copy resolved — the shape the help pane renders. */
 export type KeyboardShortcut = {
   id: string;
   label: string;
@@ -21,100 +42,128 @@ export type KeyboardShortcut = {
   category: ShortcutCategory;
 };
 
-export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
+/**
+ * Source of truth for every shortcut: ids, key combos and order are the same
+ * ones the help pane, the inline hints and the key handlers are built from.
+ */
+export const KEYBOARD_SHORTCUTS: ShortcutSpec[] = [
   // Navigation
   {
     id: "quick-search",
-    label: "Quick search",
-    description: "Open the search dialog",
+    text: () => ({
+      label: i18n.t("shared.keyboard.quick-search.label"),
+      description: i18n.t("shared.keyboard.quick-search.description"),
+    }),
     keys: "⌘K",
     keysWindows: "Ctrl+K",
     category: "Navigation",
   },
   {
     id: "browse-channels",
-    label: "Browse channels",
-    description: "Open the channel browser",
+    text: () => ({
+      label: i18n.t("shared.keyboard.browse-channels.label"),
+      description: i18n.t("shared.keyboard.browse-channels.description"),
+    }),
     keys: "⇧⌘O",
     keysWindows: "Shift+Ctrl+O",
     category: "Navigation",
   },
   {
     id: "browse-dms",
-    label: "New direct message",
-    description: "Open the new message composer",
+    text: () => ({
+      label: i18n.t("shared.keyboard.browse-dms.label"),
+      description: i18n.t("shared.keyboard.browse-dms.description"),
+    }),
     keys: "⇧⌘K",
     keysWindows: "Shift+Ctrl+K",
     category: "Navigation",
   },
   {
     id: "new-channel",
-    label: "New channel",
-    description: "Open the create channel dialog",
+    text: () => ({
+      label: i18n.t("shared.keyboard.new-channel.label"),
+      description: i18n.t("shared.keyboard.new-channel.description"),
+    }),
     keys: "⇧⌘N",
     keysWindows: "Shift+Ctrl+N",
     category: "Navigation",
   },
   {
     id: "open-settings",
-    label: "Settings",
-    description: "Open or close settings",
+    text: () => ({
+      label: i18n.t("shared.keyboard.open-settings.label"),
+      description: i18n.t("shared.keyboard.open-settings.description"),
+    }),
     keys: "⌘,",
     keysWindows: "Ctrl+,",
     category: "Navigation",
   },
   {
     id: "go-back",
-    label: "Go back",
-    description: "Navigate to the previous page",
+    text: () => ({
+      label: i18n.t("shared.keyboard.go-back.label"),
+      description: i18n.t("shared.keyboard.go-back.description"),
+    }),
     keys: "⌘[",
     keysWindows: "Alt+←",
     category: "Navigation",
   },
   {
     id: "go-forward",
-    label: "Go forward",
-    description: "Navigate to the next page",
+    text: () => ({
+      label: i18n.t("shared.keyboard.go-forward.label"),
+      description: i18n.t("shared.keyboard.go-forward.description"),
+    }),
     keys: "⌘]",
     keysWindows: "Alt+→",
     category: "Navigation",
   },
   {
     id: "find-in-channel",
-    label: "Find in channel",
-    description: "Search messages in current channel",
+    text: () => ({
+      label: i18n.t("shared.keyboard.find-in-channel.label"),
+      description: i18n.t("shared.keyboard.find-in-channel.description"),
+    }),
     keys: "⌘F",
     keysWindows: "Ctrl+F",
     category: "Navigation",
   },
   {
     id: "go-home",
-    label: "Home",
-    description: "Navigate to the home feed",
+    text: () => ({
+      label: i18n.t("shared.keyboard.go-home.label"),
+      description: i18n.t("shared.keyboard.go-home.description"),
+    }),
     keys: "⇧⌘A",
     keysWindows: "Shift+Ctrl+A",
     category: "Navigation",
   },
   {
     id: "toggle-sidebar",
-    label: "Toggle sidebar",
-    description: "Show or hide the sidebar",
+    text: () => ({
+      label: i18n.t("shared.keyboard.toggle-sidebar.label"),
+      description: i18n.t("shared.keyboard.toggle-sidebar.description"),
+    }),
     keys: "⌘S",
     keysWindows: "Ctrl+S",
     category: "Navigation",
   },
   {
     id: "mark-current-read",
-    label: "Mark as read",
-    description: "Mark the current conversation as read",
+    text: () => ({
+      label: i18n.t("shared.keyboard.mark-current-read.label"),
+      description: i18n.t("shared.keyboard.mark-current-read.description"),
+    }),
     keys: "Escape",
     keysWindows: "Escape",
     category: "Navigation",
   },
   {
     id: "mark-all-read",
-    label: "Mark all as read",
-    description: "Mark all conversations as read",
+    text: () => ({
+      label: i18n.t("shared.keyboard.mark-all-read.label"),
+      description: i18n.t("shared.keyboard.mark-all-read.description"),
+    }),
     keys: "⇧Escape",
     keysWindows: "Shift+Escape",
     category: "Navigation",
@@ -123,24 +172,30 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
   // Zoom
   {
     id: "zoom-in",
-    label: "Zoom in",
-    description: "Increase the zoom level",
+    text: () => ({
+      label: i18n.t("shared.keyboard.zoom-in.label"),
+      description: i18n.t("shared.keyboard.zoom-in.description"),
+    }),
     keys: "⌘+",
     keysWindows: "Ctrl+=",
     category: "Zoom",
   },
   {
     id: "zoom-out",
-    label: "Zoom out",
-    description: "Decrease the zoom level",
+    text: () => ({
+      label: i18n.t("shared.keyboard.zoom-out.label"),
+      description: i18n.t("shared.keyboard.zoom-out.description"),
+    }),
     keys: "⌘-",
     keysWindows: "Ctrl+-",
     category: "Zoom",
   },
   {
     id: "zoom-reset",
-    label: "Reset zoom",
-    description: "Reset zoom to default level",
+    text: () => ({
+      label: i18n.t("shared.keyboard.zoom-reset.label"),
+      description: i18n.t("shared.keyboard.zoom-reset.description"),
+    }),
     keys: "⌘0",
     keysWindows: "Ctrl+0",
     category: "Zoom",
@@ -149,57 +204,70 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
   // Messages
   {
     id: "send-message",
-    label: "Send message",
-    description: "Send the current message",
+    text: () => ({
+      label: i18n.t("shared.keyboard.send-message.label"),
+      description: i18n.t("shared.keyboard.send-message.description"),
+    }),
     keys: "Enter",
     keysWindows: "Enter",
     category: "Messages",
   },
   {
     id: "new-line",
-    label: "New line",
-    description: "Insert a line break in the composer",
+    text: () => ({
+      label: i18n.t("shared.keyboard.new-line.label"),
+      description: i18n.t("shared.keyboard.new-line.description"),
+    }),
     keys: "Shift+Enter",
     keysWindows: "Shift+Enter",
     category: "Messages",
   },
   {
     id: "always-address-agent",
-    label: "Always address agent",
-    description: "Address the default agent, or toggle the highlighted agent",
+    text: () => ({
+      label: i18n.t("shared.keyboard.always-address-agent.label"),
+      description: i18n.t("shared.keyboard.always-address-agent.description"),
+    }),
     keys: "⇧⌘M",
     keysWindows: "Ctrl+Shift+M",
     category: "Messages",
   },
   {
     id: "publish-note",
-    label: "Publish note",
-    description: "Publish a Pulse note",
+    text: () => ({
+      label: i18n.t("shared.keyboard.publish-note.label"),
+      description: i18n.t("shared.keyboard.publish-note.description"),
+    }),
     keys: "⌘Enter",
     keysWindows: "Ctrl+Enter",
     category: "Messages",
   },
   {
     id: "close-dialog",
-    label: "Close dialog",
-    description: "Close the current dialog or settings",
+    text: () => ({
+      label: i18n.t("shared.keyboard.close-dialog.label"),
+      description: i18n.t("shared.keyboard.close-dialog.description"),
+    }),
     keys: "Escape",
     keysWindows: "Escape",
     category: "Messages",
   },
   {
     id: "toggle-huddle",
-    label: "Start or leave huddle",
-    description:
-      "Start or join a huddle in the current channel; leave when connected",
+    text: () => ({
+      label: i18n.t("shared.keyboard.toggle-huddle.label"),
+      description: i18n.t("shared.keyboard.toggle-huddle.description"),
+    }),
     keys: "Ctrl+Shift+Space",
     keysWindows: "Ctrl+Shift+Space",
     category: "Messages",
   },
   {
     id: "push-to-talk",
-    label: "Push to talk",
-    description: "Hold to unmute in a huddle",
+    text: () => ({
+      label: i18n.t("shared.keyboard.push-to-talk.label"),
+      description: i18n.t("shared.keyboard.push-to-talk.description"),
+    }),
     keys: "Ctrl+Space",
     keysWindows: "Ctrl+Space",
     category: "Messages",
@@ -208,69 +276,118 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
   // Formatting
   {
     id: "format-bold",
-    label: "Bold",
-    description: "Toggle bold formatting",
+    text: () => ({
+      label: i18n.t("shared.keyboard.format-bold.label"),
+      description: i18n.t("shared.keyboard.format-bold.description"),
+    }),
     keys: "⌘B",
     keysWindows: "Ctrl+B",
     category: "Formatting",
   },
   {
     id: "format-italic",
-    label: "Italic",
-    description: "Toggle italic formatting",
+    text: () => ({
+      label: i18n.t("shared.keyboard.format-italic.label"),
+      description: i18n.t("shared.keyboard.format-italic.description"),
+    }),
     keys: "⌘I",
     keysWindows: "Ctrl+I",
     category: "Formatting",
   },
   {
     id: "format-strikethrough",
-    label: "Strikethrough",
-    description: "Toggle strikethrough formatting",
+    text: () => ({
+      label: i18n.t("shared.keyboard.format-strikethrough.label"),
+      description: i18n.t("shared.keyboard.format-strikethrough.description"),
+    }),
     keys: "⌘⇧X",
     keysWindows: "Ctrl+Shift+X",
     category: "Formatting",
   },
   {
     id: "format-code",
-    label: "Inline code",
-    description: "Toggle inline code formatting",
+    text: () => ({
+      label: i18n.t("shared.keyboard.format-code.label"),
+      description: i18n.t("shared.keyboard.format-code.description"),
+    }),
     keys: "⌘E",
     keysWindows: "Ctrl+E",
     category: "Formatting",
   },
   {
     id: "format-link",
-    label: "Insert link",
-    description:
-      "Link the selected composer text, or edit the link under the caret",
+    text: () => ({
+      label: i18n.t("shared.keyboard.format-link.label"),
+      description: i18n.t("shared.keyboard.format-link.description"),
+    }),
     keys: "⌘K",
     keysWindows: "Ctrl+K",
     category: "Formatting",
   },
 ];
 
-const CATEGORY_ORDER: ShortcutCategory[] = [
-  "Navigation",
-  "Messages",
-  "Formatting",
-  "Zoom",
+/**
+ * Both platform spellings of a combo, so `getPlatformKeys` accepts a raw
+ * registry row and a resolved one alike.
+ */
+export type ShortcutKeys = Pick<ShortcutSpec, "keys" | "keysWindows">;
+
+/** Registry groups in display order, with the heading resolved at call time. */
+const CATEGORY_ORDER: {
+  category: ShortcutCategory;
+  title: () => string;
+}[] = [
+  {
+    category: "Navigation",
+    title: () => i18n.t("shared.keyboard.category.navigation"),
+  },
+  {
+    category: "Messages",
+    title: () => i18n.t("shared.keyboard.category.messages"),
+  },
+  {
+    category: "Formatting",
+    title: () => i18n.t("shared.keyboard.category.formatting"),
+  },
+  {
+    category: "Zoom",
+    title: () => i18n.t("shared.keyboard.category.zoom"),
+  },
 ];
 
-export function getShortcutsByCategory(): Map<
-  ShortcutCategory,
-  KeyboardShortcut[]
-> {
-  const map = new Map<ShortcutCategory, KeyboardShortcut[]>();
-  for (const cat of CATEGORY_ORDER) {
+/** A registry row with its copy resolved for the language active right now. */
+function resolveShortcutText(spec: ShortcutSpec): KeyboardShortcut {
+  const { label, description } = spec.text();
+  return {
+    id: spec.id,
+    label,
+    description,
+    keys: spec.keys,
+    keysWindows: spec.keysWindows,
+    category: spec.category,
+  };
+}
+
+/**
+ * The help pane's groups, with every label resolved from the language active at
+ * call time — nothing is memoized, so switching language cannot leave stale copy
+ * behind. The map key is the group's display title, which is what the pane
+ * renders as its heading; group order stays the registry's, not the locale's.
+ */
+export function getShortcutsByCategory(): Map<string, KeyboardShortcut[]> {
+  const map = new Map<string, KeyboardShortcut[]>();
+  for (const { category, title } of CATEGORY_ORDER) {
     map.set(
-      cat,
-      KEYBOARD_SHORTCUTS.filter((s) => s.category === cat),
+      title(),
+      KEYBOARD_SHORTCUTS.filter((s) => s.category === category).map(
+        resolveShortcutText,
+      ),
     );
   }
   return map;
 }
 
-export function getPlatformKeys(shortcut: KeyboardShortcut): string {
+export function getPlatformKeys(shortcut: ShortcutKeys): string {
   return isMacPlatform() ? shortcut.keys : shortcut.keysWindows;
 }
 

@@ -7,6 +7,7 @@ import {
 } from "@/features/messages/lib/messageThreadPanelLayout";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import {
   AuxiliaryPanel,
@@ -37,13 +38,17 @@ export function MessageThreadPanelHeader({
   onHeaderTitleClick?: () => void;
   showBackButton?: boolean;
 }) {
+  const { t } = useTranslation();
+  const openLabel =
+    headerTitleAriaLabel ??
+    t("messages.thread.open-title", { title: headerTitle });
   const title = onHeaderTitleClick ? (
     <button
-      aria-label={headerTitleAriaLabel ?? `Open ${headerTitle}`}
+      aria-label={openLabel}
       className="min-w-0 max-w-full truncate text-left hover:underline"
       data-testid="message-thread-open-channel"
       onClick={onHeaderTitleClick}
-      title={headerTitleAriaLabel ?? `Open ${headerTitle}`}
+      title={openLabel}
       type="button"
     >
       {headerTitle}

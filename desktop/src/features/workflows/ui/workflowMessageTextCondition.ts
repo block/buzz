@@ -1,3 +1,5 @@
+import { i18n } from "@/i18n";
+
 export const MESSAGE_TEXT_CONDITION_OPERATORS = [
   "contains",
   "not_contains",
@@ -17,19 +19,29 @@ export type MessageTextCondition = {
   value: string;
 };
 
-export const MESSAGE_TEXT_CONDITION_LABELS: Record<
-  MessageTextConditionOperator,
-  string
-> = {
-  contains: "Contains",
-  not_contains: "Does not contain",
-  starts_with: "Starts with",
-  ends_with: "Ends with",
-  equals: "Equals",
-  not_equals: "Does not equal",
-  is_not_empty: "Has text",
-  is_empty: "Has no text",
-};
+/** Operator captions resolve at call time, per live language. */
+export function messageTextConditionLabel(
+  operator: MessageTextConditionOperator,
+): string {
+  switch (operator) {
+    case "contains":
+      return i18n.t("workflows.text-condition.contains");
+    case "not_contains":
+      return i18n.t("workflows.text-condition.not-contains");
+    case "starts_with":
+      return i18n.t("workflows.text-condition.starts-with");
+    case "ends_with":
+      return i18n.t("workflows.text-condition.ends-with");
+    case "equals":
+      return i18n.t("workflows.text-condition.equals");
+    case "not_equals":
+      return i18n.t("workflows.text-condition.not-equals");
+    case "is_not_empty":
+      return i18n.t("workflows.text-condition.has-text");
+    case "is_empty":
+      return i18n.t("workflows.text-condition.has-no-text");
+  }
+}
 
 export function messageTextConditionNeedsValue(
   operator: MessageTextConditionOperator,

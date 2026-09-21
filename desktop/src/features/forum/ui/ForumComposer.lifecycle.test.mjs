@@ -34,6 +34,24 @@ const MEDIA = [
   },
 ];
 const TEXT = "@RemoteScout hello";
+// Localized product modules imported by the code under test resolve `@/i18n`
+// through this sandbox, so the harness supplies a translator backed by the real
+// English catalog rather than handing back raw keys.
+const enCatalog = JSON.parse(
+  fs.readFileSync(new URL("../../../locales/en.json", import.meta.url), "utf8"),
+);
+const lookupKey = (key) =>
+  key.split(".").reduce((node, part) => node?.[part], enCatalog);
+function translate(key, options) {
+  let value = lookupKey(key);
+  if (typeof value !== "string") {
+    value = lookupKey(options?.count === 1 ? `${key}_one` : `${key}_other`);
+  }
+  if (typeof value !== "string") return key;
+  return value.replace(/\{\{(\w+)\}\}/g, (_, name) =>
+    String(options?.[name] ?? ""),
+  );
+}
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => {
@@ -78,6 +96,10 @@ async function setup(options = {}) {
   const noop = () => {};
   let editor, media, mentionState, prompt;
   const stubs = {
+    "@/i18n": {
+      i18n: { t: translate },
+      useTranslation: () => ({ t: translate }),
+    },
     react: React,
     sonner: { toast: { error: (value) => calls.push(["error", value]) } },
     "@tiptap/react": { EditorContent: () => null },

@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { i18n } from "@/i18n";
 import { discoverAgentModels } from "@/shared/api/agentModels";
 import type {
   AcpRuntimeCatalogEntry,
@@ -63,10 +64,16 @@ export function getDiscoveredPersonaModelOptions(
             id: "",
             label:
               provider === "relay-mesh"
-                ? "Default (auto)"
+                ? i18n.t("agents.model-discovery.default-auto")
                 : agentDefaultModel
-                  ? `Default model (${resolveModelLabel(agentDefaultModel, null, provider)})`
-                  : "Default model",
+                  ? i18n.t("agents.model-discovery.default-model-named", {
+                      model: resolveModelLabel(
+                        agentDefaultModel,
+                        null,
+                        provider,
+                      ),
+                    })
+                  : i18n.t("agents.model-discovery.default-model"),
           },
         ];
 
@@ -96,9 +103,12 @@ export function synthesizeEmptyDiscoveryStatus(
   if (getDiscoveredPersonaModelOptions(response, provider) !== null) {
     return null;
   }
-  const agentLabel = response.agentName.trim() || "This agent";
+  const agentLabel =
+    response.agentName.trim() || i18n.t("agents.model-discovery.this-agent");
   return {
-    message: `${agentLabel} reported no models. Check that the CLI is installed and signed in, then reopen this screen.`,
+    message: i18n.t("agents.model-discovery.empty-report", {
+      agent: agentLabel,
+    }),
     tone: "warning",
   };
 }

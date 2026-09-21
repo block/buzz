@@ -332,3 +332,13 @@ test("a non-allowlist mode does not seed a stale allowlist into the dialog", () 
     "stale pubkeys must not resurrect through the dialog seed",
   );
 });
+
+// Boot i18n for the assertions below: Node defines a global `navigator`, so language
+// detection must be pinned to English before initializeI18n() reads it.
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();

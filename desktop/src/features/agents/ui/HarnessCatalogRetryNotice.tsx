@@ -1,5 +1,6 @@
 import { AlertCircle } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { useRetryBootWarm } from "@/features/agents/hooks";
 import { Button } from "@/shared/ui/button";
 
@@ -11,13 +12,14 @@ import { Button } from "@/shared/ui/button";
  * picker and Agent defaults surfaces both render this instead of a dead end.
  */
 export function HarnessCatalogRetryNotice() {
+  const { t } = useTranslation();
   const retryBootWarm = useRetryBootWarm();
   return (
     <div className="flex flex-wrap items-center gap-2 text-sm text-destructive">
       <AlertCircle className="size-4 shrink-0" />
-      <span>Couldn't detect agent harnesses.</span>
+      <span>{t("agents.harness.detect-failed")}</span>
       <Button onClick={retryBootWarm} size="sm" variant="outline">
-        Try again
+        {t("agents.channel-attach.try-again")}
       </Button>
     </div>
   );

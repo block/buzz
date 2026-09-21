@@ -11,6 +11,7 @@ import type {
   Repository as Project,
 } from "@/features/projects/hooks";
 import { useProjectRepoHost } from "@/features/projects/useProjectRepoHost";
+import { useTranslation } from "@/i18n";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { publishProjectPullRequestUpdate } from "./pullRequestMutations";
 
@@ -63,6 +64,7 @@ export function usePushProjectLocalRepositoryMutation(
   branchName?: string | null,
   pullRequest?: ProjectPullRequest | null,
 ) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const selectedBranch = branchName ?? project?.defaultBranch ?? null;
 
@@ -99,7 +101,7 @@ export function usePushProjectLocalRepositoryMutation(
             error:
               error instanceof Error
                 ? error.message
-                : "The review update could not be published.",
+                : t("projects.sync.publish-failed"),
           };
         }
       }

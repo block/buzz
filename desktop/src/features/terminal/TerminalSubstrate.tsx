@@ -1,6 +1,7 @@
 import * as React from "react";
 import { ChevronRight, Maximize2, Minimize2, Plus, X } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { cn } from "@/shared/lib/cn";
 import { isMacPlatform } from "@/shared/lib/platform";
@@ -101,6 +102,7 @@ export function TerminalSubstrate({
   onCloseSession,
   onNewSession,
 }: TerminalSubstrateProps) {
+  const { t } = useTranslation();
   const { terminalPalette } = useTheme();
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const bannerCanvasRef = React.useRef<HTMLCanvasElement>(null);
@@ -475,7 +477,7 @@ export function TerminalSubstrate({
 
   return (
     <section
-      aria-label="Buzz Term"
+      aria-label={t("terminal.aria")}
       className="buzz-terminal-substrate"
       data-terminal-mode={mode}
       data-terminal-owner={owner}
@@ -505,7 +507,7 @@ export function TerminalSubstrate({
     >
       {mode === "docked" ? (
         <hr
-          aria-label="Resize Buzz Term"
+          aria-label={t("terminal.resize-aria")}
           aria-orientation="horizontal"
           aria-valuemax={Math.round(window.innerHeight * 0.7)}
           aria-valuemin={180}
@@ -612,7 +614,9 @@ export function TerminalSubstrate({
               role="presentation"
             >
               <button
-                aria-label={`Close ${session.title}`}
+                aria-label={t("terminal.close-tab-aria", {
+                  title: session.title,
+                })}
                 className="buzz-terminal-close"
                 disabled={session.closing}
                 onClick={() => runTabAction(() => onCloseSession(session.id))}
@@ -621,7 +625,16 @@ export function TerminalSubstrate({
                 <X />
               </button>
               <button
-                aria-label={`Terminal ${index + 1}${session.closing ? ", closing" : session.title !== "SHELL" ? `, ${session.title}` : ""}`}
+                aria-label={
+                  session.closing
+                    ? t("terminal.tab-aria-closing", { number: index + 1 })
+                    : session.title !== "SHELL"
+                      ? t("terminal.tab-aria-titled", {
+                          number: index + 1,
+                          title: session.title,
+                        })
+                      : t("terminal.tab-aria", { number: index + 1 })
+                }
                 aria-selected={session.active}
                 className="buzz-terminal-tab-select"
                 disabled={session.closing}
@@ -640,13 +653,15 @@ export function TerminalSubstrate({
                   )}
                 </span>
                 {session.closing ? (
-                  <span className="buzz-terminal-tab-title">Closing…</span>
+                  <span className="buzz-terminal-tab-title">
+                    {t("terminal.closing")}
+                  </span>
                 ) : null}
               </button>
             </div>
           ))}
           <button
-            aria-label="New Buzz Term tab"
+            aria-label={t("terminal.new-tab-aria")}
             className="buzz-terminal-new-tab"
             onClick={() => runTabAction(onNewSession)}
             type="button"
@@ -657,7 +672,9 @@ export function TerminalSubstrate({
         <div className="buzz-terminal-readout">
           <button
             aria-label={
-              mode === "maximized" ? "Restore Buzz Term" : "Maximize Buzz Term"
+              mode === "maximized"
+                ? t("terminal.restore-aria")
+                : t("terminal.maximize-aria")
             }
             className="buzz-terminal-window-action"
             onClick={() =>
@@ -668,7 +685,7 @@ export function TerminalSubstrate({
             {mode === "maximized" ? <Minimize2 /> : <Maximize2 />}
           </button>
           <button
-            aria-label="Hide Buzz Term"
+            aria-label={t("terminal.hide-aria")}
             className="buzz-terminal-window-action"
             onClick={onHide}
             type="button"
@@ -759,7 +776,7 @@ export function TerminalSubstrate({
           <canvas className="buzz-terminal-welcome" ref={bannerCanvasRef} />
         ) : null}
         <textarea
-          aria-label="Terminal input"
+          aria-label={t("terminal.input-aria")}
           autoCapitalize="off"
           autoComplete="off"
           className="buzz-terminal-input"
@@ -806,7 +823,9 @@ export function TerminalSubstrate({
         />
       </div>
       <div aria-live="polite" className="sr-only">
-        {owner === "terminal" ? "Buzz Term mode" : "Buzz mode"}
+        {owner === "terminal"
+          ? t("terminal.mode-buzz-term")
+          : t("terminal.mode-buzz")}
       </div>
     </section>
   );

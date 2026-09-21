@@ -17,14 +17,18 @@ const TIMEOUT_PREFIX = "restricted: you are timed out until";
  * The community-timeout durations offered wherever a moderator picks one — the
  * per-message author cluster (U2) and the report-queue timeout resolution.
  * Kept here as the single source of truth so the two surfaces can never drift.
+ * The `id` selects the menu label at the render site, where every label is a
+ * literal `t()` key (module constants cannot call `t()`).
  */
+export type TimeoutPresetId = "1-hour" | "24-hours" | "7-days";
+
 export const TIMEOUT_PRESETS: ReadonlyArray<{
-  label: string;
+  id: TimeoutPresetId;
   seconds: number;
 }> = [
-  { label: "1 hour", seconds: 60 * 60 },
-  { label: "24 hours", seconds: 24 * 60 * 60 },
-  { label: "7 days", seconds: 7 * 24 * 60 * 60 },
+  { id: "1-hour", seconds: 60 * 60 },
+  { id: "24-hours", seconds: 24 * 60 * 60 },
+  { id: "7-days", seconds: 7 * 24 * 60 * 60 },
 ];
 
 /**

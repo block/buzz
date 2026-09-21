@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import {
   getPersistentAgentAudienceRevision,
   promotePersistentAgentAudienceIfUnchanged,
@@ -40,6 +41,7 @@ export function useAutoPinMentionedAgents({
   onTurnOff,
   onTurnOn,
 }: Options) {
+  const { t } = useTranslation();
   const { pubkeys: currentAudiencePubkeys } =
     usePersistentAgentAudience(audienceScope);
   const [confirmation, setConfirmation] = React.useState<Confirmation | null>(
@@ -167,10 +169,12 @@ export function useAutoPinMentionedAgents({
           ? getDisplayName(promotedPubkeys[0])?.trim()
           : null;
       const title = displayName
-        ? `${displayName} will be mentioned automatically`
+        ? t("messages.mention.will-auto-mention", { name: displayName })
         : promotedPubkeys.length === 1
-          ? "Agent will be mentioned automatically"
-          : `${promotedPubkeys.length} agents will be mentioned automatically`;
+          ? t("messages.mention.agent-will-auto-mention")
+          : t("messages.mention.agents-will-auto-mention", {
+              count: promotedPubkeys.length,
+            });
       setConfirmationHovered(false);
       setConfirmation({
         expectedRevision: revision,
@@ -179,7 +183,7 @@ export function useAutoPinMentionedAgents({
         title,
       });
     },
-    [audienceScope, enabled, getDisplayName, onPulse],
+    [audienceScope, enabled, getDisplayName, onPulse, t],
   );
   const promoteMentionedAgents = React.useCallback(
     (promotion: {

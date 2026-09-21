@@ -3,6 +3,7 @@ import * as React from "react";
 import { useHomeFeedQuery } from "@/features/home/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { useTranslation } from "@/i18n";
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import { scheduleAfterForegroundReady } from "@/shared/lib/foregroundReady";
 import {
@@ -180,6 +181,7 @@ function mergeSeenFeedIds(current: string[], nextIds: readonly string[]) {
 }
 
 export function useNotificationSettings(pubkey?: string) {
+  const { t } = useTranslation();
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const [settings, setSettings] = React.useState<NotificationSettings>(() =>
     readStoredNotificationSettings(normalizedPubkey),
@@ -242,60 +244,63 @@ export function useNotificationSettings(pubkey?: string) {
     }
   }, [permission, settings.desktopEnabled]);
 
-  const setDesktopEnabled = React.useCallback(async (enabled: boolean) => {
-    if (!enabled) {
-      setErrorMessage(null);
-      setSettings((current) => ({
-        ...current,
-        desktopEnabled: false,
-      }));
-      void refreshPermission();
-      return true;
-    }
-
-    setIsUpdatingDesktopEnabled(true);
-    setErrorMessage(null);
-
-    try {
-      let nextPermission = await refreshPermission();
-      if (nextPermission === "default") {
-        nextPermission = await requestDesktopNotificationAccess();
-        setPermission(nextPermission);
+  const setDesktopEnabled = React.useCallback(
+    async (enabled: boolean) => {
+      if (!enabled) {
+        setErrorMessage(null);
+        setSettings((current) => ({
+          ...current,
+          desktopEnabled: false,
+        }));
+        void refreshPermission();
+        return true;
       }
 
-      if (nextPermission !== "granted") {
+      setIsUpdatingDesktopEnabled(true);
+      setErrorMessage(null);
+
+      try {
+        let nextPermission = await refreshPermission();
+        if (nextPermission === "default") {
+          nextPermission = await requestDesktopNotificationAccess();
+          setPermission(nextPermission);
+        }
+
+        if (nextPermission !== "granted") {
+          setSettings((current) => ({
+            ...current,
+            desktopEnabled: false,
+          }));
+          setErrorMessage(
+            nextPermission === "denied"
+              ? t("notifications.permission.blocked")
+              : t("notifications.permission.unavailable"),
+          );
+          return false;
+        }
+
+        setSettings((current) => ({
+          ...current,
+          desktopEnabled: true,
+        }));
+        return true;
+      } catch (error) {
         setSettings((current) => ({
           ...current,
           desktopEnabled: false,
         }));
         setErrorMessage(
-          nextPermission === "denied"
-            ? "Desktop notifications are blocked for Buzz. Enable them in system settings to turn alerts on."
-            : "Desktop notifications are unavailable in this environment.",
+          error instanceof Error
+            ? error.message
+            : t("notifications.permission.enable-failed"),
         );
         return false;
+      } finally {
+        setIsUpdatingDesktopEnabled(false);
       }
-
-      setSettings((current) => ({
-        ...current,
-        desktopEnabled: true,
-      }));
-      return true;
-    } catch (error) {
-      setSettings((current) => ({
-        ...current,
-        desktopEnabled: false,
-      }));
-      setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : "Failed to enable desktop notifications.",
-      );
-      return false;
-    } finally {
-      setIsUpdatingDesktopEnabled(false);
-    }
-  }, []);
+    },
+    [t],
+  );
 
   const setHomeBadgeEnabled = React.useCallback((enabled: boolean) => {
     setSettings((current) => ({

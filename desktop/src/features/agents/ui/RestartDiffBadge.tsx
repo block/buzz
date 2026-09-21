@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import { RefreshCw } from "lucide-react";
 
 import { Badge } from "@/shared/ui/badge";
@@ -150,10 +151,11 @@ export function RestartDiffBadge({
   restartDiff: RestartDiffEntry[];
   className?: string;
 }) {
+  const { t } = useTranslation();
   const badge = (
     <Badge className={cn("cursor-default gap-1", className)} variant="warning">
       <RefreshCw className="h-3 w-3" />
-      Restart required
+      {t("agents.restart-diff.required")}
     </Badge>
   );
 
@@ -174,11 +176,13 @@ export function RestartDiffBadge({
           data-testid="restart-diff-badge"
         >
           <RefreshCw className="h-3 w-3" />
-          Restart required
+          {t("agents.restart-diff.required")}
         </Badge>
       </TooltipTrigger>
       <TooltipContent className="max-w-72 text-xs" side="bottom">
-        <p className="mb-1.5 font-semibold">Config changed since last start:</p>
+        <p className="mb-1.5 font-semibold">
+          {t("agents.restart-diff.changed")}
+        </p>
         <DiffList cap={TOOLTIP_CAP} entries={restartDiff} />
         <p className="mt-1.5 text-secondary-foreground/70">
           {autoRestartEnabled ? AUTO_RESTART_ON_BLURB : AUTO_RESTART_OFF_BLURB}

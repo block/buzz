@@ -2,6 +2,7 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
+import { useTranslation } from "@/i18n";
 import { SidebarRelayConnectionCompactCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
@@ -37,6 +38,7 @@ function OnboardingRelayConnectionErrorCard({
   isSaving: boolean;
   message: string;
 }) {
+  const { t } = useTranslation();
   const {
     isPending: isReconnectPending,
     isWaitingOnReconnectHook,
@@ -126,14 +128,16 @@ function OnboardingRelayConnectionErrorCard({
         .catch((error) => {
           hadActiveReconnectRef.current = false;
           const detail = error instanceof Error ? error.message : String(error);
-          toast.error(`Could not reconnect to the relay. ${detail}`);
+          toast.error(
+            t("onboarding.profile.toast-reconnect-failed", { detail }),
+          );
         })
         .finally(() => {
           reconnectActionPendingRef.current = false;
           setIsReconnectActionPending(false);
         });
     },
-    [markSuccess],
+    [markSuccess, t],
   );
 
   const handleReconnectRelay = React.useCallback(() => {
@@ -198,6 +202,7 @@ export function ProfileStep({
   state,
   usesExistingIdentity = false,
 }: ProfileStepProps) {
+  const { t } = useTranslation();
   const {
     advanceWithoutSaving,
     back,
@@ -231,11 +236,10 @@ export function ProfileStep({
     >
       <div className="w-full max-w-2xl">
         <h1 className="text-title font-normal text-foreground">
-          What should we call you?
+          {t("onboarding.profile.title")}
         </h1>
         <p className="mt-5 text-sm leading-6 text-muted-foreground">
-          Pick the name people and agents will see in Buzz. You can change it
-          anytime.
+          {t("onboarding.profile.body")}
         </p>
       </div>
 
@@ -244,9 +248,11 @@ export function ProfileStep({
           className="mt-8 block w-full text-sm font-medium text-foreground"
           htmlFor="onboarding-display-name"
         >
-          <span className="mb-2 block">Name</span>
+          <span className="mb-2 block">
+            {t("onboarding.profile.name-label")}
+          </span>
           <OnboardingInput
-            aria-label="Name"
+            aria-label={t("onboarding.profile.name-label")}
             autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
@@ -260,7 +266,7 @@ export function ProfileStep({
                 submit();
               }
             }}
-            placeholder="Enter your name"
+            placeholder={t("onboarding.profile.name-placeholder")}
             ref={inputRef}
             spellCheck={false}
             value={displayNameDraft}
@@ -271,7 +277,7 @@ export function ProfileStep({
           className="mt-12 flex w-full cursor-text flex-col items-center"
           htmlFor="onboarding-display-name"
         >
-          <span className="sr-only">Name</span>
+          <span className="sr-only">{t("onboarding.profile.name-label")}</span>
           <div className="relative h-20 w-full max-w-[576px]">
             {!hasDisplayNameDraft ? (
               <div
@@ -283,12 +289,12 @@ export function ProfileStep({
                     aria-hidden="true"
                     className="buzz-onboarding-name-placeholder-caret h-[0.9em] w-0.5 rounded-full bg-primary"
                   />
-                  Enter your name
+                  {t("onboarding.profile.name-placeholder")}
                 </span>
               </div>
             ) : null}
             <input
-              aria-label="Name"
+              aria-label={t("onboarding.profile.name-label")}
               autoCapitalize="none"
               autoComplete="off"
               autoCorrect="off"
@@ -327,11 +333,14 @@ export function ProfileStep({
           type="button"
         >
           {isSaving ? (
-            <Spinner aria-label="Saving profile" className="h-4 w-4 border-2" />
+            <Spinner
+              aria-label={t("onboarding.profile.aria-saving")}
+              className="h-4 w-4 border-2"
+            />
           ) : usesExistingIdentity ? (
-            "Continue"
+            t("onboarding.profile.continue")
           ) : (
-            "Create an identity key"
+            t("onboarding.profile.create-key")
           )}
         </Button>
 
@@ -344,7 +353,7 @@ export function ProfileStep({
             type="button"
             variant="ghost"
           >
-            Back
+            {t("onboarding.profile.back")}
           </Button>
         ) : null}
 
@@ -357,7 +366,7 @@ export function ProfileStep({
             type="button"
             variant="ghost"
           >
-            I already have a key
+            {t("onboarding.profile.have-key")}
           </Button>
         ) : null}
 
@@ -372,7 +381,7 @@ export function ProfileStep({
                 type="button"
                 variant="ghost"
               >
-                Skip for now
+                {t("onboarding.profile.skip")}
               </Button>
             ) : null}
             {saveRecovery.canAdvanceWithoutSaving ? (
@@ -383,7 +392,7 @@ export function ProfileStep({
                 type="button"
                 variant="ghost"
               >
-                Continue without saving
+                {t("onboarding.profile.continue-without-saving")}
               </Button>
             ) : null}
             <div className="flex-1" />

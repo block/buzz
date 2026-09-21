@@ -147,3 +147,14 @@ test("test_archived_row_click_opens_that_explicit_pubkey", () => {
   // The archived row keeps the deliberate explicit-pubkey path (unarchive).
   assert.deepEqual(opened, [ARCHIVED_PK]);
 });
+
+// This file renders components that read catalog copy, so i18n must be booted
+// with the language pinned to English (Node ships a global `navigator`, which the
+// language detection reads before initializeI18n()). Assertions are unchanged.
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();

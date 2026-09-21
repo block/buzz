@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type { ManagedAgentBackend, RespondToMode } from "@/shared/api/types";
 
 /**
@@ -51,13 +52,16 @@ export function agentAccessWarningText(
   runLocation?: AgentRunLocation | null,
 ): string | null {
   if (mode !== "anyone" && mode !== "allowlist") return null;
-  const audience = mode === "anyone" ? "Anyone" : "Selected people";
   // The two locations differ in more than the noun: a local agent reaches the
   // owner's own files, while a remote host's files aren't theirs to describe —
-  // only the accounts and tools provisioned there.
-  const target =
-    runLocation === "remote"
-      ? "the server it runs on, including any accounts and tools available there"
-      : "your computer, including files, accounts, and connected tools";
-  return `${audience} can use this agent to access ${target}.`;
+  // only the accounts and tools provisioned there. Each full sentence is its
+  // own key so no language has to be assembled from English fragments.
+  if (mode === "anyone") {
+    return runLocation === "remote"
+      ? i18n.t("agents.access-warning.anyone-remote")
+      : i18n.t("agents.access-warning.anyone-local");
+  }
+  return runLocation === "remote"
+    ? i18n.t("agents.access-warning.allowlist-remote")
+    : i18n.t("agents.access-warning.allowlist-local");
 }

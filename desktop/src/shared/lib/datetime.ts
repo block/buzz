@@ -9,43 +9,50 @@
  *
  * The ladder follows the Block writing standard for relative dates, with one
  * deliberate deviation noted on `formatDayGroupLabel`.
+ *
+ * Which ladder rung a date lands on is business logic and stays put; only the
+ * words it renders in follow the language. The weekday / month / year shapes
+ * come from `Intl` in the active locale and "Today", "Yesterday" and the
+ * "{{date}} at {{time}}" joiner come from the catalogs — so a Chinese reader
+ * gets 今天 / 昨天 / 14:34 while an English reader keeps byte-exactly the
+ * strings these functions always produced (spec FR-006, NFR-008).
  */
 
-const WEEKDAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  weekday: "long",
-});
+import { dateTimeFormatter, dateWords, joinDayAndTime } from "./formatters";
 
-const WEEKDAY_MONTH_DAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
+/**
+ * Formatting *presets*, not formatters: each pair of options becomes one
+ * cached `Intl.DateTimeFormat` per locale, resolved at call time by
+ * `formatters.dateTimeFormatter`. Options are frozen because a mutated preset
+ * would silently poison every locale's cached formatter.
+ */
+const WEEKDAY_OPTIONS = Object.freeze({ weekday: "long" });
+
+const WEEKDAY_MONTH_DAY_OPTIONS = Object.freeze({
   weekday: "long",
   month: "long",
   day: "numeric",
 });
 
-const MONTH_DAY_YEAR_FORMATTER = new Intl.DateTimeFormat("en-US", {
+const MONTH_DAY_YEAR_OPTIONS = Object.freeze({
   month: "long",
   day: "numeric",
   year: "numeric",
 });
 
-const SHORT_WEEKDAY_SHORT_MONTH_DAY_FORMATTER = new Intl.DateTimeFormat(
-  "en-US",
-  {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  },
-);
+const SHORT_WEEKDAY_SHORT_MONTH_DAY_OPTIONS = Object.freeze({
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+});
 
-const SHORT_MONTH_DAY_YEAR_FORMATTER = new Intl.DateTimeFormat("en-US", {
+const SHORT_MONTH_DAY_YEAR_OPTIONS = Object.freeze({
   month: "short",
   day: "numeric",
   year: "numeric",
 });
 
-const TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  hour: "numeric",
-  minute: "2-digit",
-});
+const TIME_OPTIONS = Object.freeze({ hour: "numeric", minute: "2-digit" });
 
 /** Days in a week, past which the weekday name stops being unambiguous. */
 const WEEKDAY_BAND_DAYS = 7;
@@ -86,19 +93,20 @@ export function formatDayGroupLabel(
   const date = new Date(unixSeconds * 1_000);
   const now = new Date(nowSeconds * 1_000);
   const dayDiff = calendarDaysBetween(now, date);
+  const words = dateWords();
 
-  if (dayDiff === 0) return "Today";
-  if (dayDiff === 1) return "Yesterday";
+  if (dayDiff === 0) return words.today;
+  if (dayDiff === 1) return words.yesterday;
   // Bounded below as well as above: a timestamp in the future (clock skew, or a
   // relay ahead of this machine) must not be labelled with a weekday that reads
   // as the recent past.
   if (dayDiff > 1 && dayDiff < WEEKDAY_BAND_DAYS) {
-    return WEEKDAY_FORMATTER.format(date);
+    return dateTimeFormatter(WEEKDAY_OPTIONS).format(date);
   }
 
   return date.getFullYear() === now.getFullYear()
-    ? WEEKDAY_MONTH_DAY_FORMATTER.format(date)
-    : MONTH_DAY_YEAR_FORMATTER.format(date);
+    ? dateTimeFormatter(WEEKDAY_MONTH_DAY_OPTIONS).format(date)
+    : dateTimeFormatter(MONTH_DAY_YEAR_OPTIONS).format(date);
 }
 
 /**
@@ -113,6 +121,9 @@ export function formatDayGroupLabel(
  * year    → "Sat, Jun 20"         year    → "Sat, Jun 20 at 2:34 PM"
  * older   → "Jun 20, 2025"        older   → "Jun 20, 2025 at 2:34 PM"
  * ```
+ *
+ * The table documents the English output; every rung follows the active
+ * locale, and the joiner is one catalog value rather than a concatenation.
  *
  * The weekday stays through the current year (abbreviated, matching the month)
  * and drops once the year appears — see `formatDayGroupLabel` for why.
@@ -139,23 +150,23 @@ export function formatItemTimestamp(
   const date = new Date(unixSeconds * 1_000);
   const now = new Date(nowSeconds * 1_000);
   const dayDiff = calendarDaysBetween(now, date);
-  const time = TIME_FORMATTER.format(date);
+  const time = dateTimeFormatter(TIME_OPTIONS).format(date);
 
   if (dayDiff === 0) return time;
 
   let dayLabel: string;
   if (dayDiff === 1) {
-    dayLabel = "Yesterday";
+    dayLabel = dateWords().yesterday;
   } else if (dayDiff > 1 && dayDiff < WEEKDAY_BAND_DAYS) {
-    dayLabel = WEEKDAY_FORMATTER.format(date);
+    dayLabel = dateTimeFormatter(WEEKDAY_OPTIONS).format(date);
   } else {
     dayLabel =
       date.getFullYear() === now.getFullYear()
-        ? SHORT_WEEKDAY_SHORT_MONTH_DAY_FORMATTER.format(date)
-        : SHORT_MONTH_DAY_YEAR_FORMATTER.format(date);
+        ? dateTimeFormatter(SHORT_WEEKDAY_SHORT_MONTH_DAY_OPTIONS).format(date)
+        : dateTimeFormatter(SHORT_MONTH_DAY_YEAR_OPTIONS).format(date);
   }
 
-  return withTime ? `${dayLabel} at ${time}` : dayLabel;
+  return withTime ? joinDayAndTime(dayLabel, time) : dayLabel;
 }
 
 /** Local midnight of the calendar day containing `date`. */

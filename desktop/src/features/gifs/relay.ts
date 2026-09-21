@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import {
   type KlipyGif,
   type KlipyResponse,
@@ -54,13 +55,24 @@ async function nip98PostHeader(url: string, body: string): Promise<string> {
   return `Nostr ${btoa(JSON.stringify(authEvent))}`;
 }
 
-const FRIENDLY_GIF_ERRORS: Record<string, string> = {
-  relay_membership_required: "Join this community to search GIFs.",
-};
+// Only stable, documented error codes get a friendly UI summary (spec §7);
+// any other server error string is passed through untranslated.
+function friendlyGifErrorMessage(error: string): string | null {
+  switch (error) {
+    case "relay_membership_required":
+      return i18n.t("gifs.error.relay-membership-required");
+    default:
+      return null;
+  }
+}
 
 function gifErrorMessage(error: string | undefined, status: number): string {
-  if (error && FRIENDLY_GIF_ERRORS[error]) return FRIENDLY_GIF_ERRORS[error];
-  return error || `GIF request failed (${status})`;
+  if (error) {
+    const friendly = friendlyGifErrorMessage(error);
+    if (friendly) return friendly;
+    return error;
+  }
+  return i18n.t("gifs.error.request-failed", { status });
 }
 
 async function relayPost<T>(
@@ -101,7 +113,11 @@ export async function relayKlipyEndpoints(
     signal,
   });
   if (!response.ok)
-    throw new Error(`Could not read relay capabilities (${response.status})`);
+    throw new Error(
+      i18n.t("gifs.error.capabilities-failed", {
+        status: response.status,
+      }),
+    );
   const info = (await response.json()) as RelayGifSearchInfo;
   return relayKlipyCapability(info);
 }
@@ -124,7 +140,7 @@ export async function fetchKlipyGifs(
     signal,
   );
   if (response.result === false) {
-    throw new Error("GIF search failed");
+    throw new Error(i18n.t("gifs.error.search-failed"));
   }
   return normalizeKlipyGifs(response.data?.data ?? []);
 }

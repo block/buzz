@@ -19,6 +19,7 @@ import {
   type ProjectSelectionPresentation,
 } from "@/features/projects/lib/projectSelection";
 import { useProjectSelection } from "@/features/projects/lib/useProjectSelection";
+import { useTranslation } from "@/i18n";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import { ProjectSelectionDiscussAction } from "./ProjectSelectionDiscussAction";
@@ -52,6 +53,7 @@ export function ProjectsSelectionCountMenu({
   presentation: ProjectSelectionPresentation;
   selectionItems: ProjectSelectionItem[];
 }) {
+  const { t } = useTranslation();
   const selection = useProjectSelection();
   const openChannelWithDraft = useProjectDiscussInChannel(selectionItems);
   const selectionKind = selectionItems[0]?.kind;
@@ -77,7 +79,9 @@ export function ProjectsSelectionCountMenu({
         if (links.length === 0) return;
         copyTextToClipboard(
           links.join("\n"),
-          links.length === 1 ? "Link copied to clipboard" : "Links copied",
+          links.length === 1
+            ? t("sidebar.projects.copied-link")
+            : t("projects.selection-count-menu.links-copied"),
         );
         return;
       }
@@ -85,7 +89,7 @@ export function ProjectsSelectionCountMenu({
         onCreatePullRequest?.();
       }
     },
-    [onChatWithAgent, onCreatePullRequest, selection, selectionItems],
+    [onChatWithAgent, onCreatePullRequest, selection, selectionItems, t],
   );
 
   return (

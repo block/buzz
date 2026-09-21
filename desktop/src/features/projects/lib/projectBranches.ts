@@ -1,3 +1,5 @@
+import { i18n } from "@/i18n";
+
 const BRANCH_CHARACTERS = /^[A-Za-z0-9/_.-]+$/;
 
 /** Normalize a branch name using the native command's conservative rules. */
@@ -64,11 +66,14 @@ export function projectBranchCreationReason(input: {
   activeBranchCommit: string | null;
   localHead?: string | null;
 }): string | null {
-  if (!input.activeBranch) return "Choose a branch first.";
+  if (!input.activeBranch)
+    return i18n.t("projects.branch-dialogs.choose-branch-first");
   if (input.activeBranchCommit) return null;
   return input.localHead
-    ? `Push the first local commit to ${input.activeBranch} before creating another branch.`
-    : "Create the repository's first commit before creating another branch.";
+    ? i18n.t("projects.branch-dialogs.push-first-local", {
+        branch: input.activeBranch,
+      })
+    : i18n.t("projects.branch-dialogs.create-first-commit");
 }
 
 /** Resolve a usable default branch when a repository advertises a stale HEAD. */
@@ -107,13 +112,13 @@ export function projectBranchManagementState(input: {
     input.snapshotCommit ??
     null;
   const deleteBranchReason = !input.activeBranch
-    ? "Choose a branch first."
+    ? i18n.t("projects.branch-dialogs.choose-branch-first")
     : input.activeBranch === input.defaultBranch
-      ? "The repository's default branch cannot be deleted."
+      ? i18n.t("projects.branch-dialogs.default-undeletable")
       : !activeRemoteBranch
-        ? "Only a published remote branch can be deleted."
+        ? i18n.t("projects.branch-dialogs.published-only-delete")
         : input.hasOpenPullRequest
-          ? "Close the branch's review before deleting it."
+          ? i18n.t("projects.branch-dialogs.close-review-first")
           : null;
   return { activeBranchCommit, activeRemoteBranch, deleteBranchReason };
 }

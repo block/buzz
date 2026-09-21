@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { ChevronDown, Pause, Play } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import {
   playNotificationSound,
   SOUND_NAMES,
@@ -62,6 +63,7 @@ export function SoundPicker({
   disabled?: boolean;
   onChange: (next: SoundName) => void;
 }) {
+  const { t } = useTranslation();
   const items = sortedSounds(recommended);
   const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -126,7 +128,11 @@ export function SoundPicker({
         </DropdownMenuContent>
       </DropdownMenu>
       <Button
-        aria-label={isPlaying ? `Pause ${value}` : `Preview ${value}`}
+        aria-label={
+          isPlaying
+            ? t("settings.sounds.pause-aria", { sound: value })
+            : t("settings.sounds.preview-aria", { sound: value })
+        }
         className="h-7 w-7 rounded-full border border-border/50 bg-muted/45 p-0 text-foreground shadow-none hover:bg-muted/70"
         disabled={disabled}
         onClick={togglePreview}

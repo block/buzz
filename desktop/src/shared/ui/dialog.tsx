@@ -4,6 +4,7 @@ import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import "./card-texture.css";
@@ -75,64 +76,68 @@ const DialogContent = React.forwardRef<
       ...props
     },
     ref,
-  ) => (
-    <DialogPortal>
-      <DialogOverlay
-        data-testid="dialog-overlay"
-        className={cn(
-          overlayVariant === "transparent"
-            ? "bg-transparent backdrop-blur-none"
-            : undefined,
-          overlayClassName,
-        )}
-      />
-      <div
-        className={cn(
-          "pointer-events-none fixed inset-0 z-50 grid place-items-center overflow-x-hidden overflow-y-auto",
-          // The textured surface bleeds a 96px powder band beyond its layout
-          // box (see card-texture.css). Give the wrapper enough padding that
-          // the bleed isn't clipped by this scroll container; every other
-          // surface keeps the standard gutter.
-          surface === "textured"
-            ? "p-[calc(6rem+1rem)] max-sm:p-[calc(6rem-1.5rem)]"
-            : "p-4",
-        )}
-      >
-        <DialogPrimitive.Content
+  ) => {
+    const { t } = useTranslation();
+    return (
+      <DialogPortal>
+        <DialogOverlay
+          data-testid="dialog-overlay"
           className={cn(
-            "pointer-events-auto relative grid w-[calc(100vw-2rem)] max-w-2xl gap-4 outline-hidden",
-            surface === "default" && "rounded-2xl bg-background p-6 shadow-2xl",
-            surface === "none" && "bg-transparent p-0 shadow-none",
-            surface === "textured" &&
-              "buzz-card-textured isolate box-border w-full rounded-none border-0 bg-transparent p-[var(--buzz-card-textured-safe-inset)] shadow-none",
-            MODAL_CONTENT_MOTION_CLASS,
-            className,
+            overlayVariant === "transparent"
+              ? "bg-transparent backdrop-blur-none"
+              : undefined,
+            overlayClassName,
           )}
-          ref={ref}
-          {...props}
+        />
+        <div
+          className={cn(
+            "pointer-events-none fixed inset-0 z-50 grid place-items-center overflow-x-hidden overflow-y-auto",
+            // The textured surface bleeds a 96px powder band beyond its layout
+            // box (see card-texture.css). Give the wrapper enough padding that
+            // the bleed isn't clipped by this scroll container; every other
+            // surface keeps the standard gutter.
+            surface === "textured"
+              ? "p-[calc(6rem+1rem)] max-sm:p-[calc(6rem-1.5rem)]"
+              : "p-4",
+          )}
         >
-          {children}
-          {showCloseButton ? (
-            <DialogPrimitive.Close
-              className={cn(
-                "absolute flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
-                // On the textured surface the layout edge sits in the powder
-                // fade; dock the close button at the safe-inset corner so it
-                // stays on the solid center of the texture.
-                surface === "textured"
-                  ? "right-[var(--buzz-card-textured-safe-inset)] top-[var(--buzz-card-textured-safe-inset)] -mr-2 -mt-2"
-                  : "right-4 top-4",
-                closeButtonClassName,
-              )}
-            >
-              <X className="h-4 w-4" />
-              <span className="sr-only">Close</span>
-            </DialogPrimitive.Close>
-          ) : null}
-        </DialogPrimitive.Content>
-      </div>
-    </DialogPortal>
-  ),
+          <DialogPrimitive.Content
+            className={cn(
+              "pointer-events-auto relative grid w-[calc(100vw-2rem)] max-w-2xl gap-4 outline-hidden",
+              surface === "default" &&
+                "rounded-2xl bg-background p-6 shadow-2xl",
+              surface === "none" && "bg-transparent p-0 shadow-none",
+              surface === "textured" &&
+                "buzz-card-textured isolate box-border w-full rounded-none border-0 bg-transparent p-[var(--buzz-card-textured-safe-inset)] shadow-none",
+              MODAL_CONTENT_MOTION_CLASS,
+              className,
+            )}
+            ref={ref}
+            {...props}
+          >
+            {children}
+            {showCloseButton ? (
+              <DialogPrimitive.Close
+                className={cn(
+                  "absolute flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
+                  // On the textured surface the layout edge sits in the powder
+                  // fade; dock the close button at the safe-inset corner so it
+                  // stays on the solid center of the texture.
+                  surface === "textured"
+                    ? "right-[var(--buzz-card-textured-safe-inset)] top-[var(--buzz-card-textured-safe-inset)] -mr-2 -mt-2"
+                    : "right-4 top-4",
+                  closeButtonClassName,
+                )}
+              >
+                <X className="h-4 w-4" />
+                <span className="sr-only">{t("shared.ui.close")}</span>
+              </DialogPrimitive.Close>
+            ) : null}
+          </DialogPrimitive.Content>
+        </div>
+      </DialogPortal>
+    );
+  },
 );
 DialogContent.displayName = DialogPrimitive.Content.displayName;
 

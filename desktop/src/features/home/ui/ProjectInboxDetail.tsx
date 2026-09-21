@@ -1,6 +1,7 @@
 import { ArrowLeft } from "lucide-react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useTranslation } from "@/i18n";
 import type { InboxItem } from "@/features/home/lib/inbox";
 import { resolveProjectInboxWorkItem } from "@/features/home/lib/projectInbox";
 import { ProjectInboxDetailPane } from "@/features/home/ui/ProjectInboxDetailPane";
@@ -27,12 +28,13 @@ function ProjectInboxStatus({
   onBack?: () => void;
   onRetry?: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <section className="flex min-h-0 min-w-0 flex-col bg-background/60">
       {onBack ? (
         <div className="flex min-h-13 items-center px-5 py-2">
           <Button
-            aria-label="Back to Inbox"
+            aria-label={t("home.project.back-to-inbox")}
             onClick={onBack}
             size="icon"
             type="button"
@@ -46,7 +48,7 @@ function ProjectInboxStatus({
         <p className="text-sm text-muted-foreground">{message}</p>
         {onRetry ? (
           <Button onClick={onRetry} size="sm" type="button" variant="outline">
-            Retry
+            {t("channels.workflows.retry")}
           </Button>
         ) : null}
       </div>
@@ -61,6 +63,7 @@ export function ProjectInboxDetail({
   onBack,
   profiles,
 }: ProjectInboxDetailProps) {
+  const { t } = useTranslation();
   const { goProject } = useAppNavigation();
   const projectsQuery = useProjectsQuery();
   const projectsWorkItemsQuery = useProjectsWorkItemsQuery(
@@ -79,10 +82,10 @@ export function ProjectInboxDetail({
       <ProjectInboxStatus
         message={
           error
-            ? "Could not load this project item."
+            ? t("home.project.load-failed")
             : isLoading
-              ? "Loading project item…"
-              : "This project item could not be found."
+              ? t("home.project.loading")
+              : t("home.project.not-found")
         }
         onBack={onBack}
         onRetry={
@@ -104,7 +107,7 @@ export function ProjectInboxDetail({
   if (failedSections && failedSections.length > 0) {
     return (
       <ProjectInboxStatus
-        message="Some project activity could not be loaded. Actions are unavailable until the item is current."
+        message={t("home.project.activity-partial")}
         onBack={onBack}
         onRetry={() => void projectsWorkItemsQuery.refetch()}
       />

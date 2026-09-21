@@ -6,6 +6,8 @@ import {
   type FileData,
 } from "react-diff-view";
 
+import { i18n } from "@/i18n";
+
 type ParsedDiffResult = {
   files: FileData[];
   parseError: boolean;
@@ -33,13 +35,21 @@ export function parseUnifiedDiff(content: string): ParsedDiffResult {
   }
 }
 
-export const DIFF_TYPE_LABELS: Record<DiffType, string> = {
-  add: "New file",
-  copy: "Copied",
-  delete: "Deleted",
-  modify: "Modified",
-  rename: "Renamed",
-};
+/** Localized badge label for a diff change type (one literal key per type). */
+export function diffTypeLabel(type: DiffType): string {
+  switch (normalizeDiffType(type)) {
+    case "add":
+      return i18n.t("messages.diff.type-new-file");
+    case "copy":
+      return i18n.t("messages.diff.type-copied");
+    case "delete":
+      return i18n.t("messages.diff.type-deleted");
+    case "rename":
+      return i18n.t("messages.diff.type-renamed");
+    default:
+      return i18n.t("messages.diff.type-modified");
+  }
+}
 
 export function getDiffFileLabel(
   file: FileData,
@@ -64,15 +74,15 @@ export function shouldShowDiffFileHeader(
 }
 
 /**
- * Badge for the diff card's title bar. Set only when the diff is a single
- * file whose per-file header is collapsed (its label just repeats the card
- * title) and whose change type is notable — so "New file"/"Deleted" isn't
- * lost with the header.
+ * Change type behind the diff card's title badge. Set only when the diff is a
+ * single file whose per-file header is collapsed (its label just repeats the
+ * card title) and whose change type is notable — so "New file"/"Deleted" isn't
+ * lost with the header. Callers resolve the text with `diffTypeLabel`.
  */
-export function getDiffTitleBadge(
+export function getDiffTitleBadgeType(
   content: string,
   fallbackFilePath?: string,
-): string | undefined {
+): DiffType | undefined {
   const { files } = parseUnifiedDiff(content);
   if (files.length !== 1) {
     return undefined;
@@ -85,7 +95,7 @@ export function getDiffTitleBadge(
   }
 
   const diffType = normalizeDiffType(file.type);
-  return diffType === "modify" ? undefined : DIFF_TYPE_LABELS[diffType];
+  return diffType === "modify" ? undefined : diffType;
 }
 
 export function countDiffFileChanges(file: FileData) {

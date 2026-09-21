@@ -3,6 +3,7 @@ import * as React from "react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useProjectsQuery } from "@/features/projects/hooks";
 import type { Project } from "@/features/projects/projectModels";
+import { i18n } from "@/i18n";
 import {
   entityLinkProjectRouteId,
   isEntityLink,
@@ -125,36 +126,49 @@ function entityLinkPresentation(link: ParsedEntityLink) {
     case "repo":
       return {
         ariaLabel: link.commitHash
-          ? `Open commit ${link.commitHash.slice(0, 8)} in repository ${link.dtag}`
-          : `Open repository ${link.dtag}`,
+          ? i18n.t("shared.markdown.entity.aria-open-commit", {
+              hash: link.commitHash.slice(0, 8),
+              name: link.dtag,
+            })
+          : i18n.t("messages.link.open-repository", { name: link.dtag }),
         icon: "repo" as const,
         label: link.commitHash
           ? `${link.dtag} · ${link.commitHash.slice(0, 8)}`
           : link.dtag,
-        tooltipFooter: "Repository",
+        tooltipFooter: i18n.t("shared.markdown.entity.footer-repo"),
       };
     case "pr":
       return {
-        ariaLabel: `Open pull request ${link.id.slice(0, 8)} in repository ${link.dtag}`,
+        ariaLabel: i18n.t("messages.link.open-pull-request", {
+          id: link.id.slice(0, 8),
+          name: link.dtag,
+        }),
         icon: "pr" as const,
         label: `${link.dtag} · ${link.id.slice(0, 8)}`,
-        tooltipFooter: `Pull request · ${link.dtag}`,
+        tooltipFooter: i18n.t("shared.markdown.entity.footer-pr", {
+          repository: link.dtag,
+        }),
       };
     case "issue":
       return {
-        ariaLabel: `Open issue ${link.id.slice(0, 8)} in repository ${link.dtag}`,
+        ariaLabel: i18n.t("messages.link.open-issue", {
+          id: link.id.slice(0, 8),
+          name: link.dtag,
+        }),
         icon: "issue" as const,
         // Tooltip fallback only — the inline chip renders the repository name
         // alone (see `chip` below).
         label: `${link.dtag} · ${link.id.slice(0, 8)}`,
-        tooltipFooter: `Issue · ${link.dtag}`,
+        tooltipFooter: i18n.t("shared.markdown.entity.footer-issue", {
+          repository: link.dtag,
+        }),
       };
     case "project":
       return {
-        ariaLabel: `Open project ${link.dtag}`,
+        ariaLabel: i18n.t("messages.link.open-project", { name: link.dtag }),
         icon: "project" as const,
         label: link.dtag,
-        tooltipFooter: "Project",
+        tooltipFooter: i18n.t("shared.markdown.entity.footer-project"),
       };
   }
 }

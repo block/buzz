@@ -1,6 +1,7 @@
 import * as React from "react";
 import { CheckCheck } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { cn } from "@/shared/lib/cn";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
@@ -46,6 +47,7 @@ export function CompactMessageSummary({
   result: string;
   timestamp: string;
 }) {
+  const { t } = useTranslation();
   const [detailsOpen, setDetailsOpen] = React.useState(false);
   const resolvedContent = useSentMessageBody(messageLink, preview);
   const variant = useAgentSessionTranscriptVariant();
@@ -103,7 +105,9 @@ export function CompactMessageSummary({
       <div className="flex max-w-full flex-row items-start justify-start">
         {openProfilePanel && !isCompactPreview ? (
           <button
-            aria-label={`Open ${displayName} profile`}
+            aria-label={t("agents.transcript.open-profile-aria", {
+              name: displayName,
+            })}
             className={cn(
               avatarClassName,
               "pointer-events-auto rounded-[30%] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -185,14 +189,14 @@ export function CompactMessageSummary({
               timestamp={timestamp}
             />
             <button
-              aria-label="Show sent message context"
+              aria-label={t("agents.tool-summary.show-sent-context")}
               className={cn(
                 "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                 mutedTone,
               )}
               data-testid="transcript-sent-message-context-button"
               onClick={() => setDetailsOpen(true)}
-              title="Show sent message context"
+              title={t("agents.tool-summary.show-sent-context")}
               type="button"
             >
               <CheckCheck className="h-3.5 w-3.5" />

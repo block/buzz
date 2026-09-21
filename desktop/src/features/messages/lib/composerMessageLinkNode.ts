@@ -4,6 +4,7 @@ import { Selection, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import { find as findLinks } from "linkifyjs";
 
+import { i18n } from "@/i18n";
 import {
   buildIssueLink,
   buildProjectLink,
@@ -350,7 +351,9 @@ function composerLinkPresentation(
   const message = parseMessageLink(href);
   if (message.ok) {
     const resolvedChannelName =
-      resolveChannelName(message.value.channelId) || channelName || "channel";
+      resolveChannelName(message.value.channelId) ||
+      channelName ||
+      i18n.t("messages.link.fallback-channel-name");
     return {
       ariaLabel: getMessageLinkLabel({ channelName: resolvedChannelName }),
       channelName: resolvedChannelName,
@@ -372,7 +375,9 @@ function composerLinkPresentation(
       channelName ||
       channel.value.channelId.slice(0, 8);
     return {
-      ariaLabel: `Open channel ${resolvedChannelName}`,
+      ariaLabel: i18n.t("messages.link.open-channel", {
+        name: resolvedChannelName,
+      }),
       channelName: resolvedChannelName,
       dataAttributes: { "data-channel-deep-link": "" },
       icon: "channel",
@@ -382,12 +387,13 @@ function composerLinkPresentation(
 
   const entity = parseEntityLink(href);
   if (!entity.ok) {
+    const buzzLinkLabel = i18n.t("messages.link.buzz-link");
     return {
-      ariaLabel: "Buzz link",
+      ariaLabel: buzzLinkLabel,
       channelName: "",
       dataAttributes: {},
       icon: "message",
-      label: "Buzz link",
+      label: buzzLinkLabel,
     };
   }
 
@@ -398,10 +404,18 @@ function composerLinkPresentation(
   return {
     ariaLabel:
       entity.value.type === "repo"
-        ? `Open repository ${entity.value.dtag}`
+        ? i18n.t("messages.link.open-repository", { name: entity.value.dtag })
         : entity.value.type === "project"
-          ? `Open project ${entity.value.dtag}`
-          : `Open ${entity.value.type === "pr" ? "pull request" : "issue"} ${shortId} in repository ${entity.value.dtag}`,
+          ? i18n.t("messages.link.open-project", { name: entity.value.dtag })
+          : entity.value.type === "pr"
+            ? i18n.t("messages.link.open-pull-request", {
+                id: shortId,
+                name: entity.value.dtag,
+              })
+            : i18n.t("messages.link.open-issue", {
+                id: shortId,
+                name: entity.value.dtag,
+              }),
     channelName: "",
     dataAttributes: { "data-buzz-link-kind": entity.value.type },
     icon: entity.value.type,

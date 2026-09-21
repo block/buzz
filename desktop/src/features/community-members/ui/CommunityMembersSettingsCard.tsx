@@ -10,6 +10,7 @@ import {
   useRemoveRelayMemberMutation,
 } from "@/features/community-members/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { i18n, useTranslation } from "@/i18n";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
@@ -43,7 +44,9 @@ function formatDisplayName(member: RelayMember, displayName?: string | null) {
   ) {
     return trimmedDisplayName;
   }
-  return member.role === "owner" ? "Community owner" : "Unnamed member";
+  return member.role === "owner"
+    ? i18n.t("members.settings.community-owner")
+    : i18n.t("members.settings.unnamed-member");
 }
 
 function npubFromPubkey(pubkey: string): string | null {
@@ -99,6 +102,7 @@ function RelayMemberRow({
   profile?: UserProfileSummary;
   member: RelayMember;
 }) {
+  const { t } = useTranslation();
   const removeMutation = useRemoveRelayMemberMutation();
   const changeRoleMutation = useChangeRelayMemberRoleMutation();
   const isSelf = currentPubkey
@@ -125,7 +129,7 @@ function RelayMemberRow({
       toast.error(
         error instanceof Error
           ? error.message
-          : "Couldn’t update this community member.",
+          : t("members.settings.update-failed"),
       );
     }
   }
@@ -137,7 +141,9 @@ function RelayMemberRow({
     >
       <UserProfilePopover
         pubkey={member.pubkey}
-        triggerAriaLabel={`Open profile for ${displayName}`}
+        triggerAriaLabel={t("members.settings.open-profile", {
+          name: displayName,
+        })}
         triggerElement="span"
       >
         <ProfileAvatar
@@ -168,13 +174,17 @@ function RelayMemberRow({
           <span aria-hidden="true" className="shrink-0">
             ·
           </span>
-          <span className="shrink-0">Added {formatDate(member.createdAt)}</span>
+          <span className="shrink-0">
+            {t("members.settings.added", {
+              date: formatDate(member.createdAt),
+            })}
+          </span>
           {isSelf ? (
             <>
               <span aria-hidden="true" className="shrink-0">
                 ·
               </span>
-              <span className="shrink-0">You</span>
+              <span className="shrink-0">{t("members.settings.you")}</span>
             </>
           ) : null}
         </div>
@@ -184,7 +194,9 @@ function RelayMemberRow({
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label={`Actions for ${displayName}`}
+              aria-label={t("members.settings.actions-for", {
+                name: displayName,
+              })}
               data-testid={`relay-member-actions-${member.pubkey}`}
               disabled={isBusy}
               size="icon"
@@ -203,11 +215,11 @@ function RelayMemberRow({
                         pubkey: member.pubkey,
                         role: "admin",
                       }),
-                    "Made community admin",
+                    t("members.settings.made-community-admin"),
                   )
                 }
               >
-                Make admin
+                {t("members.settings.make-admin")}
               </DropdownMenuItem>
             ) : null}
             {canDemote ? (
@@ -219,11 +231,11 @@ function RelayMemberRow({
                         pubkey: member.pubkey,
                         role: "member",
                       }),
-                    "Made community member",
+                    t("members.settings.made-community-member"),
                   )
                 }
               >
-                Make member
+                {t("members.settings.make-member")}
               </DropdownMenuItem>
             ) : null}
             {canRemove && (canPromote || canDemote) ? (
@@ -235,11 +247,11 @@ function RelayMemberRow({
                 onClick={() =>
                   void mutateWithToast(
                     () => removeMutation.mutateAsync(member.pubkey),
-                    "Removed community member",
+                    t("members.settings.removed-community-member"),
                   )
                 }
               >
-                Remove from community
+                {t("members.settings.remove-from-community")}
               </DropdownMenuItem>
             ) : null}
           </DropdownMenuContent>
@@ -254,6 +266,7 @@ export function CommunityMembersSettingsCard({
 }: {
   currentPubkey?: string;
 }) {
+  const { t } = useTranslation();
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const currentRole = myMembershipQuery.data?.membership?.role ?? null;
   const canManageRelay = currentRole === "owner" || currentRole === "admin";
@@ -295,7 +308,7 @@ export function CommunityMembersSettingsCard({
     return (
       <section className="min-w-0" data-testid="settings-community-members">
         <p className="text-sm text-muted-foreground">
-          Checking invite permissions…
+          {t("members.settings.checking-invite-permissions")}
         </p>
       </section>
     );
@@ -313,17 +326,17 @@ export function CommunityMembersSettingsCard({
             data-testid="community-invite-dialog-trigger"
             onClick={() => setInviteDialogOpen(true)}
           >
-            Invite to community
+            {t("members.settings.invite-trigger")}
           </Button>
         }
-        title="Invites"
-        description="Manage members and community access."
+        title={t("members.settings.invites")}
+        description={t("members.settings.invites-description")}
       />
 
       <SettingsOptionGroup
         title={
           <>
-            Members
+            {t("members.settings.members")}
             {members.length > 0 ? (
               <span className="ml-1.5 font-normal">{members.length}</span>
             ) : null}
@@ -339,7 +352,7 @@ export function CommunityMembersSettingsCard({
               className="w-full rounded-lg border border-border/70 bg-background py-2 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="community-members-search"
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search members"
+              placeholder={t("members.settings.search-placeholder")}
               spellCheck={false}
               type="text"
               value={search}
@@ -354,15 +367,15 @@ export function CommunityMembersSettingsCard({
 
           {membersQuery.isLoading ? (
             <p className="py-3 text-sm text-muted-foreground">
-              Loading community members…
+              {t("members.settings.loading")}
             </p>
           ) : members.length === 0 ? (
             <p className="rounded-lg border border-dashed border-border/70 px-3 py-6 text-center text-sm text-muted-foreground">
-              No community members yet.
+              {t("members.settings.empty")}
             </p>
           ) : filteredMembers.length === 0 ? (
             <p className="rounded-lg border border-dashed border-border/70 px-3 py-6 text-center text-sm text-muted-foreground">
-              No members match your search.
+              {t("members.settings.no-search-results")}
             </p>
           ) : (
             <VirtualizedList

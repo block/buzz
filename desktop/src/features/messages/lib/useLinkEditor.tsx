@@ -12,6 +12,7 @@ import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useTranslation } from "@/i18n";
 
 import type {
   LinkSelectionInfo,
@@ -68,6 +69,7 @@ type LinkCardState = {
  * - `card`/`dialog` — render once inside the composer tree.
  */
 export function useLinkEditor(richText: UseRichTextEditorResult) {
+  const { t } = useTranslation();
   const { getLinkSelectionInfo, applyLink, removeLink } = richText;
   const { goChannel } = useAppNavigation();
   const [draft, setDraft] = React.useState<DraftState | null>(null);
@@ -322,7 +324,7 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
             </a>
             <div className="flex items-center justify-end gap-0.5">
               <Button
-                aria-label="Edit link"
+                aria-label={t("messages.link.edit")}
                 onClick={editFromCard}
                 size="icon-xs"
                 type="button"
@@ -331,7 +333,7 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
                 <Pencil />
               </Button>
               <Button
-                aria-label="Unlink"
+                aria-label={t("messages.link.unlink")}
                 onClick={removeFromCard}
                 size="icon-xs"
                 type="button"
@@ -356,7 +358,9 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {draft?.isExistingLink ? "Edit link" : "Add link"}
+            {draft?.isExistingLink
+              ? t("messages.link.edit")
+              : t("messages.link.add")}
           </DialogTitle>
         </DialogHeader>
         <form
@@ -370,11 +374,11 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
             className="flex flex-col gap-1 text-sm font-medium"
             htmlFor={textId}
           >
-            Display text
+            {t("messages.link.display-text")}
             <Input
               id={textId}
               autoFocus={draft?.initialFocus === "text"}
-              placeholder="Text to display"
+              placeholder={t("messages.link.display-text-placeholder")}
               value={draft?.text ?? ""}
               onChange={(event) =>
                 setDraft((prev) =>
@@ -387,7 +391,7 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
             className="flex flex-col gap-1 text-sm font-medium"
             htmlFor={urlId}
           >
-            URL
+            {t("messages.link.url")}
             <Input
               id={urlId}
               autoFocus={draft?.initialFocus === "url"}
@@ -403,17 +407,17 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
           <div className="mt-2 flex items-center justify-between gap-2">
             {draft?.isExistingLink ? (
               <Button type="button" variant="destructive" onClick={remove}>
-                Remove
+                {t("messages.link.remove")}
               </Button>
             ) : (
               <span />
             )}
             <div className="flex items-center gap-2">
               <Button type="button" variant="ghost" onClick={close}>
-                Cancel
+                {t("messages.link.cancel")}
               </Button>
               <Button type="submit" disabled={!draft?.url.trim()}>
-                Save
+                {t("messages.link.save")}
               </Button>
             </div>
           </div>

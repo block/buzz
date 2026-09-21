@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { Project } from "@/features/projects/hooks";
 import type { AddProjectRepositoryInput } from "@/features/projects/useAddProjectRepository";
+import { useTranslation } from "@/i18n";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -33,6 +34,7 @@ export function AddProjectRepositoryDialog({
   project?: Project;
   projects?: Project[];
 }) {
+  const { t } = useTranslation();
   const projectOptions = React.useMemo(
     () => projects ?? (project ? [project] : []),
     [project, projects],
@@ -79,7 +81,9 @@ export function AddProjectRepositoryDialog({
       onOpenChange(false);
     } catch (error) {
       setErrorMessage(
-        error instanceof Error ? error.message : "Failed to add repository.",
+        error instanceof Error
+          ? error.message
+          : t("projects.shared.add-repo-failed"),
       );
     }
   }
@@ -98,8 +102,10 @@ export function AddProjectRepositoryDialog({
         data-testid="add-project-repository-dialog"
         description={
           selectedProject
-            ? `Add another repository to ${selectedProject.name}.`
-            : "Choose a project for this repository."
+            ? t("projects.add-repo-dialog.description-project", {
+                name: selectedProject.name,
+              })
+            : t("projects.add-repo-dialog.choose-project")
         }
         footer={
           <Button
@@ -113,12 +119,14 @@ export function AddProjectRepositoryDialog({
             form="add-project-repository-form"
             type="submit"
           >
-            {isCreating ? "Adding..." : "Add repository"}
+            {isCreating
+              ? t("projects.add-repo-dialog.adding")
+              : t("projects.overview.action.add-repository")}
           </Button>
         }
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
-        title="Add repository"
+        title={t("projects.overview.action.add-repository")}
       >
         <form
           className="space-y-5"
@@ -131,7 +139,7 @@ export function AddProjectRepositoryDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="add-project-repository-project"
               >
-                Project
+                {t("projects.shared.project")}
               </label>
               <div className={FIELD_SHELL_CLASS}>
                 <select
@@ -161,7 +169,7 @@ export function AddProjectRepositoryDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="add-project-repository-name"
             >
-              Name
+              {t("sidebar.channel-form.name")}
             </label>
             <div className={FIELD_SHELL_CLASS}>
               <Input
@@ -188,7 +196,7 @@ export function AddProjectRepositoryDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="add-project-repository-channel"
             >
-              Access channel
+              {t("projects.add-repo-dialog.access-channel")}
             </label>
             <div className={FIELD_SHELL_CLASS}>
               <select
@@ -203,7 +211,7 @@ export function AddProjectRepositoryDialog({
                 required
                 value={selectedChannelId}
               >
-                <option value="">Select a channel</option>
+                <option value="">{t("channels.pane.placeholder-none")}</option>
                 {channels.map((channel) => (
                   <option key={channel.id} value={channel.id}>
                     {channel.name}
@@ -212,7 +220,7 @@ export function AddProjectRepositoryDialog({
               </select>
             </div>
             <p className="text-xs text-muted-foreground">
-              Members of this channel can access the repository.
+              {t("projects.add-repo-dialog.access-hint")}
             </p>
           </div>
           <div className="space-y-1.5">
@@ -220,9 +228,9 @@ export function AddProjectRepositoryDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="add-project-repository-clone-url"
             >
-              Clone URL
+              {t("projects.add-repo-dialog.clone-url")}
               <span className="ml-1 text-xs font-normal text-muted-foreground/50">
-                Optional
+                {t("sidebar.channel-form.optional")}
               </span>
             </label>
             <div className={FIELD_SHELL_CLASS}>

@@ -11,6 +11,7 @@ import {
 import type { ProjectIssue } from "@/features/projects/projectIssues.mjs";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { useTranslation } from "@/i18n";
 import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
@@ -57,6 +58,7 @@ export function IssueAssigneeFacepile({
   assignees: string[];
   profiles?: UserProfileLookup;
 }) {
+  const { t } = useTranslation();
   if (assignees.length === 0) return null;
   return (
     <span
@@ -73,7 +75,7 @@ export function IssueAssigneeFacepile({
               profile?.isAgent ? "rounded-squircle" : "rounded-full",
             )}
             key={pubkey}
-            title={`Assigned to ${label}`}
+            title={t("projects.issue-assignees.assigned-to", { name: label })}
           >
             <UserAvatar
               accent={profile?.isAgent === true}
@@ -119,6 +121,7 @@ export function IssueAssigneesRow({
   testIdPrefix?: string;
   viewerPubkey: string | null;
 }) {
+  const { t } = useTranslation();
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [assigneeQuery, setAssigneeQuery] = React.useState("");
   const assignmentOperationInFlightRef = React.useRef(false);
@@ -167,16 +170,18 @@ export function IssueAssigneesRow({
         });
         setPickerOpen(false);
         setAssigneeQuery("");
-        toast.success("Task assigned.");
+        toast.success(t("projects.issue-assignees.assigned"));
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to assign task.",
+          error instanceof Error
+            ? error.message
+            : t("projects.issue-assignees.assign-failed"),
         );
       } finally {
         assignmentOperationInFlightRef.current = false;
       }
     },
-    [assignMutation, issue, operationSigner],
+    [assignMutation, issue, operationSigner, t],
   );
 
   const handleUnassign = React.useCallback(
@@ -192,16 +197,18 @@ export function IssueAssigneesRow({
           signerPubkey: operationSigner,
           signAsManagedOwner,
         });
-        toast.success("Task unassigned.");
+        toast.success(t("projects.issue-assignees.unassigned"));
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to unassign task.",
+          error instanceof Error
+            ? error.message
+            : t("projects.issue-assignees.unassign-failed"),
         );
       } finally {
         assignmentOperationInFlightRef.current = false;
       }
     },
-    [issue, operationSigner, signAsManagedOwner, unassignMutation],
+    [issue, operationSigner, signAsManagedOwner, t, unassignMutation],
   );
 
   React.useEffect(() => {
@@ -245,7 +252,9 @@ export function IssueAssigneesRow({
             <TooltipTrigger asChild>
               {canUnassign ? (
                 <button
-                  aria-label={`Unassign ${label}`}
+                  aria-label={t("projects.issue-assignees.unassign", {
+                    name: label,
+                  })}
                   className={cn(
                     "group relative inline-flex rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
                   )}
@@ -271,7 +280,11 @@ export function IssueAssigneesRow({
               )}
             </TooltipTrigger>
             <TooltipContent>
-              {canUnassign ? `Unassign ${label}` : `${label} — assigned`}
+              {canUnassign
+                ? t("projects.issue-assignees.unassign", { name: label })
+                : t("projects.issue-assignees.assigned-label", {
+                    name: label,
+                  })}
             </TooltipContent>
           </Tooltip>
         );
@@ -294,7 +307,7 @@ export function IssueAssigneesRow({
           variant="ghost"
         >
           {contextActions ? <UserPlus /> : null}
-          Assign to me
+          {t("projects.issue-assignees.assign-to-me")}
         </Button>
       ) : null}
       {showSelfAssignmentState && isSelfAssigned ? (
@@ -309,7 +322,7 @@ export function IssueAssigneesRow({
           variant="ghost"
         >
           <Check className="h-3 w-3" />
-          Assigned to me
+          {t("projects.issue-assignees.assigned-to-me")}
         </Button>
       ) : null}
       {canAssignOthers ? (
@@ -327,14 +340,16 @@ export function IssueAssigneesRow({
               variant="ghost"
             >
               {contextActions ? <Users /> : null}
-              Assign
+              {t("projects.issue-assignees.assign")}
             </Button>
           </DialogTrigger>
           <DialogContent className="max-w-md gap-0 overflow-hidden p-0">
             <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
-              <DialogTitle>Assign task</DialogTitle>
+              <DialogTitle>
+                {t("projects.issue-assignees.assign-task")}
+              </DialogTitle>
               <DialogDescription>
-                Choose a person or agent to work on this task.
+                {t("projects.issue-assignees.assign-hint")}
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2 border-b border-border/60 px-6 py-3">
@@ -344,14 +359,14 @@ export function IssueAssigneesRow({
                 className="h-8 border-0 px-0 text-sm shadow-none focus-visible:ring-0"
                 data-testid="project-assignee-search"
                 onChange={(event) => setAssigneeQuery(event.target.value)}
-                placeholder="Search people and agents"
+                placeholder={t("channels.members.search-people-placeholder")}
                 value={assigneeQuery}
               />
             </div>
             <div className="max-h-72 min-h-28 overflow-y-auto p-2">
               {userSearchQuery.isLoading ? (
                 <p className="px-3 py-4 text-sm text-muted-foreground">
-                  Searching…
+                  {t("channels.invite.searching")}
                 </p>
               ) : candidates.length > 0 ? (
                 candidates.map((candidate) => {
@@ -381,7 +396,9 @@ export function IssueAssigneesRow({
                           {label}
                         </span>
                         <span className="block truncate text-xs text-muted-foreground">
-                          {candidate.isAgent ? "Agent · " : ""}
+                          {candidate.isAgent
+                            ? t("projects.shared.agent-prefix")
+                            : ""}
                           {truncateNpub(candidate.pubkey)}
                         </span>
                       </span>
@@ -390,7 +407,7 @@ export function IssueAssigneesRow({
                 })
               ) : (
                 <p className="px-3 py-4 text-sm text-muted-foreground">
-                  No matching people or agents.
+                  {t("channels.members.no-matches")}
                 </p>
               )}
             </div>

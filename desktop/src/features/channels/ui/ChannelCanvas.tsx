@@ -5,6 +5,7 @@ import {
   useCanvasQuery,
   useSetCanvasMutation,
 } from "@/features/channels/hooks";
+import { useTranslation } from "@/i18n";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
@@ -25,6 +26,7 @@ export function ChannelCanvas({
   canEdit,
   isArchived,
 }: ChannelCanvasProps) {
+  const { t } = useTranslation();
   const canvasQuery = useCanvasQuery(channelId, channelId !== null);
   const setCanvasMutation = useSetCanvasMutation(channelId);
   const { channels } = useChannelNavigation();
@@ -56,7 +58,11 @@ export function ChannelCanvas({
   }
 
   if (canvasQuery.isLoading) {
-    return <p className="text-sm text-muted-foreground">Loading canvas...</p>;
+    return (
+      <p className="text-sm text-muted-foreground">
+        {t("channels.canvas.loading")}
+      </p>
+    );
   }
 
   if (canvasQuery.error instanceof Error) {
@@ -73,12 +79,12 @@ export function ChannelCanvas({
     return (
       <div className="space-y-3">
         <Textarea
-          aria-label="Canvas content"
+          aria-label={t("channels.canvas.content-aria")}
           className="min-h-48 font-mono text-sm"
           data-testid="channel-canvas-editor"
           disabled={setCanvasMutation.isPending}
           onChange={(event) => setDraft(event.target.value)}
-          placeholder="Write your canvas content in Markdown..."
+          placeholder={t("channels.canvas.placeholder")}
           value={draft}
         />
         <div className="flex gap-2">
@@ -94,7 +100,9 @@ export function ChannelCanvas({
             type="button"
           >
             <Save className="h-4 w-4" />
-            {setCanvasMutation.isPending ? "Saving..." : "Save canvas"}
+            {setCanvasMutation.isPending
+              ? t("channels.canvas.saving")
+              : t("channels.canvas.save")}
           </Button>
           <Button
             data-testid="channel-canvas-cancel"
@@ -105,7 +113,7 @@ export function ChannelCanvas({
             variant="outline"
           >
             <X className="h-4 w-4" />
-            Cancel
+            {t("channels.canvas.cancel")}
           </Button>
         </div>
         {setCanvasMutation.error instanceof Error ? (
@@ -131,7 +139,7 @@ export function ChannelCanvas({
         </div>
       ) : (
         <p className="text-sm text-muted-foreground">
-          No canvas set for this channel.
+          {t("channels.canvas.empty")}
         </p>
       )}
       {canEdit && !isArchived ? (
@@ -143,7 +151,9 @@ export function ChannelCanvas({
           variant="outline"
         >
           <Pencil className="h-4 w-4" />
-          {canvasContent ? "Edit canvas" : "Create canvas"}
+          {canvasContent
+            ? t("channels.canvas.edit")
+            : t("channels.canvas.create")}
         </Button>
       ) : null}
     </div>

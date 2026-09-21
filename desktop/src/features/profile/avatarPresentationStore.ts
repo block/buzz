@@ -1,6 +1,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { i18n } from "@/i18n";
 import {
   buildAnimatedAvatarUrl,
   parseAnimatedAvatarUrl,
@@ -148,12 +149,12 @@ async function verifyPresentation(
     state: "failed",
   };
   emitChange();
-  toast.error("Avatar couldn’t finish uploading", {
+  toast.error(i18n.t("profile.upload.failed"), {
     action: {
-      label: "Retry",
+      label: i18n.t("profile.upload.retry"),
       onClick: () => retryAvatarPresentation(entry.remoteUrl),
     },
-    description: "Your default avatar is showing instead.",
+    description: i18n.t("profile.upload.failed-description"),
     id: toastId(entry.remoteUrl),
   });
 }

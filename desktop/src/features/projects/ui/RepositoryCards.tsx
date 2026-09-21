@@ -20,6 +20,7 @@ import {
   selectionItemFromRepository,
   type ProjectSelectionItem,
 } from "@/features/projects/lib/projectSelection";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
@@ -64,13 +65,14 @@ function RepositoryHostIcon({
   compact?: boolean;
   repository: Repository;
 }) {
+  const { t } = useTranslation();
   const host = projectRepoHostForRepository(repository, useRelayOrigin());
   const label =
     host.kind === "buzz"
-      ? "Buzz-hosted repository"
+      ? t("projects.repository-card.buzz-hosted")
       : host.kind === "external"
-        ? `Git data hosted on ${host.host}`
-        : "Repository host";
+        ? t("projects.repository-card.external-hosted", { host: host.host })
+        : t("projects.repository-card.host-label");
   const mark =
     host.kind === "buzz" ? (
       <BuzzMark className={compact ? "h-3.5 w-4" : "h-4.5 w-5"} />

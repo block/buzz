@@ -108,3 +108,13 @@ test("the sentinel selection persists as null (clear to adapter default)", () =>
 test("a concrete selection persists as its explicit effort level", () => {
   assert.equal(effortSelectionToPersistedValue("high"), "high");
 });
+
+// Boot i18n for the assertions below: Node defines a global `navigator`, so language
+// detection must be pinned to English before initializeI18n() reads it.
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();

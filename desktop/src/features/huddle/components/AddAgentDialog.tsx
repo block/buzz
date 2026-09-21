@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderCircle } from "lucide-react";
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { Dialog } from "@/shared/ui/dialog";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -34,6 +35,7 @@ export function AddAgentDialog({
   onAdd,
   currentAgentPubkeys,
 }: AddAgentDialogProps) {
+  const { t } = useTranslation();
   const [agents, setAgents] = React.useState<ManagedAgentSummary[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [adding, setAdding] = React.useState<string | null>(null);
@@ -143,7 +145,7 @@ export function AddAgentDialog({
         data-testid="add-huddle-agent-dialog"
         headerSubtitle="Choose an agent to join this huddle."
         scrollAreaClassName="space-y-5"
-        title="Add agents"
+        title={t("channels.bot.title")}
       >
         {error ? (
           <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
@@ -159,11 +161,11 @@ export function AddAgentDialog({
 
         {loading ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
-            Loading agents…
+            {t("huddle.add-agent-dialog.loading")}
           </p>
         ) : availableAgents.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
-            All available agents are already in this huddle.
+            {t("huddle.add-agent-dialog.all-added")}
           </p>
         ) : (
           <ul className="flex flex-col gap-1">
@@ -188,7 +190,9 @@ export function AddAgentDialog({
                     </span>
                     {isAdding ? (
                       <LoaderCircle
-                        aria-label={`Adding ${agent.name}`}
+                        aria-label={t("huddle.add-agent-dialog.adding", {
+                          name: agent.name,
+                        })}
                         className="h-4 w-4 shrink-0 animate-spin text-muted-foreground"
                       />
                     ) : null}

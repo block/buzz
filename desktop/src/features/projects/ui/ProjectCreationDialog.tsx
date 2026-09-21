@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { CreateProjectDialog } from "@/features/projects/ui/CreateProjectDialog";
+import { useTranslation } from "@/i18n";
 
 /** Shared project-creation flow for populated and first-run project views. */
 export function ProjectCreationDialog({
@@ -12,6 +13,7 @@ export function ProjectCreationDialog({
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
+  const { t } = useTranslation();
   const { goProject } = useAppNavigation();
   const createProjectMutation = useCreateProjectMutation();
 
@@ -21,11 +23,13 @@ export function ProjectCreationDialog({
       onCreate={async (input) => {
         const result = await createProjectMutation.mutateAsync(input);
         if (result.compatibilityWarning) {
-          toast.warning("Created as a standalone project", {
+          toast.warning(t("sidebar.projects.created-standalone"), {
             description: result.compatibilityWarning,
           });
         } else {
-          toast.success(`Project "${result.project.name}" created.`);
+          toast.success(
+            t("sidebar.projects.created", { name: result.project.name }),
+          );
         }
         await goProject(result.project.id);
       }}

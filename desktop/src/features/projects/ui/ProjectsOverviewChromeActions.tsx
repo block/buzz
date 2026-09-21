@@ -1,5 +1,6 @@
 import { MessageCircle } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { DrawerPanelIcon } from "@/shared/ui/DrawerPanelIcon";
@@ -17,16 +18,23 @@ export function ProjectsOverviewChromeActions({
   onToggleContext: () => void;
   sectionTitle: string;
 }) {
+  const { t } = useTranslation();
+  const chatLabel = t("projects.overview-chrome.chat-aria", {
+    section: sectionTitle,
+  });
+  const contextLabel = contextOpen
+    ? t("projects.overview-chrome.context-hide")
+    : t("projects.overview-chrome.context-show");
   return (
     <>
       <Button
-        aria-label={`Chat with an agent about ${sectionTitle}`}
+        aria-label={chatLabel}
         aria-pressed={chatOpen}
         className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
         data-testid="projects-overview-chat-toggle"
         onClick={onToggleChat}
         size="icon"
-        title={`Chat with an agent about ${sectionTitle}`}
+        title={chatLabel}
         type="button"
         variant="ghost"
       >
@@ -38,15 +46,13 @@ export function ProjectsOverviewChromeActions({
         />
       </Button>
       <Button
-        aria-label={
-          contextOpen ? "Hide project context" : "Show project context"
-        }
+        aria-label={contextLabel}
         aria-pressed={contextOpen}
         className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
         data-testid="projects-overview-context-toggle"
         onClick={onToggleContext}
         size="icon"
-        title={contextOpen ? "Hide project context" : "Show project context"}
+        title={contextLabel}
         type="button"
         variant="ghost"
       >

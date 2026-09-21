@@ -1,6 +1,7 @@
 import { MoreHorizontal, Trash2 } from "lucide-react";
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -17,6 +18,7 @@ type DeleteActionMenuProps = {
 };
 
 export function DeleteActionMenu({ label, onConfirm }: DeleteActionMenuProps) {
+  const { t } = useTranslation();
   const [isOpen, setIsOpen] = React.useState(false);
   const iconClass = "h-4 w-4";
 
@@ -38,7 +40,7 @@ export function DeleteActionMenu({ label, onConfirm }: DeleteActionMenuProps) {
             onClick={() => setIsOpen(true)}
           >
             <Trash2 className="mr-2 h-4 w-4" />
-            Delete {label}
+            {t("forum.delete.menu-item", { label })}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

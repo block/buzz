@@ -15,6 +15,7 @@ import {
   notifyWelcomeChannelReady,
   rememberPendingWelcomeChannel,
 } from "@/features/onboarding/welcome";
+import { i18n, useTranslation } from "@/i18n";
 import { forceFreshOnboarding } from "@/features/onboarding/devFreshOnboarding";
 import { ensureWelcomeCanvas } from "@/features/onboarding/welcomeCanvas";
 import { ensureWelcomeTeam } from "@/features/onboarding/welcomeGuide";
@@ -159,7 +160,7 @@ export async function initializeStarterChannels(
       reason:
         error instanceof Error
           ? error.message
-          : "Failed to set up starter channels",
+          : i18n.t("onboarding.starter-channels.fallback-reason"),
     };
   }
 }
@@ -465,6 +466,7 @@ export function useFirstRunOnboardingGate({
 
 export function useAppOnboardingState(isSharedIdentity: boolean) {
   const queryClient = useQueryClient();
+  const { t } = useTranslation();
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
   const identity = identityQuery.data;
@@ -592,10 +594,10 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
 
   const showStarterRetryToast = React.useCallback(
     (reason: string) => {
-      toast.error("Couldn't set up starter channels", {
+      toast.error(t("onboarding.starter-channels.error-setup"), {
         id: STARTER_CHANNEL_SETUP_TOAST_ID,
         action: {
-          label: "Retry",
+          label: t("onboarding.starter-channels.retry"),
           onClick: (event) => {
             event.preventDefault();
             void requestStarterChannels(true).then((result) => {
@@ -615,7 +617,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
         description: reason,
       });
     },
-    [requestStarterChannels],
+    [requestStarterChannels, t],
   );
 
   const completeAndShowWelcome = React.useCallback(() => {

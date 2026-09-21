@@ -13,6 +13,7 @@ import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { Markdown } from "@/shared/ui/markdown";
@@ -161,6 +162,7 @@ export function ForumThreadPanel({
   targetSearchMessageId,
   targetSearchQuery,
 }: ForumThreadPanelProps) {
+  const { t } = useTranslation();
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const { channels } = useChannelNavigation();
   const channelNames = React.useMemo(
@@ -196,7 +198,7 @@ export function ForumThreadPanel({
             variant="ghost"
           >
             <ArrowLeft className="h-4 w-4" />
-            Back to posts
+            {t("forum.thread.back-to-posts")}
           </Button>
         </div>
         <div className="flex-1 space-y-4 p-4">
@@ -234,7 +236,7 @@ export function ForumThreadPanel({
           variant="ghost"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back to posts
+          {t("forum.thread.back-to-posts")}
         </Button>
       </div>
 
@@ -326,7 +328,7 @@ export function ForumThreadPanel({
 
           {replies.length === 0 ? (
             <div className="px-4 py-6 text-center text-sm text-muted-foreground">
-              No replies yet. Be the first to respond.
+              {t("forum.thread.no-replies")}
             </div>
           ) : null}
         </div>
@@ -339,7 +341,7 @@ export function ForumThreadPanel({
           draftKey={`thread:${postId}`}
           isSending={isSendingReply}
           onSubmit={onReply}
-          placeholder="Reply to this post..."
+          placeholder={t("forum.thread.reply-placeholder")}
           profiles={profiles}
         />
       </div>

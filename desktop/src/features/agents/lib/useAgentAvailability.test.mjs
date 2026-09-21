@@ -117,3 +117,13 @@ for (const availability of ["online", "away"]) {
     );
   });
 }
+
+// The card renders getPresenceLabel(), which resolves through the catalog, so
+// language detection must be pinned to English before initializeI18n() reads it.
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();

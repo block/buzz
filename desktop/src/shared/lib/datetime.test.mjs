@@ -1,7 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { initializeI18n } from "@/i18n";
 import { formatDayGroupLabel, formatItemTimestamp } from "./datetime.ts";
+
+/**
+ * Every assertion below pins the English output byte-for-byte (spec NFR-008),
+ * so the suite states its language instead of inheriting the host's: the
+ * formatter locale is resolved at call time, and on a zh-Hans machine a bare
+ * `initializeI18n()` would resolve 今天 and turn all 17 of these red.
+ * `datetime.locale.test.mjs` covers the other language.
+ */
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 /** Local-time unix seconds, so the tests read in the same zone the code uses. */
 function at(year, monthIndex, day, hour = 12, minute = 0) {

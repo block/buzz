@@ -7,6 +7,7 @@ import {
 import type { ViewerGitIdentity } from "@/features/projects/lib/projectContributorMatching";
 import type { ProjectRepositorySnapshotResult } from "@/features/projects/useProjectRepositorySnapshots";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { useTranslation } from "@/i18n";
 import type { ProjectRepoCommit } from "@/shared/api/types";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { ProjectPanelState } from "./ProjectPanelState";
@@ -27,6 +28,7 @@ export function ProjectHomeCommitsPanel({
   results: ProjectRepositorySnapshotResult[];
   viewerGitIdentity?: ViewerGitIdentity | null;
 }) {
+  const { t } = useTranslation();
   const loaded = results.filter(
     (result) => (result.snapshot?.commits.length ?? 0) > 0,
   );
@@ -50,7 +52,9 @@ export function ProjectHomeCommitsPanel({
       )
     : null;
   if (results.some((result) => result.isLoading) && loaded.length === 0) {
-    return <BuzzLoadingState label="Loading commits" />;
+    return (
+      <BuzzLoadingState label={t("projects.home-commits-panel.loading")} />
+    );
   }
   if (loaded.length === 0) {
     return (
@@ -62,10 +66,10 @@ export function ProjectHomeCommitsPanel({
                   ? ` ${failed.length - 1} other repositories also failed.`
                   : ""
               }`
-            : "Commits pushed to this project's repositories will appear here."
+            : t("projects.shared.commits-project-description")
         }
         error={failed.length > 0}
-        title={failure?.title ?? "No commits yet"}
+        title={failure?.title ?? t("projects.shared.no-commits-title")}
       />
     );
   }
@@ -82,10 +86,17 @@ export function ProjectHomeCommitsPanel({
         >
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
           <p>
-            Showing commits from {loaded.length} of {results.length}{" "}
-            repositories. {failed.length}{" "}
-            {failed.length === 1 ? "repository could" : "repositories could"}{" "}
-            not be loaded.
+            {failed.length === 1
+              ? t("projects.home-commits-panel.degraded-single", {
+                  loaded: loaded.length,
+                  total: results.length,
+                  failed: failed.length,
+                })
+              : t("projects.home-commits-panel.degraded-multiple", {
+                  loaded: loaded.length,
+                  total: results.length,
+                  failed: failed.length,
+                })}
           </p>
         </div>
       ) : null}

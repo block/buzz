@@ -9,6 +9,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useProjectSelection } from "@/features/projects/lib/useProjectSelection";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -194,6 +195,7 @@ export function ProjectEntityListRow({
   titleSecondaryTestId?: string;
   trailing?: React.ReactNode;
 }) {
+  const { t } = useTranslation();
   const projectSelection = useProjectSelection();
   const selected = Boolean(
     selection && projectSelection?.isSelected(selection.item.id),
@@ -238,7 +240,9 @@ export function ProjectEntityListRow({
           >
             <ProjectEntitySelectControl
               checked={selected}
-              label={`Select ${selection.item.title}`}
+              label={t("projects.shared.select-item", {
+                title: selection.item.title,
+              })}
               onToggle={({ shiftKey }) =>
                 projectSelection.toggle(selection.item, {
                   rangeItems: selection.rangeItems,

@@ -9,6 +9,7 @@ import {
 } from "@/features/profile/ui/UserProfilePanelFields";
 import { ProfileIngressRow } from "@/features/profile/ui/UserProfilePanelTabs";
 import type { ProfileChannelLink } from "@/features/profile/ui/UserProfilePanelUtils";
+import { useTranslation } from "@/i18n";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
@@ -56,6 +57,7 @@ export function ChannelsFocusedView({
   onOpenChannel: (channelId: string) => void;
   variant?: "embedded" | "focused";
 }) {
+  const { t } = useTranslation();
   return (
     <div className={variant === "focused" ? "pt-4" : undefined}>
       <ProfileSectionGroup testId="user-profile-channels-section">
@@ -64,7 +66,7 @@ export function ChannelsFocusedView({
             disabled={isActionPending}
             grouped
             icon={UserPlus}
-            label="Add to channel"
+            label={t("profile.channels-view.add-row")}
             onClick={onAddToChannel}
             testId="user-profile-agent-add-channel"
             trailing={isActionPending ? "Working…" : undefined}
@@ -72,7 +74,7 @@ export function ChannelsFocusedView({
         ) : null}
         {isLoading ? (
           <p className="px-4 py-3 text-sm leading-6 text-muted-foreground">
-            Loading channels…
+            {t("profile.channels-view.loading")}
           </p>
         ) : channels.length === 0 ? (
           <div
@@ -85,13 +87,13 @@ export function ChannelsFocusedView({
             <UserPlus className="mx-auto h-4 w-4 text-muted-foreground" />
             <p className="mt-3 text-sm font-medium">
               {canAddToChannel
-                ? "Add this agent to a channel"
-                : "Channels appear here"}
+                ? t("profile.channels-view.empty-cta")
+                : t("profile.channels-view.empty-title")}
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
               {canAddToChannel
-                ? "Choose a channel above so it can join the conversation."
-                : "Visible memberships appear as this agent joins channels."}
+                ? t("profile.channels-view.empty-hint-select")
+                : t("profile.channels-view.empty-hint-visible")}
             </p>
           </div>
         ) : (
@@ -102,7 +104,9 @@ export function ChannelsFocusedView({
             {channels.map((channel) => (
               <li key={channel.id}>
                 <button
-                  aria-label={`Open #${channel.name}`}
+                  aria-label={t("profile.channels-view.open-aria", {
+                    name: channel.name,
+                  })}
                   className="group flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
                   data-testid={`user-profile-channel-link-${channel.name}`}
                   onClick={() => onOpenChannel(channel.id)}
@@ -130,13 +134,17 @@ export function AgentInfoFocusedView({
 }: {
   metadataFields: ProfileField[];
 }) {
+  const { t } = useTranslation();
   if (metadataFields.length === 0) {
     return null;
   }
 
   return (
     <div className="pt-4">
-      <ProfileFieldGroup fields={metadataFields} title="Info" />
+      <ProfileFieldGroup
+        fields={metadataFields}
+        title={t("profile.panel.info-title")}
+      />
     </div>
   );
 }

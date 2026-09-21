@@ -6,11 +6,14 @@
  * the payload and can be asserted directly in tests. Only cases whose caption
  * is plain text belong here — cases that interpolate a profile link build their
  * JSX in the component.
+ *
+ * Every sentence is resolved through `i18n.t` at call time (these are plain
+ * exported functions, not hooks). Captions that carry a channel topic or
+ * purpose pass that user-authored text in as an interpolation — the value
+ * itself is never rewritten, only the surrounding sentence is translated.
  */
 
-/** Curly quotes, so the caption matches the typography used elsewhere in chat. */
-const OPEN_QUOTE = "“";
-const CLOSE_QUOTE = "”";
+import { i18n } from "@/i18n";
 
 export type ChannelTextField = "topic" | "purpose";
 
@@ -20,7 +23,9 @@ export type ChannelTextField = "topic" | "purpose";
  * rather than the ungrammatical "You added by".
  */
 export function addedByActionPrefix(isCurrentUser: boolean): string {
-  return isCurrentUser ? "were added by" : "added by";
+  return isCurrentUser
+    ? i18n.t("messages.system.were-added-by")
+    : i18n.t("messages.system.added-by");
 }
 
 /**
@@ -28,7 +33,9 @@ export function addedByActionPrefix(isCurrentUser: boolean): string {
  * without attributing the action to a single actor.
  */
 export function addedActionPrefix(isCurrentUser: boolean): string {
-  return isCurrentUser ? "were added" : "was added";
+  return isCurrentUser
+    ? i18n.t("messages.system.were-added")
+    : i18n.t("messages.system.was-added");
 }
 
 /**
@@ -44,16 +51,25 @@ export function addedActionPrefix(isCurrentUser: boolean): string {
  * separate event type. Without this branch the timeline renders `changed the
  * topic to ""`, which reads like the topic was set to two quote marks.
  * Whitespace-only values are treated as cleared for the same reason.
+ *
+ * The two fields are resolved with literal keys rather than a composed
+ * `cleared the ${field}` string: the key is never built at runtime, so the
+ * call-site scan sees every form. Curly quotes live in the catalog, so a
+ * locale that does not use them simply does not.
  */
 export function describeChannelTextFieldChange(
   field: ChannelTextField,
   value: string | null | undefined,
 ): string {
   const trimmed = value?.trim();
-  if (!trimmed) {
-    return `cleared the ${field}`;
+  if (field === "topic") {
+    return trimmed
+      ? i18n.t("messages.system.changed-topic", { value: trimmed })
+      : i18n.t("messages.system.cleared-topic");
   }
-  return `changed the ${field} to ${OPEN_QUOTE}${trimmed}${CLOSE_QUOTE}`;
+  return trimmed
+    ? i18n.t("messages.system.changed-purpose", { value: trimmed })
+    : i18n.t("messages.system.cleared-purpose");
 }
 
 /**
@@ -72,5 +88,5 @@ export function describeChannelTextFieldChange(
  * untouched.
  */
 export function toInlineName(label: string, isSelf: boolean): string {
-  return isSelf ? "you" : label;
+  return isSelf ? i18n.t("messages.system.inline-you") : label;
 }

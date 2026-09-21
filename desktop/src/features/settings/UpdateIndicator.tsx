@@ -2,6 +2,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ComponentType } from "react";
 import { ExternalLink, RefreshCcw, RotateCw } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -17,41 +18,41 @@ type IndicatorIcon = ComponentType<{
   className?: string;
 }>;
 
+/** Labels are resolved at render time — module data must not read i18n. */
 const variants: Record<
   "available" | "downloading" | "installing" | "manual-required" | "ready",
   {
     Icon: IndicatorIcon;
     iconClassName?: string;
-    label: string;
+    labelKey: string;
     badgeColor: string;
   }
 > = {
   available: {
     Icon: RefreshCcw,
-    label: "Update available",
+    labelKey: "settings.updates.available",
     badgeColor: "bg-primary",
   },
   downloading: {
     Icon: Spinner,
     iconClassName: "h-4 w-4 border-2",
-    label: "Downloading update\u2026",
+    labelKey: "settings.updates.indicator-downloading",
     badgeColor: "bg-primary",
   },
   installing: {
     Icon: Spinner,
     iconClassName: "h-4 w-4 border-2",
-    label: "Installing update\u2026",
+    labelKey: "settings.updates.indicator-installing",
     badgeColor: "bg-primary",
   },
   "manual-required": {
     Icon: ExternalLink,
-    label:
-      "Update available — download from GitHub (use AppImage for auto-updates)",
+    labelKey: "settings.updates.indicator-manual-required",
     badgeColor: "bg-primary",
   },
   ready: {
     Icon: RotateCw,
-    label: "Update now",
+    labelKey: "settings.updates.update-now-label",
     badgeColor: "bg-emerald-500",
   },
 };
@@ -70,6 +71,7 @@ function getVariant(state: UpdateStatus["state"]) {
 }
 
 export function UpdateIndicator({ className }: { className?: string }) {
+  const { t } = useTranslation();
   const { status, installAndRelaunch } = useUpdaterContext();
   const variant = getVariant(status.state);
 
@@ -77,7 +79,8 @@ export function UpdateIndicator({ className }: { className?: string }) {
     return null;
   }
 
-  const { Icon, iconClassName = "h-4 w-4", label, badgeColor } = variant;
+  const { Icon, iconClassName = "h-4 w-4", labelKey, badgeColor } = variant;
+  const label = t(labelKey);
   const isActionable =
     status.state === "ready" || status.state === "manual-required";
   const handleClick =

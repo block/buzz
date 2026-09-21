@@ -11,6 +11,7 @@ import {
   isGenericToolTitle,
   normalizeToolStatus,
 } from "./agentSessionToolCatalog";
+import { i18n } from "@/i18n";
 import { classifyTool } from "./agentSessionToolClassifier";
 import { asRecord, asString, titleCase } from "./agentSessionUtils";
 import {
@@ -216,7 +217,7 @@ function describePermissionRequest(payload: Record<string, unknown>) {
     optionNames,
     descriptor: {
       renderClass: "permission" as const,
-      label: "Permission requested",
+      label: i18n.t("agents.transcript.permission-requested"),
       preview: title,
       action: { verb: "Requested", object: title },
       tone: "admin" as const,
@@ -513,7 +514,7 @@ function upsertPlan(
         id: updateMarkerId ?? `${id}:update:${timestamp}`,
         type: "plan",
         renderClass: "plan",
-        title: "Plan updated",
+        title: i18n.t("agents.transcript.plan-updated"),
         text: summarizePlanUpdate(text),
         timestamp,
         isUpdate: true,
@@ -775,7 +776,9 @@ export function processTranscriptEvent(
     const error = asString(payload.error) ?? "Unknown error";
     const displayError = friendlyTurnErrorCopy(error, payload.code);
     const title =
-      event.kind === "agent_panic" ? "Agent error (crash)" : "Turn error";
+      event.kind === "agent_panic"
+        ? i18n.t("agents.transcript.agent-error-crash")
+        : i18n.t("agents.transcript.turn-error");
     upsertTextItem(
       d,
       `${event.kind}:${ch}:${event.turnId ?? event.seq}`,

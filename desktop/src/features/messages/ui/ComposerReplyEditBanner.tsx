@@ -1,5 +1,6 @@
 import { CornerUpLeft, Pencil, X } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
@@ -25,6 +26,7 @@ export function ComposerReplyEditBanner({
   onCancelEdit?: () => void;
   onCancelReply?: () => void;
 }) {
+  const { t } = useTranslation();
   if (isEditing) {
     return (
       <div
@@ -34,12 +36,12 @@ export function ComposerReplyEditBanner({
         <Pencil aria-hidden className="h-4 w-4 shrink-0" />
         <div className="min-w-0 flex-1">
           <p className="truncate font-medium text-foreground">
-            Editing message
+            {t("messages.composer.editing-message")}
           </p>
         </div>
         {onCancelEdit ? (
           <Button
-            aria-label="Cancel edit"
+            aria-label={t("messages.composer.cancel-edit")}
             className="-mr-1 h-7 w-7 shrink-0 px-0 text-muted-foreground hover:text-foreground"
             disabled={isEditCancelDisabled}
             onClick={onCancelEdit}
@@ -63,7 +65,9 @@ export function ComposerReplyEditBanner({
         <CornerUpLeft aria-hidden className="mt-0.5 h-4 w-4 shrink-0" />
         <div className="min-w-0 flex-1">
           <p className="truncate font-medium text-foreground">
-            Replying to {replyTarget.author}
+            {t("messages.composer.replying-to", {
+              author: replyTarget.author,
+            })}
           </p>
           {replyTarget.body ? (
             <p className="truncate text-muted-foreground/80">
@@ -73,7 +77,7 @@ export function ComposerReplyEditBanner({
         </div>
         {onCancelReply ? (
           <Button
-            aria-label="Cancel reply"
+            aria-label={t("messages.composer.cancel-reply")}
             className="-mr-1 h-7 w-7 shrink-0 px-0 text-muted-foreground hover:text-foreground"
             onClick={onCancelReply}
             size="icon"

@@ -47,6 +47,7 @@ import {
   MembershipAvatarStack,
   SystemMessageAvatar,
 } from "./SystemMessageAvatars";
+import { i18n, useTranslation } from "@/i18n";
 
 const SYSTEM_ACTION_BUTTON_CLASS = "h-6 w-6 rounded-full p-0";
 const SYSTEM_ACTION_ICON_CLASS = "!h-4 !w-4";
@@ -99,7 +100,7 @@ function resolveLabel(
   profiles: UserProfileLookup | undefined,
 ): string {
   if (!pubkey) {
-    return "Someone";
+    return i18n.t("messages.system.someone");
   }
   return resolveUserLabel({ pubkey, currentPubkey, profiles });
 }
@@ -272,6 +273,7 @@ function MemberNamesInlineList({
   profiles: UserProfileLookup | undefined;
   targets: string[];
 }) {
+  const { t } = useTranslation();
   const visibleTargets = targets.slice(0, MAX_VISIBLE_ADDITIONAL_MEMBER_NAMES);
   const hiddenTargets = targets.slice(MAX_VISIBLE_ADDITIONAL_MEMBER_NAMES);
   const renderName = (pubkey: string) => (
@@ -293,9 +295,9 @@ function MemberNamesInlineList({
             ? null
             : isLast && hiddenTargets.length === 0
               ? visibleTargets.length === 2
-                ? " and "
-                : ", and "
-              : ", ";
+                ? t("messages.system.list-and")
+                : t("messages.system.list-and-comma")
+              : t("messages.system.list-separator");
         return (
           <React.Fragment key={pubkey}>
             {separator}
@@ -305,14 +307,16 @@ function MemberNamesInlineList({
       })}
       {hiddenTargets.length > 0 ? (
         <>
-          , and{" "}
+          {t("messages.system.others-connector")}{" "}
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 className="cursor-help rounded-xs hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                 type="button"
               >
-                {hiddenTargets.length} others
+                {t("messages.system.others-count", {
+                  count: hiddenTargets.length,
+                })}
               </button>
             </TooltipTrigger>
             <TooltipContent className="max-w-72 p-2 text-left" side="top">
@@ -415,13 +419,13 @@ function describeGroupedArrivals({
     if (isAllSelfJoinGroup) {
       return {
         title: membershipTitle,
-        action: "joined",
+        action: i18n.t("messages.system.joined"),
       };
     }
 
     return {
       title: membershipTitle,
-      action: "arrived",
+      action: i18n.t("messages.system.arrived"),
     };
   }
 
@@ -434,7 +438,7 @@ function describeGroupedArrivals({
           <ProfileName pubkey={sharedActor} underlineOnHover>
             {resolveInlineDisplayLabel(sharedActor, currentPubkey, profiles)}
           </ProfileName>
-          , along with{" "}
+          {i18n.t("messages.system.along-with-comma")}{" "}
           <MemberNamesInlineList
             agentPubkeys={agentPubkeys}
             currentPubkey={currentPubkey}
@@ -452,7 +456,8 @@ function describeGroupedArrivals({
       title: membershipTitle,
       action: (
         <>
-          {addedActionPrefix(isTargetCurrentUser)} along with{" "}
+          {addedActionPrefix(isTargetCurrentUser)}
+          {i18n.t("messages.system.along-with")}{" "}
           <MemberNamesInlineList
             agentPubkeys={agentPubkeys}
             currentPubkey={currentPubkey}
@@ -470,7 +475,7 @@ function describeGroupedArrivals({
       title: membershipTitle,
       action: (
         <>
-          joined along with{" "}
+          {i18n.t("messages.system.joined-along-with")}{" "}
           <MemberNamesInlineList
             agentPubkeys={agentPubkeys}
             currentPubkey={currentPubkey}
@@ -487,7 +492,7 @@ function describeGroupedArrivals({
     title: membershipTitle,
     action: (
       <>
-        arrived along with{" "}
+        {i18n.t("messages.system.arrived-along-with")}{" "}
         <MemberNamesInlineList
           agentPubkeys={agentPubkeys}
           currentPubkey={currentPubkey}
@@ -565,14 +570,14 @@ function describeSystemEvent(
       if (!payload.target) return null;
       return {
         title: membershipTitle,
-        action: "joined, then left the channel",
+        action: i18n.t("messages.system.joined-then-left"),
       };
     case "member_joined": {
       if (!payload.actor || !payload.target) return null;
       if (normalizePubkey(payload.actor) === normalizePubkey(payload.target)) {
         return {
           title: membershipTitle,
-          action: "joined the channel",
+          action: i18n.t("messages.system.joined-the-channel"),
         };
       }
       return {
@@ -594,12 +599,18 @@ function describeSystemEvent(
     case "member_left":
       return {
         title: actorName,
-        action: "left the channel",
+        action: i18n.t("messages.system.left-the-channel"),
       };
     case "member_removed":
       return {
         title: actorName,
-        action: <>removed {targetName} from the channel</>,
+        action: (
+          <>
+            {i18n.t("messages.system.removed-prefix")}
+            {targetName}
+            {i18n.t("messages.system.removed-suffix")}
+          </>
+        ),
       };
     case "topic_changed":
       return {
@@ -614,17 +625,17 @@ function describeSystemEvent(
     case "channel_created":
       return {
         title: actorName,
-        action: "created this channel",
+        action: i18n.t("messages.system.created-channel"),
       };
     case "channel_archived":
       return {
         title: actorName,
-        action: "archived this channel",
+        action: i18n.t("messages.system.archived-channel"),
       };
     case "channel_unarchived":
       return {
         title: actorName,
-        action: "unarchived this channel",
+        action: i18n.t("messages.system.unarchived-channel"),
       };
     case "message_deleted": {
       // Room-facing tombstone. When a moderator removed the message, the relay
@@ -632,13 +643,13 @@ function describeSystemEvent(
       // content and the reporter are never disclosed here.
       if (payload.public_reason) {
         return {
-          title: "Removed by community moderators",
+          title: i18n.t("messages.system.removed-by-moderators"),
           action: payload.public_reason,
         };
       }
       return {
         title: actorName,
-        action: "removed a message",
+        action: i18n.t("messages.system.removed-a-message"),
       };
     }
     default:
@@ -670,6 +681,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     remove: boolean,
   ) => Promise<void>;
 }) {
+  const { t } = useTranslation();
   const sourceMessages = React.useMemo(
     () => groupedMessages ?? [message],
     [groupedMessages, message],
@@ -827,7 +839,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
             <TooltipTrigger asChild>
               <PopoverTrigger asChild>
                 <Button
-                  aria-label="Open reactions"
+                  aria-label={t("messages.reaction.open-aria")}
                   className={SYSTEM_ACTION_BUTTON_CLASS}
                   size="sm"
                   type="button"
@@ -837,7 +849,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
                 </Button>
               </PopoverTrigger>
             </TooltipTrigger>
-            <TooltipContent>React</TooltipContent>
+            <TooltipContent>{t("messages.reaction.react")}</TooltipContent>
           </Tooltip>
           <PopoverContent
             align="end"

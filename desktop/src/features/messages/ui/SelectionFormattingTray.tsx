@@ -2,6 +2,7 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 import type { Editor } from "@tiptap/react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { getMountedEditorDom } from "./selectionFormattingTrayEditorDom";
@@ -114,6 +115,7 @@ export function SelectionFormattingTray({
   disabled = false,
   onLinkButton,
 }: SelectionFormattingTrayProps) {
+  const { t } = useTranslation();
   const [position, setPosition] = React.useState<TrayPosition | null>(null);
   const rafRef = React.useRef<number | null>(null);
   const suppressRightClickUpdatesRef = React.useRef(false);
@@ -254,7 +256,7 @@ export function SelectionFormattingTray({
       data-testid="selection-formatting-tray"
       onMouseDown={(event) => event.preventDefault()}
       role="toolbar"
-      aria-label="Selection formatting"
+      aria-label={t("messages.format.selection-formatting")}
       style={{ left: position.left, top: position.top }}
     >
       <div className="max-w-full overflow-x-auto">

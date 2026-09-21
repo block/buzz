@@ -2,34 +2,83 @@ import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
+import { i18n, useTranslation } from "@/i18n";
 import { Input } from "@/shared/ui/input";
 import { CronExpressionInput } from "./CronExpressionInput";
 import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
 import type { TriggerConfig } from "./workflowFormTypes";
 import {
   SCHEDULE_FREQUENCIES,
-  SCHEDULE_FREQUENCY_LABELS,
   scheduleFormFromTrigger,
+  scheduleFrequencyLabel,
   scheduleTriggerFromForm,
   scheduleWeekdaysFromCronField,
 } from "./workflowSchedule";
 import type { ScheduleFormState } from "./workflowSchedule";
 
-const WEEKDAYS = [
-  ["0", "Sunday", "S"],
-  ["1", "Monday", "M"],
-  ["2", "Tuesday", "T"],
-  ["3", "Wednesday", "W"],
-  ["4", "Thursday", "T"],
-  ["5", "Friday", "F"],
-  ["6", "Saturday", "S"],
-] as const;
+type WeekdayId =
+  | "friday"
+  | "monday"
+  | "saturday"
+  | "sunday"
+  | "thursday"
+  | "tuesday"
+  | "wednesday";
+
+/** `short` is the single-cell initial; it is localized separately. */
+const WEEKDAYS: Array<{ short: string; value: string; weekday: WeekdayId }> = [
+  { value: "0", weekday: "sunday", short: "S" },
+  { value: "1", weekday: "monday", short: "M" },
+  { value: "2", weekday: "tuesday", short: "T" },
+  { value: "3", weekday: "wednesday", short: "W" },
+  { value: "4", weekday: "thursday", short: "T" },
+  { value: "5", weekday: "friday", short: "F" },
+  { value: "6", weekday: "saturday", short: "S" },
+];
+
+function weekdayLabel(weekday: WeekdayId): string {
+  switch (weekday) {
+    case "friday":
+      return i18n.t("workflows.schedule.weekday-friday");
+    case "monday":
+      return i18n.t("workflows.schedule.weekday-monday");
+    case "saturday":
+      return i18n.t("workflows.schedule.weekday-saturday");
+    case "sunday":
+      return i18n.t("workflows.schedule.weekday-sunday");
+    case "thursday":
+      return i18n.t("workflows.schedule.weekday-thursday");
+    case "tuesday":
+      return i18n.t("workflows.schedule.weekday-tuesday");
+    case "wednesday":
+      return i18n.t("workflows.schedule.weekday-wednesday");
+  }
+}
+
+function weekdayInitial(weekday: WeekdayId): string {
+  switch (weekday) {
+    case "friday":
+      return i18n.t("workflows.schedule.weekday-initial-friday");
+    case "monday":
+      return i18n.t("workflows.schedule.weekday-initial-monday");
+    case "saturday":
+      return i18n.t("workflows.schedule.weekday-initial-saturday");
+    case "sunday":
+      return i18n.t("workflows.schedule.weekday-initial-sunday");
+    case "thursday":
+      return i18n.t("workflows.schedule.weekday-initial-thursday");
+    case "tuesday":
+      return i18n.t("workflows.schedule.weekday-initial-tuesday");
+    case "wednesday":
+      return i18n.t("workflows.schedule.weekday-initial-wednesday");
+  }
+}
 
 const MONTH_DAYS = Array.from({ length: 31 }, (_, index) => String(index + 1));
 
 function monthlyDayWarning(monthDay: string): string | null {
   return Number(monthDay) > 28
-    ? "This schedule won’t run in some months."
+    ? i18n.t("workflows.schedule.monthly-day-warning")
     : null;
 }
 
@@ -58,6 +107,7 @@ export function WorkflowScheduleFields({
   onUpdate: (trigger: TriggerConfig) => void;
   trigger: TriggerConfig;
 }) {
+  const { t } = useTranslation();
   const [forceCustomCron, setForceCustomCron] = React.useState(false);
   const parsedSchedule = scheduleFormFromTrigger(trigger);
   const schedule: ScheduleFormState = forceCustomCron
@@ -79,7 +129,7 @@ export function WorkflowScheduleFields({
   return (
     <div className="space-y-3">
       <fieldset>
-        <legend className="sr-only">Repeats</legend>
+        <legend className="sr-only">{t("workflows.schedule.repeats")}</legend>
         <div className="grid grid-cols-2 gap-2.5">
           {SCHEDULE_FREQUENCIES.map((frequency) => {
             const id = `wf-trigger-frequency-${frequency}`;
@@ -122,7 +172,7 @@ export function WorkflowScheduleFields({
                   )}
                   htmlFor={id}
                 >
-                  {SCHEDULE_FREQUENCY_LABELS[frequency]}
+                  {scheduleFrequencyLabel(frequency)}
                 </label>
               </div>
             );
@@ -133,15 +183,15 @@ export function WorkflowScheduleFields({
       {schedule.frequency === "weekly" ? (
         <fieldset className="space-y-1.5">
           <legend className="text-xs font-medium text-muted-foreground">
-            Repeat on
+            {t("workflows.schedule.repeat-on")}
           </legend>
           <div className="grid grid-cols-7 gap-2">
-            {WEEKDAYS.map(([value, label, shortLabel]) => {
+            {WEEKDAYS.map(({ value, weekday }) => {
               const id = `wf-trigger-weekday-${value}`;
               return (
                 <div className="relative" key={value}>
                   <input
-                    aria-label={label}
+                    aria-label={weekdayLabel(weekday)}
                     checked={selectedWeekdays.has(value)}
                     className="peer sr-only"
                     disabled={disabled}
@@ -156,7 +206,7 @@ export function WorkflowScheduleFields({
                         nextWeekdays.add(value);
                       }
                       updateSchedule({
-                        weekday: WEEKDAYS.map(([day]) => day)
+                        weekday: WEEKDAYS.map(({ value: day }) => day)
                           .filter((day) => nextWeekdays.has(day))
                           .join(","),
                       });
@@ -175,7 +225,7 @@ export function WorkflowScheduleFields({
                     )}
                     htmlFor={id}
                   >
-                    {shortLabel}
+                    {weekdayInitial(weekday)}
                   </label>
                 </div>
               );
@@ -186,7 +236,9 @@ export function WorkflowScheduleFields({
 
       {schedule.frequency === "monthly" ? (
         <div className="space-y-1.5">
-          <FieldLabel htmlFor="wf-trigger-month-day">Day of month</FieldLabel>
+          <FieldLabel htmlFor="wf-trigger-month-day">
+            {t("workflows.schedule.day-of-month")}
+          </FieldLabel>
           <FormSelect
             disabled={disabled}
             id="wf-trigger-month-day"
@@ -213,7 +265,9 @@ export function WorkflowScheduleFields({
 
       {usesTime ? (
         <div className="space-y-1.5">
-          <FieldLabel htmlFor="wf-trigger-time">Run time (UTC)</FieldLabel>
+          <FieldLabel htmlFor="wf-trigger-time">
+            {t("workflows.schedule.run-time")}
+          </FieldLabel>
           <Input
             disabled={disabled}
             id="wf-trigger-time"
@@ -235,7 +289,7 @@ export function WorkflowScheduleFields({
       {schedule.frequency === "custom_interval" ? (
         <div className="space-y-1.5">
           <FieldLabel htmlFor="wf-trigger-interval">
-            Existing interval
+            {t("workflows.schedule.existing-interval")}
           </FieldLabel>
           <Input
             autoCapitalize="off"
@@ -248,8 +302,7 @@ export function WorkflowScheduleFields({
             value={schedule.customInterval}
           />
           <p className="text-xs text-muted-foreground">
-            Keep this legacy interval or choose a repeat option above. All
-            schedules use UTC.
+            {t("workflows.schedule.interval-note")}
           </p>
         </div>
       ) : null}

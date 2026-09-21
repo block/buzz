@@ -23,6 +23,7 @@
  * events at or after `lastSeenCreatedAt - skew` and can repeat a seen delta.
  */
 
+import { i18n } from "@/i18n";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 
 const JOIN_ALERT_STORAGE_PREFIX = "buzz-community-join-seen.v1";
@@ -201,12 +202,14 @@ export function reconcileJoinAlertLedger({
 export function joinAlertTitle(communityName: string | null | undefined) {
   const trimmed = communityName?.trim();
   return trimmed && trimmed.length > 0
-    ? `New member in ${trimmed}`
-    : "New community member";
+    ? i18n.t("members.join-alerts.title-in-community", {
+        community: trimmed,
+      })
+    : i18n.t("members.join-alerts.title");
 }
 
 export function joinAlertBody(displayName: string) {
-  return `${displayName} joined`;
+  return i18n.t("members.join-alerts.body-joined", { name: displayName });
 }
 
 /**
@@ -223,5 +226,8 @@ export function joinAlertBody(displayName: string) {
 export const JOIN_ALERT_MAX_INDIVIDUAL = 3;
 
 export function joinAlertSummaryBody(count: number) {
-  return `${count} new members joined`;
+  // Deliberately a plain interpolation, not an i18next plural: this body only
+  // fires above JOIN_ALERT_MAX_INDIVIDUAL, and a `_one` branch would reword
+  // shipped English.
+  return i18n.t("members.join-alerts.summary-body", { count });
 }

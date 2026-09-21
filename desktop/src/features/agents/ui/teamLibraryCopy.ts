@@ -1,16 +1,23 @@
-export const teamCatalogCopy = {
-  chooseFromCatalog: "Choose from catalog",
-  dialogTitle: "Team Catalog",
-  dialogDescription: "Browse teams shared to this relay.",
-  emptyCatalogTitle: "No teams are being shared",
-  emptyCatalogDescription: "Shared teams will appear here.",
-  addAction: "Add team",
-  addedAction: "Added to my teams",
-  addingAction: "Adding…",
-  shareTitle: "Share to catalog",
-  shareDescription:
-    "Anyone in this community can find and add a copy of this team. Both the team instructions and every member’s instructions are shared as plaintext. Memories and secrets aren’t included.",
-} as const;
+import { i18n } from "@/i18n";
+
+/**
+ * Copy for the team catalog / "My teams" surfaces. Resolved through `i18n.t` at
+ * call time, so callers read the strings while rendering rather than at import.
+ */
+export function teamCatalogCopy() {
+  return {
+    chooseFromCatalog: i18n.t("agents.team-catalog.choose-from-catalog"),
+    dialogTitle: i18n.t("agents.team-catalog.title"),
+    dialogDescription: i18n.t("agents.team-catalog.description"),
+    emptyCatalogTitle: i18n.t("agents.team-catalog.empty-title"),
+    emptyCatalogDescription: i18n.t("agents.team-catalog.empty-description"),
+    addAction: i18n.t("agents.team-catalog.add-team"),
+    addedAction: i18n.t("agents.team-catalog.added-team"),
+    addingAction: i18n.t("agents.team-catalog.adding-team"),
+    shareTitle: i18n.t("agents.team-catalog.share-title"),
+    shareDescription: i18n.t("agents.team-catalog.share-description"),
+  };
+}
 
 /**
  * The warning notice shown when the backend automatically queues a retraction
@@ -25,7 +32,7 @@ export function teamAutoRetractedNotice(
   teamName: string,
   reason: string,
 ): string {
-  return `"${teamName}" has been queued for removal from the community catalog because it can no longer be projected: ${reason}`;
+  return i18n.t("agents.team-catalog.auto-retracted", { teamName, reason });
 }
 
 /**
@@ -42,10 +49,10 @@ export function teamShareNotice(
 ): string {
   if (publicationStatus === "queued") {
     return shared
-      ? `Sharing ${teamName} is queued. It will appear after the relay accepts the update.`
-      : `Removing ${teamName} is queued. It may remain discoverable until the relay accepts the update.`;
+      ? i18n.t("agents.team-catalog.share-queued", { teamName })
+      : i18n.t("agents.team-catalog.unshare-queued", { teamName });
   }
   return shared
-    ? `Published ${teamName} to the community catalog.`
-    : `${teamName} is no longer discoverable in the community catalog.`;
+    ? i18n.t("agents.team-catalog.published", { teamName })
+    : i18n.t("agents.team-catalog.unshared", { teamName });
 }

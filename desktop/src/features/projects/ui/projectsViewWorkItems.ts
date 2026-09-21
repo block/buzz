@@ -6,6 +6,7 @@ import type { Project } from "@/features/projects/hooks";
 import { hasLocalRepositoryCheckout } from "@/features/projects/lib/projectLocalRepos";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import type { useOpenProjectTerminal } from "@/features/projects/ui/useOpenProjectTerminal";
+import { useTranslation } from "@/i18n";
 
 // Split from ProjectsView.tsx to keep that file under the per-file line cap.
 
@@ -45,18 +46,21 @@ export function useContextWorkItems(
 export function useDeleteProjectHandler(
   mutateAsync: (project: Project) => Promise<unknown>,
 ) {
+  const { t } = useTranslation();
   return React.useCallback(
     async (project: Project) => {
       try {
         await mutateAsync(project);
-        toast.success("Project deleted");
+        toast.success(t("sidebar.projects.deleted"));
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to delete project",
+          error instanceof Error
+            ? error.message
+            : t("sidebar.projects.delete-failed"),
         );
       }
     },
-    [mutateAsync],
+    [mutateAsync, t],
   );
 }
 

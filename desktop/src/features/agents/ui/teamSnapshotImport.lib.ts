@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type {
   TeamSnapshotImportMemberResult,
   TeamSnapshotImportResult,
@@ -43,21 +44,31 @@ export function deriveImportToast(
     const parts: string[] = [];
     if (totalMemoryErrors > 0) {
       parts.push(
-        `${totalMemoryErrors} memory entr${totalMemoryErrors === 1 ? "y" : "ies"} failed to restore`,
+        i18n.t("agents.team-import.memory-errors", {
+          count: totalMemoryErrors,
+        }),
       );
     }
     if (profileSyncFailureCount > 0) {
       parts.push(
-        `${profileSyncFailureCount} member${profileSyncFailureCount === 1 ? "" : "s"} failed to sync profile${profileSyncFailureCount === 1 ? "" : "s"}`,
+        i18n.t("agents.team-import.profile-sync-errors", {
+          count: profileSyncFailureCount,
+        }),
       );
     }
     return {
       type: "error",
-      message: `${result.team.name} imported, but ${parts.join(" and ")}.`,
+      message: i18n.t("agents.team-import.partial", {
+        name: result.team.name,
+        parts: parts.join(i18n.t("agents.team-import.and-separator")),
+      }),
     };
   }
   return {
     type: "notice",
-    message: `Imported ${result.team.name} with ${memberCount} member${memberCount === 1 ? "" : "s"}.`,
+    message: i18n.t("agents.team-import.success", {
+      count: memberCount,
+      name: result.team.name,
+    }),
   };
 }

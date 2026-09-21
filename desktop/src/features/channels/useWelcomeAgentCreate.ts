@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
+import { useTranslation } from "@/i18n";
 import { useSendMessageMutation } from "@/features/messages/hooks";
 import { isWelcomeExperienceChannel } from "@/features/onboarding/welcome";
 import type { Channel, Identity } from "@/shared/api/types";
@@ -20,6 +21,7 @@ export function useWelcomeAgentCreate({
   currentIdentity: Identity | null | undefined;
   welcomeGuideAgent: WelcomeGuideAgent | null | undefined;
 }) {
+  const { t } = useTranslation();
   const sendMessageMutation = useSendMessageMutation(
     activeChannel,
     currentIdentity ?? undefined,
@@ -53,9 +55,7 @@ export function useWelcomeAgentCreate({
 
   const createInChat = React.useCallback(async () => {
     if (!activeChannel || !welcomeGuideAgent) {
-      setError(
-        "The welcome guide is unavailable. Create the agent manually instead.",
-      );
+      setError(t("channels.welcome.error-guide-unavailable"));
       return;
     }
     setError(null);
@@ -71,10 +71,10 @@ export function useWelcomeAgentCreate({
       setError(
         cause instanceof Error
           ? cause.message
-          : "Could not start the conversation.",
+          : t("channels.welcome.error-send-failed"),
       );
     }
-  }, [activeChannel, sendMessageMutation, welcomeGuideAgent]);
+  }, [activeChannel, sendMessageMutation, t, welcomeGuideAgent]);
 
   return {
     createInChat,

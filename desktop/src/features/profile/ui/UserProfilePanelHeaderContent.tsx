@@ -4,9 +4,10 @@ import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarke
 import { CopyButton } from "@/features/agents/ui/CopyButton";
 import { MemoryRefreshButton } from "@/features/agent-memory/ui/MemorySection";
 import {
-  PROFILE_PANEL_VIEW_TITLES,
+  profilePanelViewLabel,
   type ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanelUtils";
+import { i18n } from "@/i18n";
 import {
   AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
@@ -35,13 +36,13 @@ export function getUserProfilePanelHeaderContent({
   view: ProfilePanelView;
   viewerIsOwner: boolean;
 }) {
-  const title = PROFILE_PANEL_VIEW_TITLES[view];
+  const title = profilePanelViewLabel(view);
   const shouldShowLogDetails =
     (view === "diagnostics" || view === "logs") && Boolean(logSubtitle);
   const headerLeftContent = (
     <AuxiliaryPanelHeaderGroup
       align={shouldShowLogDetails ? "start" : "center"}
-      backButtonAriaLabel="Back to profile"
+      backButtonAriaLabel={i18n.t("profile.header.back-aria")}
       backButtonTestId="user-profile-panel-back"
       onBack={view !== "summary" ? onBack : undefined}
     >
@@ -71,7 +72,7 @@ export function getUserProfilePanelHeaderContent({
       {view === "summary" ? agentSettingsMenu : null}
       {view === "summary" && onEditAgent ? (
         <Button
-          aria-label="Edit agent"
+          aria-label={i18n.t("profile.header.edit-agent-aria")}
           className="text-sm"
           data-testid="user-profile-header-edit-agent"
           onClick={onEditAgent}
@@ -79,14 +80,14 @@ export function getUserProfilePanelHeaderContent({
           type="button"
           variant="ghost"
         >
-          Edit
+          {i18n.t("profile.header.edit")}
         </Button>
       ) : null}
       {shouldShowLogDetails ? (
         <CopyButton
           className="text-muted-foreground hover:text-foreground"
           iconOnly
-          label="Copy log"
+          label={i18n.t("profile.header.copy-log")}
           size="icon"
           value={logCopyValue ?? ""}
           variant="ghost"

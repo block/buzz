@@ -2,6 +2,7 @@ import * as React from "react";
 import { ChevronRight } from "lucide-react";
 
 import { ProfileSectionGroup } from "@/features/profile/ui/UserProfilePanelFields";
+import { useTranslation } from "@/i18n";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -16,6 +17,7 @@ function ProfileInstanceRow({
   instance: ManagedAgent;
   onOpenInstance: (pubkey: string) => void;
 }) {
+  const { t } = useTranslation();
   const isCurrent = instance.pubkey === currentPubkey;
   return (
     <button
@@ -29,9 +31,9 @@ function ProfileInstanceRow({
       </span>
       <span className="text-xs capitalize text-muted-foreground">
         {archived
-          ? "Archived"
+          ? t("profile.instances.archived")
           : isCurrent
-            ? "Current"
+            ? t("profile.instances.current")
             : instance.status.replace("_", " ")}
       </span>
       <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -58,15 +60,18 @@ export function ProfileInstancesSection({
   instances: ManagedAgent[];
   onOpenInstance: (pubkey: string) => void;
 }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = React.useState(false);
   const totalCount = instances.length + archivedInstances.length;
   if (totalCount === 0) return null;
-  const instanceCountLabel = `${totalCount} instance${totalCount === 1 ? "" : "s"}`;
+  const instanceCountLabel = t("profile.instances.count", {
+    count: totalCount,
+  });
 
   return (
     <ProfileSectionGroup
       testId="user-profile-instances-section"
-      title="Instances"
+      title={t("profile.instances.title")}
     >
       <button
         aria-expanded={expanded}
@@ -101,7 +106,7 @@ export function ProfileInstancesSection({
                 className="px-4 pb-1 pt-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
                 data-testid="user-profile-instances-archived-header"
               >
-                Archived
+                {t("profile.instances.archived")}
               </p>
               {archivedInstances.map((instance) => (
                 <ProfileInstanceRow

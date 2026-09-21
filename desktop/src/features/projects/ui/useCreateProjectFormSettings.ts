@@ -18,6 +18,7 @@ import {
   PROJECT_HOME_TEMPLATE_ID,
 } from "@/features/projects/lib/projectHomeTemplate";
 import type { ProjectListingVisibility } from "@/features/projects/projectCreation";
+import { i18n } from "@/i18n";
 import type {
   AcpRuntime,
   AgentPersona,
@@ -48,7 +49,7 @@ export function buildCreateProjectAgents(input: {
     if (!resolved.runtime) {
       throw new Error(
         resolved.warnings[0] ??
-          "No agent runtimes are available. Install a runtime to add agents.",
+          i18n.t("projects.create-project-form.no-runtimes"),
       );
     }
     seenPersonaIds.add(persona.id);

@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
+import { i18n } from "@/i18n";
 import { canonicalNpub, truncateNpub } from "@/shared/lib/pubkey";
 import {
   HoverCopyIndicator,
@@ -46,6 +47,47 @@ export type ProfileField = {
   testId?: string;
   trailingNode?: React.ReactNode;
 };
+
+/**
+ * `label` doubles as a stable machine id — bucketing, ordering and the focus
+ * views all compare on it — so the builders keep English ids and the display
+ * string resolves here. Keys stay literal: the call-site audit cannot resolve
+ * a computed key. Unknown ids (protocol labels like `NIP-05`) pass through.
+ */
+export function profileFieldLabel(label: string): string {
+  switch (label) {
+    case "ACP command":
+      return i18n.t("profile.fields.acp-command");
+    case "Agent profile":
+      return i18n.t("profile.fields.agent-profile");
+    case "Agent type":
+      return i18n.t("profile.fields.agent-type");
+    case "Backend":
+      return i18n.t("profile.fields.backend");
+    case "Capabilities":
+      return i18n.t("profile.fields.capabilities");
+    case "Last error":
+      return i18n.t("profile.fields.last-error");
+    case "Managed by":
+      return i18n.t("profile.fields.managed-by");
+    case "MCP command":
+      return i18n.t("profile.fields.mcp-command");
+    case "Public key":
+      return i18n.t("profile.fields.public-key");
+    case "Runtime":
+      return i18n.t("profile.fields.runtime");
+    case "Start on launch":
+      return i18n.t("profile.fields.start-on-launch");
+    case "Status":
+      return i18n.t("profile.fields.status");
+    case "Visibility":
+      return i18n.t("profile.fields.visibility");
+    case "Who can send instructions":
+      return i18n.t("profile.fields.who-can-send-instructions");
+    default:
+      return label;
+  }
+}
 
 const AGENT_INFO_LABELS = new Set([
   "Public key",
@@ -205,7 +247,7 @@ export function buildPublicFields({
 
   if (!pubkey && persona) {
     fields.push({
-      displayValue: "Not deployed",
+      displayValue: i18n.t("profile.fields.not-deployed"),
       icon: Activity,
       label: "Status",
       testId: "user-profile-agent-status",
@@ -318,7 +360,7 @@ export function buildOwnerFields({
   } else if (ownerPubkey) {
     fields.push({
       copyValue: canonicalNpub(ownerPubkey) ?? undefined,
-      displayValue: "Declared owner verified",
+      displayValue: i18n.t("profile.fields.owner-verified"),
       icon: UserRound,
       label: "Agent profile",
       testId: "user-profile-agent-profile",
@@ -502,12 +544,13 @@ function ProfileFieldRow({
   variant: "default" | "runtime";
 }) {
   const Icon = field.icon;
+  const label = profileFieldLabel(field.label);
   const isCopyable = Boolean(field.copyValue);
   const isActionable = Boolean(field.onClick);
   const isTrailingDisplay =
     variant === "runtime" && field.label === "Status" && field.displayNode;
   const { copied, copy } = useCopyFeedback({
-    label: field.label,
+    label,
     value: field.copyValue ?? "",
   });
 
@@ -521,7 +564,7 @@ function ProfileFieldRow({
       ) : null}
       <span className="min-w-0 flex-1 text-left">
         <span className="block text-sm font-medium text-foreground">
-          {field.label}
+          {label}
         </span>
         {!isTrailingDisplay ? (
           <span
@@ -553,11 +596,11 @@ function ProfileFieldRow({
   if (isActionable) {
     return (
       <button
-        aria-label={`Open ${field.label}`}
+        aria-label={i18n.t("profile.fields.open-aria", { name: label })}
         className="group flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         data-testid={field.testId}
         onClick={field.onClick}
-        title={`Open ${field.label}`}
+        title={i18n.t("profile.fields.open-aria", { name: label })}
         type="button"
       >
         {content}
@@ -568,11 +611,11 @@ function ProfileFieldRow({
   if (isCopyable && field.copyValue) {
     return (
       <button
-        aria-label={`Copy ${field.label}`}
+        aria-label={i18n.t("profile.fields.copy-aria", { name: label })}
         className="group flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         data-testid={field.testId}
         onClick={() => void copy()}
-        title={`Copy ${field.label}`}
+        title={i18n.t("profile.fields.copy-aria", { name: label })}
         type="button"
       >
         {content}

@@ -31,6 +31,7 @@ import {
   useLeaveChannelMutation,
 } from "@/features/channels/hooks";
 import { ChannelDeleteConfirmationDialog } from "@/features/channels/ui/ChannelManagementModerationActions";
+import { useTranslation } from "@/i18n";
 
 export type SectionDialogValue = {
   name: string;
@@ -60,6 +61,7 @@ function SectionNameDialog({
   isConfirmDisabled,
   onConfirm,
 }: SectionNameDialogProps) {
+  const { t } = useTranslation();
   const [name, setName] = React.useState(initialValue);
   const [icon, setIcon] = React.useState(initialIcon);
   const [pickerOpen, setPickerOpen] = React.useState(false);
@@ -108,7 +110,7 @@ function SectionNameDialog({
               <div className="relative shrink-0">
                 <PopoverTrigger asChild>
                   <button
-                    aria-label="Choose section icon"
+                    aria-label={t("sidebar.sections.choose-icon")}
                     className="flex h-9 w-9 items-center justify-center rounded-md border border-input text-lg transition-colors hover:bg-accent"
                     type="button"
                   >
@@ -121,7 +123,7 @@ function SectionNameDialog({
                 </PopoverTrigger>
                 {icon ? (
                   <button
-                    aria-label="Clear section icon"
+                    aria-label={t("sidebar.sections.clear-icon")}
                     className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-background bg-muted text-muted-foreground hover:bg-accent hover:text-foreground"
                     onClick={(event) => {
                       event.stopPropagation();
@@ -147,7 +149,7 @@ function SectionNameDialog({
               autoCorrect="off"
               className="flex-1"
               onChange={(event) => setName(event.target.value)}
-              placeholder="Section name"
+              placeholder={t("sidebar.sections.name")}
               ref={inputRef}
               spellCheck={false}
               value={name}
@@ -156,7 +158,7 @@ function SectionNameDialog({
           <div className="flex justify-end gap-2 mt-4">
             <DialogClose asChild>
               <Button variant="ghost" type="button">
-                Cancel
+                {t("sidebar.common.cancel")}
               </Button>
             </DialogClose>
             <Button
@@ -183,14 +185,15 @@ export function CreateSectionDialog({
   onOpenChange,
   onConfirm,
 }: CreateSectionDialogProps) {
+  const { t } = useTranslation();
   return (
     <SectionNameDialog
       open={open}
       onOpenChange={onOpenChange}
-      title="Create section"
-      description="Sections let you group related channels in the sidebar."
+      title={t("sidebar.sections.create")}
+      description={t("sidebar.sections.create-description")}
       initialValue=""
-      confirmLabel="Create"
+      confirmLabel={t("sidebar.sections.confirm-create")}
       isConfirmDisabled={(trimmed) => trimmed.length === 0}
       onConfirm={onConfirm}
     />
@@ -212,15 +215,16 @@ export function RenameSectionDialog({
   sectionIcon,
   onConfirm,
 }: RenameSectionDialogProps) {
+  const { t } = useTranslation();
   return (
     <SectionNameDialog
       open={open}
       onOpenChange={onOpenChange}
-      title="Rename section"
-      description="Enter a new name for this section."
+      title={t("sidebar.sections.rename")}
+      description={t("sidebar.sections.rename-description")}
       initialValue={sectionName}
       initialIcon={sectionIcon}
-      confirmLabel="Save"
+      confirmLabel={t("sidebar.sections.confirm-save")}
       isConfirmDisabled={(trimmed, icon) =>
         trimmed.length === 0 ||
         (trimmed === sectionName && icon === (sectionIcon ?? ""))
@@ -245,27 +249,32 @@ export function DeleteSectionAlertDialog({
   channelCount,
   onConfirm,
 }: DeleteSectionAlertDialogProps) {
-  const channelLabel =
-    channelCount === 1 ? "1 channel" : `${channelCount} channels`;
+  const { t } = useTranslation();
+  const channelLabel = t("sidebar.sections.channel-count", {
+    count: channelCount,
+  });
   const description =
     channelCount === 0
-      ? `Delete section "${sectionName}"? It has no channels.`
-      : `Delete section "${sectionName}"? Its ${channelLabel} will move back to the default Channels group.`;
+      ? t("sidebar.sections.delete-body-empty", { sectionName })
+      : t("sidebar.sections.delete-body", {
+          channelLabel,
+          sectionName,
+        });
 
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete section</AlertDialogTitle>
+          <AlertDialogTitle>{t("sidebar.sections.delete")}</AlertDialogTitle>
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogCancel>{t("sidebar.common.cancel")}</AlertDialogCancel>
           <AlertDialogAction
             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             onClick={onConfirm}
           >
-            Delete
+            {t("sidebar.sections.confirm-delete")}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -290,22 +299,23 @@ export function LeaveChannelAlertDialog({
   channelName,
   onConfirm,
 }: LeaveChannelAlertDialogProps) {
+  const { t } = useTranslation();
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Leave channel</AlertDialogTitle>
+          <AlertDialogTitle>{t("sidebar.channel.leave")}</AlertDialogTitle>
           <AlertDialogDescription>
-            {`Leave "${channelName}"? You'll stop receiving its messages and can rejoin later.`}
+            {t("sidebar.channel.leave-body", { channelName })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogCancel>{t("sidebar.common.cancel")}</AlertDialogCancel>
           <AlertDialogAction
             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             onClick={onConfirm}
           >
-            Leave
+            {t("sidebar.channel.confirm-leave")}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

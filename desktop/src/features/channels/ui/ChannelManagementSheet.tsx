@@ -23,6 +23,7 @@ import {
 } from "@/features/channels/hooks";
 import { compareMembersByRole } from "@/features/channels/lib/memberUtils";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useTranslation } from "@/i18n";
 import { useChannelWorkflowsQuery } from "@/features/workflows/hooks";
 import { DEFAULT_EPHEMERAL_TTL_SECONDS } from "@/features/channels/lib/ephemeralChannel";
 import type { Channel, ChannelMember, Workflow } from "@/shared/api/types";
@@ -106,6 +107,7 @@ export function ChannelManagementSheet({
   open,
   transparentChrome = false,
 }: ChannelManagementSheetProps) {
+  const { t } = useTranslation();
   const { isDark } = useTheme();
   const { goNewWorkflowForChannel, goWorkflow } = useAppNavigation();
   const {
@@ -486,8 +488,9 @@ export function ChannelManagementSheet({
             <div className="flex max-h-[85vh] flex-col">
               <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
                 <DialogTitle>
-                  Edit {nextVisibility === "private" ? "private" : "public"}{" "}
-                  channel
+                  {nextVisibility === "private"
+                    ? t("channels.manage.edit-private-channel")
+                    : t("channels.manage.edit-public-channel")}
                 </DialogTitle>
               </DialogHeader>
 
@@ -498,7 +501,7 @@ export function ChannelManagementSheet({
                       className="text-sm font-medium text-foreground"
                       htmlFor="channel-name"
                     >
-                      Name
+                      {t("channels.manage.name")}
                     </label>
                     <div
                       className={cn(
@@ -527,7 +530,7 @@ export function ChannelManagementSheet({
                       className="text-sm font-medium text-foreground"
                       htmlFor="channel-description"
                     >
-                      Description
+                      {t("channels.manage.description")}
                     </label>
                     <div className={CHANNEL_FORM_FIELD_SHELL_CLASS}>
                       <Textarea
@@ -595,7 +598,7 @@ export function ChannelManagementSheet({
                   type="button"
                   variant="outline"
                 >
-                  Cancel
+                  {t("channels.manage.cancel")}
                 </Button>
                 <Button
                   data-testid="channel-management-save-changes"
@@ -604,7 +607,9 @@ export function ChannelManagementSheet({
                   size="sm"
                   type="button"
                 >
-                  {isSavingChannelEdits ? "Saving..." : "Save changes"}
+                  {isSavingChannelEdits
+                    ? t("channels.manage.saving")
+                    : t("channels.manage.save-changes")}
                 </Button>
               </div>
             </div>
@@ -703,6 +708,7 @@ function ChannelManagementPanelContent({
   setActiveView,
   unarchiveChannelMutation,
 }: ChannelManagementPanelContentProps) {
+  const { t } = useTranslation();
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useScrollBoundaryLock(scrollRef);
 
@@ -727,7 +733,7 @@ function ChannelManagementPanelContent({
         transparent={transparentChrome}
       >
         <AuxiliaryPanelHeaderGroup
-          backButtonAriaLabel="Back to channel"
+          backButtonAriaLabel={t("channels.manage.back-to-channel")}
           backButtonTestId="channel-management-back"
           mode={mode}
           onBack={
@@ -739,15 +745,15 @@ function ChannelManagementPanelContent({
           <DialogPrimitive.Title asChild>
             <AuxiliaryPanelTitle>
               {activeView === "canvas"
-                ? "Canvas"
+                ? t("channels.manage.canvas")
                 : activeView === "workflows"
-                  ? "Workflows"
-                  : "Channel Settings"}
+                  ? t("channels.manage.workflows")
+                  : t("channels.manage.channel-settings")}
             </AuxiliaryPanelTitle>
           </DialogPrimitive.Title>
         </AuxiliaryPanelHeaderGroup>
         <DialogPrimitive.Description className="sr-only">
-          Channel settings
+          {t("channels.manage.channel-settings-desc")}
         </DialogPrimitive.Description>
       </AuxiliaryPanelHeader>
 
@@ -776,7 +782,10 @@ function ChannelManagementPanelContent({
               </p>
             ) : null}
 
-            <FieldGroup testId="channel-management-details" title="Details">
+            <FieldGroup
+              testId="channel-management-details"
+              title={t("channels.manage.details")}
+            >
               {resolvedChannel.channelType !== "dm" ? (
                 <>
                   <ChannelTypeDetailRow
@@ -786,19 +795,19 @@ function ChannelManagementPanelContent({
                   />
                   <EditableInfoFieldRow
                     editTestId="channel-management-edit-visibility"
-                    label="Visibility"
+                    label={t("channels.manage.visibility-label")}
                     onEdit={canEditChannel ? onOpenEdit : undefined}
                     testId="channel-management-visibility"
                     value={
                       resolvedChannel.visibility === "private"
-                        ? "Private"
-                        : "Public"
+                        ? t("channels.manage.private")
+                        : t("channels.manage.public")
                     }
                   />
                 </>
               ) : null}
               <InfoFieldRow
-                label="Members"
+                label={t("channels.manage.members")}
                 onClick={onOpenMembers}
                 testId="channel-management-member-count"
                 trailing={
@@ -807,10 +816,12 @@ function ChannelManagementPanelContent({
                     members={members}
                   />
                 }
-                value={`${memberCount} member${memberCount === 1 ? "" : "s"}`}
+                value={t("channels.manage.member-count", {
+                  count: memberCount,
+                })}
               />
               <CopyFieldRow
-                label="Channel ID"
+                label={t("channels.manage.channel-id-label")}
                 testId="channel-management-channel-id"
                 value={resolvedChannel.id}
               />
@@ -820,26 +831,34 @@ function ChannelManagementPanelContent({
               <div className="space-y-3">
                 <IngressRow
                   description={canvasPreview}
-                  helpText="Use the canvas as a shared space for notes, plans, and other channel information."
+                  helpText={t("channels.manage.canvas-help")}
                   icon={BookOpenText}
-                  label="Canvas"
+                  label={t("channels.manage.canvas")}
                   onClick={() => setActiveView("canvas")}
                   testId="channel-canvas-ingress"
-                  trailing={canvasQuery.isLoading ? "Loading..." : undefined}
+                  trailing={
+                    canvasQuery.isLoading
+                      ? t("channels.manage.loading")
+                      : undefined
+                  }
                 />
                 {workflowsEnabled ? (
                   <IngressRow
                     description={
                       workflowsQuery.isLoading
                         ? undefined
-                        : `${workflowsQuery.data?.length ?? 0} workflow${workflowsQuery.data?.length === 1 ? "" : "s"}`
+                        : t("channels.manage.workflow-count", {
+                            count: workflowsQuery.data?.length ?? 0,
+                          })
                     }
                     icon={WorkflowIcon}
-                    label="Workflows"
+                    label={t("channels.manage.workflows")}
                     onClick={() => setActiveView("workflows")}
                     testId="channel-workflows-ingress"
                     trailing={
-                      workflowsQuery.isLoading ? "Loading..." : undefined
+                      workflowsQuery.isLoading
+                        ? t("channels.manage.loading")
+                        : undefined
                     }
                   />
                 ) : null}
@@ -849,13 +868,19 @@ function ChannelManagementPanelContent({
                 description={
                   workflowsQuery.isLoading
                     ? undefined
-                    : `${workflowsQuery.data?.length ?? 0} workflow${workflowsQuery.data?.length === 1 ? "" : "s"}`
+                    : t("channels.manage.workflow-count", {
+                        count: workflowsQuery.data?.length ?? 0,
+                      })
                 }
                 icon={WorkflowIcon}
-                label="Workflows"
+                label={t("channels.manage.workflows")}
                 onClick={() => setActiveView("workflows")}
                 testId="channel-workflows-ingress"
-                trailing={workflowsQuery.isLoading ? "Loading..." : undefined}
+                trailing={
+                  workflowsQuery.isLoading
+                    ? t("channels.manage.loading")
+                    : undefined
+                }
               />
             ) : null}
 
@@ -863,13 +888,13 @@ function ChannelManagementPanelContent({
               <FieldGroup testId="channel-management-actions">
                 {canJoin ? (
                   <ActionFieldRow
-                    description="Add this channel to your sidebar"
+                    description={t("channels.manage.add-to-sidebar")}
                     disabled={joinChannelMutation.isPending}
                     icon={DoorOpen}
                     label={
                       joinChannelMutation.isPending
-                        ? "Joining channel..."
-                        : "Join channel"
+                        ? t("channels.manage.joining-channel")
+                        : t("channels.manage.join-channel")
                     }
                     onClick={() => {
                       void joinChannelMutation.mutateAsync();
@@ -883,8 +908,8 @@ function ChannelManagementPanelContent({
                     icon={DoorClosed}
                     label={
                       leaveChannelMutation.isPending
-                        ? "Leaving channel..."
-                        : "Leave channel"
+                        ? t("channels.manage.leaving-channel")
+                        : t("channels.manage.leave-channel")
                     }
                     onClick={() => {
                       void leaveChannelMutation.mutateAsync().then(() => {
@@ -901,8 +926,8 @@ function ChannelManagementPanelContent({
                       icon={ArchiveRestore}
                       label={
                         unarchiveChannelMutation.isPending
-                          ? "Restoring channel..."
-                          : "Unarchive channel"
+                          ? t("channels.manage.restoring-channel")
+                          : t("channels.manage.unarchive-channel")
                       }
                       onClick={() => {
                         void unarchiveChannelMutation.mutateAsync();
@@ -915,8 +940,8 @@ function ChannelManagementPanelContent({
                       icon={Archive}
                       label={
                         archiveChannelMutation.isPending
-                          ? "Archiving channel..."
-                          : "Archive channel"
+                          ? t("channels.manage.archiving-channel")
+                          : t("channels.manage.archive-channel")
                       }
                       onClick={() => {
                         void archiveChannelMutation.mutateAsync();
@@ -940,7 +965,7 @@ function ChannelManagementPanelContent({
                         destructive
                         disabled={deleteChannelMutation.isPending}
                         icon={Trash2}
-                        label="Delete channel"
+                        label={t("channels.manage.delete-channel")}
                         testId="channel-management-delete"
                       />
                     }

@@ -84,6 +84,7 @@ import {
 import { useProfileInteractionActions } from "@/features/profile/ui/useProfileInteractionActions";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
+import { useTranslation } from "@/i18n";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
@@ -121,6 +122,7 @@ export function UserProfilePanel({
   widthPx,
   transparentChrome = false,
 }: UserProfilePanelProps) {
+  const { t } = useTranslation();
   const { globalConfig } = useGlobalAgentConfig();
   const isOverlay = useIsThreadPanelOverlay();
   const isSplitLayout = layout === "split";
@@ -467,17 +469,21 @@ export function UserProfilePanel({
       if (created.spawnError) {
         toast.error(created.spawnError);
       } else {
-        toast.success(`Started ${created.agent.name}.`);
+        toast.success(
+          t("profile.agent-actions.started", { name: created.agent.name }),
+        );
       }
       if (created.profileSyncError) {
         toast.warning(created.profileSyncError);
       }
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to start agent.",
+        error instanceof Error
+          ? error.message
+          : t("profile.panel.start-failed"),
       );
     }
-  }, [createManagedAgentForPersona, resolvedPersona]);
+  }, [createManagedAgentForPersona, resolvedPersona, t]);
 
   const handleToggleAgentAutoStart = React.useCallback(async () => {
     if (managedAgent?.backend.type !== "local") return;
@@ -489,17 +495,17 @@ export function UserProfilePanel({
       });
       toast.success(
         updated.startOnAppLaunch
-          ? `Will start ${updated.name} automatically.`
-          : `${updated.name} will stay manual-start only.`,
+          ? t("profile.panel.will-start-automatically", { name: updated.name })
+          : t("profile.panel.manual-start-only", { name: updated.name }),
       );
     } catch (error) {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Failed to update startup preference.",
+          : t("profile.panel.startup-preference-failed"),
       );
     }
-  }, [managedAgent, startOnLaunchMutation.mutateAsync]);
+  }, [managedAgent, startOnLaunchMutation.mutateAsync, t]);
 
   const handleDeleteAgent = React.useCallback(async () => {
     if (!managedAgent) return;
@@ -508,14 +514,16 @@ export function UserProfilePanel({
       const result = await deleteManagedAgentRecord(managedAgent);
       if (result.cancelled) return;
 
-      toast.success(`Deleted ${managedAgent.name}.`);
+      toast.success(t("profile.panel.deleted", { name: managedAgent.name }));
       onClose();
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to delete agent.",
+        error instanceof Error
+          ? error.message
+          : t("profile.panel.delete-failed"),
       );
     }
-  }, [deleteManagedAgentRecord, managedAgent, onClose]);
+  }, [deleteManagedAgentRecord, managedAgent, onClose, t]);
 
   const handleSubmitPersona = React.useCallback(
     async (input: CreatePersonaInput | UpdatePersonaInput) => {
@@ -572,18 +580,24 @@ export function UserProfilePanel({
           id: resolvedPersona.id,
           active: false,
         });
-        toast.success(`Removed ${resolvedPersona.displayName} from My Agents.`);
+        toast.success(
+          t("profile.panel.removed-from-my-agents", {
+            name: resolvedPersona.displayName,
+          }),
+        );
         onClose();
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to delete agent.",
+          error instanceof Error
+            ? error.message
+            : t("profile.panel.delete-failed"),
         );
       }
       return;
     }
 
     if (resolvedPersona.sourceTeam) {
-      toast.error("This agent is managed by a team.");
+      toast.error(t("profile.panel.team-managed"));
       return;
     }
 
@@ -593,28 +607,33 @@ export function UserProfilePanel({
     onClose,
     resolvedPersona,
     setPersonaActiveMutation.mutateAsync,
+    t,
   ]);
 
   const handleConfirmDeletePersona = React.useCallback(
     async (personaToConfirm: AgentPersona) => {
       if (personaToConfirm.sourceTeam) {
-        toast.error("This agent is managed by a team.");
+        toast.error(t("profile.panel.team-managed"));
         setPersonaToDelete(null);
         return;
       }
 
       try {
         await deletePersonaMutation.mutateAsync(personaToConfirm.id);
-        toast.success(`Deleted ${personaToConfirm.displayName}.`);
+        toast.success(
+          t("profile.panel.deleted", { name: personaToConfirm.displayName }),
+        );
         setPersonaToDelete(null);
         onClose();
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to delete agent.",
+          error instanceof Error
+            ? error.message
+            : t("profile.panel.delete-failed"),
         );
       }
     },
-    [deletePersonaMutation.mutateAsync, onClose],
+    [deletePersonaMutation.mutateAsync, onClose, t],
   );
 
   // Count of managed-agent instances backed by the persona being deleted.
@@ -632,11 +651,26 @@ export function UserProfilePanel({
   const handleAddedToChannel = React.useCallback(
     (channel: Channel, result: AttachManagedAgentToChannelResult) => {
       if (result.started) {
-        toast.success(`Added ${result.agent.name} to ${channel.name}.`);
+        toast.success(
+          t("profile.panel.added-to-channel", {
+            channel: channel.name,
+            name: result.agent.name,
+          }),
+        );
       } else if (result.membershipAdded) {
-        toast.success(`Added ${result.agent.name} to ${channel.name}.`);
+        toast.success(
+          t("profile.panel.added-to-channel", {
+            channel: channel.name,
+            name: result.agent.name,
+          }),
+        );
       } else {
-        toast.success(`${result.agent.name} is already in ${channel.name}.`);
+        toast.success(
+          t("profile.panel.already-in-channel", {
+            channel: channel.name,
+            name: result.agent.name,
+          }),
+        );
       }
       void managedAgentsQuery.refetch();
       void relayAgentsQuery.refetch();
@@ -646,6 +680,7 @@ export function UserProfilePanel({
       channelsQuery.refetch,
       managedAgentsQuery.refetch,
       relayAgentsQuery.refetch,
+      t,
     ],
   );
 

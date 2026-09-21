@@ -5,6 +5,7 @@ import {
   selectThreadRepliesSurface,
 } from "@/features/messages/lib/timelineSnapshot";
 import { Button } from "@/shared/ui/button";
+import { useTranslation } from "@/i18n";
 
 /**
  * Terminal empty/error states for the thread reply region.
@@ -28,6 +29,7 @@ import { Button } from "@/shared/ui/button";
  * Retry became available.
  */
 export function ThreadRepliesErrorCard({ onRetry }: { onRetry?: () => void }) {
+  const { t } = useTranslation();
   return (
     <div
       className="rounded-2xl border border-dashed border-destructive/50 bg-destructive/5 px-4 py-6 text-center"
@@ -50,7 +52,7 @@ export function ThreadRepliesErrorCard({ onRetry }: { onRetry?: () => void }) {
           type="button"
           variant="outline"
         >
-          Retry
+          {t("messages.thread.retry")}
         </Button>
       ) : null}
     </div>
@@ -63,13 +65,14 @@ export function ThreadRepliesErrorCard({ onRetry }: { onRetry?: () => void }) {
  * so it can't flash while a non-empty list streams in on the deferred commit.
  */
 export function ThreadRepliesEmptyCard() {
+  const { t } = useTranslation();
   return (
     <div className="rounded-2xl border border-dashed border-border/70 bg-card/40 px-4 py-6 text-center">
       <p className="text-sm font-medium text-foreground/80">
-        No replies in this branch yet
+        {t("messages.thread.no-replies")}
       </p>
       <p className="mt-1 text-xs text-muted-foreground">
-        Reply in the thread to continue this branch.
+        {t("messages.thread.no-replies-hint")}
       </p>
     </div>
   );

@@ -1,6 +1,7 @@
 import type { CSSProperties } from "react";
 import { ZoomIn, ZoomOut } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import {
   IMAGE_LIGHTBOX_MAX_ZOOM,
   IMAGE_LIGHTBOX_MIN_ZOOM,
@@ -26,6 +27,7 @@ export function ImageLightboxZoomControls({
   updateZoom,
   zoom,
 }: ImageLightboxZoomControlsProps) {
+  const { t } = useTranslation();
   const zoomFillPercent =
     ((zoom - IMAGE_LIGHTBOX_MIN_ZOOM) /
       (IMAGE_LIGHTBOX_MAX_ZOOM - IMAGE_LIGHTBOX_MIN_ZOOM)) *
@@ -34,7 +36,7 @@ export function ImageLightboxZoomControls({
   return (
     <>
       <button
-        aria-label="Zoom out"
+        aria-label={t("shared.markdown.zoom.out-aria")}
         className={ZOOM_BUTTON_CLASS_NAME}
         disabled={zoom <= IMAGE_LIGHTBOX_MIN_ZOOM}
         type="button"
@@ -47,7 +49,7 @@ export function ImageLightboxZoomControls({
         <ZoomOut aria-hidden="true" className="h-4 w-4 opacity-80" />
       </button>
       <input
-        aria-label="Image zoom"
+        aria-label={t("shared.markdown.zoom.slider-aria")}
         className="image-zoom-slider h-3 w-32 cursor-pointer sm:w-44"
         max={IMAGE_LIGHTBOX_MAX_ZOOM}
         min={IMAGE_LIGHTBOX_MIN_ZOOM}
@@ -71,7 +73,7 @@ export function ImageLightboxZoomControls({
         }}
       />
       <button
-        aria-label="Zoom in"
+        aria-label={t("shared.markdown.zoom.in-aria")}
         className={ZOOM_BUTTON_CLASS_NAME}
         disabled={zoom >= IMAGE_LIGHTBOX_MAX_ZOOM}
         type="button"

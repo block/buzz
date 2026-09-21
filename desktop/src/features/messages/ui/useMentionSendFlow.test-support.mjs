@@ -28,6 +28,26 @@ after(() => dom.window.close());
 export const KEY = "b".repeat(64);
 export const TEXT = "@RemoteScout hello";
 const noop = () => {};
+
+// The product modules under test are localized, and this harness runs them in a
+// vm sandbox, so it supplies its own `@/i18n`. Resolving through the real
+// English catalog keeps every existing assertion (which compares visible
+// English copy) meaningful instead of degrading to raw key names.
+const enCatalog = JSON.parse(
+  fs.readFileSync(new URL("../../../locales/en.json", import.meta.url), "utf8"),
+);
+const lookup = (key) =>
+  key.split(".").reduce((node, part) => node?.[part], enCatalog);
+export function translate(key, options) {
+  let value = lookup(key);
+  if (typeof value !== "string") {
+    value = lookup(options?.count === 1 ? `${key}_one` : `${key}_other`);
+  }
+  if (typeof value !== "string") return key;
+  return value.replace(/\{\{(\w+)\}\}/g, (_, name) =>
+    String(options?.[name] ?? ""),
+  );
+}
 export function deferred() {
   let resolve;
   let reject;
@@ -88,6 +108,10 @@ export async function setup({ lifecycle = false } = {}) {
     },
   };
   const stubs = {
+    "@/i18n": {
+      i18n: { t: translate },
+      useTranslation: () => ({ t: translate }),
+    },
     react: React,
     "@/features/messages/lib/useDrafts": draftStore,
     sonner: { toast: { error: (error) => calls.push(["error", error]) } },

@@ -9,7 +9,14 @@ import {
   createMemoryHistory,
 } from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
+import { initializeI18n } from "@/i18n";
 import { AgentActivityCard } from "./AgentActivityCard.tsx";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 function render(status) {
   const pubkey = "a".repeat(64);

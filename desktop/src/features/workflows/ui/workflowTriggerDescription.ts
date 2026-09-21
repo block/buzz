@@ -1,6 +1,6 @@
 import { truncateNpub, truncatePubkey } from "@/shared/lib/pubkey";
 import { parseConditionExpressions } from "./workflowConditionExpression";
-import { TRIGGER_LABELS } from "./workflowFormTypes";
+import { triggerTypeLabel } from "./workflowFormTypes";
 import type { ParsedConditionExpression } from "./workflowConditionExpression";
 import type { TriggerConfig } from "./workflowFormTypes";
 
@@ -130,7 +130,7 @@ export function workflowTriggerDescription(
 ): string {
   const baseLabel =
     EVENT_PHRASES[trigger.on as keyof typeof EVENT_PHRASES] ??
-    TRIGGER_LABELS[trigger.on];
+    triggerTypeLabel(trigger.on);
   const eventPhrase = EVENT_PHRASES[trigger.on as keyof typeof EVENT_PHRASES];
   if (!eventPhrase) return baseLabel;
 

@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   buildTemplateModelDropdownOptions,
@@ -13,7 +14,7 @@ function withSharedComputeAutoOption(
 ): readonly PersonaModelOption[] {
   const modelOptions = options.filter((option) => option.id.trim() !== "");
   return [
-    { id: "", label: "Auto (collective when available)" },
+    { id: "", label: i18n.t("agents.model-picker.auto-collective") },
     ...modelOptions,
   ];
 }
@@ -90,10 +91,21 @@ export function modelDropdownOptions({
   return [
     ...modelOptions,
     ...(loading
-      ? [{ disabled: true, label: "Loading models...", value: loadingValue }]
+      ? [
+          {
+            disabled: true,
+            label: i18n.t("agents.model-picker.loading"),
+            value: loadingValue,
+          },
+        ]
       : []),
     ...(allowCustom
-      ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]
+      ? [
+          {
+            label: i18n.t("agents.model-picker.custom"),
+            value: CUSTOM_MODEL_DROPDOWN_VALUE,
+          },
+        ]
       : []),
   ];
 }

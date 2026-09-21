@@ -8,6 +8,7 @@ import {
 import { useReducedMotion } from "motion/react";
 import * as React from "react";
 
+import { i18n, useTranslation } from "@/i18n";
 import { getNsec } from "@/shared/api/tauriIdentity";
 import type { IdentityStorage } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -77,6 +78,7 @@ export function BackupStep({
   optionsExpanded,
   returningFromSecurity,
 }: BackupStepProps) {
+  const { t } = useTranslation();
   const reduceMotion = useReducedMotion() ?? false;
   const cardLayout = useOnboardingCardLayout();
   const [created, setCreated] = React.useState(introPlayed || reduceMotion);
@@ -124,7 +126,7 @@ export function BackupStep({
         setCopyError(
           err instanceof Error
             ? err.message
-            : "Failed to retrieve private key.",
+            : i18n.t("onboarding.backup.error-retrieve-key"),
         );
       });
   }, []);
@@ -147,23 +149,25 @@ export function BackupStep({
       if (cancelledRef.current) return;
       setCopyState("idle");
       setCopyError(
-        err instanceof Error ? err.message : "Failed to retrieve private key.",
+        err instanceof Error
+          ? err.message
+          : i18n.t("onboarding.backup.error-retrieve-key"),
       );
     }
   }, [nsec]);
 
   const storageDescription =
     identityStorage === "system-keyring"
-      ? "Buzz keeps your identity key in your system keychain. Your computer may ask for your password when Buzz needs to read the key."
+      ? t("onboarding.backup.storage-keychain-desc")
       : identityStorage === "local-file"
-        ? "Your system keychain wasn’t available, so Buzz keeps your identity key in a private file on this device."
-        : "Buzz keeps your identity key protected on this device. Make a separate backup in case you lose access.";
+        ? t("onboarding.backup.storage-localfile-desc")
+        : t("onboarding.backup.storage-default-desc");
   const storageTitle =
     identityStorage === "system-keyring"
-      ? "Protected by your system keychain"
+      ? t("onboarding.backup.storage-keychain-title")
       : identityStorage === "local-file"
-        ? "Stored in private device storage"
-        : "Protected in private device storage";
+        ? t("onboarding.backup.storage-localfile-title")
+        : t("onboarding.backup.storage-default-title");
   if (optionsExpanded) {
     return (
       <OnboardingSlideTransition
@@ -182,7 +186,7 @@ export function BackupStep({
           )}
         >
           <h1 className="text-title font-normal text-foreground">
-            Backup options
+            {t("onboarding.backup.options-title")}
           </h1>
           <p
             className={cn(
@@ -190,9 +194,7 @@ export function BackupStep({
               cardLayout ? "mt-2 text-base" : "mt-5 text-sm",
             )}
           >
-            Your identity key works like a password for your Buzz account. Keep
-            a copy somewhere safe. You can create a backup file and lock it with
-            a password you can remember.
+            {t("onboarding.backup.options-body")}
           </p>
         </div>
 
@@ -233,11 +235,10 @@ export function BackupStep({
               data-testid="backup-option-panel"
             >
               <span className="text-lg font-medium">
-                Saved in your password manager
+                {t("onboarding.backup.password-manager-title")}
               </span>
               <span className="mt-3 block text-sm leading-6 text-foreground/65">
-                Copy your identity key, then save it in a password manager like
-                1Password.
+                {t("onboarding.backup.password-manager-desc")}
               </span>
               <Button
                 className={cn(
@@ -258,10 +259,10 @@ export function BackupStep({
                   <Copy className="h-4 w-4" aria-hidden="true" />
                 )}
                 {copyState === "copying"
-                  ? "Copying…"
+                  ? t("onboarding.backup.copying")
                   : copyState === "copied"
-                    ? "Copied to clipboard"
-                    : "Copy to clipboard"}
+                    ? t("onboarding.backup.copied")
+                    : t("onboarding.backup.copy")}
               </Button>
             </div>
 
@@ -274,11 +275,10 @@ export function BackupStep({
               data-testid="backup-option-panel"
             >
               <span className="text-lg font-medium">
-                Locked in a backup file
+                {t("onboarding.backup.locked-file-title")}
               </span>
               <span className="mt-3 block text-sm leading-6 text-foreground/65">
-                Create a backup file and choose a password you can remember.
-                You’ll need both to restore your account.
+                {t("onboarding.backup.locked-file-desc")}
               </span>
               <Button
                 className={cn(
@@ -291,7 +291,7 @@ export function BackupStep({
                 variant="ghost"
               >
                 <ShieldCheck className="h-5 w-5" aria-hidden="true" />
-                Create locked backup
+                {t("onboarding.backup.create-locked-backup")}
               </Button>
             </div>
           </div>
@@ -301,8 +301,7 @@ export function BackupStep({
               className="mt-4 text-center text-sm text-destructive"
               data-testid="backup-copy-error"
             >
-              Could not retrieve your private key: {copyError}. You can continue
-              and find it later in Settings &gt; Profile &gt; Identity.
+              {t("onboarding.backup.copy-error", { error: copyError })}
             </p>
           ) : null}
         </div>
@@ -332,7 +331,9 @@ export function BackupStep({
           className={`text-title font-normal text-foreground ${REVEAL_ANIMATION_CLASS}`}
           key={created ? "created" : "creating"}
         >
-          {created ? "Your private identity key" : "Creating your identity key"}
+          {created
+            ? t("onboarding.backup.title-created")
+            : t("onboarding.backup.title-creating")}
         </h1>
         {created ? (
           <p
@@ -343,7 +344,7 @@ export function BackupStep({
               REVEAL_ANIMATION_CLASS,
             )}
           >
-            Don’t share this key. Anyone who has it can access your account.
+            {t("onboarding.backup.share-warning")}
           </p>
         ) : null}
       </div>
@@ -354,7 +355,7 @@ export function BackupStep({
           data-testid="backup-intro-logo"
         >
           <FuzzyLogo
-            ariaLabel="Creating your identity key"
+            ariaLabel={t("onboarding.backup.title-creating")}
             className="w-20! text-foreground"
             fuzz
             loop
@@ -403,10 +404,10 @@ export function BackupStep({
                   <Copy aria-hidden className="h-4 w-4" />
                 )}
                 {copyState === "copying"
-                  ? "Copying…"
+                  ? t("onboarding.backup.copying")
                   : copyState === "copied"
-                    ? "Copied to clipboard"
-                    : "Copy to clipboard"}
+                    ? t("onboarding.backup.copied")
+                    : t("onboarding.backup.copy")}
               </Button>
             </div>
 
@@ -420,7 +421,7 @@ export function BackupStep({
             >
               <span className="flex min-w-0 items-center gap-3">
                 <FileLock2 aria-hidden className="size-6" />
-                <span>Create locked backup</span>
+                <span>{t("onboarding.backup.create-locked-backup")}</span>
               </span>
               <ChevronRight aria-hidden className="size-5 text-primary" />
             </Button>
@@ -433,9 +434,7 @@ export function BackupStep({
                 )}
                 data-testid="backup-copy-error"
               >
-                Could not retrieve your private key: {copyError}. You can
-                continue and find it later in Settings &gt; Profile &gt;
-                Identity.
+                {t("onboarding.backup.copy-error", { error: copyError })}
               </p>
             ) : null}
           </div>
@@ -450,7 +449,7 @@ export function BackupStep({
           onClick={onNext}
           type="button"
         >
-          Continue
+          {t("onboarding.backup.continue")}
         </Button>
       </OnboardingFooter>
     </OnboardingSlideTransition>

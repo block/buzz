@@ -3,6 +3,7 @@ import type * as React from "react";
 
 import { AppTopChromePortal } from "@/app/AppTopChromePortal";
 import type { Project, Repository } from "@/features/projects/hooks";
+import { useTranslation } from "@/i18n";
 
 export type ProjectDetailWorkItemCrumb = {
   category: string;
@@ -28,6 +29,7 @@ export function ProjectDetailChrome({
   project: Project;
   repository?: Repository | null;
 }) {
+  const { t } = useTranslation();
   const repositoryCrumb = repository ? (
     activeWorkItemCrumb ? (
       <>
@@ -91,7 +93,7 @@ export function ProjectDetailChrome({
         data-testid="project-detail-chrome"
       >
         <nav
-          aria-label="Project breadcrumb"
+          aria-label={t("projects.breadcrumb.detail-nav")}
           className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65 transition-[left] duration-200 ease-linear motion-reduce:transition-none"
           style={{
             left: "calc(50% + var(--app-top-chrome-center-offset, 0rem))",
@@ -103,7 +105,7 @@ export function ProjectDetailChrome({
             type="button"
           >
             <Folders className="h-3.5 w-3.5" />
-            Projects
+            {t("projects.sections.projects")}
           </button>
           <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
           {repositoryCrumb ? (
@@ -149,7 +151,8 @@ export function ProjectsWorkspaceChrome({
   onGoActivity: () => void;
   section: string;
 }) {
-  const onActivity = section === "Activity";
+  const { t } = useTranslation();
+  const onActivity = section === t("projects.sections.activity");
 
   return (
     <AppTopChromePortal>
@@ -159,7 +162,7 @@ export function ProjectsWorkspaceChrome({
         data-testid="projects-workspace-chrome"
       >
         <nav
-          aria-label="Projects breadcrumb"
+          aria-label={t("projects.breadcrumb.workspace-nav")}
           className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65 transition-[left] duration-200 ease-linear motion-reduce:transition-none"
           style={{
             left: "calc(50% + var(--app-top-chrome-center-offset, 0rem))",
@@ -168,7 +171,7 @@ export function ProjectsWorkspaceChrome({
           {onActivity ? (
             <span className="flex min-w-0 items-center gap-1.5 px-1 py-1 font-medium">
               <Folders className="h-3.5 w-3.5 shrink-0" />
-              Projects
+              {t("projects.sections.projects")}
             </span>
           ) : (
             <button
@@ -177,7 +180,7 @@ export function ProjectsWorkspaceChrome({
               type="button"
             >
               <Folders className="h-3.5 w-3.5 shrink-0" />
-              Projects
+              {t("projects.sections.projects")}
             </button>
           )}
           <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />

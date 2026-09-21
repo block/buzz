@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { cn } from "@/shared/lib/cn";
 import { InlineChip } from "@/shared/ui/InlineChip";
@@ -26,6 +27,7 @@ function useBuzzLinkContextMenu({
   interactive: boolean;
   onOpenLink: () => void;
 }) {
+  const { t } = useTranslation();
   const [position, setPosition] =
     React.useState<MediaContextMenuPosition | null>(null);
   const closeMenu = React.useCallback(() => setPosition(null), []);
@@ -46,17 +48,17 @@ function useBuzzLinkContextMenu({
         dataAttributes={["data-buzz-link-context-menu"]}
         items={[
           {
-            label: "Open link",
+            label: t("shared.markdown.link.open"),
             onSelect: () => {
               closeMenu();
               onOpenLink();
             },
           },
           {
-            label: "Copy link",
+            label: t("shared.markdown.link.copy"),
             onSelect: () => {
               closeMenu();
-              copyTextToClipboard(href, "Link copied to clipboard");
+              copyTextToClipboard(href, t("shared.markdown.link.copied"));
             },
           },
         ]}

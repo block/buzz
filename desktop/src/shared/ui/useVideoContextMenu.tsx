@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { invokeTauri } from "@/shared/api/tauri";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
@@ -34,6 +35,7 @@ export function useVideoContextMenu(
   downloadUrl?: string,
   filename?: string,
 ): UseVideoContextMenu {
+  const { t } = useTranslation();
   const [position, setPosition] =
     React.useState<MediaContextMenuPosition | null>(null);
   const close = React.useCallback(() => setPosition(null), []);
@@ -48,27 +50,34 @@ export function useVideoContextMenu(
     const entries: MediaContextMenuItem[] = [];
     if (downloadUrl) {
       entries.push({
-        label: "Download video",
+        label: t("shared.ui.video-menu.download"),
         onSelect: () => {
           close();
           invokeTauri("download_file", {
             url: downloadUrl,
             filename: resolveVideoDownloadFilename(filename),
           }).catch((err: unknown) => {
-            toast.error(err instanceof Error ? err.message : "Download failed");
+            toast.error(
+              err instanceof Error
+                ? err.message
+                : t("shared.ui.video-menu.download-failed"),
+            );
           });
         },
       });
     }
     entries.push({
-      label: "Copy link",
+      label: t("shared.ui.video-menu.copy-link"),
       onSelect: () => {
         close();
-        copyTextToClipboard(downloadUrl ?? src, "Link copied to clipboard");
+        copyTextToClipboard(
+          downloadUrl ?? src,
+          t("shared.ui.video-menu.link-copied"),
+        );
       },
     });
     return entries;
-  }, [close, downloadUrl, filename, src]);
+  }, [close, downloadUrl, filename, src, t]);
 
   return {
     onContextMenu,

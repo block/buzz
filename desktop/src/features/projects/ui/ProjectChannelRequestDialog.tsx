@@ -1,3 +1,7 @@
+import { formatTtlDuration } from "@/features/channels/lib/ephemeralChannel";
+import type { ProjectChannelRequest } from "@/features/projects/projectChannelRequest";
+import { useProjectChannelRequests } from "@/features/projects/useProjectChannelRequests";
+import { useTranslation } from "@/i18n";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -8,9 +12,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/shared/ui/alert-dialog";
-import { formatTtlDuration } from "@/features/channels/lib/ephemeralChannel";
-import type { ProjectChannelRequest } from "@/features/projects/projectChannelRequest";
-import { useProjectChannelRequests } from "@/features/projects/useProjectChannelRequests";
 
 type RequestedChannel = ProjectChannelRequest["request"];
 
@@ -20,36 +21,48 @@ export function ProjectChannelRequestDetails({
 }: {
   request: RequestedChannel;
 }) {
+  const { t } = useTranslation();
   return (
     <dl className="space-y-2 rounded-xl border border-border/60 bg-muted/25 p-3 text-sm">
       <div className="flex gap-3">
-        <dt className="w-24 shrink-0 text-muted-foreground">Name</dt>
+        <dt className="w-24 shrink-0 text-muted-foreground">
+          {t("sidebar.channel-form.name")}
+        </dt>
         <dd className="min-w-0 break-words text-foreground">#{request.name}</dd>
       </div>
       {request.description ? (
         <div className="flex gap-3">
-          <dt className="w-24 shrink-0 text-muted-foreground">Description</dt>
+          <dt className="w-24 shrink-0 text-muted-foreground">
+            {t("projects.issue.description")}
+          </dt>
           <dd className="min-w-0 break-words text-foreground">
             {request.description}
           </dd>
         </div>
       ) : null}
       <div className="flex gap-3">
-        <dt className="w-24 shrink-0 text-muted-foreground">Visibility</dt>
+        <dt className="w-24 shrink-0 text-muted-foreground">
+          {t("channels.manage.visibility-label")}
+        </dt>
         <dd className="text-foreground">{request.visibility}</dd>
       </div>
       {request.ttlSeconds ? (
         <div className="flex gap-3">
-          <dt className="w-24 shrink-0 text-muted-foreground">Lifetime</dt>
+          <dt className="w-24 shrink-0 text-muted-foreground">
+            {t("projects.channel-request-dialog.lifetime")}
+          </dt>
           <dd className="min-w-0 break-words text-foreground">
-            Temporary · {formatTtlDuration(request.ttlSeconds)}. Cleans up
-            automatically after that period of inactivity.
+            {t("projects.channel-request-dialog.temporary", {
+              duration: formatTtlDuration(request.ttlSeconds),
+            })}
           </dd>
         </div>
       ) : null}
       {request.templateName ? (
         <div className="flex gap-3">
-          <dt className="w-24 shrink-0 text-muted-foreground">Template</dt>
+          <dt className="w-24 shrink-0 text-muted-foreground">
+            {t("sidebar.channel-form.template")}
+          </dt>
           <dd className="min-w-0 break-words text-foreground">
             {request.templateName}
           </dd>
@@ -61,6 +74,7 @@ export function ProjectChannelRequestDetails({
 
 /** Global owner-review surface for project-channel requests from managed agents. */
 export function ProjectChannelRequestDialog() {
+  const { t } = useTranslation();
   const management = useProjectChannelRequests();
   const request = management.request?.request;
 
@@ -73,11 +87,15 @@ export function ProjectChannelRequestDialog() {
     >
       <AlertDialogContent data-testid="project-channel-request-dialog">
         <AlertDialogHeader>
-          <AlertDialogTitle>Create project channel?</AlertDialogTitle>
+          <AlertDialogTitle>
+            {t("projects.channel-request-dialog.title")}
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            Your agent requested a new channel in{" "}
-            {management.project?.name ?? "this project"}. Review the details
-            before creating it.
+            {t("projects.channel-request-dialog.requested", {
+              project:
+                management.project?.name ??
+                t("projects.channel-request-dialog.this-project"),
+            })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {request ? <ProjectChannelRequestDetails request={request} /> : null}
@@ -86,7 +104,7 @@ export function ProjectChannelRequestDialog() {
         ) : null}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={management.isPending}>
-            Cancel
+            {t("projects.card.cancel")}
           </AlertDialogCancel>
           <AlertDialogAction
             data-testid="project-channel-request-approve"
@@ -96,7 +114,9 @@ export function ProjectChannelRequestDialog() {
               void management.approve();
             }}
           >
-            {management.isPending ? "Creating…" : "Create channel"}
+            {management.isPending
+              ? t("projects.shared.creating")
+              : t("sidebar.channel.create")}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

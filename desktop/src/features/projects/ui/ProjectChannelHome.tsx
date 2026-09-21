@@ -15,6 +15,7 @@ import {
 } from "@/features/projects/lib/projectHomeWorkspaceSheet";
 import { ProjectSelectionProvider } from "@/features/projects/lib/useProjectSelection";
 import { useHealProjectHomeRepositories } from "@/features/projects/useHealProjectHomeRepositories";
+import { useTranslation } from "@/i18n";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { RelayEvent } from "@/shared/api/types";
 import type { EntityLinkTab } from "@/shared/lib/entityLink";
@@ -62,11 +63,16 @@ function ProjectHomeHeaderToggle({
   open: boolean;
   testId: string;
 }) {
+  const { t } = useTranslation();
   return (
     <Tooltip disableHoverableContent>
       <TooltipTrigger asChild>
         <Button
-          aria-label={open ? `Hide ${label}` : `Show ${label}`}
+          aria-label={
+            open
+              ? t("projects.channel-home.hide", { name: label })
+              : t("projects.channel-home.show", { name: label })
+          }
           aria-pressed={open}
           className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
           data-testid={testId}
@@ -99,6 +105,7 @@ export function ProjectChannelHome({
   targetMessageEvents?: RelayEvent[];
   targetMessageId?: string | null;
 }) {
+  const { t } = useTranslation();
   const { goChannel, goProject, goProjects } = useAppNavigation();
   const sidebar = useOptionalSidebar();
   const identityQuery = useIdentityQuery();
@@ -227,8 +234,10 @@ export function ProjectChannelHome({
     workspaceSheetTab,
   ]);
   const expandLabel = workspaceSheetTab
-    ? `Open ${projectHomeWorkspaceSheetTitle(workspaceSheetTab)} in repository`
-    : "Open in repository";
+    ? t("projects.channel-home.expand-tab", {
+        title: projectHomeWorkspaceSheetTitle(workspaceSheetTab),
+      })
+    : t("projects.channel-home.expand");
   const workspaceSheet =
     workspaceSheetOpen && workspaceSheetTab && workspaceRepository ? (
       <ProjectHomeWorkspaceSheet
@@ -272,7 +281,7 @@ export function ProjectChannelHome({
           <ProjectDetailChrome
             actions={
               <ProjectHomeHeaderToggle
-                label="Overview"
+                label={t("projects.sections.overview")}
                 onClick={() => {
                   if (workspaceSheetOpen) {
                     closeWorkspaceSheet();
@@ -388,7 +397,7 @@ export function ProjectChannelHome({
           ) : (
             <div className="flex min-h-0 flex-1 items-center justify-center px-6 py-8">
               <p className="text-sm text-muted-foreground">
-                This project's channel could not be found.
+                {t("projects.channel-home.channel-missing")}
               </p>
             </div>
           )}

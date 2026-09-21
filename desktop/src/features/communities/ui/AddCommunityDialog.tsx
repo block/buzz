@@ -5,6 +5,7 @@ import type { AddCommunityPrefillRequest } from "@/features/communities/addCommu
 import { HostedCommunityCreateFlow } from "@/features/communities/ui/HostedCommunityCreateFlow";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
+import { useTranslation } from "@/i18n";
 import {
   Dialog,
   DialogContent,
@@ -32,6 +33,7 @@ export function AddCommunityDialog({
   open,
   onOpenChange,
 }: AddCommunityDialogProps) {
+  const { t } = useTranslation();
   const communityOnboarding = useCommunityOnboarding();
   const [mode, setMode] = React.useState<AddCommunityMode>("choose");
   const [joinError, setJoinError] = React.useState<string | null>(null);
@@ -68,29 +70,27 @@ export function AddCommunityDialog({
         policyReceipt,
       });
       if (!started) {
-        setJoinError(
-          "Finish connecting the community already in progress, then try again.",
-        );
+        setJoinError(t("communities.add.join-error-busy"));
         return;
       }
       handleClose();
     },
-    [communityOnboarding, handleClose, prefill?.name],
+    [communityOnboarding, handleClose, prefill?.name, t],
   );
 
   const title =
     mode === "create"
-      ? "Create a new community"
+      ? t("communities.add.create-title")
       : mode === "join"
-        ? "Join an existing community"
-        : "Add community";
+        ? t("communities.add.join-title")
+        : t("communities.add.choose-title");
 
   const description =
     mode === "create"
-      ? "Opens Builderlab in your browser."
+      ? t("communities.add.create-description")
       : mode === "join"
-        ? "Use the community URL or invite link you received."
-        : "Create a new community or join one you already have.";
+        ? t("communities.add.join-description")
+        : t("communities.add.choose-description");
 
   return (
     <Dialog
@@ -108,7 +108,7 @@ export function AddCommunityDialog({
           <div className="flex min-w-0 items-center gap-2">
             {mode !== "choose" ? (
               <button
-                aria-label="Back to add community options"
+                aria-label={t("communities.add.back-aria")}
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                 data-testid="add-community-back"
                 onClick={() => {
@@ -143,10 +143,10 @@ export function AddCommunityDialog({
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-medium text-foreground">
-                    Create a new community
+                    {t("communities.add.create-title")}
                   </span>
                   <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
-                    Claim a Buzz address for your team.
+                    {t("communities.add.create-option-hint")}
                   </span>
                 </span>
                 <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60" />
@@ -163,10 +163,10 @@ export function AddCommunityDialog({
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-medium text-foreground">
-                    Join an existing community
+                    {t("communities.add.join-title")}
                   </span>
                   <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
-                    Use a community URL or invite link.
+                    {t("communities.add.join-option-hint")}
                   </span>
                 </span>
                 <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60" />

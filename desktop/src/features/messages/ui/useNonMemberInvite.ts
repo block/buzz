@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "@/i18n";
 import { PRIVATE_CHANNEL_ADD_DENIED_MESSAGE } from "@/features/channels/lib/channelMemberAdmission";
 import type { MentionRevalidationOptions } from "@/features/messages/lib/agentMentionRevalidation";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -45,6 +46,7 @@ export function useNonMemberInvite({
   ) => Promise<void>;
   setError: (error: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const active = React.useRef<{
     controller: AbortController;
     draft: PendingNonMemberMentionSend;
@@ -152,7 +154,7 @@ export function useNonMemberInvite({
           setError(
             error instanceof Error
               ? error.message
-              : "Could not invite members.",
+              : t("messages.mention.invite-failed"),
           );
       })
       .finally(() => {
@@ -170,6 +172,7 @@ export function useNonMemberInvite({
     addMembers,
     completeSend,
     setError,
+    t,
   ]);
   return { invite, cancel, isPending };
 }

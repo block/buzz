@@ -1,6 +1,7 @@
 import * as React from "react";
 import { CheckCheck, ChevronDown } from "lucide-react";
 
+import { i18n, useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import {
   Dialog,
@@ -36,6 +37,7 @@ export function SentMessageContextDialog({
   preview: string | null;
   result: string;
 }) {
+  const { t } = useTranslation();
   const sections = buildSentMessageContextSections({
     args,
     description,
@@ -51,7 +53,7 @@ export function SentMessageContextDialog({
       <DialogContent className="max-w-xl overflow-hidden p-0">
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="px-6 pb-3 pt-5 pr-14">
-            <DialogTitle>Sent message context</DialogTitle>
+            <DialogTitle>{t("agents.sent-context.title")}</DialogTitle>
             <DialogDescription className="flex items-center gap-1.5">
               <CheckCheck className="h-3.5 w-3.5 shrink-0" />
               <span>{label}</span>
@@ -91,27 +93,35 @@ function buildSentMessageContextSections({
 }): SentMessageContextSection[] {
   const sections: SentMessageContextSection[] = [];
   if (preview) {
-    sections.push({ title: "Message", body: preview });
+    sections.push({
+      title: i18n.t("agents.tool-class.message"),
+      body: preview,
+    });
   }
   if (description) {
-    sections.push({ title: "Tool", body: description });
+    sections.push({
+      title: i18n.t("agents.tool-class.generic"),
+      body: description,
+    });
   }
   if (hasArgs) {
     sections.push({
-      title: "Parameters",
+      title: i18n.t("agents.tool-details.parameters"),
       body: JSON.stringify(args, null, 2),
     });
   }
   if (hasResult) {
     sections.push({
-      title: isError ? "Error" : "Result",
+      title: isError
+        ? i18n.t("agents.tool-class.error")
+        : i18n.t("agents.tool-details.result"),
       body: formatCodeValue(result),
     });
   }
   if (sections.length === 0) {
     sections.push({
-      title: "Status",
-      body: "Waiting for tool details.",
+      title: i18n.t("agents.tool-class.status"),
+      body: i18n.t("agents.tool-details.waiting"),
     });
   }
   return sections;
@@ -139,6 +149,7 @@ function SentMessageContextSectionAccordion({
 }: {
   section: SentMessageContextSection;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const body = section.body.trim();
 
@@ -169,7 +180,9 @@ function SentMessageContextSectionAccordion({
               {body.length > 0 ? (
                 body
               ) : (
-                <span className="italic text-foreground/50">No metadata.</span>
+                <span className="italic text-foreground/50">
+                  {t("agents.prompt-section.no-metadata")}
+                </span>
               )}
             </div>
           </div>

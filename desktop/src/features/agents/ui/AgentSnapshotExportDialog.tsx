@@ -2,6 +2,7 @@ import * as React from "react";
 import { AlertCircle, Brain, Download, FileType2 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import { useTranslation } from "@/i18n";
 import type {
   SnapshotFormat,
   SnapshotMemoryLevel,
@@ -31,24 +32,8 @@ type AgentSnapshotExportDialogProps = {
   onOpenChange: (open: boolean) => void;
 };
 
-const MEMORY_LEVELS: {
-  value: SnapshotMemoryLevel;
-  label: string;
-}[] = [
-  {
-    value: "none",
-    label: "Agent only",
-  },
-  {
-    value: "core",
-    label: "Agent + core memory",
-  },
-  {
-    value: "everything",
-    label: "Agent + all memories",
-  },
-];
-
+// `JSON` / `PNG` are file-format identifiers, not UI prose: they stay verbatim
+// in every locale (glossary §1).
 const FORMAT_OPTIONS: { value: SnapshotFormat; label: string }[] = [
   { value: "json", label: "JSON" },
   { value: "png", label: "PNG" },
@@ -67,6 +52,18 @@ export function AgentSnapshotExportDialog({
   onSaveFile,
   onOpenChange,
 }: AgentSnapshotExportDialogProps) {
+  const { t } = useTranslation();
+  const memoryLevelOptions = React.useMemo(
+    () => [
+      { value: "none" as const, label: t("agents.common.agent-only") },
+      { value: "core" as const, label: t("agents.common.agent-core-memory") },
+      {
+        value: "everything" as const,
+        label: t("agents.common.agent-all-memories"),
+      },
+    ],
+    [t],
+  );
   const [memoryLevel, setMemoryLevel] =
     React.useState<SnapshotMemoryLevel>("none");
   const [format, setFormat] = React.useState<SnapshotFormat>("png");
@@ -97,7 +94,9 @@ export function AgentSnapshotExportDialog({
         showCloseButton={false}
       >
         <DialogHeader className="space-y-0">
-          <DialogTitle className="truncate">Export {agentName}</DialogTitle>
+          <DialogTitle className="truncate">
+            {t("agents.common.export-title", { name: agentName })}
+          </DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 pt-2">
@@ -105,17 +104,17 @@ export function AgentSnapshotExportDialog({
             <div className="flex min-h-8 items-center justify-between gap-4">
               <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
                 <Brain className="h-4 w-4 shrink-0 text-muted-foreground" />
-                Memories
+                {t("agents.common.memories")}
               </span>
               {hasLinkedAgent ? (
                 <SnapshotOptionMenu
-                  ariaLabel="Memories"
+                  ariaLabel={t("agents.common.memories")}
                   className="font-medium text-foreground"
                   disabled={isPending}
                   onValueChange={(value) =>
                     setMemoryLevel(value as SnapshotMemoryLevel)
                   }
-                  options={MEMORY_LEVELS}
+                  options={memoryLevelOptions}
                   testId="agent-snapshot-memory-trigger"
                   value={memoryLevel}
                 />
@@ -124,7 +123,7 @@ export function AgentSnapshotExportDialog({
                   className="inline-flex h-8 w-auto items-center justify-end px-2 text-sm font-medium"
                   data-testid="agent-snapshot-memory-value"
                 >
-                  Agent only
+                  {t("agents.common.agent-only")}
                 </span>
               )}
             </div>
@@ -132,10 +131,10 @@ export function AgentSnapshotExportDialog({
             <div className="flex min-h-8 items-center justify-between gap-4">
               <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
                 <FileType2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-                File format
+                {t("agents.common.file-format")}
               </span>
               <SnapshotOptionMenu
-                ariaLabel="File format"
+                ariaLabel={t("agents.common.file-format")}
                 className="font-medium text-foreground"
                 disabled={isPending}
                 onValueChange={(value) => setFormat(value as SnapshotFormat)}
@@ -163,8 +162,9 @@ export function AgentSnapshotExportDialog({
                 >
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                   <p>
-                    Memory is stored as <strong>plaintext</strong> in the
-                    snapshot. Only share it with people you trust.
+                    {t("agents.common.memory-stored-as")}{" "}
+                    <strong>{t("agents.common.plaintext")}</strong>{" "}
+                    {t("agents.common.memory-in-snapshot")}
                   </p>
                 </div>
               </motion.div>
@@ -182,7 +182,7 @@ export function AgentSnapshotExportDialog({
                 type="button"
                 variant="ghost"
               >
-                Cancel
+                {t("agents.snapshot-export.cancel")}
               </Button>
             </DialogClose>
             <Button
@@ -193,7 +193,7 @@ export function AgentSnapshotExportDialog({
               type="button"
             >
               <Download className="h-4 w-4" />
-              Export
+              {t("agents.snapshot-export.export")}
             </Button>
           </div>
         </div>

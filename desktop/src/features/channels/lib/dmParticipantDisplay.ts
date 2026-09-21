@@ -4,6 +4,7 @@ import {
 } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { i18n } from "@/i18n";
 
 export const DM_PARTICIPANT_PREVIEW_LIMIT = 3;
 
@@ -48,7 +49,9 @@ export function formatDmParticipantDisplayName(
   );
 
   return hiddenCount > 0
-    ? [...names, `+${hiddenCount} more`].join(", ")
+    ? [...names, i18n.t("channels.dm.more-count", { total: hiddenCount })].join(
+        ", ",
+      )
     : names.join(", ");
 }
 

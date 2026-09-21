@@ -10,6 +10,7 @@ import {
 } from "@/features/agents/ui/AgentConfigFields";
 import { resetConfigForHarnessChange } from "@/features/agents/ui/agentConfigOptions";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
+import { useTranslation } from "@/i18n";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import {
   getGlobalAgentConfig,
@@ -43,8 +44,11 @@ type DefaultConfigStepProps = {
   readyRuntimeIds: readonly string[];
 };
 
-function formatHarnessLabel(runtime: AcpRuntimeCatalogEntry | undefined) {
-  if (!runtime) return "Select a harness";
+function formatHarnessLabel(
+  runtime: AcpRuntimeCatalogEntry | undefined,
+  unselectedLabel: string,
+) {
+  if (!runtime) return unselectedLabel;
   return runtime.id === "buzz-agent" ? "Buzz" : runtime.label;
 }
 
@@ -67,6 +71,7 @@ function AgentDefaultsSection({
   readyRuntimeIds: readonly string[];
 }) {
   const cardLayout = useOnboardingCardLayout();
+  const { t } = useTranslation();
   const runtimesQuery = useAcpRuntimesQuery();
   const initialDraftRef = React.useRef(draft);
   const [config, setConfig] = React.useState<GlobalAgentConfig>(
@@ -159,10 +164,13 @@ function AgentDefaultsSection({
   const harnessOptions = React.useMemo(
     () =>
       readyRuntimes.map((runtime) => ({
-        label: formatHarnessLabel(runtime),
+        label: formatHarnessLabel(
+          runtime,
+          t("onboarding.setup.select-harness"),
+        ),
         value: runtime.id,
       })),
-    [readyRuntimes],
+    [readyRuntimes, t],
   );
 
   const updateDraft = React.useCallback(
@@ -236,11 +244,11 @@ function AgentDefaultsSection({
       {configSurfaceLoading ? (
         <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
           <Spinner className="h-4 w-4 border-2" />
-          Loading…
+          {t("onboarding.setup.loading")}
         </div>
       ) : configSurfaceError ? (
         <p className="py-4 text-center text-sm text-destructive">
-          Couldn't load harness settings. Go back and try again.
+          {t("onboarding.setup.error-load-harness")}
         </p>
       ) : (
         <div className="space-y-7">
@@ -251,7 +259,7 @@ function AgentDefaultsSection({
                   className="text-sm font-medium"
                   htmlFor="global-agent-default-harness"
                 >
-                  Default harness
+                  {t("onboarding.setup.default-harness")}
                 </label>
               </div>
               <AgentDropdownSelect
@@ -263,7 +271,7 @@ function AgentDefaultsSection({
                 id="global-agent-default-harness"
                 onValueChange={handleHarnessChange}
                 options={harnessOptions}
-                placeholder="Select a harness"
+                placeholder={t("onboarding.setup.select-harness")}
                 placeholderClassName="text-foreground/70"
                 testId="global-agent-default-harness"
                 value={selectedRuntimeId}
@@ -315,7 +323,7 @@ function AgentDefaultsSection({
 
           {onUseDifferentHarness ? (
             <div className="flex items-baseline gap-1.5 text-sm text-foreground/70">
-              <span>or</span>
+              <span>{t("onboarding.setup.or")}</span>
               <Button
                 className="h-auto p-0 text-sm text-foreground"
                 data-testid="onboarding-use-different-harness"
@@ -324,7 +332,7 @@ function AgentDefaultsSection({
                 type="button"
                 variant="link"
               >
-                Use a different harness
+                {t("onboarding.setup.use-different-harness")}
               </Button>
             </div>
           ) : null}
@@ -347,6 +355,7 @@ export function DefaultConfigStep({
   readyRuntimeIds,
 }: DefaultConfigStepProps) {
   const cardLayout = useOnboardingCardLayout();
+  const { t } = useTranslation();
   const [persistenceState, setPersistenceState] = React.useState<{
     canComplete: boolean;
     commit: () => Promise<void>;
@@ -371,12 +380,12 @@ export function DefaultConfigStep({
       setSaveError(
         cause instanceof Error
           ? cause.message
-          : "Couldn’t save model settings.",
+          : t("onboarding.setup.error-save-model-generic"),
       );
     } finally {
       setIsSaving(false);
     }
-  }, [actions, isSaving, persistenceState]);
+  }, [actions, isSaving, persistenceState, t]);
 
   const handleSkip = React.useCallback(() => {
     actions.discardDraft();
@@ -395,15 +404,15 @@ export function DefaultConfigStep({
       >
         <h1 className="text-title font-normal text-foreground">
           {actions.useDifferentHarness
-            ? "Connect with an API key"
-            : "Choose your model settings"}
+            ? t("onboarding.setup.title-api-key")
+            : t("onboarding.setup.title-model-settings")}
         </h1>
         <p
           className={`w-full text-foreground/80 ${cardLayout ? "mt-2 text-base leading-6" : "mx-auto mt-3 max-w-[440px] text-sm leading-5"}`}
         >
           {actions.useDifferentHarness
-            ? "Choose your provider and enter an API key to connect to the Buzz harness."
-            : "Select the model and effort level your agents will use by default."}
+            ? t("onboarding.setup.body-api-key")
+            : t("onboarding.setup.body-model-settings")}
         </p>
       </div>
 
@@ -431,7 +440,7 @@ export function DefaultConfigStep({
           type="button"
           variant="ghost"
         >
-          Skip for now
+          {t("onboarding.setup.skip-now")}
         </Button>
         <Button
           className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
@@ -440,7 +449,7 @@ export function DefaultConfigStep({
           onClick={() => void handleComplete()}
           type="button"
         >
-          {isSaving ? "Saving…" : "Next"}
+          {isSaving ? t("onboarding.setup.saving") : t("onboarding.setup.next")}
         </Button>
 
         {saveError ? (
@@ -449,7 +458,7 @@ export function DefaultConfigStep({
             data-testid="onboarding-config-save-error"
             role="alert"
           >
-            Couldn’t save model settings. {saveError} Try again.
+            {t("onboarding.setup.error-save-model", { error: saveError })}
           </p>
         ) : null}
       </OnboardingFooter>

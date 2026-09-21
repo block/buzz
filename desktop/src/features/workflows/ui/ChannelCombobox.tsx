@@ -11,6 +11,7 @@ import * as React from "react";
 
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
+import { i18n, useTranslation } from "@/i18n";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -51,21 +52,22 @@ type ChannelComboboxProps = {
 
 export function ChannelCombobox({
   allowEmpty = false,
-  ariaLabel = "Channel",
+  ariaLabel = i18n.t("workflows.channel-combobox.aria-default"),
   channels,
   defaultOpen = false,
   disabled,
-  emptyLabel = "Choose a channel",
+  emptyLabel = i18n.t("workflows.channel-combobox.empty-default"),
   id,
   isChannelDisabled,
   onAutoOpen,
   onChange,
   readOnly = false,
-  readOnlyTooltip = "The channel can't be changed after a workflow is created.",
+  readOnlyTooltip = i18n.t("workflows.channel-combobox.readonly-tooltip"),
   required = false,
   variant = "header",
   value,
 }: ChannelComboboxProps) {
+  const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
@@ -179,7 +181,7 @@ export function ChannelCombobox({
   const selectedLabel = selected
     ? (channelLabels.get(selected.id) ?? selected.name)
     : value
-      ? "Unavailable channel"
+      ? t("workflows.channel-combobox.unavailable")
       : emptyLabel;
 
   if (readOnly) {
@@ -188,7 +190,10 @@ export function ChannelCombobox({
         <TooltipTrigger asChild>
           <button
             aria-disabled="true"
-            aria-label={`${ariaLabel}: ${selectedLabel}. Read only.`}
+            aria-label={t("workflows.channel-combobox.readonly-aria", {
+              label: ariaLabel,
+              value: selectedLabel,
+            })}
             className={cn(
               "flex w-full cursor-default items-center rounded-lg px-3 py-2 text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
               variant === "header" &&
@@ -259,7 +264,9 @@ export function ChannelCombobox({
             aria-autocomplete="list"
             aria-controls={listboxId}
             aria-expanded={open}
-            aria-label={`Search ${ariaLabel.toLowerCase()}s`}
+            aria-label={t("workflows.channel-combobox.search-aria", {
+              label: ariaLabel.toLowerCase(),
+            })}
             autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
@@ -270,14 +277,16 @@ export function ChannelCombobox({
               setHighlightedIndex(0);
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Search channels..."
+            placeholder={t("workflows.channel-combobox.search-placeholder")}
             role="combobox"
             spellCheck={false}
             value={query}
           />
         </div>
         <PortalledScrollArea
-          aria-label={`${ariaLabel} options`}
+          aria-label={t("workflows.channel-combobox.options-aria", {
+            label: ariaLabel,
+          })}
           className="max-h-60 overflow-y-auto p-1"
           data-testid="channel-combobox-list"
           id={listboxId}
@@ -306,7 +315,7 @@ export function ChannelCombobox({
           ) : null}
           {filtered.length === 0 ? (
             <p className="px-3 py-4 text-center text-xs text-muted-foreground">
-              No channels found.
+              {t("workflows.channel-combobox.empty")}
             </p>
           ) : (
             filtered.map((channel) => {

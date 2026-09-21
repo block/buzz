@@ -5,6 +5,7 @@ import {
   type SidebarActionCardSurface,
 } from "@/shared/ui/sidebar-action-card";
 import { Spinner } from "@/shared/ui/spinner";
+import { useTranslation } from "@/i18n";
 
 type SidebarRelayConnectionCardProps = {
   isActionDisabled?: boolean;
@@ -60,16 +61,21 @@ export function SidebarRelayConnectionCompactCard({
   surface,
   testId = "sidebar-relay-unreachable-compact",
 }: SidebarRelayConnectionCardProps) {
+  const { t } = useTranslation();
   const reconnectTitle = isWaitingOnReconnectHook
-    ? "Waiting to reconnect"
-    : "Connecting";
+    ? t("sidebar.relay.waiting-reconnect")
+    : t("sidebar.relay.connecting");
   const reconnectDescription = isWaitingOnReconnectHook
-    ? "Complete any prompts opened by the reconnect helper to continue."
-    : "Reconnecting";
+    ? t("sidebar.relay.reconnect-help")
+    : t("sidebar.relay.reconnecting");
 
   return (
     <SidebarCompactActionCard
-      actionAriaLabel={isConnected ? "Connected" : "Connect to relay"}
+      actionAriaLabel={
+        isConnected
+          ? t("sidebar.relay.connected")
+          : t("sidebar.relay.connect-aria")
+      }
       actionDisabled={isActionDisabled || isReconnectPending || isConnected}
       actionTestId={actionTestId}
       description={
@@ -77,7 +83,7 @@ export function SidebarRelayConnectionCompactCard({
           ? undefined
           : isReconnectPending
             ? reconnectDescription
-            : "Click to connect"
+            : t("sidebar.relay.connect-hint")
       }
       dismissClassName={dismissClassName}
       dismissLabel="Dismiss relay notification"
@@ -101,10 +107,10 @@ export function SidebarRelayConnectionCompactCard({
       testId={testId}
       title={
         isConnected
-          ? "Connected"
+          ? t("sidebar.relay.connected")
           : isReconnectPending
             ? reconnectTitle
-            : "Can't reach the relay"
+            : t("sidebar.relay.unreachable")
       }
       tone={isConnected ? "success" : "neutral"}
     />

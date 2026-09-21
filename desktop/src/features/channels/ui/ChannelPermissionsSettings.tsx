@@ -1,5 +1,6 @@
 import { ChevronDown, Globe, Lock } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import type { ChannelVisibility } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -13,8 +14,8 @@ import { cn } from "@/shared/lib/cn";
 import { SegmentedControl } from "@/shared/ui/segmented-control";
 
 const VISIBILITY_OPTIONS = [
-  { value: "private", label: "Private", Icon: Lock },
-  { value: "open", label: "Public", Icon: Globe },
+  { value: "private", Icon: Lock },
+  { value: "open", Icon: Globe },
 ] as const;
 
 export function ChannelPermissionsSettings({
@@ -30,7 +31,18 @@ export function ChannelPermissionsSettings({
   visibility: ChannelVisibility;
   variant?: "dropdown" | "segmented";
 }) {
-  const visibilityLabel = visibility === "private" ? "Private" : "Public";
+  const { t } = useTranslation();
+  const visibilityLabel =
+    visibility === "private"
+      ? t("channels.permissions.private")
+      : t("channels.permissions.public");
+  const visibilityOptions = VISIBILITY_OPTIONS.map((option) => ({
+    ...option,
+    label:
+      option.value === "private"
+        ? t("channels.permissions.private")
+        : t("channels.permissions.public"),
+  }));
 
   return (
     <div
@@ -46,15 +58,15 @@ export function ChannelPermissionsSettings({
           disabled && variant === "segmented" && "opacity-50",
         )}
       >
-        Visibility
+        {t("channels.permissions.visibility-label")}
       </span>
       {variant === "segmented" ? (
         <SegmentedControl
           disabled={disabled}
-          legend="Visibility"
+          legend={t("channels.permissions.visibility-label")}
           onValueChange={onVisibilityChange}
           optionTestIdPrefix={`${testIdPrefix}-permissions-option`}
-          options={VISIBILITY_OPTIONS}
+          options={visibilityOptions}
           testId={`${testIdPrefix}-permissions`}
           value={visibility}
         />
@@ -62,7 +74,9 @@ export function ChannelPermissionsSettings({
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label={`Visibility: ${visibilityLabel}`}
+              aria-label={t("channels.permissions.visibility-value", {
+                label: visibilityLabel,
+              })}
               className="-mr-2.5 ml-auto h-9 w-fit justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
               data-testid={`${testIdPrefix}-permissions`}
               disabled={disabled}
@@ -94,13 +108,13 @@ export function ChannelPermissionsSettings({
                 data-testid={`${testIdPrefix}-permissions-option-open`}
                 value="open"
               >
-                Public
+                {t("channels.permissions.public")}
               </DropdownMenuRadioItem>
               <DropdownMenuRadioItem
                 data-testid={`${testIdPrefix}-permissions-option-private`}
                 value="private"
               >
-                Private
+                {t("channels.permissions.private")}
               </DropdownMenuRadioItem>
             </DropdownMenuRadioGroup>
           </DropdownMenuContent>

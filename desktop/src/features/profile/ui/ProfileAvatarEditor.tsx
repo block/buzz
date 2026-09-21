@@ -10,6 +10,7 @@ import { AvatarCustomColorPanel } from "@/features/profile/ui/AvatarCustomColorP
 import { ProfileAvatarModeTabs } from "@/features/profile/ui/ProfileAvatarModeTabs";
 import { useAvatarSelection } from "@/features/profile/avatarPresentationStore";
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
@@ -89,6 +90,7 @@ export function ProfileAvatarEditor({
   compactCustomColorPicker = false,
   stackAnimatedCameraOptions = false,
 }: ProfileAvatarEditorProps) {
+  const { t } = useTranslation();
   const { burstEmoji } = useEmojiBurst();
   const shouldReduceMotion = useReducedMotion();
   const initialEmojiAvatar = React.useMemo(
@@ -584,7 +586,7 @@ export function ProfileAvatarEditor({
         void handleFiles(event.dataTransfer.files);
       }}
     >
-      <legend className="sr-only">Avatar image picker</legend>
+      <legend className="sr-only">{t("profile.avatar-editor.legend")}</legend>
       <div
         className="relative"
         style={
@@ -702,7 +704,7 @@ export function ProfileAvatarEditor({
                         "Drag or browse"
                       ) : (
                         <>
-                          Drop or{" "}
+                          {t("profile.avatar-editor.drop-or")}
                           <span className="underline underline-offset-2">
                             browse
                           </span>
@@ -755,8 +757,8 @@ export function ProfileAvatarEditor({
                       }}
                       placeholder={
                         isOnboardingModal
-                          ? "Paste a URL"
-                          : "Paste a URL (Slack profile, etc.)"
+                          ? t("profile.avatar-editor.url-placeholder")
+                          : t("profile.avatar-editor.url-placeholder-detail")
                       }
                       spellCheck={false}
                       type="url"
@@ -903,9 +905,13 @@ export function ProfileAvatarEditor({
                             aria-label={
                               isCustomSwatch
                                 ? selectedEmoji
-                                  ? "Choose custom avatar color"
-                                  : "Choose an emoji before custom avatar color"
-                                : `Use ${swatch} background`
+                                  ? t("profile.avatar-editor.color-aria")
+                                  : t(
+                                      "profile.avatar-editor.color-needs-emoji-aria",
+                                    )
+                                : t("profile.avatar-editor.use-color-aria", {
+                                    color: swatch,
+                                  })
                             }
                             aria-pressed={isSelected}
                             className={cn(
@@ -1026,10 +1032,10 @@ export function ProfileAvatarEditor({
                           transition={DONE_BUTTON_CONTENT_TRANSITION}
                         >
                           <Spinner
-                            aria-label="Saving avatar"
+                            aria-label={t("profile.avatar-editor.saving-aria")}
                             className="h-4 w-4 border-2"
                           />
-                          <span>Saving</span>
+                          <span>{t("profile.avatar-editor.saving")}</span>
                         </motion.span>
                       ) : (
                         <motion.span
@@ -1048,7 +1054,9 @@ export function ProfileAvatarEditor({
                           key="ready"
                           transition={DONE_BUTTON_CONTENT_TRANSITION}
                         >
-                          {isOnboardingModal ? "Save" : "Done"}
+                          {isOnboardingModal
+                            ? t("profile.avatar-editor.save")
+                            : t("profile.avatar-editor.done")}
                         </motion.span>
                       )}
                     </AnimatePresence>

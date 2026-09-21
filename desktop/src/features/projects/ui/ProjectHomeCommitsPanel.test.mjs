@@ -1,3 +1,11 @@
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
+
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 

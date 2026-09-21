@@ -18,6 +18,7 @@ import {
   StatusEmoji,
 } from "@/features/user-status/ui/StatusEmoji";
 import type { UserStatusInput } from "@/features/user-status/types";
+import { useTranslation } from "@/i18n";
 import type { PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { isMacPlatform } from "@/shared/lib/platform";
@@ -75,6 +76,7 @@ export function ProfilePopover({
   triggerContainerRef,
   communitySwitcherSlot,
 }: ProfilePopoverProps) {
+  const { t } = useTranslation();
   const [statusDialogOpen, setStatusDialogOpen] = React.useState(false);
   const [presenceMenuOpen, setPresenceMenuOpen] = React.useState(false);
   const hasUserStatus = Boolean(userStatusText || userStatusEmoji);
@@ -118,7 +120,7 @@ export function ProfilePopover({
             }
           }}
         >
-          <div aria-label="Profile menu" role="menu">
+          <div aria-label={t("profile.menu.profile-aria")} role="menu">
             {/* ── Identity block ─────────────────────────────────── */}
             <div className="flex items-center gap-2 px-3 pt-2 pb-2">
               <MaskedAvatarBadgeFrame
@@ -180,7 +182,10 @@ export function ProfilePopover({
                     side="bottom"
                     sideOffset={4}
                   >
-                    <div aria-label="Presence status" role="menu">
+                    <div
+                      aria-label={t("profile.menu.presence-aria")}
+                      role="menu"
+                    >
                       {ALL_STATUSES.map((status) => (
                         <button
                           className={MENU_ITEM_CLASS}
@@ -236,7 +241,7 @@ export function ProfilePopover({
                   </span>
                 ) : (
                   <span className="flex-1 truncate text-muted-foreground">
-                    Update your status
+                    {t("profile.menu.update-status")}
                   </span>
                 )}
               </button>
@@ -267,7 +272,9 @@ export function ProfilePopover({
                 role="menuitem"
                 type="button"
               >
-                <span className="flex-1">Send feedback</span>
+                <span className="flex-1">
+                  {t("profile.menu.send-feedback")}
+                </span>
               </button>
             ) : null}
 
@@ -284,7 +291,7 @@ export function ProfilePopover({
               role="menuitem"
               type="button"
             >
-              <span className="flex-1">Settings</span>
+              <span className="flex-1">{t("profile.menu.settings")}</span>
               <kbd className="text-xs text-muted-foreground">
                 {settingsShortcutLabel}
               </kbd>

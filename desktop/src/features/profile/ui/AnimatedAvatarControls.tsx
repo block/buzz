@@ -2,6 +2,7 @@ import { Circle, CircleDashed } from "lucide-react";
 import * as React from "react";
 
 import { clampFrameIndex } from "@/features/profile/ui/AnimatedAvatarCapture.helpers";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { performDefaultHaptic } from "@/shared/lib/haptics";
 import { Spinner } from "@/shared/ui/spinner";
@@ -315,10 +316,15 @@ export function AvatarOutlineToggle({
   onChange,
   testIdPrefix,
 }: AvatarOutlineToggleProps) {
+  const { t } = useTranslation();
   const Icon = enabled ? Circle : CircleDashed;
   return (
     <button
-      aria-label={enabled ? "Turn outline off" : "Turn outline on"}
+      aria-label={
+        enabled
+          ? t("profile.avatar-controls.outline-off-aria")
+          : t("profile.avatar-controls.outline-on-aria")
+      }
       aria-pressed={enabled}
       className={cn(
         "grid h-12 w-12 shrink-0 place-items-center rounded-full border border-foreground/10 bg-background text-foreground transition-[background-color,box-shadow,color] duration-150 ease-out hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -327,7 +333,11 @@ export function AvatarOutlineToggle({
       data-testid={`${testIdPrefix}-animated-outline-toggle`}
       disabled={disabled}
       onClick={() => onChange(!enabled)}
-      title={enabled ? "Outline on" : "Outline off"}
+      title={
+        enabled
+          ? t("profile.avatar-controls.outline-on-title")
+          : t("profile.avatar-controls.outline-off-title")
+      }
       type="button"
     >
       <Icon aria-hidden="true" className="h-4 w-4" />
@@ -356,6 +366,7 @@ export function AvatarFilmstripPicker({
   selectedFrame,
   testIdPrefix,
 }: AvatarFilmstripPickerProps) {
+  const { t } = useTranslation();
   const stripRef = React.useRef<HTMLDivElement | null>(null);
   const maxFrameIndex = Math.max(0, frameCount - 1);
   const safeSelectedFrame = clampFrameIndex(selectedFrame, frameCount);
@@ -399,7 +410,7 @@ export function AvatarFilmstripPicker({
       data-testid={`${testIdPrefix}-animated-poster-strip`}
     >
       <div
-        aria-label="Choose still frame"
+        aria-label={t("profile.avatar-controls.still-frame-aria")}
         aria-valuemax={maxFrameIndex}
         aria-valuemin={0}
         aria-valuenow={safeSelectedFrame}
@@ -442,7 +453,7 @@ export function AvatarFilmstripPicker({
             {frames.length === 0 ? (
               <div className="grid h-full w-full place-items-center">
                 <Spinner
-                  aria-label="Generating frame thumbnails"
+                  aria-label={t("profile.avatar-controls.thumbnails-aria")}
                   className="h-5 w-5"
                 />
               </div>

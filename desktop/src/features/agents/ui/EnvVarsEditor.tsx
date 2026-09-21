@@ -1,9 +1,11 @@
 import { AlertCircle, Lock, Plus, X } from "lucide-react";
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
-import { cn } from "@/shared/lib/cn";
+
 import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
@@ -224,6 +226,7 @@ export function EnvVarsEditor({
   inheritedRowsLabel = "build",
   keyAnnotations,
 }: EnvVarsEditorProps) {
+  const { t } = useTranslation();
   // Keys that render as their own special rows (required amber rows or
   // file-satisfied read-only rows). These must NEVER enter `rows` state —
   // they read/write `value` directly via `onChange`/`updateRequiredValue`.
@@ -373,7 +376,7 @@ export function EnvVarsEditor({
                   {isMissing ? (
                     <span className="ml-1 flex items-center gap-0.5 rounded-sm bg-amber-100 px-1 py-0.5 text-2xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
                       <AlertCircle className="h-2.5 w-2.5" aria-hidden />
-                      Required
+                      {t("agents.advanced-badge.required")}
                     </span>
                   ) : null}
                 </div>
@@ -384,7 +387,7 @@ export function EnvVarsEditor({
                   )}
                 >
                   <Input
-                    aria-label={`Value for ${key}`}
+                    aria-label={t("agents.env-vars.value-aria", { key })}
                     className={cn(
                       "h-8 px-0 py-0 font-mono leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
@@ -460,7 +463,7 @@ export function EnvVarsEditor({
                   {key}
                 </span>
                 <span className="ml-1 rounded-sm bg-muted px-1 py-0.5 text-2xs font-medium text-muted-foreground">
-                  Set in goose config
+                  {t("agents.env-vars.set-in-goose")}
                 </span>
               </div>
               {/* Spacer columns to align with required-key rows */}
@@ -505,7 +508,9 @@ export function EnvVarsEditor({
                     {irow.key}
                   </span>
                   <span className="ml-1 rounded-sm bg-muted px-1 py-0.5 text-2xs font-medium text-muted-foreground">
-                    Inherited from {inheritedRowsLabel}
+                    {t("agents.env-vars.inherited-from", {
+                      source: inheritedRowsLabel,
+                    })}
                   </span>
                 </div>
                 <div
@@ -539,7 +544,7 @@ export function EnvVarsEditor({
         fileSatisfiedKeys.length === 0 &&
         inheritedRows.length === 0 ? (
           <p className="text-xs italic text-muted-foreground">
-            No variables set.
+            {t("agents.env-vars.empty")}
           </p>
         ) : null}
         {rows.map((row) => {
@@ -556,7 +561,7 @@ export function EnvVarsEditor({
                   )}
                 >
                   <Input
-                    aria-label="Variable name"
+                    aria-label={t("agents.env-vars.name-aria")}
                     className={cn(
                       "h-8 px-0 py-0 font-mono leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
@@ -577,7 +582,7 @@ export function EnvVarsEditor({
                   )}
                 >
                   <Input
-                    aria-label="Variable value"
+                    aria-label={t("agents.env-vars.value-input-aria")}
                     className={cn(
                       "h-8 px-0 py-0 font-mono leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
@@ -592,7 +597,7 @@ export function EnvVarsEditor({
                   />
                 </div>
                 <Button
-                  aria-label="Remove variable"
+                  aria-label={t("agents.env-vars.remove-aria")}
                   data-testid="env-vars-remove"
                   disabled={disabled}
                   onClick={() => removeRow(row.id)}
@@ -605,7 +610,9 @@ export function EnvVarsEditor({
               </div>
               {showsInherited ? (
                 <p className="ml-1 text-xs text-muted-foreground">
-                  Overrides {inheritedLabel} value{" "}
+                  {t("agents.env-vars.overrides-value", {
+                    label: inheritedLabel,
+                  })}{" "}
                   <span className="font-mono">
                     {maskInherited(inheritedValue)}
                   </span>
@@ -644,7 +651,7 @@ export function EnvVarsEditor({
           variant="outline"
         >
           <Plus className="mr-1 h-4 w-4" />
-          Add variable
+          {t("agents.env-vars.add")}
         </Button>
       </div>
     </div>

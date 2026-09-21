@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 
+import { i18n } from "@/i18n";
 import {
   createChannelManagedAgents,
   type CreateChannelManagedAgentInput,
@@ -136,9 +137,9 @@ export function useApplyTemplate() {
       if (result.failures.length > 0) {
         const { toast } = await import("sonner");
         toast.warning(
-          result.failures.length === 1
-            ? "1 agent from the template could not be created"
-            : `${result.failures.length} agents from the template could not be created`,
+          i18n.t("channel-templates.apply.failed-count", {
+            count: result.failures.length,
+          }),
         );
       }
       await Promise.all([

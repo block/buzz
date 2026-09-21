@@ -7,6 +7,7 @@ import type { Project } from "@/features/projects/hooks";
 import { useAddProjectChannelMutation } from "@/features/projects/useAddProjectChannel";
 import { useAddProjectRepositoryMutation } from "@/features/projects/useAddProjectRepository";
 import { AddProjectRepositoryDialog } from "@/features/projects/ui/AddProjectRepositoryDialog";
+import { useTranslation } from "@/i18n";
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 
 export function ProjectsCategoryCreateDialogs({
@@ -24,6 +25,7 @@ export function ProjectsCategoryCreateDialogs({
   ownerControlAgentPubkeyFor: (project: Project) => string | undefined;
   repositoryOpen: boolean;
 }) {
+  const { t } = useTranslation();
   const { goChannel, goProject } = useAppNavigation();
   const [channelProjectId, setChannelProjectId] = React.useState("");
   const channelProject =
@@ -49,26 +51,33 @@ export function ProjectsCategoryCreateDialogs({
         channelKind={channelOpen ? "stream" : null}
         description={
           channelProject
-            ? `Add another stream to ${channelProject.name}.`
-            : "Choose a project for this channel."
+            ? t("projects.category-create.add-stream", {
+                name: channelProject.name,
+              })
+            : t("projects.category-create.choose-project")
         }
         isCreating={createChannelMutation.isPending}
         onCreate={async (input) => {
-          if (!channelProject) throw new Error("Choose a project.");
+          if (!channelProject)
+            throw new Error(t("projects.category-create.choose-project-error"));
           const result = await createChannelMutation.mutateAsync({
             ...input,
             ownerControlAgentPubkey: ownerControlAgentPubkeyFor(channelProject),
             project: channelProject,
           });
-          toast.success(`Channel "#${result.channel.name}" created.`);
+          toast.success(
+            t("projects.shared.channel-created", {
+              name: result.channel.name,
+            }),
+          );
           await goChannel(result.channel.id);
         }}
         onOpenChange={onChannelOpenChange}
         testId="create-project-channel-dialog"
-        title="Create a project channel"
+        title={t("projects.shared.create-project-channel")}
       >
         <label className="block space-y-1.5 text-sm font-medium">
-          <span>Project</span>
+          <span>{t("projects.shared.project")}</span>
           <select
             className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
             data-testid="create-project-channel-project"

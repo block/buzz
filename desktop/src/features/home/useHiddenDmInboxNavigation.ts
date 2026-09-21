@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useTranslation } from "@/i18n";
 import { useOpenDmMutation } from "@/features/channels/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import type { InboxItem } from "@/features/home/lib/inbox";
@@ -26,6 +27,7 @@ export function useHiddenDmInboxNavigation({
   onOpenContext,
   selectedItem,
 }: UseHiddenDmInboxNavigationOptions) {
+  const { t } = useTranslation();
   const { goChannel } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const openDm = useOpenDmMutation().mutateAsync;
@@ -80,7 +82,7 @@ export function useHiddenDmInboxNavigation({
           if (generationRef.current === generation) {
             errorChannelIdsRef.current.add(channelId);
           }
-          toast.error("Could not reopen conversation. Try again.");
+          toast.error(t("home.inbox.reopen-failed-toast"));
         },
         onPendingChange: () => setPendingVersion((version) => version + 1),
       });
@@ -91,6 +93,7 @@ export function useHiddenDmInboxNavigation({
       expectedSignerPubkey,
       onOpenContext,
       openDm,
+      t,
     ],
   );
 

@@ -3,6 +3,7 @@ import type {
   ProjectsViewMode,
 } from "@/features/projects/lib/projectsViewHelpers";
 import { ProjectsViewModeToggle } from "@/features/projects/ui/ProjectsToolbar";
+import { useTranslation } from "@/i18n";
 
 type ProjectsListHeaderBarProps = {
   onViewModeChange: (viewMode: ProjectsViewMode) => void;
@@ -17,17 +18,22 @@ export function ProjectsSortSelect({
   onChange: (sort: ProjectsSort) => void;
   sort: ProjectsSort;
 }) {
+  const { t } = useTranslation();
   return (
     <label className="flex items-center gap-2 text-xs text-muted-foreground">
-      <span className="sr-only">Sort projects</span>
+      <span className="sr-only">{t("projects.list-header.sort-projects")}</span>
       <select
         className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
         onChange={(event) => onChange(event.target.value as ProjectsSort)}
         value={sort}
       >
-        <option value="updated">Recent activity</option>
-        <option value="created">Created date</option>
-        <option value="name">Name</option>
+        <option value="updated">
+          {t("projects.list-header.recent-activity")}
+        </option>
+        <option value="created">
+          {t("projects.list-header.created-date")}
+        </option>
+        <option value="name">{t("projects.list-header.name")}</option>
       </select>
     </label>
   );

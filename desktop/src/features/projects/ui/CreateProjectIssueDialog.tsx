@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import type { Project, Repository } from "@/features/projects/hooks";
 import { useCreateProjectIssueMutation } from "@/features/projects/issueMutations";
 import { selectProjectRepository } from "@/features/projects/projectModels";
+import { useTranslation } from "@/i18n";
 import {
   CreateProjectWorkItemDialog,
   type CreateProjectWorkItemDialogInput,
@@ -26,6 +27,7 @@ export function CreateProjectIssueDialog({
   open: boolean;
   projects: Project[];
 }) {
+  const { t } = useTranslation();
   const repositoryOptions = React.useMemo(
     () =>
       projects.flatMap((project) =>
@@ -57,7 +59,7 @@ export function CreateProjectIssueDialog({
   async function handleCreate(input: CreateProjectWorkItemDialogInput) {
     if (!project || !repository) throw new Error("Choose a repository.");
     const issueId = await createMutation.mutateAsync(input);
-    toast.success("Task created.");
+    toast.success(t("projects.create-task-dialog.created"));
     await onCreated(project, repository, issueId);
   }
 
@@ -66,8 +68,10 @@ export function CreateProjectIssueDialog({
       bodyPlaceholder="Add context, expected behavior, or reproduction steps"
       description={
         repository
-          ? `Create a task in ${repository.name}`
-          : "Choose a repository for this task."
+          ? t("projects.create-task-dialog.description-in", {
+              name: repository.name,
+            })
+          : t("projects.create-task-dialog.choose-repository")
       }
       isCreating={createMutation.isPending}
       itemName="issue"
@@ -75,11 +79,11 @@ export function CreateProjectIssueDialog({
       onOpenChange={onOpenChange}
       open={open}
       submitDisabled={!repository}
-      title="Create a task"
+      title={t("projects.create-task-dialog.title")}
       titlePlaceholder="Describe the task"
     >
       <label className="block space-y-1.5 text-sm font-medium">
-        <span>Repository</span>
+        <span>{t("projects.shared.repository")}</span>
         <select
           className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
           data-testid="create-issue-repository"

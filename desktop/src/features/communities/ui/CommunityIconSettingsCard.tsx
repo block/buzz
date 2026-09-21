@@ -9,6 +9,7 @@ import {
   useActiveCommunityIcon,
 } from "@/features/communities/useCommunityIcons";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { useTranslation } from "@/i18n";
 import { setCommunityIcon } from "@/shared/api/communityProfile";
 
 /**
@@ -21,6 +22,7 @@ export function CommunityIconSettingsCard({
 }: {
   compact?: boolean;
 }) {
+  const { t } = useTranslation();
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl;
   const iconQuery = useActiveCommunityIcon(relayUrl);
@@ -72,7 +74,7 @@ export function CommunityIconSettingsCard({
             toast.error(
               error instanceof Error
                 ? error.message
-                : "Couldn’t update the community icon.",
+                : t("communities.icon.update-failed"),
             );
           }
         }
@@ -82,7 +84,7 @@ export function CommunityIconSettingsCard({
       };
       void drainQueue();
     },
-    [mutateIcon, persistedIcon],
+    [mutateIcon, persistedIcon, t],
   );
 
   function previewIcon(icon: string) {
@@ -107,7 +109,7 @@ export function CommunityIconSettingsCard({
       <AgentCreationPreview
         assetLabel="community icon"
         avatarUrl={draftIcon || null}
-        label={activeCommunity?.name ?? "Community"}
+        label={activeCommunity?.name ?? t("communities.icon.fallback-label")}
         onClearAvatar={clearIconPreview}
         onCommitAvatar={persistIcon}
         onSelectAvatar={previewIcon}

@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 
@@ -31,6 +32,7 @@ export function MarkdownVideoPlayer({
   resolvedSrc: string;
   src?: string;
 }) {
+  const { t } = useTranslation();
   const videoReviewContext = React.useContext(VideoReviewMarkdownContext);
   // Download eligibility is independent of rendering as a video: only a
   // relay-hosted `/media/` URL can pass the native `download_file` SSRF gate,
@@ -53,10 +55,13 @@ export function MarkdownVideoPlayer({
         ? {
             ...videoReviewContext,
             title:
-              videoReviewContext.title ?? entry?.filename ?? alt ?? "Video",
+              videoReviewContext.title ??
+              entry?.filename ??
+              alt ??
+              t("shared.markdown.video.title"),
           }
         : undefined,
-    [alt, entry?.filename, videoReviewContext],
+    [alt, entry?.filename, t, videoReviewContext],
   );
 
   return (

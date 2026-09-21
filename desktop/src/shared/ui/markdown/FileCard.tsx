@@ -2,6 +2,7 @@ import * as React from "react";
 import { Download, FileText } from "lucide-react";
 import { toast } from "sonner";
 
+import { useTranslation } from "@/i18n";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 
@@ -38,6 +39,7 @@ export function FileCard({
   filename: string;
   size?: number;
 }) {
+  const { t } = useTranslation();
   const cardRef = React.useRef<HTMLButtonElement | null>(null);
   const sizeLabel = size != null ? formatFileSize(size) : "";
   useSmoothCorners(cardRef);
@@ -49,7 +51,10 @@ export function FileCard({
       onClick={() => {
         invokeTauri("download_file", { url: href, filename }).catch(
           (err: unknown) => {
-            const msg = err instanceof Error ? err.message : "Download failed";
+            const msg =
+              err instanceof Error
+                ? err.message
+                : t("shared.markdown.image.download-failed");
             toast.error(msg);
           },
         );

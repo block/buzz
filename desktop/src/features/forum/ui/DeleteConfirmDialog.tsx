@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -21,24 +22,27 @@ export function DeleteConfirmDialog({
   onConfirm: () => void;
   label: string;
 }) {
+  const { t } = useTranslation();
   return (
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete {label}?</AlertDialogTitle>
+          <AlertDialogTitle>
+            {t("forum.delete.confirm-title", { label })}
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            This will permanently delete this {label} and cannot be undone.
+            {t("forum.delete.confirm-description", { label })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {t("forum.delete.cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
             <Button onClick={onConfirm} type="button" variant="destructive">
-              Delete {label}
+              {t("forum.delete.confirm", { label })}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>

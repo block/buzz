@@ -7,17 +7,9 @@ import type {
 import { cn } from "@/shared/lib/cn";
 import { SegmentedControl } from "@/shared/ui/segmented-control";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+import { useTranslation } from "@/i18n";
 
 const MODE_TAB_ORDER: AvatarMode[] = ["image", "emoji", "animated"];
-const MODE_TAB_LABELS: Record<AvatarMode, string> = {
-  animated: "Animated",
-  emoji: "Emoji",
-  image: "Image",
-};
-const MODE_SEGMENT_OPTIONS = MODE_TAB_ORDER.map((value) => ({
-  label: MODE_TAB_LABELS[value],
-  value,
-}));
 
 type ProfileAvatarModeTabsProps = {
   disabled: boolean;
@@ -34,6 +26,16 @@ export function ProfileAvatarModeTabs({
   presentation,
   portalContainer,
 }: ProfileAvatarModeTabsProps) {
+  const { t } = useTranslation();
+  const modeTabLabels: Record<AvatarMode, string> = {
+    animated: t("profile.avatar-mode.animated"),
+    emoji: t("profile.avatar-mode.emoji"),
+    image: t("profile.avatar-mode.image"),
+  };
+  const segmentOptions = MODE_TAB_ORDER.map((value) => ({
+    label: modeTabLabels[value],
+    value,
+  }));
   const isOnboardingModal = presentation === "onboarding-modal";
   const isOnboardingInline = presentation === "onboarding-inline";
   const tabs = isOnboardingInline ? (
@@ -41,10 +43,10 @@ export function ProfileAvatarModeTabs({
       className="w-full bg-muted"
       disabled={disabled}
       indicatorTestId="onboarding-avatar-mode-indicator"
-      legend="Avatar type"
+      legend={t("profile.avatar-mode.type-aria")}
       onValueChange={onModeChange}
       optionTestIdPrefix="onboarding-avatar-mode"
-      options={MODE_SEGMENT_OPTIONS}
+      options={segmentOptions}
       testId="onboarding-avatar-mode-control"
       value={mode}
     />
@@ -57,7 +59,7 @@ export function ProfileAvatarModeTabs({
       value={mode}
     >
       <TabsList
-        aria-label="Avatar type"
+        aria-label={t("profile.avatar-mode.type-aria")}
         className={cn(
           isOnboardingModal
             ? "relative isolate grid h-10 w-full max-w-[320px] grid-cols-3 overflow-hidden rounded-full bg-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.12)] p-1 text-muted-foreground"
@@ -89,7 +91,7 @@ export function ProfileAvatarModeTabs({
             key={tabMode}
             value={tabMode}
           >
-            {MODE_TAB_LABELS[tabMode]}
+            {modeTabLabels[tabMode]}
           </TabsTrigger>
         ))}
       </TabsList>

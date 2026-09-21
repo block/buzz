@@ -7,6 +7,15 @@ import {
   getInboxConversationId,
   getInboxTypeLabel,
 } from "./inbox.ts";
+import { initializeI18n } from "@/i18n";
+
+// These assertions are the English contract, but node's own `navigator.languages`
+// reports the host system locale (which may be zh-CN), so pin English first.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const DM_CHANNEL_ID = "8ad375a7-6990-4b22-985f-e3fd34f634d7";

@@ -2,6 +2,7 @@ import { ChevronDown, ClockFading, Hash } from "lucide-react";
 import * as React from "react";
 
 import type { ChannelLifecycle } from "@/features/channels/lib/channelLifecycle";
+import { useTranslation } from "@/i18n";
 import { ProjectChannelIcon } from "@/features/projects/ui/ProjectChannelIcon";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -12,12 +13,6 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-
-const LIFECYCLE_LABEL: Record<ChannelLifecycle, string> = {
-  ongoing: "Ongoing",
-  project: "Project",
-  temporary: "Temporary",
-};
 
 const LIFECYCLE_ICON = {
   ongoing: Hash,
@@ -34,7 +29,7 @@ export function ChannelTypePicker({
   onLifecycleChange,
   onOpenChange,
   open,
-  temporaryOptionAriaLabel = "Temporary channel",
+  temporaryOptionAriaLabel,
   testId,
 }: {
   align?: React.ComponentProps<typeof DropdownMenuContent>["align"];
@@ -49,10 +44,16 @@ export function ChannelTypePicker({
   temporaryOptionAriaLabel?: string;
   testId?: string;
 }) {
+  const { t } = useTranslation();
   const [internalOpen, setInternalOpen] = React.useState(false);
   const pickerOpen = open ?? internalOpen;
   const setPickerOpen = onOpenChange ?? setInternalOpen;
-  const label = LIFECYCLE_LABEL[lifecycle];
+  const label =
+    lifecycle === "project"
+      ? t("channels.type.project")
+      : lifecycle === "temporary"
+        ? t("channels.type.temporary")
+        : t("channels.type.ongoing");
   const Icon = lifecycle === "project" ? null : LIFECYCLE_ICON[lifecycle];
   const projectLocked = lifecycle === "project";
 
@@ -71,7 +72,9 @@ export function ChannelTypePicker({
     <DropdownMenu modal={false} onOpenChange={setPickerOpen} open={pickerOpen}>
       <DropdownMenuTrigger asChild>
         <Button
-          aria-label={ariaLabel ?? `Channel type: ${label}`}
+          aria-label={
+            ariaLabel ?? t("channels.type.channel-type-value", { label })
+          }
           className={cn(
             "h-9 w-fit px-2.5 text-sm font-medium text-foreground hover:bg-muted/50",
             className,
@@ -99,23 +102,28 @@ export function ChannelTypePicker({
       >
         <DropdownMenuRadioGroup onValueChange={selectType} value={lifecycle}>
           {allowProject ? (
-            <DropdownMenuRadioItem aria-label="Project channel" value="project">
-              Project
+            <DropdownMenuRadioItem
+              aria-label={t("channels.type.project-channel")}
+              value="project"
+            >
+              {t("channels.type.project")}
             </DropdownMenuRadioItem>
           ) : null}
           <DropdownMenuRadioItem
-            aria-label="Ongoing channel"
+            aria-label={t("channels.type.ongoing-channel")}
             disabled={projectLocked}
             value="ongoing"
           >
-            Ongoing
+            {t("channels.type.ongoing")}
           </DropdownMenuRadioItem>
           <DropdownMenuRadioItem
-            aria-label={temporaryOptionAriaLabel}
+            aria-label={
+              temporaryOptionAriaLabel ?? t("channels.type.temporary-channel")
+            }
             disabled={projectLocked}
             value="temporary"
           >
-            Temporary
+            {t("channels.type.temporary")}
           </DropdownMenuRadioItem>
         </DropdownMenuRadioGroup>
       </DropdownMenuContent>
