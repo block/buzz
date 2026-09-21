@@ -2470,10 +2470,7 @@ mod postgres_tests {
         let mut cursor_token = first_page["nextCursor"].as_str().map(str::to_owned);
         let mut page_count = 1usize; // already consumed first page above
 
-        loop {
-            let Some(tok) = cursor_token.clone() else {
-                break;
-            };
+        while let Some(tok) = cursor_token.clone() {
             let path = format!("/members/restrictions?communityId={community_uuid}&cursor={tok}");
             let auth = make_nostr_auth(&operator_keys, &path);
             let response = status_for(
