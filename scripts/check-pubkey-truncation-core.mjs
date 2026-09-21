@@ -6,9 +6,11 @@ import path from "node:path";
  *
  * A truncated pubkey prefix is forgeable by vanity-grinding, so display
  * truncation must be consistent and centralized: the canonical
- * `truncatePubkey` in `shared/lib/pubkey.ts` (or the `<PubKey>` component,
- * which also offers full-key reveal + copy). Ad-hoc `pubkey.slice(0, N)`
- * display forms fragmented into five formats before this guard existed.
+ * `truncateNpub` (identity keys — compact npub) and `truncatePubkey`
+ * (generic hex identifiers such as event/blob IDs) in
+ * `shared/lib/pubkey.ts` (or the `<PubKey>` component, which also offers
+ * full-key reveal + copy). Ad-hoc `pubkey.slice(0, N)` display forms
+ * fragmented into five formats before this guard existed.
  *
  * It flags `.slice(` / `.substring(` / `.slice(0` template-truncations applied
  * to identifiers that look like a pubkey/npub, outside the canonical module.
@@ -97,7 +99,7 @@ export async function runPubkeyTruncationCheck({
   if (violations.length > 0) {
     console.error(
       `${label}: found ${violations.length} hand-rolled pubkey truncation(s).\n` +
-        `Use \`truncatePubkey\` from shared/lib/pubkey (or the <PubKey> component) instead.\n` +
+        `Use \`truncateNpub\` (identity) or \`truncatePubkey\` (event/blob IDs) from shared/lib/pubkey (or the <PubKey> component) instead.\n` +
         `Genuine non-display uses can be allowlisted in ${scriptPath}.\n`,
     );
     for (const violation of violations) {

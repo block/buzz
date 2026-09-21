@@ -7,6 +7,8 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
+import 'features/age_gate/age_restriction_page.dart';
+import 'features/age_gate/age_signal_provider.dart';
 import 'features/activity/activity_provider.dart';
 import 'features/activity/inbox_local_state_provider.dart';
 import 'features/activity/inbox_read_state.dart';
@@ -18,6 +20,7 @@ import 'features/home/home_page.dart';
 import 'features/invites/invite_create_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'features/pairing/pairing_page.dart';
+import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
 import 'features/channels/deep_link_dispatcher.dart';
@@ -292,7 +295,15 @@ class App extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final communityTheme = ref.watch(communityThemeProvider);
+    final ageSignalState = ref.watch(ageSignalProvider);
+    ref.listen(ageSignalProvider, (_, next) {
+      if (next == AgeSignalState.restricted) {
+        ref.read(pairingProvider.notifier).reset();
+      }
+    });
+    final communityTheme = ageSignalState != AgeSignalState.restricted
+        ? ref.watch(communityThemeProvider)
+        : defaultCommunityTheme;
     final themeMode = communityTheme.mode;
     final accentIndex = effectiveAccentIndex(
       communityTheme.theme,
@@ -300,6 +311,13 @@ class App extends HookConsumerWidget {
     );
     final schemeName = communityTheme.theme;
     final authState = ref.watch(authProvider);
+
+    useEffect(() {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(ref.read(ageSignalProvider.notifier).request());
+      });
+      return null;
+    }, const []);
 
     final resolved = resolveSchemes(schemeName, themeMode);
     final lightScheme = applyAccent(resolved.light, accentIndex);
@@ -323,7 +341,8 @@ class App extends HookConsumerWidget {
     // Eagerly initialize websocket session and lifecycle observer when
     // authenticated. These providers connect and manage the websocket.
     var hasUnreadInbox = false;
-    if (authState.value?.status == AuthStatus.authenticated) {
+    if (ageSignalState != AgeSignalState.restricted &&
+        authState.value?.status == AuthStatus.authenticated) {
       ref.watch(relaySessionProvider);
       ref.watch(observerRelayProvider);
       ref.watch(appLifecycleProvider);
@@ -351,12 +370,18 @@ class App extends HookConsumerWidget {
     }
 
     useEffect(() {
-      applyBadge(ref.read(unreadBadgeProvider));
+      if (ageSignalState != AgeSignalState.restricted) {
+        applyBadge(ref.read(unreadBadgeProvider));
+      } else {
+        AppBadgePlus.updateBadge(0);
+      }
       return null;
-    }, const []);
-    ref.listen<UnreadBadgeState>(unreadBadgeProvider, (_, next) {
-      applyBadge(next);
-    });
+    }, [ageSignalState]);
+    if (ageSignalState != AgeSignalState.restricted) {
+      ref.listen<UnreadBadgeState>(unreadBadgeProvider, (_, next) {
+        applyBadge(next);
+      });
+    }
 
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
@@ -371,13 +396,17 @@ class App extends HookConsumerWidget {
         topSectionGradient: buzzDarkGradient,
       ),
       themeMode: effectiveMode,
-      // Above the navigator, so a burst keeps playing over a pushed thread page
-      // or a modal sheet — the same reason desktop pins its canvas to the
-      // viewport rather than to the message row.
-      builder: (context, child) => MobileHuddleShell(
-        navigatorKey: _mobileRootNavigatorKey,
-        child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
-      ),
+      // Above the navigator, so an age restriction cannot be bypassed by a
+      // route that was pushed while the store signal request was in flight.
+      builder: (context, child) => switch (ageSignalState) {
+        AgeSignalState.restricted => const AgeRestrictionPage(),
+        _ => AppMarkdownTheme(
+          child: MobileHuddleShell(
+            navigatorKey: _mobileRootNavigatorKey,
+            child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
+          ),
+        ),
+      },
       home: authState.when(
         loading: () => const _SplashScreen(),
         error: (_, _) => const PairingPage(),

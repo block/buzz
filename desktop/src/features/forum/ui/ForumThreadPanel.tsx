@@ -28,6 +28,7 @@ type ForumThreadPanelProps = {
   isLoading: boolean;
   isSendingReply: boolean;
   channelId: string;
+  postId: string;
   currentPubkey?: string;
   profiles?: UserProfileLookup;
   onBack: () => void;
@@ -83,7 +84,7 @@ function ReplyRow({
   const {
     mentionNames: replyMentionNames,
     mentionPubkeysByName: replyMentionPubkeysByName,
-  } = resolveMentionProps(reply.tags, profiles);
+  } = resolveMentionProps(reply.tags, profiles, reply.content);
 
   return (
     <div
@@ -146,6 +147,7 @@ export function ForumThreadPanel({
   isLoading,
   isSendingReply,
   channelId,
+  postId,
   currentPubkey,
   profiles,
   onBack,
@@ -210,7 +212,7 @@ export function ForumThreadPanel({
   const {
     mentionNames: postMentionNames,
     mentionPubkeysByName: postMentionPubkeysByName,
-  } = resolveMentionProps(post.tags, profiles);
+  } = resolveMentionProps(post.tags, profiles, post.content);
   const postAuthorLabel = resolveUserLabel({
     pubkey: post.pubkey,
     currentPubkey,
@@ -334,6 +336,7 @@ export function ForumThreadPanel({
         <ForumComposer
           channelId={channelId}
           channelType="forum"
+          draftKey={`thread:${postId}`}
           isSending={isSendingReply}
           onSubmit={onReply}
           placeholder="Reply to this post..."

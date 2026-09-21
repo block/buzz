@@ -159,19 +159,26 @@ async fn discover_databricks_models_with_token_source(
     cfg: &Config,
     token_source: Arc<dyn TokenSource>,
 ) -> Result<Vec<ModelEntry>, AgentError> {
+    discover_databricks_models_with_client(cfg, token_source, &Client::new()).await
+}
+
+pub(crate) async fn discover_databricks_models_with_client(
+    cfg: &Config,
+    token_source: Arc<dyn TokenSource>,
+    http: &Client,
+) -> Result<Vec<ModelEntry>, AgentError> {
     let mut bearer = token_source.bearer_no_browser().await?;
-    let http = Client::new();
     let host = cfg.base_url.trim_end_matches('/');
     let mut refreshed = false;
 
     loop {
         let result = match cfg.provider {
-            Provider::Databricks => fetch_v1_models(&http, host, &bearer)
+            Provider::Databricks => fetch_v1_models(http, host, &bearer)
                 .await
                 .map(|models| apply_model_filter(models, cfg.databricks_model_filter.as_ref())),
             Provider::DatabricksV2 => {
                 fetch_v2_models(
-                    &http,
+                    http,
                     host,
                     &bearer,
                     cfg.databricks_model_filter.as_ref(),

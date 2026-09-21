@@ -50,7 +50,12 @@ function restoreChipSigils(root: HTMLElement): boolean {
     const label = element.getAttribute(MENTION_LABEL_ATTRIBUTE);
     if (
       label &&
-      matchChipTextToLabel(element.textContent ?? "", label, "@") !== "fragment"
+      matchChipTextToLabel(
+        element.textContent ?? "",
+        label,
+        "@",
+        element.getAttribute(MENTION_PUBKEY_ATTRIBUTE) ?? undefined,
+      ) !== "fragment"
     ) {
       element.textContent = `@${label}`;
       restored = true;
@@ -101,7 +106,9 @@ function inlineChipBoxes(root: HTMLElement): void {
       node && node !== root;
       node = node.parentElement
     ) {
-      if (getComputedStyle(node).display === "block") break;
+      // A wrapping chip can itself be blockified by its flex trigger. It is
+      // still inline message content; only a block ancestor ends this walk.
+      if (node !== chip && getComputedStyle(node).display === "block") break;
       node.style.display = "inline";
     }
   }

@@ -112,6 +112,10 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 Run `just ci` before every PR — it runs repository-wide formatting, lint,
 and static checks; Rust, Tauri, desktop, and mobile tests; and desktop and web
 builds. Clippy passing does not mean fmt passes; run both.
+For changes limited to Flutter/Dart code in the mobile app, run
+`just mobile-install mobile-check mobile-test` instead of `just ci`.
+Native code and build-configuration changes also require the corresponding
+platform checks.
 
 Run `just test` for integration tests if you touched `buzz-relay`,
 `buzz-db`, or `buzz-auth` — these require a running Postgres and Redis.
@@ -691,7 +695,7 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 cd mobile
 dart format --output=none --set-exit-if-changed .
 flutter analyze
-flutter test
+flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).
@@ -740,3 +744,9 @@ Autocomplete inserts a literal full label and a separator, including multi-word
 names. Only autocomplete settlement may move the caret past that separator;
 internal label spaces and deliberate ArrowLeft/click movement must be respected.
 See `docs/mention-editor.md` and `desktop/tests/e2e/mention-spacing.spec.ts`.
+
+Selected mention labels bind exact keys, including same-name teammates and
+persistent automatic addresses. Use the returned label from registration for
+insert/restore/remove. Ambiguous manually typed names must fail visibly without
+clearing the draft in chat, edit, and standalone forum consumers; never fan out
+silently to all identities sharing a name. See `docs/mention-editor.md`.

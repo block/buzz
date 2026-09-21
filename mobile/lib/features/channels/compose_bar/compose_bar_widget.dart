@@ -86,7 +86,9 @@ class ComposeBar extends HookConsumerWidget {
       attachments: attachments,
     );
     final voiceNoteRef = useRef(voiceNote)..value = voiceNote;
+    final mentionMap = useRef(<String, MentionCandidate>{});
     _useComposeDraftLifecycle(
+      mentionMap: mentionMap,
       ref: ref,
       controller: controller,
       draftKey: draftKey,
@@ -219,7 +221,6 @@ class ComposeBar extends HookConsumerWidget {
     // Map of displayName → selected mention candidate built as the user selects
     // mentions. Used to pass resolved pubkeys directly to onSend and to attach
     // selected non-member agents before the message is published.
-    final mentionMap = useRef(<String, MentionCandidate>{});
 
     // Channel autocomplete state ----------------------------------------------
     final channelQuery = useState<String?>(null);
@@ -244,9 +245,7 @@ class ComposeBar extends HookConsumerWidget {
     // owners so @mention suggestions show names ("managed by …" included).
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
-    final agentMentionLabels = _agentMentionLabels(
-      candidates: mentionMap.value.values,
-    );
+    final agentMentionLabels = _agentMentionLabels(bindings: mentionMap.value);
     final agentMentionLabelsKey = (agentMentionLabels.toList()..sort()).join(
       '\u0000',
     );
@@ -263,6 +262,9 @@ class ComposeBar extends HookConsumerWidget {
         );
         final pubkeys = [
           ...memberList.map((m) => m.pubkey),
+          ...mentionMap.value.values
+              .where((c) => c.requiresRevalidation && c.pubkey.isNotEmpty)
+              .map((c) => c.pubkey),
           ...?relayAgents?.map((a) => a.pubkey),
           ...?agentOwners?.values,
         ];
@@ -272,6 +274,8 @@ class ComposeBar extends HookConsumerWidget {
         return null;
       },
       [
+        draftIdentity,
+        draftKey,
         membersAsync.asData?.value.length,
         cachedMembers.length,
         relayAgents?.length,
@@ -382,7 +386,10 @@ class ComposeBar extends HookConsumerWidget {
 
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
-      final name = candidate.label;
+      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
+        for (final entry in mentionMap.value.entries)
+          entry.key: entry.value.pubkey,
+      });
       // Track the resolved candidate so we can pass its pubkey and prepare
       // selected non-member agents at send time.
       mentionMap.value[name] = candidate;
@@ -470,10 +477,45 @@ class ComposeBar extends HookConsumerWidget {
       final messenger = ScaffoldMessenger.maybeOf(context);
 
       // Extract pubkeys for mentions present in the final text.
-      final selectedMentions = <MentionCandidate>[
-        for (final entry in mentionMap.value.entries)
-          if (hasMention(text, entry.key)) entry.value,
-      ];
+      List<MentionCandidate> selectedMentions;
+      try {
+        selectedMentions = _resolveComposerMentions(
+          text,
+          mentionMap.value,
+          buildMentionCandidates(
+            members: channelMembersForAutocomplete(
+              membersAsync: membersAsync,
+              sessionStatus: sessionStatus,
+              cachedMembers: cachedMembers,
+            ),
+            relayAgents: const [],
+            sharedChannelIds: const {},
+            userCache: userCache,
+            ownerByAgentPubkey: agentOwners ?? const {},
+          ),
+          buildMentionCandidates(
+            members: membersAsync.asData?.value ?? const [],
+            relayAgents: relayAgents ?? const [],
+            sharedChannelIds: {
+              for (final c in channels)
+                if (c.isMember && !c.isArchived) c.id,
+            },
+            userCache: userCache,
+            ownerByAgentPubkey: agentOwners ?? const {},
+            currentPubkey: currentPubkey,
+            // Reuse ordinary search-result classification, not membership as
+            // permission. Persisted keys/flags themselves prove no role.
+            searchResults: [
+              for (final c in mentionMap.value.values)
+                if (c.requiresRevalidation && userCache[c.pubkey] != null)
+                  userCache[c.pubkey]!,
+            ],
+          ),
+        );
+      } on FormatException catch (error) {
+        messenger?.showSnackBar(SnackBar(content: Text(error.message)));
+        return;
+      }
       final outgoing = _OutgoingMentions(selectedMentions);
       final scan = await _scanNonMemberMentions(
         ref,
@@ -589,12 +631,12 @@ class ComposeBar extends HookConsumerWidget {
             if (context.mounted &&
                 queueGeneration == uploadGeneration.value &&
                 draftRevision.value == clearedDraftRevision) {
-              controller.value = draftText;
               attachments.value = draftAttachments;
               retainedForRetry = true;
               mentionMap.value
                 ..clear()
                 ..addAll(draftMentions);
+              controller.value = draftText;
               focusNode.requestFocus();
             }
           } finally {

@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { safeNpub } from "@/shared/lib/nostrUtils";
+
 export const HOSTED_COMMUNITY_SUFFIX = "communities.buzz.xyz";
 export const HOSTED_COMMUNITY_LIMIT = 5;
 export const VALID_HOSTED_COMMUNITY_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -88,6 +90,55 @@ export function hostedCommunityErrorMessage(
 export function hostedCommunityRelayUrl(community: HostedCommunity) {
   const host = community.normalized_host?.trim();
   return host ? `wss://${host.replace(/^wss?:\/\//, "")}` : null;
+}
+
+const BOUND_KEY_HEX_REGEX = /^[0-9a-f]{64}$/;
+
+/**
+ * The ONE operational form of a hosted identity's bound key: the trimmed,
+ * lowercased `pubkey_hex` when that field carries a 64-character hex key,
+ * null otherwise.
+ *
+ * `pubkey_hex` is the authoritative field the mismatch gate and every
+ * hosted-community operation act on, so its accepted shape is defined here
+ * once and is hex-only. An `npub` spelling belongs to the server's separate
+ * display field: one stored in the hex field is not a hex key and fails
+ * closed here instead of widening the authorization domain beyond what
+ * comparisons see. Whitespace-padded or mixed-case hex normalizes to the
+ * identical value on both sides of every comparison, so a key that is the
+ * same after normalization never reads as a mismatch demanding a
+ * delete/rebind of an identity the device already holds. Consumers
+ * normalize the local key through this same function before comparing.
+ */
+export function normalizedBoundKeyHex(
+  value: string | null | undefined,
+): string | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  return BOUND_KEY_HEX_REGEX.test(normalized) ? normalized : null;
+}
+
+/**
+ * The canonical npub of the hosted identity's authoritative bound key, or
+ * null when the payload carries no key the app can act on.
+ *
+ * `pubkey_hex` is the field the mismatch gate and every hosted-community
+ * operation act on, and it is only usable when it normalizes to a hex key
+ * (`normalizedBoundKeyHex`) — the server-sent `npub` is an independent,
+ * unverified spelling and is never accepted in its place. The returned npub
+ * is derived from that same normalized key, so the displayed account
+ * identity can never disagree with the binding the decisions act on. Hosted
+ * surfaces derive their connected/readiness/create/connect gates from the
+ * normalized key instead of identity-object presence, so an identity payload
+ * without a usable authoritative key (missing, empty, invalid/non-hex,
+ * wrong-length, npub-only, or an npub stored in the hex field) fails closed
+ * into recovery rather than presenting the account as connected.
+ */
+export function usableBoundIdentityNpub(
+  identity: HostedNostrIdentity | null | undefined,
+): string | null {
+  const hex = normalizedBoundKeyHex(identity?.pubkey_hex);
+  return hex === null ? null : safeNpub(hex);
 }
 
 export function getBuilderlabAuth() {

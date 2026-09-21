@@ -13,6 +13,7 @@ import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/emoji/positive_emoji.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
+import '../../shared/utils/string_utils.dart';
 import 'channel_management_provider.dart';
 import 'emoji_picker.dart';
 import 'recent_emoji_provider.dart';
@@ -451,9 +452,7 @@ class _ReactorTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final displayName =
-        profile?.label ??
-        (pubkey.length >= 8 ? '${pubkey.substring(0, 8)}...' : pubkey);
+    final displayName = profile?.label ?? shortPubkey(pubkey);
     final about = profile?.about;
 
     return ListTile(

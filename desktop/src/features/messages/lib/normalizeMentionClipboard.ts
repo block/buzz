@@ -2,6 +2,7 @@ import {
   CHANNEL_LABEL_ATTRIBUTE,
   matchChipTextToLabel,
   MENTION_LABEL_ATTRIBUTE,
+  MENTION_PUBKEY_ATTRIBUTE,
 } from "./mentionClipboard";
 
 /**
@@ -173,7 +174,14 @@ export function normalizeMentionClipboardContent(
     // from the same attribute the records carry keeps the two provably
     // consistent, whatever the classifier goes on to tolerate.
     const match =
-      label === null ? "full" : matchChipTextToLabel(text, label, sigil);
+      label === null
+        ? "full"
+        : matchChipTextToLabel(
+            text,
+            label,
+            sigil,
+            el.getAttribute(MENTION_PUBKEY_ATTRIBUTE) ?? undefined,
+          );
     span.textContent =
       match === "fragment"
         ? text

@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.5.23
+
+### Desktop and shared changes
+
+- fix(desktop): keep packaged frontendDist relative so Windows embeds assets ([#7177](https://github.com/block/buzz/pull/7177)) ([`dad5a33865fc81a2e55b3b60746632f615ec1e3a`](https://github.com/block/buzz/commit/dad5a33865fc81a2e55b3b60746632f615ec1e3a))
+- fix(sidebar): simplify unread indicators and emphasize priority activity ([#7134](https://github.com/block/buzz/pull/7134)) ([`f038cbbb0d4092a72ffd93f17916f84d2b39bb43`](https://github.com/block/buzz/commit/f038cbbb0d4092a72ffd93f17916f84d2b39bb43))
+- feat(buzz-acp): update base prompt; add buzz context and skills to Pi agents ([#7335](https://github.com/block/buzz/pull/7335)) ([`4beffef6979347f7ebdc760705865bdd04d23508`](https://github.com/block/buzz/commit/4beffef6979347f7ebdc760705865bdd04d23508))
+- fix(desktop): restore mention chip identity icons ([#7338](https://github.com/block/buzz/pull/7338)) ([`4afef8649ab11d60b423893e9e4f8cd36868d35a`](https://github.com/block/buzz/commit/4afef8649ab11d60b423893e9e4f8cd36868d35a))
+- Persist video playback speed preference ([#7336](https://github.com/block/buzz/pull/7336)) ([`5d107836c6bd6a57e2da28560ec0acc0d016b8d9`](https://github.com/block/buzz/commit/5d107836c6bd6a57e2da28560ec0acc0d016b8d9))
+- feat(desktop): invite owned agents from standalone forums ([#7125](https://github.com/block/buzz/pull/7125)) ([`e7e29937a145aca7a3c7f5436b07e32c6c20087f`](https://github.com/block/buzz/commit/e7e29937a145aca7a3c7f5436b07e32c6c20087f))
+- fix(desktop): authorize remote mentions at publication ([#7124](https://github.com/block/buzz/pull/7124)) ([`d595806fc3b9c9758992e39b9b51cbb5f55791b0`](https://github.com/block/buzz/commit/d595806fc3b9c9758992e39b9b51cbb5f55791b0))
+- fix(acp): rename system tag to agent-instructions ([#7332](https://github.com/block/buzz/pull/7332)) ([`ce9decb235f628c484631ac923db96466460fc3f`](https://github.com/block/buzz/commit/ce9decb235f628c484631ac923db96466460fc3f))
+- fix(desktop): bind duplicate mention selections to exact recipients ([#7133](https://github.com/block/buzz/pull/7133)) ([`ee883d73fb84752d26f52c6606ad3cadc9f12cc7`](https://github.com/block/buzz/commit/ee883d73fb84752d26f52c6606ad3cadc9f12cc7))
+- feat(desktop): preserve mentions across copy and paste ([#7228](https://github.com/block/buzz/pull/7228)) ([`b1f6b7ef770dddbb7f33c9f5861c379a47bca1d6`](https://github.com/block/buzz/commit/b1f6b7ef770dddbb7f33c9f5861c379a47bca1d6))
+- test(desktop): await Bestie drag and profile hover endpoints ([#7294](https://github.com/block/buzz/pull/7294)) ([`4b0744d7f3161d9f045dd67a73e014e4440c2b47`](https://github.com/block/buzz/commit/4b0744d7f3161d9f045dd67a73e014e4440c2b47))
+- Collapse contiguous join messages ([#7262](https://github.com/block/buzz/pull/7262)) ([`2ac0aa1dd18c0b9d4fa722658c4692b0c79a496f`](https://github.com/block/buzz/commit/2ac0aa1dd18c0b9d4fa722658c4692b0c79a496f))
+
+### Other repository changes
+
+- Add generic information-flow control core ([#7293](https://github.com/block/buzz/pull/7293)) ([`4d447b9c20a23fb33c94778e6cf309424abea6c8`](https://github.com/block/buzz/commit/4d447b9c20a23fb33c94778e6cf309424abea6c8))
+- Verify ACP relay events before prompt routing ([#7010](https://github.com/block/buzz/pull/7010)) ([`e09f715c9d0ee2cb7bf8a39061e601f3a502f588`](https://github.com/block/buzz/commit/e09f715c9d0ee2cb7bf8a39061e601f3a502f588))
+- fix(buzz-acp): bound busy-owner hold to prevent cross-channel starvation ([#7337](https://github.com/block/buzz/pull/7337)) ([`b17c0776b7438d59904e8c38926148bf692fa5f5`](https://github.com/block/buzz/commit/b17c0776b7438d59904e8c38926148bf692fa5f5))
+- refactor(relay): extract NIP-29 membership authorization ([#7285](https://github.com/block/buzz/pull/7285)) ([`cd02b693aae86444b0b5636474a3d202c6fc8f26`](https://github.com/block/buzz/commit/cd02b693aae86444b0b5636474a3d202c6fc8f26))
+
+[Compare desktop-v0.5.22...desktop-v0.5.23](https://github.com/block/buzz/compare/desktop-v0.5.22...desktop-v0.5.23)
+
 ## v0.5.22
 
 ### Desktop and shared changes

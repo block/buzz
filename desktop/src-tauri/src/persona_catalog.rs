@@ -17,7 +17,9 @@ use tauri::State;
 
 use crate::{
     app_state::AppState,
-    managed_agents::{validate_agent_definition_text, validate_agent_description_text},
+    managed_agents::{
+        validate_agent_definition_text, validate_agent_description_text, AcpSessionPolicy,
+    },
     native_relay_client::NativeRelayClient,
 };
 
@@ -57,6 +59,7 @@ struct CatalogAgentProjection {
     name_pool: Vec<String>,
     respond_to: Option<String>,
     parallelism: Option<u64>,
+    session_policy: AcpSessionPolicy,
 }
 
 /// Fetches the active community's relay-confirmed persona catalog.
@@ -246,6 +249,10 @@ fn parse_agent(content: &str) -> Option<CatalogAgentProjection> {
         .get("parallelism")
         .and_then(Value::as_u64)
         .filter(|value| (1..=32).contains(value));
+    let session_policy = match object.get("session_policy").and_then(Value::as_str) {
+        Some("thread") => AcpSessionPolicy::Thread,
+        _ => AcpSessionPolicy::Channel,
+    };
     let name_pool = object
         .get("name_pool")
         .and_then(Value::as_array)
@@ -273,6 +280,7 @@ fn parse_agent(content: &str) -> Option<CatalogAgentProjection> {
         name_pool,
         respond_to,
         parallelism,
+        session_policy,
     })
 }
 

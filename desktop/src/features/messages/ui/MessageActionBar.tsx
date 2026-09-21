@@ -121,15 +121,11 @@ function MoreActionsMenu({
 }) {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   const [isReportDialogOpen, setIsReportDialogOpen] = React.useState(false);
-  // Set true the moment the user picks "Edit message". The
-  // `onCloseAutoFocus` handler on `DropdownMenuContent` reads it to
-  // suppress Radix's default focus-restoration (which would yank focus
-  // back to the trigger and steal it from the composer's editor — the
-  // composer schedules its own focus on RAF, but Radix's restoration
-  // runs in a setTimeout that fires after our RAF and wins the race).
-  // Reset to false inside the handler so Escape / non-Edit closes still
-  // get default trigger-restoration (a11y intact for keyboard users).
-  const editJustSelectedRef = React.useRef(false);
+  // Transfer focus ownership only after the menu has finished closing.
+  // During its exit animation Radix's pointer-leave handler can still focus
+  // the menu, stealing keystrokes from an already-open composer. Merely
+  // suppressing trigger restoration does not prevent that earlier race.
+  const pendingEditRef = React.useRef<(() => void) | null>(null);
 
   const hasCopyActions =
     !message.pending && message.kind !== KIND_HUDDLE_STARTED;
@@ -171,9 +167,11 @@ function MoreActionsMenu({
           side="top"
           sideOffset={6}
           onCloseAutoFocus={(event) => {
-            if (editJustSelectedRef.current) {
+            const startEdit = pendingEditRef.current;
+            if (startEdit) {
               event.preventDefault();
-              editJustSelectedRef.current = false;
+              pendingEditRef.current = null;
+              startEdit();
             }
           }}
         >
@@ -181,8 +179,7 @@ function MoreActionsMenu({
             <DropdownMenuItem
               data-testid={`edit-message-${message.id}`}
               onSelect={() => {
-                editJustSelectedRef.current = true;
-                onEdit(message);
+                pendingEditRef.current = () => onEdit(message);
               }}
             >
               <Pencil className="h-4 w-4" />
@@ -399,6 +396,7 @@ function isCustomEmojiShortcode(emoji: string) {
 export const MessageActionBar = React.memo(function MessageActionBar({
   channelId,
   message,
+  ref,
   onDelete,
   onEdit,
   onFollowThread,
@@ -420,6 +418,9 @@ export const MessageActionBar = React.memo(function MessageActionBar({
    *  action is hidden (callers like the home inbox that lack the context). */
   channelId?: string | null;
   message: TimelineMessage;
+  /** Attached to the root element so hosts can measure the rail's rendered
+   *  footprint (e.g. to reserve its width in the message-header layout). */
+  ref?: React.Ref<HTMLDivElement>;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onFollowThread?: (message: TimelineMessage) => void;
@@ -517,6 +518,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
           : "",
       )}
       data-testid={`message-action-bar-${message.id}`}
+      ref={ref}
     >
       <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
         <div className="flex items-center gap-0.5 p-1">

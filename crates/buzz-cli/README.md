@@ -112,6 +112,12 @@ stored rules in `validation_error` so an owner can remove and repair them.
 
 ## Commands
 
+`buzz --help` prints this whole surface as an indented tree — every group with
+its subcommands and their descriptions — so there is no need to run `--help`
+once per group to find a command. `buzz -h` keeps the short group-level
+summary, and `buzz <group> <subcommand> --help` has the flags and examples.
+The table below mirrors that tree for readers who are not at a terminal.
+
 | Group | Subcommand | Description |
 |-------|-----------|-------------|
 | `messages` | `send` | Send a message to a channel |
@@ -168,6 +174,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | `repos` | `create` | Announce a git repository (NIP-34) |
 | | `get` | Get a repository announcement |
 | | `list` | List repository announcements |
+| | `default-branch get/set` | Read or select an existing default branch (requires relay support) |
 | | `protect list` | List branch and tag protection rules |
 | | `protect set` | Create or replace a protection rule |
 | | `protect remove` | Remove a protection rule |
@@ -196,3 +203,29 @@ stdout: raw relay JSON
 stderr: {"error": "category", "message": "detail"}
 exit:   0=ok  1=user  2=network  3=auth  4=other  5=write conflict
 ```
+
+
+### Default branch
+
+After deploying relay support, select an existing published branch without
+renaming or deleting any branch:
+
+```bash
+buzz repos default-branch get --owner <owner-hex> --id my-repo
+buzz repos default-branch set --owner <owner-hex> --id my-repo --branch main
+# For an explicitly reviewed version, use the manifest digest returned by get:
+buzz repos default-branch set --owner <owner-hex> --id my-repo --branch main \
+  --expected-manifest <manifest-digest>
+```
+
+`--owner` defaults to the signing identity, not an agent's attested human owner.
+`set` without `--expected-manifest` reads the current version first. Success
+returns `branch`, `head`, `manifest` and `changed`; `get` omits `changed`.
+A stale version returns conflict (exit 5). Ambiguous write failures return
+`delivery_unknown` with `retryable:false` and the original digest: **read before
+retrying**, and do not blindly re-run against a newly fetched version.
+
+The signer must be a current channel member and a repository manager, directly
+or through an unrestricted, valid NIP-OA owner attestation; permission to push is
+not permission to change the default. See the
+[protocol and authorization contract](../../docs/git-on-object-storage.md#default-branch-management).

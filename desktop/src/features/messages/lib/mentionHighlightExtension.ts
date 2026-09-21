@@ -832,13 +832,18 @@ function addMatchesForPatterns(
       const from = position + match.index;
       const to = from + match[0].length;
       const outsideEnd = { inclusiveEnd: false };
+      // Presentation only: a full-key label needs zero cloned inline padding
+      // when it fragments. This does not establish a recipient binding.
+      const literalClass = / \([0-9a-f]{64}\)(?: \d+)?$/i.test(match[0])
+        ? " mention-literal-key"
+        : "";
       if (options?.hidePrefix && /^[@#]/.test(match[0])) {
         decorations.push(
           Decoration.inline(
             from,
             from + 1,
             {
-              class: "mention-prefix-hidden",
+              class: `mention-prefix-hidden${literalClass}`,
               spellcheck: "false",
             },
             outsideEnd,
@@ -849,7 +854,7 @@ function addMatchesForPatterns(
             from + 1,
             to,
             {
-              class: className,
+              class: `${className}${literalClass}`,
               spellcheck: "false",
             },
             outsideEnd,
@@ -861,7 +866,7 @@ function addMatchesForPatterns(
             from,
             to,
             {
-              class: className,
+              class: `${className}${literalClass}`,
               spellcheck: "false",
             },
             outsideEnd,

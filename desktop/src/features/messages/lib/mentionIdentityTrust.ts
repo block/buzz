@@ -25,16 +25,25 @@ import {
  *
  * Compared through `canonicalMentionLabel`, so a legitimate copy is not
  * refused over the casing, padding, or U+00A0 a pasteboard round trip leaves
- * on the declared label.
+ * on the declared label. Generated same-name qualifiers additionally require
+ * the embedded full key to match the record AND the base alias to be trusted.
+ * The qualifier alone is never identity evidence.
  */
 export function isTrustedMentionLabel(
   label: string,
   aliases: Iterable<string>,
+  pubkey?: string,
 ): boolean {
   const wanted = canonicalMentionLabel(label);
   if (!wanted) return false;
+  const qualified = wanted.match(
+    /^(.*) \(([0-9a-f]{64})\)(?: (?:[2-9]|[1-9][0-9]+))?$/,
+  );
+  const baseAlias =
+    qualified?.[2] === pubkey?.toLowerCase() ? qualified?.[1] : undefined;
   for (const alias of aliases) {
-    if (canonicalMentionLabel(alias) === wanted) return true;
+    const trusted = canonicalMentionLabel(alias);
+    if (trusted === wanted || (baseAlias && trusted === baseAlias)) return true;
   }
   return false;
 }
@@ -56,7 +65,11 @@ export function partitionMentionIdentitiesByLocalTrust(
   const unresolved: MentionIdentity[] = [];
   for (const record of records) {
     if (
-      isTrustedMentionLabel(record.label, resolveLocalAliases(record.pubkey))
+      isTrustedMentionLabel(
+        record.label,
+        resolveLocalAliases(record.pubkey),
+        record.pubkey,
+      )
     ) {
       trusted.push(record);
     } else {

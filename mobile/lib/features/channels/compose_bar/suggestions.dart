@@ -47,7 +47,10 @@ class _MentionSuggestions extends StatelessWidget {
                 radius: 18,
                 backgroundColor: context.colors.primaryContainer,
                 fallback: Text(
-                  name[0].toUpperCase(),
+                  // Name-derived for named candidates; keyed to the hex
+                  // public key for unnamed ones so the compact-npub label
+                  // doesn't render `N` for everyone.
+                  candidate.initial,
                   style: context.textTheme.labelMedium?.copyWith(
                     color: context.colors.onPrimaryContainer,
                     fontWeight: FontWeight.w600,
