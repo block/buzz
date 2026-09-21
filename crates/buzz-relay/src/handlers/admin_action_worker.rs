@@ -102,7 +102,7 @@ pub(crate) async fn recover_one(state: &Arc<AppState>, claim: StrandedActionClai
     );
 
     // Use the target context persisted at claim time for kick actions only.
-    // Migration 0045 added enforcement_target_pubkey/enforcement_channel_id
+    // Migration 0047 added enforcement_target_pubkey/enforcement_channel_id
     // for kicks; other actions (ban, timeout, delete) do not set these columns
     // and must re-derive from the report row on every recovery. Applying the
     // persisted-context branch to non-kick actions breaks delete recovery:
@@ -111,6 +111,11 @@ pub(crate) async fn recover_one(state: &Arc<AppState>, claim: StrandedActionClai
     // target_event_id=None, causing pre-marker delete recovery to fail
     // ("delete requires target_event_id") or post-marker recovery to skip the
     // tombstone outbox row. Gate strictly on action=="kick".
+    //
+    // For pre-migration kick rows (both columns NULL), we still re-derive and
+    // pass the result as function parameters; the convergence gate in
+    // drive_enforcement accepts those as a legacy-context fallback so these
+    // stranded kicks can finalize without the persisted columns being populated.
     let (target_pubkey_opt, target_event_id_opt, channel_id) = if rec.action == "kick"
         && (rec.enforcement_target_pubkey.is_some() || rec.enforcement_channel_id.is_some())
     {
@@ -122,12 +127,9 @@ pub(crate) async fn recover_one(state: &Arc<AppState>, claim: StrandedActionClai
         )
     } else {
         // Non-kick action, or pre-migration kick row with both columns NULL.
-        // Non-kick actions: re-derive from the report — all other action types
-        // (ban, timeout, delete) do not persist context and must always derive.
-        // Pre-migration kick rows (both NULL): re-derive also, but note these
-        // rows cannot finalize — convergence requires rec.enforcement_target_pubkey
-        // and rec.enforcement_channel_id (invariant error if absent). Pre-migration
-        // stranded kicks should be effectively zero at deploy time.
+        // Non-kick actions: always re-derive from the report.
+        // Pre-migration kick rows: re-derive so the convergence gate can use the
+        // result as a legacy-context fallback (see report_resolution.rs).
         let report = match state.db.admin_get_report(rec.report_id).await {
             Ok(Some(r)) => r,
             Ok(None) => {
