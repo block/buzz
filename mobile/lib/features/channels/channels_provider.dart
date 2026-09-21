@@ -38,6 +38,13 @@ const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 /// Membership loading resolves kind:39002 events tagged `#p:<my-pubkey>`,
 /// then fetches kind:39000 metadata for those channel ids.
 ///
+/// Channels this identity just created are remembered locally until their
+/// relay-side kind:39002 membership entry is observable. The relay provisions
+/// that entry asynchronously after kind:9007, so without this overlay a
+/// just-created channel can vanish from the list between creation and the
+/// membership write landing (#7780, mirrors Desktop's
+/// `AppState::pending_owned_channels`).
+///
 /// The paginated kind:39000 directory is fetched separately when Browse
 /// channels opens, so discovery never delays the main Conversations screen.
 /// Live updates are layered on top via chunked subscriptions on the `#h` tag
@@ -47,6 +54,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   final _pushExport = PushPresentationExportRecovery();
   bool _pushCacheExporting = false;
   bool _pushCacheDirty = false;
+
+  /// Channel ids this identity created whose relay-side kind:39002 membership
+  /// entry has not been observed yet.
+  ///
+  /// Keyed by the relay-and-identity scope that created them so a community or
+  /// identity switch can never carry a stale overlay into a new scope. Cleared
+  /// per id as soon as the membership query returns the channel.
+  final Map<String, Set<String>> _pendingOwnedChannelIdsByScope = {};
 
   static const _backstopInterval = Duration(seconds: 60);
 
@@ -111,6 +126,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _memberSnapshotsByChannelId = const {};
       _directoryMetas = const [];
       _hiddenDmIds = const {};
+      // The pending-owner overlay describes channels a previous relay or
+      // identity created; it must never classify channels in this scope.
+      _pendingOwnedChannelIdsByScope.clear();
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
       _refreshCoordinator.retireInFlight();
@@ -200,16 +218,34 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         .map((e) => e.getTagValue('d'))
         .whereType<String>()
         .toSet();
+
+    // Pending-owner overlay: channels this identity created whose kind:39002
+    // membership entry is not observable yet. The relay provisions it
+    // asynchronously after kind:9007, so a refresh that races that write would
+    // otherwise drop the just-created channel entirely (#7780). Treat pending
+    // ids as members for this refresh; clear each one once real membership
+    // lands so a later leave still flips `is_member` back to false.
+    final scope = fence.scope;
+    final pendingOwnedIds =
+        _pendingOwnedChannelIdsByScope[scope] ?? const <String>{};
+    if (pendingOwnedIds.isNotEmpty) {
+      _clearPendingOwnedChannels(scope, memberChannelIds);
+    }
+    final effectiveMemberIds = <String>{
+      ...memberChannelIds,
+      ...(_pendingOwnedChannelIdsByScope[scope] ?? const <String>{}),
+    };
     _cacheMemberSnapshots(memberships, replaceAll: true);
 
-    // Step 2: pull metadata for joined channels. A user with no memberships
-    // must still continue to directory discovery below.
-    final memberMetas = memberChannelIds.isEmpty
+    // Step 2: pull metadata for joined channels (and any still-pending
+    // creations, whose metadata exists but whose membership may not). A user
+    // with no memberships must still continue to directory discovery below.
+    final memberMetas = effectiveMemberIds.isEmpty
         ? const <NostrEvent>[]
         : await _fenced(
             fence,
             session.fetchHistory(
-              NostrFilters.channelMetadata(memberChannelIds.toList()),
+              NostrFilters.channelMetadata(effectiveMemberIds.toList()),
             ),
           );
 
@@ -255,7 +291,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // backing channels. The relay-signed kind:39000 metadata identifies the
     // relay, not the channel creator; the owner role in kind:39002 is the
     // canonical creator identity used to reject forged Huddle links.
-    final memberCountChannelIds = memberChannelIds.toList();
+    final memberCountChannelIds = effectiveMemberIds.toList();
     final memberEvents = memberCountChannelIds.isEmpty
         ? const <NostrEvent>[]
         : await _fenced(
@@ -283,7 +319,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     for (final event in dedupedMetas) {
       final id = event.getTagValue('d');
       if (id == null) continue;
-      final isMember = memberChannelIds.contains(id);
+      // A pending-owned channel classifies as a member: this identity created
+      // it, so the missing kind:39002 entry is provisioning lag, not a real
+      // non-membership.
+      final isMember =
+          memberChannelIds.contains(id) ||
+          (_pendingOwnedChannelIdsByScope[scope]?.contains(id) ?? false);
       final channel = _channelFromMeta(
         event,
         isMember: isMember,
@@ -417,6 +458,35 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // caller assigns whatever this returns, so the last check belongs here.
     fence.ensureCurrent();
     return channels;
+  }
+
+  /// Returns the current scope key for the pending-owner overlay.
+  String get _overlayScope => channelDirectoryScope(
+    ref.read(relayConfigProvider).baseUrl,
+    ref.read(myPubkeyProvider),
+  );
+
+  /// Marks [channelId] pending-owned for the active relay-and-identity scope.
+  ///
+  /// Called right after a successful kind:9007 submission, before the refresh
+  /// that must already show the channel. Mirrors Desktop's
+  /// `AppState::mark_pending_owned_channel`.
+  void markPendingOwnedChannel(String channelId) {
+    final id = channelId.trim();
+    if (id.isEmpty) return;
+    (_pendingOwnedChannelIdsByScope[_overlayScope] ??= {}).add(id);
+  }
+
+  /// Drops [channelIds] from the pending-owner overlay for [scope].
+  ///
+  /// Real kind:39002 membership has landed for these channels, so the overlay
+  /// must stop classifying them: otherwise a later leave could be masked and
+  /// the channel would stay visible with `is_member=true`.
+  void _clearPendingOwnedChannels(String scope, Iterable<String> channelIds) {
+    final pending = _pendingOwnedChannelIdsByScope[scope];
+    if (pending == null || pending.isEmpty) return;
+    pending.removeAll(channelIds);
+    if (pending.isEmpty) _pendingOwnedChannelIdsByScope.remove(scope);
   }
 
   /// Fetches each channel's independent latest-message window in one HTTP
