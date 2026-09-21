@@ -2471,9 +2471,8 @@ mod postgres_tests {
         let mut page_count = 1usize; // already consumed first page above
 
         loop {
-            let tok = match &cursor_token {
-                Some(t) => t.clone(),
-                None => break,
+            let Some(tok) = cursor_token.clone() else {
+                break;
             };
             let path = format!("/members/restrictions?communityId={community_uuid}&cursor={tok}");
             let auth = make_nostr_auth(&operator_keys, &path);
