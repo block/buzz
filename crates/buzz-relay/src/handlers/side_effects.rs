@@ -11,7 +11,7 @@ use buzz_core::kind::{
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
     KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    KIND_STREAM_MESSAGE_EDIT, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -34,7 +34,7 @@ pub fn is_admin_kind(kind: u32) -> bool {
 /// handled in `ingest_event()` before storage so we can short-circuit on
 /// duplicates without storing the event at all.
 pub fn is_side_effect_kind(kind: u32) -> bool {
-    matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | KIND_AGENT_PROFILE | 41001..=41003 | 40099)
+    matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | KIND_AGENT_PROFILE | KIND_STREAM_MESSAGE_EDIT | 41001..=41003 | 40099)
 }
 
 /// Apply the three live side effects that must follow a successful admin kick:
@@ -338,6 +338,7 @@ pub async fn handle_side_effects(
         9001 => handle_remove_user(tenant, event, state).await,
         9002 => handle_edit_metadata(tenant, event, state).await,
         9005 => handle_delete_event_side_effect(tenant, event, state).await,
+        KIND_STREAM_MESSAGE_EDIT => handle_message_edit_side_effect(tenant, event, state).await,
         9007 => handle_create_group(tenant, event, state).await,
         9008 => handle_delete_group(tenant, event, state).await,
         9009 => {
@@ -355,6 +356,78 @@ pub async fn handle_side_effects(
         // kind:7 (reaction) handled inline in ingest_event() before storage.
         _ => Ok(()),
     }
+}
+
+fn admin_edit_system_message_content(
+    actor_hex: String,
+    target_event_id: String,
+    channel_id: Uuid,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "message_edited_by_admin",
+        "actor": actor_hex,
+        "target_event_id": target_event_id,
+        "channel": channel_id.to_string(),
+    })
+}
+
+async fn handle_message_edit_side_effect(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> anyhow::Result<()> {
+    let channel_id =
+        extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
+    let target_id = event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            if tag.kind().to_string() == "e" {
+                tag.content().and_then(|value| {
+                    let bytes = hex::decode(value).ok()?;
+                    (bytes.len() == 32).then_some(bytes)
+                })
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| anyhow::anyhow!("missing e tag for edit target"))?;
+    let target_event = state
+        .db
+        .get_event_by_id_for_event_write(tenant.community(), &target_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("get edit target failed: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("edit target event not found"))?;
+
+    if target_event.channel_id != Some(channel_id) {
+        return Err(anyhow::anyhow!(
+            "target event belongs to a different channel"
+        ));
+    }
+
+    let actor = event.pubkey.to_bytes().to_vec();
+    let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
+    if author == actor {
+        return Ok(());
+    }
+
+    let members = state
+        .db
+        .get_members(tenant.community(), channel_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("get channel members failed: {e}"))?;
+    if !actor_is_channel_owner_or_admin(&members, &actor) {
+        // Agent-owner edits retain their existing authorization but are not
+        // channel-admin moderation actions, so they have no room-facing audit row.
+        return Ok(());
+    }
+
+    let content =
+        admin_edit_system_message_content(hex::encode(actor), hex::encode(&target_id), channel_id);
+    let timestamp =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(event.created_at.as_secs() as i64, 0)
+            .unwrap_or_else(chrono::Utc::now);
+    emit_system_message(tenant, state, channel_id, content, timestamp).await
 }
 
 /// Validate a standard NIP-09 deletion event before it is stored.
@@ -3948,5 +4021,33 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    #[test]
+    fn owner_role_is_owner_or_admin_for_message_edit_audit() {
+        let channel_id = Uuid::new_v4();
+        let actor = vec![7_u8; 32];
+        let members = vec![MemberRecord {
+            channel_id,
+            pubkey: actor.clone(),
+            role: "owner".to_string(),
+            joined_at: chrono::Utc::now(),
+            invited_by: None,
+            removed_at: None,
+        }];
+
+        assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    #[test]
+    fn admin_edit_system_message_contains_audit_provenance() {
+        let channel_id = Uuid::new_v4();
+        let content =
+            admin_edit_system_message_content("aabb".to_string(), "ccdd".to_string(), channel_id);
+
+        assert_eq!(content["type"], "message_edited_by_admin");
+        assert_eq!(content["actor"], "aabb");
+        assert_eq!(content["target_event_id"], "ccdd");
+        assert_eq!(content["channel"], channel_id.to_string());
     }
 }

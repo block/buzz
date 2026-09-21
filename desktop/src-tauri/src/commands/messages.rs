@@ -19,6 +19,7 @@ use crate::{
     nostr_convert,
     relay::{
         assert_expected_relay_scope, assert_expected_signer, query_relay, submit_event,
+        submit_event_with_keys,
         submit_event_at_created_at, submit_event_with_keys_created_at,
     },
 };
@@ -903,8 +904,10 @@ pub async fn edit_message(
     if trimmed.is_empty() && input.media_tags.is_empty() {
         return Err("edit must have content or attachments".into());
     }
+    let keys = state.signing_keys()?;
+    let editor_pubkey = keys.public_key().to_hex();
     let mention_refs: Vec<&str> = input.mention_pubkeys.iter().map(|s| s.as_str()).collect();
-    let builder = events::build_message_edit(
+    let builder = events::build_message_edit_with_editor(
         channel_uuid,
         target_eid,
         trimmed,
@@ -915,8 +918,9 @@ pub async fn edit_message(
             mention_refs: input.mention_tags.as_deref(),
         },
         input.suppress_link_previews,
+        Some(&editor_pubkey),
     )?;
-    submit_event(builder, &state).await?;
+    submit_event_with_keys(builder, &state, &keys, None).await?;
     Ok(())
 }
 

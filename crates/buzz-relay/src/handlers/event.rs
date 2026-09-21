@@ -578,6 +578,59 @@ async fn enqueue_event_created_audit(
     // DB is genuinely overloaded and the relay should slow down rather than
     // accumulate unbounded in-memory state. DB write failures in the worker are
     // logged but not retried (same as the previous per-event tokio::spawn).
+    let mut detail = serde_json::json!({
+        "event_kind": kind_u32,
+        "channel_id": stored_event.channel_id,
+    });
+    if kind_u32 == buzz_core::kind::KIND_STREAM_MESSAGE_EDIT {
+        let target_id = stored_event.event.tags.iter().find_map(|tag| {
+            if tag.kind().to_string() == "e" {
+                tag.content().and_then(|value| {
+                    let bytes = hex::decode(value).ok()?;
+                    (bytes.len() == 32).then_some(hex::encode(bytes))
+                })
+            } else {
+                None
+            }
+        });
+        if let Some(target_id) = target_id {
+            detail["target_event_id"] = serde_json::Value::String(target_id.clone());
+            if let Some(edited_by) = stored_event.event.tags.iter().find_map(|tag| {
+                (tag.kind().to_string() == "edited_by")
+                    .then(|| tag.content().map(str::to_string))
+                    .flatten()
+            }) {
+                detail["edited_by"] = serde_json::Value::String(edited_by);
+            }
+            if let (Some(channel_id), Ok(Some(target_event))) = (
+                stored_event.channel_id,
+                state
+                    .db
+                    .get_event_by_id_for_event_write(
+                        tenant.community(),
+                        &hex::decode(&target_id).unwrap_or_default(),
+                    )
+                    .await,
+            ) {
+                let author = super::ingest::effective_message_author(
+                    &target_event.event,
+                    &state.relay_keypair.public_key(),
+                );
+                let members = state.db.get_members(tenant.community(), channel_id).await;
+                let actor = stored_event.event.pubkey.to_bytes().to_vec();
+                let is_channel_admin = members.is_ok_and(|members| {
+                    members.iter().any(|member| {
+                        member.pubkey == actor && (member.role == "owner" || member.role == "admin")
+                    })
+                });
+                if author != actor && is_channel_admin {
+                    detail["type"] =
+                        serde_json::Value::String("message_edited_by_admin".to_string());
+                    detail["actor"] = serde_json::Value::String(actor_pubkey_hex.to_string());
+                }
+            }
+        }
+    }
     let audit_entry = buzz_audit::NewAuditEntry {
         community_id: tenant.community(),
         action: buzz_audit::AuditAction::EventCreated,
@@ -589,10 +642,7 @@ async fn enqueue_event_created_audit(
         // the pre-rewrite semantics, ported to the raw-bytes column.
         actor_pubkey: hex::decode(actor_pubkey_hex).ok(),
         object_id: Some(event_id_hex.to_owned()),
-        detail: serde_json::json!({
-            "event_kind": kind_u32,
-            "channel_id": stored_event.channel_id,
-        }),
+        detail,
     };
     if let Err(e) = audit_tx.send(audit_entry).await {
         error!(event_id = %event_id_hex, "Audit channel closed — entry lost: {e}");
