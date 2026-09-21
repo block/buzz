@@ -7,6 +7,7 @@
 mod auth;
 mod error;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use auth::{
@@ -60,9 +61,13 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         .route("/operators", get(list_operators))
         .route("/operators/{pubkey}", put(upsert_operator))
         .route("/operators/{pubkey}", delete(delete_operator))
+        .route("/communities", get(list_banner_communities))
+        .route("/banners", get(banners))
+        .route("/banners/current", put(upsert_banner))
+        .route("/banners/current", delete(disable_banner))
         .layer(middleware::from_fn(security_headers))
-        // Mutation routes carry a JSON body (max ~4 KB); read-only routes have no body.
-        .layer(RequestBodyLimitLayer::new(4096))
+        // Mutation routes carry a JSON body; banner text may be up to 2,000 chars.
+        .layer(RequestBodyLimitLayer::new(8192))
         .with_state(state)
 }
 
@@ -404,6 +409,331 @@ async fn feedback_attachment(
         "admin feedback attachment read"
     );
     Ok(response)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BannerCommunityResponse {
+    id: Uuid,
+    host: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminBannerResponse {
+    id: String,
+    severity: &'static str,
+    text: String,
+    max_displays: i32,
+    target_scope: &'static str,
+    community_ids: Vec<Uuid>,
+    created_by: String,
+    created_at: DateTime<Utc>,
+    disabled_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BannersResponse {
+    active: Option<AdminBannerResponse>,
+    history: Vec<AdminBannerResponse>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BannerQuery {
+    limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpsertBannerBody {
+    severity: buzz_db::RelayBannerSeverity,
+    text: String,
+    max_displays: i32,
+    target_scope: buzz_db::RelayBannerTargetScope,
+    community_ids: Option<Vec<Uuid>>,
+}
+
+impl From<buzz_db::RelayBannerRecord> for AdminBannerResponse {
+    fn from(value: buzz_db::RelayBannerRecord) -> Self {
+        let target_scope = value.target_scope().as_str();
+        Self {
+            id: value.public_id.to_string(),
+            severity: value.severity.as_str(),
+            text: value.message,
+            max_displays: value.max_displays,
+            target_scope,
+            community_ids: value
+                .community_ids
+                .into_iter()
+                .map(|id| *id.as_uuid())
+                .collect(),
+            created_by: hex::encode(value.created_by),
+            created_at: value.created_at,
+            disabled_at: value.disabled_at,
+        }
+    }
+}
+
+async fn list_banner_communities(
+    State(state): State<Arc<crate::state::AppState>>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Json<Vec<BannerCommunityResponse>>, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        uri.path_and_query()
+            .map_or_else(|| uri.path(), |pq| pq.as_str()),
+        "GET",
+        None,
+    )
+    .await?;
+    let principal = require_mutation_principal(principal)?;
+    require_operator(&principal)?;
+    let communities = state.db.admin_list_banner_communities().await?;
+    Ok(Json(
+        communities
+            .into_iter()
+            .map(|community| BannerCommunityResponse {
+                id: *community.id.as_uuid(),
+                host: community.host,
+            })
+            .collect(),
+    ))
+}
+
+async fn banners(
+    State(state): State<Arc<crate::state::AppState>>,
+    uri: Uri,
+    headers: HeaderMap,
+    Query(query): Query<BannerQuery>,
+) -> Result<Json<BannersResponse>, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        uri.path_and_query()
+            .map_or_else(|| uri.path(), |pq| pq.as_str()),
+        "GET",
+        None,
+    )
+    .await?;
+    let principal = require_mutation_principal(principal)?;
+    require_operator(&principal)?;
+    let history = state
+        .db
+        .admin_list_relay_banners(limit(query.limit)?)
+        .await?;
+    let active = history
+        .iter()
+        .find(|banner| banner.disabled_at.is_none())
+        .cloned()
+        .map(AdminBannerResponse::from);
+    Ok(Json(BannersResponse {
+        active,
+        history: history.into_iter().map(AdminBannerResponse::from).collect(),
+    }))
+}
+
+async fn upsert_banner(
+    State(state): State<Arc<crate::state::AppState>>,
+    uri: Uri,
+    headers: HeaderMap,
+    body_bytes: Bytes,
+) -> Result<Json<AdminBannerResponse>, ApiError> {
+    let principal = require_mutation_principal(
+        authorize(
+            &state,
+            &headers,
+            uri.path_and_query()
+                .map_or_else(|| uri.path(), |pq| pq.as_str()),
+            "PUT",
+            Some(&body_bytes),
+        )
+        .await?,
+    )?;
+    require_operator(&principal)?;
+    let body: UpsertBannerBody = serde_json::from_slice(&body_bytes)
+        .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
+    let scope = if body.target_scope == buzz_db::RelayBannerTargetScope::All {
+        if body
+            .community_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.is_empty())
+        {
+            return Err(ApiError::bad_request(
+                "invalid_scope",
+                "communityIds must be empty when targetScope is all",
+            ));
+        }
+        buzz_db::RelayBannerScope::AllCommunities
+    } else {
+        let mut ids = body.community_ids.unwrap_or_default();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return Err(ApiError::bad_request(
+                "invalid_scope",
+                "communityIds must be non-empty when targetScope is communities",
+            ));
+        }
+        validate_active_banner_communities(&state, &ids).await?;
+        buzz_db::RelayBannerScope::Communities(
+            ids.into_iter()
+                .map(buzz_core::CommunityId::from_uuid)
+                .collect(),
+        )
+    };
+
+    let outcome = state
+        .db
+        .admin_upsert_relay_banner(buzz_db::RelayBannerUpsert {
+            severity: body.severity,
+            message: body.text,
+            max_displays: body.max_displays,
+            scope,
+            actor_pubkey: principal.pubkey.to_vec(),
+        })
+        .await
+        .map_err(map_banner_db_error)?;
+    if let Some(previous) = outcome.previous.as_ref() {
+        fan_out_relay_banner_update(&state, previous, true).await;
+    }
+    fan_out_relay_banner_update(&state, &outcome.active, false).await;
+    Ok(Json(AdminBannerResponse::from(outcome.active)))
+}
+
+async fn disable_banner(
+    State(state): State<Arc<crate::state::AppState>>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = require_mutation_principal(
+        authorize(
+            &state,
+            &headers,
+            uri.path_and_query()
+                .map_or_else(|| uri.path(), |pq| pq.as_str()),
+            "DELETE",
+            None,
+        )
+        .await?,
+    )?;
+    require_operator(&principal)?;
+    let disabled_banner = state
+        .db
+        .admin_disable_active_relay_banner(&principal.pubkey)
+        .await?;
+    if let Some(banner) = disabled_banner.as_ref() {
+        fan_out_relay_banner_update(&state, banner, true).await;
+    }
+    Ok(Json(
+        serde_json::json!({ "disabled": disabled_banner.is_some() }),
+    ))
+}
+
+async fn validate_active_banner_communities(
+    state: &crate::state::AppState,
+    ids: &[Uuid],
+) -> Result<(), ApiError> {
+    let active = state.db.admin_list_banner_communities().await?;
+    let active: HashSet<Uuid> = active
+        .into_iter()
+        .map(|community| *community.id.as_uuid())
+        .collect();
+    if ids.iter().all(|id| active.contains(id)) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "invalid_scope",
+            "communityIds must refer to active communities",
+        ))
+    }
+}
+
+async fn fan_out_relay_banner_update(
+    state: &crate::state::AppState,
+    banner: &buzz_db::RelayBannerRecord,
+    disabled: bool,
+) {
+    let created_at = nostr::Timestamp::from(banner.updated_at.timestamp().max(0) as u64);
+    let event = if disabled {
+        match crate::api::banners::banner_disabled_event(
+            &state.relay_keypair,
+            banner,
+            Some(created_at),
+        ) {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::warn!("Relay banner disable event signing failed: {error}");
+                return;
+            }
+        }
+    } else {
+        match crate::api::banners::banner_event(&state.relay_keypair, banner, Some(created_at)) {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::warn!("Relay banner event signing failed: {error}");
+                return;
+            }
+        }
+    };
+    publish_relay_banner_update(state, banner, &event).await;
+    crate::handlers::event::fan_out_relay_banner_event(state, banner, &event, !disabled).await;
+}
+
+async fn publish_relay_banner_update(
+    state: &crate::state::AppState,
+    banner: &buzz_db::RelayBannerRecord,
+    event: &nostr::Event,
+) {
+    let communities = if banner.target_all_communities {
+        match state.db.admin_list_banner_communities().await {
+            Ok(communities) => communities
+                .into_iter()
+                .map(|community| community.id)
+                .collect(),
+            Err(error) => {
+                tracing::warn!("Relay banner community list failed during fan-out: {error}");
+                return;
+            }
+        }
+    } else {
+        banner.community_ids.clone()
+    };
+    for community_id in communities {
+        let Some(host) = state
+            .db
+            .lookup_community_host(community_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%community_id, "Relay banner community host lookup failed: {error}");
+                None
+            })
+        else {
+            continue;
+        };
+        let tenant = buzz_core::TenantContext::resolved(community_id, host);
+        state.mark_local_event(community_id, &event.id);
+        if let Err(error) = state
+            .pubsub
+            .publish_event(&tenant, buzz_pubsub::EventTopic::Global, event)
+            .await
+        {
+            state
+                .local_event_ids
+                .invalidate(&(community_id, event.id.to_bytes()));
+            tracing::warn!(%community_id, "Relay banner Redis publish failed: {error}");
+        }
+    }
+}
+
+fn map_banner_db_error(error: buzz_db::DbError) -> ApiError {
+    match error {
+        buzz_db::DbError::InvalidData(message) => ApiError::bad_request("invalid_banner", &message),
+        _ => ApiError::internal(),
+    }
 }
 
 // ── Phase 2: Report resolution ────────────────────────────────────────────────
@@ -1368,11 +1698,336 @@ mod postgres_tests {
         builder.body(Body::empty()).expect("request")
     }
 
+    fn banner_connection(
+        state: &Arc<crate::state::AppState>,
+        community: buzz_core::CommunityId,
+        host: &str,
+        pubkey: nostr::PublicKey,
+    ) -> (
+        Arc<crate::connection::ConnectionState>,
+        tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    ) {
+        let conn_id = Uuid::new_v4();
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel(16);
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(4);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let backpressure_count = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let subscriptions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        state.conn_manager.register(
+            conn_id,
+            send_tx.clone(),
+            ctrl_tx.clone(),
+            None,
+            cancel.clone(),
+            community,
+            backpressure_count.clone(),
+            subscriptions.clone(),
+            3,
+        );
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn_id, pubkey.to_bytes().to_vec());
+        let conn = Arc::new(crate::connection::ConnectionState {
+            conn_id,
+            tenant: buzz_core::TenantContext::resolved(community, host.to_owned()),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
+            auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                buzz_auth::AuthContext {
+                    pubkey,
+                    scopes: vec![],
+                    channel_ids: None,
+                    auth_method: buzz_auth::AuthMethod::Nip42,
+                    agent_owner_pubkey: None,
+                },
+            )),
+            subscriptions,
+            send_tx,
+            ctrl_tx,
+            cancel,
+            backpressure_count,
+            grace_limit: 3,
+        });
+        (conn, send_rx)
+    }
+
+    async fn register_banner_req(
+        state: Arc<crate::state::AppState>,
+        community: buzz_core::CommunityId,
+        host: &str,
+        pubkey: nostr::PublicKey,
+        sub_id: &str,
+    ) -> tokio::sync::mpsc::Receiver<axum::extract::ws::Message> {
+        let (conn, mut rx) = banner_connection(&state, community, host, pubkey);
+        crate::handlers::req::handle_req(
+            sub_id.to_owned(),
+            vec![nostr::Filter::new().kind(nostr::Kind::Custom(
+                buzz_core::kind::KIND_RELAY_BANNER as u16,
+            ))],
+            Vec::new(),
+            conn,
+            state,
+        )
+        .await;
+        loop {
+            let axum::extract::ws::Message::Text(frame) =
+                rx.recv().await.expect("initial banner frame")
+            else {
+                panic!("expected text frame");
+            };
+            let frame: serde_json::Value = serde_json::from_str(&frame).expect("relay frame JSON");
+            if frame[0] == "EOSE" {
+                break;
+            }
+            assert_eq!(frame[0], "EVENT");
+        }
+        rx
+    }
+
+    async fn recv_banner_frame(
+        rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    ) -> nostr::Event {
+        let axum::extract::ws::Message::Text(text) = rx.recv().await.expect("banner EVENT") else {
+            panic!("expected text frame");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("EVENT frame JSON");
+        assert_eq!(frame[0], "EVENT");
+        serde_json::from_value(frame[2].clone()).expect("banner event")
+    }
+
+    fn is_disabled_banner(event: &nostr::Event) -> bool {
+        event
+            .tags
+            .iter()
+            .any(|tag| tag.kind().to_string() == "status" && tag.content() == Some("disabled"))
+    }
+
+    fn banner_text(event: &nostr::Event) -> String {
+        serde_json::from_str::<serde_json::Value>(&event.content).expect("banner content JSON")
+            ["text"]
+            .as_str()
+            .expect("banner text")
+            .to_owned()
+    }
+
+    fn spawn_banner_pubsub_loop(state: Arc<crate::state::AppState>) -> tokio::task::JoinHandle<()> {
+        let mut rx = state.pubsub.subscribe_local();
+        tokio::spawn(async move {
+            while let Ok(channel_event) = rx.recv().await {
+                crate::handlers::event::fan_out_pubsub_event(&state, channel_event).await;
+            }
+        })
+    }
+
+    async fn banner_test_community(
+        pool: &sqlx::PgPool,
+        prefix: &str,
+    ) -> (buzz_core::CommunityId, String) {
+        let id = Uuid::new_v4();
+        let host = format!("{prefix}-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&host)
+            .execute(pool)
+            .await
+            .expect("insert community");
+        (buzz_core::CommunityId::from_uuid(id), host)
+    }
+
     async fn status_for(
         state: Arc<crate::state::AppState>,
         request: Request<Body>,
     ) -> axum::response::Response {
         router(state).oneshot(request).await.expect("response")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn banner_admin_req_local_and_redis_lifecycle_orders_scope_shrink() {
+        let _guard = crate::test_support::RELAY_BANNER_TEST_LOCK.lock().await;
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let redis_pool = deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let mut redis_conn = match redis_pool.get().await {
+            Ok(conn) => conn,
+            Err(_) => {
+                eprintln!("skipping banner lifecycle test: Redis unavailable");
+                return;
+            }
+        };
+        if redis::cmd("PING")
+            .query_async::<String>(&mut redis_conn)
+            .await
+            .is_err()
+        {
+            eprintln!("skipping banner lifecycle test: Redis unavailable");
+            return;
+        }
+        drop(redis_conn);
+
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect test DB");
+        let operator = test_operator_keys();
+        let origin = nip98_state_with_database_pool_and_redis(
+            pool.clone(),
+            &redis_url,
+            vec![operator.public_key().to_hex()],
+        )
+        .await;
+        let receiver = nip98_state_with_database_pool_and_redis(
+            pool.clone(),
+            &redis_url,
+            vec![operator.public_key().to_hex()],
+        )
+        .await;
+        let origin_subscriber = tokio::spawn(origin.pubsub.clone().run_subscriber());
+        let receiver_subscriber = tokio::spawn(receiver.pubsub.clone().run_subscriber());
+        let origin_fanout = spawn_banner_pubsub_loop(origin.clone());
+        let receiver_fanout = spawn_banner_pubsub_loop(receiver.clone());
+
+        let (retained, retained_host) = banner_test_community(&pool, "banner-admin-retained").await;
+        let (removed, removed_host) = banner_test_community(&pool, "banner-admin-removed").await;
+        origin
+            .db
+            .admin_disable_active_relay_banner(&operator.public_key().to_bytes())
+            .await
+            .expect("clear pre-existing active banner");
+        let retained_user = nostr::Keys::generate().public_key();
+        let removed_user = nostr::Keys::generate().public_key();
+        let remote_retained_user = nostr::Keys::generate().public_key();
+        let mut retained_rx = register_banner_req(
+            origin.clone(),
+            retained,
+            &retained_host,
+            retained_user,
+            "retained-banner",
+        )
+        .await;
+        let mut removed_rx = register_banner_req(
+            origin.clone(),
+            removed,
+            &removed_host,
+            removed_user,
+            "removed-banner",
+        )
+        .await;
+        let mut remote_retained_rx = register_banner_req(
+            receiver.clone(),
+            retained,
+            &retained_host,
+            remote_retained_user,
+            "remote-retained-banner",
+        )
+        .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let first_body = serde_json::json!({
+            "severity": "info",
+            "text": "initial all",
+            "maxDisplays": 1,
+            "targetScope": "all"
+        })
+        .to_string();
+        let response = status_for(
+            origin.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri("/banners/current")
+                .header(header::HOST, "admin.example")
+                .header(
+                    header::AUTHORIZATION,
+                    make_nostr_auth_put(&operator, "/banners/current", first_body.as_bytes()),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(first_body))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let retained_initial = recv_banner_frame(&mut retained_rx).await;
+        let removed_initial = recv_banner_frame(&mut removed_rx).await;
+        let remote_initial = recv_banner_frame(&mut remote_retained_rx).await;
+        assert_eq!(banner_text(&retained_initial), "initial all");
+        assert_eq!(banner_text(&removed_initial), "initial all");
+        assert_eq!(banner_text(&remote_initial), "initial all");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), retained_rx.recv())
+                .await
+                .is_err()
+        );
+
+        let second_body = serde_json::json!({
+            "severity": "warning",
+            "text": "retained only",
+            "maxDisplays": 1,
+            "targetScope": "communities",
+            "communityIds": [*retained.as_uuid()]
+        })
+        .to_string();
+        let response = status_for(
+            origin.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri("/banners/current")
+                .header(header::HOST, "admin.example")
+                .header(
+                    header::AUTHORIZATION,
+                    make_nostr_auth_put(&operator, "/banners/current", second_body.as_bytes()),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(second_body))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let retained_clear = recv_banner_frame(&mut retained_rx).await;
+        let retained_active = recv_banner_frame(&mut retained_rx).await;
+        assert!(is_disabled_banner(&retained_clear));
+        assert_eq!(banner_text(&retained_active), "retained only");
+        assert!(retained_clear.created_at < retained_active.created_at);
+
+        let removed_clear = recv_banner_frame(&mut removed_rx).await;
+        assert!(is_disabled_banner(&removed_clear));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), removed_rx.recv())
+                .await
+                .is_err()
+        );
+
+        let remote_clear = recv_banner_frame(&mut remote_retained_rx).await;
+        let remote_active = recv_banner_frame(&mut remote_retained_rx).await;
+        assert!(is_disabled_banner(&remote_clear));
+        assert_eq!(banner_text(&remote_active), "retained only");
+        assert_eq!(remote_clear.created_at, retained_clear.created_at);
+        assert_eq!(remote_active.created_at, retained_active.created_at);
+
+        let response = status_for(
+            origin.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri("/banners/current")
+                .header(header::HOST, "admin.example")
+                .header(
+                    header::AUTHORIZATION,
+                    make_nostr_auth_delete(&operator, "/banners/current"),
+                )
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let retained_disable = recv_banner_frame(&mut retained_rx).await;
+        assert!(is_disabled_banner(&retained_disable));
+        assert!(retained_active.created_at < retained_disable.created_at);
+
+        origin_subscriber.abort();
+        receiver_subscriber.abort();
+        origin_fanout.abort();
+        receiver_fanout.abort();
     }
 
     #[tokio::test]
@@ -1782,6 +2437,57 @@ mod postgres_tests {
     /// (populated in relay_operator_pubkeys config) and an AlwaysFreshReplayGuard.
     async fn nip98_state(pubkeys: Vec<String>) -> Arc<crate::state::AppState> {
         nip98_state_with_replay(pubkeys, Arc::new(AlwaysFreshReplayGuard)).await
+    }
+
+    async fn nip98_state_with_database_pool_and_redis(
+        pool: sqlx::PgPool,
+        redis_url: &str,
+        pubkeys: Vec<String>,
+    ) -> Arc<crate::state::AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = redis_url.to_owned();
+        config.read_database_url = None;
+        config.relay_operator_pubkeys = pubkeys;
+        if !config.relay_operator_pubkeys.is_empty() {
+            config.relay_operator_api_origin = Some("https://admin.example".to_string());
+        }
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example".to_string(),
+            auth: crate::config::AdminAuth::Nip98,
+            web_dir: None,
+        });
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (mut state, _audit_shutdown) = crate::state::AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
+        Arc::new(state)
     }
 
     async fn nip98_state_with_replay(

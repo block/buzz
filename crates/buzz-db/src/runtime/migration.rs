@@ -490,6 +490,10 @@ mod postgres_tests {
             "relay_admin_outbox",
             "relay_operator_audit",
             "storage_accounting_snapshots",
+            "relay_banners",
+            "relay_banner_communities",
+            "relay_banner_user_state",
+            "relay_banner_view_acks",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -703,7 +707,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 46);
+        assert_eq!(migrations.len(), 47);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1288,6 +1292,21 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE TABLE storage_accounting_snapshots"));
+
+        // Relay banners are deployment-global operator configuration and
+        // per-user display state. Keep them additive after storage accounting
+        // so the brownfield 0046 checksum from main remains immutable.
+        assert_eq!(migrations[46].version, 47);
+        let relay_banners = migrations[46].sql.as_str();
+        assert!(relay_banners.contains("CREATE TABLE relay_banners"));
+        assert!(relay_banners.contains("CREATE TABLE relay_banner_communities"));
+        assert!(relay_banners.contains("CREATE TABLE relay_banner_user_state"));
+        assert!(relay_banners.contains("CREATE TABLE relay_banner_view_acks"));
+        assert!(relay_banners.contains("_operator_global_tables"));
+        assert!(relay_banners.contains("attach_community_write_fence('relay_banner_communities')"));
+        assert!(relay_banners.contains("attach_community_write_fence('relay_banner_user_state')"));
+        assert!(relay_banners.contains("attach_community_write_fence('relay_banner_view_acks')"));
+        assert!(!migrations[0].sql.as_str().contains("relay_banners"));
         // schema.sql exclusion list must match the restored (pre-0041) body.
         assert!(
             desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
@@ -1828,6 +1847,9 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        expected_fences.insert("relay_banner_communities".to_owned());
+        expected_fences.insert("relay_banner_user_state".to_owned());
+        expected_fences.insert("relay_banner_view_acks".to_owned());
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -2267,6 +2289,10 @@ mod postgres_tests {
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "relay_banners",
+            "relay_banner_communities",
+            "relay_banner_user_state",
+            "relay_banner_view_acks",
         ] {
             assert_eq!(
                 columns(&desired, table).await,

@@ -9,6 +9,10 @@ pub(crate) fn database_url() -> String {
 }
 
 #[cfg(test)]
+pub(crate) static RELAY_BANNER_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
 const CHILD_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 #[cfg(test)]
 const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;

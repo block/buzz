@@ -1182,6 +1182,27 @@ async fn query_events_authed(
         return presence_result.map(|events| Json(Value::Array(events)));
     }
 
+    if filters_are_relay_banner_only(&filters) {
+        let mut events = Vec::new();
+        if let Some(event) =
+            crate::api::banners::active_banner_event_for_user(state, tenant, &pubkey_bytes)
+                .await
+                .map_err(|e| internal_error(&format!("banner lookup: {e}")))?
+        {
+            let stored =
+                buzz_core::StoredEvent::with_received_at(event, chrono::Utc::now(), None, true);
+            if filters.iter().any(|filter| {
+                buzz_core::filter::filters_match(std::slice::from_ref(filter), &stored)
+            }) {
+                events.push(
+                    serde_json::to_value(&stored.event)
+                        .map_err(|e| internal_error(&format!("banner serialize: {e}")))?,
+                );
+            }
+        }
+        return Ok(Json(Value::Array(events)));
+    }
+
     let mut events: Vec<Value> = Vec::new();
     let mut handled: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
@@ -2327,6 +2348,18 @@ async fn synthesize_presence(
     }
 
     Some(Ok(events))
+}
+
+fn filters_are_relay_banner_only(filters: &[nostr::Filter]) -> bool {
+    !filters.is_empty()
+        && filters.iter().all(|filter| {
+            filter.kinds.as_ref().is_some_and(|kinds| {
+                kinds.len() == 1
+                    && kinds
+                        .iter()
+                        .all(|kind| kind.as_u16() as u32 == buzz_core::kind::KIND_RELAY_BANNER)
+            })
+        })
 }
 
 // ── Moderation queue reads (L6 — Quinn) ───────────────────────────────────────

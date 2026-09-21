@@ -437,6 +437,9 @@ pub const KIND_THREAD_SUMMARY: u32 = 39005;
 /// content = `{has_more, next_cursor}`. The only authority on exhaustion —
 /// clients must not infer `has_more` from row counts.
 pub const KIND_WINDOW_BOUNDS: u32 = 39006;
+/// Deployment banner overlay: relay-signed active operator banner for this viewer.
+/// Content is `{id, severity, text, maxDisplays}` and `d` tag is the banner public id.
+pub const KIND_RELAY_BANNER: u32 = 13536;
 
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
@@ -694,6 +697,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP29_GROUP_ROLES,
     KIND_THREAD_SUMMARY,
     KIND_WINDOW_BOUNDS,
+    KIND_RELAY_BANNER,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_HUDDLE_REACTION,
@@ -839,6 +843,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
+            | KIND_RELAY_BANNER
     )
 }
 
@@ -867,6 +872,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 3062
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
+const _: () = assert!(is_replaceable(KIND_RELAY_BANNER)); // 13536 ∈ 10000–19999
 
 // Compile-time: NIP-34 parameterized replaceable kinds are in the correct range.
 const _: () = assert!(
@@ -934,6 +940,14 @@ mod tests {
                 "kind {kind} is both replaceable and parameterized replaceable"
             );
         }
+    }
+
+    #[test]
+    fn relay_banner_is_replaceable_relay_only_not_parameterized() {
+        assert_eq!(KIND_RELAY_BANNER, 13536);
+        assert!(is_replaceable(KIND_RELAY_BANNER));
+        assert!(!is_parameterized_replaceable(KIND_RELAY_BANNER));
+        assert!(is_relay_only_kind(KIND_RELAY_BANNER));
     }
 
     // ── event_is_shared / is_unshared_gated_event ────────────────────────
