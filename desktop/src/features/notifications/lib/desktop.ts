@@ -329,18 +329,29 @@ export async function setDesktopAppBadge(state: AppBadgeState): Promise<void> {
   }
 
   try {
+    const currentWindow = getCurrentWindow();
     if (state.kind === "count") {
-      await getCurrentWindow().setBadgeCount(state.count);
+      // Clear any prior label so a previous "dot" can't stick on macOS.
+      if (isMacPlatform()) {
+        await currentWindow.setBadgeLabel("");
+      }
+      await currentWindow.setBadgeCount(state.count);
     } else if (state.kind === "dot" && isMacPlatform()) {
-      await getCurrentWindow().setBadgeLabel(" ");
+      // macOS Dock badges are numeric in practice. A blank badgeLabel (" ") was
+      // used to request a "dot", but it does not produce a visible Dock badge,
+      // so ordinary channel unreads never lit the icon. Use a minimal count so
+      // the product intent (any unread → Dock indicator) is actually visible.
+      await currentWindow.setBadgeLabel("");
+      await currentWindow.setBadgeCount(1);
     } else {
       if (isMacPlatform()) {
-        await getCurrentWindow().setBadgeLabel("");
+        await currentWindow.setBadgeLabel("");
       }
-      await getCurrentWindow().setBadgeCount(undefined);
+      await currentWindow.setBadgeCount(undefined);
     }
-  } catch {
-    // Ignore unsupported platforms and best-effort badge sync failures.
+  } catch (error) {
+    // Best-effort: unsupported platforms / transient Tauri failures.
+    console.warn("Failed to sync desktop app badge", error);
   }
 }
 
