@@ -66,6 +66,330 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
     }
 }
 
+fn persona_with_behavior(id: &str, parallelism: u32) -> AgentDefinition {
+    AgentDefinition {
+        id: id.to_string(),
+        display_name: "Fizz".to_string(),
+        avatar_url: None,
+        description: None,
+        system_prompt: String::new(),
+        runtime: None,
+        model: None,
+        provider: None,
+        name_pool: vec![],
+        is_builtin: false,
+        is_active: true,
+        shared: false,
+        source_team: None,
+        source_team_persona_slug: None,
+        catalog_source: None,
+        team_catalog_source: None,
+        env_vars: std::collections::BTreeMap::new(),
+        respond_to: Some("anyone".to_string()),
+        respond_to_allowlist: vec![],
+        parallelism: Some(parallelism),
+        session_policy: crate::managed_agents::AcpSessionPolicy::Thread,
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+#[test]
+fn linked_behavior_application_updates_the_policy_and_runtime_restart_proof() {
+    let mut linked = agent("persona-1", "Fizz", Some("Fizz"));
+    linked.parallelism = 10;
+    let unrelated = agent("persona-2", "Other", Some("Other"));
+    let unrelated_before = unrelated.clone();
+    let mut records = vec![linked, unrelated];
+
+    let applied =
+        apply_linked_persona_behavior(&mut records, &persona_with_behavior("persona-1", 3))
+            .expect("apply linked behavior");
+
+    assert_eq!(records[0].parallelism, 3);
+    assert_eq!(
+        records[0].respond_to,
+        crate::managed_agents::RespondTo::Anyone
+    );
+    assert_eq!(
+        records[0].session_policy,
+        crate::managed_agents::AcpSessionPolicy::Thread
+    );
+    assert_eq!(applied.policy_pubkeys, vec!["pubkey-Fizz"]);
+    assert_eq!(applied.runtime_pubkeys, vec!["pubkey-Fizz"]);
+    assert_eq!(records[1], unrelated_before);
+}
+
+#[test]
+fn repeated_behavior_save_retries_policy_and_runtime_alignment() {
+    let persona = persona_with_behavior("persona-1", 3);
+    let mut linked = agent("persona-1", "Fizz", Some("Fizz"));
+    linked.parallelism = 3;
+    linked.respond_to = crate::managed_agents::RespondTo::Anyone;
+    linked.session_policy = crate::managed_agents::AcpSessionPolicy::Thread;
+    let before = linked.clone();
+    let mut records = vec![linked];
+
+    let applied =
+        apply_linked_persona_behavior(&mut records, &persona).expect("retry alignment proof");
+
+    assert_eq!(records[0], before, "retry must not churn stored config");
+    assert_eq!(applied.policy_pubkeys, vec!["pubkey-Fizz"]);
+    assert_eq!(applied.runtime_pubkeys, vec!["pubkey-Fizz"]);
+}
+
+#[test]
+fn production_restart_seam_visits_each_active_pair_and_surfaces_failure() {
+    let pairs = vec![
+        ("agent-a".to_string(), vec!["wss://one".to_string()]),
+        (
+            "agent-b".to_string(),
+            vec!["wss://two".to_string(), "wss://three".to_string()],
+        ),
+    ];
+    let mut visited = Vec::new();
+    restart_linked_behavior_pairs_with(&pairs, |pubkey, relay| {
+        visited.push((pubkey.to_string(), relay.to_string()));
+        Ok(())
+    })
+    .expect("all active pairs restart");
+    assert_eq!(visited.len(), 3);
+
+    let mut failed = Vec::new();
+    let error = restart_linked_behavior_pairs_with(&pairs, |pubkey, relay| {
+        failed.push((pubkey.to_string(), relay.to_string()));
+        (relay != "wss://two")
+            .then_some(())
+            .ok_or_else(|| "restart rejected".to_string())
+    })
+    .expect_err("runtime failure must fail the save");
+    assert_eq!(error, "restart rejected");
+    assert_eq!(failed.len(), 2, "must stop after the first failed pair");
+}
+
+fn behavior_transition() -> LinkedBehaviorTransition {
+    let previous_persona = persona_with_behavior("persona-1", 10);
+    let committed_persona = persona_with_behavior("persona-1", 3);
+    let mut previous_record = agent("persona-1", "Fizz", Some("Fizz"));
+    previous_record.parallelism = 10;
+    let mut committed_record = previous_record.clone();
+    committed_record.parallelism = 3;
+    LinkedBehaviorTransition {
+        previous_personas: vec![previous_persona],
+        previous_records: vec![previous_record],
+        committed_persona,
+        committed_records: vec![committed_record],
+        policy_pubkeys: vec!["pubkey-Fizz".to_string()],
+        runtime_pairs: vec![],
+    }
+}
+
+#[test]
+fn rollback_is_generation_fenced_and_preserves_runtime_receipts() {
+    let transition = behavior_transition();
+    let mut current_personas = vec![transition.committed_persona.clone()];
+    let mut current_records = transition.committed_records.clone();
+    current_records[0].runtime_pid = Some(99);
+
+    let outcome = apply_linked_behavior_rollback_if_current(
+        &mut current_personas,
+        &mut current_records,
+        &transition,
+    )
+    .expect("current generation can roll back");
+
+    assert_eq!(outcome, RollbackOutcome::Applied);
+    assert_eq!(current_personas[0].parallelism, Some(10));
+    assert_eq!(current_records[0].parallelism, 10);
+    assert_eq!(current_records[0].runtime_pid, Some(99));
+
+    current_personas[0].parallelism = Some(4);
+    current_records[0].parallelism = 4;
+    let outcome = apply_linked_behavior_rollback_if_current(
+        &mut current_personas,
+        &mut current_records,
+        &transition,
+    )
+    .expect("newer generation must be preserved");
+    assert_eq!(outcome, RollbackOutcome::Superseded);
+    assert_eq!(current_personas[0].parallelism, Some(4));
+    assert_eq!(current_records[0].parallelism, 4);
+}
+
+#[tokio::test]
+async fn production_policy_enqueue_seam_restores_the_atomic_store_on_failure() {
+    use crate::app_state::build_app_state;
+    use crate::relay_admission::TEST_SERIAL;
+    use tauri::Manager;
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: TEST_SERIAL excludes the crate's other environment tests.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: the same TEST_SERIAL guard is still held during drop.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    let _serial = TEST_SERIAL.lock().await;
+    let temp = tempfile::tempdir().expect("temp home");
+    let _home = EnvGuard::set("HOME", temp.path());
+    let _xdg = EnvGuard::set("XDG_DATA_HOME", temp.path());
+    let app = tauri::test::mock_builder()
+        .manage(build_app_state())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let state = app.state::<AppState>();
+
+    let previous_persona = persona_with_behavior("persona-1", 10);
+    let mut previous_record = agent("persona-1", "Fizz", Some("Fizz"));
+    previous_record.parallelism = 10;
+    let committed_persona = persona_with_behavior("persona-1", 3);
+    let mut committed_record = previous_record.clone();
+    committed_record.parallelism = 3;
+    crate::managed_agents::save_agent_definitions_and_instances(
+        app.handle(),
+        std::slice::from_ref(&committed_persona),
+        std::slice::from_ref(&committed_record),
+    )
+    .expect("seed committed generation");
+
+    let base = crate::managed_agents::managed_agents_base_dir(app.handle()).expect("agent dir");
+    std::fs::write(base.join("retention"), b"blocks retention directory")
+        .expect("install deterministic retention failure");
+
+    let error = retain_linked_policies_or_rollback(
+        app.handle(),
+        &state,
+        &[committed_record.pubkey.clone()],
+        std::slice::from_ref(&committed_record),
+        std::slice::from_ref(&previous_persona),
+        std::slice::from_ref(&previous_record),
+    )
+    .expect_err("retention failure must reject the save");
+    assert!(error.contains("rolled back"));
+
+    let personas = load_personas(app.handle()).expect("load rolled-back definition");
+    let records = load_managed_agents(app.handle()).expect("load rolled-back instance");
+    assert_eq!(
+        personas
+            .iter()
+            .find(|persona| persona.id == "persona-1")
+            .expect("rolled-back persona")
+            .parallelism,
+        Some(10)
+    );
+    assert_eq!(
+        records
+            .iter()
+            .find(|record| record.pubkey == "pubkey-Fizz")
+            .expect("rolled-back agent")
+            .parallelism,
+        10
+    );
+}
+
+#[tokio::test]
+async fn rollback_policy_failure_preserves_committed_generation_for_retry() {
+    use crate::app_state::build_app_state;
+    use crate::relay_admission::TEST_SERIAL;
+    use tauri::Manager;
+
+    struct RollbackEnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+    impl RollbackEnvGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: TEST_SERIAL excludes the crate's other environment tests.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+    impl Drop for RollbackEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: the same TEST_SERIAL guard is still held during drop.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    let _serial = TEST_SERIAL.lock().await;
+    let temp = tempfile::tempdir().expect("temp home");
+    let _home = RollbackEnvGuard::set("HOME", temp.path());
+    let _xdg = RollbackEnvGuard::set("XDG_DATA_HOME", temp.path());
+    let app = tauri::test::mock_builder()
+        .manage(build_app_state())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let state = app.state::<AppState>();
+    let transition = behavior_transition();
+    crate::managed_agents::save_agent_definitions_and_instances(
+        app.handle(),
+        std::slice::from_ref(&transition.committed_persona),
+        &transition.committed_records,
+    )
+    .expect("seed committed generation");
+    let committed_refs = transition.committed_records.iter().collect::<Vec<_>>();
+    crate::commands::agents::try_retain_managed_agents_pending(
+        app.handle(),
+        &state,
+        &committed_refs,
+    )
+    .expect("seed committed policy");
+
+    let base = crate::managed_agents::managed_agents_base_dir(app.handle()).expect("agent dir");
+    std::fs::rename(base.join("retention"), base.join("retention-saved"))
+        .expect("move retention directory");
+    std::fs::write(
+        base.join("retention"),
+        b"blocks rollback policy transaction",
+    )
+    .expect("install deterministic rollback failure");
+
+    let outcome = rollback_linked_behavior(app.handle(), &state, &transition)
+        .expect("rollback failure is recovered to committed state");
+    assert_eq!(outcome, RollbackOutcome::Committed);
+    let personas = load_personas(app.handle()).expect("load committed definition");
+    let records = load_managed_agents(app.handle()).expect("load committed instance");
+    assert_eq!(
+        personas
+            .iter()
+            .find(|persona| persona.id == "persona-1")
+            .expect("committed persona")
+            .parallelism,
+        Some(3)
+    );
+    assert_eq!(
+        records
+            .iter()
+            .find(|record| record.pubkey == "pubkey-Fizz")
+            .expect("committed agent")
+            .parallelism,
+        3
+    );
+}
+
 #[test]
 fn test_rename_propagates_to_matching_instance() {
     // An instance whose `name` equals the OLD persona display_name must get

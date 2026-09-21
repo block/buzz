@@ -73,6 +73,7 @@ import {
   deriveProfileChannels,
   type ProfilePanelTab,
   type ProfilePanelView,
+  profileManagedAgentCreateInput,
   profilePanelTargetKey,
   resolveAgentInstruction,
   resolvePanelProfile,
@@ -435,7 +436,9 @@ export function UserProfilePanel({
         runtime,
       );
 
-      const created = await createAgentMutation.mutateAsync(input);
+      const created = await createAgentMutation.mutateAsync(
+        profileManagedAgentCreateInput(input),
+      );
       void managedAgentsQuery.refetch();
       void relayAgentsQuery.refetch();
       return created;
@@ -530,7 +533,6 @@ export function UserProfilePanel({
         },
         previousPersona: resolvedPersona,
         runtimes: acpRuntimesQuery.data ?? [],
-        updateManagedAgent: updateManagedAgentMutation.mutateAsync,
         updatePersona: updatePersonaMutation.mutateAsync,
       });
     },
@@ -541,7 +543,6 @@ export function UserProfilePanel({
       personasQuery.refetch,
       resolvedPersona,
       acpRuntimesQuery.data,
-      updateManagedAgentMutation.mutateAsync,
       updatePersonaMutation.mutateAsync,
     ],
   );

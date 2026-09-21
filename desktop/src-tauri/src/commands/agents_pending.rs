@@ -27,18 +27,55 @@ pub(crate) fn retain_managed_agent_pending(
     state: &AppState,
     record: &ManagedAgentRecord,
 ) {
-    use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
-
-    let result = (|| -> Result<(), String> {
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        let conn = open_retention_db(&scope.db_path)?;
-        // Shared engine with the boot-time reconcile: projection content diff
-        // (no republish for runtime-only churn) + monotonic created_at bump
-        // past the retained head (NIP-AP step 3).
-        retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
-    })();
+    let result = try_retain_managed_agent_pending(app, state, record);
     if let Err(e) = result {
         eprintln!("buzz-desktop: agent-retain: {e}");
+    }
+}
+
+/// Strict managed-policy enqueue used by commands whose success contract
+/// includes a durable kind:30177 update. Unlike the lifecycle wrapper above,
+/// failures propagate so the caller can roll back the unified store/runtime.
+pub(crate) fn try_retain_managed_agent_pending<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    record: &ManagedAgentRecord,
+) -> Result<(), String> {
+    use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
+
+    let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    let conn = open_retention_db(&scope.db_path)?;
+    // Shared engine with the boot-time reconcile: projection content diff
+    // (no republish for runtime-only churn) + monotonic created_at bump past
+    // the retained head (NIP-AP step 3).
+    retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
+}
+
+/// Atomically replace the retained policy projection for a set of managed
+/// agents. This is used by persona edits and their rollback path: either every
+/// kind:30177 row advances together, or the retention database is unchanged.
+pub(crate) fn try_retain_managed_agents_pending<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    records: &[&ManagedAgentRecord],
+) -> Result<(), String> {
+    use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
+
+    let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    let conn = open_retention_db(&scope.db_path)?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| format!("failed to begin managed policy transaction: {error}"))?;
+    let result = records
+        .iter()
+        .try_for_each(|record| retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ()));
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .map_err(|error| format!("failed to commit managed policy transaction: {error}")),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
     }
 }
 

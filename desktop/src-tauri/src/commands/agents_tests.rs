@@ -98,6 +98,36 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
     }
 }
 
+#[test]
+fn persona_create_replay_reuses_the_existing_instance_only_when_requested() {
+    let existing = bare_agent_record(Some("persona-1"), None, None);
+    let records = vec![existing];
+
+    assert_eq!(
+        find_reusable_persona_agent(&records, Some("persona-1"), true)
+            .map(|record| record.pubkey.as_str()),
+        Some("agent")
+    );
+    assert!(find_reusable_persona_agent(&records, Some("persona-1"), false).is_none());
+    assert!(find_reusable_persona_agent(&records, Some("persona-2"), true).is_none());
+    assert!(find_reusable_persona_agent(&records, None, true).is_none());
+}
+
+#[test]
+fn reused_create_response_never_hides_runtime_or_policy_failure() {
+    let (spawn_error, policy_error) = reused_create_errors("running", true);
+    assert!(spawn_error.is_none());
+    assert!(policy_error.is_some());
+
+    let (spawn_error, policy_error) = reused_create_errors("stopped", false);
+    assert!(spawn_error.is_some());
+    assert!(policy_error.is_none());
+
+    let (spawn_error, policy_error) = reused_create_errors("running", false);
+    assert!(spawn_error.is_none());
+    assert!(policy_error.is_none());
+}
+
 /// Auto-archive uses the same NIP-IA wire builder as the explicit GUI action,
 /// attaches owner consent, and marks a deliberate delete as `retired`.
 #[test]

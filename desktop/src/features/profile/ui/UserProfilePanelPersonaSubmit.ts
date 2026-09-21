@@ -1,13 +1,11 @@
 import { toast } from "sonner";
 
-import { personaManagedAgentUpdate } from "@/features/profile/ui/UserProfilePanelUtils";
 import type {
   AcpRuntimeCatalogEntry,
   AgentPersona,
   CreateManagedAgentResponse,
   CreatePersonaInput,
   ManagedAgent,
-  UpdateManagedAgentInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 
@@ -21,9 +19,6 @@ type SubmitProfilePersonaDialogOptions = {
   onDone: () => void;
   previousPersona?: AgentPersona;
   runtimes?: readonly AcpRuntimeCatalogEntry[];
-  updateManagedAgent: (
-    input: UpdateManagedAgentInput,
-  ) => Promise<{ agent: ManagedAgent; profileSyncError: string | null }>;
   updatePersona: (input: UpdatePersonaInput) => Promise<AgentPersona>;
 };
 
@@ -33,6 +28,14 @@ type ValidateLinkedAgentRuntimeEditOptions = {
   previousPersona?: AgentPersona;
   runtimes?: readonly AcpRuntimeCatalogEntry[];
 };
+
+export function profileCreateResultKind(
+  created: CreateManagedAgentResponse,
+): "error" | "pending" | "success" {
+  if (created.spawnError) return "error";
+  if (created.profileSyncError) return "pending";
+  return "success";
+}
 
 function normalizeRuntimePreference(value: string | null | undefined): string {
   return value?.trim() ?? "";
@@ -71,7 +74,6 @@ export async function submitProfilePersonaDialog({
   onDone,
   previousPersona,
   runtimes,
-  updateManagedAgent,
   updatePersona,
 }: SubmitProfilePersonaDialogOptions) {
   try {
@@ -87,34 +89,27 @@ export async function submitProfilePersonaDialog({
         return;
       }
 
-      const persona = await updatePersona(input);
-      const agentUpdate = managedAgent
-        ? personaManagedAgentUpdate(managedAgent, persona, {
-            previousPersona,
-            runtimes,
-          })
-        : null;
-      const result = agentUpdate ? await updateManagedAgent(agentUpdate) : null;
-      if (result?.profileSyncError) {
-        toast.warning(
-          `${result.agent.name} was updated, but profile sync failed: ${result.profileSyncError}`,
-        );
-      }
+      await updatePersona(input);
       toast.success(`Updated ${input.displayName}.`);
     } else {
       const persona = await createPersona(input);
       try {
         const created = await createManagedAgentForPersona(persona);
-        if (created.spawnError) {
+        const resultKind = profileCreateResultKind(created);
+        if (resultKind === "error") {
           toast.error(
             `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
+          );
+        } else if (resultKind === "pending") {
+          toast.warning(
+            `${created.agent.name} reused its existing identity, but policy sync is still pending: ${created.profileSyncError}`,
           );
         } else {
           toast.success(`Created and started ${created.agent.name}.`);
         }
-        if (created.profileSyncError) {
+        if (created.spawnError && created.profileSyncError) {
           toast.warning(
-            `${created.agent.name} was created, but profile sync failed: ${created.profileSyncError}`,
+            `${created.agent.name} policy sync is still pending: ${created.profileSyncError}`,
           );
         }
       } catch (error) {

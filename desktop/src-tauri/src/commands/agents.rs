@@ -31,7 +31,10 @@ pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
 mod pending;
 #[cfg(test)]
 use pending::build_agent_archive_request;
-pub(crate) use pending::{retain_managed_agent_pending, tombstone_managed_agent_pending};
+pub(crate) use pending::{
+    retain_managed_agent_pending, tombstone_managed_agent_pending,
+    try_retain_managed_agent_pending, try_retain_managed_agents_pending,
+};
 
 /// Build a summary from fresh disk state (personas, teams, global config).
 /// For one-shot command paths only — the 5s list poll calls
@@ -338,6 +341,68 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
+pub(crate) fn find_reusable_persona_agent<'a>(
+    records: &'a [ManagedAgentRecord],
+    persona_id: Option<&str>,
+    reuse_existing_persona_instance: bool,
+) -> Option<&'a ManagedAgentRecord> {
+    if !reuse_existing_persona_instance {
+        return None;
+    }
+    let persona_id = persona_id?;
+    records
+        .iter()
+        .find(|record| record.is_active && record.persona_id.as_deref() == Some(persona_id))
+}
+
+fn reused_create_response(
+    app: &AppHandle,
+    state: &AppState,
+    records: &[ManagedAgentRecord],
+    runtimes: &std::collections::HashMap<
+        crate::managed_agents::ManagedAgentRuntimeKey,
+        crate::managed_agents::ManagedAgentPairRuntime,
+    >,
+    persona_id: Option<&str>,
+    reuse_existing_persona_instance: bool,
+) -> Result<Option<CreateManagedAgentResponse>, String> {
+    let Some(record) =
+        find_reusable_persona_agent(records, persona_id, reuse_existing_persona_instance)
+    else {
+        return Ok(None);
+    };
+
+    let agent = summarize_from_disk(app, record, runtimes)?;
+    let policy_pending = crate::managed_agents::persona_events::active_pending_event(
+        app,
+        state,
+        buzz_core_pkg::kind::KIND_MANAGED_AGENT,
+        &record.pubkey,
+    )?;
+    let (spawn_error, profile_sync_error) = reused_create_errors(&agent.status, policy_pending);
+
+    Ok(Some(CreateManagedAgentResponse {
+        agent,
+        private_key_nsec: record.private_key_nsec.clone(),
+        profile_sync_error,
+        spawn_error,
+    }))
+}
+
+/// Production response contract for an idempotent create replay. Reusing a
+/// pubkey is not equivalent to a successful create: stopped runtimes and
+/// pending kind:30177 delivery must remain visible to the Profile UI.
+fn reused_create_errors(status: &str, policy_pending: bool) -> (Option<String>, Option<String>) {
+    let spawn_error = (status != "running").then(|| {
+        "The existing agent identity was recovered, but its runtime is not running. Use Start to retry without creating another identity."
+            .to_string()
+    });
+    let profile_sync_error = policy_pending.then(|| {
+        "Managed policy sync is still pending; the existing identity was reused.".to_string()
+    });
+    (spawn_error, profile_sync_error)
+}
+
 #[tauri::command]
 pub async fn create_managed_agent(
     input: CreateManagedAgentRequest,
@@ -395,6 +460,16 @@ pub async fn create_managed_agent(
         }
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
+        }
+        if let Some(response) = reused_create_response(
+            &app,
+            &state,
+            &records,
+            &runtimes,
+            requested_persona_id.as_deref(),
+            input.reuse_existing_persona_instance,
+        )? {
+            return Ok(response);
         }
         if let Some(persona_id) = requested_persona_id.as_deref() {
             let personas = load_personas(&app)?;
@@ -466,6 +541,20 @@ pub async fn create_managed_agent(
         }
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
+        }
+
+        // A retry can race the original request between phase 1 and phase 3.
+        // Re-check while holding the same store lock used for persistence so
+        // at most one persona identity is committed.
+        if let Some(response) = reused_create_response(
+            &app,
+            &state,
+            &records,
+            &runtimes,
+            requested_persona_id.as_deref(),
+            input.reuse_existing_persona_instance,
+        )? {
+            return Ok(response);
         }
 
         // Guard against a duplicate pubkey appearing between phase 1 and phase 3
@@ -704,7 +793,18 @@ pub async fn create_managed_agent(
         // Publish the agent to the relay. Inside the Phase-3 lock, after save,
         // before any .await — owner-authored, every agent (Will's ruling: no
         // is_builtin/persona-membership gate).
-        retain_managed_agent_pending(&app, &state, record);
+        if let Err(error) = try_retain_managed_agent_pending(&app, &state, record) {
+            records.retain(|candidate| candidate.pubkey != pubkey);
+            save_managed_agents(&app, &records)?;
+            crate::managed_agents::delete_agent_key(&pubkey);
+            return Err(format!(
+                "agent creation was rolled back because its managed policy could not be queued: {error}"
+            ));
+        }
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
         // Effective owner-authored description for the kind:0 `about`.
         let profile_about = crate::managed_agents::record_effective_description(record, &personas);
         (

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { validateLinkedAgentRuntimeEdit } from "./UserProfilePanelPersonaSubmit.ts";
+import {
+  profileCreateResultKind,
+  submitProfilePersonaDialog,
+  validateLinkedAgentRuntimeEdit,
+} from "./UserProfilePanelPersonaSubmit.ts";
 
 function agent(overrides = {}) {
   return {
@@ -44,6 +48,7 @@ function persona(overrides = {}) {
     id: "persona-1",
     displayName: "Fizz",
     avatarUrl: null,
+    description: null,
     systemPrompt: "Prompt",
     runtime: "goose",
     model: null,
@@ -52,11 +57,64 @@ function persona(overrides = {}) {
     isBuiltIn: false,
     isActive: true,
     envVars: {},
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+    parallelism: 3,
+    sessionPolicy: "thread",
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
     ...overrides,
   };
 }
+
+test("submitProfilePersonaDialog saves a linked definition through one backend command", async () => {
+  const personaUpdates = [];
+  let done = false;
+
+  await submitProfilePersonaDialog({
+    createManagedAgentForPersona: async () => {
+      throw new Error("not used");
+    },
+    createPersona: async () => {
+      throw new Error("not used");
+    },
+    input: updateInput({
+      runtime: "goose",
+      behavior: { parallelism: 3 },
+    }),
+    managedAgent: agent({ parallelism: 10 }),
+    onDone: () => {
+      done = true;
+    },
+    previousPersona: persona({ parallelism: 10 }),
+    updatePersona: async (input) => {
+      personaUpdates.push(input);
+      return persona({ parallelism: 3 });
+    },
+  });
+
+  assert.equal(personaUpdates.length, 1);
+  assert.equal(done, true);
+});
+
+test("a reused identity with pending policy sync is never classified as success", () => {
+  const created = {
+    agent: agent({ status: "running" }),
+    privateKeyNsec: "nsec1test",
+    spawnError: null,
+    profileSyncError: "Managed policy sync is still pending",
+  };
+
+  assert.equal(profileCreateResultKind(created), "pending");
+  assert.equal(
+    profileCreateResultKind({ ...created, profileSyncError: null }),
+    "success",
+  );
+  assert.equal(
+    profileCreateResultKind({ ...created, spawnError: "not running" }),
+    "error",
+  );
+});
 
 function updateInput(overrides = {}) {
   return {

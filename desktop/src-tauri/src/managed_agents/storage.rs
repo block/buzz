@@ -405,6 +405,32 @@ pub(crate) fn save_agent_definitions<R: tauri::Runtime>(
     write_agent_store(app, definitions, instances)
 }
 
+/// Atomically replace both halves of the unified agent store in one file
+/// rename. Use this when one user action changes a definition and one or more
+/// linked instances; calling the two half-store helpers sequentially would
+/// expose or strand a split state if the process exits between writes.
+pub(crate) fn save_agent_definitions_and_instances<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    definitions: &[crate::managed_agents::AgentDefinition],
+    instances: &[ManagedAgentRecord],
+) -> Result<(), String> {
+    let definitions = definitions
+        .iter()
+        .cloned()
+        .map(crate::managed_agents::AgentDefinition::into_agent_record)
+        .collect();
+    let mut instances = instances.to_vec();
+    instances.retain(|record| !record.pubkey.is_empty());
+    instances.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.pubkey.cmp(&right.pubkey))
+    });
+    persist_agent_keys(&mut instances);
+    write_agent_store(app, definitions, instances)
+}
+
 /// Serialize definitions + instances into the single unified store file.
 /// Definitions sort first (by slug) for stable diffs; instances keep the
 /// name/pubkey order their save path established.

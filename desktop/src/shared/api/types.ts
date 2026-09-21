@@ -403,6 +403,8 @@ export type RelayMeshConfig = {
 export type CreateManagedAgentInput = {
   name: string;
   personaId?: string;
+  /** Reuse an existing instance for this persona when replaying a timed-out create. */
+  reuseExistingPersonaInstance?: boolean;
   /** Team this instance was deployed from; controls runtime team instructions. */
   teamId?: string;
   relayUrl?: string;

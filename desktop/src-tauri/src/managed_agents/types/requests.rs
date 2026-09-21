@@ -145,6 +145,12 @@ pub struct CreateManagedAgentRequest {
     pub name: String,
     #[serde(default)]
     pub persona_id: Option<String>,
+    /// Profile saves are replayable: when a prior create persisted but its
+    /// response timed out, reuse that persona's existing instance instead of
+    /// minting a second identity. Other creation surfaces keep multi-instance
+    /// behavior by leaving this false.
+    #[serde(default)]
+    pub reuse_existing_persona_instance: bool,
     /// Optional deployment-time team binding for runtime instruction layering.
     #[serde(default)]
     pub team_id: Option<String>,

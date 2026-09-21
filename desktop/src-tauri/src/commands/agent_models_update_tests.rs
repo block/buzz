@@ -1,4 +1,10 @@
 use super::*;
+
+#[test]
+fn parallelism_change_requires_an_immediate_runtime_restart() {
+    assert!(managed_agent_runtime_config_changed(10, 3));
+    assert!(!managed_agent_runtime_config_changed(3, 3));
+}
 // The tests call `apply_record_field_updates(...)` and consume the return value
 // via `.expect(...)`, discarding `RecordFieldsApplied`. The tests verify column
 // writes (side effects), not the token itself. The lint is suppressed here so

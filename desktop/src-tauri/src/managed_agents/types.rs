@@ -12,7 +12,7 @@ pub enum BackendKind {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentDefinition {
     pub id: String,
     pub display_name: String,

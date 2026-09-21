@@ -19,6 +19,13 @@ pub(crate) fn managed_agent_access_policy_changed(
             && prospective_allowlist != current_allowlist)
 }
 
+pub(crate) fn managed_agent_runtime_config_changed(
+    previous_parallelism: u32,
+    prospective_parallelism: u32,
+) -> bool {
+    previous_parallelism != prospective_parallelism
+}
+
 fn ensure_access_policy_change_supported(
     record: &ManagedAgentRecord,
     access_policy_changed: bool,
@@ -29,6 +36,22 @@ fn ensure_access_policy_change_supported(
     {
         return Err(
             "Access cannot be changed while this provider-backed agent is deployed because the provider protocol has no explicit stop or revocation acknowledgement. Stop or recreate the provider agent first."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn ensure_parallelism_change_supported(
+    record: &ManagedAgentRecord,
+    parallelism_changed: bool,
+) -> Result<(), String> {
+    if parallelism_changed
+        && record.backend != crate::managed_agents::BackendKind::Local
+        && record.backend_agent_id.is_some()
+    {
+        return Err(
+            "Parallelism cannot be changed while this provider-backed agent is deployed because the provider protocol cannot acknowledge a runtime restart. Stop or recreate the provider agent first."
                 .to_string(),
         );
     }
@@ -136,9 +159,9 @@ pub(crate) async fn flush_managed_agent_policy(
 
 /// Update mutable fields on an existing managed agent record.
 ///
-/// Most runtime config changes take effect on the next agent spawn. Access
-/// policy changes stop active local pairs before saving and restart those exact
-/// pairs after the relay policy is flushed.
+/// Most runtime config changes take effect on the next agent spawn. Access and
+/// parallelism changes stop active local pairs before saving and restart those
+/// exact pairs after the relay policy is flushed.
 #[tauri::command]
 pub async fn update_managed_agent(
     input: UpdateManagedAgentRequest,
@@ -146,7 +169,14 @@ pub async fn update_managed_agent(
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
     // Phase 1: local save (synchronous, under lock)
-    let (mut summary, sync_params, rollback, access_policy_changed, access_restart_relays) = {
+    let (
+        mut summary,
+        sync_params,
+        mut rollback,
+        access_policy_changed,
+        parallelism_changed,
+        runtime_restart_relays,
+    ) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -164,6 +194,7 @@ pub async fn update_managed_agent(
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
+        let previous_parallelism = record.parallelism;
 
         let mut name_changed = false;
         if let Some(name_update) = input.name {
@@ -182,6 +213,9 @@ pub async fn update_managed_agent(
         if let Some(parallelism) = input.parallelism {
             record.parallelism = parallelism;
         }
+        let parallelism_changed =
+            managed_agent_runtime_config_changed(previous_parallelism, record.parallelism);
+        ensure_parallelism_change_supported(record, parallelism_changed)?;
         // turn_timeout_seconds is intentionally not applied here —
         // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness.
         // Use idle_timeout_seconds or max_turn_duration_seconds instead.
@@ -277,20 +311,22 @@ pub async fn update_managed_agent(
         // store/process critical section prevents another command or a status
         // refresh from observing a saved narrow policy while the old broad
         // process is still alive. A stop failure aborts before mutation.
-        let mut access_restart_relays = Vec::new();
-        if access_policy_changed && record.backend == crate::managed_agents::BackendKind::Local {
-            access_restart_relays =
+        let mut runtime_restart_relays = Vec::new();
+        if (access_policy_changed || parallelism_changed)
+            && record.backend == crate::managed_agents::BackendKind::Local
+        {
+            runtime_restart_relays =
                 crate::managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey)
                     .into_iter()
                     .map(|key| key.relay_url)
                     .collect();
-            if access_restart_relays.is_empty() && record.runtime_pid.is_some() {
-                access_restart_relays.push(crate::relay::effective_agent_relay_url(
+            if runtime_restart_relays.is_empty() && record.runtime_pid.is_some() {
+                runtime_restart_relays.push(crate::relay::effective_agent_relay_url(
                     &record.relay_url,
                     &relay_ws_url_with_override(&state),
                 ));
             }
-            if !access_restart_relays.is_empty() {
+            if !runtime_restart_relays.is_empty() {
                 crate::managed_agents::stop_managed_agent_process(&app, record, &mut runtimes)?;
             }
         }
@@ -366,14 +402,20 @@ pub async fn update_managed_agent(
         };
 
         let summary = { super::super::agents::summarize_from_disk(&app, record, &runtimes)? };
-        let rollback = name_changed
-            .then(|| AgentUpdateRollback::new(previous_record, record, access_policy_changed));
+        let rollback = (name_changed || parallelism_changed).then(|| {
+            AgentUpdateRollback::new(
+                previous_record,
+                record,
+                access_policy_changed && !parallelism_changed,
+            )
+        });
         (
             summary,
             sync_params,
             rollback,
             access_policy_changed,
-            access_restart_relays,
+            parallelism_changed,
+            runtime_restart_relays,
         )
     }; // lock dropped here
 
@@ -403,6 +445,38 @@ pub async fn update_managed_agent(
         );
     }
 
+    // Parallelism is one observable setting across the local record, the
+    // owner-authored managed policy, and the running process. If the relay did
+    // not accept the new policy, restore the prior record and runtime so the
+    // caller can also roll back the definition instead of reporting a false
+    // success with split-brain worker counts.
+    if parallelism_changed {
+        if let Some(sync_error) = profile_sync_error.as_ref() {
+            let rollback = rollback.take().ok_or_else(|| {
+                "missing local rollback state after parallelism sync failure".to_string()
+            })?;
+            rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback)?;
+            let restart_suffix = if runtime_restart_relays.is_empty() {
+                String::new()
+            } else {
+                match super::super::agents::start_local_agent_pairs_with_preflight(
+                    &app,
+                    &state,
+                    &summary.pubkey,
+                    &runtime_restart_relays,
+                )
+                .await
+                {
+                    Ok(_) => String::new(),
+                    Err(error) => format!(" The previous runtime also failed to restart: {error}"),
+                }
+            };
+            return Err(format!(
+                "Agent parallelism was not changed because its managed policy could not be synchronized: {sync_error}.{restart_suffix}"
+            ));
+        }
+    }
+
     // A rename is committed only when profile sync succeeds; otherwise restore
     // the complete pre-edit record so Desktop and the relay keep one
     // authoritative name.
@@ -422,14 +496,14 @@ pub async fn update_managed_agent(
                 "missing local rollback state after relay profile sync failure".to_string()
             })?;
             rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback)?;
-            let restart_suffix = if access_restart_relays.is_empty() {
+            let restart_suffix = if runtime_restart_relays.is_empty() {
                 String::new()
             } else {
                 match super::super::agents::start_local_agent_pairs_with_preflight(
                     &app,
                     &state,
                     &summary.pubkey,
-                    &access_restart_relays,
+                    &runtime_restart_relays,
                 )
                 .await
                 {
@@ -450,19 +524,55 @@ pub async fn update_managed_agent(
         }
     }
 
-    if !access_restart_relays.is_empty() {
-        summary = super::super::agents::start_local_agent_pairs_with_preflight(
+    if !runtime_restart_relays.is_empty() {
+        match super::super::agents::start_local_agent_pairs_with_preflight(
             &app,
             &state,
             &summary.pubkey,
-            &access_restart_relays,
+            &runtime_restart_relays,
         )
         .await
-        .map_err(|error| {
-            format!(
-                "Agent access was saved and published, but its runtime failed to restart with the new policy: {error}"
-            )
-        })?;
+        {
+            Ok(restarted) => summary = restarted,
+            Err(error) if parallelism_changed => {
+                let rollback = rollback.take().ok_or_else(|| {
+                    "missing local rollback state after parallelism restart failure".to_string()
+                })?;
+                rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback)?;
+                let rollback_policy_error =
+                    crate::managed_agents::persona_events::flush_active_pending_events(
+                        &app, &state,
+                    )
+                    .await
+                    .err()
+                    .map(|flush_error| {
+                        format!(" Managed policy rollback is queued: {flush_error}.")
+                    })
+                    .unwrap_or_default();
+                let restart_suffix =
+                    match super::super::agents::start_local_agent_pairs_with_preflight(
+                        &app,
+                        &state,
+                        &summary.pubkey,
+                        &runtime_restart_relays,
+                    )
+                    .await
+                    {
+                        Ok(_) => String::new(),
+                        Err(restart_error) => format!(
+                            " The previous runtime also failed to restart: {restart_error}."
+                        ),
+                    };
+                return Err(format!(
+                    "Agent parallelism was rolled back because its runtime failed to restart: {error}.{rollback_policy_error}{restart_suffix}"
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Agent access was saved and published, but its runtime failed to restart with the new policy: {error}"
+                ));
+            }
+        }
     }
 
     Ok(UpdateManagedAgentResponse {

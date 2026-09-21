@@ -308,6 +308,16 @@ with a TypeScript lookup table or an id comparison in a component.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs retain neutral effort capabilities. A boundary-matched GPT-5-or-newer family in the service-name component selects OpenAI Responses so tools can coexist with reasoning; other FQNs use MLflow Chat Completions. Catalog/schema components never influence routing. Keep this route-only rule identical in the Rust and TypeScript capability interpreters. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
+18. **Profile saves preserve one identity and one effective parallelism.** The
+    profile surface owns one managed instance per definition, so a replay after
+    an ambiguous create timeout must explicitly reuse that active instance;
+    generic create surfaces retain multi-instance behavior. A definition
+    parallelism edit must update the linked record, publish kind:30177, and
+    restart every active local relay pair before success is reported. If policy
+    publication fails, restore the previous record/runtime and let the profile
+    surface restore the previous definition. Never show a success toast while
+    definition, managed policy, and runtime worker count disagree.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness

@@ -1,16 +1,27 @@
 import * as React from "react";
 import type {
-  AcpRuntimeCatalogEntry,
   AgentPersona,
   Channel,
+  CreateManagedAgentInput,
   ManagedAgent,
   Profile,
   RelayAgent,
-  UpdateManagedAgentInput,
 } from "@/shared/api/types";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 
 export { truncateNpub };
+
+export function profileManagedAgentCreateInput(
+  input: CreateManagedAgentInput,
+): CreateManagedAgentInput {
+  return {
+    ...input,
+    // This surface owns exactly one instance for a definition. If the command
+    // response times out after persistence, a retry must reuse the same
+    // identity instead of minting an orphaned second keypair.
+    reuseExistingPersonaInstance: true,
+  };
+}
 
 export type ProfileChannelLink = {
   id: string;
@@ -263,99 +274,6 @@ export function resolveAgentInstruction(
   return (
     managedAgent?.systemPrompt?.trim() || persona?.systemPrompt.trim() || null
   );
-}
-
-export function personaManagedAgentUpdate(
-  agent: ManagedAgent,
-  persona: AgentPersona,
-  options: {
-    previousPersona?: AgentPersona;
-    runtimes?: readonly AcpRuntimeCatalogEntry[];
-  } = {},
-): UpdateManagedAgentInput | null {
-  if (agent.personaId !== persona.id) return null;
-
-  const input: UpdateManagedAgentInput = { pubkey: agent.pubkey };
-  let hasChanges = false;
-
-  if (persona.displayName !== agent.name) {
-    input.name = persona.displayName;
-    hasChanges = true;
-  }
-
-  if (persona.systemPrompt !== (agent.systemPrompt ?? "")) {
-    input.systemPrompt = persona.systemPrompt;
-    hasChanges = true;
-  }
-
-  if ((persona.model ?? null) !== (agent.model ?? null)) {
-    input.model = persona.model;
-    hasChanges = true;
-  }
-
-  if (!stringRecordEqual(persona.envVars, agent.envVars)) {
-    input.envVars = persona.envVars;
-    hasChanges = true;
-  }
-
-  // Definition edits expose the access policy in the same dialog as identity
-  // and runtime settings. Keep the exact linked instance in sync when the
-  // definition carries an explicit policy; otherwise the dialog reopens with
-  // the new value while the running agent and sidebar retain the old one.
-  if (persona.respondTo != null && persona.respondTo !== agent.respondTo) {
-    input.respondTo = persona.respondTo;
-    hasChanges = true;
-  }
-  if (
-    persona.respondTo === "allowlist" &&
-    !stringArrayEqual(persona.respondToAllowlist, agent.respondToAllowlist)
-  ) {
-    input.respondToAllowlist = [...persona.respondToAllowlist];
-    hasChanges = true;
-  }
-
-  const runtimeChanged =
-    options.previousPersona !== undefined &&
-    options.previousPersona.runtime !== persona.runtime;
-  const runtime = runtimeChanged
-    ? options.runtimes?.find((candidate) => candidate.id === persona.runtime)
-    : undefined;
-  if (runtime?.command) {
-    if (runtime.command !== agent.agentCommand) {
-      input.agentCommand = runtime.command;
-      hasChanges = true;
-    }
-
-    if (!stringArrayEqual(runtime.defaultArgs, agent.agentArgs)) {
-      input.agentArgs = [...runtime.defaultArgs];
-      hasChanges = true;
-    }
-
-    const mcpCommand = runtime.mcpCommand ?? "";
-    if (mcpCommand !== agent.mcpCommand) {
-      input.mcpCommand = mcpCommand;
-      hasChanges = true;
-    }
-  }
-
-  return hasChanges ? input : null;
-}
-
-function stringArrayEqual(left: readonly string[], right: readonly string[]) {
-  if (left.length !== right.length) return false;
-
-  return left.every((value, index) => value === right[index]);
-}
-
-function stringRecordEqual(
-  left: Record<string, string>,
-  right: Record<string, string>,
-) {
-  const leftKeys = Object.keys(left);
-  const rightKeys = Object.keys(right);
-  if (leftKeys.length !== rightKeys.length) return false;
-
-  return leftKeys.every((key) => left[key] === right[key]);
 }
 
 export function useRetainedPersona(
