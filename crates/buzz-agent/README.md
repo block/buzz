@@ -242,7 +242,7 @@ lifecycle hook — see [MCP_DRIVEN_HOOKS.md](../../docs/MCP_DRIVEN_HOOKS.md).
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | OpenRouter | `openrouter` | `POST {base}/chat/completions` | anything they route (extended-thinking replay, provider-agnostic tool calling) |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
-| Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | workspace endpoints and Unity Catalog model-service FQNs; UC FQNs use MLflow Chat Completions |
+| Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | workspace endpoints and Unity Catalog model-service FQNs; UC GPT-5+ services use OpenAI Responses; other UC FQNs use MLflow Chat Completions |
 
 The optional `DATABRICKS_MODEL_FILTER` applies only to model discovery. Each comma-separated entry is trimmed and matched against the complete raw ID with case-sensitive `*` (zero or more characters) and `?` (one Unicode character) semantics; patterns are OR-ed. Unset or blank preserves the full authenticated catalog. A nonblank value containing no usable patterns is rejected. This controls picker visibility only; Databricks and Unity Catalog permissions remain the authorization boundary. A filtered-empty result is authoritative and does not restore the built-in fallback models.
 

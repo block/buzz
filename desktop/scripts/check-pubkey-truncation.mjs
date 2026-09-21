@@ -6,8 +6,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 
 // Truncated pubkey prefixes are forgeable (vanity grinding), so all display
-// truncation goes through the canonical `truncatePubkey` / `<PubKey>` — this
-// guard keeps ad-hoc `pubkey.slice(0, N)` forms from fragmenting again.
+// truncation goes through the canonical `truncateNpub` (identity keys —
+// compact npub), `truncatePubkey` (generic hex identifiers such as event and
+// blob IDs), or `<PubKey>` — this guard keeps ad-hoc `pubkey.slice(0, N)`
+// forms from fragmenting again.
 const rules = [
   {
     root: "src",

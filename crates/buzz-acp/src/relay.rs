@@ -1160,10 +1160,8 @@ struct BgState {
     /// On reconnect resubscribe, `since` = min(last_seen, channel_dropped_since).
     /// Cleared per-channel after a successful resubscribe.
     channel_dropped_since: HashMap<Uuid, u64>,
-    /// Set by the backpressure handler when the event channel is full.
-    /// The main loop checks this flag and triggers a proactive resubscribe
-    /// (without waiting for a disconnect) so dropped events are replayed.
-    proactive_resubscribe_needed: bool,
+    /// Rate/fairness bookkeeping only; replay cursors retain baseline semantics.
+    recovery: recovery::RecoverySchedule,
     /// Unix timestamp captured just before the relay connection was established.
     /// Used as the floor `since` for membership notification replay so events
     /// predating this session are never re-delivered.
@@ -1237,7 +1235,7 @@ impl BgState {
             membership_sub_active: false,
             observer_control_sub_active: false,
             channel_dropped_since: HashMap::new(),
-            proactive_resubscribe_needed: false,
+            recovery: recovery::RecoverySchedule::default(),
             startup_watermark: None,
             subscribe_since: HashMap::new(),
             rate_limit_gate: None,
@@ -1298,6 +1296,9 @@ impl BgState {
     /// Prevents stale replay on re-subscribe and avoids unbounded state growth
     /// for channels that are removed and never re-added.
     fn clear_channel_state(&mut self, channel_id: &Uuid) {
+        self.recovery
+            .last_attempt
+            .remove(&channel_sub_id(*channel_id));
         self.last_seen.remove(channel_id);
         self.subscribe_since.remove(channel_id);
         self.channel_dropped_since.remove(channel_id);
@@ -1826,82 +1827,6 @@ async fn run_background_task(
     let mut drain_pacing_next: Option<tokio::time::Instant> = None;
 
     loop {
-        if state.proactive_resubscribe_needed {
-            state.proactive_resubscribe_needed = false;
-            info!("proactive resubscribe triggered by backpressure event loss");
-            // Proactive resubscribe runs on the EXISTING socket — do NOT clear the
-            // rate-limit gate or pending queues.
-            match resubscribe_after_reconnect(
-                &mut ws,
-                &mut cmd_rx,
-                &mut state,
-                &agent_pubkey_hex,
-                false, // existing socket — preserve gate state
-            )
-            .await
-            {
-                ResubscribeResult::Ok => {}
-                ResubscribeResult::Shutdown => return,
-                ResubscribeResult::RetryConnection => {
-                    warn!("proactive resubscribe had failures — triggering reconnect");
-                    let _ = event_tx.try_send(None);
-                    match try_autonomous_reconnect(
-                        &mut ws,
-                        &mut cmd_rx,
-                        &mut state,
-                        &keys,
-                        &relay_url,
-                        &agent_pubkey_hex,
-                        &event_tx,
-                        &observer_control_tx,
-                        auth_tag.as_ref(),
-                    )
-                    .await
-                    {
-                        ReconnectOutcome::Ok => {
-                            if matches!(
-                                drain_post_reconnect(
-                                    &mut ws,
-                                    &mut cmd_rx,
-                                    &mut state,
-                                    &agent_pubkey_hex
-                                )
-                                .await,
-                                ReconnectOutcome::Shutdown
-                            ) {
-                                return;
-                            }
-                        }
-                        ReconnectOutcome::Shutdown => return,
-                        ReconnectOutcome::Failed => {
-                            if matches!(
-                                wait_for_reconnect(
-                                    &mut ws,
-                                    &mut cmd_rx,
-                                    &mut state,
-                                    &keys,
-                                    &relay_url,
-                                    &agent_pubkey_hex,
-                                    &event_tx,
-                                    &observer_control_tx,
-                                    true,
-                                    auth_tag.as_ref(),
-                                )
-                                .await,
-                                ReconnectOutcome::Shutdown
-                            ) {
-                                return;
-                            }
-                        }
-                    }
-                    ping_sent = false;
-                    last_pong = Instant::now();
-                    connected_since = Instant::now();
-                    stable_logged = false;
-                }
-            }
-        }
-
         // Drain pending subs, one REQ per pacing tick within the relay's
         // admission window.
         let drain_window_open = drain_pacing_next.is_none_or(|t| tokio::time::Instant::now() >= t);
@@ -1982,7 +1907,11 @@ async fn run_background_task(
             }
         }
 
+        let recovery_at = recovery::ready_at(&mut state);
         tokio::select! {
+                   _ = recovery::ready(&event_tx, recovery_at) => {
+                       recovery::recover_one(&mut ws, &mut state, &event_tx, &agent_pubkey_hex).await;
+                   }
                    raw = ws.next() => {
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
@@ -2267,6 +2196,36 @@ async fn handle_ws_message(
                     subscription_id,
                     event,
                 } => {
+                    // Relay and storage responses are untrusted. Verify before
+                    // any event field can affect routing, replay state, or the
+                    // harness queues.
+                    let event_id = event.id.to_hex();
+                    let event = match tokio::task::spawn_blocking(move || {
+                        buzz_core::verify_event(&event).map(|()| event)
+                    })
+                    .await
+                    {
+                        Ok(Ok(event)) => event,
+                        Ok(Err(error)) => {
+                            warn!(
+                                subscription_id,
+                                event_id,
+                                error = %error,
+                                "relay event failed NIP-01 verification — dropping"
+                            );
+                            return true;
+                        }
+                        Err(error) => {
+                            warn!(
+                                subscription_id,
+                                event_id,
+                                error = %error,
+                                "relay event verification task failed — dropping"
+                            );
+                            return true;
+                        }
+                    };
+
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
                         match observer_control_tx.try_send(*event) {
                             Ok(()) => {}
@@ -2328,12 +2287,10 @@ async fn handle_ws_message(
                                 // replay starts early enough to re-deliver it.
                                 state.membership_dropped_since =
                                     Some(state.membership_dropped_since.map_or(ts, |d| d.min(ts)));
-                                // Proactively trigger resubscribe without waiting for a disconnect.
-                                state.proactive_resubscribe_needed = true;
                                 warn!(
                                     channel_id = %channel_uuid,
                                     ts,
-                                    "membership notification dropped (backpressure) — proactive resubscribe queued"
+                                    "membership notification dropped (backpressure) — targeted recovery pending"
                                 );
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
@@ -2370,12 +2327,10 @@ async fn handle_ws_message(
                                         .entry(channel_id)
                                         .and_modify(|d| *d = (*d).min(ts))
                                         .or_insert(ts);
-                                    // Proactively trigger resubscribe without waiting for a disconnect.
-                                    state.proactive_resubscribe_needed = true;
                                     warn!(
                                         channel_id = %channel_id,
                                         ts,
-                                        "event channel full — dropping event for channel {channel_id} — proactive resubscribe queued"
+                                        "event channel full — dropping event for channel {channel_id} — targeted recovery pending"
                                     );
                                 }
                                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -4218,6 +4173,11 @@ async fn wait_for_any_ok(
     }
 }
 
+mod recovery;
+
+#[cfg(test)]
+mod recovery_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4745,7 +4705,7 @@ mod tests {
             .expect("signing should succeed")
     }
 
-    async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
+    pub(super) async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test websocket");
@@ -4762,7 +4722,7 @@ mod tests {
         (client, server.await.expect("join test websocket server"))
     }
 
-    async fn next_test_frame(
+    pub(super) async fn next_test_frame(
         server: &mut WebSocketStream<tokio::net::TcpStream>,
     ) -> serde_json::Value {
         let message = timeout(Duration::from_secs(1), server.next())
@@ -4774,14 +4734,245 @@ mod tests {
             .expect("parse test websocket frame")
     }
 
-    fn test_channel_filter() -> ChannelFilter {
+    fn make_signed_channel_event(keys: &Keys, content: &str, created_at_secs: u64) -> Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags([])
+            .custom_created_at(nostr::Timestamp::from(created_at_secs))
+            .sign_with_keys(keys)
+            .expect("sign channel event")
+    }
+
+    fn replace_event_field(event: &Event, field: &str, replacement: Value) -> Event {
+        let mut value = serde_json::to_value(event).expect("serialize event");
+        value[field] = replacement;
+        serde_json::from_value(value).expect("deserialize tampered event")
+    }
+
+    fn recompute_event_id(event: &Event) -> Event {
+        let id = nostr::EventId::new(
+            &event.pubkey,
+            &event.created_at,
+            &event.kind,
+            &event.tags,
+            &event.content,
+        );
+        replace_event_field(event, "id", json!(id.to_hex()))
+    }
+
+    async fn handle_test_relay_event(
+        ws: &mut WsStream,
+        event_tx: &mpsc::Sender<Option<BuzzEvent>>,
+        observer_control_tx: &mpsc::Sender<Event>,
+        state: &mut BgState,
+        subscription_id: &str,
+        event: &Event,
+    ) -> bool {
+        let keys = Keys::generate();
+        let agent_pubkey_hex = keys.public_key().to_hex();
+        let text = serde_json::to_string(&json!(["EVENT", subscription_id, event]))
+            .expect("serialize relay frame");
+        handle_ws_message(
+            Message::Text(text.into()),
+            ws,
+            event_tx,
+            observer_control_tx,
+            state,
+            &keys,
+            "wss://relay.example.com",
+            &agent_pubkey_hex,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn verified_channel_event_is_recorded_and_forwarded() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let event = make_signed_channel_event(&Keys::generate(), "hello", 2_000);
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &channel_sub_id(channel_id),
+                &event,
+            )
+            .await
+        );
+
+        let received = event_rx.try_recv().expect("verified event was forwarded");
+        let received = received.expect("event channel should not contain shutdown marker");
+        assert_eq!(received.channel_id, channel_id);
+        assert_eq!(received.event.id, event.id);
+        assert_eq!(state.last_seen.get(&channel_id), Some(&2_000));
+        assert!(state.seen_ids.contains(&event.id.to_hex()));
+        assert!(matches!(
+            observer_control_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tampered_channel_events_are_dropped_before_state_or_queue_changes() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let owner_event = make_signed_channel_event(&Keys::generate(), "status", 2_000);
+        let other_event = make_signed_channel_event(&Keys::generate(), "other", 3_000);
+        let other = serde_json::to_value(&other_event).expect("serialize other event");
+        let owner_command = recompute_event_id(&replace_event_field(
+            &owner_event,
+            "content",
+            json!("!shutdown"),
+        ));
+
+        let cases = [
+            (
+                "changed content",
+                replace_event_field(&owner_event, "content", json!("tampered")),
+            ),
+            ("forged owner command with a matching id", owner_command),
+            (
+                "changed event id",
+                replace_event_field(&owner_event, "id", other["id"].clone()),
+            ),
+            (
+                "changed signature",
+                replace_event_field(&owner_event, "sig", other["sig"].clone()),
+            ),
+            (
+                "changed author pubkey",
+                replace_event_field(&owner_event, "pubkey", other["pubkey"].clone()),
+            ),
+            (
+                "changed tags",
+                replace_event_field(
+                    &owner_event,
+                    "tags",
+                    json!([["h", Uuid::new_v4().to_string()]]),
+                ),
+            ),
+            (
+                "changed timestamp",
+                replace_event_field(&owner_event, "created_at", json!(4_000)),
+            ),
+        ];
+
+        for (case, event) in cases {
+            assert!(
+                handle_test_relay_event(
+                    &mut client,
+                    &event_tx,
+                    &observer_control_tx,
+                    &mut state,
+                    &channel_sub_id(channel_id),
+                    &event,
+                )
+                .await,
+                "{case} should not close the connection"
+            );
+            assert!(
+                matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{case} reached the harness event queue"
+            );
+        }
+
+        assert!(state.last_seen.is_empty());
+        assert!(state.seen_ids.current.is_empty());
+        assert!(state.seen_ids.previous.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forged_membership_notification_is_dropped_before_state_or_queue_changes() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let attacker_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16),
+            "membership changed",
+        )
+        .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+        .custom_created_at(nostr::Timestamp::from(2_000))
+        .sign_with_keys(&attacker_keys)
+        .expect("sign membership event");
+        let forged = recompute_event_id(&replace_event_field(
+            &event,
+            "pubkey",
+            json!(owner_keys.public_key().to_hex()),
+        ));
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                MEMBERSHIP_NOTIF_SUB_ID,
+                &forged,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(state.membership_last_seen, None);
+        assert!(state.seen_ids.current.is_empty());
+        assert!(state.seen_ids.previous.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forged_observer_control_is_dropped_before_control_queue() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let event = make_signed_channel_event(&Keys::generate(), "control", 2_000);
+        let forged = recompute_event_id(&replace_event_field(
+            &event,
+            "content",
+            json!("tampered control"),
+        ));
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                OBSERVER_CONTROL_SUB_ID,
+                &forged,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            observer_control_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    pub(super) fn test_channel_filter() -> ChannelFilter {
         ChannelFilter {
             kinds: Some(vec![9]),
             require_mention: false,
         }
     }
 
-    fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
+    pub(super) fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
         apply_command_to_state(
             state,
             RelayCommand::Subscribe {

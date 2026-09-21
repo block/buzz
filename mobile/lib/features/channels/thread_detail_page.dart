@@ -128,14 +128,15 @@ class ThreadDetailPage extends HookConsumerWidget {
     final liveChannelEvents =
         ref.watch(channelMessagesProvider(channelId)).value ??
         const <NostrEvent>[];
-    final replyMessages = repliesState.whenData((events) {
-      return formatTimeline(
-        mergeThreadEvents(events, liveChannelEvents),
-        currentPubkey: currentPubkey,
-      );
-    });
-
-    final fetchedReplies = replyMessages.value;
+    // Loading/error states can still carry replies from the last query.
+    // whenData drops that retained value during retries.
+    final replyEvents = repliesState.value;
+    final fetchedReplies = replyEvents == null
+        ? null
+        : formatTimeline(
+            mergeThreadEvents(replyEvents, liveChannelEvents),
+            currentPubkey: currentPubkey,
+          );
     final hasFetchedReplies = fetchedReplies != null;
     // A terminal query error cannot produce a more authoritative list. Keep
     // loading states provisional, but let the hydrated route snapshot drive
@@ -892,6 +893,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                   itemPositionsListener: itemPositionsListener,
                   bottomInset: timelineBottomInset,
                   replies: replies,
+                  relayReplyState: relayReplyState,
                   localSendAnimations: localSendAnimations,
                   trackActiveScrollPosition: trackActiveScrollPosition,
                   headIsDeleted: liveDeletionHidesHead,

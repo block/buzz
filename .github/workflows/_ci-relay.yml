@@ -35,7 +35,7 @@ jobs:
   desktop-e2e-relay:
     name: Desktop E2E Relay
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     if: inputs.lane == 'artifacts' && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
     permissions:
       contents: read
@@ -484,6 +484,27 @@ jobs:
           VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
           ON CONFLICT (lower(host)) DO NOTHING
           ;"
+      - name: Git default-branch route and clone regressions
+        env:
+          # The preceding step already applied and reconciled schema/schema.sql.
+          BUZZ_TEST_SCHEMA_MODE: desired
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          BUZZ_TEST_REDIS_URL: redis://localhost:6379
+          BUZZ_TEST_S3_ENDPOINT: http://localhost:9000
+          BUZZ_TEST_S3_BUCKET: buzz-media
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/api::git::settings::tests::external_infra::/)' \
+            --run-ignored ignored-only
+      - name: Relay quota accounting and rejection regressions
+        env:
+          BUZZ_TEST_REDIS_URL: redis://localhost:6379
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and (test(/^rejection::/) or test(/^admission::/))' \
+            --run-ignored all
       - name: Workflow message provenance unit tests
         # The relay's workflow_sink suite is not selected by the infra-free
         # unit job. Its ignored database cases run in the isolated PostgreSQL
@@ -566,9 +587,10 @@ jobs:
           ./scripts/start-relay-for-tests.sh --no-build
       - name: Relay E2E tests
         run: |
-          cargo test -p buzz-test-client --test e2e_persona --test e2e_team_catalog --test e2e_nostr_interop --test e2e_project -- --ignored --nocapture
+          cargo test -p buzz-test-client --test e2e_persona --test e2e_team_catalog --test e2e_nostr_interop --test e2e_thread_roots --test e2e_project -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip43_membership_snapshots_are_rejected -- --ignored --nocapture
+          cargo test -p buzz-test-client --test e2e_relay nip29_departure_wire -- --ignored --nocapture
         env:
           RELAY_URL: ws://localhost:3000
           GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr

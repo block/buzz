@@ -400,7 +400,7 @@ class RunnerTests: XCTestCase {
     let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
 
     XCTAssertEqual(size.width, 216)
-    XCTAssertEqual(size.height, 264)
+    XCTAssertEqual(size.height, 324) // Five actions, including voice notes.
     XCTAssertEqual(NativeAttachmentMenuLayout.contentPadding, 16)
     XCTAssertEqual(
       NativeAttachmentMenuLayout.itemHeight(compatibleWith: traits),
@@ -902,6 +902,42 @@ class RunnerTests: XCTestCase {
     XCTAssertNotNil(row.actionImageView.image)
     row.sendActions(for: .touchUpInside)
     XCTAssertTrue(selected)
+  }
+
+  @MainActor
+  func testNativeMessageActionRowReceivesTapsAcrossItsWholeSurface() throws {
+    let definition = try XCTUnwrap(
+      NativeMessageActionDefinition(
+        arguments: [
+          "id": "edit", "title": "Edit message",
+          "symbol": "pencil", "group": "primary",
+        ]
+      )
+    )
+    var selectionCount = 0
+    let row = NativeMessageActionRowControl(
+      definition: definition,
+      foregroundColor: .label,
+      destructiveColor: .systemRed,
+      onSelected: { selectionCount += 1 }
+    )
+    row.frame = CGRect(x: 0, y: 0, width: 288, height: 48)
+    row.layoutIfNeeded()
+
+    let iconCenter = row.actionImageView.convert(
+      CGPoint(x: row.actionImageView.bounds.midX, y: row.actionImageView.bounds.midY),
+      to: row
+    )
+    let labelCenter = row.actionTitleLabel.convert(
+      CGPoint(x: row.actionTitleLabel.bounds.midX, y: row.actionTitleLabel.bounds.midY),
+      to: row
+    )
+    for point in [CGPoint(x: 4, y: 24), iconCenter, labelCenter, CGPoint(x: 284, y: 24)] {
+      let target = row.hitTest(point, with: nil)
+      XCTAssertTrue(target === row, "Tap at \(point) must reach the action control")
+      (target as? UIControl)?.sendActions(for: .touchUpInside)
+    }
+    XCTAssertEqual(selectionCount, 4)
   }
 
   @MainActor

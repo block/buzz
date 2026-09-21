@@ -1,10 +1,10 @@
 # Buzz Push Gateway deployment
 
-`buzz-push-gateway` is the standalone public APNs last hop intended for `push.buzz.xyz`. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs credentials.
+`buzz-push-gateway` is a standalone APNs last hop. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs credentials.
 
 ## Network and health
 
-- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route `https://push.buzz.xyz` to this port.
+- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the configured `BUZZ_PUSH_GATEWAY_ORIGIN` to this port.
 - Private health listener: `BUZZ_PUSH_HEALTH_ADDR` (default `0.0.0.0:8081`). Probe `/_liveness` and `/_readiness`; do not expose this port publicly. The chart has no pod-ingress allowance for 8081; Kubernetes node/kubelet-origin probe traffic is exempt from NetworkPolicy. Add a narrowly selected monitoring source only if the target CNI requires pod-origin health scraping.
 - Readiness fails when PostgreSQL authority is unavailable. Graceful shutdown stops accepting new requests before draining in-flight APNs calls.
 
@@ -13,7 +13,7 @@
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the six gateway tables, not DDL. |
-| `BUZZ_PUSH_PUBLIC_DELIVERY_URL` | Exact externally signed URL, normally `https://push.buzz.xyz/v1/deliveries/apns`. |
+| `BUZZ_PUSH_GATEWAY_ORIGIN` | Exact externally reachable HTTPS origin. No credentials, port, path, query, or fragment. The gateway derives its transport routes from it; NIP-PL v1 App Attest audiences remain the registered `https://push.buzz.xyz/v1/...` constants. |
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
@@ -24,7 +24,7 @@
 | `BUZZ_PUSH_GRANT_KEYS` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
 | `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
 
-The canonical `push.buzz.xyz` MVP serves the dogfood application identity
+The current MVP serves the dogfood application identity
 (`xyz.block.buzz.dogfood.mobile`). App Attest must cryptographically validate
 the configured application ID before enrollment. Assertions and delivery use
 the server-owned APNs topic, certificate-backed connection pool, and
@@ -52,6 +52,25 @@ Mount the App Attest root read-only and startup will reject any byte mismatch. T
 The gateway stores APNs tokens encrypted in PostgreSQL. Database backups therefore contain ciphertext plus authority metadata and must receive the same access controls and retention treatment as the service secrets.
 
 ## PostgreSQL and replicas
+
+### First deployment, not a legacy upgrade
+
+This gateway has never been deployed outside personal development infrastructure.
+This release supports a fresh dedicated database, not migration of existing
+development authority. Before running any schema migrations, `--migrate-only`
+refuses a non-empty database that has not completed gateway initialization
+(migration 0005). The error names the populated table and tells the operator to
+stop the development gateway and provision a fresh database. It does not delete
+or migrate that data. Normal deployments of an already initialized gateway may
+retain their data.
+
+Do not run a rolling upgrade from a pre-launch development binary. Stop that
+deployment before initialization, use the fresh database, and do not roll back
+to a pre-launch binary against the new database. The rolling strategy is for
+compatible versions after initial deployment; no legacy writer compatibility or
+mobile configured-to-unconfigured migration is supported. Push has no existing
+enabled users. After enabling push, retain gateway configuration in updates to
+that app identity; omitting it is not a push shutdown mechanism.
 
 The gateway's dedicated pool does not consume the relay-oriented `BUZZ_DB_LOCK_TIMEOUT_MS`, `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`, or `BUZZ_DB_STATEMENT_TIMEOUT_MS` settings. Its session-timeout policy remains separate from the `buzz-db` writer policy and must be designed and rolled out independently.
 
@@ -122,10 +141,9 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 
 Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
 the established strict boolean parser rejects unknown values and the default is
-false. When enabled, an absent `BUZZ_PUSH_GATEWAY_DELIVERY_URL` selects the exact
-canonical URL `https://push.buzz.xyz/v1/deliveries/apns`; operators can provide
-another exact HTTPS `/v1/deliveries/apns` URL as an advanced override. An
-explicitly empty URL while enabled is a startup error. Only an enabled relay
+false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
+exact HTTPS `/v1/deliveries/apns` URL. An absent or explicitly empty URL while
+enabled is a startup error. Only an enabled relay
 advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
 matcher and delivery worker. Relays retain lease matching, authorization, durable
 jobs/retries, and generation checks; they receive only opaque capabilities and
@@ -157,7 +175,7 @@ capability—not a raw APNs token—into the encrypted relay lease.
 
 ## Internal dogfood evaluation and rollback
 
-The MVP is ready to enable only when the canonical gateway's sole dogfood
+The MVP is ready to enable only when the configured gateway's sole dogfood
 profile is configured with its server-owned App Attest app ID, APNs topic,
 production certificate identity, and production APNs environment, and only the
 selected internal relay deployments set `BUZZ_PUSH_ENABLED=true`. Every iOS
@@ -178,7 +196,7 @@ publish the next immutable `mobile-vX.Y.Z-rc.N` candidate from the exact current
 and wait for the signed `xyz.block.buzz.dogfood.mobile` artifact to appear in
 Mobile Releases/Comp Portal before installing it on a physical device. Verify
 APNs delivery, fetched and signature-verified notification content, and
-exact-message tap routing against the canonical gateway and a push-enabled
+exact-message tap routing against the configured gateway and a push-enabled
 internal relay before widening the internal evaluation.
 
 Before that first candidate, the private dogfood builder's manual signing and
@@ -229,7 +247,7 @@ the environment's GitOps values; the chart then renders
 `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
 `values-production.yaml` remains an intentionally invalid production-input
 contract: deployment CI must inject the verified image digest, the provisioned
-dogfood Apple application identifier, and the actual PostgreSQL network. In an
+dogfood Apple application identifier, `gatewayOrigin`, and the actual PostgreSQL network. In an
 environment with an existing ingress or service mesh route, keep
 `httpRoute.enabled=false`. If this chart owns a Gateway API route, enable it and
 inject an environment-owned `parentRef`; schema validation rejects an enabled

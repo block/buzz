@@ -437,15 +437,16 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         Err(e) => error!("Failed to backfill d_tags: {e}"),
     }
 
-    let audit = if config.audit_enabled {
+    let (audit, audit_metrics_pool) = if config.audit_enabled {
         let audit_pool = connect_audit_pool(&db_config)
             .await
             .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
         info!("Audit service ready");
-        Some(AuditService::new(audit_pool))
+        let metrics_pool = audit_pool.clone();
+        (Some(AuditService::new(audit_pool)), Some(metrics_pool))
     } else {
         info!("Audit logging disabled by BUZZ_AUDIT_ENABLED");
-        None
+        (None, None)
     };
 
     let redis_pool = {
@@ -495,6 +496,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         .connect(search_db_url)
         .await
         .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
+    let search_metrics_pool = search_pool.clone();
     let search = SearchService::new(search_pool);
     info!(
         replica = config.read_database_url.is_some(),
@@ -1101,20 +1103,18 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             loop {
                 interval.tick().await;
                 let db_stats = pool_state.db.pool_stats();
-                let active = db_stats.size.saturating_sub(db_stats.idle);
-                metrics::gauge!("buzz_db_pool_size").set(db_stats.size as f64);
-                metrics::gauge!("buzz_db_pool_idle").set(db_stats.idle as f64);
-                metrics::gauge!("buzz_db_pool_active").set(active as f64);
-                metrics::gauge!("buzz_db_pool_max").set(db_stats.max as f64);
+                let read_stats = pool_state.db.read_pool_stats();
+                relay_metrics::record_db_pool_metrics(relay_metrics::DbPoolMetricsInput {
+                    writer: db_stats,
+                    reader: read_stats,
+                    audit: audit_metrics_pool
+                        .as_ref()
+                        .map(buzz_db::DbPoolStats::from_pool),
+                    search: buzz_db::DbPoolStats::from_pool(&search_metrics_pool),
+                });
                 pool_state.db.refresh_pool_waiter_metrics();
 
-                if let Some(read_stats) = pool_state.db.read_pool_stats() {
-                    let read_active = read_stats.size.saturating_sub(read_stats.idle);
-                    metrics::gauge!("buzz_db_read_pool_size").set(read_stats.size as f64);
-                    metrics::gauge!("buzz_db_read_pool_idle").set(read_stats.idle as f64);
-                    metrics::gauge!("buzz_db_read_pool_active").set(read_active as f64);
-                    metrics::gauge!("buzz_db_read_pool_max").set(read_stats.max as f64);
-
+                if read_stats.is_some() {
                     // Fence observability: 1 when replica routing is
                     // eligible, and the verified-freshness lag in seconds.
                     // Closed/stale fence reports open=0 with lag untouched.
@@ -1609,6 +1609,7 @@ impl InMemoryMetricKey {
 /// racing the lifecycle-relative increments and decrements.
 fn refresh_legacy_active_gauge_recency() {
     metrics::gauge!("buzz_ws_connections_active").increment(0.0);
+    metrics::gauge!("buzz_ws_authenticated_connections_active").increment(0.0);
     metrics::gauge!("buzz_subscriptions_active").increment(0.0);
 }
 
@@ -1763,27 +1764,62 @@ async fn run_storage_sweep_tick(
     // leader tick, and stable for the process lifetime (env is immutable).
     // Keeping it here avoids widening Config/AppState for a single consumer.
     let config = *SWEEP_CONFIG.get_or_init(storage_sweep::StorageSweepConfig::from_env);
-    if !config.enabled {
-        return;
+    match config.mode {
+        storage_sweep::StorageMetricsMode::Disabled => return,
+        storage_sweep::StorageMetricsMode::Inline => {
+            let media_storage = Arc::clone(&state.media_storage);
+            let max_objects = config.max_objects;
+            storage_sweep::maybe_spawn_sweep(
+                &state.storage_sweep,
+                config.interval,
+                config.timeout,
+                async move {
+                    buzz_media::fold_bucket_listing(max_objects, move |token| {
+                        let media_storage = Arc::clone(&media_storage);
+                        async move { media_storage.list_page(token, 1000).await }
+                    })
+                    .await
+                },
+            )
+            .await;
+        }
+        storage_sweep::StorageMetricsMode::Snapshot => {
+            match state.db.load_storage_accounting_snapshot().await {
+                Ok(Some(stored)) => match serde_json::from_value(stored.snapshot) {
+                    Ok(snapshot) => {
+                        let duration = std::time::Duration::from_millis(
+                            u64::try_from(stored.duration_ms).unwrap_or_default(),
+                        );
+                        let max_objects = u64::try_from(stored.max_objects).unwrap_or_default();
+                        storage_sweep::cache_persisted_snapshot(
+                            &state.storage_sweep,
+                            snapshot,
+                            stored.completed_at,
+                            duration,
+                            max_objects,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "stored storage snapshot is invalid");
+                        storage_sweep::record_persisted_snapshot_load_failure(&state.storage_sweep)
+                            .await;
+                    }
+                },
+                Ok(None) => {
+                    storage_sweep::record_persisted_snapshot_load_failure(&state.storage_sweep)
+                        .await;
+                }
+                Err(error) => {
+                    warn!(error = %error, "failed to load stored storage snapshot");
+                    storage_sweep::record_persisted_snapshot_load_failure(&state.storage_sweep)
+                        .await;
+                }
+            }
+        }
     }
 
-    let media_storage = Arc::clone(&state.media_storage);
-    let max_objects = config.max_objects;
-    storage_sweep::maybe_spawn_sweep(
-        &state.storage_sweep,
-        config.interval,
-        config.timeout,
-        async move {
-            buzz_media::fold_bucket_listing(max_objects, move |token| {
-                let media_storage = Arc::clone(&media_storage);
-                async move { media_storage.list_page(token, 1000).await }
-            })
-            .await
-        },
-    )
-    .await;
-
-    storage_sweep::emit_storage_metrics(&state.storage_sweep, host_map, |id| {
+    storage_sweep::emit_storage_metrics(&state.storage_sweep, config.mode, host_map, |id| {
         emission_scope.allows(id)
     })
     .await;
@@ -2291,13 +2327,16 @@ mod tests {
 
         metrics::with_local_recorder(&recorder, || {
             let connections = metrics::gauge!("buzz_ws_connections_active");
+            let authenticated = metrics::gauge!("buzz_ws_authenticated_connections_active");
             let subscriptions = metrics::gauge!("buzz_subscriptions_active");
             connections.increment(1.0);
+            authenticated.increment(1.0);
             subscriptions.increment(1.0);
 
             refresh_legacy_active_gauge_recency();
 
             connections.decrement(1.0);
+            authenticated.decrement(1.0);
             subscriptions.increment(1.0);
         });
 
@@ -2314,6 +2353,10 @@ mod tests {
             .collect::<std::collections::HashMap<_, _>>();
 
         assert_eq!(values.get("buzz_ws_connections_active"), Some(&0.0));
+        assert_eq!(
+            values.get("buzz_ws_authenticated_connections_active"),
+            Some(&0.0)
+        );
         assert_eq!(values.get("buzz_subscriptions_active"), Some(&2.0));
     }
 

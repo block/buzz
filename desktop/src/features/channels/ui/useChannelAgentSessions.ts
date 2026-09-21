@@ -8,7 +8,7 @@ import type {
   RelayAgent,
 } from "@/shared/api/types";
 import { usePanelReturnTarget } from "@/shared/hooks/usePanelReturnTarget";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import {
   channelBotMemberPubkeySet,
   channelMemberPubkeySet,
@@ -100,7 +100,7 @@ export function buildChannelAgentSessionCandidates({
 
     byPubkey.set(key, {
       pubkey: member.pubkey,
-      name: member.displayName ?? truncatePubkey(member.pubkey),
+      name: member.displayName ?? truncateNpub(member.pubkey),
       status: "deployed",
       agentSource: "member-bot",
       canInterruptTurn: false,

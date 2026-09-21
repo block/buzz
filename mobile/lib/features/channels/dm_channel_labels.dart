@@ -54,6 +54,56 @@ String resolveDmChannelDisplayLabel(Channel channel, {String? currentPubkey}) {
       : channel.name;
 }
 
+/// Avatar initial for the DM's visible counterpart.
+///
+/// Mirrors [resolveDmChannelDisplayLabel]'s participant selection: the
+/// first participant that is not [currentPubkey], since member order does
+/// not guarantee the counterpart is listed first — otherwise the avatar
+/// could identify the current user while the label beside it identifies
+/// the counterpart. When every participant is the current user (a
+/// self-DM), the label names the current user too, so the avatar keys off
+/// that same first participant instead of its label's first character.
+///
+/// A resolved display name keeps its name-derived initial. A label that
+/// fell back to the compact npub form of the participant's key is keyed to
+/// the hex public key instead — the npub form starts with `npub1`, so every
+/// unnamed participant would otherwise render `N`.
+String dmAvatarInitial(Channel channel, {String? currentPubkey}) {
+  final normalizedCurrent = currentPubkey?.toLowerCase();
+  var index = 0;
+  while (normalizedCurrent != null &&
+      index < channel.participantPubkeys.length &&
+      channel.participantPubkeys[index].toLowerCase() == normalizedCurrent) {
+    index++;
+  }
+
+  if (index >= channel.participantPubkeys.length) {
+    // No participant pubkeys (labels only): fall back to the first
+    // participant label, like the channel label does when the non-self
+    // list is empty.
+    if (channel.participantPubkeys.isEmpty) {
+      final label = channel.participants.isNotEmpty
+          ? channel.participants.first
+          : '';
+      return label.isNotEmpty ? label[0].toUpperCase() : '?';
+    }
+    // Keys exist but every participant is the current user (a self-DM):
+    // the label names the current user, so key the avatar to that same
+    // first participant with the shared provenance rule below — the hex
+    // key for a compact npub label, the authored name otherwise.
+    index = 0;
+  }
+
+  final pubkey = channel.participantPubkeys[index];
+  final label = index < channel.participants.length
+      ? channel.participants[index]
+      : shortPubkey(pubkey);
+  if (pubkey.isNotEmpty && label == shortPubkey(pubkey)) {
+    return pubkey[0].toUpperCase();
+  }
+  return label.isNotEmpty ? label[0].toUpperCase() : '?';
+}
+
 List<Channel> sortDmChannelsByDisplayLabel(
   Iterable<Channel> channels, {
   String? currentPubkey,

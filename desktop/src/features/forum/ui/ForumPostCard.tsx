@@ -49,6 +49,7 @@ export function ForumPostCard({
   const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
     post.tags,
     profiles,
+    post.content,
   );
   // Memoize the imeta map: `parseImetaTags` builds a fresh object each render,
   // and the `Markdown` memo compares `imetaByUrl` by reference. Without this,

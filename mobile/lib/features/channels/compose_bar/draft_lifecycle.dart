@@ -26,10 +26,10 @@ Future<void> _sendTextOnlyDraft({
         draftRevision.value != clearedDraftRevision) {
       return;
     }
-    controller.value = clearedDraftText;
     mentionMap.value
       ..clear()
       ..addAll(clearedDraftMentions);
+    controller.value = clearedDraftText;
     focusNode.requestFocus();
   }
 
@@ -63,6 +63,7 @@ Future<void> _sendTextOnlyDraft({
 }
 
 void _useComposeDraftLifecycle({
+  required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required WidgetRef ref,
   required _MarkdownEditingController controller,
   required String draftKey,
@@ -82,11 +83,25 @@ void _useComposeDraftLifecycle({
 }) {
   final lastDraftIdentity = useRef<String?>(null);
   useEffect(() {
+    final identity = '$draftIdentity\u0000$draftKey';
+    final shouldHydrate = lastDraftIdentity.value != identity;
     final identityChanged =
-        lastDraftIdentity.value != null &&
-        lastDraftIdentity.value != draftIdentity;
-    lastDraftIdentity.value = draftIdentity;
-    final saved = ref.read(composeDraftsProvider.notifier).textFor(draftKey);
+        lastDraftIdentity.value != null && lastDraftIdentity.value != identity;
+    lastDraftIdentity.value = identity;
+    final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
+    if (shouldHydrate) {
+      mentionMap.value
+        ..clear()
+        ..addAll({
+          for (final entry
+              in (saved?.mentionKeys ?? <String, String>{}).entries)
+            entry.key: MentionCandidate(
+              pubkey: entry.value,
+              displayName: entry.key,
+              requiresRevalidation: true,
+            ),
+        });
+    }
     if (identityChanged) {
       draftRevision.value += 1;
       onDraftIdentityChanged();
@@ -101,15 +116,38 @@ void _useComposeDraftLifecycle({
       final staleAttachments = attachments.value;
       attachments.value = const [];
       unawaited(_deleteOwnedAttachments(staleAttachments));
-      controller.text = saved ?? '';
+      controller.text = saved?.text ?? '';
     } else if (saved != null && controller.text.isEmpty) {
-      controller.text = saved;
+      controller.text = saved.text;
     }
 
     var lastPersistedText = controller.text;
+    var lastBindings = <String, String>{
+      for (final e in mentionMap.value.entries) e.key: e.value.pubkey,
+    };
     void persistDraft() {
       final text = controller.text;
-      if (text == lastPersistedText) return;
+      if (text != lastPersistedText) {
+        // Prune before the atomic snapshot, not in a later editor listener.
+        // Code formatting hides a binding without deleting its literal.
+        final retained = mentionOccurrences(
+          text.replaceAll('`', ' '),
+          mentionMap.value.keys,
+        ).map((range) => range.label).toSet();
+        // Whole-record taint has no literal to prune. Removing every @ is a
+        // safe reset; unrelated edits must not turn lost keys into name lookup.
+        mentionMap.value.removeWhere(
+          (label, _) =>
+              label.isEmpty ? !text.contains('@') : !retained.contains(label),
+        );
+      }
+      final bindings = <String, String>{
+        for (final e in mentionMap.value.entries) e.key: e.value.pubkey,
+      };
+      if (text == lastPersistedText && mapEquals(bindings, lastBindings)) {
+        return;
+      }
+      lastBindings = bindings;
       lastPersistedText = text;
       draftRevision.value += 1;
       ref
@@ -119,6 +157,7 @@ void _useComposeDraftLifecycle({
             channelId: channelId,
             threadHeadId: threadHeadId,
             text: text,
+            mentionKeys: bindings,
           );
     }
 

@@ -16,6 +16,7 @@ use buzz_core::kind::{
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
 
+use super::channel_authz::{self, ChannelAuthzError, PutUserDecision, RemoveOtherDecision};
 use super::event::dispatch_persistent_event;
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
@@ -365,120 +366,51 @@ pub async fn validate_admin_event(
             let target_pubkey =
                 extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
 
-            // PUT_USER: open channels allow any authenticated user; private channels
-            // require the actor to be an existing active member. Any active member may
-            // add an ordinary member, guest, or bot, but only owners/admins may grant
-            // an elevated role.
-            if channel.visibility == "private" {
-                if actor_role.is_none() {
-                    return Err(anyhow::anyhow!("actor not authorized"));
-                }
-
-                if requested_role.is_some_and(|role| role.is_elevated())
-                    && !actor_role.is_some_and(|role| role.is_elevated())
-                {
-                    return Err(anyhow::anyhow!(
-                        "only owners/admins may grant elevated roles"
-                    ));
-                }
-            }
-
-            // Changing an ACTIVE existing member's role is privileged in both
-            // directions, on every visibility. `get_members` filters
-            // `removed_at IS NULL`, so a soft-removed row is deliberately not an
-            // "existing member" here: its stored role is history, not live
-            // authority, and reactivation is governed by the elevated-granter
-            // check above rather than by the role the row remembers.
-            //
-            // `add_member` is the authority (it also covers the desktop/admin
-            // callers that skip this validator); rejecting here too means the
-            // client gets a real error instead of an OK for an event whose side
-            // effect then fails. Re-adding at the same role stays idempotent —
-            // the huddle bot-add path relies on that.
-            if let Some((target, role)) = members
-                .iter()
-                .find(|m| m.pubkey == target_pubkey)
-                .zip(requested_role)
-                .filter(|(m, role)| m.role != role.as_str())
-            {
-                if !actor_role.is_some_and(|r| r.is_elevated()) {
-                    return Err(anyhow::anyhow!(
-                        "only owners/admins may change an active member's role"
-                    ));
-                }
-                if target.role == "owner"
-                    && role != buzz_db::channel::MemberRole::Owner
-                    && members.iter().filter(|m| m.role == "owner").count() <= 1
-                {
-                    return Err(anyhow::anyhow!(
-                        "cannot demote the last owner — transfer ownership first"
-                    ));
-                }
-            }
-
-            // Self-add: always allowed regardless of policy.
-            if target_pubkey == actor_bytes {
-                return Ok(());
-            }
-
-            // Third-party add: check channel_add_policy on the target.
-            if let Some((policy, owner)) = state
-                .db
-                .get_agent_channel_policy(tenant.community(), &target_pubkey)
-                .await?
-            {
-                match policy.as_str() {
-                    "owner_only" => {
-                        let owner_bytes = owner.ok_or_else(|| {
-                            anyhow::anyhow!("policy:owner_only — agent has no owner set")
-                        })?;
-                        if actor_bytes != owner_bytes {
-                            return Err(anyhow::anyhow!(
-                                "policy:owner_only — only the agent owner can add this agent"
-                            ));
-                        }
+            // Authorization policy — visibility gate, elevated-grant gate,
+            // active-member role-change gate, and last-owner demotion — lives in
+            // `channel_authz`, which is pure and table-tested. The database reads
+            // it depends on stay here.
+            match channel_authz::decide_put_user(
+                &channel.visibility,
+                actor_role,
+                requested_role,
+                &members,
+                &target_pubkey,
+                &actor_bytes,
+            )? {
+                // Self-add: always allowed regardless of policy.
+                PutUserDecision::Allow => Ok(()),
+                // Third-party add: check channel_add_policy on the target.
+                PutUserDecision::CheckAddPolicy => {
+                    if let Some((policy, owner)) = state
+                        .db
+                        .get_agent_channel_policy(tenant.community(), &target_pubkey)
+                        .await?
+                    {
+                        channel_authz::decide_channel_add_policy(
+                            &policy,
+                            owner.as_deref(),
+                            &actor_bytes,
+                        )?;
                     }
-                    "nobody" => {
-                        return Err(anyhow::anyhow!(
-                            "policy:nobody — this agent has disabled external channel additions"
-                        ));
-                    }
-                    // "anyone" or any unknown value → allow.
-                    // NOTE: DB ENUM constraint prevents unknown values from being stored.
-                    // If a new policy value is added to the ENUM, update this match.
-                    _ => {}
+
+                    Ok(())
                 }
             }
-
-            Ok(())
         }
         9001 => {
             // REMOVE_USER: self-remove allowed unless actor is the last owner; removing others requires owner/admin
             let target_pubkey =
                 extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
+            let members = state.db.get_members(tenant.community(), channel_id).await?;
             if target_pubkey == actor_bytes {
                 // Self-removal: must be an active member, and cannot be the last owner.
-                let members = state.db.get_members(tenant.community(), channel_id).await?;
-                let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-                match actor_member {
-                    None => {
-                        return Err(anyhow::anyhow!("actor is not an active member"));
-                    }
-                    Some(m) if m.role == "owner" => {
-                        let owner_count = members.iter().filter(|m| m.role == "owner").count();
-                        if owner_count <= 1 {
-                            return Err(anyhow::anyhow!("cannot remove the last owner"));
-                        }
-                    }
-                    _ => {}
-                }
+                channel_authz::decide_self_departure(&members, &actor_bytes)?;
                 Ok(())
             } else {
-                let members = state.db.get_members(tenant.community(), channel_id).await?;
-                let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-                match actor_member {
-                    Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                    Some(_) => {
+                match channel_authz::classify_remove_other(&members, &actor_bytes) {
+                    RemoveOtherDecision::Allow => Ok(()),
+                    RemoveOtherDecision::CheckAgentOwner => {
                         if state
                             .db
                             .is_agent_owner(tenant.community(), &target_pubkey, &actor_bytes)
@@ -486,13 +418,13 @@ pub async fn validate_admin_event(
                         {
                             Ok(())
                         } else {
-                            Err(anyhow::anyhow!("actor not authorized"))
+                            Err(ChannelAuthzError::ActorNotAuthorized.into())
                         }
                     }
                     // Non-members fall here. We intentionally do NOT check
                     // is_agent_owner for non-members — you must be in the channel
                     // to remove anyone, even your own bot.
-                    _ => Err(anyhow::anyhow!("actor not authorized")),
+                    RemoveOtherDecision::Deny => Err(ChannelAuthzError::ActorNotAuthorized.into()),
                 }
             }
         }
@@ -742,20 +674,9 @@ pub async fn validate_admin_event(
         }
         9022 => {
             // LEAVE_REQUEST: must be an active member, and cannot be the last owner.
+            // Identical rule to kind:9001 self-removal, including its wording.
             let members = state.db.get_members(tenant.community(), channel_id).await?;
-            let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-            match actor_member {
-                None => {
-                    return Err(anyhow::anyhow!("actor is not an active member"));
-                }
-                Some(m) if m.role == "owner" => {
-                    let owner_count = members.iter().filter(|m| m.role == "owner").count();
-                    if owner_count <= 1 {
-                        return Err(anyhow::anyhow!("cannot remove the last owner"));
-                    }
-                }
-                _ => {}
-            }
+            channel_authz::decide_self_departure(&members, &actor_bytes)?;
             Ok(())
         }
         _ => Ok(()),
@@ -1459,14 +1380,8 @@ async fn handle_remove_user(
             .db
             .get_members_for_event_write(tenant.community(), channel_id)
             .await?;
-        let owner_count = members.iter().filter(|m| m.role == "owner").count();
-        let actor_is_owner = members
-            .iter()
-            .any(|m| m.pubkey == actor_bytes && m.role == "owner");
-        if actor_is_owner && owner_count <= 1 {
-            return Err(anyhow::anyhow!(
-                "cannot remove the last owner — transfer ownership first"
-            ));
+        if channel_authz::is_sole_owner(&members, &actor_bytes) {
+            return Err(ChannelAuthzError::LastOwnerRemovalTransferFirst.into());
         }
     }
 
@@ -2126,14 +2041,8 @@ async fn handle_leave_request(
         .db
         .get_members_for_event_write(tenant.community(), channel_id)
         .await?;
-    let owner_count = members.iter().filter(|m| m.role == "owner").count();
-    let actor_is_owner = members
-        .iter()
-        .any(|m| m.pubkey == actor_bytes && m.role == "owner");
-    if actor_is_owner && owner_count <= 1 {
-        return Err(anyhow::anyhow!(
-            "cannot remove the last owner — transfer ownership first"
-        ));
+    if channel_authz::is_sole_owner(&members, &actor_bytes) {
+        return Err(ChannelAuthzError::LastOwnerRemovalTransferFirst.into());
     }
 
     state
@@ -2180,6 +2089,56 @@ async fn handle_leave_request(
 // handle_reaction() removed — kind:7 reaction dedup and DB writes are now
 // handled inline in ingest_event() before storage (see ingest.rs step 20a).
 
+/// Whether the standard deletion handler will process a workflow coordinate.
+pub(crate) fn is_workflow_deletion(event: &Event) -> bool {
+    // Match authorization and dispatch: e-tags take precedence, otherwise only
+    // the first a-tag is authorized and processed.
+    event.kind == Kind::EventDeletion
+        && !has_e_tag(event)
+        && event
+            .tags
+            .iter()
+            .find(|tag| tag.kind().to_string() == "a")
+            .and_then(|tag| tag.content())
+            .is_some_and(|value| {
+                value
+                    .split(':')
+                    .next()
+                    .and_then(|kind| kind.parse::<u32>().ok())
+                    == Some(buzz_core::kind::KIND_WORKFLOW_DEF)
+            })
+}
+
+/// Persist an already-authorized workflow deletion and its domain changes atomically.
+pub(crate) async fn persist_workflow_deletion(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
+    let coordinate = event
+        .tags
+        .iter()
+        .find(|tag| tag.kind().to_string() == "a")
+        .and_then(|tag| tag.content())
+        .ok_or_else(|| anyhow::anyhow!("missing workflow coordinate"))?;
+    let mut parts = coordinate.splitn(3, ':');
+    let _kind = parts.next();
+    let owner = hex::decode(parts.next().unwrap_or_default())?;
+    let d_tag = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid workflow coordinate"))?;
+    let (stored, dispatch, channel_id) = state
+        .db
+        .insert_workflow_deletion(tenant.community(), event, &owner, d_tag)
+        .await?;
+    if let Some(channel_id) = channel_id {
+        state
+            .workflow_engine
+            .invalidate_channel_workflows(tenant.community(), channel_id);
+    }
+    Ok((stored, dispatch))
+}
+
 /// Handle NIP-09 deletion via `a` tag (addressable/parameterized-replaceable events).
 /// Parses "kind:pubkey:d-tag" and deletes the corresponding DB record.
 async fn handle_a_tag_deletion(
@@ -2203,7 +2162,6 @@ async fn handle_a_tag_deletion(
         .map_err(|_| anyhow::anyhow!("invalid kind in a-tag"))?;
     let pubkey_hex = parts[1];
     let d_tag = parts[2];
-    let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
 
     match kind_num {
         // kind:30350 revocation is exclusively a higher-generation inactive replacement.
@@ -2211,60 +2169,12 @@ async fn handle_a_tag_deletion(
             tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
         }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
-            // Try UUID first (workflow_id); fall back to name-based lookup.
-            if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
-                let channel_id = state
-                    .db
-                    .delete_workflow_for_owner(tenant.community(), wf_id, &actor_bytes)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?;
-                if let Some(channel_id) = channel_id {
-                    state
-                        .workflow_engine
-                        .invalidate_channel_workflows(tenant.community(), channel_id);
-                }
-                tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
-            } else {
-                // Name-based lookup
-                match state
-                    .db
-                    .find_workflow_by_owner_and_name(tenant.community(), &actor_bytes, d_tag)
-                    .await
-                {
-                    Ok(Some(wf)) => {
-                        let channel_id = state
-                            .db
-                            .delete_workflow_for_owner(tenant.community(), wf.id, &actor_bytes)
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!("failed to delete workflow {}: {e}", wf.id)
-                            })?;
-                        if let Some(channel_id) = channel_id {
-                            state
-                                .workflow_engine
-                                .invalidate_channel_workflows(tenant.community(), channel_id);
-                        }
-                        tracing::info!(workflow_id = %wf.id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
-                    }
-                    Ok(None) => {
-                        tracing::warn!(
-                            "NIP-09 a-tag deletion: no workflow '{d_tag}' found for owner"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("NIP-09 a-tag deletion: DB lookup failed: {e}");
-                    }
-                }
-            }
+            // Workflow deletion belongs to the atomic persistence path in ingest.
+            return Err(anyhow::anyhow!(
+                "workflow deletion requires atomic persistence"
+            ));
         }
-        // Generic NIP-33 (parameterized-replaceable) soft-delete by coordinate.
-        //
-        // Listed after the workflow branch so workflow's bespoke deletion
-        // (which doesn't soft-delete the `events` row by design — that's a
-        // separate concern) takes precedence. For every other addressable
-        // kind, including kind:30023 (NIP-23 long-form), we soft-delete the
-        // live row matching `(kind, pubkey, d_tag)` so REQs stop returning it.
-        // See https://github.com/block/sprout/issues/714.
+        // Other NIP-33 events have no executable workflow projection.
         k if is_parameterized_replaceable(k) => {
             let pubkey_bytes = match hex::decode(pubkey_hex) {
                 Ok(b) => b,
@@ -3745,6 +3655,53 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_deletion_retry_matches_authorized_dispatch() {
+        let keys = nostr::Keys::generate();
+        let workflow = format!("30620:{}:workflow", keys.public_key());
+        let other = format!("30023:{}:article", keys.public_key());
+        for (kind, tags, expected) in [
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", workflow.as_str()]],
+                true,
+            ),
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", workflow.as_str()], vec!["e", "malformed"]],
+                false,
+            ),
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", other.as_str()], vec!["a", workflow.as_str()]],
+                false,
+            ),
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", workflow.as_str()], vec!["a", other.as_str()]],
+                true,
+            ),
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", "306200:owner:id"]],
+                false,
+            ),
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", "30620abc:owner:id"]],
+                false,
+            ),
+            (Kind::EventDeletion, vec![], false),
+            (Kind::TextNote, vec![vec!["a", workflow.as_str()]], false),
+        ] {
+            let event = EventBuilder::new(kind, "")
+                .tags(tags.into_iter().map(|tag| Tag::parse(tag).expect("tag")))
+                .sign_with_keys(&keys)
+                .expect("sign");
+            assert_eq!(is_workflow_deletion(&event), expected, "{:?}", event.tags);
+        }
+    }
 
     #[test]
     fn nip43_reconciliation_compatibility_alias_is_preserved() {

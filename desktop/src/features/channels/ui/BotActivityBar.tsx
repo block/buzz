@@ -195,6 +195,7 @@ export function BotActivityComposerAction({
                 fallbackDelayMs={isInline ? 0 : undefined}
                 key={agent.pubkey}
                 size="xs"
+                testId={`bot-activity-composer-avatar-${agent.pubkey}`}
               />
             ))}
           </span>
