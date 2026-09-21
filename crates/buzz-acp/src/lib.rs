@@ -4608,6 +4608,25 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// True when the harness refused the turn because the provider's usage or rate
+/// limit is exhausted.
+///
+/// A quota is wall-clock bound: it cannot clear inside the retry ladder's
+/// ~21-minute budget, so every attempt the batch spends here is a guaranteed
+/// failure that still ends in a dead-letter. Classifying it lets the caller
+/// surface the provider's own reset time immediately instead of discarding the
+/// request silently 21 minutes later.
+fn is_usage_limit_error(error: &acp::AcpError) -> bool {
+    let acp::AcpError::AgentError { message, .. } = error else {
+        return false;
+    };
+    let message = message.to_lowercase();
+    message.contains("session limit")
+        || message.contains("usage limit")
+        || message.contains("rate_limit_error")
+        || message.contains("api error: 429")
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -4766,6 +4785,29 @@ fn handle_prompt_result(
                     different model from the dropdown, and save your changes. Restart the agent \
                     to apply the new configuration, then re-send your request."
                     .to_string();
+                spawn_failure_notice(rest_client, &batch, content);
+            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_usage_limit_error(e))
+            {
+                // Quota exhaustion is wall-clock bound, not transient within the
+                // retry ladder: the limit resets on the provider's schedule, so
+                // retrying only burns the batch's attempt budget and then
+                // dead-letters anyway — ~21 minutes later, with the same
+                // outcome. Dead-letter immediately and hand the user the
+                // provider's own reset time so they know when to re-send.
+                let detail = match &result.outcome {
+                    PromptOutcome::Error(e) => e.to_string(),
+                    _ => String::new(),
+                };
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    detail = %detail,
+                    "dead-lettering batch immediately — provider usage limit reached"
+                );
+                let content = format!(
+                    "⚠️ I couldn't process the last request: the provider's usage limit is \
+                    reached ({detail}). Please re-send once it resets."
+                );
                 spawn_failure_notice(rest_client, &batch, content);
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
@@ -10860,6 +10902,139 @@ mod error_outcome_emission_tests {
         assert!(crash_history[0].open_until.is_none());
         assert!(!crash_history[0].respawn_in_flight);
         assert!(respawn_tasks.is_empty());
+    }
+
+    // ── is_usage_limit_error classification ────────────────────────────────
+
+    #[test]
+    fn is_usage_limit_error_matches_claude_session_limit_message() {
+        // Verbatim shape observed from claude-agent-acp 0.78.0 in production logs.
+        let e = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error: You've hit your session limit \u{b7} resets 4:50pm (America/Sao_Paulo)"
+                .to_string(),
+        };
+        assert!(
+            is_usage_limit_error(&e),
+            "harness session-limit refusal must be classified as a usage limit"
+        );
+    }
+
+    #[test]
+    fn is_usage_limit_error_matches_usage_limit_and_429_variants() {
+        for message in [
+            "Claude usage limit reached",
+            "API Error: 429 rate limited",
+            "{\"type\":\"rate_limit_error\"}",
+        ] {
+            let e = acp::AcpError::AgentError {
+                code: -32603,
+                message: message.to_string(),
+            };
+            assert!(is_usage_limit_error(&e), "{message} must classify");
+        }
+    }
+
+    #[test]
+    fn is_usage_limit_error_rejects_unrelated_and_transport_errors() {
+        let other = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error: tool execution failed".to_string(),
+        };
+        assert!(!is_usage_limit_error(&other));
+        let timeout = acp::AcpError::Timeout(std::time::Duration::from_secs(1));
+        assert!(!is_usage_limit_error(&timeout));
+    }
+
+    /// Binds the production dispatch seam, not the classifier: a usage-limit
+    /// refusal must dead-letter the batch instead of consuming a retry slot.
+    /// Deleting the `is_usage_limit_error` branch in `handle_prompt_result`
+    /// falls through to `queue.requeue(batch)` and fails this assertion.
+    #[tokio::test]
+    async fn usage_limit_error_dead_letters_batch_without_consuming_retries() {
+        let channel_id = Uuid::new_v4();
+        let session_scope = scope::SessionScope::Conversation { channel_id };
+        let event = EventBuilder::new(Kind::Custom(9), "quota work")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            scope: session_scope.clone(),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(session_scope.clone(), "healthy-session".into());
+        let mut pool = AgentPool::from_slots(vec![None]);
+        bind_agent_scope_owner(&mut pool, &mut agent, session_scope.clone());
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(session_scope.clone()),
+                turn_id: "usage-limit".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(session_scope.clone()),
+            turn_id: "usage-limit".into(),
+            outcome: PromptOutcome::Error(acp::AcpError::AgentError {
+                code: -32603,
+                message: "Internal error: You've hit your session limit \u{b7} resets 4:50pm"
+                    .to_string(),
+            }),
+            batch: Some(batch),
+        };
+
+        assert!(matches!(
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                None,
+            ),
+            LoopAction::Continue
+        ));
+
+        assert_eq!(
+            queue.queued_event_count(channel_id),
+            0,
+            "a usage-limit refusal must dead-letter, not requeue for retry"
+        );
     }
 
     // ── is_auth_error classification ───────────────────────────────────────
