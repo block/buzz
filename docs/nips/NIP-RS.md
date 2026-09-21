@@ -388,13 +388,15 @@ conformance properties above.
 
 Discovery: obtain NIP-11 from the configured, trusted relay origin. Its optional
 `read_state_snapshot` descriptor contains `version: 1`, `community_id` (canonical
-UUID string), `max_events: 4096`, and `max_bytes: 8388608`. The community identifier
-is resolved from that request's Host through the active community map; it is not
-supplied by the client or derived from its key. An unresolved host omits the
-descriptor. This is TLS/origin-bound discovery, not an independently signed global
-community identity. Clients MUST bind discovery and queries to the same trusted
-relay origin and community session, and fence asynchronous results on identity or
-community changes.
+UUID string), `max_events: 4096`, and `max_event_array_bytes: 8388608`. The byte
+budget applies only to the compact JSON `events` array, not the complete HTTP
+response; clients MUST allow additional space for the success envelope metadata.
+The community identifier is resolved from that request's Host through the active
+community map; it is not supplied by the client or derived from its key. An
+unresolved host omits the descriptor. This is TLS/origin-bound discovery, not an
+independently signed global community identity. Clients MUST bind discovery and
+queries to the same trusted relay origin and community session, and fence
+asynchronous results on identity or community changes.
 
 Request: NIP-98 authenticated `POST /query` with exactly one raw filter:
 

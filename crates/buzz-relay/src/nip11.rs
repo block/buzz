@@ -302,7 +302,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
             "version": 1,
             "community_id": tenant.community().as_uuid(),
             "max_events": buzz_db::read_state::MAX_SNAPSHOT_EVENTS,
-            "max_bytes": buzz_db::read_state::MAX_SNAPSHOT_BYTES,
+            "max_event_array_bytes": buzz_db::read_state::MAX_SNAPSHOT_BYTES,
         }));
     }
     let tenant_host = if state.config.push_enabled {

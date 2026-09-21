@@ -344,6 +344,57 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn read_state_snapshot_router_advertised_event_array_byte_boundary() {
+        let (state, host, community, key) = setup().await;
+        let info = crate::nip11::nip11_document(&state, &host).await;
+        let descriptor = info.read_state_snapshot.unwrap();
+        let budget = descriptor["max_event_array_bytes"].as_u64().unwrap() as usize;
+        assert_eq!(budget, buzz_db::read_state::MAX_SNAPSHOT_BYTES);
+        assert!(descriptor.get("max_bytes").is_none());
+
+        // ASCII content adds exactly one encoded byte per character; timestamp,
+        // event id and signature widths stay fixed across these signed events.
+        let make = |content: String, timestamp| {
+            EventBuilder::new(Kind::Custom(30078), content)
+                .tags([Tag::identifier("byte-boundary")])
+                .custom_created_at(nostr::Timestamp::from(timestamp))
+                .sign_with_keys(&key)
+                .unwrap()
+        };
+        let overhead = serde_json::to_vec(&json!([make(String::new(), 1789090000)]))
+            .unwrap()
+            .len();
+        for extra in 0..=1 {
+            let event = make(
+                "x".repeat(budget - overhead + extra),
+                1789090001 + extra as u64,
+            );
+            assert_eq!(
+                serde_json::to_vec(&json!([event])).unwrap().len(),
+                budget + extra
+            );
+            state
+                .db
+                .replace_parameterized_event(community, &event, "byte-boundary", None)
+                .await
+                .unwrap();
+            let (status, body) = request(state.clone(), &host, Some(&key), filter(&key)).await;
+            if extra == 0 {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body["complete"], true);
+                assert_eq!(serde_json::to_vec(&body["events"]).unwrap().len(), budget);
+                // Discovery bounds the array, not the larger success envelope.
+                assert!(serde_json::to_vec(&body).unwrap().len() > budget);
+            } else {
+                assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+                assert_ne!(body["complete"], true);
+                assert!(body.get("events").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn read_state_snapshot_router_beyond_page_cap_and_overflow() {
         let (state, host, community, key) = setup().await;
         let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
