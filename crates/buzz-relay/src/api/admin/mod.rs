@@ -9080,29 +9080,13 @@ mod postgres_tests {
         let target = vec![0xE1u8; 32];
         let actor = vec![0xE2u8; 32];
 
-        // Seed channel and member.
-        let channel_id = uuid::Uuid::new_v4();
-        sqlx::query(
-            r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
-               VALUES ($1, $2, 'legacy-pre-marker-ch', 'stream', 'open', $3)"#,
-        )
-        .bind(channel_id)
-        .bind(community_id)
-        .bind(&actor)
-        .execute(&pool)
-        .await
-        .expect("create channel");
-        sqlx::query(
-            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) VALUES ($1, $2, $3, 'member')",
-        )
-        .bind(community_id)
-        .bind(channel_id)
-        .bind(&target)
-        .execute(&pool)
-        .await
-        .expect("add member");
-
-        let report_id = e2e_report_pubkey(&pool, community_id, &target).await;
+        // Seed an event report with author=target so:
+        //   1. report.report.channel_id is non-NULL (kick requires it)
+        //   2. derive_enforcement_target_pub returns Some(target) via the event
+        //      author join, giving the convergence gate a real pubkey fallback
+        //   3. target is already a channel member (helper seeds it)
+        let (report_id, channel_id, _) =
+            e2e_event_report_with_author(&pool, community_id, &target).await;
 
         // Claim via the normal path (populates enforcement columns), then clear
         // them to simulate the old writer that did not know about migration 0047.
@@ -9323,29 +9307,13 @@ mod postgres_tests {
         let target = vec![0xE3u8; 32];
         let actor = vec![0xE4u8; 32];
 
-        // Seed channel and member.
-        let channel_id = uuid::Uuid::new_v4();
-        sqlx::query(
-            r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
-               VALUES ($1, $2, 'legacy-post-marker-ch', 'stream', 'open', $3)"#,
-        )
-        .bind(channel_id)
-        .bind(community_id)
-        .bind(&actor)
-        .execute(&pool)
-        .await
-        .expect("create channel");
-        sqlx::query(
-            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) VALUES ($1, $2, $3, 'member')",
-        )
-        .bind(community_id)
-        .bind(channel_id)
-        .bind(&target)
-        .execute(&pool)
-        .await
-        .expect("add member");
-
-        let report_id = e2e_report_pubkey(&pool, community_id, &target).await;
+        // Seed an event report with author=target so:
+        //   1. report.report.channel_id is non-NULL (kick requires it)
+        //   2. derive_enforcement_target_pub returns Some(target) via the event
+        //      author join, giving the convergence gate a real pubkey fallback
+        //   3. target is already a channel member (helper seeds it)
+        let (report_id, channel_id, _) =
+            e2e_event_report_with_author(&pool, community_id, &target).await;
 
         // Claim and execute the kick (mutation + marker), then NULL out the
         // enforcement columns to simulate the old-writer shape.
