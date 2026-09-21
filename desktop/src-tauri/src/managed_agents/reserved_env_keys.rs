@@ -79,6 +79,17 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // for same-session sweep decisions.
     "BUZZ_MANAGED_AGENT",
     "BUZZ_MANAGED_AGENT_START_NONCE",
+    // Collaboration host binding: role, project, helper root, HMAC, and
+    // turn path must come from Desktop/ACP, never from persona env_vars.
+    "BUZZ_COLLAB_ROLE",
+    "BUZZ_COLLAB_PROJECT_IDS",
+    "BUZZ_COLLAB_HELPER_ROOT",
+    "BUZZ_COLLAB_MCP_COMMAND",
+    "BUZZ_COLLAB_AUTHORITY",
+    "BUZZ_COLLAB_HMAC_KEY",
+    "BUZZ_COLLAB_TURN_PATH",
+    "BUZZ_COLLAB_AGENT_PRINCIPAL",
+    "BUZZ_COLLAB_AGENT_AUTHORITY",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {

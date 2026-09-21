@@ -152,6 +152,11 @@ pub(crate) struct SpawnConfigSnapshot {
     /// via layered env), so it must be captured explicitly rather than read back
     /// out of `env`.
     pub session_policy: String,
+    /// Host-bound collaboration role. Empty when the agent is not a fusion
+    /// collaborator. Written after user env so reserved keys cannot override.
+    pub collaboration_role: String,
+    pub managed_project_ids: Vec<String>,
+    pub collab_helper_root: String,
 }
 
 /// The startup effort a spawn actually applied, read from the single effort key
@@ -260,6 +265,9 @@ impl SpawnConfigSnapshot {
             // what launched regardless of which tier supplied the value.
             effort_level: effective_effort(descriptor),
             session_policy: session_policy.as_str().to_string(),
+            collaboration_role: record.collaboration_role.clone(),
+            managed_project_ids: record.managed_project_ids.clone(),
+            collab_helper_root: record.collab_helper_root.clone(),
         }
     }
 

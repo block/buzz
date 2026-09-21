@@ -49,10 +49,13 @@ chrono = { workspace = true }
 # URL parsing
 url = { workspace = true }
 
-# NIP-98 HTTP auth signing
+# NIP-98 HTTP auth signing and collaboration envelope HMAC
 sha2 = { workspace = true }
+hmac = { workspace = true }
 base64 = "0.22"
 hex = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
 
 # Logging
 tracing = { workspace = true }

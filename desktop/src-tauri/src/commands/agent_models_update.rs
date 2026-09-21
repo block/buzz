@@ -318,6 +318,22 @@ pub async fn update_managed_agent(
             input.effort_level,
         )?;
 
+        if let Some(role) = input.collaboration_role {
+            record.collaboration_role =
+                crate::managed_agents::normalize_collaboration_role(&role)?;
+        }
+        if let Some(project_ids) = input.managed_project_ids {
+            record.managed_project_ids = project_ids
+                .into_iter()
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .collect();
+        }
+        if let Some(helper_root) = input.collab_helper_root {
+            record.collab_helper_root = helper_root.trim().to_string();
+        }
+        crate::managed_agents::validate_collaboration_binding(record)?;
+
         stamp_record_updated_at(record, applied);
 
         save_managed_agents(&app, &records)?;

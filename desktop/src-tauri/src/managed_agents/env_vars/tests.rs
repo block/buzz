@@ -205,6 +205,28 @@ fn reserved_keys_include_relay_url() {
     assert!(merged.is_empty());
 }
 
+#[test]
+fn reserved_keys_include_collaboration_host_binding() {
+    for key in [
+        "BUZZ_COLLAB_ROLE",
+        "BUZZ_COLLAB_PROJECT_IDS",
+        "BUZZ_COLLAB_HELPER_ROOT",
+        "BUZZ_COLLAB_MCP_COMMAND",
+        "BUZZ_COLLAB_AUTHORITY",
+        "BUZZ_COLLAB_HMAC_KEY",
+        "BUZZ_COLLAB_TURN_PATH",
+        "BUZZ_COLLAB_AGENT_PRINCIPAL",
+        "BUZZ_COLLAB_AGENT_AUTHORITY",
+    ] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+        let agent = map(&[(key, "forged")]);
+        assert!(
+            merged_user_env(&BTreeMap::new(), &agent).is_empty(),
+            "{key} should be stripped from user env"
+        );
+    }
+}
+
 // ── validate_user_env_keys ─────────────────────────────────────────
 
 #[test]

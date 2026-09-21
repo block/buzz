@@ -174,6 +174,9 @@ impl AgentDefinition {
             definition_parallelism: self.parallelism,
             relay_mesh: None,
             effort_level: None,
+            collaboration_role: String::new(),
+            managed_project_ids: Vec::new(),
+            collab_helper_root: String::new(),
         }
     }
 }
@@ -488,6 +491,19 @@ pub struct ManagedAgentRecord {
     /// switches (invalid values skip-as-absent at projection time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_level: Option<String>,
+    /// Host-bound collaboration role (`main`, `requirements`, `solution`,
+    /// `ui`, `recipient`). Empty means no collaboration MCP. Not inferred
+    /// from persona name or prompt.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub collaboration_role: String,
+    /// Project IDs this agent may coordinate. A unique ID is required before
+    /// ACP will issue a turn envelope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_project_ids: Vec<String>,
+    /// Fusion-layer helper root containing `scripts/collab_invoke.py`.
+    /// Machine-local; omitted from portable agent snapshots.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub collab_helper_root: String,
 }
 
 #[derive(Debug)]

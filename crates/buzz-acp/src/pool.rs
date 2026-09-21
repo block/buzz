@@ -854,6 +854,8 @@ pub struct PromptContext {
     pub memory_enabled: bool,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
+    pub collab: crate::collab_context::CollabHostConfig,
+    pub collab_broker: crate::collab_context::CollabContextBroker,
     pub harness_name: String,
     /// Relay URL this harness is connected to. Rides in observer payloads that
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
@@ -2643,6 +2645,36 @@ pub async fn run_prompt_task(
             "isNewSession": is_new_session,
         }),
     );
+
+    // Host-owned collaboration envelope: signed after Nostr admission and
+    // session resolve, before the model prompt. Heartbeats drop the previous
+    // turn so confirmation tools cannot reuse a stale event.
+    let collab_channel = batch.as_ref().map(|item| item.channel_id.to_string());
+    if let Err(error) = crate::collab_context::publish_prompt_turn(
+        &ctx.collab_broker,
+        &ctx.collab,
+        &ctx.agent_keys.public_key().to_hex(),
+        &session_id,
+        collab_channel.as_deref(),
+        batch
+            .as_ref()
+            .map(|item| item.events.as_slice())
+            .unwrap_or(&[]),
+    ) {
+        tracing::warn!(
+            %error,
+            "collaboration envelope was not issued; failing closed before prompt"
+        );
+        send_prompt_result(
+            &result_tx,
+            &turn_id,
+            agent,
+            source,
+            PromptOutcome::Error(AcpError::Protocol(error)),
+            requeue_batch_if_queue(&ctx, batch),
+        );
+        return;
+    }
 
     // Standing context is fixed for the life of a session. Agents with
     // systemPrompt support already hold it from session/new; legacy agents
@@ -9961,6 +9993,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            collab: crate::collab_context::CollabHostConfig::default(),
+            collab_broker: crate::collab_context::CollabContextBroker::new(),
         }
     }
 

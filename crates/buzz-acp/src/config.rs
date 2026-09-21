@@ -267,6 +267,27 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// Host-bound collaboration role. Empty = no collaboration MCP.
+    /// Not inferred from persona name. Reserved: user env cannot override.
+    #[arg(long, env = "BUZZ_COLLAB_ROLE", default_value = "")]
+    pub collab_role: String,
+
+    /// Comma-separated project IDs this agent may coordinate. A unique ID is
+    /// required before a turn envelope can be issued.
+    #[arg(long, env = "BUZZ_COLLAB_PROJECT_IDS", default_value = "")]
+    pub collab_project_ids: String,
+
+    /// Fusion-layer helper root containing scripts/collab_invoke.py.
+    #[arg(long, env = "BUZZ_COLLAB_HELPER_ROOT", default_value = "")]
+    pub collab_helper_root: String,
+
+    /// Override for the collaboration MCP command. Empty uses `buzz-acp collab-mcp`.
+    #[arg(long, env = "BUZZ_COLLAB_MCP_COMMAND", default_value = "")]
+    pub collab_mcp_command: String,
+
+    #[arg(long, env = "BUZZ_COLLAB_AUTHORITY", default_value = "buzz-desktop")]
+    pub collab_authority: String,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -629,6 +650,9 @@ pub struct Config {
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
+    /// Host-owned collaboration binding. HMAC key is generated in-process and
+    /// is never read from user-overridable env.
+    pub collab: crate::collab_context::CollabHostConfig,
 }
 
 /// Maximum length, in characters, of a session title sent to the adapter.
@@ -930,6 +954,7 @@ impl Config {
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
+        let collab = collab_host_config_from_args(&args);
         let keys = Keys::parse(&args.private_key)?;
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
@@ -1201,9 +1226,10 @@ impl Config {
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
             replay_floor_unix: args.replay_floor,
-            agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
+            collab,
+            agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
         };
 
         Ok(config)
@@ -1515,6 +1541,46 @@ pub fn resolve_dynamic_channel_filter(
     }
 }
 
+fn collab_host_config_from_args(args: &CliArgs) -> crate::collab_context::CollabHostConfig {
+    use crate::collab_context::{generate_hmac_key, CollabHostConfig, CollabRole};
+    let project_ids = args
+        .collab_project_ids
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let helper_root = args
+        .collab_helper_root
+        .trim()
+        .is_empty()
+        .then_some(())
+        .map_or_else(
+            || Some(PathBuf::from(args.collab_helper_root.trim())),
+            |_| None,
+        );
+    let turn_dir = std::env::temp_dir().join(format!("buzz-collab-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&turn_dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(&turn_dir) {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o700);
+            let _ = std::fs::set_permissions(&turn_dir, permissions);
+        }
+    }
+    CollabHostConfig {
+        role: CollabRole::parse(&args.collab_role),
+        project_ids,
+        helper_root,
+        mcp_command: args.collab_mcp_command.clone(),
+        authority: args.collab_authority.clone(),
+        hmac_key: generate_hmac_key(),
+        turn_path: turn_dir.join("turn.json"),
+    }
+}
+
 fn rule_applies_to_channel(rule: &SubscriptionRule, channel_id: Uuid) -> bool {
     use crate::filter::ChannelScope;
     match &rule.channels {
@@ -1580,6 +1646,7 @@ mod tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            collab: crate::collab_context::CollabHostConfig::default(),
         }
     }
 

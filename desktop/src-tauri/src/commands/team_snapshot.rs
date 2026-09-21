@@ -627,6 +627,9 @@ pub async fn confirm_team_snapshot_import(
             definition_parallelism: minted_parallelism,
             relay_mesh: None,
             effort_level: None,
+            collaboration_role: String::new(),
+            managed_project_ids: Vec::new(),
+            collab_helper_root: String::new(),
             runtime: member.definition.runtime.clone(),
             name_pool: member.definition.name_pool.clone(),
         };

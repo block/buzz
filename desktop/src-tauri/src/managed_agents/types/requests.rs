@@ -200,6 +200,13 @@ pub struct CreateManagedAgentRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// Host-bound collaboration role. Empty/absent = unset.
+    #[serde(default)]
+    pub collaboration_role: Option<String>,
+    #[serde(default)]
+    pub managed_project_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub collab_helper_root: Option<String>,
 }
 
 /// Patch request for updating a managed agent's mutable fields.
@@ -275,6 +282,13 @@ pub struct UpdateManagedAgentRequest {
     /// the record-scope alias sweep runs atomically with the column write.
     #[serde(default, deserialize_with = "crate::util::double_option")]
     pub effort_level: Option<Option<String>>,
+    /// Absent = don't touch. Empty string = clear the collaboration role.
+    #[serde(default)]
+    pub collaboration_role: Option<String>,
+    #[serde(default)]
+    pub managed_project_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub collab_helper_root: Option<String>,
 }
 
 #[cfg(test)]

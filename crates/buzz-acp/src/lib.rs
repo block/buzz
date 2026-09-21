@@ -1,6 +1,8 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod collab_context;
+mod collab_mcp;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -2487,6 +2489,10 @@ async fn tokio_main() -> Result<()> {
         return run_authenticate(args).await;
     }
 
+    if is_subcommand("collab-mcp") {
+        return collab_mcp::run().await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
@@ -2798,6 +2804,8 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        collab: config.collab.clone(),
+        collab_broker: crate::collab_context::CollabContextBroker::new(),
     });
 
     if !config.memory_enabled {
@@ -5869,60 +5877,112 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
+    let mut servers = Vec::new();
+    if !config.mcp_command.is_empty() {
+        servers.push(McpServer {
+            name: std::path::Path::new(&config.mcp_command)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("mcp")
+                .to_string(),
+            command: config.mcp_command.clone(),
+            args: vec![],
+            env: {
+                let mut env = vec![
+                    EnvVar {
+                        name: "BUZZ_RELAY_URL".into(),
+                        value: config.relay_url.clone(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_PRIVATE_KEY".into(),
+                        // bech32 encoding of a valid secret key is infallible.
+                        // Panic here is correct: injecting a bogus secret would cause
+                        // delayed, hard-to-diagnose agent failures downstream.
+                        value: config
+                            .keys
+                            .secret_key()
+                            .to_bech32()
+                            .expect("secret key bech32 encoding should never fail"),
+                    },
+                ];
+                // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
+                // so the MCP server can attach it to every signed event.
+                if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+                    if !auth_tag.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_AUTH_TAG".into(),
+                            value: auth_tag,
+                        });
+                    }
+                }
+                // Forward the agent's display name so dev-mcp can use it as the git
+                // author name instead of the raw npub. Read from the process env
+                // rather than Config: this is a pass-through of a contract owned
+                // upstream, and absent simply means dev-mcp falls back to the npub.
+                if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+                    if !display_name.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                            value: display_name,
+                        });
+                    }
+                }
+                env
+            },
+        });
     }
-    vec![McpServer {
-        name: std::path::Path::new(&config.mcp_command)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mcp")
-            .to_string(),
-        command: config.mcp_command.clone(),
-        args: vec![],
-        env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
-                }
-            }
-            // Forward the agent's display name so dev-mcp can use it as the git
-            // author name instead of the raw npub. Read from the process env
-            // rather than Config: this is a pass-through of a contract owned
-            // upstream, and absent simply means dev-mcp falls back to the npub.
-            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
-                if !display_name.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
-                        value: display_name,
-                    });
-                }
-            }
-            env
-        },
-    }]
+    if let Some(server) = build_collab_mcp_server(config) {
+        servers.push(server);
+    }
+    servers
+}
+
+fn build_collab_mcp_server(config: &Config) -> Option<McpServer> {
+    use collab_context::{
+        AGENT_AUTHORITY_ENV, AGENT_PRINCIPAL_ENV, HELPER_ROOT_ENV, HMAC_KEY_ENV, ROLE_ENV,
+        TURN_PATH_ENV,
+    };
+    if !config.collab.is_active() {
+        return None;
+    }
+    let helper = config.collab.helper_root.as_ref()?;
+    let (command, args) = if config.collab.mcp_command.is_empty() {
+        let exe = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+        (exe, vec!["collab-mcp".to_string()])
+    } else {
+        (config.collab.mcp_command.clone(), Vec::new())
+    };
+    Some(McpServer {
+        name: "buzz-collab".into(),
+        command,
+        args,
+        env: vec![
+            EnvVar {
+                name: HMAC_KEY_ENV.into(),
+                value: hex::encode(&config.collab.hmac_key),
+            },
+            EnvVar {
+                name: TURN_PATH_ENV.into(),
+                value: config.collab.turn_path.to_string_lossy().into_owned(),
+            },
+            EnvVar {
+                name: HELPER_ROOT_ENV.into(),
+                value: helper.to_string_lossy().into_owned(),
+            },
+            EnvVar {
+                name: AGENT_PRINCIPAL_ENV.into(),
+                value: config.keys.public_key().to_hex(),
+            },
+            EnvVar {
+                name: AGENT_AUTHORITY_ENV.into(),
+                value: crate::collab_context::DEFAULT_AGENT_AUTHORITY.into(),
+            },
+            EnvVar {
+                name: ROLE_ENV.into(),
+                value: config.collab.role.as_str().into(),
+            },
+        ],
+    })
 }
 
 #[cfg(test)]
@@ -9176,6 +9236,7 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            collab: crate::collab_context::CollabHostConfig::default(),
         }
     }
 
@@ -9280,6 +9341,51 @@ mod build_mcp_servers_tests {
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
             "empty display name should not be forwarded"
         );
+    }
+
+    fn active_collab_config() -> Config {
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        config.collab = crate::collab_context::CollabHostConfig {
+            role: crate::collab_context::CollabRole::Main,
+            project_ids: vec!["demo".into()],
+            helper_root: Some(std::path::PathBuf::from("/tmp/helper")),
+            hmac_key: vec![7; 32],
+            turn_path: std::path::PathBuf::from("/tmp/turn.json"),
+            ..crate::collab_context::CollabHostConfig::default()
+        };
+        config
+    }
+
+    #[test]
+    fn collab_mcp_is_mounted_without_agent_private_key() {
+        let config = active_collab_config();
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "buzz-collab");
+        let names: Vec<&str> = servers[0].env.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"BUZZ_COLLAB_HMAC_KEY"));
+        assert!(names.contains(&"BUZZ_COLLAB_TURN_PATH"));
+        assert!(names.contains(&"BUZZ_COLLAB_ROLE"));
+        assert!(!names.contains(&"BUZZ_PRIVATE_KEY"));
+        assert!(!names.contains(&"NOSTR_PRIVATE_KEY"));
+    }
+
+    #[test]
+    fn generic_mcp_does_not_receive_collab_hmac() {
+        let mut config = active_collab_config();
+        config.mcp_command = "buzz-dev-mcp".into();
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 2);
+        let generic = servers.iter().find(|s| s.name == "buzz-dev-mcp").unwrap();
+        let collab = servers.iter().find(|s| s.name == "buzz-collab").unwrap();
+        assert!(generic.env.iter().any(|e| e.name == "BUZZ_PRIVATE_KEY"));
+        assert!(!generic
+            .env
+            .iter()
+            .any(|e| e.name == "BUZZ_COLLAB_HMAC_KEY"));
+        assert!(!collab.env.iter().any(|e| e.name == "BUZZ_PRIVATE_KEY"));
+        assert!(collab.env.iter().any(|e| e.name == "BUZZ_COLLAB_HMAC_KEY"));
     }
 
     #[test]
@@ -9402,6 +9508,7 @@ mod error_outcome_emission_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            collab: crate::collab_context::CollabHostConfig::default(),
         }
     }
 

@@ -698,7 +698,26 @@ pub async fn create_managed_agent(
                 relay_mesh.clone()
             },
             effort_level: None,
+            collaboration_role: input
+                .collaboration_role
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    crate::managed_agents::normalize_collaboration_role(value)
+                })
+                .transpose()?
+                .unwrap_or_default(),
+            managed_project_ids: input.managed_project_ids.clone().unwrap_or_default(),
+            collab_helper_root: input
+                .collab_helper_root
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_default()
+                .to_string(),
         };
+        crate::managed_agents::validate_collaboration_binding(&record)?;
 
         records.push(record);
 

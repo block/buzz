@@ -77,6 +77,9 @@ fn minimal_record() -> ManagedAgentRecord {
         definition_parallelism: Some(4),
         relay_mesh: None,
         effort_level: None,
+            collaboration_role: String::new(),
+            managed_project_ids: Vec::new(),
+            collab_helper_root: String::new(),
     }
 }
 
@@ -458,6 +461,13 @@ fn secret_exclusion_machine_commands_absent() {
     assert!(
         !json.contains("mcpCommand") && !json.contains("mcp_command"),
         "mcpCommand field must not appear"
+    );
+    assert!(
+        !json.contains("collabHelperRoot")
+            && !json.contains("collab_helper_root")
+            && !json.contains("collaboration_role")
+            && !json.contains("managed_project_ids"),
+        "host collaboration binding must not appear in portable snapshots"
     );
 }
 

@@ -663,6 +663,9 @@ pub async fn confirm_agent_snapshot_import(
             definition_parallelism: minted_parallelism,
             relay_mesh: None,
             effort_level: None,
+            collaboration_role: String::new(),
+            managed_project_ids: Vec::new(),
+            collab_helper_root: String::new(),
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),
         };

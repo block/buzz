@@ -26,6 +26,8 @@
 //!   - `acp_command` / `agent_command` / `agent_command_override` / `agent_args`
 //!     (machine-local harness paths)
 //!   - `mcp_command` (machine-local)
+//!   - `collab_helper_root` (machine-local fusion helper path)
+//!   - collaboration_role / managed_project_ids (host binding, not portable)
 //!   - runtime state: `runtime_pid`, `backend_agent_id`, `backend` blob,
 //!     `provider_binary_path`, `last_*`
 //!   - lineage ids: `persona_id`, `team_id`, `source_team`, `source_team_persona_slug`,

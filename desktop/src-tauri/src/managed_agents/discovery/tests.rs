@@ -269,6 +269,9 @@ fn record_with(
         definition_parallelism: None,
         relay_mesh: None,
         effort_level: None,
+            collaboration_role: String::new(),
+            managed_project_ids: Vec::new(),
+            collab_helper_root: String::new(),
     }
 }
 

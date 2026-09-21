@@ -30,6 +30,9 @@ fn base() -> SpawnConfigSnapshot {
         parallelism: 1,
         effort_level: Some("high".into()),
         session_policy: "channel".into(),
+        collaboration_role: String::new(),
+        managed_project_ids: Vec::new(),
+        collab_helper_root: String::new(),
     }
 }
 
@@ -74,6 +77,13 @@ fn mutations() -> Vec<Mutation> {
         ("parallelism", |s| s.parallelism = 8),
         ("effort_level", |s| s.effort_level = None),
         ("session_policy", |s| s.session_policy = "thread".into()),
+        ("collaboration_role", |s| s.collaboration_role = "main".into()),
+        ("managed_project_ids", |s| {
+            s.managed_project_ids = vec!["demo".into()]
+        }),
+        ("collab_helper_root", |s| {
+            s.collab_helper_root = "/tmp/helper".into()
+        }),
     ]
 }
 

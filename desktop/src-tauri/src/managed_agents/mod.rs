@@ -39,6 +39,7 @@ mod runtime;
 mod runtime_commands;
 mod runtime_types;
 mod session_policy;
+mod collab_host;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_snapshot;
 pub(crate) mod storage;
@@ -108,6 +109,9 @@ pub use runtime_types::*;
 pub(crate) use session_policy::{
     apply_acp_session_policy_env, effective_acp_session_policy, insert_acp_session_policy_env,
     AcpSessionPolicy, ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR,
+};
+pub(crate) use collab_host::{
+    apply_collab_host_env, normalize_collaboration_role, validate_collaboration_binding,
 };
 pub use storage::*;
 pub use teams::*;
