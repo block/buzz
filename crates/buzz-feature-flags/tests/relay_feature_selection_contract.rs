@@ -4,32 +4,31 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+use tempfile::TempDir;
 
 fn fixture_manifest() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/relay-feature-selection/Cargo.toml")
+}
+
+fn fixture_lockfile() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/relay-feature-selection/Cargo.lock")
 }
 
 fn cargo_bin() -> OsString {
     env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
 }
 
-fn target_dir(case_name: &str) -> PathBuf {
-    env::temp_dir().join(format!(
-        "buzz-feature-flags-relay-feature-selection-{case_name}-{}",
-        std::process::id()
-    ))
-}
-
-fn cargo_check(case_name: &str, features: &[&str]) -> std::process::Output {
+fn cargo_check(target_dir: &Path, case_name: &str, features: &[&str]) -> std::process::Output {
     let mut command = Command::new(cargo_bin());
     command
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .arg("check")
         .arg("--quiet")
+        .arg("--locked")
         .arg("--manifest-path")
         .arg(fixture_manifest())
         .arg("--no-default-features")
-        .env("CARGO_TARGET_DIR", target_dir(case_name));
+        .env("CARGO_TARGET_DIR", target_dir);
 
     if !features.is_empty() {
         command.arg("--features").arg(features.join(","));
@@ -42,6 +41,13 @@ fn cargo_check(case_name: &str, features: &[&str]) -> std::process::Output {
 
 #[test]
 fn relay_artifact_provider_features_require_exactly_one_selection() {
+    assert!(
+        fixture_lockfile().is_file(),
+        "relay feature selection fixture must check in Cargo.lock for locked nested cargo runs"
+    );
+
+    let target_dir = TempDir::new().expect("temp target dir");
+
     let valid_cases = [
         ("static", &["static-feature-flags"][..]),
         ("environment", &["environment-feature-flags"][..]),
@@ -49,7 +55,7 @@ fn relay_artifact_provider_features_require_exactly_one_selection() {
     ];
 
     for (case_name, features) in valid_cases {
-        let output = cargo_check(case_name, features);
+        let output = cargo_check(target_dir.path(), case_name, features);
         assert!(
             output.status.success(),
             "expected {case_name} to compile successfully\nstdout:\n{}\nstderr:\n{}",
@@ -83,7 +89,7 @@ fn relay_artifact_provider_features_require_exactly_one_selection() {
     ];
 
     for (case_name, features) in invalid_cases {
-        let output = cargo_check(case_name, features);
+        let output = cargo_check(target_dir.path(), case_name, features);
         assert!(
             !output.status.success(),
             "expected {case_name} to fail compilation"

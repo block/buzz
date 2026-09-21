@@ -1245,6 +1245,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-feature-flags"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "launchdarkly-server-sdk",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [
