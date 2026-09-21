@@ -35,6 +35,7 @@ import type {
   InstallRuntimeResult,
   GitBashPrerequisite,
   RuntimeConfigSurface,
+  HarnessVariants,
 } from "@/shared/api/types";
 
 export * from "@/shared/api/tauriChannels";
@@ -192,6 +193,14 @@ export type RawAcpRuntimeCatalogEntry = {
   source: "builtin" | "preset" | "custom";
   /** Definition-level env vars for `source: custom` entries; absent for builtin/preset. */
   definition_env?: Record<string, string>;
+  /** Who chooses the model for agents on this harness; absent for builtin/preset. */
+  model_selection?: "user" | "harness";
+  /** Definition-level profile-variant template for `source: custom` entries. */
+  definition_variants?: HarnessVariants;
+  /** True when the entry was generated from another definition's `variants` block. */
+  generated?: boolean;
+  /** Id of the definition that generated this entry; absent for authored entries. */
+  generated_from?: string;
   max_parallelism?: number;
   effort_canonical_values?: string[] | null;
 };
@@ -683,6 +692,12 @@ export function fromRawAcpRuntimeCatalogEntry(
     loginHint: entry.login_hint ?? null,
     source: entry.source,
     definitionEnv: entry.definition_env ?? {},
+    modelSelection: entry.model_selection ?? "user",
+    definitionVariants: entry.definition_variants,
+    generated: entry.generated ?? false,
+    ...(entry.generated_from !== undefined && {
+      generatedFrom: entry.generated_from,
+    }),
     effortCanonicalValues: entry.effort_canonical_values ?? null,
     ...(entry.max_parallelism !== undefined && {
       maxParallelism: entry.max_parallelism,

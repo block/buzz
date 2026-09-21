@@ -8,10 +8,32 @@ import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
 /**
  * Returns true iff the given catalog entry is editable by the user.
- * Only `source === "custom"` entries are editable/deletable.
+ *
+ * Only `source === "custom"` entries are editable/deletable, and a *generated*
+ * entry is not: it exists only while its parent definition's `variants` block
+ * keeps detecting that profile, so a local edit would be discarded on the next
+ * scan. The way to change one is to edit the definition that produced it, or to
+ * stop it matching the marker; `generatedEntryNote` says so in the row.
  */
 export function isEditableEntry(entry: AcpRuntimeCatalogEntry): boolean {
-  return entry.source === "custom";
+  return entry.source === "custom" && entry.generated !== true;
+}
+
+/**
+ * One-line explanation of where a generated entry comes from, or null for
+ * entries the user edits directly.
+ *
+ * Names the parent definition when the backend reports it (`generatedFrom`):
+ * "edit the definition" is useless advice without knowing which one.
+ */
+export function generatedEntryNote(
+  entry: AcpRuntimeCatalogEntry,
+): string | null {
+  if (entry.generated !== true) return null;
+  const from = entry.generatedFrom?.trim();
+  return from
+    ? `Generated from the "${from}" harness definition. Change that definition to change this entry.`
+    : "Generated from a harness definition that declares profile variants. Change that definition to change this entry.";
 }
 
 /**

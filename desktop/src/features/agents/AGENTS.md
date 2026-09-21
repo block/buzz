@@ -36,6 +36,19 @@ X" flag): add it to `KnownAcpRuntime` first, expose it on
 `AcpRuntimeCatalogEntry`, then project it through the core. Do not shortcut
 with a TypeScript lookup table or an id comparison in a component.
 
+**Third source: definition-authored facts on user-defined harnesses.**
+A custom harness definition file may declare capabilities that no preset can
+know, and those belong to the definition, not to a TypeScript table. Today that
+is `model_selection: "user" | "harness"` (the harness picks the model, so no
+picker may render) plus the `variants` block, which expands one definition into
+one read-only catalog entry per detected profile. Both reach the UI the same
+way as preset facts: the definition is projected onto `AcpRuntimeCatalogEntry`
+(`modelSelection`, `generated`, `generatedFrom`) and consumed through
+`lib/agentConfigCore.ts`. Components must never test a runtime id, a definition
+field, or `generated` to decide whether a control renders — they ask the field
+model. `generated` is a provenance flag for edit surfaces only
+(`harnessGalleryLogic.isEditableEntry`); it is not a rendering capability.
+
 ## Rules
 
 1. **No hardcoded harness-ID checks in render code.** `runtime.id === "claude"`
@@ -50,7 +63,10 @@ with a TypeScript lookup table or an id comparison in a component.
    Goose/Claude — do not "fix" one to match the other without doing the
    migration work.
 3. **Field absence has a named reason, not a boolean.** Codex effort is
-   `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
+   `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`;
+   model is `ownedByHarnessSelection` when the catalog entry reports
+   `modelSelection: "harness"` (the harness picks the model for that entry, so
+   the picker is omitted rather than shown and ignored).
    New absences get new named reasons in `AgentConfigOmission` /
    `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:
@@ -336,7 +352,9 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
-  policy. Update when the capability model changes.
+  policy, and the harness-owned model omission
+  (`ownedByHarnessSelection` + `harnessOwnsModelSelection`). Update when the
+  capability model changes.
 - `ui/agentConfigFieldsContract.test.mjs` — canonical behaviors + disclosure
   presets + `shouldShowModelStatusMessage` status-bypass +
   `shouldRenderModelControl` (successful-empty omit vs failure keep). If this

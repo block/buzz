@@ -41,7 +41,11 @@ import {
   isDownloadPageUrl,
 } from "./harnessCatalogLogic";
 import { formValuesFromCatalogEntry } from "./harnessFormLogic";
-import { deleteConfirmState } from "./harnessGalleryLogic";
+import {
+  deleteConfirmState,
+  generatedEntryNote,
+  isEditableEntry,
+} from "./harnessGalleryLogic";
 
 /** Link label for the row's install-instructions URL. Distinct from the
  * catalog's `installLinkLabel` — rows spell out what the guide covers
@@ -303,7 +307,11 @@ export function HarnessRow({
   resetEpoch: number;
   runtime: AcpRuntimeCatalogEntry;
 }) {
-  const isCustom = runtime.source === "custom";
+  // Generated (profile-variant) entries are read-only in this row: they are
+  // owned by the definition that produced them, so edit/delete would only
+  // create drift that the next scan throws away.
+  const canEdit = isEditableEntry(runtime);
+  const generatedNote = generatedEntryNote(runtime);
   const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
     string | null
   >(null);
@@ -439,14 +447,14 @@ export function HarnessRow({
               );
             }}
             onDelete={
-              isCustom
+              canEdit
                 ? () => {
                     setDeleteError(null);
                     setConfirmingDelete(true);
                   }
                 : undefined
             }
-            onEdit={isCustom ? () => setEditing(true) : undefined}
+            onEdit={canEdit ? () => setEditing(true) : undefined}
             onInstall={() => {
               if (runtime.availability === "adapter_outdated") {
                 setIsUpdateWarningOpen(true);
@@ -457,6 +465,15 @@ export function HarnessRow({
             runtime={runtime}
           />
         </div>
+
+        {generatedNote ? (
+          <p
+            className="mt-2 rounded-lg border border-border/60 bg-background/60 px-3 py-1.5 text-sm text-muted-foreground"
+            data-testid={`doctor-runtime-generated-${runtime.id}`}
+          >
+            {generatedNote}
+          </p>
+        ) : null}
 
         {runtime.authStatus.status === "config_invalid" ? (
           <p

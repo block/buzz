@@ -6,6 +6,7 @@ import {
   countAgentsReferencingHarness,
   deleteHarnessConfirmMessage,
   deleteConfirmState,
+  generatedEntryNote,
 } from "./harnessGalleryLogic.ts";
 
 // ── Minimal catalog entry factory ────────────────────────────────────────────
@@ -31,6 +32,10 @@ function entry(overrides = {}) {
     nodeRequired: false,
     authStatus: { status: "not_applicable" },
     loginHint: null,
+    generated: overrides.generated ?? false,
+    ...(overrides.generatedFrom !== undefined && {
+      generatedFrom: overrides.generatedFrom,
+    }),
   };
 }
 
@@ -47,6 +52,41 @@ describe("isEditableEntry", () => {
 
   it("returns false for builtin entries", () => {
     assert.ok(!isEditableEntry(entry({ source: "builtin" })));
+  });
+
+  // A generated entry is `source: "custom"` but is owned by the definition that
+  // produced it, so the row must not offer edit/delete for it.
+  it("returns false for a generated custom entry", () => {
+    assert.ok(
+      !isEditableEntry(
+        entry({ source: "custom", generated: true, generatedFrom: "hermes" }),
+      ),
+    );
+  });
+});
+
+// ── generatedEntryNote ────────────────────────────────────────────────────────
+
+describe("generatedEntryNote", () => {
+  it("returns null for an authored entry", () => {
+    assert.equal(generatedEntryNote(entry({ source: "custom" })), null);
+  });
+
+  it("names the parent definition so the user knows which file to edit", () => {
+    const note = generatedEntryNote(
+      entry({ source: "custom", generated: true, generatedFrom: "hermes" }),
+    );
+    assert.ok(note);
+    assert.ok(note.includes('"hermes"'));
+  });
+
+  it("falls back to a definition-agnostic sentence when the parent is unknown", () => {
+    const note = generatedEntryNote(
+      entry({ source: "custom", generated: true }),
+    );
+    assert.ok(note);
+    assert.ok(!note.includes("undefined"));
+    assert.ok(!note.includes("null"));
   });
 });
 

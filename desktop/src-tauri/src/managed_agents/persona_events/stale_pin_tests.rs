@@ -134,6 +134,7 @@ fn apply_persona_snapshot_goose_to_custom_harness_drops_stale_goose_pin() {
         env: BTreeMap::new(),
         install_instructions_url: String::new(),
         install_hint: String::new(),
+        ..Default::default()
     }]);
 
     let mut record = sample_record();

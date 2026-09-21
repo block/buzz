@@ -96,6 +96,12 @@ pub(super) fn preset_catalog_entry(
         login_hint: None,
         source: HarnessSource::Preset,
         definition_env: Default::default(),
+        // Presets are always user-selected and are never generated from another
+        // definition's `variants` block.
+        definition_variants: None,
+        model_selection: None,
+        generated: false,
+        generated_from: None,
         // Derived from the static preset command (`def.command`). This ensures
         // unavailable entries (command: null in JSON, None here) still carry
         // the cap — the harness cap is command-keyed, not availability-gated.
@@ -241,6 +247,7 @@ pub(crate) fn preset_harness_definitions(
                 env: Default::default(),
                 install_instructions_url: preset.install_instructions_url.to_string(),
                 install_hint: preset.install_hint.to_string(),
+                ..Default::default()
             },
         )
         .collect()

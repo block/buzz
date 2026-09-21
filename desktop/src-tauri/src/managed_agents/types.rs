@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Child};
 
+use super::custom_harnesses::HarnessVariants;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendKind {
@@ -660,6 +662,23 @@ pub enum HarnessSource {
     Custom,
 }
 
+/// Who chooses the LLM model for agents running on a harness.
+///
+/// Serializes as a lowercase string so the TypeScript consumer can switch on it
+/// and custom-harness JSON files can spell it out: `"modelSelection": "harness"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelSelection {
+    /// Buzz owns the choice: the model picker is shown and the selected model
+    /// is stored on the agent. The default for every runtime.
+    #[default]
+    User,
+    /// The harness owns the choice (a profile directory, a config file, or the
+    /// CLI itself decides). Buzz hides the model picker for agents on this
+    /// harness and stores no model override for them.
+    Harness,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AcpRuntimeCatalogEntry {
     pub id: String,
@@ -717,6 +736,30 @@ pub struct AcpRuntimeCatalogEntry {
     /// Spawn-time parallelism cap; absent for uncapped harnesses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_parallelism: Option<u32>,
+    /// Definition-level profile-variant template for `source: custom` entries;
+    /// populated from `HarnessDefinition.variants` for the same reason
+    /// `definition_env` exists: the harness form does not author this block, so
+    /// without the round-trip an edit in the UI would erase a hand-authored one.
+    /// Absent for builtin/preset entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_variants: Option<HarnessVariants>,
+    /// Who chooses the LLM model for agents on this harness. `Some(Harness)`
+    /// means the harness decides (a profile directory, its own config file), so
+    /// the UI must not offer a model picker for agents pinned to this entry.
+    /// Absent for builtin/preset entries, which are always user-selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<ModelSelection>,
+    /// True when this entry was materialized from another definition's
+    /// `variants` block (a detected profile) rather than read from its own file.
+    /// Generated entries are read-only in the UI: they are edited and deleted
+    /// through the definition file that produced them.
+    #[serde(default)]
+    pub generated: bool,
+    /// Id of the definition whose `variants` block produced this entry, when
+    /// `generated` is true. Lets the UI name the file to edit instead of
+    /// telling the user to go find it. Absent for every other entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_from: Option<String>,
 }
 
 /// Result of a single install step (CLI or adapter).
