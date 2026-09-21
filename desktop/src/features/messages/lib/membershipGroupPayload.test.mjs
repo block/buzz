@@ -25,15 +25,25 @@ function systemEntry(id, createdAt, body) {
 }
 
 // One symbol per membership mechanism the relay can emit, so the matrix covers
-// self-arrival, addition (same and different actor), and departure — for two
-// distinct targets, which is what makes same-target vs cross-target grouping
-// observable.
+// self-arrival, addition (same and different actor), removal, and departure —
+// for two distinct targets, which is what makes same-target vs cross-target
+// grouping observable.
 const SYMBOLS = {
   "self-join(a)": { type: "member_joined", actor: "aaa", target: "aaa" },
   "self-join(b)": { type: "member_joined", actor: "bbb", target: "bbb" },
   "add(a by x)": { type: "member_joined", actor: "xxx", target: "aaa" },
   "add(b by x)": { type: "member_joined", actor: "xxx", target: "bbb" },
   "add(b by y)": { type: "member_joined", actor: "yyy", target: "bbb" },
+  "remove(a)": {
+    type: "member_removed",
+    actor: "xxx",
+    target: "aaa",
+  },
+  "remove(b)": {
+    type: "member_removed",
+    actor: "xxx",
+    target: "bbb",
+  },
   "leave(a)": { type: "member_left", actor: "aaa" },
   "leave(b)": { type: "member_left", actor: "bbb" },
 };
@@ -94,6 +104,106 @@ test("every membership group buildTimelineItems emits is describable", () => {
     [],
     `${undescribable.length} grouped shape(s) render as the oldest event only`,
   );
+});
+
+test("an alternating arrival and departure burst collapses to one row", () => {
+  const entries = Array.from({ length: 20 }, (_, index) => {
+    const target = `${index.toString(16).padStart(2, "0")}aa`;
+    return systemEntry(
+      `burst-${index}`,
+      DAY_START + index * 30,
+      index % 2 === 0
+        ? { type: "member_joined", actor: "admin", target }
+        : { type: "member_removed", actor: "admin", target },
+    );
+  });
+
+  const { items } = buildTimelineItems(entries, null);
+  const groups = items.filter((item) => item.kind === "system-group");
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].entries.length, 20);
+  assert.equal(
+    buildGroupedMembershipPayload(
+      groups[0].entries.map((entry) => entry.message),
+    )?.type,
+    "members_changed",
+  );
+});
+
+test("an ordinary message between membership bursts yields two rows", () => {
+  const firstBurst = [
+    systemEntry("first-join", DAY_START, {
+      type: "member_joined",
+      actor: "admin",
+      target: "first",
+    }),
+    systemEntry("first-remove", DAY_START + 30, {
+      type: "member_removed",
+      actor: "admin",
+      target: "first",
+    }),
+  ];
+  const ordinaryMessage = {
+    message: {
+      author: "Member",
+      body: "ordinary message",
+      createdAt: DAY_START + 60,
+      depth: 0,
+      id: "ordinary",
+      kind: 9,
+      pubkey: "bb".repeat(32),
+      reactions: [],
+      time: "12:00 PM",
+    },
+    summary: null,
+  };
+  const secondBurst = [
+    systemEntry("second-join", DAY_START + 90, {
+      type: "member_joined",
+      actor: "admin",
+      target: "second",
+    }),
+    systemEntry("second-remove", DAY_START + 120, {
+      type: "member_removed",
+      actor: "admin",
+      target: "second",
+    }),
+  ];
+
+  const { items } = buildTimelineItems(
+    [...firstBurst, ordinaryMessage, ...secondBurst],
+    null,
+  );
+  const groups = items.filter((item) => item.kind === "system-group");
+
+  assert.deepEqual(
+    groups.map((group) => group.entries.map((entry) => entry.message.id)),
+    [
+      ["first-join", "first-remove"],
+      ["second-join", "second-remove"],
+    ],
+  );
+});
+
+test("membership events more than an hour apart do not group", () => {
+  const entries = [
+    systemEntry("first", DAY_START, {
+      type: "member_joined",
+      actor: "admin",
+      target: "first",
+    }),
+    systemEntry("second", DAY_START + 60 * 60 + 1, {
+      type: "member_removed",
+      actor: "admin",
+      target: "second",
+    }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+
+  assert.equal(items.filter((item) => item.kind === "system-group").length, 0);
+  assert.equal(items.filter((item) => item.kind === "system").length, 2);
 });
 
 test("a lifecycle group needs every arrival to be a self-join by the departing member", () => {
