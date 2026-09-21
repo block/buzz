@@ -1,5 +1,5 @@
 mod buzz_agent;
-mod claude;
+pub(crate) mod claude;
 mod codex;
 pub(crate) mod effort;
 mod goose;

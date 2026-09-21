@@ -1,6 +1,7 @@
 import {
   createContext,
   createElement,
+  Fragment,
   type ReactNode,
   useContext,
   useMemo,
@@ -18,12 +19,20 @@ import { BestieSidebarEntry } from "./bestie/BestieSidebarEntry";
 import { filterBestieDmChannels } from "./bestie/filterBestieDmChannels";
 import { findAssignedLocalAgent } from "./bestie/findAssignedLocalAgent";
 import { useBestieAssignmentQuery } from "./bestie/useBestie";
+import { OpenClawWorkspaceRelayListener } from "./openclawWorkspaceMcp/OpenClawWorkspaceRelayListener";
+import { OpenClawWorkspaceSettingsCard } from "./openclawWorkspaceMcp/OpenClawWorkspaceSettingsCard";
+import { handleProtectedRelayPayload } from "./openclawWorkspaceMcp/handleRelayPayload";
 
 const ProtectedMessageActionsContext = createContext(true);
 
 export function ProtectedGlobalOverlay() {
-  const enabled = useFeatureEnabled("bestie");
-  return enabled ? createElement(BestieGlobalOverlay) : null;
+  const bestieEnabled = useFeatureEnabled("bestie");
+  return createElement(
+    Fragment,
+    null,
+    bestieEnabled ? createElement(BestieGlobalOverlay) : null,
+    createElement(OpenClawWorkspaceRelayListener),
+  );
 }
 
 export function ProtectedMessageAction(props: {
@@ -87,3 +96,9 @@ export function useProtectedVisibleDirectMessages(
     [bestiePubkey, channels, currentPubkey],
   );
 }
+
+export function ProtectedOpenClawWorkspaceSettingsCard() {
+  return createElement(OpenClawWorkspaceSettingsCard);
+}
+
+export { handleProtectedRelayPayload };

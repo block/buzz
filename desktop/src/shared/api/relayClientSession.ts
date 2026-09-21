@@ -74,6 +74,7 @@ import {
 } from "@/shared/api/relayAuthPolicy";
 import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
+import { handleProtectedRelayPayload } from "@protected-feature-components";
 type UserStatusInput = { text: string; emoji: string; expiresAt?: number };
 export class RelayClient {
   private wsId: number | null = null;
@@ -817,6 +818,14 @@ export class RelayClient {
     if (type === "NOTICE" && typeof rest[0] === "string") {
       // Connection-scoped back-pressure — arm the gate until it expires.
       activateRateLimitIfSignalled(rest[0]);
+      // Hula-only: OpenClaw workspace MCP capability may arrive as NOTICE JSON.
+      void handleProtectedRelayPayload(rest[0]);
+      return;
+    }
+
+    // Hula-only custom frame: ["HULA", { type: "hula.capability", ... }]
+    if (type === "HULA" && rest[0] != null) {
+      void handleProtectedRelayPayload(rest[0]);
     }
   }
 

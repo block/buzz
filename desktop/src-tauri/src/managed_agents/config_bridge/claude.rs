@@ -75,6 +75,118 @@ fn json_string(val: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+
+
+pub(crate) const OPENCLAW_WORKSPACE_MCP_NAME: &str = "openclaw-workspace";
+
+/// Resolve the `.claude.json` path the same way [`read_config_file`] does.
+pub(crate) fn mcp_config_path(config_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(
+        config_dir
+            .map(|d| d.join(".claude.json"))
+            .unwrap_or_else(|| home.join(".claude.json")),
+    )
+}
+
+/// Upsert an HTTP MCP server entry into `.claude.json` (creates parents/file).
+pub(crate) fn upsert_http_mcp_server(
+    config_dir: Option<&std::path::Path>,
+    name: &str,
+    url: &str,
+    authorization: &str,
+) -> Result<std::path::PathBuf, String> {
+    let path = mcp_config_path(config_dir).ok_or_else(|| "home directory unavailable".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create Claude config dir: {e}"))?;
+    }
+    let mut root: serde_json::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        if raw.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&raw)
+                .map_err(|e| format!("failed to parse {}: {e}", path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    let servers = root
+        .as_object_mut()
+        .ok_or_else(|| "Claude MCP config root must be an object".to_string())?
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    if !servers.is_object() {
+        *servers = serde_json::json!({});
+    }
+    servers.as_object_mut().unwrap().insert(
+        name.to_string(),
+        serde_json::json!({
+            "type": "http",
+            "url": url,
+            "headers": {
+                "Authorization": authorization
+            }
+        }),
+    );
+    let pretty = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("failed to serialize Claude MCP config: {e}"))?;
+    {
+        use atomic_write_file::AtomicWriteFile;
+        use std::io::Write;
+        match AtomicWriteFile::open(&path) {
+            Ok(mut file) => {
+                file.write_all(pretty.as_bytes())
+                    .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+                file.write_all(b"\n")
+                    .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+                file.commit()
+                    .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+            }
+            Err(_) => {
+                std::fs::write(&path, pretty + "\n")
+                    .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+            }
+        }
+    }
+    Ok(path)
+}
+
+
+/// Remove an MCP server entry by name. No-op if missing.
+pub(crate) fn remove_mcp_server(
+    config_dir: Option<&std::path::Path>,
+    name: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let path = match mcp_config_path(config_dir) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let mut root: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+    let Some(servers) = root.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
+        return Ok(Some(path));
+    };
+    if servers.remove(name).is_none() {
+        return Ok(Some(path));
+    }
+    let pretty = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("failed to serialize Claude MCP config: {e}"))?;
+    std::fs::write(&path, pretty + "\n")
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    Ok(Some(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +346,31 @@ mod tests {
             Some("value"),
             "unknown future fields should appear in extra"
         );
+    }
+
+    #[test]
+    fn upsert_http_mcp_server_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = upsert_http_mcp_server(
+            Some(dir.path()),
+            OPENCLAW_WORKSPACE_MCP_NAME,
+            "https://workspace.hulapreview.com/mcp",
+            "Bearer test.jwt.token",
+        )
+        .unwrap();
+        assert!(path.ends_with(".claude.json"));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let server = &val["mcpServers"][OPENCLAW_WORKSPACE_MCP_NAME];
+        assert_eq!(server["type"], "http");
+        assert_eq!(server["url"], "https://workspace.hulapreview.com/mcp");
+        assert_eq!(
+            server["headers"]["Authorization"],
+            "Bearer test.jwt.token"
+        );
+        remove_mcp_server(Some(dir.path()), OPENCLAW_WORKSPACE_MCP_NAME).unwrap();
+        let raw2 = std::fs::read_to_string(&path).unwrap();
+        let val2: serde_json::Value = serde_json::from_str(&raw2).unwrap();
+        assert!(val2["mcpServers"].get(OPENCLAW_WORKSPACE_MCP_NAME).is_none());
     }
 }

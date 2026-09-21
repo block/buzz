@@ -1,3 +1,4 @@
+import { ProtectedOpenClawWorkspaceSettingsCard } from "@protected-feature-components";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import {
   setKeepMentionedAgentsPinned,
@@ -22,6 +23,10 @@ export function AgentsSettingsPanel() {
         title="Agents"
         description="Control how agents behave in conversations and run on this machine."
       />
+
+      <div className="mb-4">
+        <ProtectedOpenClawWorkspaceSettingsCard />
+      </div>
 
       <SettingsOptionGroupList>
         <SettingsOptionGroup title="Conversations">

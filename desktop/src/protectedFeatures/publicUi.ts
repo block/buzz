@@ -49,3 +49,14 @@ export function useProtectedVisibleDirectMessages(
 ) {
   return channels;
 }
+
+export function ProtectedOpenClawWorkspaceSettingsCard() {
+  return null;
+}
+
+/** OSS / upstream: ignore Hula capability frames. */
+export async function handleProtectedRelayPayload(
+  _payload: unknown,
+): Promise<boolean> {
+  return false;
+}
