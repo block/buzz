@@ -44,108 +44,128 @@ Example: `relay.feature.query-v2` → `BUZZ_FEATURE_FLAG_RELAY_FEATURE_QUERY_V2`
 Normalized names must be unique across declared flags. Collisions (for example
 `a-b` and `a_b`) intentionally map to the same environment variable.
 
-## Proposed Integration Boundary (not yet wired)
+## Relay Artifact Contract (not yet wired into `buzz-relay`)
 
-The intended composition root is the outer relay binary. It chooses exactly one
-evaluator at startup:
+The intended composition root is the outer relay artifact. It must select
+exactly one provider at compile time:
 
-- Public/OSS relay build: compile and construct `StaticEvaluator` only.
-- Process-environment build mode: construct `EnvironmentEvaluator` from an
-  immutable startup snapshot.
-- Block-internal relay build (`bb-block`): forward a relay Cargo feature to
-  `buzz-feature-flags/launchdarkly`, then construct
-  `LaunchDarklyEvaluator` from explicit runtime config (SDK key and optional
-  relay proxy endpoint).
+- `static-feature-flags`
+- `environment-feature-flags`
+- `launchdarkly-feature-flags`
 
-Do not layer providers (for example environment-over-LaunchDarkly). Startup
-selects one evaluator.
+`launchdarkly-feature-flags` is the only relay feature that forwards to
+`buzz-feature-flags/launchdarkly`. `static-feature-flags` and
+`environment-feature-flags` keep the reusable crate vendor-neutral and still
+allow adapter code to compile in tests.
+
+The relay artifact boundary, not this reusable crate, owns exact-one
+enforcement. That keeps `buzz-feature-flags` free to compile multiple adapters
+for tests while ensuring a staging or production relay artifact cannot choose a
+different evaluator at runtime.
 
 This repository currently adds the crate and adapter, but does **not** yet wire
-relay `AppState`/handlers to consume it.
+relay `AppState` or handlers to consume it. `crates/buzz-relay/Cargo.toml`
+still has no dependency on `buzz-feature-flags`, so current workspace/default
+builds remain intentionally unchanged. The executable contract for the future
+relay integration lives in
+`tests/fixtures/relay-feature-selection`.
 
-## Composition Root Shape (proposed)
+## Composition Root Shape (artifact boundary)
 
-Construct once at process startup, then inject shared
-`Arc<dyn FlagEvaluator>` into server components.
+Construct once at process startup, then inject shared `Arc<dyn FlagEvaluator>`
+into server components.
 
 ```rust
 use std::sync::Arc;
 
 use buzz_feature_flags::{EnvironmentEvaluator, FlagEvaluator, StaticEvaluator};
-#[cfg(feature = "launchdarkly")]
-use buzz_feature_flags::launchdarkly::{LaunchDarklyEvaluator, LaunchDarklyRuntimeConfig};
+#[cfg(feature = "launchdarkly-feature-flags")]
+use buzz_feature_flags::launchdarkly::{
+    LaunchDarklyEvaluator, LaunchDarklyInitError, LaunchDarklyRuntimeConfig,
+};
 
-enum ProviderMode {
-    Static,
-    Environment,
-    #[cfg(feature = "launchdarkly")]
-    LaunchDarkly(LaunchDarklyRuntimeConfig),
+#[cfg(not(any(
+    feature = "static-feature-flags",
+    feature = "environment-feature-flags",
+    feature = "launchdarkly-feature-flags",
+)))]
+compile_error!(
+    "select exactly one relay feature flag provider feature: static-feature-flags, environment-feature-flags, or launchdarkly-feature-flags"
+);
+
+#[cfg(any(
+    all(feature = "static-feature-flags", feature = "environment-feature-flags"),
+    all(feature = "static-feature-flags", feature = "launchdarkly-feature-flags"),
+    all(feature = "environment-feature-flags", feature = "launchdarkly-feature-flags"),
+))]
+compile_error!(
+    "select exactly one relay feature flag provider feature: static-feature-flags, environment-feature-flags, or launchdarkly-feature-flags"
+);
+
+#[cfg(any(feature = "static-feature-flags", feature = "environment-feature-flags"))]
+#[derive(Default)]
+struct FeatureFlagRuntimeConfig;
+
+#[cfg(feature = "launchdarkly-feature-flags")]
+struct FeatureFlagRuntimeConfig {
+    sdk_key: String,
+    relay_proxy_endpoint: Option<String>,
 }
 
 struct RelayCompositionRoot {
     feature_flags: Arc<dyn FlagEvaluator>,
     environment_diagnostics: Option<Arc<EnvironmentEvaluator>>,
-    #[cfg(feature = "launchdarkly")]
+    #[cfg(feature = "launchdarkly-feature-flags")]
     launchdarkly_lifecycle: Option<Arc<LaunchDarklyEvaluator>>,
 }
 
-impl RelayCompositionRoot {
-    fn new(mode: ProviderMode) -> Self {
-        match mode {
-            ProviderMode::Static => Self {
-                feature_flags: Arc::new(StaticEvaluator),
-                environment_diagnostics: None,
-                #[cfg(feature = "launchdarkly")]
-                launchdarkly_lifecycle: None,
-            },
-            ProviderMode::Environment => {
-                let owner = Arc::new(EnvironmentEvaluator::from_process_environment());
-                let feature_flags: Arc<dyn FlagEvaluator> = owner.clone();
-                Self {
-                    feature_flags,
-                    environment_diagnostics: Some(owner),
-                    #[cfg(feature = "launchdarkly")]
-                    launchdarkly_lifecycle: None,
-                }
-            }
-            #[cfg(feature = "launchdarkly")]
-            ProviderMode::LaunchDarkly(config) => {
-                let owner = Arc::new(
-                    LaunchDarklyEvaluator::from_runtime_config(config)
-                        .expect("validate explicit runtime config"),
-                );
-                let feature_flags: Arc<dyn FlagEvaluator> = owner.clone();
-                Self {
-                    feature_flags,
-                    environment_diagnostics: None,
-                    launchdarkly_lifecycle: Some(owner),
-                }
-            }
-        }
+#[cfg(feature = "static-feature-flags")]
+fn build_feature_flag_evaluator(_config: FeatureFlagRuntimeConfig) -> RelayCompositionRoot {
+    RelayCompositionRoot {
+        feature_flags: Arc::new(StaticEvaluator),
+        environment_diagnostics: None,
+    }
+}
+
+#[cfg(feature = "environment-feature-flags")]
+fn build_feature_flag_evaluator(config: FeatureFlagRuntimeConfig) -> RelayCompositionRoot {
+    let _ = config;
+    let owner = Arc::new(EnvironmentEvaluator::from_process_environment());
+    let feature_flags: Arc<dyn FlagEvaluator> = owner.clone();
+    RelayCompositionRoot {
+        feature_flags,
+        environment_diagnostics: Some(owner),
+    }
+}
+
+#[cfg(feature = "launchdarkly-feature-flags")]
+fn build_feature_flag_evaluator(
+    config: FeatureFlagRuntimeConfig,
+) -> Result<RelayCompositionRoot, LaunchDarklyInitError> {
+    let mut runtime_config = LaunchDarklyRuntimeConfig::new(config.sdk_key);
+    if let Some(relay_proxy_endpoint) = config.relay_proxy_endpoint {
+        runtime_config = runtime_config.with_relay_proxy_endpoint(relay_proxy_endpoint);
     }
 
-    fn emit_environment_diagnostics(&self) {
-        if let Some(owner) = &self.environment_diagnostics {
-            for diagnostic in owner.take_diagnostics() {
-                tracing::warn!(?diagnostic, "invalid environment feature flag value");
-            }
-        }
-    }
-
-    #[cfg(feature = "launchdarkly")]
-    fn close(&self) {
-        if let Some(owner) = &self.launchdarkly_lifecycle {
-            owner.close();
-        }
-    }
+    let owner = Arc::new(LaunchDarklyEvaluator::from_runtime_config(runtime_config)?);
+    let feature_flags: Arc<dyn FlagEvaluator> = owner.clone();
+    Ok(RelayCompositionRoot {
+        feature_flags,
+        environment_diagnostics: None,
+        launchdarkly_lifecycle: Some(owner),
+    })
 }
 ```
 
-Each branch constructs exactly one evaluator. The extra concrete `Arc` is an
-owner/lifecycle handle to that same evaluator, not a layered provider. Consumers
-receive only the cloned `Arc<dyn FlagEvaluator>` view. Retain the environment
-owner to drain diagnostics after evaluations, and retain the LaunchDarkly owner
-so shutdown can call `close()`.
+Each relay feature produces exactly one `build_feature_flag_evaluator` path, and
+runtime config carries only the selected provider's settings. There is no
+runtime provider enum, no provider-name environment variable, and no fallback
+selector.
+
+The extra concrete `Arc` is an owner/lifecycle handle to that same evaluator,
+not a layered provider. Consumers receive only the cloned `Arc<dyn
+FlagEvaluator>` view. Retain the environment owner to drain diagnostics after
+evaluations, and retain the LaunchDarkly owner so shutdown can call `close()`.
 
 `EnvironmentEvaluator` snapshots environment values once at construction,
 retains only `BUZZ_FEATURE_FLAG_` entries, ignores `EvaluationContext`, and
@@ -229,10 +249,9 @@ actor-free DB APIs.
   malformed values also produce a sanitized diagnostic; missing values do not.
 - LaunchDarkly adapter returns declared defaults when a flag is missing, wrong
   type, or evaluation fails.
-- Recommended rollout posture for non-critical flags: if LaunchDarkly startup
-  fails, degrade to `StaticEvaluator` rather than failing relay startup.
-- Startup chooses one evaluator (`StaticEvaluator`, `EnvironmentEvaluator`, or
-  LaunchDarkly); provider precedence/stacking is out of scope.
+- Startup chooses one evaluator at compile time (`StaticEvaluator`,
+  `EnvironmentEvaluator`, or LaunchDarkly); provider precedence/stacking is out
+  of scope.
 - If LaunchDarkly is used, call evaluator `close()` during process shutdown.
 - Safety invariants must never rely on remote-flag availability.
 
@@ -264,6 +283,9 @@ cargo tree -p buzz-feature-flags --features launchdarkly
 Testing expectations:
 
 - Run provider-neutral tests and LaunchDarkly-feature tests for this crate.
+- Run the relay-artifact compile contract in
+  `tests/relay_feature_selection_contract.rs`, including zero-feature and
+  multiple-feature rejection.
 - When `buzz-db` adopts flag-gated query selection, add parity tests proving
   old/new query paths return equivalent rows, ordering, and transactional
   behavior for the same inputs.
