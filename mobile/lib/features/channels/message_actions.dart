@@ -56,6 +56,9 @@ final _messageActionBackdropFilter = ImageFilter.blur(
   sigmaY: _messageActionBackdropBlurSigma,
 );
 
+/// The message or forum post currently in substring-selection mode, if any.
+final messageTextSelectionIdProvider = StateProvider<String?>((ref) => null);
+
 /// Presents the actions for [message] as an anchored popover when both
 /// [anchorRect] and [captureAnchorSnapshot] are supplied, otherwise as a sheet.
 ///
@@ -88,6 +91,7 @@ void showMessageActions({
   VoidCallback? restoreComposerFocus,
   bool isArchived = false,
   EdgeInsets popoverSpotlightPadding = const EdgeInsets.all(Grid.xxs),
+  VoidCallback? onSelectText,
 }) {
   final hasReactionOnlyActions = message.isSystem && !canManageMessage;
   if (anchorRect != null && hasReactionOnlyActions) {
@@ -117,6 +121,7 @@ void showMessageActions({
     onPopoverDismissed: onPopoverDismissed,
     composerFocusNode: composerFocusNode,
     restoreComposerFocus: restoreComposerFocus,
+    onSelectText: onSelectText,
   )) {
     return;
   }
@@ -177,6 +182,15 @@ void showMessageActions({
                         // Copy to clipboard
                         final data = ClipboardData(text: message.content);
                         Clipboard.setData(data);
+                      },
+                    ),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(LucideIcons.textCursorInput),
+                      title: const Text('Select text'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        onSelectText?.call();
                       },
                     ),
                   ],
@@ -459,6 +473,34 @@ String messageLinkFor({
     messageId: message.id,
     threadRootId: message.rootId,
   );
+}
+
+/// Exits [messageTextSelectionIdProvider] for the message currently selecting.
+class MessageTextSelectionDoneButton extends ConsumerWidget {
+  const MessageTextSelectionDoneButton({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return TextButton(
+      key: const ValueKey('message-select-text-done'),
+      onPressed: () {
+        ref.read(messageTextSelectionIdProvider.notifier).state = null;
+      },
+      style: TextButton.styleFrom(
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
+        minimumSize: Size.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      child: Text(
+        'Done',
+        style: context.textTheme.labelMedium?.copyWith(
+          color: context.colors.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
 }
 
 class _MarkReadUnreadTile extends ConsumerWidget {
