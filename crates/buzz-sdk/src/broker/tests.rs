@@ -79,6 +79,29 @@ fn action_fixtures() -> Vec<ActionArgs> {
         ActionArgs::StorageAddress(StorageAddressArgs {
             slug: "mem/broker-foundation".into(),
         }),
+        ActionArgs::StorageGet(StorageGetArgs {
+            slug: "core".into(),
+        }),
+        ActionArgs::StoragePut(StoragePutArgs {
+            slug: "mem/broker-foundation".into(),
+            value: "a remembered fact".into(),
+        }),
+        ActionArgs::PresenceSet(PresenceSetArgs {
+            status: PresenceStatus::Online,
+        }),
+        ActionArgs::TypingSet(TypingSetArgs {
+            channel_id: CHANNEL.into(),
+        }),
+        ActionArgs::ObserverEmit(ObserverEmitArgs {
+            frames: vec![ObserverFrame {
+                kind: "acp_write".into(),
+                payload: r#"{"jsonrpc":"2.0","method":"session/update"}"#.into(),
+            }],
+        }),
+        ActionArgs::LivenessPing(LivenessPingArgs {
+            channel_id: CHANNEL.into(),
+            turn_id: "turn-7f3a".into(),
+        }),
         ActionArgs::AgentsCreate(AgentsCreateArgs {
             channel_id: CHANNEL.into(),
             display_name: "Research helper".into(),
@@ -119,12 +142,20 @@ fn outcome_fixtures(keys: &Keys) -> Vec<ActionOutcome> {
         ActionOutcome::MessagePost(published.clone()),
         ActionOutcome::MessageReply(published.clone()),
         ActionOutcome::ReactionAdd(published.clone()),
-        ActionOutcome::ProfileSet(published),
+        ActionOutcome::ProfileSet(published.clone()),
         ActionOutcome::StorageAddress(StorageAddress {
             author_pubkey: pubkey(),
             kind: 30174,
             d_tag: EVENT.into(),
         }),
+        ActionOutcome::StorageGet(StorageRecord {
+            value: Some("a remembered fact".into()),
+        }),
+        ActionOutcome::StoragePut(published.clone()),
+        ActionOutcome::PresenceSet(published.clone()),
+        ActionOutcome::TypingSet(published.clone()),
+        ActionOutcome::ObserverEmit(ObserverReceipt { accepted: 1 }),
+        ActionOutcome::LivenessPing(published),
         ActionOutcome::AgentsCreate(AgentsCreateOutcome {
             agent_pubkey: pubkey(),
             display_name: "Research helper".into(),
@@ -248,6 +279,20 @@ fn every_outcome_round_trips_through_a_response_envelope() {
         assert_eq!(parsed.result.outcome(), Some(&outcome));
         assert!(parsed.result.error().is_none());
     }
+}
+
+/// A `storage.get` outcome omits `value` when the slug holds no record, and the
+/// absence survives the round trip as `None` — never a stored empty string.
+#[test]
+fn storage_get_outcome_absent_value_round_trips() {
+    let empty = ActionOutcome::StorageGet(StorageRecord { value: None });
+    let json = serde_json::to_value(&empty).expect("outcome serializes");
+    assert!(
+        json["outcome"].get("value").is_none(),
+        "an absent record must not put a value key on the wire"
+    );
+    let parsed: ActionOutcome = serde_json::from_value(json).expect("outcome deserializes");
+    assert_eq!(parsed, empty);
 }
 
 /// Args and outcome share the `action` discriminator, so a payload can never
@@ -692,8 +737,6 @@ fn only_declared_action_names_resolve() {
         "nip98.auth",
         "keys.export",
         "identity.nsec",
-        "presence.set",
-        "typing.set",
     ] {
         assert!(
             Action::parse(rejected).is_err(),
@@ -936,6 +979,12 @@ fn every_payload_has_an_exact_and_secret_free_wire_schema() {
         ),
         ("profile.set/args", vec!["about", "displayName", "picture"]),
         ("storage.address/args", vec!["slug"]),
+        ("storage.get/args", vec!["slug"]),
+        ("storage.put/args", vec!["slug", "value"]),
+        ("presence.set/args", vec!["status"]),
+        ("typing.set/args", vec!["channelId"]),
+        ("observer.emit/args", vec!["frames"]),
+        ("liveness.ping/args", vec!["channelId", "turnId"]),
         (
             "agents.create/args",
             vec![
@@ -973,6 +1022,15 @@ fn every_payload_has_an_exact_and_secret_free_wire_schema() {
         (
             "storage.address/outcome",
             vec!["authorPubkey", "dTag", "kind"],
+        ),
+        ("storage.get/outcome", vec!["value"]),
+        ("storage.put/outcome", vec!["createdAt", "eventId", "kind"]),
+        ("presence.set/outcome", vec!["createdAt", "eventId", "kind"]),
+        ("typing.set/outcome", vec!["createdAt", "eventId", "kind"]),
+        ("observer.emit/outcome", vec!["accepted"]),
+        (
+            "liveness.ping/outcome",
+            vec!["createdAt", "eventId", "kind"],
         ),
         (
             "agents.create/outcome",
@@ -1354,6 +1412,77 @@ fn validators_accept_and_reject_at_their_boundaries() {
     assert!(!slug("secrets"));
     assert!(!slug("mem/Bad Slug"));
 
+    // storage.put carries a body: non-empty, bounded, and still slug-gated.
+    let put = |slug: &str, value: String| {
+        StoragePutArgs {
+            slug: slug.into(),
+            value,
+        }
+        .validated()
+    };
+    assert!(put("core", "remember this".into()).is_ok());
+    assert!(put("core", "   ".into()).is_err());
+    assert!(matches!(
+        put("core", "x".repeat(actions::MAX_CONTENT_BYTES + 1)).unwrap_err(),
+        SdkError::ContentTooLarge { .. }
+    ));
+    assert!(put("Core", "v".into()).is_err());
+
+    // Live signals: presence needs a known status, typing and liveness a real
+    // channel, and observer.emit a non-empty, bounded batch of non-empty frames.
+    assert!(PresenceSetArgs {
+        status: PresenceStatus::Away
+    }
+    .validated()
+    .is_ok());
+    assert!(serde_json::from_value::<PresenceSetArgs>(
+        serde_json::json!({ "status": "invisible" })
+    )
+    .is_err());
+    assert!(TypingSetArgs {
+        channel_id: CHANNEL.into()
+    }
+    .validated()
+    .is_ok());
+    assert!(TypingSetArgs {
+        channel_id: "not-a-uuid".into()
+    }
+    .validated()
+    .is_err());
+    let ping = |channel: &str, turn: &str| {
+        LivenessPingArgs {
+            channel_id: channel.into(),
+            turn_id: turn.into(),
+        }
+        .validated()
+    };
+    assert!(ping(CHANNEL, "turn-1").is_ok());
+    assert!(ping(CHANNEL, "  ").is_err());
+    assert!(ping("not-a-uuid", "turn-1").is_err());
+
+    let frame = |payload: String| ObserverFrame {
+        kind: "acp_write".into(),
+        payload,
+    };
+    let emit = |frames: Vec<ObserverFrame>| ObserverEmitArgs { frames }.validated();
+    assert!(emit(vec![frame("{}".into())]).is_ok());
+    assert!(emit(vec![]).is_err());
+    assert!(emit(vec![ObserverFrame {
+        kind: String::new(),
+        payload: "{}".into()
+    }])
+    .is_err());
+    assert!(emit(vec![frame("   ".into())]).is_err());
+    assert!(matches!(
+        emit(vec![frame(
+            "x".repeat(actions::MAX_OBSERVER_FRAME_BYTES + 1)
+        )])
+        .unwrap_err(),
+        SdkError::ContentTooLarge { .. }
+    ));
+    assert!(emit(vec![frame("{}".into()); actions::MAX_OBSERVER_FRAMES]).is_ok());
+    assert!(emit(vec![frame("{}".into()); actions::MAX_OBSERVER_FRAMES + 1]).is_err());
+
     // Patch-shaped writes must change something, and reject unknown modes.
     let profile_error = ProfileSetArgs {
         display_name: None,
@@ -1387,6 +1516,109 @@ fn validators_accept_and_reject_at_their_boundaries() {
     }
     .validated()
     .is_err());
+}
+
+#[test]
+fn storage_put_bounds_the_complete_canonical_nip_ae_body() {
+    use buzz_core::engram::{Body, CORE_SLUG, NIP44_PLAINTEXT_MAX};
+
+    let body_len = |slug: &str, value: &str| {
+        if slug == CORE_SLUG {
+            Body::Core {
+                profile: value.into(),
+            }
+        } else {
+            Body::Memory {
+                slug: slug.into(),
+                value: Some(value.into()),
+            }
+        }
+        .to_json_bytes()
+        .len()
+    };
+    let put = |slug: &str, value: String| {
+        StoragePutArgs {
+            slug: slug.into(),
+            value,
+        }
+        .validated()
+    };
+
+    for slug in [CORE_SLUG, "mem/review-boundary"] {
+        let max_value_len = NIP44_PLAINTEXT_MAX - body_len(slug, "");
+        let at_limit = "x".repeat(max_value_len);
+        assert_eq!(body_len(slug, &at_limit), NIP44_PLAINTEXT_MAX);
+        put(slug, at_limit).expect("a canonical body exactly at the limit is valid");
+
+        let error = put(slug, "x".repeat(max_value_len + 1)).unwrap_err();
+        assert!(matches!(
+            error,
+            SdkError::ContentTooLarge {
+                max: NIP44_PLAINTEXT_MAX,
+                got
+            } if got == NIP44_PLAINTEXT_MAX + 1
+        ));
+    }
+
+    let slug = "mem/escaping";
+    let max_value_len = NIP44_PLAINTEXT_MAX - body_len(slug, "");
+    put(slug, "x".repeat(max_value_len)).expect("unescaped bytes fit exactly");
+    assert!(matches!(
+        put(slug, "\"".repeat(max_value_len)).unwrap_err(),
+        SdkError::ContentTooLarge { .. }
+    ));
+}
+
+#[test]
+fn observer_emit_bounds_the_complete_serialized_batch() {
+    let frame = |payload: String| ObserverFrame {
+        kind: "acp_write".into(),
+        payload,
+    };
+    let encoded_len = |payload: &str| {
+        serde_json::to_vec(&ObserverEmitArgs {
+            frames: vec![frame(payload.into())],
+        })
+        .unwrap()
+        .len()
+    };
+
+    let max_payload_len = actions::MAX_OBSERVER_BATCH_BYTES - encoded_len("");
+    assert!(max_payload_len <= actions::MAX_OBSERVER_FRAME_BYTES);
+    ObserverEmitArgs {
+        frames: vec![frame("x".repeat(max_payload_len))],
+    }
+    .validated()
+    .expect("a serialized batch exactly at the limit is valid");
+    assert!(matches!(
+        ObserverEmitArgs {
+            frames: vec![frame("\"".repeat(max_payload_len))]
+        }
+        .validated()
+        .unwrap_err(),
+        SdkError::ContentTooLarge { .. }
+    ));
+    assert!(matches!(
+        ObserverEmitArgs {
+            frames: vec![frame("x".repeat(max_payload_len + 1))]
+        }
+        .validated()
+        .unwrap_err(),
+        SdkError::ContentTooLarge { .. }
+    ));
+
+    let individually_valid = frame("x".repeat(300));
+    individually_valid
+        .validated()
+        .expect("one frame is independently valid");
+    assert!(matches!(
+        ObserverEmitArgs {
+            frames: vec![individually_valid; actions::MAX_OBSERVER_FRAMES]
+        }
+        .validated()
+        .unwrap_err(),
+        SdkError::ContentTooLarge { .. }
+    ));
 }
 
 /// Validation must be **inseparable from normalization**: there must be no way
@@ -2303,6 +2535,28 @@ fn a_read_page_is_bounded_by_the_limit_its_own_request_asked_for() {
     )
     .validate_for(&unlimited)
     .is_err());
+}
+
+#[test]
+fn an_observer_receipt_cannot_accept_more_frames_than_were_sent() {
+    let request = prepared(ActionArgs::ObserverEmit(ObserverEmitArgs {
+        frames: vec![ObserverFrame {
+            kind: "acp_write".into(),
+            payload: "{}".into(),
+        }],
+    }));
+    let response = |accepted| {
+        BrokerResponse::new(
+            request.request_id(),
+            BrokerResult::succeeded(ActionOutcome::ObserverEmit(ObserverReceipt { accepted })),
+        )
+        .validate_for(&request)
+    };
+
+    response(0).expect("a host may accept none of a best-effort batch");
+    response(1).expect("the exact submitted count is valid");
+    let error = response(2).expect_err("a host cannot accept frames it was not sent");
+    assert!(error.to_string().contains("from a batch of 1"));
 }
 
 // ── Results ─────────────────────────────────────────────────────────────────
