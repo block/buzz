@@ -21,6 +21,79 @@ async function getTimelineMetrics(page: import("@playwright/test").Page) {
   });
 }
 
+// These default mock fixtures have immediate EOSE and no injected reconnect.
+// Steady-state pagination begins after live admission and its head refresh,
+// which can replace paged tails. This does not test early startup scrolling.
+async function waitForMockChannelHeadReady(
+  page: import("@playwright/test").Page,
+  channelName: string,
+  channelId: string,
+) {
+  await page.waitForFunction(
+    ({ channelId, channelName }) => {
+      if (
+        !window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+          channelName,
+          kind: 39005,
+        })
+      ) {
+        return false;
+      }
+      const commands = window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [];
+      const liveIndex = commands.findIndex(({ command, payload }) => {
+        if (command !== "plugin:websocket|send") return false;
+        const message = (
+          payload as { message?: { type: string; data: string } }
+        )?.message;
+        if (message?.type !== "Text") return false;
+        const [type, id, ...filters] = JSON.parse(message.data);
+        return (
+          type === "REQ" &&
+          id.startsWith("live-") &&
+          filters.some(
+            (filter: { kinds?: number[]; "#h"?: string[] }) =>
+              filter.kinds?.includes(39005) &&
+              filter["#h"]?.includes(channelId),
+          )
+        );
+      });
+      const refreshed = commands
+        .slice(liveIndex + 1)
+        .some(({ command, payload }) => {
+          const args = payload as {
+            channelId?: string;
+            cursor?: unknown;
+          } | null;
+          return (
+            command === "get_channel_window" &&
+            args?.channelId === channelId &&
+            args.cursor === null
+          );
+        });
+      const state = window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState([
+        "channel-messages",
+        channelId,
+      ]);
+      return (
+        liveIndex >= 0 &&
+        refreshed &&
+        state?.status === "success" &&
+        state.fetchStatus === "idle"
+      );
+    },
+    { channelId, channelName },
+  );
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+  await expect
+    .poll(async () => {
+      const { scrollHeight, scrollTop, clientHeight } =
+        await getTimelineMetrics(page);
+      return scrollHeight - scrollTop - clientHeight;
+    })
+    .toBeLessThanOrEqual(2);
+}
+
 async function getFirstVisibleMessage(page: import("@playwright/test").Page) {
   return page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
@@ -188,66 +261,12 @@ test("preserves user scroll while older channel history loads", async ({
   await page.getByTestId("channel-deep-history").click();
   await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
 
-  // This tests steady-state prepending, not early scrolling during startup.
-  // Admission precedes EOSE and the hook's post-subscribe head refresh, which
-  // replaces paged tails. Observe that refresh through the existing IPC journal
-  // and query state before collecting the baseline; admission alone can race it.
-  await page.waitForFunction(() => {
-    const channelId = "feedf00d-0000-4000-8000-000000000007";
-    if (
-      !window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
-        channelName: "deep-history",
-        kind: 39005,
-      })
-    ) {
-      return false;
-    }
-    const commands = window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [];
-    const liveIndex = commands.findIndex(({ command, payload }) => {
-      if (command !== "plugin:websocket|send") return false;
-      const message = (payload as { message?: { type: string; data: string } })
-        ?.message;
-      if (message?.type !== "Text") return false;
-      const [type, id, ...filters] = JSON.parse(message.data);
-      return (
-        type === "REQ" &&
-        id.startsWith("live-") &&
-        filters.some(
-          (filter: { kinds?: number[]; "#h"?: string[] }) =>
-            filter.kinds?.includes(39005) && filter["#h"]?.includes(channelId),
-        )
-      );
-    });
-    const refreshed = commands
-      .slice(liveIndex + 1)
-      .some(({ command, payload }) => {
-        const args = payload as { channelId?: string; cursor?: unknown } | null;
-        return (
-          command === "get_channel_window" &&
-          args?.channelId === channelId &&
-          args.cursor === null
-        );
-      });
-    const state = window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState([
-      "channel-messages",
-      channelId,
-    ]);
-    return (
-      liveIndex >= 0 &&
-      refreshed &&
-      state?.status === "success" &&
-      state.fetchStatus === "idle"
-    );
-  });
+  await waitForMockChannelHeadReady(
+    page,
+    "deep-history",
+    "feedf00d-0000-4000-8000-000000000007",
+  );
   const timeline = page.getByTestId("message-timeline");
-  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
-  await expect
-    .poll(async () => {
-      const { scrollHeight, scrollTop, clientHeight } =
-        await getTimelineMetrics(page);
-      return scrollHeight - scrollTop - clientHeight;
-    })
-    .toBeLessThanOrEqual(2);
   await page.waitForFunction(() => {
     const element = document.querySelector(
       '[data-testid="message-timeline"]',
@@ -1709,6 +1728,11 @@ test("channel intro stays hidden while paginating past the timeline cap", async 
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockChannelHeadReady(
+    page,
+    "general",
+    "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+  );
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
 
@@ -1846,6 +1870,11 @@ test("older-history fetches never overlap (no concurrent in-flight requests)", a
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockChannelHeadReady(
+    page,
+    "general",
+    "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+  );
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
 
@@ -1909,6 +1938,11 @@ test("older-history spinner stays visible in viewport while fetching mid-scroll"
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockChannelHeadReady(
+    page,
+    "general",
+    "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+  );
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
 
@@ -2085,6 +2119,11 @@ test("older-history prepend keeps the reading row fixed (no jump to oldest)", as
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockChannelHeadReady(
+    page,
+    "general",
+    "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+  );
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
   await page.waitForFunction(() => {
