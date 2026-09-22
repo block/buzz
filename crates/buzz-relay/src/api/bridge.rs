@@ -931,15 +931,13 @@ async fn submit_event_authed(
     .await
     {
         Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(
-                    &pubkey_bytes,
-                    auth_tag,
-                    signed_auth_created_at,
-                )
-            } else {
-                None
-            }
+            // Same as WS AUTH: member agents on closed relays still need
+            // agent→owner materialization for observer frames.
+            super::relay_members::extract_nip_oa_owner(
+                &pubkey_bytes,
+                auth_tag,
+                signed_auth_created_at,
+            )
         }),
         Err(e) => {
             return SubmitOutcome::Err {
