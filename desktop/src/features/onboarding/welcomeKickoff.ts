@@ -579,6 +579,7 @@ export function useWelcomeKickoff(
           channelId,
           activeCommunity?.relayUrl,
         );
+        if (!welcomeTeam) return;
         await queryClient.invalidateQueries({
           queryKey: managedAgentsQueryKey,
         });

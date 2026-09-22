@@ -35,7 +35,7 @@ fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
 }
 
 #[test]
-fn merge_personas_adds_missing_built_ins() {
+fn merge_personas_adds_missing_built_ins_as_optional_templates() {
     let (records, changed) = merge_personas(Vec::new(), "2026-03-19T00:00:00Z");
 
     assert!(changed);
@@ -54,9 +54,9 @@ fn merge_personas_adds_missing_built_ins() {
         .filter(|record| record.is_active)
         .map(|record| record.id.as_str())
         .collect();
-    assert_eq!(
-        active_ids,
-        vec!["builtin:fizz", "builtin:honey", "builtin:bumble"]
+    assert!(
+        active_ids.is_empty(),
+        "starter templates must be explicitly added"
     );
 }
 
@@ -125,7 +125,10 @@ fn merge_personas_adds_fizz_and_retires_old_builtins_for_existing_store() {
         .find(|record| record.id == "builtin:fizz")
         .expect("fizz built-in should exist");
     assert!(fizz.is_builtin);
-    assert!(fizz.is_active);
+    assert!(
+        !fizz.is_active,
+        "upgrades must not activate new starter templates"
+    );
 
     let solo = records
         .iter()
@@ -416,4 +419,50 @@ fn fizz_builtin_resolves_to_buzz_agent() {
         "buzz-agent",
         "Fizz must resolve to buzz-agent specifically"
     );
+}
+
+#[test]
+fn optional_templates_survive_real_store_reload_and_keep_custom_profiles() {
+    use tauri::Manager;
+    let dir = tempfile::tempdir().unwrap();
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    // Absolute identifier confines Tauri's joined app_data_dir to this tempdir
+    // without mutating process environment or reaching the user's installation.
+    context.config_mut().identifier = dir
+        .path()
+        .join("isolated-app")
+        .to_string_lossy()
+        .into_owned();
+    let app = tauri::test::mock_builder().build(context).unwrap();
+    assert_eq!(
+        app.path().app_data_dir().unwrap(),
+        dir.path().join("isolated-app")
+    );
+    let mut personas = super::load_personas(app.handle()).unwrap();
+    assert!(personas.iter().all(|p| !p.is_active));
+    let fizz = personas
+        .iter_mut()
+        .find(|p| p.id == "builtin:fizz")
+        .unwrap();
+    fizz.is_active = true;
+    fizz.display_name = "My customized starter".into();
+    personas.push(custom_persona("custom:lookalike", "Fizz"));
+    super::save_personas(app.handle(), &personas).unwrap();
+    let mut personas = super::load_personas(app.handle()).unwrap();
+    let fizz = personas
+        .iter_mut()
+        .find(|p| p.id == "builtin:fizz")
+        .unwrap();
+    validate_persona_activation_change(fizz, false, false, false).unwrap();
+    fizz.is_active = false;
+    super::save_personas(app.handle(), &personas).unwrap();
+    for _ in 0..2 {
+        let reloaded = super::load_personas(app.handle()).unwrap();
+        let fizz = reloaded.iter().find(|p| p.id == "builtin:fizz").unwrap();
+        assert!(!fizz.is_active);
+        assert_eq!(fizz.display_name, "My customized starter");
+        assert!(reloaded
+            .iter()
+            .any(|p| p.id == "custom:lookalike" && p.is_active));
+    }
 }

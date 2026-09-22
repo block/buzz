@@ -47,7 +47,7 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
         ],
         model: None,
         runtime: None,
-        default_active: true,
+        default_active: false,
     },
     BuiltInPersona {
         id: "builtin:honey",
@@ -57,7 +57,7 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
         name_pool: &["Honey"],
         model: None,
         runtime: None,
-        default_active: true,
+        default_active: false,
     },
     BuiltInPersona {
         id: POLLEN_PERSONA_ID,
@@ -67,7 +67,7 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
         name_pool: &[POLLEN_DISPLAY_NAME],
         model: None,
         runtime: None,
-        default_active: true,
+        default_active: false,
     },
 ];
 
