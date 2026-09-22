@@ -194,13 +194,6 @@ deployment mapping from canonical host URI to
 Host-resolved mapping, so a globally known issuer is not implicitly trusted by
 every community.
 
-The verification implementation MUST pass the immutable community configuration
-resolved from `Host` into this procedure.  This shape keeps the expected
-canonical audience and the community's issuer allowlist from coming from
-independent caller inputs.  The existing `FederatedAssertionVerifier<S>` and
-`ProductionJwksSource<F>` (merged in PR 3 / `70895b355`) are the implementation
-components to update for this contract; this specification requires the
-Host-bound API and does not claim that older token-only callers are conformant.
 The `nostr_pubkey` claim is unconditionally required — absence rejects
 regardless of issuer policy (NIP-FI v2, PR #7221).
 
@@ -248,7 +241,7 @@ VerifyAssertion(token, community, D, R_t):
 
   // 4. Validate claims against the resolved community and issuer policy
   AssertExactIss(claims.iss, policy.iss) or DENY(evidence_rejected)
-  AssertIssuerAuthorized(policy.iss, community.authorized_issuers) or DENY(authorization_denied)
+  AssertIssuerAuthorized(policy.iss, community.authorized_issuers) or DENY(evidence_rejected)
   AssertAudienceMatch(claims.aud, community.expected_aud) or DENY(evidence_rejected)
   AssertTimeBounds(claims, policy) or DENY(evidence_rejected)  // [FI-TRACE-ASSERTION-VALIDATION]
   k_claimed := ParseHexKey(claims.nostr_pubkey) or DENY(evidence_rejected)
