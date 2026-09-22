@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { waitForMockChannelHeadReady } from "../helpers/channelHeadReady";
 
 // Lane 1c regression — the dense-second reachability wall.
 //
@@ -64,6 +65,11 @@ test("dense single second beyond one window page is fully reachable via composit
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockChannelHeadReady(
+    page,
+    "general",
+    "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+  );
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
   await page.waitForFunction(() => {
@@ -92,14 +98,20 @@ test("dense single second beyond one window page is fully reachable via composit
   // a genuine leave→enter transition (IntersectionObserver), so a raw
   // `scrollTop = 0` write on the virtualized container can fail to re-fire.
   // A wheel event is what a real user issues and what the observer honors.
+  const wheelStep = await timeline.evaluate(
+    (element) => element.clientHeight / 2,
+  );
   const wheelToTop = async () => {
     for (let step = 0; step < 12; step += 1) {
       const atTop = await timeline.evaluate(
         (element) => (element as HTMLDivElement).scrollTop <= 1,
       );
       if (atTop) break;
-      await page.mouse.wheel(0, -6000);
+      // Overlapping viewport steps let the virtualizer actually mount each
+      // row. A 6,000px jump can skip rows even when every page is reachable.
+      await page.mouse.wheel(0, -wheelStep);
       await page.waitForTimeout(40);
+      await collectRendered();
     }
   };
 
