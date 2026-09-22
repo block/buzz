@@ -856,11 +856,15 @@ pub async fn submit_event(
                 "HTTP bridge request"
             );
         }
-        SubmitOutcome::Rejected { kind, reason, .. } => {
+        SubmitOutcome::Rejected {
+            kind,
+            reason,
+            response,
+        } => {
             tracing::warn!(
                 pubkey = %pubkey_hex,
                 route = "/events",
-                status = 400u16,
+                status = response.0.as_u16(),
                 accepted = false,
                 kind,
                 reason = %reason,
@@ -899,7 +903,10 @@ enum SubmitOutcome {
         column: usize,
         response: (StatusCode, Json<Value>),
     },
-    /// IngestError::Rejected — log kind + truncated reason.
+    /// IngestError::Rejected or IngestError::CanvasConflict — log kind + truncated reason.
+    ///
+    /// Generic rejections yield HTTP 400; canvas CAS conflicts yield HTTP 409.
+    /// The logged `status` reflects the actual response status carried in `response`.
     Rejected {
         kind: u32,
         reason: String,
@@ -4382,7 +4389,8 @@ mod postgres_tests {
     ///
     /// Mutation oracle: mapping `IngestError::CanvasConflict` to
     /// `StatusCode::BAD_REQUEST` (reverting the fix) makes step 3 return 400
-    /// and fails both assertions.
+    /// and fails the status assertion. The body assertion separately pins the
+    /// exact `error` envelope value.
     #[test]
     #[ignore = "requires Postgres"]
     fn canvas_cas_conflict_yields_409_through_http_bridge() {
@@ -4477,7 +4485,7 @@ mod postgres_tests {
         // Step 3: stale write C with the same `expected-revision: A` — A is no
         // longer the head (B is), so this must be a CAS conflict → HTTP 409.
         // Mutation oracle: reverting IngestError::CanvasConflict → BAD_REQUEST
-        // in bridge.rs makes this return 400 and both assertions below fail.
+        // in bridge.rs makes this return 400 and fails the status assertion.
         let event_c = EventBuilder::new(
             Kind::Custom(KIND_CANVAS as u16),
             "# stale write (still on A)",
@@ -4501,10 +4509,15 @@ mod postgres_tests {
             axum::http::StatusCode::CONFLICT,
             "stale canvas CAS write must yield 409 CONFLICT (not 400); body: {body_text}"
         );
-        assert!(
-            body_text.contains("canvas changed since it was loaded"),
-            "409 body must contain the canonical conflict message. \
-             Got: {body_text}; mutation oracle: revert CanvasConflict → BAD_REQUEST → status 400"
+        // Parse the response body and assert the exact canonical `error` value to
+        // pin the byte-preservation contract. A substring check would pass even if
+        // the message were embedded elsewhere; this ensures the envelope is intact.
+        let body_json: serde_json::Value =
+            serde_json::from_str(&body_text).expect("response body must be valid JSON");
+        assert_eq!(
+            body_json.get("error").and_then(|v| v.as_str()),
+            Some("conflict: canvas changed since it was loaded"),
+            "409 body must carry the exact canonical error value. Got: {body_text}"
         );
     }
 
@@ -4688,6 +4701,158 @@ mod postgres_tests {
         assert!(
             log.contains(&pubkey_hex[..16]),
             "attribution line must carry the pubkey;\nlog:\n{log}"
+        );
+    }
+
+    /// T3c — log fidelity for canvas CAS conflict: the terminal attribution line
+    /// must log `status=409`, not 400, when the relay emits a canvas CAS 409.
+    ///
+    /// Before the fix, `SubmitOutcome::Rejected` hardcoded `status = 400u16` in
+    /// its logging arm, so every canvas CAS conflict — which now correctly
+    /// returns HTTP 409 to the client — was misattributed as 400 in the relay
+    /// log.  This test pins both the log fidelity and the 400 control so the
+    /// distinction is exercised in the same run.
+    ///
+    /// - **CAS branch:** a stale canvas write (RevisionMismatch) must log `status=409`.
+    /// - **Generic-rejection control:** a relay-only-kind event must log `status=400`.
+    ///
+    /// Discriminating: restoring `status = 400u16` in bridge.rs's `Rejected` logging
+    /// arm causes the CAS `status=409` assertion to fail while the 400 control
+    /// continues to pass — the test is split so the regression direction is unambiguous.
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn canvas_cas_conflict_logs_status_409_not_400() {
+        use buzz_core::kind::KIND_CANVAS;
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use uuid::Uuid;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+
+        let state = rt
+            .block_on(bridge_handler_test_state())
+            .expect("local Postgres not reachable — start Postgres on 127.0.0.1:5432 before running ignored bridge handler tests");
+
+        let (host, channel_id) = rt.block_on(async {
+            let h = format!("canvas-cas-log-{}.local", Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&h)
+                .await
+                .expect("ensure community");
+            let creator_keys = nostr::Keys::generate();
+            let (channel, _) = state
+                .db
+                .create_channel_with_id(
+                    community.id,
+                    Uuid::new_v4(),
+                    &format!("log-test-{}", Uuid::new_v4().simple()),
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    creator_keys.public_key().to_bytes().as_slice(),
+                    None,
+                )
+                .await
+                .expect("create test channel");
+            (h, channel.id.to_string())
+        });
+
+        let author_keys = Keys::generate();
+        let pubkey_hex = author_keys.public_key().to_hex();
+        let relay_now = chrono::Utc::now().timestamp() as u64;
+
+        // Establish head A with an unconditional write.
+        let event_a = EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# head")
+            .tag(Tag::parse(["h", channel_id.as_str()]).expect("h tag"))
+            .custom_created_at(nostr::Timestamp::from(relay_now))
+            .sign_with_keys(&author_keys)
+            .expect("sign event A");
+        let event_a_id = event_a.id.to_hex();
+        let body_a = serde_json::to_vec(&event_a).expect("serialize event A");
+        // Accept A silently (no log assertion here).
+        rt.block_on(post_events(state.clone(), &host, &pubkey_hex, &body_a));
+
+        // Advance head to B.
+        let event_b = EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# head B")
+            .tag(Tag::parse(["h", channel_id.as_str()]).expect("h tag"))
+            .tag(
+                Tag::parse(["expected-revision", event_a_id.as_str()])
+                    .expect("expected-revision tag"),
+            )
+            .custom_created_at(nostr::Timestamp::from(relay_now + 1))
+            .sign_with_keys(&author_keys)
+            .expect("sign event B");
+        let body_b = serde_json::to_vec(&event_b).expect("serialize event B");
+        rt.block_on(post_events(state.clone(), &host, &pubkey_hex, &body_b));
+
+        // Stale write C: still expects A, but B is now head → RevisionMismatch → 409.
+        // Capture the log to assert the logged status.
+        let event_c = EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# stale")
+            .tag(Tag::parse(["h", channel_id.as_str()]).expect("h tag"))
+            .tag(
+                Tag::parse(["expected-revision", event_a_id.as_str()])
+                    .expect("expected-revision tag"),
+            )
+            .custom_created_at(nostr::Timestamp::from(relay_now + 2))
+            .sign_with_keys(&author_keys)
+            .expect("sign event C");
+        let body_c = serde_json::to_vec(&event_c).expect("serialize event C");
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let (status_cas, log_cas) = metrics::with_local_recorder(&recorder, || {
+            run_and_capture(&rt, state.clone(), &host, &pubkey_hex, &body_c)
+        });
+
+        assert_eq!(
+            status_cas,
+            axum::http::StatusCode::CONFLICT,
+            "canvas CAS conflict must yield HTTP 409"
+        );
+        // The log must record the real response status, not the former hardcoded 400.
+        // Discriminating: restoring `status = 400u16` in the Rejected logging arm
+        // makes this assertion fail while the generic-rejection control below still passes.
+        assert!(
+            log_cas.contains("status=409"),
+            "terminal attribution line must log status=409 for canvas CAS conflict;\nlog:\n{log_cas}"
+        );
+        assert_eq!(
+            count_attribution_lines(&log_cas),
+            1,
+            "exactly one attribution line for canvas CAS conflict;\nlog:\n{log_cas}"
+        );
+
+        // ── Generic-rejection control ────────────────────────────────────────
+        // A relay-only-kind event is still a Rejected outcome → HTTP 400.
+        // This control confirms the fix does not break generic-rejection logging.
+        let relay_only_event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as u16),
+            "",
+        )
+        .sign_with_keys(&author_keys)
+        .expect("sign relay-only event");
+        let relay_only_json = serde_json::to_vec(&relay_only_event).expect("serialize");
+
+        let recorder2 = metrics_util::debugging::DebuggingRecorder::new();
+        let (status_generic, log_generic) = metrics::with_local_recorder(&recorder2, || {
+            run_and_capture(&rt, state.clone(), &host, &pubkey_hex, &relay_only_json)
+        });
+
+        assert_eq!(
+            status_generic,
+            axum::http::StatusCode::BAD_REQUEST,
+            "generic rejection must still yield HTTP 400"
+        );
+        assert!(
+            log_generic.contains("status=400"),
+            "generic rejection must log status=400;\nlog:\n{log_generic}"
+        );
+        assert_eq!(
+            count_attribution_lines(&log_generic),
+            1,
+            "exactly one attribution line for generic rejection;\nlog:\n{log_generic}"
         );
     }
 
