@@ -21,6 +21,18 @@ Make sure `pi` and `buzz-pi-acp` are on PATH, then restart Buzz.
 cargo test -p buzz-acp
 ```
 
+Managed agent sessions may already export harness options. Clear them when
+running the package suite: three CLI parsing tests assert the unset defaults,
+and inherited values would change the inputs those tests exercise. Running the
+package serially also avoids scheduling flakes in existing short-deadline tests.
+
+```sh
+env -u BUZZ_ACP_ALLOWED_RESPOND_TO \
+  -u BUZZ_ACP_LAZY_POOL \
+  -u BUZZ_ACP_IDLE_POOL_SLEEP \
+  cargo test -p buzz-acp -- --test-threads=1
+```
+
 Run the ignored real-adapter test with a built fork checkout:
 
 ```sh
