@@ -921,6 +921,12 @@ mod tests {
     }
 
     #[test]
+    fn thread_window_bounds_is_relay_only() {
+        assert_eq!(KIND_THREAD_WINDOW_BOUNDS, 39007);
+        assert!(is_relay_only_kind(KIND_THREAD_WINDOW_BOUNDS));
+    }
+
+    #[test]
     fn parameterized_replaceable_range() {
         assert!(!is_parameterized_replaceable(29999));
         assert!(is_parameterized_replaceable(30000));
