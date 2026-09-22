@@ -683,6 +683,7 @@ pub fn run() {
             copy_image_to_clipboard,
             copy_text_to_clipboard,
             read_clipboard_text,
+            read_clipboard_image,
             fetch_snapshot_bytes,
             relay_requires_membership,
             list_relay_members,
