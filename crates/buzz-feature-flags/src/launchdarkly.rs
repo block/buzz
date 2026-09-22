@@ -115,8 +115,7 @@ impl LaunchDarklyEvaluator {
 
         let mut builder = ConfigBuilder::new(sdk_key);
         if let Some(relay_proxy_endpoint) = config.relay_proxy_endpoint {
-            let relay_proxy_endpoint = relay_proxy_endpoint.trim().to_owned();
-            if relay_proxy_endpoint.is_empty() {
+            if relay_proxy_endpoint.trim().is_empty() {
                 return Err(LaunchDarklyInitError::EmptyRelayProxyEndpoint);
             }
             let relay_proxy_endpoint = validate_relay_proxy_endpoint(&relay_proxy_endpoint)?;
@@ -189,6 +188,12 @@ fn strict_f64_to_i64(value: f64) -> Option<i64> {
 }
 
 fn validate_relay_proxy_endpoint(endpoint: &str) -> Result<String, LaunchDarklyInitError> {
+    if endpoint.trim() != endpoint {
+        return Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
+            InvalidRelayProxyEndpointReason::MalformedUri,
+        ));
+    }
+
     let parsed = endpoint.parse::<Uri>().map_err(|_| {
         LaunchDarklyInitError::InvalidRelayProxyEndpoint(
             InvalidRelayProxyEndpointReason::MalformedUri,
@@ -201,13 +206,19 @@ fn validate_relay_proxy_endpoint(endpoint: &str) -> Result<String, LaunchDarklyI
         ));
     }
 
-    if parsed.authority().is_some() {
-        return Ok(endpoint.to_owned());
+    let Some(authority) = parsed.authority() else {
+        return Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
+            InvalidRelayProxyEndpointReason::MissingAuthority,
+        ));
+    };
+
+    if authority.host().is_empty() {
+        return Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
+            InvalidRelayProxyEndpointReason::MissingAuthority,
+        ));
     }
 
-    Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
-        InvalidRelayProxyEndpointReason::MissingAuthority,
-    ))
+    Ok(endpoint.to_owned())
 }
 
 fn launchdarkly_context(context: &EvaluationContext) -> Result<Context, String> {
@@ -349,6 +360,25 @@ mod tests {
             "https://",
             "http:///missing-authority",
             "https:///still-missing-authority",
+            "https://:8030/path-prefix",
+        ] {
+            let result = LaunchDarklyEvaluator::from_runtime_config(
+                LaunchDarklyRuntimeConfig::new("sdk-key").with_relay_proxy_endpoint(endpoint),
+            );
+            assert!(matches!(
+                result,
+                Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn relay_proxy_endpoint_rejects_leading_or_trailing_whitespace() {
+        for endpoint in [
+            " https://relay.internal:8030",
+            "https://relay.internal:8030 ",
+            "\thttps://relay.internal:8030",
+            "https://relay.internal:8030\n",
         ] {
             let result = LaunchDarklyEvaluator::from_runtime_config(
                 LaunchDarklyRuntimeConfig::new("sdk-key").with_relay_proxy_endpoint(endpoint),
