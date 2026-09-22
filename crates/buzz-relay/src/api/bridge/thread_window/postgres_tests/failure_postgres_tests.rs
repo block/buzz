@@ -21,6 +21,36 @@ where
     }
 }
 
+async fn pause_after_aux_page<F: Future>(
+    request: F,
+) -> std::pin::Pin<Box<impl Future<Output = F::Output>>> {
+    let pages = Arc::new(AtomicUsize::new(0));
+    let subscriber = tracing_subscriber::registry().with(AuxPages(pages.clone()));
+    let mut request = Box::pin(request.with_subscriber(subscriber));
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        std::future::poll_fn(|cx| {
+            assert!(
+                request.as_mut().poll(cx).is_pending(),
+                "must pause inside closure"
+            );
+            if pages.load(Ordering::SeqCst) > 0 {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }),
+    )
+    .await
+    .expect("first auxiliary page must complete before transition");
+    assert_eq!(
+        pages.load(Ordering::SeqCst),
+        1,
+        "barrier must precede closure completion"
+    );
+    request
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn thread_window_bridge_restarts_both_aux_hops_after_replica_failure() {
@@ -29,10 +59,7 @@ async fn thread_window_bridge_restarts_both_aux_hops_after_replica_failure() {
     let reaction = f.aux(7, &reply, Some(f.channel)).await;
     // Two raw pages, so losing the snapshot after page one leaves a meaningful
     // old cursor. The writer edit inserted later sorts before that cursor.
-    sqlx::query("INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
-        SELECT community_id,decode(md5(n::text)||md5(('restart'||n)::text),'hex'),pubkey,created_at,kind,tags,'fixture',sig,received_at,channel_id \
-        FROM events CROSS JOIN generate_series(1,1000) n WHERE community_id=$1 AND id=$2")
-        .bind(f.community.as_uuid()).bind(reaction.id.to_bytes().to_vec()).execute(&f.pool).await.unwrap();
+    f.copy_aux(&reaction, 1000, "fixture").await;
     let reader_name = format!("tw-reader-{}", Uuid::new_v4());
     let options: sqlx::postgres::PgConnectOptions =
         crate::test_support::database_url().parse().unwrap();
@@ -48,35 +75,13 @@ async fn thread_window_bridge_restarts_both_aux_hops_after_replica_failure() {
     let mut filter = f.filter();
     filter["until"] = json!(f.root.created_at.as_secs() + 1);
     filter["before_id"] = json!("00".repeat(32));
-    let pages = Arc::new(AtomicUsize::new(0));
-    let subscriber = tracing_subscriber::registry().with(AuxPages(pages.clone()));
-    let mut request = Box::pin(
-        f.post(&f.keys, "/query", json!([filter]))
-            .with_subscriber(subscriber),
-    );
-    std::future::poll_fn(|cx| {
-        assert!(
-            request.as_mut().poll(cx).is_pending(),
-            "request must pause inside closure"
-        );
-        if pages.load(Ordering::SeqCst) > 0 {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    })
-    .await;
+    let request = pause_after_aux_page(f.post(&f.keys, "/query", json!([filter]))).await;
     let held: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name=$1 AND xact_start IS NOT NULL")
         .bind(&reader_name).fetch_one(&f.pool).await.unwrap();
     assert_eq!(held, 1, "must actually hold the proved replica transaction");
     let edit = f.aux(40003, &reply, Some(f.channel)).await;
     let deletion = f.aux(5, &edit, None).await;
-    sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
-        .bind(f.community.as_uuid())
-        .bind(edit.id.to_bytes().to_vec())
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    f.tombstone(&edit).await;
     sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name=$1")
         .bind(&reader_name)
         .execute(&f.pool)
@@ -85,12 +90,7 @@ async fn thread_window_bridge_restarts_both_aux_hops_after_replica_failure() {
     let (status, body) = request.await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(f.bounds(&body, &filter)["has_more"], false);
-    let ids: Vec<_> = body
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v["id"].as_str().unwrap())
-        .collect();
+    let ids = ids(&body, None);
     assert!(
         ids.contains(&deletion.id.to_hex().as_str()),
         "restart must discover writer edit tombstone and its deletion"
@@ -109,31 +109,19 @@ async fn thread_window_bridge_restarts_both_aux_hops_after_replica_failure() {
 #[ignore = "requires Postgres"]
 async fn thread_window_http_deadline_covers_authorization_wait() {
     let mut f = Fixture::new().await;
-    // Disable only the optional DB lock budget via production configuration;
-    // the shared HTTP deadline must still cover authorization in this mode.
-    Arc::make_mut(&mut f.state).db = buzz_db::Db::new(&buzz_db::DbConfig {
-        database_url: crate::test_support::database_url(),
-        max_connections: 5,
+    // The shared HTTP deadline still applies when the optional DB lock budget is disabled.
+    Arc::make_mut(&mut f.state).db = production_db(buzz_db::DbConfig {
         lock_timeout_ms: 0,
         ..Default::default()
     })
-    .await
-    .unwrap();
-    let mut lock = f.pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE channel_members IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *lock)
-        .await
-        .unwrap();
-    let started = std::time::Instant::now();
-    let (status, body) = f.post(&f.keys, "/query", json!([f.filter()])).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_eq!(body, json!({"error":"thread window deadline exceeded"}));
-    assert!(started.elapsed() >= DEADLINE);
-    assert!(started.elapsed() < DEADLINE + Duration::from_secs(4));
-    lock.rollback().await.unwrap();
-    let (status, body) = f.post(&f.keys, "/query", json!([f.filter()])).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(f.bounds(&body, &f.filter())["has_more"], false);
+    .await;
+    assert_authorization_timeout(
+        &f,
+        "thread window deadline exceeded",
+        DEADLINE,
+        DEADLINE + Duration::from_secs(4),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -148,28 +136,16 @@ async fn thread_window_bounds_rejected_by_ws_event_handler() {
         None,
         Timestamp::now().as_secs(),
     );
-    let (send_tx, mut send_rx) = tokio::sync::mpsc::channel(10);
-    let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(10);
-    let conn = Arc::new(crate::connection::ConnectionState {
-        conn_id: Uuid::new_v4(),
-        tenant: buzz_core::TenantContext::resolved(f.community, f.host.clone()),
-        remote_addr: "127.0.0.1:1234".parse().unwrap(),
-        auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
-            buzz_auth::AuthContext {
-                pubkey: f.keys.public_key(),
-                scopes: vec![],
-                channel_ids: None,
-                auth_method: buzz_auth::AuthMethod::Nip42,
-                agent_owner_pubkey: None,
-            },
-        )),
-        subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        send_tx,
-        ctrl_tx,
-        cancel: tokio_util::sync::CancellationToken::new(),
-        backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-        grace_limit: 3,
+    let auth = crate::connection::AuthState::Authenticated(buzz_auth::AuthContext {
+        pubkey: f.keys.public_key(),
+        scopes: vec![],
+        channel_ids: None,
+        auth_method: buzz_auth::AuthMethod::Nip42,
+        agent_owner_pubkey: None,
     });
+    let (mut conn, mut send_rx) = crate::connection::tests::test_conn_with_auth(auth);
+    Arc::get_mut(&mut conn).unwrap().tenant =
+        buzz_core::TenantContext::resolved(f.community, f.host.clone());
     crate::handlers::event::handle_event(forged.clone(), conn, f.state.clone()).await;
     let axum::extract::ws::Message::Text(text) = send_rx.try_recv().unwrap() else {
         panic!("expected ACK")
@@ -200,43 +176,9 @@ async fn assert_aux_access_change(grant: bool) {
     // polling can pause, even when the cross-channel edit is initially hidden.
     f.aux(7, &reply, Some(f.channel)).await;
     let aux_channel = Uuid::new_v4();
-    f.state
-        .db
-        .create_channel_with_id(
-            f.community,
-            aux_channel,
-            "aux-access-change",
-            ChannelType::Stream,
-            ChannelVisibility::Private,
-            None,
-            &f.keys.public_key().to_bytes(),
-            None,
-        )
-        .await
-        .unwrap();
-    let edit = event(
-        &f.keys,
-        aux_channel,
-        40003,
-        "cross-channel edit",
-        Some(&reply),
-        f.root.created_at.as_secs() + 60,
-    );
-    f.state
-        .db
-        .insert_event(f.community, &edit, Some(aux_channel))
-        .await
-        .unwrap();
-    let set_access = "UPDATE channel_members SET removed_at=CASE WHEN $4 THEN NULL ELSE now() END \
-                      WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3";
-    sqlx::query(set_access)
-        .bind(f.community.as_uuid())
-        .bind(aux_channel)
-        .bind(f.keys.public_key().to_bytes().to_vec())
-        .bind(!grant)
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    private_channel(&f.state.db, f.community, aux_channel, &f.keys).await;
+    let edit = f.aux(40003, &reply, Some(aux_channel)).await;
+    set_access(&f, aux_channel, !grant).await;
     let contains_edit = |body: &Value| {
         body.as_array()
             .unwrap()
@@ -244,8 +186,7 @@ async fn assert_aux_access_change(grant: bool) {
             .any(|e| e["id"] == edit.id.to_hex())
     };
     let filter = f.filter();
-    let (status, before) = f.post(&f.keys, "/query", json!([filter])).await;
-    assert_eq!(status, StatusCode::OK, "{before}");
+    let before = f.query(&filter).await;
     f.bounds(&before, &filter);
     assert_eq!(
         contains_edit(&before),
@@ -253,42 +194,8 @@ async fn assert_aux_access_change(grant: bool) {
         "pre-transition visibility control"
     );
 
-    let pages = Arc::new(AtomicUsize::new(0));
-    let subscriber = tracing_subscriber::registry().with(AuxPages(pages.clone()));
-    let mut request = Box::pin(
-        f.post(&f.keys, "/query", json!([filter]))
-            .with_subscriber(subscriber),
-    );
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        std::future::poll_fn(|cx| {
-            assert!(
-                request.as_mut().poll(cx).is_pending(),
-                "must pause before final authorization"
-            );
-            if pages.load(Ordering::SeqCst) > 0 {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        }),
-    )
-    .await
-    .expect("first auxiliary page must complete before transition");
-    assert_eq!(
-        pages.load(Ordering::SeqCst),
-        1,
-        "barrier must precede closure completion"
-    );
-    let changed = sqlx::query(set_access)
-        .bind(f.community.as_uuid())
-        .bind(aux_channel)
-        .bind(f.keys.public_key().to_bytes().to_vec())
-        .bind(grant)
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    assert_eq!(changed.rows_affected(), 1);
+    let request = pause_after_aux_page(f.post(&f.keys, "/query", json!([filter]))).await;
+    set_access(&f, aux_channel, grant).await;
     let current = f
         .state
         .db
@@ -307,8 +214,7 @@ async fn assert_aux_access_change(grant: bool) {
         json!({"error":"thread auxiliary authorization changed; retry window"})
     );
 
-    let (status, after) = f.post(&f.keys, "/query", json!([filter])).await;
-    assert_eq!(status, StatusCode::OK, "{after}");
+    let after = f.query(&filter).await;
     f.bounds(&after, &filter);
     assert_eq!(
         contains_edit(&after),
@@ -321,6 +227,16 @@ async fn assert_aux_access_change(grant: bool) {
 #[ignore = "requires Postgres"]
 async fn thread_window_production_authorization_lock_timeout_is_retryable() {
     let f = Fixture::new().await;
+    assert_authorization_timeout(
+        &f,
+        "thread database timeout; retry window",
+        Duration::from_millis(buzz_db::DbConfig::default().lock_timeout_ms),
+        DEADLINE,
+    )
+    .await;
+}
+
+async fn assert_authorization_timeout(f: &Fixture, message: &str, min: Duration, max: Duration) {
     let mut lock = f.pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE channel_members IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *lock)
@@ -329,18 +245,26 @@ async fn thread_window_production_authorization_lock_timeout_is_retryable() {
     let started = std::time::Instant::now();
     let (status, body) = f.post(&f.keys, "/query", json!([f.filter()])).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_eq!(
-        body,
-        json!({"error":"thread database timeout; retry window"})
-    );
-    assert!(
-        started.elapsed() >= Duration::from_millis(buzz_db::DbConfig::default().lock_timeout_ms)
-    );
-    assert!(started.elapsed() < DEADLINE);
+    assert_eq!(body, json!({"error":message}));
+    assert!((min..max).contains(&started.elapsed()));
     lock.rollback().await.unwrap();
-    let (status, recovered) = f.post(&f.keys, "/query", json!([f.filter()])).await;
-    assert_eq!(status, StatusCode::OK, "{recovered}");
+    let recovered = f.query(&f.filter()).await;
     assert_eq!(f.bounds(&recovered, &f.filter())["has_more"], false);
+}
+
+async fn set_access(f: &Fixture, channel: Uuid, allowed: bool) {
+    let changed = sqlx::query(
+        "UPDATE channel_members SET removed_at=CASE WHEN $4 THEN NULL ELSE now() END \
+        WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3",
+    )
+    .bind(f.community.as_uuid())
+    .bind(channel)
+    .bind(f.keys.public_key().to_bytes().to_vec())
+    .bind(allowed)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(changed.rows_affected(), 1);
 }
 
 #[tokio::test]

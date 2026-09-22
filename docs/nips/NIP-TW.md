@@ -1,120 +1,97 @@
 NIP-TW
 ======
 
-Newest-first Thread Windows
----------------------------
+Thread Window
+-------------
 
-`draft` `optional` `relay` — contract version 1
+`draft` `optional` `relay`
 
-## Scope and compatibility
+**Depends on**: NIP-01 (events and filters), NIP-29 (groups), NIP-98 (HTTP auth)
 
-Opt-in extension of authenticated `POST /query`, returning the existing flat
-array of signed Nostr events. No new endpoint, subscriptions, client changes,
-or around-target API. Requests without `thread_window: true` retain their
-existing oldest-first `depth_limit` / `thread_cursor` behavior. Channel bounds
-kind **39006** and NIP-CW are unchanged. This capability does not establish the
-cause of any production loading incident.
+## Abstract
 
-```json
+A thread window is a newest-first page of replies served through the existing
+NIP-98-authenticated `POST /query`. The response is a flat array of signed events:
+reply rows, optional auxiliary events, and one relay-signed `kind:39007` bounds
+overlay. No endpoint, subscription, or around-target operation is added.
+
+Absent or false `thread_window` preserves the existing oldest-first
+`depth_limit` / `thread_cursor` behavior. [NIP-CW](NIP-CW.md) and its channel
+bounds (`kind:39006`) are unchanged.
+
+## Request
+
+Submit the filter in the usual query filter array:
+
+```jsonc
 {
   "thread_window": true,
-  "#h": ["00000000-0000-0000-0000-000000000001"],
-  "#e": ["abababababababababababababababababababababababababababababababab"],
+  "#h": ["<channel UUID>"],
+  "#e": ["<root event id>"],
   "kinds": [9, 40002],
   "depth_limit": 100,
   "limit": 50,
-  "include_aux": true
+  "include_aux": true,
+  "until": 1751500000,         // continuation: both cursor fields or neither
+  "before_id": "<64-hex id>"
 }
 ```
 
-Send as an element of the usual query filter array. Both `until` (integer Unix
-seconds) and `before_id` (full 64-hex id) continue from the preceding bounds.
-Both absent means newest page. Null, malformed, fractional, negative,
-unrepresentable or half cursors are HTTP 400, never a restart. Hex IDs normalize
-to lowercase and channel IDs to canonical UUID text.
+- `#h` and `#e` require exactly one raw entry each. UUIDs and full 64-hex IDs
+  normalize to canonical lowercase text; duplicate entries are not collapsed.
+- `kinds` requires 1–4 entries from conversation kinds 9, 40002, 45001, 45003;
+  it normalizes to sorted, distinct integers.
+- `limit` defaults to 50 (range 1–200); `depth_limit` defaults to 100 (1–100).
+  Out-of-range values reject rather than clamp. `include_aux` defaults to false
+  and must be boolean.
+- `until` is a nonnegative integer Unix timestamp representable by the relay;
+  `before_id` is a full 64-hex ID. Both absent selects the head. Half, null,
+  malformed, fractional, negative or out-of-range cursors reject, never restart.
+- Every other field rejects, including legacy cursor spellings, `top_level`
+  (even false), search, summaries, authors, additional tags, `since`, IDs,
+  offsets and page numbers. Non-boolean `thread_window` also rejects.
 
-Exactly one raw `#h` and one raw `#e` are required (duplicates are not silently
-collapsed). `limit` defaults to 50, accepts 1–200; `depth_limit` defaults to 100,
-accepts 1–100. Out-of-range budgets reject rather than clamp. `include_aux`
-defaults to false and must be boolean when present.
+Invalid requests return HTTP 400. A query accepts at most four window filters
+and cannot mix them with other query modes.
 
-`kinds` requires one to four raw entries; version 1 supports conversation row kinds
-**9, 40002, 45001, 45003**. Kinds normalize to ascending, distinct integers.
-Root, reactions, edits, deletions, summaries and bounds never consume the reply
-budget. All other fields are rejected on an opted-in filter, including authors,
-since, ids, additional tag filters, search, top_level (even false), summaries,
-legacy thread cursors (both spellings), offset and page. Unsupported filters
-are errors, not silently ignored constraints. Up to four windows can be served
-in one query; window filters cannot be mixed with any other query mode.
-This isolates their shared deadline/allowances from permissive legacy dispatch.
-`thread_window: false` is inert; other non-boolean values reject.
+## Relay processing
 
-## Selection and bounds
+1. Refresh channel access from the writer. Inaccessible or nonexistent channels
+   return no rows or bounds. Within the host-derived community, require a
+   conversation-kind root in the requested channel. A root tombstone remains
+   valid; a missing or wrong-channel root serves an empty window without root aux.
+2. Select non-deleted replies at depths 1..`depth_limit`, matching `kinds`, with
+   both event and metadata channel equal to `#h`. Order by `created_at DESC,
+   id ASC`. Continuation keeps `created_at < until OR (created_at = until AND
+   id > before_id)`.
+3. Probe `limit + 1` after **all** predicates. Discard the sentinel before
+   response/aux processing. If it exists, set `has_more: true` and take
+   `next_cursor` from the last retained raw candidate, before reconstruction.
+   Otherwise return `has_more: false, next_cursor: null`. A damaged reply can
+   consume a slot and become the cursor without being delivered; other
+   reconstruction errors fail the request.
+4. If requested, expand the root and retained reconstructed replies: reactions
+   (7), deletions (5/9005), edits (40003), then deletions of those aux IDs.
+   Preserve original signatures and deduplicate by ID. Apply reader access to
+   every event, including channel-less deletions. Deleted aux payloads are
+   omitted but their IDs remain targets for the second hop. Drain each hop
+   with raw cursors; a damaged live aux event fails rather than implying EOF.
+5. Refresh writer access before signing. Revoked access to the requested
+   channel returns no rows or bounds; any other access-set change returns a
+   retryable error. Append exactly one bounds event per served window, including
+   empty and exhausted windows. Root, aux and bounds do not consume `limit`.
 
-After fresh writer access authorization, select replies under the given root,
-within the host-bound community and channel, with depth 1..depth_limit,
-matching kinds and not deleted. Both metadata and event channel must match.
-The root must be a conversation row kind in that community/channel; a root tombstone remains a valid
-anchor. A nonexistent or wrong-channel root on an accessible channel yields a
-served empty window, without expanding root aux.
+## Bounds: kind 39007
 
-The total order is:
-
-```sql
-ORDER BY tm.event_created_at DESC, tm.event_id ASC
--- continuation:
-tm.event_created_at < $ts
-OR (tm.event_created_at = $ts AND tm.event_id > $id)
-```
-
-Probe `limit + 1` **after** all predicates, discard the sentinel, capture the
-last retained raw candidate before reconstruction. If the probe found another
-row, `has_more` is true and `next_cursor` is that raw scan position. Otherwise
-`has_more` is false and `next_cursor` is null. A damaged reply may be skipped;
-it still consumes a scan slot and can be the cursor. Other reconstruction
-errors fail the request. The sentinel never reaches the response or closure.
-Neither row count nor the last delivered row is a pagination authority.
-
-## Auxiliary closure and bounded work
-
-When requested, expand root and retained reconstructed reply IDs (never the
-sentinel): reactions 7, deletions 5/9005, edits 40003; then deletions 5/9005 of
-those aux IDs. Deleted aux payloads are not delivered, but their raw IDs are
-retained for deletion-of-aux discovery. Original signed events remain intact;
-deduplicate by ID. Channel-less authorized deletions remain eligible.
-
-Aux selection uses raw `limit + 1` probes and raw cursors. Failure to reconstruct
-a live auxiliary event is an error, **not** a short successful page or EOF.
-Thus 1,001 matches with one damaged row in the first 1,000 cannot hide the older
-edit/deletion. The legacy generic aux helper is unchanged.
-
-Budgets: 1,000 raw candidates/aux page, 200 targets/SQL query, 64 SQL aux queries
-and 8,192 raw aux candidates (including tombstones and repeated cross-batch
-matches and probes) across both hops and all windows per query; 8 MiB
-serialized events across the query. Retries spend the same allowances;
-corruption and exhausted allowances do not trigger fallback.
-An 8-second upper deadline spans fresh access lookups, pool waits, selection,
-closure, fallback, final access checks and signing for all windows in one query.
-Selection and auxiliary SQL use transaction-local 4-second statement and
-1-second lock timeouts, never leaked to pooled legacy callers. Authorization
-uses the ordinary writer pool's configured budgets (by default, 5-second lock
-and 3-second pool-acquisition timeouts); these can expire before eight seconds.
-Pool, statement and lock timeouts return retryable HTTP 503 without bounds, as
-does the outer deadline. No minimum wait or exact eight-second response time
-is promised. Any cap/deadline/required-closure/signing failure returns an error
-and no successful partial response or bounds. Query-entry authentication
-retains its existing budgets.
-
-## Signed bounds: kind 39007
-
-Exactly one per successfully served window, including empty/exhausted pages:
+Bounds are query-time metadata, never stored. Client submissions MUST be
+rejected at ingest. Tags are exactly one `d`, one `h`, one `e`:
 
 ```jsonc
 {
   "kind": 39007,
   "pubkey": "<relay identity>",
   "tags": [
-    ["d", "tw:1:<binding sha256 lowercase hex>"],
+    ["d", "tw:1:<binding SHA-256 lowercase hex>"],
     ["h", "<canonical channel UUID>"],
     ["e", "<lowercase root id>"]
   ],
@@ -122,112 +99,88 @@ Exactly one per successfully served window, including empty/exhausted pages:
 }
 ```
 
-Tag cardinality is exact: one d, one h, one e, nothing else. Synthesized at query
-time, never persisted; client submission is rejected through shared ingest.
-`next_cursor == null` iff exhausted. Bind the entire normalized response
-contract with SHA-256 over UTF-8 compact JSON of this **ordered array**:
+The binding hashes UTF-8 compact JSON of this ordered array, without whitespace
+or a trailing newline, using decimal integers and JSON booleans:
 
 ```jsonc
-["tw",1,"older","<normalized host>","<reader pubkey hex>","<channel>","<root>",50,100,[9,40002],null,true]
-// slots: discriminator, version, direction, host, reader, channel, root, limit, depth,
-//        sorted unique kinds, request cursor, include_aux
-// cursor slot: null for head, otherwise [<integer seconds>,"<lowercase id>"]
+["tw",1,"older","<host>","<reader hex>","<channel>","<root>",50,100,[9,40002],null,true]
+// slots: discriminator, version, direction, host, reader, channel, root,
+//        limit, depth, sorted unique kinds, request cursor, include_aux
+// cursor: null for head, otherwise [<seconds>,"<lowercase id>"]
 ```
 
-No whitespace, no trailing newline, ordinary decimal integers, boolean JSON
-literals. The d tag is `tw:1:` followed by the lowercase digest. The host is the server-resolved
-normalized request authority (see `buzz-core/src/tenant.rs`); reader is the
-authenticated lowercase public key. Neither comes from filter fields. Binding
-both prevents reuse across colliding tenant scopes or readers with different
-aux access on the same relay. Clients must verify the **expected relay signer**
-and signature, exact host/reader/scope/binding, version,
-direction and cursor invariant. Missing or invalid bounds prove neither
-exhaustion nor feature support. Old relays can ignore the flag and serve old
-history: clients MUST NOT present that as a confirmed newest page.
-A later client may explicitly fall back for an unsupported relay, but must
-restart with clean **legacy** pagination state. Never reuse a descending cursor
-as a legacy forward cursor, or downgrade signature/binding, authorization,
-timeout, corruption or incomplete-closure errors to compatibility fallback.
-This relay-only change implements no client fallback.
+Host is the server-resolved normalized authority (`buzz-core/src/tenant.rs`);
+reader is the authenticated lowercase pubkey. Neither comes from filter fields.
 
-## Authorization and consistency
+Clients MUST verify the expected relay signer and signature, exact tags and
+request binding, version, direction, and `next_cursor == null` iff exhausted.
+Only validated bounds determine exhaustion; row count and the last delivered
+row do not. Echo `next_cursor` as `until` / `before_id` to continue.
 
-Refresh channel access from the writer for every page, before selection and
-before issuing bounds; check every delivered row/aux event. Inaccessible or
-nonexistent channels retain ordinary access-scoped output: no rows or bounds.
-Revocation during a page cannot produce authoritative empty bounds. Access
-changes affecting auxiliary channels cause a retryable error.
+An old relay may ignore the flag and return oldest-first history without
+bounds. Missing/invalid bounds prove neither exhaustion nor support. An
+explicit compatibility fallback must restart with clean legacy state, never
+reuse a descending cursor. Signature/binding, authorization, timeout, corruption
+and incomplete-closure failures MUST NOT trigger compatibility fallback.
+This extension implements no client opt-in or fallback.
 
-Cursor pages reuse the channel-window upper-bound replica proof, including
-terminal pages. They do not use the forward-thread last-row/newest assumption.
-The proved REPEATABLE READ replica transaction is retained through rows and
-aux closure. Mid-request replica failure permanently degrades to the writer;
-the bridge discards already collected aux and restarts both hops once from
-the original targets, spending the same query/scan/byte/deadline allowances.
-Resuming only at a pre-failure aux cursor could omit newer writer edits. Writer
-follow-ups use a pool, not one globally pinned snapshot. No snapshot isolation
-is promised across history pages or after degradation. Root/aux updates can
-advance while a writer request runs. Existing replica deletion-lag semantics
-apply: the floor proof guarantees insertion coverage, not update freshness.
-Reply insertion coverage does **not** cover more recent aux timestamps or
-channel-less deletions; aux is complete within the serving snapshot, not
-necessarily current on the writer. Aux queries never inherit reply time bounds.
-Fresh writer authorization checks are point-in-time observations, not a lease
-preventing revocation after the last check.
-Head routing remains the existing default-off bounded-staleness policy; this
-change adds no setting and enables none.
+## Consistency and limits
 
-## Index deployment
+Cursor pages use NIP-CW's upper-bound replica proof, including terminal pages,
+retaining the proved REPEATABLE READ transaction through rows and aux. Reader
+failure degrades permanently to the writer and restarts both aux hops once
+from the original targets, discarding collected aux but retaining spent budgets.
+Writer follow-ups use a pool, not a pinned snapshot; no cross-page snapshot is
+promised. Reply insertion coverage does not prove freshness of edits, deletions
+or newer aux. Aux is complete within the serving snapshot and never inherits
+reply time bounds. Writer authorization is a point-in-time check, not a lease.
+Head routing keeps the existing default-off bounded-staleness policy.
 
-Both desired-state schema and additive migration 0048 define:
+Limits are shared across all windows and retries in one query:
 
-```sql
-CREATE INDEX idx_thread_metadata_window
-ON thread_metadata (community_id, root_event_id, event_created_at DESC, event_id ASC);
-```
+| Resource | Limit |
+|---|---|
+| Aux scan | 1,000 raw candidates/page; 200 targets/SQL query |
+| Aux work | 64 SQL queries; 8,192 raw candidates, including tombstones, repeated matches and probes |
+| Serialized response | 8 MiB |
+| Whole request after authentication | 8 seconds, including access, pool waits, fallback and signing |
+| Selection/aux transaction | 4-second statement timeout; 1-second lock timeout |
 
-`thread_metadata` is not partitioned. Keep the existing indexes. Reverse
-scanning this index gives ASC/DESC, not the legacy ASC/ASC; measure legacy
-separately before adding another index.
+Authorization uses ordinary writer-pool budgets (defaults: 5-second lock and
+3-second acquisition timeout). Pool, statement, lock and outer timeouts return
+retryable HTTP 503; no exact wait is promised. Exhausted budgets, required
+closure or signing failures return an error without partial rows or bounds.
+Corruption and exhausted budgets do not trigger replica fallback. Transaction
+settings do not leak to legacy callers; query-entry authentication is unchanged.
 
-For a populated production database, **before upgrading the relay**, execute
-this standalone statement (not inside a transaction) through the operator's
-approved schema-change workflow, coordinated with community deletion/schema
-maintenance:
+## Deployment
+
+Desired-state schema and additive migration 0048 add an index on the
+unpartitioned `thread_metadata`. On populated databases, prebuild it through
+the approved schema-change workflow before upgrading, outside a transaction
+and coordinated with community deletion/schema maintenance:
 
 ```sql
 CREATE INDEX CONCURRENTLY idx_thread_metadata_window
 ON public.thread_metadata (community_id, root_event_id, event_created_at DESC, event_id ASC);
 ```
 
-Inspect `pg_index.indisvalid`, `indisready`, `indislive` and
-`pg_get_indexdef(indexrelid)`. A failed concurrent build can leave an invalid
-same-name index: diagnose, then drop/rebuild it concurrently before upgrading.
-Do not use IF NOT EXISTS to disguise that failure. Migration 0048 validates
-the exact definition and validity, even when the index already exists. A
-prebuilt index takes the catalog-only path: no `CREATE INDEX`, since even
-`IF NOT EXISTS` requests a writer-conflicting lock before checking existence.
-Fresh small installs create it transactionally. Startup limits lock acquisition to
-one second and the build to five seconds; larger/busy installs intentionally
-fail deployment rather than hold an unbounded write-blocking lock. Prebuild,
-then retry. Desired-state deployments should likewise prebuild on brownfield
-instances, inspect their plan and verify the catalog after apply.
+Verify `pg_get_indexdef`, `indisvalid`, `indisready`, and `indislive`. Diagnose
+and rebuild failed same-name indexes; do not hide them with `IF NOT EXISTS`.
+Migration 0048 validates the definition and skips CREATE for a valid prebuild
+(even `CREATE INDEX IF NOT EXISTS` takes a writer-conflicting lock). Fresh
+installs build transactionally with 1-second lock/5-second statement limits;
+busy or larger installs must prebuild and retry. Inspect desired-state plans
+and verify the catalog after apply too.
 
-Measure representative `EXPLAIN (ANALYZE, BUFFERS)` for head, deep cursor,
-same-second, selective kind/depth and legacy pages; record index size and write
-cost. DB spans `get_thread_window` / `thread_window_aux`, existing pool metrics,
-route labels `thread_window_head` / `thread_window_cursor`, and
-`buzz_thread_window_response_bytes` separate pool, SQL, aux and response costs.
+Keep existing indexes. Reverse scanning this index is ASC/DESC, not legacy
+ASC/ASC. Before rollout, measure representative head, deep, same-second,
+selective kind/depth and legacy plans, index size and write cost; validate the
+actual replica topology. Spans `get_thread_window` / `thread_window_aux`, route
+labels `thread_window_head` / `thread_window_cursor`, pool metrics and
+`buzz_thread_window_response_bytes` expose query and response costs.
 
-
-### Rollback
-
-Keep the additive index when rolling back the binary; old SQL does not need
-it removed. Run old relays with `BUZZ_AUTO_MIGRATE=false` (the default): an old
-embedded SQLx migrator rejects the newer migration-ledger version 48 with
-`VersionMissing`. Do **not** delete ledger rows or rewrite checksums to hide
-this. Roll forward to a capable migrator for future schema changes. Actual
-old-binary boot/read/write verification and production-size build/write-cost
-measurements remain rollout gates, not consequences proved by additive DDL.
-The [local validation report](../bridge-thread-window-validation.md) records
-this candidate's tests, measured costs, rollback exercise and remaining gaps.
+For binary rollback, keep the index and set `BUZZ_AUTO_MIGRATE=false` (default).
+Old embedded SQLx migrators reject ledger version 48 with `VersionMissing`.
+Never delete ledger rows or rewrite checksums; roll forward for schema changes.
+Verify old-binary boot/read/write on the upgraded schema before deployment.

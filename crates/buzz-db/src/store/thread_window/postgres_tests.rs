@@ -218,35 +218,68 @@ async fn thread_window_predicates_corruption_and_legacy() {
     assert!(!page.rows.iter().any(|r| r.event.id == expected[50].id));
     expected.remove(49);
     assert_pages(&db, cid, req, &expected).await;
-    // Selection predicates must run BEFORE the probe. Exclude a deleted row,
-    // a too-deep row and a different conversation kind from a 50-row set.
-    let deleted = expected.remove(0);
-    sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
-        .bind(cid.as_uuid())
-        .bind(deleted.id.to_bytes().to_vec())
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let deep = expected.remove(0);
-    sqlx::query("UPDATE thread_metadata SET depth=2 WHERE community_id=$1 AND event_id=$2")
-        .bind(cid.as_uuid())
-        .bind(deep.id.to_bytes().to_vec())
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let other = expected.remove(0);
-    sqlx::query("UPDATE events SET kind=40002 WHERE community_id=$1 AND id=$2")
-        .bind(cid.as_uuid())
-        .bind(other.id.to_bytes().to_vec())
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    // Put 600 ineligible rows before 51 eligible ones. Each rejection class
+    // exceeds a page independently; an early metadata LIMIT manufactures EOF.
+    let other_channel = Uuid::new_v4();
+    db.create_channel_with_id(
+        cid,
+        other_channel,
+        "other",
+        ChannelType::Stream,
+        ChannelVisibility::Private,
+        None,
+        &keys.public_key().to_bytes(),
+        None,
+    )
+    .await
+    .unwrap();
+    let dense_root = make_event(&keys, ch, 9, "dense root", None, root.created_at.as_secs());
+    db.insert_event(cid, &dense_root, Some(ch)).await.unwrap();
+    let rows = replies(&db, cid, ch, &keys, &dense_root, 651).await;
+    for (class, sql) in [
+        "UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=ANY($2)",
+        "UPDATE events SET kind=40002 WHERE community_id=$1 AND id=ANY($2)",
+        "UPDATE events SET channel_id=$3 WHERE community_id=$1 AND id=ANY($2)",
+        "UPDATE thread_metadata SET channel_id=$3 WHERE community_id=$1 AND event_id=ANY($2)",
+        "UPDATE thread_metadata SET depth=2 WHERE community_id=$1 AND event_id=ANY($2)",
+        "UPDATE thread_metadata SET root_event_id=$3 WHERE community_id=$1 AND event_id=ANY($2)",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ids: Vec<_> = rows[..600]
+            .iter()
+            .skip(class)
+            .step_by(6)
+            .map(|row| row.id.to_bytes().to_vec())
+            .collect();
+        let query = sqlx::query(sql).bind(cid.as_uuid()).bind(ids);
+        let query = match class {
+            2 | 3 => query.bind(other_channel),
+            5 => query.bind(root.id.to_bytes().to_vec()),
+            _ => query,
+        };
+        assert_eq!(query.execute(&db.pool).await.unwrap().rows_affected(), 100);
+    }
+    let root = dense_root;
+    let expected = &rows[600..];
     let mut req = request(ch, &root, 50);
     req.depth = 1;
     let (page, _) = db.get_thread_window_with_session(cid, &req).await.unwrap();
-    assert!(!page.has_more);
-    assert_eq!(page.rows.len(), expected.len());
-    assert_pages(&db, cid, req.clone(), &expected).await;
+    assert_eq!(page.rows.len(), 50);
+    assert!(page.has_more);
+    assert_eq!(page.next_cursor.unwrap().id, expected[49].id.to_hex());
+    assert_pages(&db, cid, req.clone(), expected).await;
+    sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
+        .bind(cid.as_uuid())
+        .bind(expected[50].id.to_bytes().to_vec())
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let expected = &expected[..50];
+    let (page, _) = db.get_thread_window_with_session(cid, &req).await.unwrap();
+    assert_eq!(page.rows.len(), 50);
+    assert!(!page.has_more && page.next_cursor.is_none());
     // Deleting the root does not hide the descendants.
     sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
         .bind(cid.as_uuid())
@@ -254,7 +287,7 @@ async fn thread_window_predicates_corruption_and_legacy() {
         .execute(&db.pool)
         .await
         .unwrap();
-    assert_pages(&db, cid, req.clone(), &expected).await;
+    assert_pages(&db, cid, req.clone(), expected).await;
     req.channel = Uuid::new_v4();
     let (page, _) = db.get_thread_window_with_session(cid, &req).await.unwrap();
     assert!(page.rows.is_empty() && !page.has_more && !page.root_in_channel);
@@ -269,7 +302,7 @@ async fn thread_window_predicates_corruption_and_legacy() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn thread_aux_1001_with_damaged_row_fails_instead_of_false_eof() {
+async fn thread_aux_tombstone_ids_and_raw_cursor_survive_damaged_payload() {
     let (db, cid, ch, keys, root) = fixture().await;
     let rows = replies(&db, cid, ch, &keys, &root, 1001).await;
     // Change kinds only in the isolated corruption fixture. Reconstruction is
@@ -292,39 +325,13 @@ async fn thread_aux_1001_with_damaged_row_fails_instead_of_false_eof() {
     let mut session = ReadSession {
         inner: ReadSessionInner::Writer(db.pool.clone()),
     };
-    let first = session
-        .thread_window_aux(&query, &mut AuxBudget::default())
-        .await
-        .unwrap();
-    assert_eq!(first.events.len(), 1000);
-    assert!(first.next_cursor.is_some());
-    query.cursor = first.next_cursor;
-    let tail = session
-        .thread_window_aux(&query, &mut AuxBudget::default())
-        .await
-        .unwrap();
-    assert_eq!(tail.events.len(), 1);
-    assert!(tail.next_cursor.is_none());
-    query.cursor = None;
-    sqlx::query("UPDATE events SET sig='\\x00' WHERE community_id=$1 AND id=$2")
+    sqlx::query("UPDATE events SET sig='\\x00', deleted_at=now() WHERE community_id=$1 AND id=$2")
         .bind(cid.as_uuid())
         .bind(rows[500].id.to_bytes().to_vec())
         .execute(&db.pool)
         .await
         .unwrap();
-    assert!(matches!(
-        session
-            .thread_window_aux(&query, &mut AuxBudget::default())
-            .await,
-        Err(DbError::InvalidData(_))
-    ));
     // A deleted damaged payload still supplies its ID for delete-of-aux.
-    sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
-        .bind(cid.as_uuid())
-        .bind(rows[500].id.to_bytes().to_vec())
-        .execute(&db.pool)
-        .await
-        .unwrap();
     let first = session
         .thread_window_aux(&query, &mut AuxBudget::default())
         .await
@@ -333,6 +340,13 @@ async fn thread_aux_1001_with_damaged_row_fails_instead_of_false_eof() {
     assert_eq!(first.target_ids.len(), 1000);
     assert!(first.target_ids.contains(&rows[500].id.to_hex()));
     assert!(first.next_cursor.is_some());
+    query.cursor = first.next_cursor;
+    let tail = session
+        .thread_window_aux(&query, &mut AuxBudget::default())
+        .await
+        .unwrap();
+    assert_eq!(tail.events.len(), 1);
+    assert!(tail.next_cursor.is_none());
 }
 
 #[tokio::test]

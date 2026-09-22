@@ -158,38 +158,21 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
 async fn migration_schema_thread_window_prebuild_validation_and_old_ledger() {
     let admin = PgPool::connect(&admin_url().await).await.unwrap();
     let (pool, name) = create_scratch_db_through(&admin, "tw_prebuild", Some(47)).await;
-    // Brownfield same-name/wrong-order must not be accepted by IF NOT EXISTS.
-    sqlx::query("CREATE INDEX idx_thread_metadata_window ON thread_metadata (community_id,root_event_id,event_created_at ASC,event_id ASC)")
-        .execute(&pool).await.unwrap();
-    let error = migration::run_migrations(&pool).await.unwrap_err();
-    assert!(
-        error.to_string().contains("invalid or wrong definition"),
-        "must reject the catalog shape, not merely time out: {error}"
-    );
-    let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(version, 47);
-    sqlx::query("DROP INDEX CONCURRENTLY idx_thread_metadata_window")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("CREATE INDEX CONCURRENTLY idx_thread_metadata_window ON thread_metadata (community_id,root_event_id,event_created_at DESC,event_id ASC)")
-        .execute(&pool).await.unwrap();
-    // An invalid concurrent-build remnant is also refused. This mutation is
-    // confined to a disposable test DB on the lane's superuser instance.
-    sqlx::query("UPDATE pg_index SET indisvalid=false WHERE indexrelid='idx_thread_metadata_window'::regclass")
-        .execute(&pool).await.unwrap();
-    let error = migration::run_migrations(&pool).await.unwrap_err();
-    assert!(
-        error.to_string().contains("invalid or wrong definition"),
-        "must reject the catalog shape, not merely time out: {error}"
-    );
-    sqlx::query("DROP INDEX CONCURRENTLY idx_thread_metadata_window")
-        .execute(&pool)
-        .await
-        .unwrap();
+    for setup in [
+        "CREATE INDEX idx_thread_metadata_window ON thread_metadata (community_id,root_event_id,event_created_at ASC,event_id ASC)",
+        // Simulate an invalid concurrent-build remnant only in this disposable superuser DB.
+        "CREATE INDEX idx_thread_metadata_window ON thread_metadata (community_id,root_event_id,event_created_at DESC,event_id ASC); \
+         UPDATE pg_index SET indisvalid=false WHERE indexrelid='idx_thread_metadata_window'::regclass",
+    ] {
+        sqlx::raw_sql(setup).execute(&pool).await.unwrap();
+        let error = migration::run_migrations(&pool).await.unwrap_err();
+        assert!(error.to_string().contains("invalid or wrong definition"),
+            "must reject catalog shape, not merely time out: {error}");
+        let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(version, 47);
+        sqlx::query("DROP INDEX CONCURRENTLY idx_thread_metadata_window").execute(&pool).await.unwrap();
+    }
     sqlx::query("CREATE INDEX CONCURRENTLY idx_thread_metadata_window ON thread_metadata (community_id,root_event_id,event_created_at DESC,event_id ASC)")
         .execute(&pool).await.unwrap();
     let oid: i64 = sqlx::query_scalar("SELECT 'idx_thread_metadata_window'::regclass::oid::bigint")

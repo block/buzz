@@ -32,13 +32,7 @@ impl Fixture {
         let mut state = (*state).clone();
         // Use production after_connect policy (floor guard, isolation and
         // session timeouts), not raw SQLx pools that mask deployed failures.
-        state.db = buzz_db::Db::new(&buzz_db::DbConfig {
-            database_url: crate::test_support::database_url(),
-            max_connections: 5,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+        state.db = production_db(buzz_db::DbConfig::default()).await;
         Arc::make_mut(&mut state.config).require_auth_token = true;
         state.nip98_replay = Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(
             state.redis_pool.clone(),
@@ -53,20 +47,7 @@ impl Fixture {
             .id;
         let channel = Uuid::new_v4();
         let keys = Keys::generate();
-        state
-            .db
-            .create_channel_with_id(
-                community,
-                channel,
-                "thread-window",
-                ChannelType::Stream,
-                ChannelVisibility::Private,
-                None,
-                &keys.public_key().to_bytes(),
-                None,
-            )
-            .await
-            .unwrap();
+        private_channel(&state.db, community, channel, &keys).await;
         let root = event(&keys, channel, 9, "root", None, Timestamp::now().as_secs());
         state
             .db
@@ -92,6 +73,27 @@ impl Fixture {
     }
     async fn post(&self, key: &Keys, path: &str, body: Value) -> (StatusCode, Value) {
         post(self.state.clone(), &self.host, key, path, body).await
+    }
+    async fn query(&self, filter: &Value) -> Value {
+        let (status, body) = self.post(&self.keys, "/query", json!([filter])).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+    async fn tombstone(&self, event: &Event) {
+        sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
+            .bind(self.community.as_uuid())
+            .bind(event.id.to_bytes().to_vec())
+            .execute(&self.pool)
+            .await
+            .unwrap();
+    }
+    // Bulk budget fixtures need structurally readable rows, not valid signatures.
+    async fn copy_aux(&self, source: &Event, count: i32, content: &str) {
+        sqlx::query("INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+            SELECT community_id,decode(md5(n::text)||md5(('aux'||n)::text),'hex'),pubkey,created_at,kind,tags,$4,sig,received_at,channel_id \
+            FROM events CROSS JOIN generate_series(1,$3) n WHERE community_id=$1 AND id=$2")
+            .bind(self.community.as_uuid()).bind(source.id.to_bytes().to_vec())
+            .bind(count).bind(content).execute(&self.pool).await.unwrap();
     }
     async fn reply(&self, n: usize) -> Event {
         let reply = event(
@@ -130,7 +132,7 @@ impl Fixture {
     async fn aux(&self, kind: u16, target: &Event, channel: Option<Uuid>) -> Event {
         let aux = event(
             &self.keys,
-            self.channel,
+            channel.unwrap_or(self.channel),
             kind,
             &format!("aux {}", Uuid::new_v4()),
             Some(target),
@@ -144,6 +146,10 @@ impl Fixture {
         aux
     }
     fn bounds(&self, response: &Value, filter: &Value) -> Value {
+        self.bounds_on_host(response, filter, &self.host)
+    }
+    fn bounds_on_host(&self, response: &Value, filter: &Value, host: &str) -> Value {
+        let request = Request::parse(filter).unwrap();
         let bounds = response
             .as_array()
             .unwrap()
@@ -158,18 +164,51 @@ impl Fixture {
         assert_eq!(
             tags,
             json!([
-                [
-                    "d",
-                    Request::parse(filter)
-                        .unwrap()
-                        .binding(&self.host, &self.keys.public_key().to_hex())
-                ],
-                ["h", self.channel.to_string()],
-                ["e", self.root.id.to_hex()]
+                ["d", request.binding(host, &self.keys.public_key().to_hex())],
+                ["h", request.channel.to_string()],
+                ["e", request.root]
             ])
         );
-        serde_json::from_str(&event.content).unwrap()
+        let content: Value = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(content["version"], 1);
+        assert_eq!(content["direction"], "older");
+        assert_eq!(
+            content["has_more"].as_bool().unwrap(),
+            !content["next_cursor"].is_null()
+        );
+        content
     }
+}
+
+async fn production_db(mut config: buzz_db::DbConfig) -> buzz_db::Db {
+    config.database_url = crate::test_support::database_url();
+    config.max_connections = 5;
+    buzz_db::Db::new(&config).await.unwrap()
+}
+
+async fn private_channel(db: &buzz_db::Db, community: CommunityId, channel: Uuid, owner: &Keys) {
+    db.create_channel_with_id(
+        community,
+        channel,
+        "thread-window",
+        ChannelType::Stream,
+        ChannelVisibility::Private,
+        None,
+        &owner.public_key().to_bytes(),
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+fn ids(response: &Value, kind: Option<u16>) -> Vec<&str> {
+    response
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| kind.is_none_or(|kind| e["kind"] == kind))
+        .map(|e| e["id"].as_str().unwrap())
+        .collect()
 }
 
 fn event(
@@ -236,8 +275,7 @@ async fn post(
 async fn thread_window_real_query_signed_bounds_and_sentinel_aux() {
     let f = Fixture::new().await;
     let filter = f.filter();
-    let (status, empty) = f.post(&f.keys, "/query", json!([filter])).await;
-    assert_eq!(status, StatusCode::OK, "{empty}");
+    let empty = f.query(&filter).await;
     assert_eq!(f.bounds(&empty, &filter)["has_more"], false);
     let mut replies = Vec::new();
     for n in 0..51 {
@@ -246,51 +284,31 @@ async fn thread_window_real_query_signed_bounds_and_sentinel_aux() {
     let sentinel_aux = f.aux(7, &replies[0], Some(f.channel)).await;
     let reaction = f.aux(7, &replies[50], Some(f.channel)).await;
     let deletion = f.aux(5, &reaction, None).await;
-    sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
-        .bind(f.community.as_uuid())
-        .bind(reaction.id.to_bytes().to_vec())
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    f.tombstone(&reaction).await;
     let root_edit = f.aux(40003, &f.root, Some(f.channel)).await;
-    let (status, page) = f.post(&f.keys, "/query", json!([filter])).await;
-    assert_eq!(status, StatusCode::OK, "{page}");
-    let rows = page
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|e| e["kind"] == 9)
-        .collect::<Vec<_>>();
+    let page = f.query(&filter).await;
+    let rows = ids(&page, Some(9));
     assert_eq!(rows.len(), 50);
-    assert_eq!(rows[0]["id"], replies[50].id.to_hex());
-    assert_eq!(rows[49]["id"], replies[1].id.to_hex());
-    let ids = page
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["id"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert!(!ids.contains(&sentinel_aux.id.to_hex().as_str()));
-    assert!(!ids.contains(&reaction.id.to_hex().as_str()));
-    assert!(ids.contains(&deletion.id.to_hex().as_str()));
-    assert!(ids.contains(&root_edit.id.to_hex().as_str()));
+    assert_eq!(rows[0], replies[50].id.to_hex());
+    assert_eq!(rows[49], replies[1].id.to_hex());
+    let all = ids(&page, None);
+    for (event, present) in [
+        (&sentinel_aux, false),
+        (&reaction, false),
+        (&deletion, true),
+        (&root_edit, true),
+    ] {
+        assert_eq!(all.contains(&event.id.to_hex().as_str()), present);
+    }
     let bounds = f.bounds(&page, &filter);
     assert_eq!(bounds["has_more"], true);
     assert_eq!(bounds["next_cursor"]["id"], replies[1].id.to_hex());
     let mut next = filter.clone();
     next["until"] = bounds["next_cursor"]["created_at"].clone();
     next["before_id"] = bounds["next_cursor"]["id"].clone();
-    let (status, tail) = f.post(&f.keys, "/query", json!([next])).await;
-    assert_eq!(status, StatusCode::OK, "{tail}");
+    let tail = f.query(&next).await;
     assert_eq!(f.bounds(&tail, &next)["next_cursor"], Value::Null);
-    assert_eq!(
-        tail.as_array()
-            .unwrap()
-            .iter()
-            .filter(|e| e["kind"] == 9)
-            .count(),
-        1
-    );
+    assert_eq!(ids(&tail, Some(9)), [replies[0].id.to_hex()]);
     // Actual mobile sentinel + unbounded depth remain valid ONLY in legacy.
     // Both cursor spellings and absent/false opt-in preserve ASC/ASC and no bounds.
     for flag in [None, Some(false)] {
@@ -304,15 +322,13 @@ async fn thread_window_real_query_signed_bounds_and_sentinel_aux() {
             if let Some(flag) = flag {
                 legacy["thread_window"] = json!(flag);
             }
-            let (status, old) = f.post(&f.keys, "/query", json!([legacy])).await;
-            assert_eq!(status, StatusCode::OK, "{old}");
+            let old = f.query(&legacy).await;
             assert_eq!(old[0]["id"], replies[0].id.to_hex());
             assert_eq!(old[1]["id"], replies[1].id.to_hex());
             assert_eq!(old.as_array().unwrap().len(), 2);
             legacy[ts_key] = json!(replies[1].created_at.as_secs());
             legacy[id_key] = json!(replies[1].id.to_hex());
-            let (status, next) = f.post(&f.keys, "/query", json!([legacy])).await;
-            assert_eq!(status, StatusCode::OK, "{next}");
+            let next = f.query(&legacy).await;
             assert_eq!(next[0]["id"], replies[2].id.to_hex());
             assert_eq!(next[1]["id"], replies[3].id.to_hex());
             assert_eq!(next.as_array().unwrap().len(), 2);
@@ -338,20 +354,7 @@ async fn thread_window_real_query_denial_revocation_and_colliding_tenants() {
         .await
         .unwrap()
         .id;
-    f.state
-        .db
-        .create_channel_with_id(
-            other,
-            f.channel,
-            "same-channel",
-            ChannelType::Stream,
-            ChannelVisibility::Private,
-            None,
-            &f.keys.public_key().to_bytes(),
-            None,
-        )
-        .await
-        .unwrap();
+    private_channel(&f.state.db, other, f.channel, &f.keys).await;
     // Same channel ID, same accessible reader, absent root in the other tenant.
     let (status, other_page) = post(
         f.state.clone(),
@@ -363,22 +366,11 @@ async fn thread_window_real_query_denial_revocation_and_colliding_tenants() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(other_page.as_array().unwrap().len(), 1);
-    let other_bounds: Event = serde_json::from_value(other_page[0].clone()).unwrap();
-    other_bounds.verify().unwrap();
-    assert_eq!(other_bounds.pubkey, f.state.relay_keypair.public_key());
-    assert!(other_bounds.tags.iter().any(|t| t.as_slice()
-        == [
-            "d",
-            &Request::parse(&filter)
-                .unwrap()
-                .binding(&other_host, &f.keys.public_key().to_hex())
-        ]));
     assert_eq!(
-        serde_json::from_str::<Value>(&other_bounds.content).unwrap()["has_more"],
+        f.bounds_on_host(&other_page, &filter, &other_host)["has_more"],
         false
     );
-    let (status, _) = f.post(&f.keys, "/query", json!([filter])).await;
-    assert_eq!(status, StatusCode::OK);
+    f.query(&filter).await;
     // Prime the usual cached access, then revoke directly on the writer without
     // cache invalidation (the shape of cross-node delayed invalidation).
     assert!(f
@@ -410,7 +402,7 @@ async fn thread_window_real_query_denial_revocation_and_colliding_tenants() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn thread_window_real_query_validation_forgery_and_aux_failure() {
+async fn thread_window_real_query_validation_forgery_and_sql_failure() {
     let f = Fixture::new().await;
     for (key, val) in [
         ("until", json!(1)),
@@ -442,16 +434,6 @@ async fn thread_window_real_query_validation_forgery_and_aux_failure() {
         "{status}: {body}"
     );
     assert!(body.to_string().contains("relay-only"), "{body}");
-    let aux = f.aux(40003, &f.root, Some(f.channel)).await;
-    sqlx::query("UPDATE events SET sig='\\x00' WHERE community_id=$1 AND id=$2")
-        .bind(f.community.as_uuid())
-        .bind(aux.id.to_bytes().to_vec())
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    let (status, body) = f.post(&f.keys, "/query", json!([f.filter()])).await;
-    assert!(status.is_server_error(), "{status}: {body}");
-    assert!(!body.is_array());
     // A required SQL read blocked by DDL must error, not sign empty bounds.
     let mut lock = f.pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE thread_metadata IN ACCESS EXCLUSIVE MODE")
@@ -480,74 +462,41 @@ async fn thread_window_scope_roots_and_aggregate_budgets() {
         let (status, body) = f.post(&f.keys, "/query", json!([filter, other])).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
-    // A private/author-gated non-conversation root cannot authorize aux.
-    let hidden = event(
-        &f.keys,
-        f.channel,
-        30300,
-        "private root",
-        None,
-        f.root.created_at.as_secs(),
-    );
-    f.state
-        .db
-        .insert_event(f.community, &hidden, Some(f.channel))
-        .await
-        .unwrap();
-    f.aux(40003, &hidden, Some(f.channel)).await;
-    let mut hidden_filter = filter.clone();
-    hidden_filter["#e"] = json!([hidden.id.to_hex()]);
-    let (status, body) = f.post(&f.keys, "/query", json!([hidden_filter])).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        body.as_array().unwrap().len(),
-        1,
-        "hidden-root aux must not leak"
-    );
-    // A root from another channel cannot influence rows, probe or root aux.
+    // Neither a private non-conversation root nor a root in another channel
+    // may authorize aux, even when the aux itself is in the requested channel.
     let other_channel = Uuid::new_v4();
-    f.state
-        .db
-        .create_channel_with_id(
-            f.community,
-            other_channel,
-            "other",
-            ChannelType::Stream,
-            ChannelVisibility::Private,
+    private_channel(&f.state.db, f.community, other_channel, &Keys::generate()).await;
+    for (channel, kind) in [(f.channel, 30300), (other_channel, 9)] {
+        let root = event(
+            &f.keys,
+            channel,
+            kind,
+            "hidden root",
             None,
-            &Keys::generate().public_key().to_bytes(),
-            None,
-        )
-        .await
-        .unwrap();
-    let other_root = event(
-        &f.keys,
-        other_channel,
-        9,
-        "other root",
-        None,
-        f.root.created_at.as_secs(),
-    );
-    f.state
-        .db
-        .insert_event(f.community, &other_root, Some(other_channel))
-        .await
-        .unwrap();
-    f.aux(40003, &other_root, Some(f.channel)).await;
-    hidden_filter["#e"] = json!([other_root.id.to_hex()]);
-    let (status, body) = f.post(&f.keys, "/query", json!([hidden_filter])).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body.as_array().unwrap().len(), 1);
+            f.root.created_at.as_secs(),
+        );
+        f.state
+            .db
+            .insert_event(f.community, &root, Some(channel))
+            .await
+            .unwrap();
+        f.aux(40003, &root, Some(f.channel)).await;
+        let mut hidden_filter = filter.clone();
+        hidden_filter["#e"] = json!([root.id.to_hex()]);
+        let body = f.query(&hidden_filter).await;
+        assert_eq!(
+            body.as_array().unwrap().len(),
+            1,
+            "hidden-root aux must not leak"
+        );
+        assert_eq!(f.bounds(&body, &hidden_filter)["has_more"], false);
+    }
 
     // Real bounded payloads: one 4.8 MiB page passes, two in the same request
     // exceed 8 MiB. A per-window (instead of per-query) ledger fails this test.
     let aux = f.aux(40003, &f.root, Some(f.channel)).await;
-    sqlx::query("INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
-        SELECT community_id,decode(md5(n::text)||md5(('payload'||n)::text),'hex'),pubkey,created_at,kind,tags,repeat('x',60000),sig,received_at,channel_id \
-        FROM events CROSS JOIN generate_series(1,80) n WHERE community_id=$1 AND id=$2")
-        .bind(f.community.as_uuid()).bind(aux.id.to_bytes().to_vec()).execute(&f.pool).await.unwrap();
-    let (status, one) = f.post(&f.keys, "/query", json!([filter])).await;
-    assert_eq!(status, StatusCode::OK, "{one}");
+    f.copy_aux(&aux, 80, &"x".repeat(60_000)).await;
+    f.query(&filter).await;
     let (status, two) = f.post(&f.keys, "/query", json!([filter, filter])).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{two}");
     assert!(two.to_string().contains("byte budget"));
@@ -558,10 +507,10 @@ async fn thread_window_scope_roots_and_aggregate_budgets() {
 async fn thread_window_router_aux_row_cap_and_corrupt_page() {
     let f = Fixture::new().await;
     let aux = f.aux(40003, &f.root, Some(f.channel)).await;
-    sqlx::query("INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
-        SELECT community_id,decode(md5(n::text)||md5(('aux'||n)::text),'hex'),pubkey,created_at,kind,tags,'fixture',sig,received_at,channel_id \
-        FROM events CROSS JOIN generate_series(1,8200) n WHERE community_id=$1 AND id=$2")
-        .bind(f.community.as_uuid()).bind(aux.id.to_bytes().to_vec()).execute(&f.pool).await.unwrap();
+    for n in 0..51 {
+        f.reply(n).await;
+    }
+    f.copy_aux(&aux, 8200, "fixture").await;
     let (status, body) = f.post(&f.keys, "/query", json!([f.filter()])).await;
     assert!(status.is_server_error(), "{status}: {body}");
     assert_eq!(body, json!({"error":"internal server error"}));
@@ -570,9 +519,9 @@ async fn thread_window_router_aux_row_cap_and_corrupt_page() {
         (SELECT id FROM events WHERE community_id=$1 AND kind=40003 ORDER BY created_at DESC,id ASC LIMIT 1001)")
         .bind(f.community.as_uuid()).execute(&f.pool).await.unwrap();
     // Positive control: the same 1,001 raw rows succeed before corruption.
-    let (status, complete) = f.post(&f.keys, "/query", json!([f.filter()])).await;
-    assert_eq!(status, StatusCode::OK, "{complete}");
-    assert_eq!(complete.as_array().unwrap().len(), 1002);
+    let complete = f.query(&f.filter()).await;
+    assert_eq!(complete.as_array().unwrap().len(), 1052);
+    assert_eq!(f.bounds(&complete, &f.filter())["has_more"], true);
     sqlx::query("UPDATE events SET sig='\\x00' WHERE community_id=$1 AND id = \
         (SELECT id FROM events WHERE community_id=$1 AND kind=40003 ORDER BY created_at DESC,id ASC OFFSET 500 LIMIT 1)")
         .bind(f.community.as_uuid()).execute(&f.pool).await.unwrap();
@@ -581,5 +530,4 @@ async fn thread_window_router_aux_row_cap_and_corrupt_page() {
     assert_eq!(body, json!({"error":"internal server error"}));
 }
 
-mod cost_postgres_tests;
 mod failure_postgres_tests;

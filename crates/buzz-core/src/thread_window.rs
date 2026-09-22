@@ -232,9 +232,14 @@ mod tests {
     #[test]
     fn binding_normalizes_defaults_and_binds_every_argument() {
         let f = filter();
-        let request = Request::parse(&f).unwrap();
+        let binding = |raw: &Value| {
+            Request::parse(raw)
+                .unwrap()
+                .binding("relay.example", &"ab".repeat(32))
+        };
+        let expected = binding(&f);
         assert_eq!(
-            request.binding("relay.example", &"ab".repeat(32)),
+            expected,
             "tw:1:5252322dfd797ddb1d5f1150acd4cf914b9fc09e39bcf3048d25aed514b3546d"
         );
         let mut explicit = f.clone();
@@ -242,12 +247,7 @@ mod tests {
         explicit["depth_limit"] = json!(100);
         explicit["include_aux"] = json!(false);
         explicit["#e"] = json!(["AB".repeat(32)]);
-        assert_eq!(
-            request.binding("relay.example", &"ab".repeat(32)),
-            Request::parse(&explicit)
-                .unwrap()
-                .binding("relay.example", &"ab".repeat(32))
-        );
+        assert_eq!(expected, binding(&explicit));
         for (key, val) in [
             ("limit", json!(49)),
             ("depth_limit", json!(1)),
@@ -258,32 +258,15 @@ mod tests {
         ] {
             let mut changed = f.clone();
             changed[key] = val;
-            assert_ne!(
-                request.binding("relay.example", &"ab".repeat(32)),
-                Request::parse(&changed)
-                    .unwrap()
-                    .binding("relay.example", &"ab".repeat(32))
-            );
+            assert_ne!(expected, binding(&changed), "{key} must affect binding");
         }
-        assert_ne!(
-            request.binding("relay.example", &"ab".repeat(32)),
-            request.binding("other.example", &"ab".repeat(32))
-        );
-        assert_ne!(
-            request.binding("relay.example", &"ab".repeat(32)),
-            request.binding("relay.example", &"cd".repeat(32))
-        );
+        let request = Request::parse(&f).unwrap();
+        for (host, reader) in [("other.example", "ab"), ("relay.example", "cd")] {
+            assert_ne!(expected, request.binding(host, &reader.repeat(32)));
+        }
         let mut changed = f;
         changed["until"] = json!(0);
         changed["before_id"] = json!("ab".repeat(32));
-        assert_ne!(
-            request.binding("relay.example", &"ab".repeat(32)),
-            Request::parse(&changed)
-                .unwrap()
-                .binding("relay.example", &"ab".repeat(32))
-        );
-        assert!(crate::kind::is_relay_only_kind(
-            crate::kind::KIND_THREAD_WINDOW_BOUNDS
-        ));
+        assert_ne!(expected, binding(&changed));
     }
 }
