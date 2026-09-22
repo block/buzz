@@ -6,6 +6,7 @@ import {
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
+import { useCommunityBotsQuery } from "@/features/community-bots/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -14,20 +15,26 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 type IngestionAgent = Pick<ManagedAgent, "pubkey" | "status">;
 
 /**
- * Combine locally managed agents with relay agents the current identity
- * declared-owns (NIP-OA `ownerPubkey == me`) into one ingestion list.
+ * Combine locally managed agents, relay agents the current identity
+ * declared-owns (NIP-OA `ownerPubkey == me`), and catalog community bots into
+ * one ingestion list.
  *
- * Managed agents keep their real status; owned relay agents that are not
- * managed locally are treated as `deployed` so the observer subscription
- * starts and their frames decrypt. Registering non-owned agents would be
- * pointless — observer frames are `#p`-addressed to the owner, so frames for
- * agents we do not own never arrive on our subscription in the first place.
+ * Managed agents keep their real status; owned relay agents and community bots
+ * that are not managed locally are treated as `deployed` so the observer
+ * subscription starts and their frames decrypt into `knownAgentPubkeys`.
+ *
+ * Community bots (OpenClaw / buzz-acp@korg etc.) publish kind 24200 frames
+ * `#p`-addressed to `BUZZ_ACP_AGENT_OWNER`. Those frames arrive on the
+ * owner-global subscription, but without registering the bot pubkey they are
+ * dropped by the trusted-agent gate — which is why the ACP activity pane stays
+ * empty after a successful mention. Catalog pubkeys close that gap.
  */
 export function combineObserverIngestionAgents(
   managedAgents: readonly IngestionAgent[],
   relayAgentPubkeys: readonly string[],
   ownerByPubkey: ReadonlyMap<string, string>,
   currentPubkey: string | null | undefined,
+  communityBotPubkeys: readonly string[] = [],
 ): IngestionAgent[] {
   const managed = managedAgents.map((agent) => ({
     pubkey: agent.pubkey,
@@ -37,22 +44,32 @@ export function combineObserverIngestionAgents(
     return managed;
   }
 
-  const managedSet = new Set(
-    managed.map((agent) => normalizePubkey(agent.pubkey)),
-  );
+  const seen = new Set(managed.map((agent) => normalizePubkey(agent.pubkey)));
   const me = normalizePubkey(currentPubkey);
   const owned: IngestionAgent[] = [];
   for (const pubkey of relayAgentPubkeys) {
     const key = normalizePubkey(pubkey);
-    if (managedSet.has(key)) {
+    if (seen.has(key)) {
       continue;
     }
     const owner = ownerByPubkey.get(key);
     if (owner && normalizePubkey(owner) === me) {
       owned.push({ pubkey, status: "deployed" as const });
+      seen.add(key);
     }
   }
-  return [...managed, ...owned];
+
+  const community: IngestionAgent[] = [];
+  for (const pubkey of communityBotPubkeys) {
+    const key = normalizePubkey(pubkey);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    community.push({ pubkey, status: "deployed" as const });
+    seen.add(key);
+  }
+
+  return [...managed, ...owned, ...community];
 }
 
 /**
@@ -64,14 +81,15 @@ export function combineObserverIngestionAgents(
  * stores; none of them need to mount their own bridge for ingestion to work.
  *
  * This is the product invariant: if the current identity owns an agent (local
- * managed agent or declared-owned relay agent), its turn activity is ingested
- * app-wide — not only while a panel that happens to mount a bridge is open.
+ * managed agent or declared-owned relay agent) — or has installed a community
+ * bot that telemeters to this owner — its turn activity is ingested app-wide,
+ * not only while a panel that happens to mount a bridge is open.
  *
  * Mounts before identity resolves by design: while `currentPubkey` is still
  * `undefined`, `combineObserverIngestionAgents` returns managed agents only,
- * and relay-owned agents are folded in on the render after identity arrives.
- * Do not gate this hook on identity/startup readiness — that would drop
- * managed-agent observer coverage during startup.
+ * and relay-owned / community agents are folded in on the render after identity
+ * arrives. Do not gate this hook on identity/startup readiness — that would
+ * drop managed-agent observer coverage during startup.
  */
 export function useAgentObserverIngestion() {
   const identityQuery = useIdentityQuery();
@@ -84,6 +102,12 @@ export function useAgentObserverIngestion() {
   const relayAgentPubkeys = React.useMemo(
     () => (relayAgentsQuery.data ?? []).map((agent) => agent.pubkey),
     [relayAgentsQuery.data],
+  );
+
+  const communityBotsQuery = useCommunityBotsQuery(Boolean(currentPubkey));
+  const communityBotPubkeys = React.useMemo(
+    () => (communityBotsQuery.data ?? []).map((bot) => bot.pubkey),
+    [communityBotsQuery.data],
   );
 
   const profilesQuery = useUsersBatchQuery(relayAgentPubkeys, {
@@ -108,8 +132,15 @@ export function useAgentObserverIngestion() {
       relayAgentPubkeys,
       ownerByPubkey,
       currentPubkey,
+      communityBotPubkeys,
     );
-  }, [currentPubkey, managedAgents, profiles, relayAgentPubkeys]);
+  }, [
+    communityBotPubkeys,
+    currentPubkey,
+    managedAgents,
+    profiles,
+    relayAgentPubkeys,
+  ]);
 
   useManagedAgentObserverBridge(ingestionAgents);
   useActiveAgentTurnsBridge(ingestionAgents);
