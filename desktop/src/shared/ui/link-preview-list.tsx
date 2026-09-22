@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { useTranslation } from "@/i18n";
 import { useLinkPreviewStyle } from "@/shared/lib/linkPreviewStylePreference";
 import type { ResolvedLinkPreview } from "@/shared/lib/useResolvedLinkPreviews";
 import {
@@ -28,12 +29,13 @@ export function LinkPreviewList({
   onRemoveForEveryone?: () => Promise<void>;
   previews: ResolvedLinkPreview[];
 }) {
+  const { t } = useTranslation();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [removed, setRemoved] = useState(false);
   const style = useLinkPreviewStyle();
   if (removed || previews.length === 0) return null;
 
-  const previewNoun = previews.length === 1 ? "preview" : "previews";
+  const count = previews.length;
   const controlsIndex = 0;
   return (
     <>
@@ -64,17 +66,17 @@ export function LinkPreviewList({
         <AlertDialog onOpenChange={setDialogOpen} open={dialogOpen}>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Remove {previewNoun}?</AlertDialogTitle>
+              <AlertDialogTitle>
+                {t("shared.linkPreview.remove-dialog.title", { count })}
+              </AlertDialogTitle>
               <AlertDialogDescription>
-                This removes{" "}
-                {previews.length === 1 ? "the preview" : "the previews"} for
-                everyone.
+                {t("shared.linkPreview.remove-dialog.description", { count })}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel asChild>
                 <Button type="button" variant="outline">
-                  Cancel
+                  {t("shared.linkPreview.remove-dialog.cancel")}
                 </Button>
               </AlertDialogCancel>
               <AlertDialogAction asChild>
@@ -86,7 +88,7 @@ export function LinkPreviewList({
                   type="button"
                   variant="destructive"
                 >
-                  Remove {previewNoun}
+                  {t("shared.linkPreview.remove-dialog.confirm", { count })}
                 </Button>
               </AlertDialogAction>
             </AlertDialogFooter>

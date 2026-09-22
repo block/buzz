@@ -1,5 +1,7 @@
 import { toast } from "sonner";
 
+import { useTranslation } from "@/i18n";
+
 import { truncateNpub } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useRemoveRelayMemberMutation } from "@/features/community-members/hooks";
@@ -24,6 +26,7 @@ export function ConfirmRemoveDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const removeMutation = useRemoveRelayMemberMutation();
   const label = displayName || (member ? truncateNpub(member.pubkey) : "");
 
@@ -41,9 +44,11 @@ export function ConfirmRemoveDialog({
         data-testid="confirm-remove-member-dialog"
       >
         <DialogHeader>
-          <DialogTitle>Remove {label}?</DialogTitle>
+          <DialogTitle>
+            {t("members.remove.title", { name: label })}
+          </DialogTitle>
           <DialogDescription>
-            This will immediately revoke their access to the relay.
+            {t("members.remove.description")}
           </DialogDescription>
           {member ? (
             <PubKey
@@ -59,7 +64,7 @@ export function ConfirmRemoveDialog({
             size="sm"
             variant="outline"
           >
-            Cancel
+            {t("members.remove.cancel")}
           </Button>
           <Button
             data-testid="confirm-remove-member"
@@ -68,14 +73,14 @@ export function ConfirmRemoveDialog({
               if (!member) return;
               removeMutation.mutate(member.pubkey, {
                 onSuccess: () => {
-                  toast.success("Member removed");
+                  toast.success(t("members.remove.removed"));
                   handleOpenChange(false);
                 },
                 onError: (error) => {
                   toast.error(
                     error instanceof Error
                       ? error.message
-                      : "Failed to remove member",
+                      : t("members.remove.failed"),
                   );
                 },
               });
@@ -83,7 +88,9 @@ export function ConfirmRemoveDialog({
             size="sm"
             variant="destructive"
           >
-            {removeMutation.isPending ? "Removing..." : "Remove"}
+            {removeMutation.isPending
+              ? t("members.remove.removing")
+              : t("members.remove.confirm")}
           </Button>
         </div>
       </DialogContent>

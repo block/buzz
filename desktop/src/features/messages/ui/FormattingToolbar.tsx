@@ -14,6 +14,7 @@ import {
   Strikethrough,
 } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
@@ -129,6 +130,7 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   disabled = false,
   onLinkButton,
 }: FormattingToolbarProps) {
+  const { t } = useTranslation();
   const pendingSelectionRef = React.useRef<FormattingSelectionRange | null>(
     null,
   );
@@ -254,18 +256,18 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
     const hasSelection = from !== to;
 
     if (hasSelection) {
-      const url = window.prompt("Enter URL:");
+      const url = window.prompt(t("messages.format.enter-url"));
       if (url) {
         editor.chain().focus().setLink({ href: url }).run();
       }
     } else {
-      const url = window.prompt("Enter URL:");
+      const url = window.prompt(t("messages.format.enter-url"));
       if (url) {
-        const label = window.prompt("Link text:", url) || url;
+        const label = window.prompt(t("messages.format.link-text"), url) || url;
         editor.chain().focus().insertContent(`[${label}](${url})`).run();
       }
     }
-  }, [editor, formattingChain, onLinkButton, restorePendingSelection]);
+  }, [editor, formattingChain, onLinkButton, restorePendingSelection, t]);
 
   const toggleBulletList = React.useCallback(() => {
     formattingChain()
@@ -319,67 +321,77 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
 
   const items = [
     {
+      id: "bold",
       icon: Bold,
-      label: "Bold",
+      label: t("messages.format.bold"),
       shortcut: "⌘B",
       action: toggleBold,
       active: activeStates.bold,
     },
     {
+      id: "italic",
       icon: Italic,
-      label: "Italic",
+      label: t("messages.format.italic"),
       shortcut: "⌘I",
       action: toggleItalic,
       active: activeStates.italic,
     },
     {
+      id: "strikethrough",
       icon: Strikethrough,
-      label: "Strikethrough",
+      label: t("messages.format.strikethrough"),
       shortcut: "⌘⇧X",
       action: toggleStrike,
       active: activeStates.strike,
     },
     {
+      id: "code",
       icon: Code,
-      label: "Code",
+      label: t("messages.format.code"),
       shortcut: "⌘E",
       action: toggleCode,
       active: activeStates.code,
     },
     {
+      id: "code-block",
       icon: SquareCode,
-      label: "Code block",
+      label: t("messages.format.code-block"),
       action: toggleCodeBlock,
       active: activeStates.codeBlock,
     },
     {
+      id: "link",
       icon: Link,
-      label: "Link",
+      label: t("messages.format.link"),
       shortcut: "⌘K",
       action: toggleLink,
       active: activeStates.link,
     },
     {
+      id: "bullet-list",
       icon: List,
-      label: "Bullet list",
+      label: t("messages.format.bullet-list"),
       action: toggleBulletList,
       active: activeStates.bulletList,
     },
     {
+      id: "ordered-list",
       icon: ListOrdered,
-      label: "Ordered list",
+      label: t("messages.format.ordered-list"),
       action: toggleOrderedList,
       active: activeStates.orderedList,
     },
     {
+      id: "quote",
       icon: Quote,
-      label: "Quote",
+      label: t("messages.format.quote"),
       action: toggleBlockquote,
       active: activeStates.blockquote,
     },
     {
+      id: "spoiler",
       icon: HatGlasses,
-      label: "Spoiler",
+      label: t("messages.format.spoiler"),
       action: toggleSpoiler,
       active: activeStates.spoiler,
     },
@@ -388,7 +400,7 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   return (
     <div className="flex items-center gap-0.5">
       {items.map((item) => (
-        <Tooltip key={item.label} disableHoverableContent>
+        <Tooltip key={item.id} disableHoverableContent>
           <TooltipTrigger asChild>
             <button
               type="button"
@@ -413,7 +425,10 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
           </TooltipTrigger>
           <TooltipContent>
             {"shortcut" in item
-              ? `${item.label} (${item.shortcut})`
+              ? t("messages.format.tooltip-with-shortcut", {
+                  label: item.label,
+                  shortcut: item.shortcut,
+                })
               : item.label}
           </TooltipContent>
         </Tooltip>

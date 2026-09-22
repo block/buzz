@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 
 export function AgentDefinitionMetadata({
@@ -13,21 +14,29 @@ export function AgentDefinitionMetadata({
   provider?: string | null;
   runtime: string | null;
 }) {
+  const { t } = useTranslation();
   const items = [
     {
-      label: "Type",
-      value: isBuiltIn ? "Built-in agent" : "Custom agent",
+      label: t("sidebar.channel-form.type"),
+      value: isBuiltIn
+        ? t("agents.definition-metadata.built-in-agent")
+        : t("agents.definition-metadata.custom-agent"),
     },
     {
-      label: "Preferred model",
-      value: model ?? "Use app default",
+      label: t("agents.definition-metadata.preferred-model"),
+      value: model ?? t("agents.definition-metadata.use-app-default"),
     },
     {
-      label: "Preferred runtime",
-      value: runtime ?? "Use app default",
+      label: t("agents.definition-metadata.preferred-runtime"),
+      value: runtime ?? t("agents.definition-metadata.use-app-default"),
     },
     ...(provider !== undefined
-      ? [{ label: "Preferred provider", value: provider ?? "Use app default" }]
+      ? [
+          {
+            label: t("agents.definition-metadata.preferred-provider"),
+            value: provider ?? t("agents.definition-metadata.use-app-default"),
+          },
+        ]
       : []),
   ];
 

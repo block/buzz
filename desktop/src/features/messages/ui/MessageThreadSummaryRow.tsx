@@ -17,6 +17,7 @@ import {
   THREAD_REPLY_ROW_MARGIN_INLINE_REM,
 } from "@/features/messages/lib/threadTreeLayout";
 import { cn } from "@/shared/lib/cn";
+import { useTranslation } from "@/i18n";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const THREAD_SUMMARY_CONTENT_OFFSET_REM =
@@ -108,6 +109,7 @@ export function MessageThreadSummaryRow({
   summaryIndentOffsetRem?: number;
   unreadCount?: number;
 }) {
+  const { t } = useTranslation();
   const indentRem = getThreadReplyIndentRem(depth);
   const hoverLeftRem =
     indentRem + THREAD_REPLY_ROW_MARGIN_INLINE_REM + summaryIndentOffsetRem;
@@ -287,14 +289,14 @@ export function MessageThreadSummaryRow({
                     className="col-start-1 row-start-1 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
                     data-testid="message-thread-summary-last-reply"
                   >
-                    last reply{" "}
+                    {t("messages.thread.summary-last-reply")}{" "}
                     {formatThreadSummaryLastReplyTime(summary.lastReplyAt)}
                   </span>
                   <span
                     className="col-start-1 row-start-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
                     data-testid="message-thread-summary-hover-action"
                   >
-                    View thread
+                    {t("messages.thread.view-thread")}
                   </span>
                 </span>
               </>

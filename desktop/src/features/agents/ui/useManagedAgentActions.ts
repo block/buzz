@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
+import { useTranslation } from "@/i18n";
 import {
   type AttachManagedAgentToChannelResult,
   useAvailableAcpRuntimes,
@@ -39,6 +40,7 @@ import {
 } from "../lib/instanceInputForDefinition";
 
 export function useManagedAgentActions() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { globalConfig } = useGlobalAgentConfig();
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -240,7 +242,7 @@ export function useManagedAgentActions() {
       const input = await buildInstanceInputForDefinition(persona, runtime);
 
       const created = await createAgentMutation.mutateAsync(input);
-      toast.success("Agent created");
+      toast.success(t("agents.agent-created.title"));
       const notices = [...warnings];
 
       if (created.spawnError) {
@@ -388,12 +390,14 @@ export function useManagedAgentActions() {
   async function runBulkAction(
     targets: ManagedAgent[],
     confirmLabel: string,
-    failureNoun: string,
     action: (agent: ManagedAgent) => Promise<unknown>,
   ): Promise<boolean> {
     if (targets.length === 0) return false;
     const confirmed = window.confirm(
-      `${confirmLabel} ${targets.length} agent${targets.length === 1 ? "" : "s"}?`,
+      t("agents.managed-actions.bulk-confirm", {
+        action: confirmLabel,
+        count: targets.length,
+      }),
     );
     if (!confirmed) return false;
     clearFeedback();
@@ -401,7 +405,10 @@ export function useManagedAgentActions() {
     const failures = results.filter((r) => r.status === "rejected");
     if (failures.length > 0) {
       setActionErrorMessage(
-        `${failures.length} of ${targets.length} ${failureNoun}${failures.length === 1 ? "" : "s"} failed.`,
+        t("agents.managed-actions.bulk-failures", {
+          failed: failures.length,
+          total: targets.length,
+        }),
       );
     }
     return true;
@@ -410,8 +417,7 @@ export function useManagedAgentActions() {
   async function handleBulkStopRunning() {
     await runBulkAction(
       managedAgents.filter((a) => isManagedAgentActive(a)),
-      "Stop",
-      "stop",
+      t("huddle.participants.stop"),
       async (a) => {
         await stopManagedAgentWithRules({
           agent: a,

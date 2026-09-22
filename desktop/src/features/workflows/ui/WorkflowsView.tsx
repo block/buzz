@@ -21,6 +21,7 @@ import {
   getWorkflowEnabled,
   withWorkflowEnabled,
 } from "@/features/workflows/ui/workflowDefinition";
+import { useTranslation } from "@/i18n";
 import type { Channel, Workflow } from "@/shared/api/types";
 import {
   deleteWorkflow,
@@ -88,9 +89,10 @@ function WorkflowsListSkeleton() {
 }
 
 function CreateWorkflowCard({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslation();
   return (
     <button
-      aria-label="Create Workflow"
+      aria-label={t("workflows.view.create-aria")}
       className="group relative flex min-h-60 w-full min-w-0 items-center justify-center overflow-hidden rounded-2xl border border-dashed border-border/80 bg-transparent text-muted-foreground shadow-xs transition-colors hover:border-border hover:bg-muted/70 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
       data-testid="new-workflow-card"
       onClick={onClick}
@@ -111,6 +113,7 @@ export function WorkflowsView({
   onViewWorkflow,
   onEditorPaneChange,
 }: WorkflowsViewProps) {
+  const { t } = useTranslation();
   const [deleteTarget, setDeleteTarget] = React.useState<Workflow | null>(null);
   const [activationTarget, setActivationTarget] =
     React.useState<Workflow | null>(null);
@@ -185,11 +188,11 @@ export function WorkflowsView({
         workflow.revision,
       ),
     onError: (error) => {
-      toast.error("Couldn’t change workflow status", {
+      toast.error(t("workflows.view.status-toggle-failed"), {
         description:
           error instanceof Error
             ? error.message
-            : "The workflow was not changed. Try again.",
+            : t("workflows.view.status-toggle-failed-description"),
       });
     },
     onSuccess: (_data, workflow) => {
@@ -282,7 +285,7 @@ export function WorkflowsView({
           <PageHeader
             action={
               <Button
-                aria-label="Refresh workflows"
+                aria-label={t("workflows.view.refresh-aria")}
                 disabled={allWorkflowsQuery.isFetching}
                 onClick={() => void allWorkflowsQuery.refetch()}
                 size="icon"
@@ -293,21 +296,23 @@ export function WorkflowsView({
                 />
               </Button>
             }
-            description="Automations that keep your community moving."
-            title="Workflows"
+            description={t("workflows.view.description")}
+            title={t("workflows.view.title")}
           />
 
           {allWorkflowsQuery.isLoading ? (
             <WorkflowsListSkeleton />
           ) : allWorkflowsQuery.isError ? (
             <div className="flex flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
-              <p className="text-sm text-red-400">Failed to load workflows</p>
+              <p className="text-sm text-red-400">
+                {t("workflows.view.load-failed")}
+              </p>
               <Button
                 onClick={() => void allWorkflowsQuery.refetch()}
                 size="sm"
                 variant="outline"
               >
-                Retry
+                {t("workflows.view.retry")}
               </Button>
             </div>
           ) : (
@@ -360,15 +365,18 @@ export function WorkflowsView({
         <AlertDialogContent data-testid="workflow-activation-confirmation">
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {activationWarning?.title ?? "Turn on this workflow?"}
+              {activationWarning?.title ??
+                t("workflows.activation.turn-on-title")}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {activationWarning?.description ??
-                "Turn it on to let it run immediately, or keep it off until you’re ready."}
+                t("workflows.activation.turn-on-description")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Keep off</AlertDialogCancel>
+            <AlertDialogCancel>
+              {t("workflows.activation.keep-off")}
+            </AlertDialogCancel>
             <AlertDialogAction
               disabled={toggleEnabledMutation.isPending}
               onClick={(event) => {
@@ -377,7 +385,7 @@ export function WorkflowsView({
                 toggleEnabled(activationTarget);
               }}
             >
-              Turn on
+              {t("workflows.activation.turn-on")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

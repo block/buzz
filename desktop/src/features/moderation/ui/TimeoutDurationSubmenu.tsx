@@ -3,7 +3,9 @@ import { Clock } from "lucide-react";
 import {
   TIMEOUT_PRESETS,
   timeoutExpiresAt,
+  type TimeoutPresetId,
 } from "@/features/moderation/lib/timeout";
+import { useTranslation } from "@/i18n";
 import {
   DropdownMenuItem,
   DropdownMenuSub,
@@ -20,12 +22,12 @@ import {
  * timeout resolution can share it and stay on one preset list.
  */
 export function TimeoutDurationSubmenu({
-  label = "Time out",
+  label,
   disabled = false,
   testIdPrefix,
   onSelect,
 }: {
-  /** Sub-trigger label; defaults to "Time out". */
+  /** Sub-trigger label; defaults to the localized "Time out". */
   label?: string;
   disabled?: boolean;
   /** Prefix for each preset item's `data-testid` (e.g. `moderation-timeout`). */
@@ -33,11 +35,17 @@ export function TimeoutDurationSubmenu({
   /** Called with the absolute expiry in epoch seconds for the chosen preset. */
   onSelect: (expiresAt: number) => void;
 }) {
+  const { t } = useTranslation();
+  const timeoutLabels: Record<TimeoutPresetId, string> = {
+    "1-hour": t("channels.members.timeout-1-hour"),
+    "24-hours": t("channels.members.timeout-24-hours"),
+    "7-days": t("channels.members.timeout-7-days"),
+  };
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger disabled={disabled}>
         <Clock className="h-4 w-4" />
-        {label}
+        {label ?? t("channels.members.time-out")}
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent>
         {TIMEOUT_PRESETS.map((preset) => (
@@ -49,7 +57,7 @@ export function TimeoutDurationSubmenu({
             key={preset.seconds}
             onClick={() => onSelect(timeoutExpiresAt(preset.seconds))}
           >
-            {preset.label}
+            {timeoutLabels[preset.id]}
           </DropdownMenuItem>
         ))}
       </DropdownMenuSubContent>

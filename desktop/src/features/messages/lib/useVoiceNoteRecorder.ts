@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { encodeVoiceNoteWav } from "./voiceNoteWav";
 
 const MIME_CANDIDATES = [
@@ -40,6 +41,7 @@ function releaseSessionAudio(session: RecordingSession) {
 }
 
 export function useVoiceNoteRecorder() {
+  const { t } = useTranslation();
   const mountedRef = React.useRef(true);
   const sessionRef = React.useRef<RecordingSession | null>(null);
   const [status, setStatus] = React.useState<
@@ -69,7 +71,7 @@ export function useVoiceNoteRecorder() {
     if (status !== "idle" || sessionRef.current) return;
     setError(null);
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-      setError("Voice recording is not available in this environment.");
+      setError(t("messages.voice.recording-unavailable"));
       return;
     }
 
@@ -156,7 +158,7 @@ export function useVoiceNoteRecorder() {
                 mountedRef.current &&
                 sessionRef.current === session
               ) {
-                setError("Buzz could not prepare this voice note for upload.");
+                setError(t("messages.voice.prepare-failed"));
               }
             }
           }
@@ -174,7 +176,7 @@ export function useVoiceNoteRecorder() {
       });
       recorder.addEventListener("error", () => {
         if (mountedRef.current && sessionRef.current === session) {
-          setError("The voice recording was interrupted.");
+          setError(t("messages.voice.interrupted"));
         }
       });
       recorder.start(250);
@@ -218,11 +220,11 @@ export function useVoiceNoteRecorder() {
         (cause.name === "NotAllowedError" || cause.name === "SecurityError");
       setError(
         denied
-          ? "Allow Buzz to access your microphone to record a voice note."
-          : "Buzz could not start the voice recorder.",
+          ? t("messages.voice.microphone-permission")
+          : t("messages.voice.start-failed"),
       );
     }
-  }, [status]);
+  }, [status, t]);
 
   const stop = React.useCallback(
     (discard = false): Promise<VoiceNoteRecording | null> => {

@@ -1,5 +1,6 @@
 import { Activity, Bot } from "lucide-react";
 
+import { i18n, useTranslation } from "@/i18n";
 import type { UserNote } from "@/shared/api/socialTypes";
 import type { UserProfileSummary } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
@@ -17,10 +18,14 @@ function formatRelativeTime(unixSeconds: number): string {
   const now = Date.now() / 1_000;
   const diff = now - unixSeconds;
 
-  if (diff < 60) return "just now";
-  if (diff < 3_600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86_400) return `${Math.floor(diff / 3_600)}h`;
-  return `${Math.floor(diff / 86_400)}d`;
+  if (diff < 60) return i18n.t("channels.activity.just-now");
+  if (diff < 3_600) {
+    return i18n.t("home.notes.minutes-ago", { count: Math.floor(diff / 60) });
+  }
+  if (diff < 86_400) {
+    return i18n.t("home.notes.hours-ago", { count: Math.floor(diff / 3_600) });
+  }
+  return i18n.t("home.notes.days-ago", { count: Math.floor(diff / 86_400) });
 }
 
 export function RecentNotesSection({
@@ -29,6 +34,7 @@ export function RecentNotesSection({
   agentPubkeys,
   onOpenPulse,
 }: RecentNotesSectionProps) {
+  const { t } = useTranslation();
   if (notes.length === 0) return null;
 
   return (
@@ -37,7 +43,7 @@ export function RecentNotesSection({
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-muted-foreground" />
           <h3 className="text-sm font-semibold text-foreground">
-            Recent Notes
+            {t("home.notes.heading")}
           </h3>
         </div>
         <button
@@ -45,7 +51,7 @@ export function RecentNotesSection({
           onClick={onOpenPulse}
           type="button"
         >
-          View all in Pulse
+          {t("home.notes.view-all-pulse")}
         </button>
       </div>
 
@@ -78,7 +84,7 @@ export function RecentNotesSection({
                   </span>
                   {isAgent ? (
                     <span className="inline-flex h-3.5 items-center rounded bg-muted px-1 text-2xs font-medium text-muted-foreground">
-                      bot
+                      {t("channels.invite.role-bot")}
                     </span>
                   ) : null}
                   <span className="shrink-0 text-2xs text-muted-foreground">

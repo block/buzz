@@ -4,6 +4,7 @@ import * as React from "react";
 import type { CreateProjectInput } from "@/features/projects/useCreateProject";
 import { CreateProjectFormSettings } from "@/features/projects/ui/CreateProjectFormSettings";
 import { useCreateProjectFormSettings } from "@/features/projects/ui/useCreateProjectFormSettings";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -32,6 +33,7 @@ export function CreateProjectFormContent({
   onCreate: (input: CreateProjectInput) => Promise<void>;
   onCreated: () => void;
 }) {
+  const { t } = useTranslation();
   const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
@@ -68,7 +70,9 @@ export function CreateProjectFormContent({
       onCreated();
     } catch (error) {
       setErrorMessage(
-        error instanceof Error ? error.message : "Failed to create project.",
+        error instanceof Error
+          ? error.message
+          : t("projects.create-project-form.create-failed"),
       );
     }
   }
@@ -78,7 +82,7 @@ export function CreateProjectFormContent({
       className="max-w-lg"
       contentClassName="pt-3"
       data-testid="create-project-dialog"
-      headerSubtitle="A project starts as a channel with a repository. People in the channel can talk, clone, and open tasks here."
+      headerSubtitle={t("projects.create-project-form.header-subtitle")}
       footer={
         <div className="flex w-full items-center justify-end gap-3">
           <Button
@@ -87,13 +91,15 @@ export function CreateProjectFormContent({
             form="create-project-form"
             type="submit"
           >
-            {isCreating ? "Creating..." : "Create project"}
+            {isCreating
+              ? t("sidebar.channel-form.creating")
+              : t("projects.overview.action.create-project")}
           </Button>
         </div>
       }
       footerClassName="border-t-0 pt-0"
       headerClassName="pb-2"
-      title="Create a new project"
+      title={t("projects.create-project-form.title")}
     >
       {onBack ? (
         <Button
@@ -105,7 +111,7 @@ export function CreateProjectFormContent({
           variant="ghost"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back to projects
+          {t("projects.create-project-form.back-to-projects")}
         </Button>
       ) : null}
       <form
@@ -120,7 +126,7 @@ export function CreateProjectFormContent({
             className="text-sm font-medium text-foreground"
             htmlFor="create-project-name"
           >
-            Name
+            {t("sidebar.channel-form.name")}
           </label>
           <div
             className={cn(
@@ -156,8 +162,10 @@ export function CreateProjectFormContent({
             className="text-sm font-medium text-foreground"
             htmlFor="create-project-description"
           >
-            Description
-            <span className={CREATE_LABEL_OPTIONAL_CLASS}>Optional</span>
+            {t("projects.issue.description")}
+            <span className={CREATE_LABEL_OPTIONAL_CLASS}>
+              {t("sidebar.channel-form.optional")}
+            </span>
           </label>
           <div className={CREATE_FIELD_SHELL_CLASS}>
             <Textarea
@@ -172,7 +180,9 @@ export function CreateProjectFormContent({
                 setDescription(event.target.value);
                 setErrorMessage(null);
               }}
-              placeholder="What this project should become"
+              placeholder={t(
+                "projects.create-project-form.description-placeholder",
+              )}
               rows={2}
               value={description}
             />

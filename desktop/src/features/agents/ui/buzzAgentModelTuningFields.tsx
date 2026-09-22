@@ -6,6 +6,7 @@
  * PersonaAdvancedFields and EditAgentAdvancedFields.
  */
 import * as React from "react";
+import { i18n, useTranslation } from "@/i18n";
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/cn";
 import type { EnvVarsValue } from "./EnvVarsEditor";
@@ -226,20 +227,27 @@ export function useEffortAutoClear({
 
 export type { NumericDescriptor };
 
-const NUMERIC_KIND_LABELS: Record<NumericDescriptor["kind"], string> = {
-  maxOutputTokens: "Max output tokens",
-  contextLimit: "Context limit",
-  maxRounds: "Max rounds",
-};
+function numericKindLabel(kind: NumericDescriptor["kind"]): string {
+  switch (kind) {
+    case "maxOutputTokens":
+      return i18n.t("agents.model-tuning.max-output-tokens");
+    case "contextLimit":
+      return i18n.t("agents.model-tuning.context-limit");
+    case "maxRounds":
+      return i18n.t("agents.model-tuning.max-rounds");
+  }
+}
 
-const NUMERIC_KIND_DESCRIPTIONS: Record<NumericDescriptor["kind"], string> = {
-  maxOutputTokens:
-    "Maximum tokens the LLM may generate per response. Leave blank to inherit.",
-  contextLimit:
-    "Maximum context window tokens tracked before a handoff. Leave blank to inherit.",
-  maxRounds:
-    "Maximum LLM + tool-call rounds per turn. 0 = unlimited. Leave blank to inherit.",
-};
+function numericKindDescription(kind: NumericDescriptor["kind"]): string {
+  switch (kind) {
+    case "maxOutputTokens":
+      return i18n.t("agents.model-tuning.max-output-tokens-help");
+    case "contextLimit":
+      return i18n.t("agents.model-tuning.context-limit-help");
+    case "maxRounds":
+      return i18n.t("agents.model-tuning.max-rounds-help");
+  }
+}
 
 const NUMERIC_KIND_TEST_IDS: Record<NumericDescriptor["kind"], string> = {
   maxOutputTokens: "numeric-max-output-tokens-input",
@@ -287,8 +295,8 @@ export function NumericTuningFields({
     <div className="grid gap-4 md:grid-cols-2">
       {descriptors.map((d) => {
         const key = d.currentPersistence.key;
-        const label = NUMERIC_KIND_LABELS[d.kind];
-        const description = NUMERIC_KIND_DESCRIPTIONS[d.kind];
+        const label = numericKindLabel(d.kind);
+        const description = numericKindDescription(d.kind);
         const testId = NUMERIC_KIND_TEST_IDS[d.kind];
         const inheritedVal = inheritedEnvVars[key];
         return (
@@ -338,6 +346,7 @@ export function BuzzAgentModelTuningFields({
   /** Active LLM provider id (optional) — used for effort filtering + default labels. */
   provider?: string;
 }) {
+  const { t } = useTranslation();
   const effortConfig = getProviderEffortConfig(provider ?? "", model);
   const { validValues: effortValid, defaultValue: effortDefault } =
     effortConfig;
@@ -352,7 +361,7 @@ export function BuzzAgentModelTuningFields({
   return (
     <div className="space-y-4">
       <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-        buzz-agent model tuning
+        {t("agents.model-tuning.section")}
       </p>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -365,8 +374,10 @@ export function BuzzAgentModelTuningFields({
             effortValid={effortValid}
             htmlFor="ba-thinking-effort"
             inheritedEffort={inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]}
-            inheritFallbackLabel="Inherit (agent default)"
-            label="Thinking / Effort"
+            inheritFallbackLabel={t(
+              "agents.model-tuning.inherit-agent-default",
+            )}
+            label={t("agents.model-tuning.thinking-effort")}
             onChange={(value) =>
               onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, value)
             }
@@ -376,8 +387,7 @@ export function BuzzAgentModelTuningFields({
             className="text-xs text-muted-foreground"
             id="help-ba-thinking-effort"
           >
-            Controls how much reasoning effort the LLM applies per turn. Leave
-            blank to inherit from the global or persona default.
+            {t("agents.model-tuning.thinking-effort-help")}
           </p>
         </div>
       </div>

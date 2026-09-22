@@ -1,4 +1,5 @@
 import { SmilePlus, X } from "lucide-react";
+import { useTranslation } from "@/i18n";
 import * as React from "react";
 
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
@@ -38,6 +39,7 @@ export function WorkflowEmojiField({
   onChange,
   value,
 }: WorkflowEmojiFieldProps) {
+  const { t } = useTranslation();
   const [pickerOpen, setPickerOpen] = React.useState(false);
 
   return (
@@ -60,7 +62,9 @@ export function WorkflowEmojiField({
             ) : (
               <>
                 <SmilePlus className="text-muted-foreground" />
-                <span className="text-muted-foreground">Choose a reaction</span>
+                <span className="text-muted-foreground">
+                  {t("workflows.emoji.choose")}
+                </span>
               </>
             )}
           </Button>

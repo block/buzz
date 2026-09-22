@@ -7,6 +7,7 @@ import type {
   Repository as Project,
 } from "@/features/projects/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { useTranslation } from "@/i18n";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
@@ -36,6 +37,7 @@ export function PullRequestMetaHeader({
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
+  const { t } = useTranslation();
   const identityQuery = useIdentityQuery();
   const targetBranch =
     pullRequest.targetBranch || project.defaultBranch || "default branch";
@@ -71,7 +73,10 @@ export function PullRequestMetaHeader({
 
   return (
     <ProjectDetailMetaList>
-      <ProjectDetailMetaRow icon={GitBranch} label="Branch">
+      <ProjectDetailMetaRow
+        icon={GitBranch}
+        label={t("projects.meta-rail.branch")}
+      >
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <p className="flex min-w-0 items-center gap-1.5 overflow-hidden">
             <span className="truncate text-foreground">{sourceBranch}</span>
@@ -127,7 +132,7 @@ export function PullRequestMetaHeader({
         </span>
       </ProjectDetailMetaRow>
       {labels.length > 0 ? (
-        <ProjectDetailMetaRow icon={Tag} label="Labels">
+        <ProjectDetailMetaRow icon={Tag} label={t("projects.issue.labels")}>
           <ProjectDetailMetaPills labels={labels} />
         </ProjectDetailMetaRow>
       ) : null}

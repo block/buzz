@@ -1,7 +1,11 @@
 import * as React from "react";
 import { FileDiff, Maximize2 } from "lucide-react";
 
-import { getDiffTitleBadge } from "@/features/messages/lib/parseDiff";
+import { useTranslation } from "@/i18n";
+import {
+  diffTypeLabel,
+  getDiffTitleBadgeType,
+} from "@/features/messages/lib/parseDiff";
 import { HighlightedSearchText } from "@/features/search/ui/HighlightedSearchText";
 import { isSafeUrl } from "@/shared/lib/url";
 import { Button } from "@/shared/ui/button";
@@ -38,15 +42,17 @@ export default function DiffMessage({
   truncated,
   onExpand,
 }: DiffMessageProps) {
+  const { t } = useTranslation();
   const diffCardRef = React.useRef<HTMLDivElement | null>(null);
   useSmoothCorners(diffCardRef);
 
   const safeRepoUrl = isSafeUrl(repoUrl) ? repoUrl : undefined;
 
-  const titleBadge = React.useMemo(
-    () => getDiffTitleBadge(content, filePath),
+  const titleBadgeType = React.useMemo(
+    () => getDiffTitleBadgeType(content, filePath),
     [content, filePath],
   );
+  const titleBadge = titleBadgeType ? diffTypeLabel(titleBadgeType) : undefined;
 
   const commitUrl =
     safeRepoUrl && commitSha ? `${safeRepoUrl}/commit/${commitSha}` : undefined;
@@ -101,7 +107,7 @@ export default function DiffMessage({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  aria-label="Expand diff"
+                  aria-label={t("messages.diff.expand")}
                   className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
                   onClick={onExpand}
                   size="sm"
@@ -111,7 +117,7 @@ export default function DiffMessage({
                   <Maximize2 className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Expand diff</TooltipContent>
+              <TooltipContent>{t("messages.diff.expand")}</TooltipContent>
             </Tooltip>
           )}
         </div>
@@ -137,7 +143,7 @@ export default function DiffMessage({
       {/* Truncation warning */}
       {truncated && (
         <div className="px-3 py-2 border-t border-border/50 bg-amber-500/10 text-xs text-warning">
-          Diff truncated.{" "}
+          {t("messages.diff.truncated")}{" "}
           {safeRepoUrl && commitUrl ? (
             <a
               className="underline hover:no-underline"
@@ -145,10 +151,12 @@ export default function DiffMessage({
               rel="noreferrer noopener"
               target="_blank"
             >
-              View full diff on {getHostname(safeRepoUrl)}
+              {t("messages.diff.view-full-on", {
+                host: getHostname(safeRepoUrl),
+              })}
             </a>
           ) : (
-            "View the full diff at the source repository."
+            t("messages.diff.view-full-source")
           )}
         </div>
       )}

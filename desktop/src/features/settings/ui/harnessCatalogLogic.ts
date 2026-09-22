@@ -5,6 +5,7 @@
  * Extracted for deterministic unit-testing — no React, no Tauri, no network.
  */
 
+import { i18n } from "@/i18n";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
 // Builtins that anchor the top of "Your runtimes" — mirrors the old
@@ -216,7 +217,10 @@ export function catalogPrimaryAction(
   if (entry.canAutoInstall && !entry.nodeRequired) {
     return {
       kind: "install",
-      label: entry.availability === "adapter_outdated" ? "Update" : "Install",
+      label:
+        entry.availability === "adapter_outdated"
+          ? i18n.t("settings.runtimes.update")
+          : i18n.t("settings.runtimes.install"),
     };
   }
   if (entry.installInstructionsUrl.trim().length > 0) {

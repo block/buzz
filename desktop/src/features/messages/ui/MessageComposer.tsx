@@ -12,6 +12,7 @@ import {
   type EmojiSuggestion,
 } from "@/features/messages/lib/useEmojiAutocomplete";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import { useTranslation } from "@/i18n";
 import {
   findSpoileredImetaMediaUrls,
   type ImetaMedia,
@@ -101,6 +102,7 @@ function MessageComposerImpl({
   typingParentEventId = null,
   typingRootEventId = null,
 }: MessageComposerProps) {
+  const { t } = useTranslation();
   const {
     contentRef,
     isContentEmpty,
@@ -273,11 +275,14 @@ function MessageComposerImpl({
     });
   }, []);
   const computedPlaceholder = editTarget
-    ? "Edit your message"
+    ? t("messages.composer.edit-placeholder")
     : (placeholder ??
       (replyTarget
-        ? `Reply to ${replyTarget.author} in #${channelName}`
-        : `Message #${channelName}`));
+        ? t("messages.composer.reply-placeholder", {
+            author: replyTarget.author,
+            channelName,
+          })
+        : t("channels.pane.placeholder-channel", { channelName })));
   const richText = useRichTextEditor({
     placeholder: computedPlaceholder,
     editable: !composerDisabled,
@@ -899,13 +904,15 @@ function MessageComposerImpl({
             />
             {media.uploadState.status === "error" ? (
               <div className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                Upload failed: {media.uploadState.message}
+                {t("messages.composer.upload-failed", {
+                  message: media.uploadState.message,
+                })}
                 <button
                   className="ml-2 underline"
                   onClick={() => media.setUploadState({ status: "idle" })}
                   type="button"
                 >
-                  Dismiss
+                  {t("messages.composer.dismiss")}
                 </button>
               </div>
             ) : null}

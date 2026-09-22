@@ -16,6 +16,7 @@ import {
   resolveUserSecondaryLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { i18n, useTranslation } from "@/i18n";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { Badge } from "@/shared/ui/badge";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -139,13 +140,15 @@ export function SearchResultShell({
 }
 
 export function ChannelResultBody({ channel }: { channel: Channel }) {
+  const { t } = useTranslation();
+
   return (
     <div className="min-w-0 flex-1">
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-sm font-semibold tracking-tight">{channel.name}</p>
         <Badge variant="secondary">{channel.channelType}</Badge>
         <p className="ml-auto whitespace-nowrap text-xs text-muted-foreground">
-          Channel
+          {t("search.kind.channel")}
         </p>
       </div>
       {channel.description ? (
@@ -160,26 +163,26 @@ export function ChannelResultBody({ channel }: { channel: Channel }) {
 function describeSearchHit(hit: SearchHit) {
   switch (hit.kind) {
     case 1:
-      return "Note";
+      return i18n.t("search.kind.note");
     case 45001:
-      return "Forum post";
+      return i18n.t("search.kind.forum-post");
     case 45003:
-      return "Forum reply";
+      return i18n.t("search.kind.forum-reply");
     case 43001:
-      return "Agent job";
+      return i18n.t("search.kind.agent-job");
     case 43003:
-      return "Agent update";
+      return i18n.t("search.kind.agent-update");
     case 46010:
-      return "Approval request";
+      return i18n.t("search.kind.approval-request");
     default:
-      return "Message";
+      return i18n.t("search.context.message");
   }
 }
 
 function truncateContent(content: string) {
   const trimmed = content.trim();
   if (trimmed.length === 0) {
-    return "No message body.";
+    return i18n.t("search.preview.no-message-body");
   }
 
   if (trimmed.length <= 180) {
@@ -193,15 +196,19 @@ function formatRelativeTime(unixSeconds: number) {
   const diff = Math.floor(Date.now() / 1_000) - unixSeconds;
 
   if (diff < 60) {
-    return "just now";
+    return i18n.t("channels.activity.just-now");
   }
 
   if (diff < 60 * 60) {
-    return `${Math.floor(diff / 60)}m ago`;
+    return i18n.t("search.relative.minutes-ago", {
+      count: Math.floor(diff / 60),
+    });
   }
 
   if (diff < 60 * 60 * 24) {
-    return `${Math.floor(diff / (60 * 60))}h ago`;
+    return i18n.t("search.relative.hours-ago", {
+      count: Math.floor(diff / (60 * 60)),
+    });
   }
 
   return new Intl.DateTimeFormat("en-US", {

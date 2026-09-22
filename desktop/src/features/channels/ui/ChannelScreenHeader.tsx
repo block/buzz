@@ -24,6 +24,7 @@ import {
   toggleTerminalPanel,
   useTerminalPanel,
 } from "@/features/terminal/terminalPanelStore";
+import { useTranslation } from "@/i18n";
 
 const DM_HEADER_AVATAR_SIZE = 32;
 const DM_HEADER_AVATAR_STATUS_GEOMETRY = scaleProfileAvatarStatusGeometry(
@@ -72,6 +73,7 @@ export function ChannelScreenHeader({
   onManageChannel,
   onToggleMembers,
 }: ChannelScreenHeaderProps) {
+  const { t } = useTranslation();
   const isGroupDm =
     activeChannel?.channelType === "dm" &&
     activeDmHeaderParticipants.length > 1;
@@ -87,11 +89,13 @@ export function ChannelScreenHeader({
   const terminalButton = activeChannel ? (
     <Button
       aria-label={
-        terminalPanel.mode === "closed" ? "Open Buzz Term" : "Hide Buzz Term"
+        terminalPanel.mode === "closed"
+          ? t("channels.header.terminal-open")
+          : t("channels.header.terminal-hide")
       }
       onClick={toggleTerminalPanel}
       size="icon"
-      title="Buzz Term (⌘J)"
+      title={t("channels.header.terminal-title")}
       type="button"
       variant={terminalPanel.mode === "closed" ? "outline" : "secondary"}
     >
@@ -108,7 +112,7 @@ export function ChannelScreenHeader({
           variant="default"
         >
           <LogIn className="mr-1.5 h-4 w-4" />
-          {isJoining ? "Joining…" : "Join"}
+          {isJoining ? t("channels.header.joining") : t("channels.header.join")}
         </Button>
         {headerEndActions}
       </div>
@@ -156,7 +160,9 @@ export function ChannelScreenHeader({
             <UserProfilePopover
               pubkey={activeDmParticipant.pubkey}
               role={activeDmParticipant.isAgent ? "bot" : undefined}
-              triggerAriaLabel={`Open profile for ${activeChannelTitle}`}
+              triggerAriaLabel={t("channels.header.open-profile", {
+                name: activeChannelTitle,
+              })}
               triggerElement="span"
             >
               <ProfileAvatarWithStatus
@@ -229,6 +235,7 @@ function DmHeaderParticipantStack({
 }: {
   participants: ActiveDmHeaderParticipant[];
 }) {
+  const { t } = useTranslation();
   const { hiddenCount, visibleParticipants } =
     getDmParticipantPreview(participants);
   const stackItemCount = visibleParticipants.length + (hiddenCount > 0 ? 1 : 0);
@@ -242,7 +249,9 @@ function DmHeaderParticipantStack({
         <UserProfilePopover
           key={participant.pubkey}
           pubkey={participant.pubkey}
-          triggerAriaLabel={`Open profile for ${participant.displayName}`}
+          triggerAriaLabel={t("channels.header.open-profile", {
+            name: participant.displayName,
+          })}
           triggerElement="span"
           role={participant.isAgent ? "bot" : undefined}
         >

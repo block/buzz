@@ -4,9 +4,9 @@ import * as React from "react";
 import type { ProjectIssue } from "@/features/projects/hooks";
 import {
   formatExactTimestamp,
-  pluralize,
   relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
+import { useTranslation } from "@/i18n";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -25,6 +25,7 @@ export function ProjectIssueCommentTimeline({
   comments: ProjectIssue["comments"];
   profiles?: UserProfileLookup;
 }) {
+  const { t } = useTranslation();
   const [isCollapsed, setIsCollapsed] = React.useState(false);
   const [isExpanded, setIsExpanded] = React.useState(false);
   const orderedComments = React.useMemo(
@@ -68,8 +69,10 @@ export function ProjectIssueCommentTimeline({
         </span>
         <span className="flex min-h-5 min-w-0 flex-1 items-center text-left">
           {isCollapsed
-            ? `Show ${pluralize(orderedComments.length, "earlier comment")}`
-            : "Collapse comment history"}
+            ? t("projects.issue-comment-timeline.show-earlier", {
+                count: orderedComments.length,
+              })
+            : t("projects.issue-comment-timeline.collapse-history")}
         </span>
         {isCollapsed ? (
           <ChevronDown className="mt-0.5 h-3.5 w-3.5" />
@@ -92,7 +95,9 @@ export function ProjectIssueCommentTimeline({
             </span>
           </span>
           <span className="min-w-0 flex-1 text-left">
-            Show {pluralize(earlierCommentCount, "earlier comment")}
+            {t("projects.issue-comment-timeline.show-earlier", {
+              count: earlierCommentCount,
+            })}
           </span>
         </button>
       ) : null}

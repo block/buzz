@@ -13,6 +13,7 @@ import {
 } from "@/shared/ui/sidebar";
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
 import { ProtectedBestieSidebarEntry } from "@protected-feature-components";
+import { useTranslation } from "@/i18n";
 
 type SidebarSelectedView =
   | "home"
@@ -99,6 +100,7 @@ export function AppSidebarPrimaryMenu({
   projectsOverviewActive,
   selectedView,
 }: AppSidebarPrimaryMenuProps) {
+  const { t } = useTranslation();
   return (
     <>
       <SidebarHeader
@@ -112,11 +114,11 @@ export function AppSidebarPrimaryMenu({
               className="data-[active=true]:font-normal"
               isActive={selectedView === "home"}
               onClick={onSelectHome}
-              tooltip="Inbox"
+              tooltip={t("sidebar.nav.inbox")}
               type="button"
             >
               <Inbox className="h-4 w-4" />
-              <SidebarMenuLabel>Inbox</SidebarMenuLabel>
+              <SidebarMenuLabel>{t("sidebar.nav.inbox")}</SidebarMenuLabel>
             </SidebarMenuButton>
             {homeBadgeCount > 0 ? (
               <SidebarMenuBadge
@@ -133,11 +135,11 @@ export function AppSidebarPrimaryMenu({
                 data-testid="open-pulse-view"
                 isActive={selectedView === "pulse"}
                 onClick={onSelectPulse}
-                tooltip="Pulse"
+                tooltip={t("sidebar.nav.pulse")}
                 type="button"
               >
                 <Activity className="h-4 w-4" />
-                <SidebarMenuLabel>Pulse</SidebarMenuLabel>
+                <SidebarMenuLabel>{t("sidebar.nav.pulse")}</SidebarMenuLabel>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </FeatureGate>
@@ -147,11 +149,11 @@ export function AppSidebarPrimaryMenu({
                 data-testid="open-projects-view"
                 isActive={selectedView === "projects" && projectsOverviewActive}
                 onClick={onSelectProjects}
-                tooltip="Projects"
+                tooltip={t("sidebar.nav.projects")}
                 type="button"
               >
                 <Folders className="h-4 w-4" />
-                <SidebarMenuLabel>Projects</SidebarMenuLabel>
+                <SidebarMenuLabel>{t("sidebar.nav.projects")}</SidebarMenuLabel>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </FeatureGate>
@@ -161,11 +163,11 @@ export function AppSidebarPrimaryMenu({
               data-testid="open-agents-view"
               isActive={selectedView === "agents"}
               onClick={onSelectAgents}
-              tooltip="Agents"
+              tooltip={t("sidebar.nav.agents")}
               type="button"
             >
               <Bot className="h-4 w-4" />
-              <SidebarMenuLabel>Agents</SidebarMenuLabel>
+              <SidebarMenuLabel>{t("sidebar.nav.agents")}</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <ProtectedBestieSidebarEntry />
@@ -175,11 +177,13 @@ export function AppSidebarPrimaryMenu({
                 data-testid="open-workflows-view"
                 isActive={selectedView === "workflows"}
                 onClick={onSelectWorkflows}
-                tooltip="Workflows"
+                tooltip={t("sidebar.nav.workflows")}
                 type="button"
               >
                 <Zap className="h-4 w-4" />
-                <SidebarMenuLabel>Workflows</SidebarMenuLabel>
+                <SidebarMenuLabel>
+                  {t("sidebar.nav.workflows")}
+                </SidebarMenuLabel>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </FeatureGate>

@@ -2,6 +2,7 @@ import type {
   ProjectRepoSnapshot,
   Repository as Project,
 } from "@/features/projects/hooks";
+import { i18n } from "@/i18n";
 import type { EntityLinkTab } from "@/shared/lib/entityLink";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -13,14 +14,16 @@ export const PROJECT_REPOSITORY_SEARCH_KEYS = [
   "filePath",
 ] as const;
 
-export const PROJECT_TAB_CRUMB_LABELS: Record<string, string> = {
-  files: "Files",
-  activity: "Commits",
-  issues: "Tasks",
-  prs: "Review",
-  contributors: "Contributors",
-  channels: "Channels",
-};
+/** Breadcrumb label for a workspace tab, or `null` for an unknown tab. */
+export function projectTabCrumbLabel(tab: string): string | null {
+  if (tab === "files") return i18n.t("projects.tabs.files");
+  if (tab === "activity") return i18n.t("projects.tabs.commits");
+  if (tab === "issues") return i18n.t("projects.tabs.tasks");
+  if (tab === "prs") return i18n.t("projects.tabs.review");
+  if (tab === "contributors") return i18n.t("projects.tabs.contributors");
+  if (tab === "channels") return i18n.t("projects.tabs.channels");
+  return null;
+}
 
 export type ProjectDetailScreenProps = {
   commitHash?: string;
@@ -40,8 +43,18 @@ export function pushPullTitle(
   count: number | undefined,
   side: "local" | "remote",
 ) {
-  if (!count) return `${verb} ${side} commits`;
-  return `${verb} ${count} ${side} ${count === 1 ? "commit" : "commits"}`;
+  const isPush = verb === "Push";
+  const isLocal = side === "local";
+  if (!count) {
+    if (isPush && isLocal) return i18n.t("projects.sync.push-local-any");
+    if (isPush) return i18n.t("projects.sync.push-remote-any");
+    if (isLocal) return i18n.t("projects.sync.pull-local-any");
+    return i18n.t("projects.sync.pull-remote-any");
+  }
+  if (isPush && isLocal) return i18n.t("projects.sync.push-local", { count });
+  if (isPush) return i18n.t("projects.sync.push-remote", { count });
+  if (isLocal) return i18n.t("projects.sync.pull-local", { count });
+  return i18n.t("projects.sync.pull-remote", { count });
 }
 
 /** Returns the normalized owner and contributor pubkeys for a project. */

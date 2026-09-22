@@ -11,6 +11,7 @@ import {
   useMergeProjectPullRequestMutation,
   usePublishProjectPullRequestMergedMutation,
 } from "@/features/projects/pullRequestMutations";
+import { useTranslation } from "@/i18n";
 import {
   ProjectPullRequestMergeError,
   type ProjectPullRequestMergeRecovery,
@@ -44,6 +45,7 @@ export function MergePullRequestButton({
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
+  const { t } = useTranslation();
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [isPreparingRecovery, setIsPreparingRecovery] = React.useState(false);
   const [conflictRecoveryState, setConflictRecoveryState] = React.useState<{
@@ -108,10 +110,12 @@ export function MergePullRequestButton({
         setConfirmOpen(false);
       }
       toast.error(
-        error instanceof Error ? error.message : "Failed to merge review.",
+        error instanceof Error
+          ? error.message
+          : t("projects.merge-review-button.merge-failed"),
       );
     }
-  }, [mergeMutation, pullRequest]);
+  }, [mergeMutation, pullRequest, t]);
 
   const recoveryCommands =
     conflictRecovery && preparedRecovery
@@ -139,12 +143,12 @@ export function MergePullRequestButton({
         recoveryRef: result.recoveryRef,
         targetRef: result.targetRef,
       });
-      toast.success("Recovery commit fetched and terminal opened.");
+      toast.success(t("projects.merge-review-button.recovery-opened"));
     } catch (error) {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Failed to prepare merge recovery.",
+          : t("projects.merge-review-button.prepare-failed"),
       );
     } finally {
       setIsPreparingRecovery(false);
@@ -156,6 +160,7 @@ export function MergePullRequestButton({
     pullRequest.cloneUrls,
     pullRequest.commit,
     pullRequest.id,
+    t,
   ]);
 
   const handlePublishMergedStatus = React.useCallback(async () => {
@@ -165,15 +170,15 @@ export function MergePullRequestButton({
         statusEvent: unpublishedStatusEvent,
       });
       setUnpublishedStatusState(null);
-      toast.success("Published merged review status.");
+      toast.success(t("projects.merge-review-button.published"));
     } catch (error) {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Failed to publish merged review status.",
+          : t("projects.merge-review-button.publish-failed"),
       );
     }
-  }, [publishMergedMutation, unpublishedStatusEvent]);
+  }, [publishMergedMutation, t, unpublishedStatusEvent]);
 
   return (
     <div className="contents">
@@ -193,23 +198,26 @@ export function MergePullRequestButton({
         >
           <GitMerge className="h-3.5 w-3.5" />
           {publishMergedMutation.isPending
-            ? "Publishing…"
+            ? t("projects.merge-review-button.publishing")
             : unpublishedStatusEvent
-              ? "Publish merged status"
-              : "Merge"}
+              ? t("projects.merge-review-button.publish-merged-status")
+              : t("projects.merge-review-button.merge")}
         </Button>
         <AlertDialogContent data-testid="merge-pull-request-confirm">
           <AlertDialogHeader>
-            <AlertDialogTitle>Merge review?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t("projects.merge-review-button.confirm-title")}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Merge {pullRequest.branchName} into {targetBranch} and push the
-              result to the repository. The remote will reject the operation if
-              the branch changed or conflicts.
+              {t("projects.merge-review-button.confirm-description", {
+                source: pullRequest.branchName,
+                target: targetBranch,
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={mergeMutation.isPending}>
-              Cancel
+              {t("projects.card.cancel")}
             </AlertDialogCancel>
             <AlertDialogAction asChild>
               <Button
@@ -221,7 +229,9 @@ export function MergePullRequestButton({
                 }}
                 type="button"
               >
-                {mergeMutation.isPending ? "Merging…" : "Merge review"}
+                {mergeMutation.isPending
+                  ? t("projects.merge-review-button.merging")
+                  : t("projects.merge-review-button.merge-review")}
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -236,13 +246,12 @@ export function MergePullRequestButton({
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium text-foreground">
-                Resolve conflicts in your local checkout
+                {t("projects.merge-review-button.resolve-title")}
               </p>
               <p className="text-xs text-muted-foreground">
-                Prepare the local checkout, then switch to{" "}
-                {conflictRecovery.targetBranch} with the commands shown. After
-                resolving and committing, push the target branch and retry the
-                merge.
+                {t("projects.merge-review-button.resolve-steps", {
+                  branch: conflictRecovery.targetBranch,
+                })}
               </p>
             </div>
           </div>
@@ -252,8 +261,7 @@ export function MergePullRequestButton({
             </pre>
           ) : (
             <p className="rounded-md bg-background/80 p-2 text-xs text-muted-foreground">
-              Resolve in Terminal securely fetches the target and review commits
-              before showing copyable commands.
+              {t("projects.merge-review-button.resolve-hint")}
             </p>
           )}
           <div className="flex flex-wrap gap-2">
@@ -265,7 +273,9 @@ export function MergePullRequestButton({
               variant="outline"
             >
               <SquareTerminal className="h-3.5 w-3.5" />
-              {isPreparingRecovery ? "Preparing…" : "Resolve in Terminal"}
+              {isPreparingRecovery
+                ? t("projects.merge-review-button.preparing")
+                : t("projects.merge-review-button.resolve-in-terminal")}
             </Button>
             <Button
               disabled={!preparedRecovery}
@@ -280,7 +290,7 @@ export function MergePullRequestButton({
               variant="ghost"
             >
               <Copy className="h-3.5 w-3.5" />
-              Copy commands
+              {t("projects.merge-review-button.copy-commands")}
             </Button>
           </div>
         </div>

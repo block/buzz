@@ -6,6 +6,7 @@ import {
 } from "@/features/channels/lib/threadViewModePreference";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { useTranslation } from "@/i18n";
 
 /** Preserve focus only when activation did not come from a pointer click. */
 export function shouldRestoreThreadToggleFocus(clickDetail: number): boolean {
@@ -28,13 +29,11 @@ const THREAD_VIEW_MODE_TOGGLE = {
   focus: {
     // Viewing the drawer → offer the pane.
     icon: Columns2,
-    label: "Show thread beside channel",
     target: "split",
   },
   split: {
     // Viewing the pane → offer the drawer.
     icon: PanelRightOpen,
-    label: "Expand thread",
     target: "focus",
   },
 } as const;
@@ -57,8 +56,15 @@ export function ThreadViewModeToggle({
 }: {
   onChange: (mode: ThreadViewMode, restoreFocus: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const viewMode = useThreadViewMode();
-  const { icon: Icon, label, target } = THREAD_VIEW_MODE_TOGGLE[viewMode];
+  const { icon: Icon, target } = THREAD_VIEW_MODE_TOGGLE[viewMode];
+  // The label lives here rather than in the module-level table because a
+  // constant outside the component cannot call `t()`.
+  const label =
+    viewMode === "focus"
+      ? t("channels.thread.show-beside")
+      : t("channels.thread.expand");
 
   return (
     <Tooltip disableHoverableContent>

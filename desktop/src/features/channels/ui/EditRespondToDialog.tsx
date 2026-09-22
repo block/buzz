@@ -8,6 +8,7 @@ import {
   CreateAgentRespondToField,
   OWNER_ONLY_ACCESS_DISABLED_REASON,
 } from "@/features/agents/ui/RespondToField";
+import { useTranslation } from "@/i18n";
 import type { ManagedAgent, RespondToMode } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -29,6 +30,7 @@ export function EditRespondToDialog({
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
+  const { t } = useTranslation();
   const updateMutation = useUpdateManagedAgentMutation();
   const { data: agentAccessOwnerOnly } = useAgentAccessOwnerOnlyQuery({
     enabled: open,
@@ -65,9 +67,11 @@ export function EditRespondToDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Manage agent access</DialogTitle>
+          <DialogTitle>{t("channels.members.manage-agent-access")}</DialogTitle>
           <DialogDescription>
-            Choose who can send instructions to {agent?.name ?? "this agent"}.
+            {t("channels.members.access-body", {
+              name: agent?.name ?? t("channels.members.this-agent"),
+            })}
           </DialogDescription>
         </DialogHeader>
         <CreateAgentRespondToField
@@ -94,7 +98,7 @@ export function EditRespondToDialog({
             type="button"
             variant="outline"
           >
-            Cancel
+            {t("channels.members.cancel")}
           </Button>
           <Button
             disabled={
@@ -104,7 +108,9 @@ export function EditRespondToDialog({
             size="sm"
             type="button"
           >
-            {updateMutation.isPending ? "Saving..." : "Save access"}
+            {updateMutation.isPending
+              ? t("channels.members.saving")
+              : t("channels.members.save-access")}
           </Button>
         </div>
       </DialogContent>

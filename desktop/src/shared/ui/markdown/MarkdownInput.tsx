@@ -1,5 +1,6 @@
 import type * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Checkbox } from "@/shared/ui/checkbox";
 
@@ -14,10 +15,15 @@ export function MarkdownInput({
   type,
   ...props
 }: MarkdownInputProps) {
+  const { t } = useTranslation();
   if (type === "checkbox") {
     return (
       <Checkbox
-        aria-label={checked ? "Completed task" : "Incomplete task"}
+        aria-label={
+          checked
+            ? t("shared.markdown.task.completed-aria")
+            : t("shared.markdown.task.incomplete-aria")
+        }
         checked={Boolean(checked)}
         className={cn(
           "pointer-events-none mr-1.5 inline-flex align-[-0.125rem] disabled:opacity-45",

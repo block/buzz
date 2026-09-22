@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 
 import { personaManagedAgentUpdate } from "@/features/profile/ui/UserProfilePanelUtils";
+import { i18n } from "@/i18n";
 import type {
   AcpRuntimeCatalogEntry,
   AgentPersona,
@@ -59,8 +60,9 @@ export function validateLinkedAgentRuntimeEdit({
     return null;
   }
 
-  const runtimeLabel = runtime?.label ?? "This provider";
-  return `${runtimeLabel} is not available. Install it before saving this linked agent.`;
+  const runtimeLabel =
+    runtime?.label ?? i18n.t("profile.persona.this-provider");
+  return i18n.t("profile.persona.runtime-unavailable", { label: runtimeLabel });
 }
 
 export async function submitProfilePersonaDialog({
@@ -97,31 +99,51 @@ export async function submitProfilePersonaDialog({
       const result = agentUpdate ? await updateManagedAgent(agentUpdate) : null;
       if (result?.profileSyncError) {
         toast.warning(
-          `${result.agent.name} was updated, but profile sync failed: ${result.profileSyncError}`,
+          i18n.t("profile.persona.sync-failed-updated", {
+            name: result.agent.name,
+            error: result.profileSyncError,
+          }),
         );
       }
-      toast.success(`Updated ${input.displayName}.`);
+      toast.success(
+        i18n.t("profile.persona.updated", { name: input.displayName }),
+      );
     } else {
       const persona = await createPersona(input);
       try {
         const created = await createManagedAgentForPersona(persona);
         if (created.spawnError) {
           toast.error(
-            `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
+            i18n.t("profile.persona.created-not-started", {
+              name: persona.displayName,
+              error: created.spawnError,
+            }),
           );
         } else {
-          toast.success(`Created and started ${created.agent.name}.`);
+          toast.success(
+            i18n.t("profile.persona.created-and-started", {
+              name: created.agent.name,
+            }),
+          );
         }
         if (created.profileSyncError) {
           toast.warning(
-            `${created.agent.name} was created, but profile sync failed: ${created.profileSyncError}`,
+            i18n.t("profile.persona.created-sync-failed", {
+              name: created.agent.name,
+              error: created.profileSyncError,
+            }),
           );
         }
       } catch (error) {
         toast.error(
           error instanceof Error
-            ? `${persona.displayName} was created, but the agent instance could not be created: ${error.message}`
-            : `${persona.displayName} was created, but the agent instance could not be created.`,
+            ? i18n.t("profile.persona.created-instance-failed", {
+                name: persona.displayName,
+                error: error.message,
+              })
+            : i18n.t("profile.persona.created-instance-failed-plain", {
+                name: persona.displayName,
+              }),
         );
       }
     }
@@ -129,7 +151,9 @@ export async function submitProfilePersonaDialog({
     onDone();
   } catch (error) {
     toast.error(
-      error instanceof Error ? error.message : "Failed to save agent.",
+      error instanceof Error
+        ? error.message
+        : i18n.t("profile.persona.save-failed"),
     );
   }
 }

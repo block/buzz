@@ -1,5 +1,6 @@
 import { ChevronDown } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import type { InboxFilter } from "@/features/home/lib/inbox";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -11,18 +12,15 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 
-const INBOX_FILTER_OPTIONS: Array<{
-  label: string;
-  value: InboxFilter;
-}> = [
-  { value: "all", label: "All" },
-  { value: "project", label: "Projects" },
-  { value: "mention", label: "Mentions" },
-  { value: "thread", label: "Threads" },
-  { value: "needs_action", label: "Needs action" },
-  { value: "agent_activity", label: "Agents" },
-  { value: "reminders", label: "Reminders" },
-  { value: "drafts", label: "Drafts" },
+const INBOX_FILTER_OPTIONS: Array<{ value: InboxFilter }> = [
+  { value: "all" },
+  { value: "project" },
+  { value: "mention" },
+  { value: "thread" },
+  { value: "needs_action" },
+  { value: "agent_activity" },
+  { value: "reminders" },
+  { value: "drafts" },
 ];
 
 const TRIGGER_CLASS =
@@ -43,26 +41,42 @@ export function InboxFilterMenu({
   onFilterChange,
   reminderCount,
 }: InboxFilterMenuProps) {
-  const activeFilter = INBOX_FILTER_OPTIONS.find(
-    (option) => option.value === filter,
-  );
+  const { t } = useTranslation();
+  const filterLabels: Record<InboxFilter, string> = {
+    all: t("home.filter.all"),
+    project: t("sidebar.nav.projects"),
+    mention: t("home.filter.mentions"),
+    thread: t("home.filter.threads"),
+    needs_action: t("home.filter.needs-action"),
+    agent_activity: t("sidebar.nav.agents"),
+    reminders: t("home.filter.reminders"),
+    drafts: t("messages.drafts.heading"),
+  };
+  const activeLabel = filterLabels[filter] ?? filterLabels.all;
   const statusLabel =
     dueReminderCount > 0
-      ? `${dueReminderCount} due reminder${dueReminderCount === 1 ? "" : "s"}`
+      ? t("home.filter.due-reminders", { count: dueReminderCount })
       : activeDraftCount > 0
-        ? `${activeDraftCount} active draft${activeDraftCount === 1 ? "" : "s"}`
+        ? t("home.filter.active-drafts", { count: activeDraftCount })
         : null;
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          aria-label={`Filter inbox: ${activeFilter?.label ?? "All"}${statusLabel ? `. ${statusLabel}` : ""}`}
+          aria-label={
+            statusLabel
+              ? t("home.filter.trigger-aria-status", {
+                  filter: activeLabel,
+                  status: statusLabel,
+                })
+              : t("home.filter.trigger-aria", { filter: activeLabel })
+          }
           className={cn(TRIGGER_CLASS)}
           data-testid="inbox-filter-trigger"
           type="button"
         >
-          <span>{activeFilter?.label ?? "All"}</span>
+          <span>{activeLabel}</span>
           <ChevronDown className="text-muted-foreground" />
         </button>
       </DropdownMenuTrigger>
@@ -78,7 +92,7 @@ export function InboxFilterMenu({
               ) : null}
               <DropdownMenuRadioItem value={option.value}>
                 <span className="flex flex-1 items-center gap-2">
-                  <span>{option.label}</span>
+                  <span>{filterLabels[option.value]}</span>
                   <span className="ml-auto flex items-center gap-1.5">
                     {option.value === "reminders" && reminderCount > 0 ? (
                       <span

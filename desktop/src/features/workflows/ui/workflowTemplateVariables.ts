@@ -1,12 +1,16 @@
+import { i18n } from "@/i18n";
 import type {
   ActionType,
   StepFormState,
   TriggerType,
 } from "./workflowFormTypes";
 
+export type WorkflowTemplateVariableGroup = "previous-steps" | "trigger";
+
 export type WorkflowTemplateVariable = {
   description: string;
-  group: "Trigger" | "Previous steps";
+  group: WorkflowTemplateVariableGroup;
+  groupLabel: string;
   value: string;
 };
 
@@ -16,82 +20,172 @@ export type ActiveTemplateToken = {
   start: number;
 };
 
-const COMMON_EVENT_VARIABLES: WorkflowTemplateVariable[] = [
-  {
-    value: "trigger.author",
-    description: "Author pubkey",
-    group: "Trigger",
-  },
+/** Caption ids are stable names; only the catalog text changes with language. */
+type TemplateVariableCaption =
+  | "author-pubkey"
+  | "channel-uuid"
+  | "diff-text"
+  | "http-response-body"
+  | "http-response-status"
+  | "message-event-id"
+  | "message-text"
+  | "message-was-sent"
+  | "reaction-emoji"
+  | "reaction-was-added"
+  | "seconds-elapsed"
+  | "sent-message-id"
+  | "unix-timestamp"
+  | "workflow-channel-uuid";
+
+/**
+ * Template variable captions resolve at call time so they follow the live
+ * language. The `value` tokens themselves are substituted verbatim into the
+ * workflow YAML, so they stay exactly as written.
+ */
+export function templateVariableCaption(caption: TemplateVariableCaption) {
+  switch (caption) {
+    case "author-pubkey":
+      return i18n.t("workflows.template.author-pubkey");
+    case "channel-uuid":
+      return i18n.t("workflows.template.channel-uuid");
+    case "diff-text":
+      return i18n.t("workflows.template.diff-text");
+    case "http-response-body":
+      return i18n.t("workflows.template.http-response-body");
+    case "http-response-status":
+      return i18n.t("workflows.template.http-response-status");
+    case "message-event-id":
+      return i18n.t("workflows.template.message-event-id");
+    case "message-text":
+      return i18n.t("workflows.template.message-text");
+    case "message-was-sent":
+      return i18n.t("workflows.template.message-was-sent");
+    case "reaction-emoji":
+      return i18n.t("workflows.template.reaction-emoji");
+    case "reaction-was-added":
+      return i18n.t("workflows.template.reaction-was-added");
+    case "seconds-elapsed":
+      return i18n.t("workflows.template.seconds-elapsed");
+    case "sent-message-id":
+      return i18n.t("workflows.template.sent-message-id");
+    case "unix-timestamp":
+      return i18n.t("workflows.template.unix-timestamp");
+    case "workflow-channel-uuid":
+      return i18n.t("workflows.template.workflow-channel-uuid");
+  }
+}
+
+export function templateVariableGroupLabel(
+  group: WorkflowTemplateVariableGroup,
+): string {
+  return group === "trigger"
+    ? i18n.t("workflows.template.group-trigger")
+    : i18n.t("workflows.template.group-previous-steps");
+}
+
+const TRIGGER_GROUP = "trigger" as const;
+const PREVIOUS_STEPS_GROUP = "previous-steps" as const;
+
+type TemplateVariableSpec = {
+  caption: TemplateVariableCaption;
+  group: WorkflowTemplateVariableGroup;
+  value: string;
+};
+
+const COMMON_EVENT_VARIABLES: TemplateVariableSpec[] = [
+  { value: "trigger.author", caption: "author-pubkey", group: TRIGGER_GROUP },
   {
     value: "trigger.channel_id",
-    description: "Channel UUID",
-    group: "Trigger",
+    caption: "channel-uuid",
+    group: TRIGGER_GROUP,
   },
   {
     value: "trigger.timestamp",
-    description: "Unix timestamp",
-    group: "Trigger",
+    caption: "unix-timestamp",
+    group: TRIGGER_GROUP,
   },
   {
     value: "trigger.message_id",
-    description: "Message event ID",
-    group: "Trigger",
+    caption: "message-event-id",
+    group: TRIGGER_GROUP,
   },
 ];
 
-const STEP_OUTPUTS: Partial<Record<ActionType, Record<string, string>>> = {
-  delay: { slept_secs: "Seconds elapsed" },
-  send_message: {
-    sent: "Whether the message was sent",
-    event_id: "Sent message ID",
+const MESSAGE_EVENT_VARIABLES: TemplateVariableSpec[] = [
+  { value: "trigger.text", caption: "message-text", group: TRIGGER_GROUP },
+  ...COMMON_EVENT_VARIABLES,
+];
+
+const DIFF_EVENT_VARIABLES: TemplateVariableSpec[] = [
+  { value: "trigger.text", caption: "diff-text", group: TRIGGER_GROUP },
+  ...COMMON_EVENT_VARIABLES,
+];
+
+const REACTION_EVENT_VARIABLES: TemplateVariableSpec[] = [
+  { value: "trigger.emoji", caption: "reaction-emoji", group: TRIGGER_GROUP },
+  ...COMMON_EVENT_VARIABLES,
+];
+
+const SCHEDULE_VARIABLES: TemplateVariableSpec[] = [
+  {
+    value: "trigger.channel_id",
+    caption: "channel-uuid",
+    group: TRIGGER_GROUP,
   },
-  call_webhook: { status: "HTTP response status", body: "HTTP response body" },
-  add_reaction: {
-    added: "Whether the reaction was added",
+  {
+    value: "trigger.timestamp",
+    caption: "unix-timestamp",
+    group: TRIGGER_GROUP,
   },
+];
+
+const WEBHOOK_VARIABLES: TemplateVariableSpec[] = [
+  {
+    value: "trigger.channel_id",
+    caption: "workflow-channel-uuid",
+    group: TRIGGER_GROUP,
+  },
+];
+
+/** Output fields each action publishes, keyed by action id. */
+const STEP_OUTPUTS: Partial<
+  Record<ActionType, Array<{ caption: TemplateVariableCaption; field: string }>>
+> = {
+  delay: [{ field: "slept_secs", caption: "seconds-elapsed" }],
+  send_message: [
+    { field: "sent", caption: "message-was-sent" },
+    { field: "event_id", caption: "sent-message-id" },
+  ],
+  call_webhook: [
+    { field: "status", caption: "http-response-status" },
+    { field: "body", caption: "http-response-body" },
+  ],
+  add_reaction: [{ field: "added", caption: "reaction-was-added" }],
 };
 
 function triggerVariables(
   triggerType: TriggerType,
 ): WorkflowTemplateVariable[] {
-  switch (triggerType) {
-    case "message_posted":
-      return [
-        {
-          value: "trigger.text",
-          description: "Message text",
-          group: "Trigger",
-        },
-        ...COMMON_EVENT_VARIABLES,
-      ];
-    case "diff_posted":
-      return [
-        { value: "trigger.text", description: "Diff text", group: "Trigger" },
-        ...COMMON_EVENT_VARIABLES,
-      ];
-    case "reaction_added":
-      return [
-        {
-          value: "trigger.emoji",
-          description: "Reaction emoji",
-          group: "Trigger",
-        },
-        ...COMMON_EVENT_VARIABLES,
-      ];
-    case "schedule":
-      return COMMON_EVENT_VARIABLES.filter(
-        ({ value }) =>
-          value === "trigger.channel_id" || value === "trigger.timestamp",
-      );
-    case "webhook":
-      return [
-        {
-          value: "trigger.channel_id",
-          description: "Workflow channel UUID",
-          group: "Trigger",
-        },
-      ];
-  }
+  const specs =
+    triggerType === "message_posted"
+      ? MESSAGE_EVENT_VARIABLES
+      : triggerType === "diff_posted"
+        ? DIFF_EVENT_VARIABLES
+        : triggerType === "reaction_added"
+          ? REACTION_EVENT_VARIABLES
+          : triggerType === "schedule"
+            ? SCHEDULE_VARIABLES
+            : WEBHOOK_VARIABLES;
+  return specs.map(resolveVariable);
+}
+
+function resolveVariable(spec: TemplateVariableSpec): WorkflowTemplateVariable {
+  return {
+    description: templateVariableCaption(spec.caption),
+    group: spec.group,
+    groupLabel: templateVariableGroupLabel(spec.group),
+    value: spec.value,
+  };
 }
 
 export function workflowTemplateVariables(
@@ -101,11 +195,13 @@ export function workflowTemplateVariables(
   const priorOutputs = previousSteps.flatMap((step) => {
     const outputs = STEP_OUTPUTS[step.action];
     if (!outputs || !/^[A-Za-z0-9_]+$/.test(step.id)) return [];
-    return Object.entries(outputs).map(([field, description]) => ({
-      value: `steps.${step.id}.output.${field}`,
-      description,
-      group: "Previous steps" as const,
-    }));
+    return outputs.map(({ caption, field }) =>
+      resolveVariable({
+        caption,
+        group: PREVIOUS_STEPS_GROUP,
+        value: `steps.${step.id}.output.${field}`,
+      }),
+    );
   });
 
   return [...triggerVariables(triggerType), ...priorOutputs];

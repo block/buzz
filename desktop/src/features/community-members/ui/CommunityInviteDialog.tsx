@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
+
 import {
   Dialog,
   DialogContent,
@@ -23,6 +25,7 @@ export function CommunityInviteDialog({
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
+  const { t } = useTranslation();
   const [ttlSecs, setTtlSecs] = React.useState(DEFAULT_INVITE_TTL_SECS);
 
   React.useEffect(() => {
@@ -38,9 +41,9 @@ export function CommunityInviteDialog({
         data-testid="community-invite-dialog"
       >
         <DialogHeader>
-          <DialogTitle>Invite to community</DialogTitle>
+          <DialogTitle>{t("members.invite.title")}</DialogTitle>
           <DialogDescription>
-            Add someone directly or share a link they can use to join.
+            {t("members.invite.description")}
           </DialogDescription>
         </DialogHeader>
 
@@ -48,7 +51,7 @@ export function CommunityInviteDialog({
           <DirectAddMemberForm
             isOwner={isOwner}
             showLabel={false}
-            submitLabel="Invite"
+            submitLabel={t("members.invite.submit")}
           />
         </section>
 
@@ -58,7 +61,7 @@ export function CommunityInviteDialog({
         >
           <Separator className="bg-input/40" />
           <span className="absolute left-1/2 -translate-x-1/2 bg-background px-3 text-sm text-muted-foreground">
-            Or, copy a link
+            {t("members.invite.or-copy-link")}
           </span>
         </div>
 

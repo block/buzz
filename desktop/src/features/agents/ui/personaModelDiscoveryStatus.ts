@@ -1,3 +1,5 @@
+import { i18n } from "@/i18n";
+
 export type PersonaModelDiscoveryStatus = {
   message: string;
   tone: "muted" | "warning";
@@ -67,23 +69,20 @@ export function formatModelDiscoveryErrorStatus(
 
     if (message.includes("shared compute is not available in this build")) {
       return {
-        message:
-          "This version of Buzz cannot use shared compute. Update Buzz or choose another provider.",
+        message: i18n.t("agents.model-discovery.shared-compute-unsupported"),
         tone: "warning",
       };
     }
 
     if (message.includes("shared compute status is malformed")) {
       return {
-        message:
-          "Buzz received an invalid shared compute status. Check the member machine, then try again.",
+        message: i18n.t("agents.model-discovery.shared-compute-malformed"),
         tone: "warning",
       };
     }
 
     return {
-      message:
-        "Buzz couldn't check shared compute through the relay. Check your relay connection and try again.",
+      message: i18n.t("agents.model-discovery.shared-compute-relay-failed"),
       tone: "warning",
     };
   }
@@ -96,22 +95,24 @@ export function formatModelDiscoveryErrorStatus(
   if (message.toLowerCase().includes("authentication required")) {
     const label = agentLabel?.trim();
     return {
-      message: `${label || "This agent"} requires sign-in before models can load. Sign in with the ${label || "agent's"} CLI in a terminal, then try again.`,
+      message: i18n.t("agents.model-discovery.sign-in-required", {
+        agent: label || i18n.t("agents.model-discovery.this-agent"),
+        cliOwner: label || i18n.t("agents.model-discovery.agent-possessive"),
+      }),
       tone: "warning",
     };
   }
 
   if (message.includes("ANTHROPIC_API_KEY required")) {
     return {
-      message: "Enter an Anthropic API key to load Anthropic models.",
+      message: i18n.t("agents.model-discovery.anthropic-key-required"),
       tone: "warning",
     };
   }
 
   if (message.includes("OPENAI_COMPAT_API_KEY required")) {
     return {
-      message:
-        "Enter an OpenAI runtime API key (OPENAI_COMPAT_API_KEY) to load OpenAI models.",
+      message: i18n.t("agents.model-discovery.openai-key-required"),
       tone: "warning",
     };
   }

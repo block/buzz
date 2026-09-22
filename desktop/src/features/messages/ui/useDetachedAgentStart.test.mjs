@@ -44,6 +44,16 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, beforeEach, test } from "node:test";
 
 import { JSDOM } from "jsdom";
+import { initializeI18n } from "@/i18n";
+
+// The hook resolves its toast copy through i18n, and those assertions are the
+// English contract — but node's own `navigator.languages` reports the host
+// system locale, which may be zh-CN.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 const SELF = "1".repeat(64);
 // The key a mid-session import puts in force — the signing identity is one

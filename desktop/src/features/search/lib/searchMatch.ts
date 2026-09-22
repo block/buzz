@@ -1,3 +1,5 @@
+import { i18n } from "@/i18n";
+
 export type SearchMatchPart = {
   isMatch: boolean;
   key: string;
@@ -173,7 +175,7 @@ export function buildSearchResultPreview(
 ): string {
   const text = content.trim();
   if (!text) {
-    return "No message body.";
+    return i18n.t("search.preview.no-message-body");
   }
   if (text.length <= maxLength) {
     return text;

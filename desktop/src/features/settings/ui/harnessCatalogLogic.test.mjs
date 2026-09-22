@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { initializeI18n } from "@/i18n";
+
 import {
   adapterUpdateWarning,
   catalogDialogEntries,
@@ -12,6 +14,12 @@ import {
   stableRowOrder,
   yourHarnessEntries,
 } from "./harnessCatalogLogic.ts";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 // ── Minimal catalog entry factory ────────────────────────────────────────────
 

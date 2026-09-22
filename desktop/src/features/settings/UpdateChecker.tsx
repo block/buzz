@@ -1,4 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { useTranslation } from "@/i18n";
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import { Button } from "@/shared/ui/button";
 import {
@@ -7,16 +8,17 @@ import {
 } from "./ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "./ui/SettingsSectionHeader";
 export function UpdateChecker() {
+  const { t } = useTranslation();
   const { status, checkForUpdate, installAndRelaunch } = useUpdaterContext();
 
   return (
     <section className="min-w-0" data-testid="settings-updates">
       <SettingsSectionHeader
-        title="Software Updates"
-        description="Keep Buzz up to date with the latest features and fixes."
+        title={t("settings.updates.software-updates")}
+        description={t("settings.updates.section-description")}
       />
 
-      <SettingsOptionGroup title="Update status">
+      <SettingsOptionGroup title={t("settings.updates.status-group")}>
         {status.state === "idle" && (
           <SettingsOptionRow>
             <div className="min-w-0">
@@ -24,11 +26,11 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Check if a new version is available.
+                {t("settings.updates.idle-hint")}
               </p>
             </div>
             <Button size="sm" onClick={checkForUpdate}>
-              Check for Updates
+              {t("settings.updates.check")}
             </Button>
           </SettingsOptionRow>
         )}
@@ -40,7 +42,7 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Checking for updates...
+                {t("settings.updates.checking")}
               </p>
             </div>
           </SettingsOptionRow>
@@ -53,11 +55,11 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                You're on the latest version.
+                {t("settings.updates.up-to-date")}
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={checkForUpdate}>
-              Check Again
+              {t("settings.updates.check-again")}
             </Button>
           </SettingsOptionRow>
         )}
@@ -69,12 +71,11 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Automatic updates aren't available on this build. Download the
-                latest release manually.
+                {t("settings.updates.unavailable-hint")}
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={checkForUpdate}>
-              Check Again
+              {t("settings.updates.check-again")}
             </Button>
           </SettingsOptionRow>
         )}
@@ -83,19 +84,20 @@ export function UpdateChecker() {
           <SettingsOptionRow>
             <div className="min-w-0">
               <p className="text-sm font-medium">
-                Update available — v{status.version}
+                {t("settings.updates.available-version", {
+                  version: status.version,
+                })}
               </p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                In-app updates aren't supported on this Linux package. Download
-                the new version from GitHub.{" "}
-                <span>Switch to the AppImage build for automatic updates.</span>
+                {t("settings.updates.manual-required-hint")}{" "}
+                <span>{t("settings.updates.manual-required-appimage")}</span>
               </p>
             </div>
             <Button size="sm" onClick={() => void openUrl(status.releaseUrl)}>
-              Download Update
+              {t("settings.updates.download-update")}
             </Button>
           </SettingsOptionRow>
         )}
@@ -107,7 +109,7 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Preparing update...
+                {t("settings.updates.preparing")}
               </p>
             </div>
           </SettingsOptionRow>
@@ -120,7 +122,7 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Downloading update...
+                {t("settings.updates.downloading-dots")}
               </p>
             </div>
           </SettingsOptionRow>
@@ -133,7 +135,7 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Installing update...
+                {t("settings.updates.installing-dots")}
               </p>
             </div>
           </SettingsOptionRow>
@@ -146,11 +148,11 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Update downloaded. Click to apply.
+                {t("settings.updates.ready-hint")}
               </p>
             </div>
             <Button size="sm" onClick={installAndRelaunch}>
-              Update Now
+              {t("settings.updates.update-now")}
             </Button>
           </SettingsOptionRow>
         )}
@@ -159,11 +161,11 @@ export function UpdateChecker() {
           <SettingsOptionRow>
             <div className="min-w-0">
               <p className="text-sm font-normal text-destructive">
-                Update failed: {status.message}
+                {t("settings.updates.failed", { message: status.message })}
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={checkForUpdate}>
-              Retry
+              {t("settings.updates.retry")}
             </Button>
           </SettingsOptionRow>
         )}

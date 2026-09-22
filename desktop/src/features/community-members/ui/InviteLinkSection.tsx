@@ -3,6 +3,7 @@ import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { i18n, useTranslation } from "@/i18n";
 import { mintInvite } from "@/shared/api/invites";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
@@ -16,21 +17,53 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 
-const TTL_OPTIONS: { label: string; value: number }[] = [
-  { label: "1 day", value: 24 * 60 * 60 },
-  { label: "3 days", value: 3 * 24 * 60 * 60 },
-  { label: "7 days", value: 7 * 24 * 60 * 60 },
-  { label: "30 days", value: 30 * 24 * 60 * 60 },
+const TTL_OPTIONS: { id: string; value: number }[] = [
+  { id: "1-day", value: 24 * 60 * 60 },
+  { id: "3-days", value: 3 * 24 * 60 * 60 },
+  { id: "7-days", value: 7 * 24 * 60 * 60 },
+  { id: "30-days", value: 30 * 24 * 60 * 60 },
 ];
 
-const MAX_USE_OPTIONS: { label: string; value: number | null }[] = [
-  { label: "No limit", value: null },
-  { label: "1 use", value: 1 },
-  { label: "3 uses", value: 3 },
-  { label: "5 uses", value: 5 },
-  { label: "10 uses", value: 10 },
-  { label: "25 uses", value: 25 },
+const MAX_USE_OPTIONS: { id: string; value: number | null }[] = [
+  { id: "no-limit", value: null },
+  { id: "1-use", value: 1 },
+  { id: "3-uses", value: 3 },
+  { id: "5-uses", value: 5 },
+  { id: "10-uses", value: 10 },
+  { id: "25-uses", value: 25 },
 ];
+
+/** Option ids only — the `value`s are wire data and each label resolves at the
+ *  render site through a literal `t()` key. */
+function ttlLabel(id: string): string {
+  switch (id) {
+    case "3-days":
+      return i18n.t("members.invite.ttl-3-days");
+    case "7-days":
+      return i18n.t("members.invite.ttl-7-days");
+    case "30-days":
+      return i18n.t("members.invite.ttl-30-days");
+    default:
+      return i18n.t("members.invite.ttl-1-day");
+  }
+}
+
+function maxUsesLabel(id: string): string {
+  switch (id) {
+    case "1-use":
+      return i18n.t("members.invite.uses-1");
+    case "3-uses":
+      return i18n.t("members.invite.uses-3");
+    case "5-uses":
+      return i18n.t("members.invite.uses-5");
+    case "10-uses":
+      return i18n.t("members.invite.uses-10");
+    case "25-uses":
+      return i18n.t("members.invite.uses-25");
+    default:
+      return i18n.t("members.invite.no-limit");
+  }
+}
 
 export const DEFAULT_INVITE_TTL_SECS = TTL_OPTIONS[1].value;
 
@@ -51,6 +84,7 @@ export function InviteLinkSection({
   onTtlSecsChange: (ttlSecs: number) => void;
   ttlSecs: number;
 }) {
+  const { t } = useTranslation();
   const [copyStatus, setCopyStatus] = React.useState<CopyStatus>("idle");
   const [generationStatus, setGenerationStatus] =
     React.useState<GenerationStatus>("generating");
@@ -64,20 +98,22 @@ export function InviteLinkSection({
     new Map<string, ReturnType<typeof mintInvite>>(),
   );
   const shouldReduceMotion = useReducedMotion();
-  const ttlLabel =
-    TTL_OPTIONS.find((option) => option.value === ttlSecs)?.label ?? "3 days";
-  const maxUsesLabel =
-    MAX_USE_OPTIONS.find((option) => option.value === maxUses)?.label ??
-    "No limit";
+  const resolvedTtlLabel = ttlLabel(
+    TTL_OPTIONS.find((option) => option.value === ttlSecs)?.id ?? "3-days",
+  );
+  const resolvedMaxUsesLabel = maxUsesLabel(
+    MAX_USE_OPTIONS.find((option) => option.value === maxUses)?.id ??
+      "no-limit",
+  );
   const isGenerating = generationStatus === "generating";
   const hasGenerationFailed = generationStatus === "failed";
   const inviteSettingsKey = `${ttlSecs}:${maxUses ?? "no-limit"}`;
   const isWorking = isGenerating || copyStatus === "copying";
   const copyLabel = hasGenerationFailed
-    ? "Retry"
+    ? t("members.invite.retry")
     : copyStatus === "copied"
-      ? "Copied"
-      : "Copy link";
+      ? t("members.invite.copied")
+      : t("members.invite.copy-link");
   const copyButtonWidth = isWorking
     ? "6.25rem"
     : copyStatus === "copied"
@@ -120,10 +156,10 @@ export function InviteLinkSection({
       }
       if (generationRequestId.current === requestId) {
         setGenerationStatus("failed");
-        toast.error("Couldn’t create an invite link.");
+        toast.error(t("members.invite.create-failed"));
       }
     }
-  }, [inviteSettingsKey, maxUses, ttlSecs]);
+  }, [inviteSettingsKey, maxUses, t, ttlSecs]);
 
   React.useEffect(() => {
     void generateInviteLink();
@@ -143,10 +179,10 @@ export function InviteLinkSection({
     try {
       await writeTextToClipboard(inviteUrl);
       setCopyStatus("copied");
-      toast.success("Invite link copied");
+      toast.success(t("members.invite.copied-toast"));
     } catch {
       setCopyStatus("idle");
-      toast.error("Couldn’t copy the invite link. Try again.");
+      toast.error(t("members.invite.copy-failed"));
     }
   }
 
@@ -154,14 +190,14 @@ export function InviteLinkSection({
     <section data-testid="community-invite-link-section">
       <div className="relative">
         <Input
-          aria-label="Community invite link"
+          aria-label={t("members.invite.link-label")}
           className="h-11 pr-28 text-transparent caret-transparent selection:bg-transparent"
           data-testid="invite-link-url"
           disabled={isGenerating}
           placeholder={
             hasGenerationFailed
-              ? "Couldn’t create invite link"
-              : "Creating invite link…"
+              ? t("members.invite.create-failed-placeholder")
+              : t("members.invite.creating")
           }
           readOnly
           value={inviteUrl}
@@ -207,11 +243,13 @@ export function InviteLinkSection({
 
       <div className="mt-3 space-y-3">
         <div className="flex items-center justify-between gap-4">
-          <span className="text-sm font-medium">Expires after</span>
+          <span className="text-sm font-medium">
+            {t("members.invite.expires-after")}
+          </span>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
-                aria-label="Choose invite expiry"
+                aria-label={t("members.invite.choose-expiry")}
                 className="h-8 shrink-0 gap-1.5 px-2 text-sm text-muted-foreground"
                 data-testid="invite-link-ttl-trigger"
                 disabled={isGenerating || copyStatus === "copying"}
@@ -219,7 +257,7 @@ export function InviteLinkSection({
                 type="button"
                 variant="ghost"
               >
-                {ttlLabel}
+                {resolvedTtlLabel}
                 <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" />
               </Button>
             </DropdownMenuTrigger>
@@ -234,7 +272,7 @@ export function InviteLinkSection({
                     key={option.value}
                     value={String(option.value)}
                   >
-                    {option.label}
+                    {ttlLabel(option.id)}
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>
@@ -242,11 +280,13 @@ export function InviteLinkSection({
           </DropdownMenu>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-sm font-medium">Limit number of uses</span>
+          <span className="text-sm font-medium">
+            {t("members.invite.limit-uses")}
+          </span>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
-                aria-label="Choose maximum invite uses"
+                aria-label={t("members.invite.choose-max-uses")}
                 className="h-8 shrink-0 gap-1.5 px-2 text-sm text-muted-foreground"
                 data-testid="invite-link-max-uses-trigger"
                 disabled={isGenerating || copyStatus === "copying"}
@@ -254,7 +294,7 @@ export function InviteLinkSection({
                 type="button"
                 variant="ghost"
               >
-                {maxUsesLabel}
+                {resolvedMaxUsesLabel}
                 <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" />
               </Button>
             </DropdownMenuTrigger>
@@ -271,7 +311,7 @@ export function InviteLinkSection({
                     key={option.value ?? "no-limit"}
                     value={String(option.value ?? "no-limit")}
                   >
-                    {option.label}
+                    {maxUsesLabel(option.id)}
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>

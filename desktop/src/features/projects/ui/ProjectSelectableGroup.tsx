@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
 import { useProjectSelection } from "@/features/projects/lib/useProjectSelection";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { ProjectEntitySelectControl } from "./ProjectEntityListRow";
 
@@ -32,6 +33,7 @@ export function ProjectSelectableGroup({
   labelTestId?: string;
   testId: string;
 }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = React.useState(true);
   const selection = useProjectSelection();
   const selectedCount =
@@ -81,7 +83,11 @@ export function ProjectSelectableGroup({
               <ProjectEntitySelectControl
                 checked={allSelected}
                 indeterminate={partiallySelected}
-                label={`${allSelected ? "Clear" : "Select"} all ${label}`}
+                label={
+                  allSelected
+                    ? t("projects.selectable-group.clear-all", { label })
+                    : t("projects.selectable-group.select-all", { label })
+                }
                 onToggle={() => selection.toggleGroup(items)}
                 testId="projects-group-select"
               />

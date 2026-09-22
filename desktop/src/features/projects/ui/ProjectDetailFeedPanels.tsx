@@ -15,6 +15,7 @@ import type {
 import { selectionItemFromCommit } from "@/features/projects/lib/projectSelection";
 import { commitShareLink } from "@/features/projects/lib/projectShareLinks";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
+import { useTranslation } from "@/i18n";
 import type { ProjectRepoCommit } from "@/shared/api/types";
 import { truncateNpub } from "@/shared/lib/pubkey";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
@@ -69,6 +70,7 @@ export function ContributorsPanel({
   profiles?: UserProfileLookup;
   repoContributors: ProjectRepoContributor[];
 }) {
+  const { t } = useTranslation();
   const gitRows = repoContributors.map((contributor) => {
     const signedPubkey = contributorPubkeysByGitIdentity.get(
       contributorKey(contributor),
@@ -96,14 +98,17 @@ export function ContributorsPanel({
       profileLinked: matchedPubkey !== null,
       reviewCount: signedCounts?.reviews ?? null,
       role: signedPubkey
-        ? matchedProfile?.nip05Handle || contributor.email || "Buzz contributor"
+        ? matchedProfile?.nip05Handle ||
+          contributor.email ||
+          t("projects.detail-feed-panels.role-buzz")
         : heuristicProfile
-          ? `${
-              heuristicProfile.profile.nip05Handle ||
-              contributor.email ||
-              "Git contributor"
-            } · unverified match`
-          : contributor.email || "Git contributor",
+          ? t("projects.detail-feed-panels.role-unverified", {
+              name:
+                heuristicProfile.profile.nip05Handle ||
+                contributor.email ||
+                t("projects.detail-feed-panels.role-git"),
+            })
+          : contributor.email || t("projects.detail-feed-panels.role-git"),
       taskCount: signedCounts?.tasks ?? null,
     };
   });
@@ -135,7 +140,9 @@ export function ContributorsPanel({
         reviewCount: signedCounts.reviews,
         role:
           profile?.nip05Handle ||
-          (isAgent ? "Agent contributor" : "Buzz contributor"),
+          (isAgent
+            ? t("projects.detail-feed-panels.role-agent")
+            : t("projects.detail-feed-panels.role-buzz")),
         taskCount: signedCounts.tasks,
       };
     });
@@ -152,8 +159,8 @@ export function ContributorsPanel({
   if (rows.length === 0) {
     return (
       <ProjectPanelState
-        description="Contributors appear after signed project or repository activity."
-        title="No contributors yet"
+        description={t("projects.detail-feed-panels.contributors-empty-body")}
+        title={t("projects.detail-feed-panels.contributors-empty-title")}
       />
     );
   }
@@ -198,7 +205,7 @@ export function ContributorsPanel({
             data-testid="project-contributor-commit-count"
             title={
               row.commitCount === null
-                ? "No git commits"
+                ? t("projects.detail-feed-panels.no-git-commits")
                 : pluralize(row.commitCount, "commit")
             }
           >
@@ -210,7 +217,7 @@ export function ContributorsPanel({
             data-testid="project-contributor-review-count"
             title={
               row.reviewCount === null
-                ? "No linked reviews"
+                ? t("projects.detail-feed-panels.no-linked-reviews")
                 : pluralize(row.reviewCount, "review")
             }
           >
@@ -222,7 +229,7 @@ export function ContributorsPanel({
             data-testid="project-contributor-task-count"
             title={
               row.taskCount === null
-                ? "No linked tasks"
+                ? t("projects.detail-feed-panels.no-linked-tasks")
                 : pluralize(row.taskCount, "task")
             }
           >
@@ -269,6 +276,7 @@ export function ActivityPanel({
   repoContributors: ProjectRepoContributor[];
   viewerGitIdentity?: ViewerGitIdentity | null;
 }) {
+  const { t } = useTranslation();
   const items =
     commitItems ??
     (snapshot?.commits ?? []).map((commit) => ({
@@ -301,7 +309,9 @@ export function ActivityPanel({
   });
 
   if (isLoading) {
-    return <BuzzLoadingState label="Loading activity" />;
+    return (
+      <BuzzLoadingState label={t("projects.detail-feed-panels.loading")} />
+    );
   }
 
   if (items.length === 0) {
@@ -309,13 +319,17 @@ export function ActivityPanel({
       <ProjectPanelState
         description={
           error
-            ? "Refresh the repository and try again."
+            ? t("projects.shared.refresh-retry")
             : commitItems
-              ? "Commits pushed to this project's repositories will appear here."
-              : "Commits pushed to this repository will appear here."
+              ? t("projects.shared.commits-project-description")
+              : t("projects.shared.commits-repository-description")
         }
         error={Boolean(error)}
-        title={error ? "Could not load commits" : "No commits yet"}
+        title={
+          error
+            ? t("projects.shared.could-not-load-commits")
+            : t("projects.shared.no-commits-title")
+        }
       />
     );
   }

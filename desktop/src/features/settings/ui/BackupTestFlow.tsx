@@ -6,6 +6,7 @@ import {
   verifyNcryptsecBackup,
   type BackupVerification,
 } from "@/shared/api/tauriIdentity";
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { PubKey } from "@/shared/ui/PubKey";
@@ -117,6 +118,7 @@ export function BackupTestFlow({
   progress,
   onProgressChange,
 }: BackupTestFlowProps) {
+  const { t } = useTranslation();
   const reduceMotion = useReducedMotion() ?? false;
   const { stage, fileName, ncryptsec, result } = progress;
   // True while a file drag is anywhere over the window — the drop overlay
@@ -184,12 +186,13 @@ export function BackupTestFlow({
       try {
         text = (await file.text()).trim();
       } catch {
-        if (mountedRef.current) setError("Could not read that file.");
+        if (mountedRef.current)
+          setError(t("onboarding.backup.test-error-read"));
         return;
       }
       if (!mountedRef.current) return;
       if (!text.toLowerCase().startsWith("ncryptsec1")) {
-        setError("That doesn't look like a key backup file.");
+        setError(t("onboarding.backup.test-error-not-backup"));
         return;
       }
       setError(null);
@@ -201,7 +204,7 @@ export function BackupTestFlow({
         result: null,
       });
     },
-    [onProgressChange],
+    [onProgressChange, t],
   );
 
   const handleVerify = React.useCallback(async () => {
@@ -225,13 +228,15 @@ export function BackupTestFlow({
     } catch (err) {
       if (mountedRef.current && requestId === requestRef.current)
         setError(
-          err instanceof Error ? err.message : "Could not verify this backup.",
+          err instanceof Error
+            ? err.message
+            : t("onboarding.backup.test-error-verify"),
         );
     } finally {
       if (mountedRef.current && requestId === requestRef.current)
         setIsVerifying(false);
     }
-  }, [attempt, isVerifying, ncryptsec, onProgressChange]);
+  }, [attempt, isVerifying, ncryptsec, onProgressChange, t]);
 
   if (stage === "success" && result) {
     return (
@@ -260,12 +265,12 @@ export function BackupTestFlow({
           }
         >
           <p className="text-lg font-medium text-foreground">
-            This backup works
+            {t("onboarding.backup.test-success-generic-title")}
           </p>
           <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
             {result.matchesCurrentIdentity
-              ? "It restores your current Buzz identity."
-              : "It restores a different identity than the one signed in here."}
+              ? t("onboarding.backup.test-success-current")
+              : t("onboarding.backup.test-success-different")}
           </p>
           <div className="mt-3 flex justify-center">
             <PubKey
@@ -285,7 +290,7 @@ export function BackupTestFlow({
           type="button"
           variant="ghost"
         >
-          Test another backup
+          {t("onboarding.backup.test-another")}
         </Button>
       </div>
     );
@@ -318,7 +323,9 @@ export function BackupTestFlow({
             onClick={() => fileInputRef.current?.click()}
             type="button"
           >
-            <span className="text-sm font-medium">Select your backup file</span>
+            <span className="text-sm font-medium">
+              {t("onboarding.backup.select-file")}
+            </span>
           </button>
           {isWindowDragging ? (
             /*
@@ -340,7 +347,7 @@ export function BackupTestFlow({
             >
               <span className="flex items-center gap-2 rounded-full bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-sm ring-1 ring-background/15">
                 <FileUp aria-hidden="true" className="size-4" />
-                <span>Drop your backup file here</span>
+                <span>{t("onboarding.backup.drop-here")}</span>
               </span>
             </div>
           ) : null}
@@ -370,11 +377,11 @@ export function BackupTestFlow({
             <Check aria-hidden="true" className="h-4 w-4 text-primary" />
           </div>
           <p className="text-center text-sm leading-6 text-muted-foreground">
-            That's the one. Now enter your password to prove you can unlock it.
+            {t("settings.backup.test-hint")}
           </p>
           <div className="relative">
             <Input
-              aria-label="Backup password"
+              aria-label={t("onboarding.key-import.backup-password")}
               autoComplete="off"
               className="h-10 bg-background pr-10 font-mono"
               data-testid="backup-test-password"
@@ -386,13 +393,17 @@ export function BackupTestFlow({
                   void handleVerify();
                 }
               }}
-              placeholder="Your backup password"
+              placeholder={t("onboarding.backup.test-placeholder")}
               ref={passwordInputRef}
               type={isRevealed ? "text" : "password"}
               value={attempt}
             />
             <Button
-              aria-label={isRevealed ? "Hide password" : "Reveal password"}
+              aria-label={
+                isRevealed
+                  ? t("onboarding.backup.aria-hide-password")
+                  : t("onboarding.backup.aria-reveal-password")
+              }
               className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               data-testid="backup-test-password-reveal-toggle"
               disabled={isVerifying}
@@ -428,10 +439,10 @@ export function BackupTestFlow({
               {isVerifying ? (
                 <>
                   <Spinner className="h-4 w-4 border-2" />
-                  Checking…
+                  {t("onboarding.backup.checking")}
                 </>
               ) : (
-                "Verify backup"
+                t("onboarding.backup.verify")
               )}
             </Button>
             <Button
@@ -449,7 +460,7 @@ export function BackupTestFlow({
               type="button"
               variant="ghost"
             >
-              Use a different file
+              {t("settings.backup.use-different-file")}
             </Button>
           </div>
         </>

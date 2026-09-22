@@ -1,12 +1,15 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
-const SEARCH_PROMPT_WORDS = [
+import { useTranslation } from "@/i18n";
+
+/** Option ids only — the labels are resolved from the catalog at render time. */
+const SEARCH_PROMPT_WORD_KEYS = [
   "everything",
-  "a channel",
-  "a message",
-  "a thread",
-  "an agent",
+  "a-channel",
+  "a-message",
+  "a-thread",
+  "an-agent",
 ] as const;
 const SEARCH_PROMPT_ROTATION_MS = 3200;
 const SEARCH_PROMPT_EASE = [0.22, 1, 0.36, 1] as const;
@@ -81,9 +84,20 @@ function getPromptEnterTotalSeconds(characterCount: number) {
 }
 
 export function SearchPromptPlaceholder() {
+  const { t } = useTranslation();
   const shouldReduceMotion = useReducedMotion();
   const [wordIndex, setWordIndex] = React.useState(0);
-  const activeWord = SEARCH_PROMPT_WORDS[wordIndex];
+  const promptWords = React.useMemo(
+    () => [
+      t("search.prompt.everything"),
+      t("search.prompt.a-channel"),
+      t("search.prompt.a-message"),
+      t("search.prompt.a-thread"),
+      t("search.prompt.an-agent"),
+    ],
+    [t],
+  );
+  const activeWord = promptWords[wordIndex];
   const activeCharacters = React.useMemo(
     () => getPromptCharacters(activeWord),
     [activeWord],
@@ -103,7 +117,7 @@ export function SearchPromptPlaceholder() {
 
     const intervalId = window.setInterval(() => {
       setWordIndex((currentIndex) => {
-        return (currentIndex + 1) % SEARCH_PROMPT_WORDS.length;
+        return (currentIndex + 1) % SEARCH_PROMPT_WORD_KEYS.length;
       });
     }, SEARCH_PROMPT_ROTATION_MS);
 
@@ -142,7 +156,7 @@ export function SearchPromptPlaceholder() {
         className="text-muted-foreground"
         data-testid="search-placeholder"
       >
-        Search for {activeWord}
+        {t("search.prompt.search-for")} {activeWord}
       </span>
     );
   }
@@ -152,10 +166,10 @@ export function SearchPromptPlaceholder() {
       aria-hidden="true"
       className="pointer-events-none inline-flex min-w-0 items-baseline text-muted-foreground"
       data-active-search-prompt={activeWord}
-      data-search-prompt-options={SEARCH_PROMPT_WORDS.join(",")}
+      data-search-prompt-options={promptWords.join(",")}
       data-testid="search-placeholder"
     >
-      <span>Search for&nbsp;</span>
+      <span>{t("search.prompt.search-for")}&nbsp;</span>
       <span
         className="relative inline-block overflow-visible whitespace-nowrap align-baseline leading-[inherit] motion-safe:transition-[width] motion-safe:ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
         data-width-animation-duration-ms={Math.round(
@@ -166,7 +180,7 @@ export function SearchPromptPlaceholder() {
           ...(wordWidth === null ? {} : { width: wordWidth }),
         }}
       >
-        <span className="sr-only">everything</span>
+        <span className="sr-only">{t("search.prompt.everything")}</span>
         <span
           aria-hidden="true"
           className="pointer-events-none invisible inline-block whitespace-nowrap leading-[inherit]"

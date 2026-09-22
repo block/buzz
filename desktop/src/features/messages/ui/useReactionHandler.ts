@@ -8,6 +8,7 @@ import type {
 } from "@/features/messages/types";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
+import { useTranslation } from "@/i18n";
 
 type ReactionHandler = {
   /** Reactions in chronological order (earliest first) as emitted by the formatter. */
@@ -104,6 +105,7 @@ export function useReactionHandler(
     remove: boolean,
   ) => Promise<void>,
 ): ReactionHandler {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [pending, setPending] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
@@ -162,7 +164,7 @@ export function useReactionHandler(
         const nextMessage =
           error instanceof Error
             ? error.message
-            : "Failed to update the reaction.";
+            : t("messages.reaction.failed");
         setErrorMessage(nextMessage);
         throw error;
       } finally {
@@ -176,6 +178,7 @@ export function useReactionHandler(
       queryClient,
       reactions,
       sourceReactions,
+      t,
     ],
   );
 

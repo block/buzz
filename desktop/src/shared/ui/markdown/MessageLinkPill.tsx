@@ -6,6 +6,7 @@ import {
 } from "@/features/channels/openChannelDirectory";
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { getMessageLinkLabel } from "@/features/messages/lib/messageLinkLabel";
+import { i18n, useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import {
   Tooltip,
@@ -56,13 +57,23 @@ function formatMessageAge(createdAt: number): string {
     0,
     Math.floor((Date.now() - createdAt * 1_000) / 60_000),
   );
-  if (elapsedMinutes < 1) return "just now";
-  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  if (elapsedMinutes < 1)
+    return i18n.t("shared.markdown.link-pill.age-just-now");
+  if (elapsedMinutes < 60)
+    return i18n.t("shared.markdown.link-pill.age-minutes", {
+      count: elapsedMinutes,
+    });
   const elapsedHours = Math.floor(elapsedMinutes / 60);
-  if (elapsedHours < 24) return `${elapsedHours}h ago`;
+  if (elapsedHours < 24)
+    return i18n.t("shared.markdown.link-pill.age-hours", {
+      count: elapsedHours,
+    });
   const elapsedDays = Math.floor(elapsedHours / 24);
-  if (elapsedDays < 7) return `${elapsedDays}d ago`;
-  return `${Math.floor(elapsedDays / 7)}w ago`;
+  if (elapsedDays < 7)
+    return i18n.t("shared.markdown.link-pill.age-days", { count: elapsedDays });
+  return i18n.t("shared.markdown.link-pill.age-weeks", {
+    count: Math.floor(elapsedDays / 7),
+  });
 }
 
 function MessageLinkMetadataTooltip({
@@ -74,6 +85,7 @@ function MessageLinkMetadataTooltip({
   footer: string;
   metadata: ReturnType<typeof useMessageLinkMetadata>;
 }) {
+  const { t } = useTranslation();
   const { contentRef, onPointerMove } = useInlineTooltipPosition();
   if (
     metadata.state.kind === "deleted" ||
@@ -81,8 +93,8 @@ function MessageLinkMetadataTooltip({
   ) {
     const message =
       metadata.state.kind === "deleted"
-        ? "Message deleted"
-        : "Message unavailable";
+        ? t("shared.markdown.link-pill.deleted")
+        : t("shared.markdown.link-pill.unavailable");
     return (
       <TooltipProvider delayDuration={500} skipDelayDuration={0}>
         <Tooltip>
@@ -162,6 +174,7 @@ function MessageLinkPillContents({
   channelLabel?: string;
   openable?: boolean;
 }) {
+  const { t } = useTranslation();
   const [isHovered, setIsHovered] = React.useState(false);
   const channelLabel = resolvedChannelLabel ?? link.channelId.slice(0, 8);
   const isSentFromThread = variant === "sent-from-thread";
@@ -171,11 +184,11 @@ function MessageLinkPillContents({
   const destination =
     channel?.channelType === "dm" ? channelLabel : `#${channelLabel}`;
   const tooltipFooter = link.threadRootId
-    ? `Thread in ${destination}`
+    ? t("shared.markdown.link-pill.thread-in", { destination })
     : channel?.channelType === "dm"
-      ? `Direct message with ${destination}`
+      ? t("shared.markdown.link-pill.dm-with", { destination })
       : channel?.channelType === "forum"
-        ? `Forum post in ${destination}`
+        ? t("shared.markdown.link-pill.forum-post-in", { destination })
         : destination;
   const label = getMessageLinkLabel({
     channelName: channelLabel,
@@ -196,12 +209,20 @@ function MessageLinkPillContents({
         icon="message"
         aria-label={
           !openable
-            ? `Message in channel ${channelLabel}`
+            ? t("shared.markdown.link-pill.aria-in-channel", {
+                name: channelLabel,
+              })
             : isDeleted
               ? link.threadRootId
-                ? `Open thread in channel ${channelLabel}; linked message was deleted`
-                : `Open channel ${channelLabel}; linked message was deleted`
-              : `Open message in channel ${channelLabel}`
+                ? t("shared.markdown.link-pill.aria-open-thread-deleted", {
+                    name: channelLabel,
+                  })
+                : t("shared.markdown.link-pill.aria-open-channel-deleted", {
+                    name: channelLabel,
+                  })
+              : t("shared.markdown.link-pill.aria-open-message-in-channel", {
+                  name: channelLabel,
+                })
         }
         className={cn(
           metadata.state.kind === "unavailable" && "buzz-link-unavailable",
@@ -251,7 +272,9 @@ function MessageLinkPillContents({
       type="button"
       data-message-link=""
       data-hovered={isHovered ? "" : undefined}
-      aria-label={`Open thread in ${channelLabel}`}
+      aria-label={t("shared.markdown.link-pill.aria-open-thread-in", {
+        name: channelLabel,
+      })}
       title={label}
       className={cn(
         "max-w-80 cursor-pointer truncate",

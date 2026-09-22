@@ -10,6 +10,7 @@ import {
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useTranslation } from "@/i18n";
 import {
   canOpenDraft,
   canSendDraft,
@@ -37,6 +38,7 @@ export function DraftDetailPane({
   onBack,
   onDelete,
 }: DraftDetailPaneProps) {
+  const { t } = useTranslation();
   const { goChannel } = useAppNavigation();
   const [sendDialogOpen, setSendDialogOpen] = React.useState(false);
 
@@ -50,9 +52,11 @@ export function DraftDetailPane({
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-muted text-muted-foreground">
             <FileText className="h-6 w-6" />
           </div>
-          <p className="mt-4 text-base font-semibold">Select a draft</p>
+          <p className="mt-4 text-base font-semibold">
+            {t("messages.drafts.select-heading")}
+          </p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Pick a draft to preview it and choose what to do next.
+            {t("messages.drafts.select-hint")}
           </p>
         </div>
       </section>
@@ -67,7 +71,7 @@ export function DraftDetailPane({
     ? isDm
       ? source.label
       : `#${source.label}`
-    : "Unknown channel";
+    : t("messages.drafts.unknown-channel");
   const openEnabled = canOpenDraft(entry.draft, source) && !isOrphaned;
   const sendEnabled = canSendDraft(entry.draft, source, rootStatus);
   const content = entry.draft.content.trim();
@@ -84,7 +88,7 @@ export function DraftDetailPane({
             <div className="flex min-w-0 items-center gap-1">
               {onBack ? (
                 <Button
-                  aria-label="Back to drafts list"
+                  aria-label={t("messages.drafts.back-to-list")}
                   className="rounded-full text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                   onClick={onBack}
                   size="icon"
@@ -114,10 +118,7 @@ export function DraftDetailPane({
             data-testid="home-inbox-draft-orphaned-notice"
           >
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>
-              The original thread was deleted. This draft can no longer be
-              opened or sent.
-            </span>
+            <span>{t("messages.drafts.orphaned-notice")}</span>
           </div>
         ) : null}
 
@@ -134,17 +135,17 @@ export function DraftDetailPane({
             <UserAvatar
               avatarUrl={null}
               className="h-9 w-9 shrink-0"
-              displayName="You"
+              displayName={t("messages.drafts.you")}
               size="md"
             />
 
             <div className="min-w-0 flex-1">
               <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0">
                 <span className="text-sm font-semibold text-foreground">
-                  You
+                  {t("messages.drafts.you")}
                 </span>
                 <span className="text-xs font-medium text-muted-foreground">
-                  Draft
+                  {t("messages.drafts.label")}
                 </span>
                 <span className="shrink-0 text-xs font-normal tabular-nums text-muted-foreground/55">
                   {formatDraftCreatedAt(entry.draft)}
@@ -159,8 +160,9 @@ export function DraftDetailPane({
                 />
                 {attachmentCount > 0 && content ? (
                   <p className="mt-2 text-sm text-muted-foreground">
-                    {attachmentCount} attachment
-                    {attachmentCount === 1 ? "" : "s"}
+                    {t("messages.drafts.attachment-count", {
+                      count: attachmentCount,
+                    })}
                   </p>
                 ) : null}
               </div>
@@ -198,6 +200,7 @@ function DraftActionBar({
   onOpen: () => void;
   onSend: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="absolute right-2 top-1 z-10">
       <div
@@ -208,19 +211,23 @@ function DraftActionBar({
           <div className="flex items-center gap-0.5 p-1">
             <DraftActionButton
               disabled={!canOpen}
-              label="Open draft"
+              label={t("messages.drafts.open-draft")}
               onClick={onOpen}
             >
               <Pencil className="h-4 w-4" />
             </DraftActionButton>
             <DraftActionButton
               disabled={!canSend}
-              label="Send"
+              label={t("messages.drafts.send")}
               onClick={onSend}
             >
               <Send className="h-4 w-4" />
             </DraftActionButton>
-            <DraftActionButton destructive label="Delete" onClick={onDelete}>
+            <DraftActionButton
+              destructive
+              label={t("messages.drafts.delete")}
+              onClick={onDelete}
+            >
               <Trash2 className="h-4 w-4" />
             </DraftActionButton>
           </div>

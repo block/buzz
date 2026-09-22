@@ -7,8 +7,10 @@ import {
   useBackgroundLinkPreviewPreparation,
 } from "@/features/messages/lib/linkPreviewPreparationStore";
 import { ComposerUploadProgressPill } from "@/features/messages/ui/ComposerUploadProgressPill";
+import { useTranslation } from "@/i18n";
 
 export function ComposerUploadProgressOverlay() {
+  const { t } = useTranslation();
   const backgroundUpload = useBackgroundMediaUpload();
   const linkPreviews = useBackgroundLinkPreviewPreparation();
 
@@ -16,7 +18,7 @@ export function ComposerUploadProgressOverlay() {
     <div className="pointer-events-auto">
       {linkPreviews.isPreparing ? (
         <ComposerUploadProgressPill
-          actionLabel="Skip"
+          actionLabel={t("messages.composer.skip")}
           canCancel={linkPreviews.canSkip}
           isUploading
           onCancel={skipBackgroundLinkPreviews}

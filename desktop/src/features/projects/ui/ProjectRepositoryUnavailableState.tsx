@@ -17,6 +17,7 @@ import {
   type ProjectRepoUnavailableReason,
   projectRepoUnavailablePresentation,
 } from "@/features/projects/lib/projectRepoAvailability";
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -138,6 +139,7 @@ export function ProjectRepositoryUnavailableState({
   reason?: ProjectRepoUnavailableReason;
   retryPending?: boolean;
 }) {
+  const { t } = useTranslation();
   const unavailable = projectRepoUnavailablePresentation(reason);
   const UnavailableIcon = UNAVAILABLE_ICONS[reason];
 
@@ -177,7 +179,9 @@ export function ProjectRepositoryUnavailableState({
             ) : (
               <RefreshCw className="h-4 w-4" />
             )}
-            {retryPending ? "Retrying…" : "Retry"}
+            {retryPending
+              ? t("agent-memory.section.retrying")
+              : t("projects.shared.retry")}
           </Button>
         ) : null}
         {reason === "access" && onAskForAccess ? (

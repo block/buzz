@@ -2,6 +2,7 @@ import * as React from "react";
 import { AlertCircle, Brain, Download, FileType2 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import { useTranslation } from "@/i18n";
 import type {
   SnapshotFormat,
   SnapshotMemoryLevel,
@@ -29,15 +30,6 @@ type TeamSnapshotExportDialogProps = {
   onOpenChange: (open: boolean) => void;
 };
 
-const MEMORY_LEVELS: {
-  value: SnapshotMemoryLevel;
-  label: string;
-}[] = [
-  { value: "none", label: "Team only" },
-  { value: "core", label: "Team + core memory" },
-  { value: "everything", label: "Team + all memories" },
-];
-
 const FORMAT_OPTIONS: { value: SnapshotFormat; label: string }[] = [
   { value: "json", label: "JSON" },
   { value: "png", label: "PNG" },
@@ -55,6 +47,18 @@ export function TeamSnapshotExportDialog({
   onSaveFile,
   onOpenChange,
 }: TeamSnapshotExportDialogProps) {
+  const { t } = useTranslation();
+  const memoryLevelOptions = React.useMemo(
+    () => [
+      { value: "none" as const, label: t("agents.common.team-only") },
+      { value: "core" as const, label: t("agents.common.team-core-memory") },
+      {
+        value: "everything" as const,
+        label: t("agents.common.team-all-memories"),
+      },
+    ],
+    [t],
+  );
   const [memoryLevel, setMemoryLevel] =
     React.useState<SnapshotMemoryLevel>("none");
   const [format, setFormat] = React.useState<SnapshotFormat>("png");
@@ -80,7 +84,9 @@ export function TeamSnapshotExportDialog({
         showCloseButton={false}
       >
         <DialogHeader className="space-y-0">
-          <DialogTitle className="truncate">Export {team.name}</DialogTitle>
+          <DialogTitle className="truncate">
+            {t("agents.common.export-title", { name: team.name })}
+          </DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 pt-2">
@@ -88,16 +94,16 @@ export function TeamSnapshotExportDialog({
             <div className="flex min-h-8 items-center justify-between gap-4">
               <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
                 <Brain className="h-4 w-4 shrink-0 text-muted-foreground" />
-                Memories
+                {t("agents.common.memories")}
               </span>
               <SnapshotOptionMenu
-                ariaLabel="Memories"
+                ariaLabel={t("agents.common.memories")}
                 className="font-medium text-foreground"
                 disabled={isSavePending}
                 onValueChange={(value) =>
                   setMemoryLevel(value as SnapshotMemoryLevel)
                 }
-                options={MEMORY_LEVELS}
+                options={memoryLevelOptions}
                 testId="team-snapshot-memory-trigger"
                 value={memoryLevel}
               />
@@ -106,10 +112,10 @@ export function TeamSnapshotExportDialog({
             <div className="flex min-h-8 items-center justify-between gap-4">
               <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
                 <FileType2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-                File format
+                {t("agents.common.file-format")}
               </span>
               <SnapshotOptionMenu
-                ariaLabel="File format"
+                ariaLabel={t("agents.common.file-format")}
                 className="font-medium text-foreground"
                 disabled={isSavePending}
                 onValueChange={(value) => setFormat(value as SnapshotFormat)}
@@ -137,8 +143,9 @@ export function TeamSnapshotExportDialog({
                 >
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                   <p>
-                    Memory is stored as <strong>plaintext</strong> in the
-                    snapshot. Only share it with people you trust.
+                    {t("agents.common.memory-stored-as")}{" "}
+                    <strong>{t("agents.common.plaintext")}</strong>{" "}
+                    {t("agents.common.memory-in-snapshot")}
                   </p>
                 </div>
               </motion.div>
@@ -156,7 +163,7 @@ export function TeamSnapshotExportDialog({
                 type="button"
                 variant="ghost"
               >
-                Cancel
+                {t("agents.team-snapshot-export.cancel")}
               </Button>
             </DialogClose>
             <Button
@@ -167,7 +174,7 @@ export function TeamSnapshotExportDialog({
               type="button"
             >
               <Download className="h-4 w-4" />
-              Export
+              {t("agents.team-snapshot-export.export")}
             </Button>
           </div>
         </div>

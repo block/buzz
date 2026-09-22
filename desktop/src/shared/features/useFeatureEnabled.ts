@@ -1,4 +1,5 @@
 import { useSyncExternalStore, useCallback, useEffect } from "react";
+import { i18n } from "@/i18n";
 import { getFeature } from "./manifest";
 import { resolveEnabled } from "./resolveEnabled";
 import { getOverrides, setOverride, OVERRIDES_KEY } from "./store";
@@ -151,7 +152,7 @@ export function usePreviewFeatureWarning(featureId: string): void {
     void import("sonner").then(({ toast }) => {
       if (cancelled) return;
       toast.warning(
-        `${feature.name} is a preview feature. Enable it in Settings → Experiments to surface it in your sidebar.`,
+        i18n.t("shared.feature-enabled.preview-hint", { name: feature.name }),
       );
     });
     return () => {

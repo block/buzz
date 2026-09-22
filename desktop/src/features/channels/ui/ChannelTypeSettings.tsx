@@ -1,6 +1,7 @@
 import { ChevronDown, ClockFading, Hash } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import { useTranslation } from "@/i18n";
 import {
   channelLifecycle,
   channelLifecycleLabel,
@@ -25,21 +26,22 @@ import { EditableInfoFieldRow } from "./ChannelManagementSheetRows";
 import { ChannelTypePicker } from "./ChannelTypePicker";
 
 const CHANNEL_TYPE_OPTIONS = [
-  { value: "temporary", label: "Temporary", Icon: ClockFading },
-  { value: "ongoing", label: "Ongoing", Icon: Hash },
+  { value: "temporary", Icon: ClockFading },
+  { value: "ongoing", Icon: Hash },
 ] as const;
 
-const EPHEMERAL_TIMEOUT_OPTIONS = [
-  { label: "30 minutes", seconds: 30 * 60 },
-  { label: "1 hour", seconds: 60 * 60 },
-  { label: "6 hours", seconds: 6 * 60 * 60 },
-  { label: "12 hours", seconds: 12 * 60 * 60 },
-  { label: "1 day", seconds: 24 * 60 * 60 },
-  { label: "3 days", seconds: 3 * 24 * 60 * 60 },
-  { label: "7 days", seconds: DEFAULT_EPHEMERAL_TTL_SECONDS },
-  { label: "14 days", seconds: 14 * 24 * 60 * 60 },
-  { label: "30 days", seconds: 30 * 24 * 60 * 60 },
-] as const;
+/** Temporal TTL ids in picker order; labels resolve at render via `t()`. */
+const EPHEMERAL_TIMEOUT_SECONDS: number[] = [
+  30 * 60,
+  60 * 60,
+  6 * 60 * 60,
+  12 * 60 * 60,
+  24 * 60 * 60,
+  3 * 24 * 60 * 60,
+  DEFAULT_EPHEMERAL_TTL_SECONDS,
+  14 * 24 * 60 * 60,
+  30 * 24 * 60 * 60,
+];
 
 const CHANNEL_TYPE_RESIZE_TRANSITION = {
   duration: 0.22,
@@ -55,6 +57,7 @@ export function ChannelTypeDetailRow({
   channel: Channel;
   onEdit?: () => void;
 }) {
+  const { t } = useTranslation();
   const projectHome = useIsProjectHomeChannel(channel.id);
   const lifecycle = channelLifecycle({
     projectHome,
@@ -64,7 +67,7 @@ export function ChannelTypeDetailRow({
   return (
     <EditableInfoFieldRow
       editTestId="channel-management-edit-channel-type"
-      label="Channel type"
+      label={t("channels.type.channel-type")}
       onEdit={canEdit ? onEdit : undefined}
       testId="channel-management-type"
       value={channelLifecycleLabel(lifecycle, channel.ttlSeconds)}
@@ -75,7 +78,7 @@ export function ChannelTypeDetailRow({
 export function ChannelTypeSettings({
   channelId,
   disabled,
-  label = "Channel type",
+  label,
   onOpenChange,
   onTemporaryChange,
   onTtlSecondsChange,
@@ -97,23 +100,62 @@ export function ChannelTypeSettings({
   ttlSeconds: number;
   variant?: "dropdown" | "segmented";
 }) {
+  const { t } = useTranslation();
   const projectHome = useIsProjectHomeChannel(channelId);
   const lifecycle = channelLifecycle({ projectHome, temporary });
   const shouldReduceMotion = useReducedMotion();
   const channelTypeResizeTransition = shouldReduceMotion
     ? { duration: 0 }
     : CHANNEL_TYPE_RESIZE_TRANSITION;
-  const selectedTimeoutOption = EPHEMERAL_TIMEOUT_OPTIONS.find(
+  const rowLabel = label ?? t("channels.type.channel-type");
+  const currentDurationLabel = t("channels.type.current-duration", {
+    duration: formatTtlDuration(ttlSeconds),
+  });
+
+  function ttlLabelForSeconds(seconds: number) {
+    switch (seconds) {
+      case 30 * 60:
+        return t("channels.type.ttl-30-minutes");
+      case 60 * 60:
+        return t("channels.type.ttl-1-hour");
+      case 6 * 60 * 60:
+        return t("channels.type.ttl-6-hours");
+      case 12 * 60 * 60:
+        return t("channels.type.ttl-12-hours");
+      case 24 * 60 * 60:
+        return t("channels.type.ttl-1-day");
+      case 3 * 24 * 60 * 60:
+        return t("channels.type.ttl-3-days");
+      case DEFAULT_EPHEMERAL_TTL_SECONDS:
+        return t("channels.type.ttl-7-days");
+      case 14 * 24 * 60 * 60:
+        return t("channels.type.ttl-14-days");
+      case 30 * 24 * 60 * 60:
+        return t("channels.type.ttl-30-days");
+      default:
+        return currentDurationLabel;
+    }
+  }
+
+  const timeoutDurationOptions = EPHEMERAL_TIMEOUT_SECONDS.map((seconds) => ({
+    seconds,
+    label: ttlLabelForSeconds(seconds),
+  }));
+  const channelTypeOptions = CHANNEL_TYPE_OPTIONS.map((option) => ({
+    ...option,
+    label:
+      option.value === "temporary"
+        ? t("channels.type.temporary")
+        : t("channels.type.ongoing"),
+  }));
+  const selectedTimeoutOption = timeoutDurationOptions.find(
     (option) => option.seconds === ttlSeconds,
   );
   const timeoutOptions = selectedTimeoutOption
-    ? EPHEMERAL_TIMEOUT_OPTIONS
+    ? timeoutDurationOptions
     : [
-        {
-          label: `Current (${formatTtlDuration(ttlSeconds)})`,
-          seconds: ttlSeconds,
-        },
-        ...EPHEMERAL_TIMEOUT_OPTIONS,
+        { label: currentDurationLabel, seconds: ttlSeconds },
+        ...timeoutDurationOptions,
       ];
 
   return (
@@ -131,15 +173,15 @@ export function ChannelTypeSettings({
             disabled && variant === "segmented" && "opacity-50",
           )}
         >
-          {label}
+          {rowLabel}
         </span>
         {variant === "segmented" ? (
           <SegmentedControl
             disabled={disabled}
-            legend="Channel type"
+            legend={t("channels.type.channel-type")}
             onValueChange={(value) => onTemporaryChange(value === "temporary")}
             optionTestIdPrefix={`${testIdPrefix}-channel-type-option`}
-            options={CHANNEL_TYPE_OPTIONS}
+            options={channelTypeOptions}
             testId={`${testIdPrefix}-channel-type`}
             value={temporary ? "temporary" : "ongoing"}
           />
@@ -180,12 +222,12 @@ export function ChannelTypeSettings({
                 )}
                 htmlFor={`${testIdPrefix}-ttl`}
               >
-                Expires after
+                {t("channels.type.expires-after")}
               </label>
               <DropdownMenu modal={false}>
                 <DropdownMenuTrigger asChild>
                   <Button
-                    aria-label="Expires after"
+                    aria-label={t("channels.type.expires-after")}
                     className="-mr-2.5 ml-auto h-9 w-fit justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
                     data-testid={`${testIdPrefix}-ttl`}
                     disabled={disabled}
@@ -194,8 +236,7 @@ export function ChannelTypeSettings({
                     variant="ghost"
                   >
                     <span className="text-right">
-                      {selectedTimeoutOption?.label ??
-                        `Current (${formatTtlDuration(ttlSeconds)})`}
+                      {selectedTimeoutOption?.label ?? currentDurationLabel}
                     </span>
                     <ChevronDown className="size-4 shrink-0 text-muted-foreground/70" />
                   </Button>

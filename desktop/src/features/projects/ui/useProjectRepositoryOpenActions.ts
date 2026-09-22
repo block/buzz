@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import type { Repository } from "@/features/projects/hooks";
+import { useTranslation } from "@/i18n";
 import {
   openProjectMergeRecoveryTerminal,
   openProjectRepositoryFolder,
@@ -28,6 +29,7 @@ export function useProjectRepositoryOpenActions({
   repository: Repository | null | undefined;
   reposDir?: string | null;
 }) {
+  const { t } = useTranslation();
   const openTerminal = useOpenProjectTerminal(reposDir);
   const handleOpenTerminal = React.useCallback(() => {
     if (!repository) return Promise.resolve();
@@ -40,8 +42,8 @@ export function useProjectRepositoryOpenActions({
   const handleOpenLocalRepository = React.useCallback(async () => {
     const cloneUrl = repository?.cloneUrls[0];
     if (!localRepositoryPath || !repository || !cloneUrl) {
-      toast.error("Couldn’t open repository folder", {
-        description: "Buzz could not find this repository’s local checkout.",
+      toast.error(t("projects.repo-open.folder-error-title"), {
+        description: t("projects.repo-open.folder-missing-description"),
       });
       return;
     }
@@ -52,11 +54,11 @@ export function useProjectRepositoryOpenActions({
         reposDir,
       });
     } catch {
-      toast.error("Couldn’t open repository folder", {
-        description: "Buzz could not open this checkout in your file browser.",
+      toast.error(t("projects.repo-open.folder-error-title"), {
+        description: t("projects.repo-open.folder-open-description"),
       });
     }
-  }, [localRepositoryPath, repository, reposDir]);
+  }, [localRepositoryPath, repository, reposDir, t]);
 
   const handleOpenMergeRecoveryTerminal = React.useCallback(
     async (input: MergeRecoveryInput) => {

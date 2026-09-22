@@ -8,6 +8,7 @@ import type {
   RelayAgent,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
+import { i18n } from "@/i18n";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 
 export { truncateNpub };
@@ -29,20 +30,41 @@ export type ProfilePanelView =
 
 export type ProfilePanelTab = "info" | "runtime" | "channels" | "memories";
 
-export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
-  summary: "Profile",
-  instructions: "Agent instructions",
-  info: "Agent info",
-  configuration: "Runtime",
-  diagnostics: "Harness log",
-  memories: "Memories",
-  channels: "Channels",
-  logs: "Harness log",
-};
+/**
+ * Panel titles resolve from the catalog at call time so a language switch is
+ * reflected on the next render. Keys stay literal — the call-site audit cannot
+ * resolve a computed key.
+ */
+export function profilePanelViewLabel(view: ProfilePanelView): string {
+  switch (view) {
+    case "channels":
+      return i18n.t("profile.panel.view-channels");
+    case "configuration":
+      return i18n.t("profile.panel.view-configuration");
+    case "diagnostics":
+    case "logs":
+      return i18n.t("profile.panel.view-harness-log");
+    case "info":
+      return i18n.t("profile.panel.view-info");
+    case "instructions":
+      return i18n.t("profile.panel.view-instructions");
+    case "memories":
+      return i18n.t("profile.panel.view-memories");
+    default:
+      return i18n.t("profile.panel.view-summary");
+  }
+}
 
-const PROFILE_PANEL_VIEWS = new Set<ProfilePanelView>(
-  Object.keys(PROFILE_PANEL_VIEW_TITLES) as ProfilePanelView[],
-);
+const PROFILE_PANEL_VIEWS = new Set<ProfilePanelView>([
+  "channels",
+  "configuration",
+  "diagnostics",
+  "info",
+  "instructions",
+  "logs",
+  "memories",
+  "summary",
+]);
 
 const PROFILE_PANEL_TABS = new Set<ProfilePanelTab>([
   "info",

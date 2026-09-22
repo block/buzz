@@ -19,6 +19,7 @@ import {
   eventToRepository,
 } from "@/features/projects/projectModels";
 import { markProjectDataAuthoritative } from "@/features/projects/projectSnapshot";
+import { i18n } from "@/i18n";
 import { publishProjectOwnerAnnouncement } from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
@@ -278,7 +279,7 @@ export async function addProjectRepository(
         const message =
           retryError instanceof Error
             ? retryError.message
-            : "Failed to create the repository.";
+            : i18n.t("projects.add-repo-dialog.create-repo-failed");
         // The project already lists the coordinate. Surface a partial-write
         // error with the event id so the user (or a future repair pass) can
         // query the relay directly and re-submit the signed event if needed.

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { BookUser } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import type { CatalogTeamShareLevel } from "@/features/agents/lib/teamCatalogRelay";
 import { encodeTeamSnapshotForSend } from "@/shared/api/tauriTeams";
 import type { AgentTeam } from "@/shared/api/types";
@@ -28,6 +29,8 @@ export function TeamShareDialog({
   open,
   team,
 }: TeamShareDialogProps) {
+  const { t } = useTranslation();
+  const copy = teamCatalogCopy();
   const encodeSnapshot = React.useCallback(
     (memoryLevel: "none" | "core" | "everything") =>
       encodeTeamSnapshotForSend(team.id, memoryLevel, "png"),
@@ -47,15 +50,13 @@ export function TeamShareDialog({
           >
             <BookUser className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1">
-              <h3 className="text-sm font-medium">
-                {teamCatalogCopy.shareTitle}
-              </h3>
+              <h3 className="text-sm font-medium">{copy.shareTitle}</h3>
               <p className="text-xs text-secondary-foreground/75">
-                {teamCatalogCopy.shareDescription}
+                {copy.shareDescription}
               </p>
             </div>
             <Switch
-              aria-label="Share to catalog"
+              aria-label={t("agents.common.share-to-catalog")}
               checked={catalogShareLevel !== "not-shared"}
               data-testid="team-share-catalog-access"
               disabled={isPending}

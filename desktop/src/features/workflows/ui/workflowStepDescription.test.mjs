@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { initializeI18n } from "@/i18n";
 import { workflowStepDescription } from "./workflowStepDescription.ts";
+
+// These assertions are the English contract, but node's own `navigator.languages`
+// reports the host system locale (which may be zh-CN), so pin English first.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 test("describes configured workflow steps on the canvas", () => {
   assert.equal(

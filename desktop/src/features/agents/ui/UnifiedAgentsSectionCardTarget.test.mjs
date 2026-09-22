@@ -604,3 +604,13 @@ test("N cards share a snapshot, one poll, failure recovery and live subscription
     Object.assign(relayClient, original);
   }
 });
+
+// Mounted cards render the catalog-localized presence labels, so language
+// detection must be pinned to English before initializeI18n() reads it.
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis.navigator, "languages", {
+  configurable: true,
+  value: ["en-US", "en"],
+});
+initializeI18n();

@@ -17,6 +17,7 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 
 import type { Channel } from "@/shared/api/types";
+import { useTranslation } from "@/i18n";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
@@ -43,14 +44,14 @@ import {
 } from "./workflowConditionExpression";
 import type { WorkflowEditorPane } from "./workflowEditorPane";
 import {
+  actionTypeLabel,
   DEFAULT_FORM_STATE,
-  ACTION_LABELS,
+  nextStepId,
   SELECTABLE_ACTION_TYPES,
   SELECTABLE_TRIGGER_TYPES,
-  TRIGGER_LABELS,
   formStateToYaml,
-  nextStepId,
   supportsMessageTextCondition,
+  triggerTypeLabel,
   withTriggerType,
   yamlToFormState,
 } from "./workflowFormTypes";
@@ -78,6 +79,7 @@ function TriggerConfigFields({
   onUpdate: (trigger: TriggerConfig) => void;
   workflowChannelId?: string | null;
 }) {
+  const { t } = useTranslation();
   switch (trigger.on) {
     case "message_posted":
     case "diff_posted":
@@ -104,7 +106,7 @@ function TriggerConfigFields({
     case "webhook":
       return (
         <p className="text-xs text-muted-foreground">
-          A unique URL is generated after creation.
+          {t("workflows.form.webhook-url-note")}
         </p>
       );
     case "schedule":
@@ -167,14 +169,14 @@ const inspectorContentVariants = {
 function InspectorTypeMenu<T extends string>({
   ariaLabel,
   disabled,
-  labels,
+  labelOf,
   onChange,
   options,
   value,
 }: {
   ariaLabel: string;
   disabled?: boolean;
-  labels: Record<T, string>;
+  labelOf: (value: T) => string;
   onChange: (value: T) => void;
   options: readonly T[];
   value: T;
@@ -189,7 +191,7 @@ function InspectorTypeMenu<T extends string>({
           disabled={disabled}
           type="button"
         >
-          <span className="truncate">{labels[value]}</span>
+          <span className="truncate">{labelOf(value)}</span>
           <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground opacity-60 transition-opacity group-hover:opacity-100" />
         </button>
       </DropdownMenuTrigger>
@@ -202,7 +204,7 @@ function InspectorTypeMenu<T extends string>({
                 option === value ? "opacity-100" : "opacity-0",
               )}
             />
-            {labels[option]}
+            {labelOf(option)}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>
@@ -214,6 +216,7 @@ function WorkflowNode({
   description,
   disabled,
   icon,
+  isTrigger,
   label,
   number,
   onAddAfter,
@@ -228,6 +231,7 @@ function WorkflowNode({
   description: React.ReactNode;
   disabled?: boolean;
   icon?: React.ReactNode;
+  isTrigger?: boolean;
   label: string;
   number?: number;
   onAddAfter: (action: ActionType) => void;
@@ -239,6 +243,7 @@ function WorkflowNode({
   terminal: boolean;
   title: string;
 }) {
+  const { t } = useTranslation();
   const isNumbered = number !== undefined;
   const [addMenuOpen, setAddMenuOpen] = React.useState(false);
 
@@ -291,7 +296,7 @@ function WorkflowNode({
 
         {onRemove ? (
           <Button
-            aria-label={`Remove ${title}`}
+            aria-label={t("workflows.form.remove-node", { title })}
             className="pointer-events-none absolute -right-8 top-1/2 z-10 h-8 w-8 -translate-y-1/2 rounded-full bg-transparent opacity-0 transition-all duration-200 group-focus-within:pointer-events-auto group-focus-within:translate-x-3 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-x-3 group-hover:opacity-100 hover:bg-destructive/15 hover:text-destructive"
             disabled={disabled}
             onClick={onRemove}
@@ -320,7 +325,9 @@ function WorkflowNode({
           <DropdownMenuTrigger asChild>
             <Button
               aria-label={
-                title === "Trigger" ? "Add step" : `Add after ${title}`
+                isTrigger
+                  ? t("workflows.form.add-step")
+                  : t("workflows.form.add-after", { title })
               }
               className={cn(
                 "relative z-10 h-7 w-7 rounded-full bg-background shadow-sm",
@@ -341,7 +348,7 @@ function WorkflowNode({
                 key={action}
                 onSelect={() => onAddAfter(action)}
               >
-                <span>{ACTION_LABELS[action]}</span>
+                <span>{actionTypeLabel(action)}</span>
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
@@ -371,6 +378,7 @@ export const WorkflowFormBuilder = React.forwardRef<
   },
   ref,
 ) {
+  const { t } = useTranslation();
   // Parse once on mount instead of calling yamlToFormState three times
   const initialParseRef = React.useRef(yaml ? yamlToFormState(yaml) : null);
   const [formState, setFormState] = React.useState<WorkflowFormState>(
@@ -657,7 +665,7 @@ export const WorkflowFormBuilder = React.forwardRef<
             className="mx-6 mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
             role="alert"
           >
-            Cannot switch to form view: {parseError}
+            {t("workflows.form.cannot-switch-to-form", { error: parseError })}
           </p>
         ) : null}
 
@@ -666,7 +674,7 @@ export const WorkflowFormBuilder = React.forwardRef<
             <div className="max-w-md flex-shrink-0">{scopeField}</div>
             <div className="flex min-h-0 flex-1 flex-col gap-1.5">
               <Textarea
-                aria-label="Workflow YAML"
+                aria-label={t("workflows.form.yaml-aria")}
                 autoCapitalize="off"
                 className="min-h-0 flex-1 resize-none font-mono text-xs"
                 disabled={disabled}
@@ -674,7 +682,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                 value={yaml}
               />
               <p className="flex-shrink-0 text-xs text-muted-foreground">
-                Edit the raw YAML definition directly.
+                {t("workflows.form.yaml-hint")}
               </p>
             </div>
           </div>
@@ -684,7 +692,7 @@ export const WorkflowFormBuilder = React.forwardRef<
               <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-6 py-5">
                 <div className="mx-auto w-full max-w-sm">
                   {scopeField ? <div className="mb-3">{scopeField}</div> : null}
-                  <ol aria-label="Workflow sequence">
+                  <ol aria-label={t("workflows.form.sequence-aria")}>
                     <WorkflowNode
                       description={visibleTriggerDescription}
                       disabled={disabled}
@@ -698,16 +706,22 @@ export const WorkflowFormBuilder = React.forwardRef<
                           <TriggerIcon className="h-4 w-4" />
                         )
                       }
-                      label={`Trigger: ${triggerDescription}`}
+                      isTrigger
+                      label={t("workflows.form.trigger-node-label", {
+                        description: triggerDescription,
+                      })}
                       onAddAfter={(action) => insertStep(0, action)}
                       onClick={() => selectNode({ type: "trigger" })}
                       selected={selectedNode?.type === "trigger"}
                       terminal={formState.steps.length === 0}
-                      title="Trigger"
+                      title={t("workflows.form.trigger")}
                     />
 
                     {formState.steps.map((step, index) => {
-                      const actionLabel = ACTION_LABELS[step.action];
+                      const actionLabel = actionTypeLabel(step.action);
+                      const stepTitle = t("workflows.form.step-title", {
+                        number: index + 1,
+                      });
                       const channelLabel = step.channel
                         ? channels.find(
                             (channel) => channel.id === step.channel,
@@ -738,7 +752,10 @@ export const WorkflowFormBuilder = React.forwardRef<
                             ) : undefined
                           }
                           key={step.id}
-                          label={`Step ${index + 1}: ${nodeDescription}`}
+                          label={t("workflows.form.step-node-label", {
+                            description: nodeDescription,
+                            number: index + 1,
+                          })}
                           number={stepEmoji ? undefined : index + 1}
                           onAddAfter={(action) => insertStep(index + 1, action)}
                           onClick={() =>
@@ -754,7 +771,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                             showActionSubtitle ? actionLabel : undefined
                           }
                           terminal={index === formState.steps.length - 1}
-                          title={`Step ${index + 1}`}
+                          title={stepTitle}
                         />
                       );
                     })}
@@ -766,7 +783,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                 {selectedNode ? (
                   <motion.button
                     animate={{ opacity: 1 }}
-                    aria-label="Close inspector overlay"
+                    aria-label={t("workflows.form.close-inspector-overlay")}
                     className="absolute inset-0 z-20 hidden bg-background/15 backdrop-blur-sm [@container(max-width:58rem)]:block"
                     data-testid="workflow-node-inspector-backdrop"
                     exit={{ opacity: 0 }}
@@ -790,7 +807,9 @@ export const WorkflowFormBuilder = React.forwardRef<
                     <motion.aside
                       animate={{ opacity: 1, width: "26rem", x: 0 }}
                       aria-label={
-                        narrowInspector ? "Workflow node inspector" : undefined
+                        narrowInspector
+                          ? t("workflows.form.node-inspector")
+                          : undefined
                       }
                       aria-modal={narrowInspector || undefined}
                       className="flex flex-shrink-0 p-4 [@container(max-width:58rem)]:absolute [@container(max-width:58rem)]:inset-y-0 [@container(max-width:58rem)]:right-0 [@container(max-width:58rem)]:z-30 [@container(max-width:58rem)]:max-w-full"
@@ -820,14 +839,16 @@ export const WorkflowFormBuilder = React.forwardRef<
                           <div className="min-w-0">
                             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                               {selectedNode.type === "trigger"
-                                ? "Trigger"
-                                : `Step ${selectedStepIndex + 1}`}
+                                ? t("workflows.form.trigger")
+                                : t("workflows.form.step-title", {
+                                    number: selectedStepIndex + 1,
+                                  })}
                             </p>
                             {selectedNode.type === "trigger" ? (
                               <InspectorTypeMenu
-                                ariaLabel="Trigger event"
+                                ariaLabel={t("workflows.form.trigger-event")}
                                 disabled={disabled}
-                                labels={TRIGGER_LABELS}
+                                labelOf={triggerTypeLabel}
                                 onChange={(triggerType) => {
                                   setTriggerConditionDrafts(null);
                                   const next = withTriggerType(
@@ -855,9 +876,9 @@ export const WorkflowFormBuilder = React.forwardRef<
                               />
                             ) : selectedStep ? (
                               <InspectorTypeMenu
-                                ariaLabel="Action"
+                                ariaLabel={t("workflows.form.action")}
                                 disabled={disabled}
-                                labels={ACTION_LABELS}
+                                labelOf={actionTypeLabel}
                                 onChange={(action) => {
                                   const next = { ...selectedStep, action };
                                   if (
@@ -876,7 +897,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                           <div className="flex items-center gap-1">
                             {selectedNode.type === "step" && selectedStep ? (
                               <Button
-                                aria-label="Remove step"
+                                aria-label={t("workflows.form.remove-step")}
                                 className="h-8 w-8"
                                 disabled={disabled}
                                 onClick={() => removeStep(selectedStepIndex)}
@@ -888,7 +909,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                               </Button>
                             ) : null}
                             <Button
-                              aria-label="Close inspector"
+                              aria-label={t("workflows.form.close-inspector")}
                               className="h-8 w-8"
                               onClick={() => onSelectedNodeChange(null)}
                               size="icon"
@@ -973,7 +994,7 @@ export const WorkflowFormBuilder = React.forwardRef<
       {mode === "form" && nameLeadingContainer
         ? createPortal(
             <Switch
-              aria-label="Enable workflow"
+              aria-label={t("workflows.form.enable-workflow")}
               checked={formState.enabled}
               disabled={disabled}
               id="wf-enabled"

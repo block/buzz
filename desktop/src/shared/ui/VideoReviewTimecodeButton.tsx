@@ -1,5 +1,6 @@
 import type * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 
 const TIMECODE_ACCENT_CLASS =
@@ -42,9 +43,10 @@ export function VideoReviewTimecodeButton({
   surface?: "message" | "review";
   timecode: string;
 }) {
+  const { t } = useTranslation();
   return (
     <button
-      aria-label={`Jump to ${timecode}`}
+      aria-label={t("shared.ui.video-review.jump-to-aria", { timecode })}
       className={timecodeClasses({ className, interactive: true, surface })}
       data-testid="video-review-comment-timecode"
       type="button"

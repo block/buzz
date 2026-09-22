@@ -12,6 +12,7 @@ import { getSendToChannelSemantics } from "@/features/messages/lib/sendToChannel
 import { summarizeThreadRoot } from "@/features/messages/lib/sentFromThread";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { useTranslation } from "@/i18n";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -68,6 +69,7 @@ export function useChannelPaneHandlers({
   threadReplyTargetId: string | null;
   toggleReactionMutation: ReturnType<typeof useToggleReactionMutation>;
 }) {
+  const { t } = useTranslation();
   // Keep mutable values in refs so callbacks never need to list them as deps.
   const openThreadHeadIdRef = React.useRef(openThreadHeadId);
   openThreadHeadIdRef.current = openThreadHeadId;
@@ -124,9 +126,9 @@ export function useChannelPaneHandlers({
 
   const requireThreadEditResolution = React.useCallback(() => {
     if (!editTargetIsThreadReplyRef.current) return true;
-    toast.info("Finish or cancel your edit before leaving the thread.");
+    toast.info(t("channels.pane.finish-edit-thread"));
     return false;
-  }, []);
+  }, [t]);
 
   const handleCloseThread = React.useCallback(() => {
     if (!requireThreadEditResolution()) {

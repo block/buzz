@@ -29,6 +29,7 @@ import { useEnsureAgentMentionsReady } from "./useEnsureAgentMentionsReady";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
+import { useTranslation } from "@/i18n";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
   dedupeQueuedAgentWakes,
@@ -74,6 +75,7 @@ export function useMentionSendFlow({
   restoreQueuedAttachments,
   setSpoileredAttachmentUrls,
 }: UseMentionSendFlowOptions) {
+  const { t } = useTranslation();
   const [pendingNonMemberSend, setPendingNonMemberSend] =
     React.useState<PendingNonMemberMentionSend | null>(null);
   const [nonMemberPromptError, setNonMemberPromptError] = React.useState<
@@ -498,12 +500,13 @@ export function useMentionSendFlow({
           return;
         }
         if (agentReadiness.errors.length > 0) {
-          const message =
-            agentReadiness.errors.length === 1
-              ? `Could not prepare agent mention: ${agentReadiness.errors[0]}`
-              : `Could not prepare agent mentions: ${agentReadiness.errors.join(
-                  "; ",
-                )}`;
+          const message = t("messages.mention.prepare-agent-mention-failed", {
+            count: agentReadiness.errors.length,
+            error:
+              agentReadiness.errors.length === 1
+                ? agentReadiness.errors[0]
+                : agentReadiness.errors.join("; "),
+          });
           setNonMemberPromptError(message);
           toast.error(message);
           return restoreComposerAfterFailure();
@@ -651,7 +654,9 @@ export function useMentionSendFlow({
             onError: (error) => {
               restoreComposerAfterFailure();
               toast.error(
-                `Upload failed: ${getErrorMessage(error, "Unknown error")}`,
+                t("messages.composer.upload-failed", {
+                  message: getErrorMessage(error, "Unknown error"),
+                }),
               );
               settleUpload();
             },
@@ -720,6 +725,7 @@ export function useMentionSendFlow({
       hasUnsavedMedia,
       mentions.restoreDraftMentionRefs,
       activePreparedLinkPreviews,
+      t,
     ],
   );
   const sendMessageWithMentionFlow = React.useCallback(
@@ -803,12 +809,13 @@ export function useMentionSendFlow({
         );
         if (isSendCancelled()) return;
         if (personaMentionResult.errors.length > 0) {
-          const message =
-            personaMentionResult.errors.length === 1
-              ? `Could not create agent mention: ${personaMentionResult.errors[0]}`
-              : `Could not create agent mentions: ${personaMentionResult.errors.join(
-                  "; ",
-                )}`;
+          const message = t("messages.mention.create-agent-mention-failed", {
+            count: personaMentionResult.errors.length,
+            error:
+              personaMentionResult.errors.length === 1
+                ? personaMentionResult.errors[0]
+                : personaMentionResult.errors.join("; "),
+          });
           setNonMemberPromptError(message);
           toast.error(message);
           return;
@@ -935,6 +942,7 @@ export function useMentionSendFlow({
       mentions.registerMentionPubkey,
       onPrepareSendChannel,
       activePreparedLinkPreviews,
+      t,
     ],
   );
   const pendingNonMemberNames = React.useMemo(() => {

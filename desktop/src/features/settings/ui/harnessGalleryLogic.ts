@@ -4,6 +4,7 @@
  * Extracted for deterministic unit-testing — no React, no Tauri, no network.
  */
 
+import { i18n } from "@/i18n";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
 /**
@@ -88,13 +89,15 @@ export function deleteConfirmState(
   if (agents.isPending || personas.isPending) {
     return {
       canConfirm: false,
-      message: "Checking which agents use this harness…",
+      message: i18n.t("settings.runtimes.delete-checking"),
     };
   }
   if (agents.isError || personas.isError) {
     return {
       canConfirm: true,
-      message: `Couldn't check which agents use this harness — some agents may stop launching. Delete ${label}?`,
+      message: i18n.t("settings.runtimes.delete-check-failed", {
+        label,
+      }),
     };
   }
   const count = countAgentsReferencingHarness(

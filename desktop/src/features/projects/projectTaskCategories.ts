@@ -1,7 +1,9 @@
+import { i18n } from "@/i18n";
+
 export const PROJECT_TASK_CATEGORIES = [
-  { label: "Issue", value: "issue" },
-  { label: "Change request", value: "change-request" },
-  { label: "Improvement", value: "improvement" },
+  { value: "issue" },
+  { value: "change-request" },
+  { value: "improvement" },
 ] as const;
 
 export type ProjectTaskCategory =
@@ -28,10 +30,11 @@ export function projectTaskCategoryFromLabels(
 }
 
 export function projectTaskCategoryLabel(category: ProjectTaskCategory) {
-  return (
-    PROJECT_TASK_CATEGORIES.find((option) => option.value === category)
-      ?.label ?? "Issue"
-  );
+  if (category === "change-request")
+    return i18n.t("projects.task-category.change-request");
+  if (category === "improvement")
+    return i18n.t("projects.task-category.improvement");
+  return i18n.t("projects.task-category.issue");
 }
 
 export function projectTaskUserLabels(labels: string[]) {

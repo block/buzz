@@ -6,6 +6,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { useTranslation } from "@/i18n";
 
 const MAX_MEMBERSHIP_AVATARS = 5;
 
@@ -47,6 +48,7 @@ export function SystemMessageAvatar({
   profiles: UserProfileLookup | undefined;
   targetPubkey: string | undefined;
 }) {
+  const { t } = useTranslation();
   const hasActorAndTarget =
     actorPubkey && targetPubkey && actorPubkey !== targetPubkey;
   const actorLabel = actorPubkey
@@ -56,7 +58,7 @@ export function SystemMessageAvatar({
         profiles,
         preferResolvedSelfLabel: true,
       })
-    : "Someone";
+    : t("messages.system.someone");
   const singlePubkey = actorPubkey ?? targetPubkey;
 
   if (!hasActorAndTarget) {
@@ -170,11 +172,14 @@ export function MembershipAvatarStack({
   profiles: UserProfileLookup | undefined;
   pubkeys: readonly string[];
 }) {
+  const { t } = useTranslation();
   const visiblePubkeys = pubkeys.slice(0, MAX_MEMBERSHIP_AVATARS);
   if (visiblePubkeys.length === 0) return null;
   return (
     <div
-      aria-label={`${visiblePubkeys.length} channel member${visiblePubkeys.length === 1 ? "" : "s"}`}
+      aria-label={t("messages.system.channel-members", {
+        count: visiblePubkeys.length,
+      })}
       className="relative z-10 flex shrink-0 items-center justify-center"
       data-testid="system-message-avatar-stack"
       role="img"

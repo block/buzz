@@ -25,6 +25,7 @@ import {
 } from "@/features/projects/lib/projectAgentConversationStorage";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
+import { useTranslation } from "@/i18n";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { addChannelMembers } from "@/shared/api/tauri";
 import { sendChannelMessage } from "@/shared/api/tauriMessages";
@@ -72,6 +73,7 @@ export function ProjectAgentChatPanel({
   sharedHeaderBackdrop?: boolean;
   widthPx?: number;
 }) {
+  const { t } = useTranslation();
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
   // Repository coordinates (`kind:owner:dtag`) are not globally unique — the
@@ -230,7 +232,9 @@ export function ProjectAgentChatPanel({
         }
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to reach the agent",
+          error instanceof Error
+            ? error.message
+            : t("projects.shared.agent-unreachable"),
         );
       } finally {
         setIsSending(false);
@@ -248,6 +252,7 @@ export function ProjectAgentChatPanel({
       signerScope,
       startAgentMutation,
       storageScope,
+      t,
     ],
   );
 
@@ -292,13 +297,13 @@ export function ProjectAgentChatPanel({
             <div className="flex min-h-40 flex-1 flex-col items-center justify-center gap-2 text-center">
               <p className="text-sm font-medium text-foreground">
                 {homeChannel
-                  ? "Explain what this project should be"
-                  : "Ask about this page"}
+                  ? t("projects.agent-chat-panel.empty-title-home")
+                  : t("projects.agent-chat-panel.empty-title")}
               </p>
               <p className="max-w-72 text-xs text-muted-foreground">
                 {homeChannel
-                  ? "The project agent will build it out from this channel."
-                  : "Start a conversation with the project agent."}
+                  ? t("projects.agent-chat-panel.empty-body-home")
+                  : t("projects.agent-chat-panel.empty-body")}
               </p>
             </div>
           )}
@@ -318,8 +323,10 @@ export function ProjectAgentChatPanel({
           onSend={handleSubmit}
           placeholder={
             selectedAgent
-              ? `Message ${selectedAgent.name}`
-              : "No agents available"
+              ? t("messages.new-message.placeholder-direct", {
+                  name: selectedAgent.name,
+                })
+              : t("projects.shared.no-agents-available")
           }
           profiles={candidateProfilesQuery.data?.profiles}
           showBackgroundUploadProgress={false}
@@ -333,11 +340,11 @@ export function ProjectAgentChatPanel({
               />
               {conversation ? (
                 <Button
-                  aria-label="Clear project agent chat"
+                  aria-label={t("projects.agent-chat-panel.clear-aria")}
                   className="h-7 w-7"
                   onClick={handleClear}
                   size="icon"
-                  title="Clear conversation"
+                  title={t("projects.shared.clear-conversation")}
                   type="button"
                   variant="ghost"
                 >

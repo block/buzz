@@ -63,6 +63,7 @@ import {
   hsvToHex,
   normalizeHue,
 } from "@/features/profile/ui/ProfileAvatarEditor.utils";
+import { useTranslation } from "@/i18n";
 import { uploadMediaBytes } from "@/shared/api/tauri";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -84,6 +85,7 @@ export function AnimatedAvatarCapture({
   compactColorPicker = false,
   stackCameraOptions = false,
 }: AnimatedAvatarCaptureProps) {
+  const { t } = useTranslation();
   const [phase, setPhase] = React.useState<CapturePhase>("idle");
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [cameraDevices, setCameraDevices] = React.useState<
@@ -690,7 +692,7 @@ export function AnimatedAvatarCapture({
               animation on hover — exactly how the avatar behaves in the app.
               Dragging repositions the active framing target. */}
       <div
-        aria-label="Avatar preview — drag or use arrow keys to position"
+        aria-label={t("profile.animated.preview-aria")}
         className={cn(
           // Transparent like the real avatar container — only a faint
           // ring marks the circular crop boundary. pointer-events-auto
@@ -782,15 +784,21 @@ export function AnimatedAvatarCapture({
       ) : phase === "starting" ? (
         <div className="absolute inset-0 grid place-items-center rounded-full bg-background/70 text-center shadow-inner">
           <div className="grid justify-items-center gap-2 px-4">
-            <Spinner aria-label="Starting camera" className="h-4 w-4" />
+            <Spinner
+              aria-label={t("profile.animated.starting")}
+              className="h-4 w-4"
+            />
             <span className="text-xs font-medium text-muted-foreground">
-              Starting camera
+              {t("profile.animated.starting")}
             </span>
           </div>
         </div>
       ) : phase === "processing" ? (
         <div className="grid h-full w-full place-items-center rounded-full bg-background/60 shadow-inner">
-          <Spinner aria-label="Processing recording" className="h-6 w-6" />
+          <Spinner
+            aria-label={t("profile.animated.processing")}
+            className="h-6 w-6"
+          />
         </div>
       ) : null}
     </div>
@@ -916,7 +924,7 @@ export function AnimatedAvatarCapture({
           frameCount={bitmaps.length}
           frames={filmstripFrames}
           helpTestId={`${testIdPrefix}-animated-review-help`}
-          helpText="Pick the still shown before hover."
+          helpText={t("profile.animated.poster-help")}
           onSelectFrame={(index) =>
             setPosterIndex(clampFrameIndex(index, bitmaps.length))
           }
@@ -964,11 +972,11 @@ export function AnimatedAvatarCapture({
         >
           {isSaving ? (
             <Spinner
-              aria-label="Uploading animated avatar"
+              aria-label={t("profile.animated.uploading")}
               className="h-4 w-4 border-2"
             />
           ) : (
-            "Use as avatar"
+            t("profile.animated.use-as-avatar")
           )}
         </Button>
       ) : null}

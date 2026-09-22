@@ -11,6 +11,8 @@ import {
   XCircle,
 } from "lucide-react";
 
+import { i18n } from "@/i18n";
+
 import type { BuzzToolInfo, ToolStatus } from "./agentSessionTypes";
 
 export function normalizeToolStatus(status: string): ToolStatus {
@@ -34,7 +36,7 @@ export function normalizeToolStatus(status: string): ToolStatus {
 export function getToolStatusDisplay(status: ToolStatus, isError: boolean) {
   if (isError || status === "failed") {
     return {
-      label: "Error",
+      label: i18n.t("agents.tool-status.error"),
       Icon: XCircle,
       state: "output-error" as const,
       variant: "destructive" as const,
@@ -42,7 +44,7 @@ export function getToolStatusDisplay(status: ToolStatus, isError: boolean) {
   }
   if (status === "completed") {
     return {
-      label: "Done",
+      label: i18n.t("agents.tool-status.done"),
       Icon: CheckCircle2,
       state: "output-available" as const,
       variant: "secondary" as const,
@@ -50,14 +52,14 @@ export function getToolStatusDisplay(status: ToolStatus, isError: boolean) {
   }
   if (status === "pending") {
     return {
-      label: "Pending",
+      label: i18n.t("agents.tool-status.pending"),
       Icon: CircleDot,
       state: "input-streaming" as const,
       variant: "secondary" as const,
     };
   }
   return {
-    label: "Running",
+    label: i18n.t("agents.tool-status.running"),
     Icon: Clock3,
     state: "input-available" as const,
     variant: "secondary" as const,
@@ -148,8 +150,8 @@ export function getBuzzToolInfo(title: string): BuzzToolInfo | null {
     return {
       icon: Workflow,
       label: isRead
-        ? "Reads workflow state from Buzz."
-        : "Updates workflow state in Buzz.",
+        ? i18n.t("agents.buzz-tool.reads-workflow")
+        : i18n.t("agents.buzz-tool.updates-workflow"),
       tone: isWrite ? "write" : "read",
     };
   }
@@ -161,8 +163,8 @@ export function getBuzzToolInfo(title: string): BuzzToolInfo | null {
     return {
       icon: Hash,
       label: isRead
-        ? "Reads channel context from the Buzz relay."
-        : "Changes channel state in the Buzz relay.",
+        ? i18n.t("agents.buzz-tool.reads-channel")
+        : i18n.t("agents.buzz-tool.changes-channel"),
       tone: isWrite ? "write" : "read",
     };
   }
@@ -174,15 +176,15 @@ export function getBuzzToolInfo(title: string): BuzzToolInfo | null {
     return {
       icon: Users,
       label: isRead
-        ? "Reads Buzz identity or presence data."
-        : "Updates Buzz identity or membership data.",
+        ? i18n.t("agents.buzz-tool.reads-identity")
+        : i18n.t("agents.buzz-tool.updates-identity"),
       tone: isWrite ? "write" : "admin",
     };
   }
   if (name.includes("search") || name === "get_feed") {
     return {
       icon: Search,
-      label: "Searches relay-visible Buzz history.",
+      label: i18n.t("agents.buzz-tool.searches-history"),
       tone: "read",
     };
   }
@@ -193,14 +195,16 @@ export function getBuzzToolInfo(title: string): BuzzToolInfo | null {
   ) {
     return {
       icon: Send,
-      label: "Publishes relay-visible Buzz activity.",
+      label: i18n.t("agents.buzz-tool.publishes-activity"),
       tone: "write",
     };
   }
 
   return {
     icon: MessageSquare,
-    label: isRead ? "Reads from Buzz." : "Writes to Buzz.",
+    label: isRead
+      ? i18n.t("agents.buzz-tool.reads")
+      : i18n.t("agents.buzz-tool.writes"),
     tone: isWrite ? "write" : "read",
   };
 }

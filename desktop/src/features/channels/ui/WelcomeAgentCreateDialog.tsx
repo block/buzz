@@ -1,5 +1,6 @@
 import { MessageCircle, SlidersHorizontal } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -28,13 +29,14 @@ export function WelcomeAgentCreateDialog({
   onCreateManually,
   onOpenChange,
 }: WelcomeAgentCreateDialogProps) {
+  const { t } = useTranslation();
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Create an agent</DialogTitle>
+          <DialogTitle>{t("channels.welcome.dialog-title")}</DialogTitle>
           <DialogDescription>
-            Start with a conversation, or set everything up yourself.
+            {t("channels.welcome.dialog-body")}
           </DialogDescription>
         </DialogHeader>
 
@@ -51,11 +53,10 @@ export function WelcomeAgentCreateDialog({
             </span>
             <span className="min-w-0">
               <span className="block text-sm font-medium text-foreground">
-                Create with {guideName}
+                {t("channels.welcome.create-with-guide", { guideName })}
               </span>
               <span className="mt-0.5 block text-sm text-muted-foreground">
-                Talk through what you need. {guideName} will prepare a draft you
-                can review and edit.
+                {t("channels.welcome.create-with-guide-body", { guideName })}
               </span>
             </span>
           </button>
@@ -71,10 +72,10 @@ export function WelcomeAgentCreateDialog({
             </span>
             <span className="min-w-0">
               <span className="block text-sm font-medium text-foreground">
-                Create manually
+                {t("channels.welcome.create-manually")}
               </span>
               <span className="mt-0.5 block text-sm text-muted-foreground">
-                Fill in the agent’s name, instructions, and settings yourself.
+                {t("channels.welcome.create-manually-body")}
               </span>
             </span>
           </button>
@@ -93,7 +94,7 @@ export function WelcomeAgentCreateDialog({
             type="button"
             variant="ghost"
           >
-            Cancel
+            {t("channels.welcome.cancel")}
           </Button>
         </div>
       </DialogContent>

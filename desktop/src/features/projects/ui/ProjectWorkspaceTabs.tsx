@@ -31,6 +31,7 @@ import { projectRepoUnavailableReason } from "@/features/projects/lib/projectRep
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { useTranslation } from "@/i18n";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Tabs, TabsContent } from "@/shared/ui/tabs";
 import { findReadmeFile } from "./ProjectReadmePanel";
@@ -186,6 +187,7 @@ export function WorkspaceTabs({
   sourceControls?: RepoSourceHeaderControls;
   viewerGitIdentity?: ViewerGitIdentity | null;
 }) {
+  const { t } = useTranslation();
   const localCheckoutSnapshot = localSnapshot?.snapshot ?? null;
   const displayedSnapshot =
     repoSource === "local" ? localCheckoutSnapshot : snapshot;
@@ -356,24 +358,24 @@ export function WorkspaceTabs({
       <ProjectSectionHeader
         className={PROJECT_SECTION_HEADER_CLASS}
         icon={FilesIcon}
-        title="Files"
+        title={t("projects.tabs.files")}
       />
     ) : selectedTab === "activity" && !selectedCommitHash ? (
       <ProjectSectionHeader
         className={PROJECT_SECTION_HEADER_CLASS}
         icon={GitCommitHorizontal}
-        title="Commits"
+        title={t("projects.tabs.commits")}
       />
     ) : selectedTab === "issues" && !selectedIssueId ? (
       <ProjectSectionHeader
         action={{
           disabled: createIssueAction.pending,
-          label: "Create task",
+          label: t("projects.overview.action.create-task"),
           onClick: () => setCreateIssueOpen(true),
         }}
         className={PROJECT_SECTION_HEADER_CLASS}
         icon={CircleDot}
-        title="Tasks"
+        title={t("projects.tabs.tasks")}
       />
     ) : selectedTab === "prs" && !selectedPullRequestId ? (
       <ProjectSectionHeader
@@ -381,25 +383,25 @@ export function WorkspaceTabs({
           disabled:
             !createPullRequestAction ||
             createPullRequestAction.projects.length === 0,
-          label: "Create review",
+          label: t("projects.overview.action.create-review"),
           onClick: () => setCreatePullRequestOpen(true),
-          title: "Create review — choose a repository and branches to compare",
+          title: t("projects.tabs.create-review-hint"),
         }}
         className={PROJECT_SECTION_HEADER_CLASS}
         icon={GitPullRequest}
-        title="Reviews"
+        title={t("projects.sections.reviews")}
       />
     ) : selectedTab === "channels" ? (
       <ProjectSectionHeader
         className={PROJECT_SECTION_HEADER_CLASS}
         icon={Hash}
-        title="Channels"
+        title={t("projects.tabs.channels")}
       />
     ) : selectedTab === "contributors" ? (
       <ProjectSectionHeader
         className={PROJECT_SECTION_HEADER_CLASS}
         icon={Users}
-        title="Contributors"
+        title={t("projects.tabs.contributors")}
       />
     ) : null;
 
@@ -424,13 +426,13 @@ export function WorkspaceTabs({
                 disabled={updatePullRequestAction.pending}
                 onClick={updatePullRequestAction.onUpdate}
                 size="sm"
-                title="Publish the pushed commit to this review"
+                title={t("projects.tabs.publish-update-hint")}
                 variant="outline"
               >
                 <RefreshCw className="h-4 w-4" />
                 {updatePullRequestAction.pending
-                  ? "Updating…"
-                  : "Update review"}
+                  ? t("projects.tabs.updating")
+                  : t("projects.tabs.update-review")}
               </Button>
             ) : null}
           </div>
@@ -575,8 +577,8 @@ export function WorkspaceTabs({
             !localSnapshot &&
             !localSnapshotLoading ? (
               <ProjectPanelState
-                description="Switch to the remote source or clone this repository locally."
-                title="No local checkout found"
+                description={t("projects.tabs.no-checkout-description")}
+                title={t("projects.tabs.no-checkout-title")}
               />
             ) : (
               <RepositoryFilesPanel
@@ -592,7 +594,7 @@ export function WorkspaceTabs({
                 snapshot={displayedSnapshot}
                 unavailableMessage={
                   externalHost
-                    ? `Not mirrored on Buzz. Repository files are hosted on ${externalHost}.`
+                    ? t("projects.tabs.not-mirrored", { host: externalHost })
                     : undefined
                 }
               />
@@ -608,7 +610,7 @@ export function WorkspaceTabs({
 
         <TabsContent className="m-0" value="contributors">
           {displayedSnapshotLoading ? (
-            <BuzzLoadingState label="Loading contributors" />
+            <BuzzLoadingState label={t("projects.tabs.loading-contributors")} />
           ) : (
             <ContributorsPanel
               activityCounts={contributorActivityCounts}

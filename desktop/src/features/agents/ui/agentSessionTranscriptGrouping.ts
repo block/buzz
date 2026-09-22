@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import { buildTranscriptState } from "./agentSessionTranscript";
 import type { ObserverEvent, TranscriptItem } from "./agentSessionTypes";
 import { classifyToolItem } from "./agentSessionToolClassifier";
@@ -299,7 +300,9 @@ function groupMixedToolRuns(
         kind: "summary",
         summary: {
           id: `summary:mixed:${items[0].id}`,
-          label: `Ran ${items.length} tool calls`,
+          label: i18n.t("agents.transcript.ran-tool-calls", {
+            count: items.length,
+          }),
           count: items.length,
           items,
           renderClass: null,
@@ -363,19 +366,27 @@ function sameKindKey(item: TranscriptItem): string | null {
 }
 
 function sameKindLabel(item: TranscriptItem, count: number): string {
-  if (item.type !== "tool") return `${count} items`;
+  if (item.type !== "tool") {
+    return i18n.t("agents.transcript.item-count", { count });
+  }
   const descriptor = item.descriptor ?? classifyToolItem(item);
   const renderClass = getRenderClass(item);
   const label = descriptor.label;
   if (renderClass === "file-edit") {
-    return `Edited ${count} file${count === 1 ? "" : "s"}`;
+    return i18n.t("agents.transcript.edited-files", { count });
   }
-  if (renderClass === "file-read") return `Read ${count} files`;
+  if (renderClass === "file-read") {
+    return i18n.t("agents.transcript.read-files", { count });
+  }
   if (renderClass === "skill-read") {
-    return `Read ${count} skill${count === 1 ? "" : "s"}`;
+    return i18n.t("agents.transcript.read-skills", { count });
   }
-  if (renderClass === "shell") return `Ran ${count} commands`;
-  if (renderClass === "relay-op") return `Ran ${count} Buzz relay ops`;
+  if (renderClass === "shell") {
+    return i18n.t("agents.transcript.ran-commands", { count });
+  }
+  if (renderClass === "relay-op") {
+    return i18n.t("agents.transcript.ran-relay-ops", { count });
+  }
   return `${label} ×${count}`;
 }
 

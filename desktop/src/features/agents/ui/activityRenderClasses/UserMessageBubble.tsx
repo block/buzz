@@ -5,6 +5,7 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { Markdown } from "@/shared/ui/markdown";
@@ -29,6 +30,7 @@ export function UserMessageBubble({
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
 }) {
+  const { t } = useTranslation();
   const variant = useAgentSessionTranscriptVariant();
   const { goChannel } = useAppNavigation();
   const { openProfilePanel } = useProfilePanel();
@@ -100,7 +102,9 @@ export function UserMessageBubble({
     >
       {isCompactPreview ? null : item.authorPubkey && openProfilePanel ? (
         <button
-          aria-label={`Open ${authorLabel} profile`}
+          aria-label={t("agents.transcript.open-profile-aria", {
+            name: authorLabel,
+          })}
           className={cn(
             "pointer-events-auto order-last ml-2 mt-1 size-7 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             authorProfile?.isAgent ? "rounded-[30%]" : "rounded-full",

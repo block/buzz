@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type { TriggerType } from "./workflowFormTypes";
 
 export const CONDITION_OPERATORS = [
@@ -18,6 +19,15 @@ const EXACT_MATCH_OPERATORS = [
 ] as const satisfies readonly ConditionOperator[];
 const HEX_ID_PATTERN = /^[0-9a-fA-F]{64}$/;
 
+const AUTHOR_FIELD = "trigger_author";
+const FIELD_VALUES_BY_TRIGGER: Record<TriggerType, string[]> = {
+  message_posted: ["trigger_text", AUTHOR_FIELD],
+  diff_posted: ["trigger_text", AUTHOR_FIELD],
+  reaction_added: ["trigger_emoji", AUTHOR_FIELD, "trigger_message_id"],
+  webhook: [],
+  schedule: [],
+};
+
 export type ConditionField = { label: string; value: string };
 export type ParsedConditionExpression = {
   field: string;
@@ -26,29 +36,39 @@ export type ParsedConditionExpression = {
   webhookField: string;
 };
 
-const AUTHOR_FIELD: ConditionField = {
-  label: "Author",
-  value: "trigger_author",
-};
-const FIELDS_BY_TRIGGER: Record<TriggerType, ConditionField[]> = {
-  message_posted: [
-    { label: "Message text", value: "trigger_text" },
-    AUTHOR_FIELD,
-  ],
-  diff_posted: [{ label: "Diff text", value: "trigger_text" }, AUTHOR_FIELD],
-  reaction_added: [
-    { label: "Reaction emoji", value: "trigger_emoji" },
-    AUTHOR_FIELD,
-    { label: "Message", value: "trigger_message_id" },
-  ],
-  webhook: [],
-  schedule: [],
-};
+/**
+ * Condition field captions resolve at call time so they follow the live
+ * language. `trigger_text` is the same evalexpr variable for both the message
+ * and diff triggers, so the trigger decides which phrase reads naturally.
+ */
+export function conditionFieldLabel(
+  triggerType: TriggerType,
+  field: string,
+): string {
+  if (field === AUTHOR_FIELD) {
+    return i18n.t("workflows.condition.field-author");
+  }
+  if (field === "trigger_emoji") {
+    return i18n.t("workflows.condition.field-reaction-emoji");
+  }
+  if (field === "trigger_message_id") {
+    return i18n.t("workflows.condition.field-message");
+  }
+  if (field === "trigger_text") {
+    return triggerType === "diff_posted"
+      ? i18n.t("workflows.condition.field-diff-text")
+      : i18n.t("workflows.condition.field-message-text");
+  }
+  return field;
+}
 
 export function conditionFieldsForTrigger(
   triggerType: TriggerType,
 ): ConditionField[] {
-  return FIELDS_BY_TRIGGER[triggerType];
+  return FIELD_VALUES_BY_TRIGGER[triggerType].map((value) => ({
+    label: conditionFieldLabel(triggerType, value),
+    value,
+  }));
 }
 
 export function conditionOperatorsForField(
@@ -80,10 +100,10 @@ export function conditionValueError(
   const trimmed = value.trim();
   if (!trimmed) return null;
   if (field === "trigger_author" && !HEX_ID_PATTERN.test(trimmed)) {
-    return "Enter a 64-character hex pubkey.";
+    return i18n.t("workflows.condition.error-hex-pubkey");
   }
   if (field.endsWith("_id") && !HEX_ID_PATTERN.test(trimmed)) {
-    return "Enter a 64-character hex event ID.";
+    return i18n.t("workflows.condition.error-hex-event-id");
   }
   return null;
 }

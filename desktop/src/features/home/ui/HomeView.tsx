@@ -2,6 +2,7 @@ import * as React from "react";
 import { RefreshCcw } from "lucide-react";
 
 import { useAppShell } from "@/app/AppShellContext";
+import { useTranslation } from "@/i18n";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
@@ -104,6 +105,7 @@ export function HomeView({
   onOpenContext,
   onRefresh,
 }: HomeViewProps) {
+  const { t } = useTranslation();
   const relaySelfPubkey = useRelaySelfQuery().data;
   const [homeInboxRef, homeInboxWidthPx] = useElementWidth<HTMLDivElement>();
   const isNarrowHomeViewport =
@@ -590,14 +592,14 @@ export function HomeView({
         <div className="flex w-full max-w-3xl flex-col gap-4">
           <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-5">
             <p className="text-base font-semibold tracking-tight">
-              Home feed unavailable
+              {t("home.feed.unavailable")}
             </p>
             <p className="mt-2 text-sm text-muted-foreground">
-              {errorMessage ?? "The relay did not return a feed response."}
+              {errorMessage ?? t("home.feed.no-response")}
             </p>
             <Button className="mt-5" onClick={onRefresh} type="button">
               <RefreshCcw className="h-4 w-4" />
-              Try again
+              {t("onboarding.recovery.retry")}
             </Button>
           </div>
         </div>
@@ -757,7 +759,7 @@ export function HomeView({
           ) : null}
 
           <button
-            aria-label="Resize inbox list"
+            aria-label={t("home.resizer.aria")}
             className={cn(
               "group absolute bottom-0 z-40 w-3 -translate-x-1/2 cursor-col-resize",
               topChromeInset.top,
@@ -771,8 +773,8 @@ export function HomeView({
             style={{ left: `${effectiveInboxListWidthPx}px` }}
             title={
               canResetInboxListWidth
-                ? "Drag to resize. Double-click to reset width."
-                : "Drag to resize."
+                ? t("home.resizer.drag-reset")
+                : t("home.resizer.drag")
             }
             type="button"
           >
@@ -832,7 +834,7 @@ export function HomeView({
               }) => {
                 const channelId = selectedItem?.item.channelId;
                 if (!selectedItem || !channelId || !canReply) {
-                  throw new Error("Replies are not available for this item.");
+                  throw new Error(t("home.inbox.replies-unavailable"));
                 }
 
                 const itemToReply = selectedItem;
@@ -861,7 +863,7 @@ export function HomeView({
                           profiles: feedProfiles,
                           pubkey: authorPubkey,
                         })
-                      : "You",
+                      : t("messages.drafts.you"),
                     authorPubkey,
                     avatarUrl:
                       currentPubkey && feedProfiles

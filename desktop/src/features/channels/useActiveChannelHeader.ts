@@ -7,6 +7,7 @@ import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useTranslation } from "@/i18n";
 
 export type ActiveDmHeaderParticipant = {
   pubkey: string;
@@ -19,6 +20,7 @@ export function useActiveChannelHeader(
   activeChannel: Channel | null,
   currentPubkey?: string,
 ) {
+  const { t } = useTranslation();
   const activeDmParticipants = React.useMemo(() => {
     if (activeChannel?.channelType !== "dm") {
       return [];
@@ -92,7 +94,7 @@ export function useActiveChannelHeader(
           currentPubkey,
           activeDmProfilesQuery.data?.profiles,
         )
-      : "Channels",
+      : t("sidebar.shell.channels"),
     activeDmAvatarUrl,
     activeDmHeaderParticipants,
     activeDmPresenceStatus,

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
+import { useTranslation } from "@/i18n";
 import {
   remindersQueryKey,
   useRemindersQuery,
@@ -60,6 +61,7 @@ export function useReminderNotifications(
   settings: NotificationSettings,
   channels: ReadonlyArray<{ id: string; name?: string | null }>,
 ): void {
+  const { t } = useTranslation();
   const reminders = useRemindersQuery(pubkey).data;
   const queryClient = useQueryClient();
   const remindersRef = React.useRef<Reminder[]>([]);
@@ -101,12 +103,15 @@ export function useReminderNotifications(
       due.length === 1
         ? truncateNotificationBody(
             due[0].content.target?.preview ?? due[0].content.note ?? "",
-            "A reminder is waiting",
+            t("reminders.notification.body-fallback"),
           )
-        : `${due.length} reminders are due`;
+        : t("reminders.notification.due-count", { count: due.length });
 
     void sendDesktopNotification({
-      title: formatNotificationTitle({ prefix: "Reminder due", channelLabel }),
+      title: formatNotificationTitle({
+        prefix: t("reminders.notification.title"),
+        channelLabel,
+      }),
       body,
     }).then((didSend) => {
       if (!didSend) return;

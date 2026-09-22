@@ -87,7 +87,7 @@ import { AgentDefinitionDialogFooter } from "./AgentDefinitionDialogFooter";
 import { AgentDefinitionDialogShell } from "./AgentDefinitionDialogShell";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
 import {
-  ADD_CUSTOM_HARNESS_OPTION,
+  addCustomHarnessOption,
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
@@ -586,7 +586,7 @@ export function AgentDefinitionDialog({
       runtimes,
       runtimesLoading,
     });
-  runtimeDropdownOptions.push(ADD_CUSTOM_HARNESS_OPTION);
+  runtimeDropdownOptions.push(addCustomHarnessOption());
   const runtimeSummaryLabel = selectedRuntime
     ? formatRuntimeOptionLabel(selectedRuntime)
     : runtime.trim() || "Not configured";

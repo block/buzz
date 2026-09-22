@@ -1,6 +1,7 @@
 import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { useBackendProvidersQuery } from "@/features/agents/hooks";
 import { probeBackendProvider } from "@/shared/api/tauri";
 
@@ -22,17 +23,18 @@ export function WhereToRunSection({
   isPending: boolean;
   onDraftChange: (next: WhereToRunDraft) => void;
 }) {
+  const { t } = useTranslation();
   const backendProviders = useBackendProvidersQuery().data ?? [];
   const [probeError, setProbeError] = React.useState<string | null>(null);
   const runOnOptions = React.useMemo(
     () => [
-      { label: "This computer", value: "local" },
+      { label: t("agents.run-on.this-computer"), value: "local" },
       ...backendProviders.map((provider) => ({
         label: provider.id,
         value: provider.id,
       })),
     ],
-    [backendProviders],
+    [backendProviders, t],
   );
   const isProviderMode = draft.runOn !== "local";
   const selectedBackendProvider = React.useMemo(
@@ -89,7 +91,7 @@ export function WhereToRunSection({
     <div className="space-y-4">
       <div className="space-y-1.5">
         <label className="text-sm font-medium" htmlFor="agent-run-on">
-          Run on
+          {t("agents.run-on.label")}
         </label>
         <PersonaDropdownField
           disabled={isPending}
@@ -101,7 +103,7 @@ export function WhereToRunSection({
             })
           }
           options={runOnOptions}
-          placeholder="Choose where to run"
+          placeholder={t("agents.where-to-run.placeholder")}
           value={draft.runOn}
         />
       </div>
@@ -111,17 +113,14 @@ export function WhereToRunSection({
           <div className="flex gap-3 rounded-2xl border border-warning/30 bg-warning-bg px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <p className="text-sm text-warning">
-              This provider at{" "}
-              <span className="font-mono font-medium">
-                {selectedBackendProvider.binaryPath}
-              </span>{" "}
-              will receive your agent&apos;s private key. Only use providers
-              from trusted sources.
+              {t("agents.where-to-run.key-warning", {
+                path: selectedBackendProvider.binaryPath,
+              })}
             </p>
           </div>
           {probeError ? (
             <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-              Could not probe provider: {probeError}
+              {t("agents.where-to-run.probe-failed", { error: probeError })}
             </p>
           ) : null}
           {draft.probedProvider?.config_schema ? (

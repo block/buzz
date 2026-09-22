@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import { after, afterEach, before, describe, it } from "node:test";
 import { JSDOM } from "jsdom";
+import { initializeI18n } from "@/i18n";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost",
@@ -38,6 +39,7 @@ Object.defineProperty(globalThis, "navigator", {
   configurable: true,
   value: dom.window.navigator,
 });
+initializeI18n();
 dom.window.requestAnimationFrame = (callback) => setTimeout(callback, 0);
 globalThis.requestAnimationFrame = dom.window.requestAnimationFrame;
 dom.window.ResizeObserver = globalThis.ResizeObserver;

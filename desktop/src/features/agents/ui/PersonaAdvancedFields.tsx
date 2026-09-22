@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "@/i18n";
 import { useAgentAccessOwnerOnlyQuery } from "../useAgentAccessOwnerOnly";
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/cn";
@@ -94,6 +95,7 @@ export function PersonaAdvancedFields({
    */
   selectedRuntime?: AcpRuntimeCatalogEntry;
 }) {
+  const { t } = useTranslation();
   const { data: agentAccessOwnerOnly = false } = useAgentAccessOwnerOnlyQuery();
   const respondToMode = agentAccessOwnerOnly
     ? "owner-only"
@@ -168,7 +170,7 @@ export function PersonaAdvancedFields({
             className="text-sm font-medium text-foreground"
             htmlFor="persona-session-policy"
           >
-            Conversation context
+            {t("agents.advanced-fields.conversation-context")}
           </label>
           <PersonaDropdownField
             ariaDescribedBy="persona-session-policy-description"
@@ -181,10 +183,16 @@ export function PersonaAdvancedFields({
               })
             }
             options={[
-              { label: "Entire channel", value: "channel" },
-              { label: "Each thread", value: "thread" },
+              {
+                label: t("agents.advanced-fields.entire-channel"),
+                value: "channel",
+              },
+              {
+                label: t("agents.advanced-fields.each-thread"),
+                value: "thread",
+              },
             ]}
-            placeholder="Entire channel"
+            placeholder={t("agents.advanced-fields.entire-channel")}
             value={behaviorDraft.sessionPolicy}
           />
           <p
@@ -192,8 +200,8 @@ export function PersonaAdvancedFields({
             id="persona-session-policy-description"
           >
             {behaviorDraft.sessionPolicy === "thread"
-              ? "Keeps a separate conversation for each channel thread. Direct messages remain shared."
-              : "Shares one conversation across every thread in a channel."}
+              ? t("agents.advanced-fields.thread-separate-desc")
+              : t("agents.advanced-fields.thread-shared-desc")}
           </p>
         </div>
 
@@ -202,8 +210,10 @@ export function PersonaAdvancedFields({
             className="text-sm font-medium text-foreground"
             htmlFor="persona-parallelism"
           >
-            Parallelism
-            <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+            {t("agents.advanced-fields.parallelism")}
+            <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+              {t("sidebar.channel-form.optional")}
+            </span>
           </label>
           <div
             className={cn(
@@ -248,8 +258,10 @@ export function PersonaAdvancedFields({
           className="text-sm font-medium text-foreground"
           htmlFor="persona-name-pool"
         >
-          Instance name pool
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+          {t("agents.advanced-fields.name-pool")}
+          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+            {t("sidebar.channel-form.optional")}
+          </span>
         </label>
         <div
           className={cn(

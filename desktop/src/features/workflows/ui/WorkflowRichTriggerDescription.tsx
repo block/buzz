@@ -1,5 +1,6 @@
 import { LoaderCircle } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { splitWorkflowAuthorDescription } from "./workflowTriggerDescription";
 
@@ -16,12 +17,13 @@ export function WorkflowRichTriggerDescription({
   label?: string | null;
   loading?: boolean;
 }) {
+  const { t } = useTranslation();
   if (loading) {
     return (
       <span className="flex min-w-0 items-center gap-1.5">
         <span className="truncate">{description}</span>
         <LoaderCircle
-          aria-label="Loading author"
+          aria-label={t("workflows.rich-trigger.loading-author-aria")}
           className="h-3.5 w-3.5 shrink-0 animate-spin"
           role="status"
         />

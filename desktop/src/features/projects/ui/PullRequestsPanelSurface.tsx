@@ -1,5 +1,6 @@
 import type * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { ProjectPanelState } from "./ProjectPanelState";
 
@@ -36,13 +37,16 @@ export function PullRequestsPanelSurface({
   pullRequests: { length: number };
   selectedPullRequest: unknown;
 }) {
+  const { t } = useTranslation();
   const kind = pullRequestsPanelKind({
     isLoading,
     pullRequests,
     selectedPullRequest,
   });
   if (kind === "loading") {
-    return <BuzzLoadingState label="Loading reviews" />;
+    return (
+      <BuzzLoadingState label={t("projects.pull-requests-list.loading")} />
+    );
   }
   if (kind === "detail") {
     return detail;
@@ -52,12 +56,16 @@ export function PullRequestsPanelSurface({
       <ProjectPanelState
         description={
           error
-            ? "Refresh the repository and try again."
-            : "Reviews opened for this repository will appear here."
+            ? t("projects.shared.refresh-retry")
+            : t("projects.pr-panel-surface.empty-description")
         }
         error={Boolean(error)}
         testId="project-pull-requests-empty"
-        title={error ? "Could not load reviews" : "No reviews yet"}
+        title={
+          error
+            ? t("projects.pull-requests-list.load-error")
+            : t("projects.pr-panel-surface.no-reviews")
+        }
       />
     );
   }

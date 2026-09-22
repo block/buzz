@@ -1,6 +1,7 @@
 import { Bot, ChevronDown, ChevronRight } from "lucide-react";
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import type { AgentNoteGroup } from "@/features/pulse/lib/groupAgentNotes";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type { UserProfileSummary } from "@/shared/api/types";
@@ -30,6 +31,7 @@ function formatRelativeTime(unixSeconds: number): string {
 }
 
 function StatusDot({ status }: { status: "online" | "away" | "offline" }) {
+  const { t } = useTranslation();
   const color =
     status === "online"
       ? "bg-emerald-500"
@@ -38,7 +40,7 @@ function StatusDot({ status }: { status: "online" | "away" | "offline" }) {
         : "bg-zinc-400";
   return (
     <span
-      aria-label={`Agent ${status}`}
+      aria-label={t("pulse.agent-activity.status-aria", { status })}
       role="img"
       className={`inline-block h-2 w-2 rounded-full ${color}`}
     />
@@ -50,6 +52,7 @@ export function AgentActivityCard({
   profile,
   agentStatus,
 }: AgentActivityCardProps) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = React.useState(false);
   const displayName = profile?.displayName ?? truncateNpub(group.pubkey);
   const avatarUrl = profile?.avatarUrl ?? null;
@@ -68,7 +71,9 @@ export function AgentActivityCard({
           role={"bot" as const}
         >
           <button
-            aria-label={`Open profile for ${displayName}`}
+            aria-label={t("channels.header.open-profile", {
+              name: displayName,
+            })}
             className="relative flex shrink-0 rounded-xl pt-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             type="button"
           >

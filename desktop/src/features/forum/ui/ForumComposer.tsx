@@ -23,6 +23,7 @@ import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import { MessageComposerToolbar } from "@/features/messages/ui/MessageComposerToolbar";
 import { NonMemberMentionDialog } from "@/features/messages/ui/NonMemberMentionDialog";
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -67,6 +68,7 @@ function ForumComposerVisit({
   autocompleteBelow = false,
   profiles,
 }: ForumComposerProps) {
+  const { t } = useTranslation();
   const drafts = useDrafts();
   const mountedRef = React.useRef(false);
   React.useLayoutEffect(() => {
@@ -710,7 +712,7 @@ function ForumComposerVisit({
                         type="button"
                         variant="ghost"
                       >
-                        Cancel
+                        {t("forum.composer.cancel")}
                       </Button>
                     ) : null}
                     {onSecondarySubmit && secondarySubmitLabel ? (
@@ -730,7 +732,7 @@ function ForumComposerVisit({
                           >
                             {submitMode === "secondary"
                               ? secondarySubmitLabel
-                              : "Comment"}
+                              : t("forum.composer.comment")}
                             <ChevronDown className="h-3.5 w-3.5" />
                           </Button>
                         </DropdownMenuTrigger>
@@ -742,7 +744,7 @@ function ForumComposerVisit({
                             value={submitMode}
                           >
                             <DropdownMenuRadioItem value="primary">
-                              Comment
+                              {t("forum.composer.comment")}
                             </DropdownMenuRadioItem>
                             <DropdownMenuRadioItem value="secondary">
                               {secondarySubmitLabel}

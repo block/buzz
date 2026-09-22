@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
+import { useTranslation } from "@/i18n";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { HighlightedSearchText } from "@/features/search/ui/HighlightedSearchText";
 import { useHuddle } from "@/features/huddle";
@@ -31,6 +32,7 @@ export function WaveMessageAttachment({
   huddleMemberPubkeysPending = false,
   searchQuery,
 }: WaveMessageAttachmentProps) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { isStarting, startHuddle } = useHuddle();
   const startHuddleDisabled =
@@ -78,7 +80,7 @@ export function WaveMessageAttachment({
           />
         </AttachmentTitle>
         <AttachmentDescription>
-          Start a huddle to talk to them.
+          {t("messages.attachment.huddle-description")}
         </AttachmentDescription>
       </AttachmentContent>
       <AttachmentActions>
@@ -88,7 +90,7 @@ export function WaveMessageAttachment({
           size="xs"
           type="button"
         >
-          Start huddle
+          {t("messages.attachment.start-huddle")}
         </AttachmentAction>
       </AttachmentActions>
     </Attachment>

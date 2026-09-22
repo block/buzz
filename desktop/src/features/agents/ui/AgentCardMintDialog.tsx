@@ -12,6 +12,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 
+import { useTranslation } from "@/i18n";
 import {
   setCardGalleryOpen,
   startCardMint,
@@ -46,13 +47,6 @@ import {
 
 const OPENAI_KEYS_URL = "https://platform.openai.com/api-keys";
 
-/** Same three levels as snapshot export; "Agent only" is the safe default. */
-const MEMORY_LEVELS: { value: SnapshotMemoryLevel; label: string }[] = [
-  { value: "none", label: "Agent only" },
-  { value: "core", label: "Agent + core memory" },
-  { value: "everything", label: "Agent + all memories" },
-];
-
 /**
  * The free alternative, as an action: ordinary snapshot export shares the
  * same importable agent without card art or API spend. Rendered in both the
@@ -66,14 +60,14 @@ function FreeSharePathRow({
   disabled: boolean;
   onExportInstead?: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className="flex items-center justify-between gap-3"
       data-testid="agent-card-free-path"
     >
       <p className="text-xs text-muted-foreground">
-        Don’t want to spend money? Ordinary export shares the same importable
-        agent — free, just without the card art.
+        {t("agents.card-mint.free-path-copy")}
       </p>
       {onExportInstead ? (
         <Button
@@ -84,7 +78,7 @@ function FreeSharePathRow({
           size="sm"
           variant="outline"
         >
-          Share without card art
+          {t("agents.card-mint.free-path-action")}
         </Button>
       ) : null}
     </div>
@@ -125,6 +119,19 @@ export function AgentCardMintDialog({
   onExportInstead?: () => void;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useTranslation();
+  // Same three levels as snapshot export; "Agent only" is the safe default.
+  const memoryLevels = React.useMemo(
+    () => [
+      { value: "none" as const, label: t("agents.common.agent-only") },
+      { value: "core" as const, label: t("agents.common.agent-core-memory") },
+      {
+        value: "everything" as const,
+        label: t("agents.common.agent-all-memories"),
+      },
+    ],
+    [t],
+  );
   const [styleNotes, setStyleNotes] = React.useState("");
   const [lockCard, setLockCard] = React.useState(false);
   const [memoryLevel, setMemoryLevel] =
@@ -171,12 +178,14 @@ export function AgentCardMintDialog({
       });
       setKeyDraft("");
       setEditingKey(false);
-      toast.success(
-        "API key saved to your agent defaults. Running agents pick it up on their next restart.",
-      );
+      toast.success(t("agents.card-mint.key-saved"));
     },
     onError: (error) =>
-      toast.error(typeof error === "string" ? error : "Couldn't save the key."),
+      toast.error(
+        typeof error === "string"
+          ? error
+          : t("agents.card-mint.key-save-failed"),
+      ),
   });
 
   function beginMint() {
@@ -334,7 +343,7 @@ export function AgentCardMintDialog({
                   onValueChange={(value) =>
                     setMemoryLevel(value as SnapshotMemoryLevel)
                   }
-                  options={MEMORY_LEVELS}
+                  options={memoryLevels}
                   testId="agent-card-memory-trigger"
                   value={memoryLevel}
                 />

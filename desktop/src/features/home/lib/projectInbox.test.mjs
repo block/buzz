@@ -8,6 +8,15 @@ import {
   isProjectInboxItem,
   resolveProjectInboxWorkItem,
 } from "./projectInbox.ts";
+import { initializeI18n } from "@/i18n";
+
+// The asserted labels come from `inbox.ts` via i18n; pin English so the
+// assertions compare against the English contract, not the host locale.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 const OWNER = "a".repeat(64);
 const REVIEWER = "b".repeat(64);

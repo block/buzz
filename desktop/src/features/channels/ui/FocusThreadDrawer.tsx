@@ -6,6 +6,7 @@ import {
   THREAD_FOCUS_SLIVER_WIDTH_PX,
 } from "@/features/channels/lib/threadFocusLayout";
 import { getThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 
 type FocusThreadDrawerProps = {
@@ -13,7 +14,7 @@ type FocusThreadDrawerProps = {
   children: React.ReactNode;
   /** Prevent a covered drawer from handling Escape before its overlay. */
   escapeEnabled?: boolean;
-  /** Accessible name for the drawer. Channel threads leave the default. */
+  /** Accessible name for the drawer. Channel threads leave the catalog default. */
   label?: string;
   hasActiveEdit?: boolean;
   onClose: () => void;
@@ -187,11 +188,13 @@ export function FocusThreadDrawer({
   channelName,
   children,
   escapeEnabled = true,
-  label = "Thread",
+  label,
   hasActiveEdit = false,
   onClose,
   restoreFocusTarget,
 }: FocusThreadDrawerProps) {
+  const { t } = useTranslation();
+  const drawerLabel = label ?? t("channels.thread.label");
   const prefersReducedMotion = useReducedMotion();
   const travelPx = prefersReducedMotion ? 0 : THREAD_FOCUS_DRAWER_TRAVEL_PX;
   const drawerRef = React.useRef<HTMLDivElement>(null);
@@ -256,7 +259,7 @@ export function FocusThreadDrawer({
     >
       <motion.button
         animate={{ opacity: 1 }}
-        aria-label={`Back to #${channelName}`}
+        aria-label={t("channels.thread.back-to", { channelName })}
         className={cn(
           "absolute inset-0 cursor-pointer transition-colors duration-150",
           FOCUS_SCRIM_CLASS,
@@ -290,7 +293,7 @@ export function FocusThreadDrawer({
           // see the token for why a `border-l` cannot.
           "absolute inset-y-0 right-0 flex flex-col overflow-hidden rounded-l-2xl bg-background shadow-panel-left outline-hidden",
         )}
-        aria-label={label}
+        aria-label={drawerLabel}
         data-testid="focus-thread-drawer"
         ref={drawerRef}
         role="complementary"

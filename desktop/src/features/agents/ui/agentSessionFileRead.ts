@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type {
   AgentActivityDescriptor,
   TranscriptItem,
@@ -50,7 +51,7 @@ export function buildSkillReadContent(
           kind: "context" as const,
           text: line,
         }))
-      : [{ kind: "meta" as const, text: "No skill content returned." }];
+      : [{ kind: "meta" as const, text: i18n.t("agents.file-read.no-skill") }];
 
   const footerText = skillRef.includes("/") ? skillRef : `${skillRef}/SKILL.md`;
 
@@ -107,7 +108,12 @@ function parseReadFileOutput(resultText: string, path: string) {
             : ("context" as const),
           text: line,
         }))
-      : [{ kind: "meta" as const, text: "No file content returned." }];
+      : [
+          {
+            kind: "meta" as const,
+            text: i18n.t("agents.file-read.no-content"),
+          },
+        ];
 
   return {
     footerText: hasRangeHeader ? firstLine : path,

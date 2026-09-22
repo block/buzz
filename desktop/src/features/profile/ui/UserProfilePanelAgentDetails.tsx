@@ -1,5 +1,6 @@
 import { ChevronRight, MessageSquare } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { Markdown } from "@/shared/ui/markdown";
 import {
   type ProfileField,
@@ -111,6 +112,7 @@ export function AgentInstructionRow({
   instruction: string | null;
   onOpenInstructions?: () => void;
 }) {
+  const { t } = useTranslation();
   const trimmedInstruction = instruction?.trim() ?? "";
   const canOpenInstructions =
     trimmedInstruction.length > 0 && onOpenInstructions !== undefined;
@@ -119,7 +121,7 @@ export function AgentInstructionRow({
       <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1 text-left">
         <div className="text-xs font-medium text-foreground">
-          Agent instructions
+          {t("profile.details.instructions")}
         </div>
         {trimmedInstruction ? (
           canOpenInstructions ? (
@@ -146,7 +148,7 @@ export function AgentInstructionRow({
             className="mt-0.5 text-sm leading-6 text-muted-foreground"
             data-testid="user-profile-agent-instruction-empty"
           >
-            No instruction set.
+            {t("profile.details.no-instructions")}
           </p>
         )}
       </div>
@@ -177,6 +179,7 @@ export function AgentInstructionsFocusedView({
 }: {
   instruction: string | null;
 }) {
+  const { t } = useTranslation();
   const trimmedInstruction = instruction?.trim() ?? "";
 
   return (
@@ -193,7 +196,7 @@ export function AgentInstructionsFocusedView({
           />
         ) : (
           <p className="text-sm leading-6 text-muted-foreground">
-            No instruction set.
+            {t("profile.details.no-instructions")}
           </p>
         )}
       </div>

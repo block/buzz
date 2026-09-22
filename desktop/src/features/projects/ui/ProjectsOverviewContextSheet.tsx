@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import { DrawerPanelIcon } from "@/shared/ui/DrawerPanelIcon";
 import { Sheet, SheetContent, SheetTitle } from "@/shared/ui/sheet";
@@ -47,6 +48,7 @@ export function ProjectsOverviewContextSheet({
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <Sheet onOpenChange={onOpenChange} open={open}>
       <SheetContent
@@ -56,7 +58,9 @@ export function ProjectsOverviewContextSheet({
         onCloseAutoFocus={onCloseAutoFocus}
         side="right"
       >
-        <SheetTitle className="sr-only">Project context</SheetTitle>
+        <SheetTitle className="sr-only">
+          {t("projects.shared.project-context")}
+        </SheetTitle>
         {children}
       </SheetContent>
     </Sheet>

@@ -1,11 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { initializeI18n } from "@/i18n/index.ts";
 import {
   TIME_PRESETS,
   parseCustomDateTime,
   todayDateString,
 } from "./timePresets.ts";
+
+// `TIME_PRESETS[].label` resolves through `i18n.t`, which returns `undefined`
+// until the singleton boots (`main.tsx` does that in the app). English is
+// pinned explicitly before init: node's own `navigator.languages` reports the
+// host system locale — which may be zh-CN — and every assertion below is the
+// English contract.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 const nowSeconds = () => Math.floor(Date.now() / 1_000);
 

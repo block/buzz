@@ -10,6 +10,7 @@ import type {
 import { pullRequestShareLink } from "@/features/projects/lib/projectShareLinks";
 import { selectionItemFromReview } from "@/features/projects/lib/projectSelection";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
+import { i18n, useTranslation } from "@/i18n";
 import {
   countGroupedRows,
   sliceGroupedRows,
@@ -55,10 +56,13 @@ type ProjectsPullRequestsListProps = {
 };
 
 function nextStepLabel(status: ProjectPullRequest["status"]) {
-  if (status === "Draft") return "View draft";
-  if (status === "Merged") return "View merge";
-  if (status === "Closed") return "View closed";
-  return "Open review";
+  if (status === "Draft")
+    return i18n.t("projects.pull-requests-list.next-draft");
+  if (status === "Merged")
+    return i18n.t("projects.pull-requests-list.next-merge");
+  if (status === "Closed")
+    return i18n.t("projects.pull-requests-list.next-closed");
+  return i18n.t("projects.pull-requests-list.next-open");
 }
 
 const PullRequestGridCard = React.memo(function PullRequestGridCard({
@@ -149,6 +153,7 @@ const PullRequestListRow = React.memo(function PullRequestListRow({
     pullRequest: ProjectPullRequest,
   ) => void;
 }) {
+  const { t } = useTranslation();
   const authorLabel = resolveUserLabel({
     profiles,
     pubkey: pullRequest.author,
@@ -191,7 +196,7 @@ const PullRequestListRow = React.memo(function PullRequestListRow({
           </DropdownMenuItem>
           <CopyShareLinkMenuItem
             link={pullRequestShareLink(pullRequest)}
-            label="Copy review link"
+            label={t("projects.pull-requests-list.copy-review-link")}
             testId={`projects-pull-request-copy-link-${pullRequest.id}`}
           />
         </ProjectListRowMenu>
@@ -213,6 +218,7 @@ export function ProjectsPullRequestsList({
   pullRequests,
   viewMode,
 }: ProjectsPullRequestsListProps) {
+  const { t } = useTranslation();
   // Grouping and per-group selection arrays are identity-stable across
   // re-renders so the memoized rows only re-render when their data changes.
   const allGroups = React.useMemo(
@@ -248,7 +254,9 @@ export function ProjectsPullRequestsList({
   );
 
   if (isLoading) {
-    return <BuzzLoadingState label="Loading reviews" />;
+    return (
+      <BuzzLoadingState label={t("projects.pull-requests-list.loading")} />
+    );
   }
 
   const loadNotice = (
@@ -271,15 +279,19 @@ export function ProjectsPullRequestsList({
             size="sm"
             variant="outline"
           >
-            {isRetrying ? "Retrying..." : "Retry"}
+            {isRetrying
+              ? t("projects.work-items-list.retrying")
+              : t("projects.shared.retry")}
           </Button>
         }
         description={
-          error instanceof Error ? error.message : "The relay request failed."
+          error instanceof Error
+            ? error.message
+            : t("projects.work-items-notice.relay-failed")
         }
         error
         panel={false}
-        title="Could not load reviews"
+        title={t("projects.pull-requests-list.load-error")}
       />
     );
   }

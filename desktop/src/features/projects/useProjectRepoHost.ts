@@ -3,6 +3,7 @@ import {
   type ProjectRepoHost,
   projectRepoHostForRepository,
 } from "@/features/projects/lib/projectRepoHost";
+import { useTranslation } from "@/i18n";
 import { isSafeUrl } from "@/shared/lib/url";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 
@@ -15,6 +16,7 @@ export function useProjectRepoHost(
 export function useProjectRepoPresentation(
   repository: Repository | null | undefined,
 ) {
+  const { t } = useTranslation();
   const host = useProjectRepoHost(repository);
   const webUrl =
     repository?.webUrl && isSafeUrl(repository.webUrl)
@@ -30,7 +32,8 @@ export function useProjectRepoPresentation(
     controls: {
       externalUrl: host.kind === "external" ? webUrl : null,
       remoteKind: host.kind === "unresolved" ? undefined : host.kind,
-      remoteLabel: host.kind === "external" ? host.host : "Remote",
+      remoteLabel:
+        host.kind === "external" ? host.host : t("projects.shared.remote"),
     },
   };
 }

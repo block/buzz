@@ -91,7 +91,7 @@ import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
 import {
-  ADD_CUSTOM_HARNESS_OPTION,
+  addCustomHarnessOption,
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
@@ -270,7 +270,7 @@ export function AgentInstanceEditDialog({
         value: selectedRuntimeId,
       });
     }
-    options.push(ADD_CUSTOM_HARNESS_OPTION);
+    options.push(addCustomHarnessOption());
     return options;
   }, [sortedRuntimes, selectedRuntimeId]);
 

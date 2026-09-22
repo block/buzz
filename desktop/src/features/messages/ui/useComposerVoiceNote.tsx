@@ -6,6 +6,7 @@ import {
   isVoiceNoteFile,
   VOICE_NOTE_MAX_DURATION_SECONDS,
 } from "@/features/messages/lib/audioAttachment";
+import { useTranslation } from "@/i18n";
 import { useVoiceNoteRecorder } from "@/features/messages/lib/useVoiceNoteRecorder";
 import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import { VoiceNoteRecorder } from "./VoiceNoteRecorder";
@@ -23,6 +24,7 @@ export function useComposerVoiceNote({
   setEmojiPickerOpen: (open: boolean) => void;
   setFormattingOpen: (open: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const recorder = useVoiceNoteRecorder();
   const limitReachedRef = React.useRef(false);
   const statusRef = React.useRef(recorder.status);
@@ -87,13 +89,13 @@ export function useComposerVoiceNote({
     }
     const attachments = getAttachmentsRef.current();
     if (attachments.pending.length > 0 || attachments.queued.length > 0) {
-      toast.error("A voice note must be the only attachment.");
+      toast.error(t("messages.voice.only-attachment"));
       return;
     }
     recordingContextRef.current = currentContextRef.current;
     onBeforeStartRef.current();
     void recorder.start();
-  }, [finish, recorder.start]);
+  }, [finish, recorder.start, t]);
 
   const cancel = recorder.cancel;
   const attachments = getAttachments();
@@ -119,13 +121,13 @@ export function useComposerVoiceNote({
     if (statusRef.current !== "idle" || hasVoiceNoteAttachment) {
       toast.error(
         statusRef.current === "idle"
-          ? "A voice note must be the only attachment."
-          : "Finish or discard the voice note before attaching a file.",
+          ? t("messages.voice.only-attachment")
+          : t("messages.voice.finish-or-discard-first"),
       );
       return false;
     }
     return true;
-  }, []);
+  }, [t]);
 
   const uploadFileWhenIdle = React.useCallback(
     async (file: File) => {

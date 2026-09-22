@@ -1,5 +1,6 @@
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
+import { useTranslation } from "@/i18n";
 
 type AddChannelBotGenericSectionProps = {
   disabled: boolean;
@@ -16,18 +17,21 @@ export function AddChannelBotGenericSection({
   onNameChange,
   onPromptChange,
 }: AddChannelBotGenericSectionProps) {
+  const { t } = useTranslation();
   return (
     <div className="space-y-5 rounded-2xl border border-border/70 bg-card/70 p-4">
       <div>
-        <div className="text-sm font-medium">Generic agent</div>
+        <div className="text-sm font-medium">
+          {t("channels.bot.generic-agent")}
+        </div>
         <p className="text-xs text-muted-foreground">
-          Add one custom agent alongside any selected agents.
+          {t("channels.bot.generic-description")}
         </p>
       </div>
 
       <div className="space-y-1.5">
         <label className="text-sm font-medium" htmlFor="channel-generic-name">
-          Name
+          {t("channels.bot.name")}
         </label>
         <Input
           autoCapitalize="none"
@@ -39,24 +43,24 @@ export function AddChannelBotGenericSection({
           value={name}
         />
         <p className="text-xs text-muted-foreground">
-          Defaults to the selected runtime name.
+          {t("channels.bot.name-hint")}
         </p>
       </div>
 
       <div className="space-y-1.5">
         <label className="text-sm font-medium" htmlFor="channel-generic-prompt">
-          Prompt
+          {t("channels.bot.prompt")}
         </label>
         <Textarea
           className="min-h-24"
           disabled={disabled}
           id="channel-generic-prompt"
           onChange={(event) => onPromptChange(event.target.value)}
-          placeholder="What should this agent help with in the channel?"
+          placeholder={t("channels.bot.prompt-placeholder")}
           value={prompt}
         />
         <p className="text-xs text-muted-foreground">
-          Saved as the generic agent&apos;s system prompt override.
+          {t("channels.bot.prompt-hint")}
         </p>
       </div>
     </div>

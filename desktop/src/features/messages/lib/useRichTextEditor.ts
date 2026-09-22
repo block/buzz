@@ -9,6 +9,7 @@ import { Extension } from "@tiptap/core";
 import { TextSelection } from "@tiptap/pm/state";
 
 import { readTextFromSystemClipboard } from "@/shared/api/tauriMedia";
+import { i18n, useTranslation } from "@/i18n";
 import {
   hasPrimaryShortcutModifier,
   isMacPlatform,
@@ -159,6 +160,7 @@ export function useRichTextEditor({
   onLinkSelectionChange,
   onLinkShortcut,
 }: RichTextEditorOptions) {
+  const { t } = useTranslation();
   const addressedAgentMentionNamesRef = React.useRef<readonly string[]>([]);
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
@@ -336,7 +338,11 @@ export function useRichTextEditor({
         customEmojiWiring.extension,
         messageLinkWiring.extension,
         Placeholder.configure({
-          placeholder: () => placeholderRef.current ?? "Write a message…",
+          // Read the fallback through the singleton: this callback is built
+          // once with the `[]`-deps editor config, so a captured `t` would keep
+          // serving the language the editor was created in.
+          placeholder: () =>
+            placeholderRef.current ?? i18n.t("messages.editor.placeholder"),
         }),
         Link.extend({
           inclusive() {
@@ -578,14 +584,16 @@ export function useRichTextEditor({
     }
   }, [editor, editable]);
 
-  // Update placeholder text without recreating the editor.
+  // Update placeholder text without recreating the editor. `t` changes
+  // identity on a language switch, which re-runs this dispatch so the
+  // translated fallback re-renders too.
   // biome-ignore lint/correctness/useExhaustiveDependencies: placeholder triggers the ref update
   React.useEffect(() => {
     if (!editor) return;
     // Force ProseMirror to re-run decoration plugins so the Placeholder
     // extension picks up the new text from placeholderRef.
     editor.view.dispatch(editor.state.tr);
-  }, [editor, placeholder]);
+  }, [editor, placeholder, t]);
 
   // Keep mention/channel-highlight decorations in sync with known names.
   // Mutate `editor.storage.mentionHighlight`; the extension getter copies storage.

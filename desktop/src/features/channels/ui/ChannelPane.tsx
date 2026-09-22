@@ -71,6 +71,7 @@ import { isWelcomeExperienceChannel as isWelcomeExperience } from "@/features/on
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { useTranslation } from "@/i18n";
 const HUDDLE_TRANSCRIPT_ROOT_STYLE = {
   "--buzz-channel-content-top-padding": "0rem",
   "--channel-top-chrome-height": "0.25rem",
@@ -186,6 +187,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   threadFirstUnreadReplyId,
   typingPubkeys,
 }: ChannelPaneProps) {
+  const { t } = useTranslation();
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
@@ -538,7 +540,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       <FocusThreadDrawer
         channelName={activeChannel?.name ?? "channel"}
         key="idle-auxiliary-surface"
-        label={idleAuxiliaryTitle || "Panel"}
+        label={idleAuxiliaryTitle || t("channels.pane.panel")}
         onClose={onCloseIdleAuxiliaryPanel}
         restoreFocusTarget={threadSurface.restoreFocusTarget}
       >
@@ -594,7 +596,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       ) : null}
       {!isSinglePanelView ? (
         <section
-          aria-label="Channel messages and composer"
+          aria-label={t("channels.pane.messages-aria")}
           className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           inert={channelIsCovered ? true : undefined}
           data-testid="channel-drop-zone"
@@ -651,15 +653,15 @@ export const ChannelPane = React.memo(function ChannelPane({
               unfollowThreadById={unfollowThreadById}
               emptyDescription={
                 activeChannel?.channelType === "forum"
-                  ? "Select a stream or DM to load real message history in this first integration pass."
-                  : "Messages and sub-replies will appear here once the relay has history for this channel."
+                  ? t("channels.pane.empty-forum-description")
+                  : t("channels.pane.empty-description")
               }
               emptyTitle={
                 activeChannel
                   ? activeChannel.channelType === "forum"
-                    ? "Forum channels are next"
-                    : "No messages yet"
-                  : "No channel selected"
+                    ? t("channels.pane.empty-forum-title")
+                    : t("channels.pane.empty-title")
+                  : t("channels.pane.empty-no-channel")
               }
               isError={isTimelineError}
               isLoading={isHuddleTranscript ? false : isTimelineLoading}
@@ -707,7 +709,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     />
                   ) : null}
                   <span className="truncate">
-                    Viewing{" "}
+                    {t("channels.pane.viewing")}{" "}
                     <span className="font-medium text-foreground">
                       #{activeChannel?.name}
                     </span>
@@ -722,7 +724,9 @@ export const ChannelPane = React.memo(function ChannelPane({
                   variant="default"
                 >
                   <LogIn className="mr-1.5 h-4 w-4" />
-                  {isJoining ? "Joining..." : "Join to participate"}
+                  {isJoining
+                    ? t("channels.pane.joining")
+                    : t("channels.pane.join-participate")}
                 </Button>
               </div>
             ) : (
@@ -780,19 +784,24 @@ export const ChannelPane = React.memo(function ChannelPane({
                     showBackgroundUploadProgress={false}
                     placeholder={
                       timeoutState.active
-                        ? "You're timed out by community moderators."
+                        ? t("channels.pane.placeholder-timeout")
                         : isModerationDmChannel
-                          ? "This channel is read-only."
+                          ? t("channels.pane.placeholder-readonly")
                           : activeChannel?.archivedAt
-                            ? "Archived channels are read-only."
+                            ? t("channels.pane.placeholder-archived")
                             : activeChannel?.channelType === "forum"
-                              ? "Forum posting is not wired in this pass."
+                              ? t("channels.pane.placeholder-forum")
                               : activeChannel
                                 ? activeChannel.channelType === "dm" &&
                                   directMessageIntro
-                                  ? `Message ${directMessageIntro.displayName}`
-                                  : `Message #${activeChannel.name}`
-                                : "Select a channel"
+                                  ? t("channels.pane.placeholder-dm", {
+                                      displayName:
+                                        directMessageIntro.displayName,
+                                    })
+                                  : t("channels.pane.placeholder-channel", {
+                                      channelName: activeChannel.name,
+                                    })
+                                : t("channels.pane.placeholder-none")
                     }
                     showTopBorder={false}
                   />

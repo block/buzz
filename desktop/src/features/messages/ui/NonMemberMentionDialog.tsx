@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "@/i18n";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -36,6 +37,7 @@ export function NonMemberMentionDialog({
   open,
   onRestoreFocus,
 }: NonMemberMentionDialogProps) {
+  const { t } = useTranslation();
   const safeActionRef = React.useRef<HTMLButtonElement>(null);
   const restoreFocusRef = React.useRef(onRestoreFocus);
   return (
@@ -63,17 +65,21 @@ export function NonMemberMentionDialog({
       >
         <AlertDialogHeader>
           <AlertDialogTitle>
-            Mention people outside this channel?
+            {t("messages.mention.dialog-title")}
           </AlertDialogTitle>
           <AlertDialogDescription>
-            {names.join(", ")} {names.length === 1 ? "is" : "are"} not in this
-            channel.{" "}
+            {t("messages.mention.nonmember-names", {
+              count: names.length,
+              names: names.join(", "),
+            })}{" "}
             {onDoNothing
               ? canInvite
-                ? "Invite them to the channel, or send without inviting them."
-                : `${PRIVATE_CHANNEL_ADD_DENIED_MESSAGE} You can still send without inviting them.`
+                ? t("messages.mention.invite-or-send")
+                : `${PRIVATE_CHANNEL_ADD_DENIED_MESSAGE} ${t(
+                    "messages.mention.denied-still-send",
+                  )}`
               : canInvite
-                ? "Invite them to the channel, or cancel to keep your draft."
+                ? t("messages.mention.invite-or-cancel")
                 : PRIVATE_CHANNEL_ADD_DENIED_MESSAGE}
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -96,9 +102,9 @@ export function NonMemberMentionDialog({
           >
             {onDoNothing
               ? canInvite
-                ? "Do nothing"
-                : "Send anyway"
-              : "Cancel"}
+                ? t("messages.mention.do-nothing")
+                : t("messages.mention.send-anyway")
+              : t("messages.mention.cancel")}
           </Button>
           {canInvite ? (
             <Button
@@ -107,7 +113,9 @@ export function NonMemberMentionDialog({
               size="sm"
               type="button"
             >
-              {isInvitePending ? "Inviting..." : "Invite"}
+              {isInvitePending
+                ? t("messages.mention.inviting")
+                : t("messages.mention.invite")}
             </Button>
           ) : null}
         </AlertDialogFooter>

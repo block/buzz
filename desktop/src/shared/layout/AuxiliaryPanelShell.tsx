@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { useIsAuxiliaryPanelOverlay } from "@/shared/hooks/use-mobile";
 import { AUXILIARY_PANEL_MIN_WIDTH_PX } from "@/shared/layout/auxiliaryPanelLayout";
 import {
@@ -70,6 +71,7 @@ export function AuxiliaryPanel({
   transparentChrome = false,
   widthPx,
 }: AuxiliaryPanelProps) {
+  const { t } = useTranslation();
   const isOverlay = useIsAuxiliaryPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
@@ -119,8 +121,8 @@ export function AuxiliaryPanel({
         onPointerDown={onResizeStart}
         title={
           canResetWidth
-            ? "Drag to resize. Double-click to reset width."
-            : "Drag to resize."
+            ? t("channels.thread.resize-drag-reset")
+            : t("channels.thread.resize-drag")
         }
         type="button"
       >

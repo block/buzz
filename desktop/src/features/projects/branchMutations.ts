@@ -3,6 +3,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import type { Repository as Project } from "@/features/projects/hooks";
+import { useTranslation } from "@/i18n";
 import {
   createProjectRemoteBranch,
   deleteProjectRemoteBranch,
@@ -65,6 +66,7 @@ export function useProjectBranchActions(input: {
   forgetBranch: (branch: string) => void;
   selectBranch: (branch: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const [createOpen, setCreateOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const createMutation = useCreateProjectRemoteBranchMutation(input.project);
@@ -102,7 +104,9 @@ export function useProjectBranchActions(input: {
       !input.activeRemoteBranch ||
       input.deleteBranchReason
     ) {
-      throw new Error(input.deleteBranchReason ?? "Choose a remote branch.");
+      throw new Error(
+        input.deleteBranchReason ?? t("projects.branch-dialogs.choose-remote"),
+      );
     }
     const result = await deleteBranch({
       branch: input.activeBranch,
@@ -121,6 +125,7 @@ export function useProjectBranchActions(input: {
     input.forgetBranch,
     input.refetchRepoState,
     input.selectBranch,
+    t,
   ]);
 
   return {

@@ -1,5 +1,6 @@
 import { ArrowLeft } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
@@ -21,30 +22,31 @@ export function ProjectTabsList({
   onBack: () => void;
   prsActive?: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="flex h-full min-w-0 max-w-full flex-none items-center gap-1.5 overflow-x-auto scrollbar-none">
       <button
-        aria-label="Back"
+        aria-label={t("projects.tabs.back")}
         className={PROJECT_TAB_ICON_BUTTON_CLASS}
         data-testid="project-workspace-back"
         onClick={onBack}
-        title="Back"
+        title={t("projects.tabs.back")}
         type="button"
       >
         <ArrowLeft className="h-full w-full" strokeWidth={2} />
       </button>
       <TabsList className="h-full min-w-0 max-w-full flex-none justify-start gap-1.5 overflow-x-auto bg-transparent p-0 scrollbar-none">
         <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="overview">
-          <ProjectTabLabel>Overview</ProjectTabLabel>
+          <ProjectTabLabel>{t("projects.sections.overview")}</ProjectTabLabel>
         </TabsTrigger>
         <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="files">
-          <ProjectTabLabel>Files</ProjectTabLabel>
+          <ProjectTabLabel>{t("projects.tabs.files")}</ProjectTabLabel>
         </TabsTrigger>
         <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="activity">
-          <ProjectTabLabel>Commits</ProjectTabLabel>
+          <ProjectTabLabel>{t("projects.tabs.commits")}</ProjectTabLabel>
         </TabsTrigger>
         <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="issues">
-          <ProjectTabLabel>Tasks</ProjectTabLabel>
+          <ProjectTabLabel>{t("projects.tabs.tasks")}</ProjectTabLabel>
         </TabsTrigger>
         <TabsTrigger
           aria-current={prsActive ? "page" : undefined}
@@ -54,13 +56,13 @@ export function ProjectTabsList({
           )}
           value="prs"
         >
-          <ProjectTabLabel>Review</ProjectTabLabel>
+          <ProjectTabLabel>{t("projects.tabs.review")}</ProjectTabLabel>
         </TabsTrigger>
         <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="channels">
-          <ProjectTabLabel>Channels</ProjectTabLabel>
+          <ProjectTabLabel>{t("projects.tabs.channels")}</ProjectTabLabel>
         </TabsTrigger>
         <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="contributors">
-          <ProjectTabLabel>Contributors</ProjectTabLabel>
+          <ProjectTabLabel>{t("projects.tabs.contributors")}</ProjectTabLabel>
         </TabsTrigger>
       </TabsList>
     </div>

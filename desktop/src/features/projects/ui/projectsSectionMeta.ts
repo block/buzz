@@ -8,14 +8,16 @@ import {
 } from "lucide-react";
 
 import type { ProjectsFilter } from "@/features/projects/lib/projectsViewHelpers";
+import { i18n } from "@/i18n";
 
 export function projectsSectionTitle(filter: ProjectsFilter) {
-  if (filter === "all") return "Activity";
-  if (filter === "prs") return "Reviews";
-  if (filter === "issues") return "Tasks";
-  if (filter === "repositories") return "Repositories";
-  if (filter === "channels") return "Channels";
-  return "Projects";
+  if (filter === "all") return i18n.t("projects.sections.activity");
+  if (filter === "prs") return i18n.t("projects.sections.reviews");
+  if (filter === "issues") return i18n.t("projects.sections.tasks");
+  if (filter === "repositories")
+    return i18n.t("projects.sections.repositories");
+  if (filter === "channels") return i18n.t("projects.sections.channels");
+  return i18n.t("projects.sections.projects");
 }
 
 export function projectsSectionIcon(filter: ProjectsFilter): LucideIcon {

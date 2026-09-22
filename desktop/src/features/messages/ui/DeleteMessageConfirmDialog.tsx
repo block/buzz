@@ -9,6 +9,7 @@ import {
   AlertDialogTitle,
 } from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
+import { useTranslation } from "@/i18n";
 
 /**
  * The "Delete message?" confirmation. Single definition shared by every
@@ -26,24 +27,25 @@ export function DeleteMessageConfirmDialog({
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete message?</AlertDialogTitle>
+          <AlertDialogTitle>{t("messages.delete.title")}</AlertDialogTitle>
           <AlertDialogDescription>
-            This will permanently delete this message and cannot be undone.
+            {t("messages.delete.body")}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {t("messages.delete.cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
             <Button onClick={onConfirm} type="button" variant="destructive">
-              Delete
+              {t("messages.delete.confirm")}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>

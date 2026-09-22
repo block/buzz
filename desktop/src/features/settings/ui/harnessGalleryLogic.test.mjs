@@ -7,6 +7,13 @@ import {
   deleteHarnessConfirmMessage,
   deleteConfirmState,
 } from "./harnessGalleryLogic.ts";
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 // ── Minimal catalog entry factory ────────────────────────────────────────────
 

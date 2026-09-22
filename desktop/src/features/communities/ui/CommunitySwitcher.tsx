@@ -37,6 +37,7 @@ import {
 } from "@/shared/api/useRelayConnection";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { useActiveCommunityIcon } from "@/features/communities/useCommunityIcons";
+import { i18n, useTranslation } from "@/i18n";
 import { EditCommunityDialog } from "./EditCommunityDialog";
 
 // Community actions is a responsive navigation submenu, not an informational
@@ -45,14 +46,26 @@ import { EditCommunityDialog } from "./EditCommunityDialog";
 const PROFILE_MENU_HOVER_OPEN_DELAY_MS = 80;
 const PROFILE_MENU_HOVER_CLOSE_DELAY_MS = 160;
 
-const CONNECTION_STATE_LABEL: Record<ConnectionState, string> = {
-  idle: "Not connected",
-  connecting: "Connecting…",
-  connected: "Connected",
-  reconnecting: "Reconnecting to relay…",
-  stalled: "Connection lost — relay is not responding",
-  disconnected: "Disconnected from relay",
-};
+/**
+ * Literal keys only, so the catalog call-site gate can resolve every branch.
+ * Resolved at call time because i18n boots after this module is imported.
+ */
+function connectionStateLabel(state: ConnectionState): string {
+  switch (state) {
+    case "idle":
+      return i18n.t("communities.connection.idle");
+    case "connecting":
+      return i18n.t("communities.connection.connecting");
+    case "connected":
+      return i18n.t("communities.connection.connected");
+    case "reconnecting":
+      return i18n.t("communities.connection.reconnecting");
+    case "stalled":
+      return i18n.t("communities.connection.stalled");
+    case "disconnected":
+      return i18n.t("communities.connection.disconnected");
+  }
+}
 
 type CommunitySwitcherProps = {
   activeCommunity: Community | null;
@@ -109,6 +122,7 @@ export function CommunitySwitcher({
   onUpdateCommunity,
   onRemoveCommunity,
 }: CommunitySwitcherProps) {
+  const { t } = useTranslation();
   const [editingCommunity, setEditingCommunity] =
     React.useState<Community | null>(null);
   const [dropdownOpen, setDropdownOpen] = React.useState(false);
@@ -117,7 +131,7 @@ export function CommunitySwitcher({
   const profileMenuHoverTimer = React.useRef<number | null>(null);
   const connectionState = useRelayConnection();
   const degraded = isRelayConnectionDegraded(connectionState);
-  const connectionLabel = CONNECTION_STATE_LABEL[connectionState];
+  const connectionLabel = connectionStateLabel(connectionState);
   const activeIconQuery = useActiveCommunityIcon(activeCommunity?.relayUrl);
   const activeIcon = activeIconQuery.data ?? null;
   const isProfileVariant = variant === "profile";
@@ -173,22 +187,21 @@ export function CommunitySwitcher({
       const result = await onRemoveCommunity(activeCommunity.id);
       setDropdownOpen(false);
       if (result?.status === "already-absent") {
-        toast("Community removed", {
-          description:
-            "You were no longer a member, so Buzz removed the community from this device.",
+        toast(t("communities.switcher.removed-toast"), {
+          description: t("communities.switcher.removed-description"),
         });
       }
     } catch (error) {
       setLeaveError(
         error instanceof Error
           ? error.message
-          : "Couldn't leave the community. Try again.",
+          : t("communities.switcher.leave-error"),
       );
       setDropdownOpen(true);
     } finally {
       setIsLeaving(false);
     }
-  }, [activeCommunity, isLeaving, onRemoveCommunity]);
+  }, [activeCommunity, isLeaving, onRemoveCommunity, t]);
 
   const triggerContent = (
     <>
@@ -229,7 +242,7 @@ export function CommunitySwitcher({
             : "min-w-0 flex-1 truncate font-medium"
         }
       >
-        {activeCommunity?.name ?? "No community"}
+        {activeCommunity?.name ?? t("communities.switcher.no-community")}
       </span>
       {variant === "profile-menu" ? (
         <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -254,8 +267,8 @@ export function CommunitySwitcher({
             aria-haspopup="menu"
             aria-label={
               degraded
-                ? `${activeCommunity?.name ?? "Community"} — ${connectionLabel}`
-                : "Community actions"
+                ? `${activeCommunity?.name ?? t("communities.switcher.fallback-name")} — ${connectionLabel}`
+                : t("communities.switcher.actions-aria")
             }
             className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-popover-foreground outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none data-[state=open]:bg-muted/50 data-[state=open]:text-popover-foreground"
             data-testid="community-switcher"
@@ -277,7 +290,7 @@ export function CommunitySwitcher({
           sideOffset={0}
         >
           <div
-            aria-label="Community actions"
+            aria-label={t("communities.switcher.actions-aria")}
             data-testid="profile-community-actions"
             role="menu"
           >
@@ -293,7 +306,7 @@ export function CommunitySwitcher({
                   type="button"
                 >
                   <Link2 className="h-4 w-4" />
-                  <span>Copy community URL</span>
+                  <span>{t("communities.switcher.copy-url")}</span>
                 </button>
                 {canInvite && onInvite ? (
                   <button
@@ -306,7 +319,7 @@ export function CommunitySwitcher({
                     type="button"
                   >
                     <Ticket className="h-4 w-4" />
-                    <span>Invite to community</span>
+                    <span>{t("communities.switcher.invite")}</span>
                   </button>
                 ) : null}
                 <button
@@ -319,7 +332,7 @@ export function CommunitySwitcher({
                   type="button"
                 >
                   <Settings2 className="h-4 w-4" />
-                  <span>Community settings</span>
+                  <span>{t("communities.switcher.settings")}</span>
                 </button>
                 <button
                   className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-destructive outline-hidden transition-colors hover:bg-destructive/10 focus:bg-destructive/10 focus:outline-none focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
@@ -329,7 +342,11 @@ export function CommunitySwitcher({
                   type="button"
                 >
                   <LogOut className="h-4 w-4" />
-                  <span>{isLeaving ? "Leaving…" : "Leave community"}</span>
+                  <span>
+                    {isLeaving
+                      ? t("communities.switcher.leaving")
+                      : t("communities.switcher.leave")}
+                  </span>
                 </button>
                 {leaveError ? (
                   <p
@@ -352,7 +369,7 @@ export function CommunitySwitcher({
               type="button"
             >
               <Plus className="h-4 w-4" />
-              <span>Add a community</span>
+              <span>{t("communities.switcher.add")}</span>
             </button>
           </div>
         </PopoverContent>
@@ -370,8 +387,8 @@ export function CommunitySwitcher({
           <button
             aria-label={
               degraded
-                ? `${activeCommunity?.name ?? "Community"} — ${connectionLabel}`
-                : "Switch community"
+                ? `${activeCommunity?.name ?? t("communities.switcher.fallback-name")} — ${connectionLabel}`
+                : t("communities.switcher.switch")
             }
             className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md py-0.5 text-left text-xs text-sidebar-foreground/50 outline-hidden transition-colors hover:text-sidebar-foreground focus:outline-none focus-visible:outline-none data-[state=open]:text-sidebar-foreground"
             data-testid="community-switcher"
@@ -383,7 +400,7 @@ export function CommunitySwitcher({
           <SidebarMenuButton
             aria-label={
               degraded
-                ? `${activeCommunity?.name ?? "Community"} — ${connectionLabel}`
+                ? `${activeCommunity?.name ?? t("communities.switcher.fallback-name")} — ${connectionLabel}`
                 : undefined
             }
             className="h-auto gap-2 rounded-xl px-2.5 py-2 data-[state=open]:bg-sidebar-accent"
@@ -416,7 +433,9 @@ export function CommunitySwitcher({
             </span>
             <span className="min-w-0 flex-1 truncate">{community.name}</span>
             <button
-              aria-label={`Edit ${community.name}`}
+              aria-label={t("communities.switcher.edit-aria", {
+                name: community.name,
+              })}
               className="flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 hover:bg-accent group-hover:opacity-100 group-focus:opacity-100"
               onClick={(e) => {
                 e.stopPropagation();
@@ -433,7 +452,7 @@ export function CommunitySwitcher({
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onAddCommunity}>
           <Plus className="h-4 w-4" />
-          <span>Add a community</span>
+          <span>{t("communities.switcher.add")}</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

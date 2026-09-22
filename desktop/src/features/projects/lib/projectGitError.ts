@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type { ProjectRepoUnavailableReason } from "./projectRepoAvailability";
 
 export type ProjectGitErrorPresentation = {
@@ -28,9 +29,8 @@ export function projectCloneErrorPresentation(
 
   if (unavailableReason === "access") {
     return {
-      title: "Repository access restricted",
-      description:
-        "You need access to the repository’s channel before you can clone it.",
+      title: i18n.t("projects.unavailable.access-title"),
+      description: i18n.t("projects.clone-error.access-restricted-description"),
     };
   }
   if (
@@ -39,17 +39,16 @@ export function projectCloneErrorPresentation(
     )
   ) {
     return {
-      title: "Repository access required",
+      title: i18n.t("projects.clone-error.access-required-title"),
       description: github
-        ? "This repository requires GitHub authentication. Buzz currently clones public GitHub repositories without credentials."
-        : "Buzz could not authenticate with this repository. Check your access and try again.",
+        ? i18n.t("projects.clone-error.access-required-github")
+        : i18n.t("projects.unavailable.authentication-description"),
     };
   }
   if (/\b404\b|repository not found|repository does not exist/.test(message)) {
     return {
-      title: "Repository not found",
-      description:
-        "Check that the repository link is correct and that the repository still exists.",
+      title: i18n.t("projects.clone-error.not-found-title"),
+      description: i18n.t("projects.clone-error.not-found-description"),
     };
   }
   if (
@@ -58,8 +57,8 @@ export function projectCloneErrorPresentation(
     )
   ) {
     return {
-      title: "Couldn’t reach the repository",
-      description: "Check your connection and try cloning again.",
+      title: i18n.t("projects.clone-error.unreachable-title"),
+      description: i18n.t("projects.clone-error.unreachable-description"),
     };
   }
   if (
@@ -68,15 +67,14 @@ export function projectCloneErrorPresentation(
     )
   ) {
     return {
-      title: "Local folder already exists",
-      description:
-        "Choose a different repositories directory or remove the existing checkout.",
+      title: i18n.t("projects.clone-error.folder-exists-title"),
+      description: i18n.t("projects.clone-error.folder-exists-description"),
     };
   }
   return {
-    title: "Couldn’t clone repository",
+    title: i18n.t("projects.clone-error.fallback-title"),
     description: github
-      ? "Try again, or open the repository on GitHub for more information."
-      : "Try again. If the problem continues, contact the repository owner.",
+      ? i18n.t("projects.clone-error.fallback-github")
+      : i18n.t("projects.clone-error.fallback-description"),
   };
 }

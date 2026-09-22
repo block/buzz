@@ -1,4 +1,5 @@
 import { Button } from "@/shared/ui/button";
+import { useTranslation } from "@/i18n";
 
 /** Retryable terminal failure for a channel history load with no cached rows. */
 export function MessageTimelineErrorCard({
@@ -6,6 +7,7 @@ export function MessageTimelineErrorCard({
 }: {
   onRetry?: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className="mt-auto rounded-2xl border border-dashed border-destructive/50 bg-destructive/5 px-6 py-10 text-center shadow-xs"
@@ -28,7 +30,7 @@ export function MessageTimelineErrorCard({
           type="button"
           variant="outline"
         >
-          Retry
+          {t("messages.timeline.retry")}
         </Button>
       ) : null}
     </div>

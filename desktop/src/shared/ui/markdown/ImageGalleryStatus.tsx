@@ -1,3 +1,5 @@
+import { useTranslation } from "@/i18n";
+
 type ImageGalleryStatusProps = {
   currentIndex: number;
   itemCount: number;
@@ -7,6 +9,7 @@ export function ImageGalleryStatus({
   currentIndex,
   itemCount,
 }: ImageGalleryStatusProps) {
+  const { t } = useTranslation();
   if (itemCount <= 1) {
     return null;
   }
@@ -19,7 +22,10 @@ export function ImageGalleryStatus({
         className="h-5 w-px shrink-0 bg-muted-foreground/15"
       />
       <span
-        aria-label={`Image ${position} of ${itemCount}`}
+        aria-label={t("shared.markdown.gallery.position-aria", {
+          current: position,
+          total: itemCount,
+        })}
         aria-live="polite"
         className="min-w-9 text-center text-xs font-medium tabular-nums text-muted-foreground"
         role="status"

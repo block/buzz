@@ -40,6 +40,7 @@ import type {
   CreateTeamInput,
   UpdateTeamInput,
 } from "@/shared/api/types";
+import { useTranslation } from "@/i18n";
 import { deriveImportToast } from "./teamSnapshotImport.lib";
 import { teamShareNotice } from "./teamLibraryCopy";
 
@@ -64,6 +65,7 @@ export function useTeamActions(
   actions: ActionMessages,
   refetch: RefetchCallbacks,
 ) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
@@ -142,15 +144,21 @@ export function useTeamActions(
     try {
       if ("id" in input) {
         await updateTeamMutation.mutateAsync(input);
-        actions.setActionNoticeMessage(`Updated team "${input.name}".`);
+        actions.setActionNoticeMessage(
+          t("agents.team-actions.updated", { name: input.name }),
+        );
       } else {
         await createTeamMutation.mutateAsync(input);
-        actions.setActionNoticeMessage(`Created team "${input.name}".`);
+        actions.setActionNoticeMessage(
+          t("agents.team-actions.created", { name: input.name }),
+        );
       }
       setTeamDialogState(null);
     } catch (error) {
       actions.setActionErrorMessage(
-        error instanceof Error ? error.message : "Failed to save team.",
+        error instanceof Error
+          ? error.message
+          : t("agents.team-actions.save-failed"),
       );
     }
   }
@@ -161,11 +169,15 @@ export function useTeamActions(
 
     try {
       await deleteTeamMutation.mutateAsync(team.id);
-      actions.setActionNoticeMessage(`Deleted team "${team.name}".`);
+      actions.setActionNoticeMessage(
+        t("agents.team-actions.deleted", { name: team.name }),
+      );
       setTeamToDelete(null);
     } catch (error) {
       actions.setActionErrorMessage(
-        error instanceof Error ? error.message : "Failed to delete team.",
+        error instanceof Error
+          ? error.message
+          : t("agents.team-actions.delete-failed"),
       );
     }
   }
@@ -179,11 +191,18 @@ export function useTeamActions(
     const failCount = result.failures.length;
     if (failCount === 0) {
       actions.setActionNoticeMessage(
-        `Deployed ${successCount} ${successCount === 1 ? "agent" : "agents"} to ${channel.name}.`,
+        t("agents.team-actions.deployed", {
+          count: successCount,
+          channelName: channel.name,
+        }),
       );
     } else {
       actions.setActionNoticeMessage(
-        `Deployed ${successCount} ${successCount === 1 ? "agent" : "agents"} to ${channel.name}. ${failCount} failed.`,
+        t("agents.team-actions.deployed-partial", {
+          count: successCount,
+          channelName: channel.name,
+          failed: failCount,
+        }),
       );
     }
     setTeamToAddToChannel(null);
@@ -195,9 +214,9 @@ export function useTeamActions(
     actions.setActionNoticeMessage(null);
     actions.setActionErrorMessage(null);
     setTeamDialogState({
-      title: "Create team",
-      description: "Group agents together for quick deployment to channels.",
-      submitLabel: "Create team",
+      title: t("agents.team-actions.create-team"),
+      description: t("agents.team-actions.create-description"),
+      submitLabel: t("agents.team-actions.create-team"),
       initialValues: {
         name: "",
         description: "",
@@ -210,11 +229,11 @@ export function useTeamActions(
     actions.setActionNoticeMessage(null);
     actions.setActionErrorMessage(null);
     setTeamDialogState({
-      title: `Duplicate ${team.name}`,
-      description: "Create a new team by copying this one.",
-      submitLabel: "Create team",
+      title: t("agents.team-actions.duplicate-title", { name: team.name }),
+      description: t("agents.team-actions.duplicate-description"),
+      submitLabel: t("agents.team-actions.create-team"),
       initialValues: {
-        name: `${team.name} copy`,
+        name: t("agents.team-actions.copy-name", { name: team.name }),
         description: team.description ?? "",
         personaIds: [...team.personaIds],
       },
@@ -239,9 +258,9 @@ export function useTeamActions(
     actions.setActionNoticeMessage(null);
     actions.setActionErrorMessage(null);
     setTeamDialogState({
-      title: "Edit team",
+      title: t("agents.team-actions.edit-team"),
       description: "",
-      submitLabel: "Save changes",
+      submitLabel: t("agents.team-actions.save-changes"),
       initialValues: {
         id: team.id,
         name: team.name,
@@ -294,7 +313,9 @@ export function useTeamActions(
       actions.setActionErrorMessage(
         error instanceof Error
           ? error.message
-          : `Failed to ${shared ? "share" : "unshare"} team.`,
+          : shared
+            ? t("agents.team-actions.share-failed")
+            : t("agents.team-actions.unshare-failed"),
       );
     }
   }
@@ -320,13 +341,17 @@ export function useTeamActions(
       });
       actions.setActionNoticeMessage(
         result.alreadyPresent
-          ? `${result.team.name} is already in your teams.`
-          : `Added ${result.team.name} to your teams.`,
+          ? t("agents.team-actions.already-added", {
+              name: result.team.name,
+            })
+          : t("agents.team-actions.added", { name: result.team.name }),
       );
       onSuccess?.();
     } catch (error) {
       actions.setActionErrorMessage(
-        error instanceof Error ? error.message : "Failed to add team.",
+        error instanceof Error
+          ? error.message
+          : t("agents.team-actions.add-failed"),
       );
     }
   }
@@ -342,14 +367,16 @@ export function useTeamActions(
       {
         onSuccess: (saved) => {
           if (saved) {
-            actions.setActionNoticeMessage(`Exported ${team.name}.`);
+            actions.setActionNoticeMessage(
+              t("agents.team-actions.exported", { name: team.name }),
+            );
           }
         },
         onError: (error) => {
           actions.setActionErrorMessage(
             error instanceof Error
               ? error.message
-              : "Failed to export team snapshot.",
+              : t("agents.team-actions.export-snapshot-failed"),
           );
         },
       },
@@ -374,7 +401,7 @@ export function useTeamActions(
       actions.setActionErrorMessage(
         err instanceof Error
           ? err.message
-          : "Failed to read team snapshot file.",
+          : t("agents.team-actions.read-snapshot-failed"),
       );
     }
   }
@@ -401,7 +428,9 @@ export function useTeamActions(
       }
     } catch (err) {
       setTeamSnapshotImportConfirmError(
-        err instanceof Error ? err.message : "Failed to import team snapshot.",
+        err instanceof Error
+          ? err.message
+          : t("agents.team-actions.import-snapshot-failed"),
       );
     }
   }

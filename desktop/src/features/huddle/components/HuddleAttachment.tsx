@@ -3,6 +3,7 @@ import { Headphones, MessageSquareText } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { i18n, useTranslation } from "@/i18n";
 import type { TimelineMessage } from "@/features/messages/types";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
@@ -110,7 +111,7 @@ function reconstructHuddleLifecycle(
 }
 
 function participantLabel(count: number) {
-  return `${count} participant${count === 1 ? "" : "s"}`;
+  return i18n.t("huddle.attachment.participant-count", { count });
 }
 
 export function HuddleAttachment({
@@ -118,6 +119,7 @@ export function HuddleAttachment({
   className,
   message,
 }: HuddleAttachmentProps) {
+  const { t } = useTranslation();
   const ephemeralChannelId = React.useMemo(
     () => parseEphemeralChannelId(message.body),
     [message.body],
@@ -243,9 +245,11 @@ export function HuddleAttachment({
           <Headphones />
         </AttachmentMedia>
         <AttachmentContent>
-          <AttachmentTitle>Huddle unavailable</AttachmentTitle>
+          <AttachmentTitle>
+            {t("huddle.attachment.unavailable-title")}
+          </AttachmentTitle>
           <AttachmentDescription>
-            This huddle card is missing session details.
+            {t("huddle.attachment.unavailable-body")}
           </AttachmentDescription>
         </AttachmentContent>
       </Attachment>
@@ -268,9 +272,11 @@ export function HuddleAttachment({
       </AttachmentMedia>
       <AttachmentContent>
         <AttachmentTitle>
-          Huddle
+          {t("huddle.attachment.title")}
           <span aria-hidden="true"> · </span>
-          {displayEnded ? "Ended" : "In progress"}
+          {displayEnded
+            ? t("huddle.attachment.status-ended")
+            : t("huddle.attachment.status-active")}
         </AttachmentTitle>
         <AttachmentDescription>
           {participantLabel(participantCount)}
@@ -286,11 +292,13 @@ export function HuddleAttachment({
             variant="secondary"
           >
             <Headphones className="h-4 w-4" />
-            {isJoining || isStarting ? "Joining" : "Join"}
+            {isJoining || isStarting
+              ? t("huddle.attachment.joining")
+              : t("huddle.attachment.join")}
           </AttachmentAction>
         ) : isCurrentHuddle || displayEnded ? (
           <AttachmentAction
-            aria-label="View huddle"
+            aria-label={t("huddle.attachment.view")}
             onClick={() => {
               if (isCurrentHuddle) {
                 showHuddleInMainApp(ephemeralChannelId);
@@ -303,7 +311,7 @@ export function HuddleAttachment({
             variant="ghost"
           >
             <MessageSquareText className="h-4 w-4" />
-            View
+            {t("huddle.attachment.view-short")}
           </AttachmentAction>
         ) : null}
       </AttachmentActions>

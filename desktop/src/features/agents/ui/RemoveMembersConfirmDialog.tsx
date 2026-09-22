@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -25,19 +26,21 @@ export function RemoveMembersConfirmDialog({
   onKeepAgents,
   onRemoveAgents,
 }: RemoveMembersConfirmDialogProps) {
+  const { t } = useTranslation();
   const count = memberNames.length;
-  const plural = count !== 1;
 
   return (
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            Remove {count} member{plural ? "s" : ""}?
+            {t("agents.remove-members.title", { count })}
           </AlertDialogTitle>
           <AlertDialogDescription>
-            {memberNames.join(", ")} will be removed from this team. Do you also
-            want to remove the {plural ? "agents" : "agent"} completely?
+            {t("agents.remove-members.description", {
+              count,
+              memberNames: memberNames.join(", "),
+            })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -47,7 +50,7 @@ export function RemoveMembersConfirmDialog({
             type="button"
             variant="outline"
           >
-            Cancel
+            {t("agents.remove-members.cancel")}
           </Button>
           <Button
             disabled={isPending}
@@ -56,7 +59,7 @@ export function RemoveMembersConfirmDialog({
             type="button"
             variant="outline"
           >
-            Keep {plural ? "agents" : "agent"}
+            {t("agents.remove-members.keep-agent", { count })}
           </Button>
           <Button
             disabled={isPending}
@@ -65,7 +68,7 @@ export function RemoveMembersConfirmDialog({
             type="button"
             variant="destructive"
           >
-            Remove {plural ? "agents" : "agent"}
+            {t("agents.remove-members.remove-agent", { count })}
           </Button>
         </AlertDialogFooter>
       </AlertDialogContent>

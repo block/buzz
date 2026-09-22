@@ -1,9 +1,10 @@
+import { i18n } from "@/i18n";
 import { truncateNpub } from "@/shared/lib/pubkey";
 import {
   formatDurationSecondsVerbose,
   parseDurationSeconds,
 } from "./workflowDuration";
-import { ACTION_LABELS } from "./workflowFormTypes";
+import { actionTypeLabel } from "./workflowFormTypes";
 import type { StepFormState } from "./workflowFormTypes";
 
 const MAX_DETAIL_LENGTH = 42;
@@ -50,13 +51,23 @@ function configuredStepDetail(
     case "send_message": {
       const text = quoted(step.text);
       const channel = channelLabel ? `#${channelLabel}` : null;
-      if (text && channel) return `${text} in ${channel}`;
+      if (text && channel) {
+        return i18n.t("workflows.step-detail.in-channel", {
+          channel,
+          text,
+        });
+      }
       return text ?? channel;
     }
     case "send_dm": {
       const text = quoted(step.text);
       const recipient = destination(step.to);
-      if (text && recipient) return `${text} to ${recipient}`;
+      if (text && recipient) {
+        return i18n.t("workflows.step-detail.to-recipient", {
+          recipient,
+          text,
+        });
+      }
       return text ?? recipient;
     }
     case "call_webhook": {
@@ -67,7 +78,12 @@ function configuredStepDetail(
     case "request_approval": {
       const message = quoted(step.message);
       const approver = destination(step.from);
-      if (message && approver) return `${message} from ${approver}`;
+      if (message && approver) {
+        return i18n.t("workflows.step-detail.from-approver", {
+          approver,
+          message,
+        });
+      }
       return message ?? approver;
     }
     case "add_reaction":
@@ -85,5 +101,5 @@ export function workflowStepDescription(
   const name = options.includeName === false ? undefined : step.name?.trim();
   const detail = configuredStepDetail(step, options.channelLabel);
   if (name && detail) return `${name} · ${detail}`;
-  return name || detail || ACTION_LABELS[step.action];
+  return name || detail || actionTypeLabel(step.action);
 }

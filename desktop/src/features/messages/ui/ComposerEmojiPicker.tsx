@@ -7,6 +7,7 @@ import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { klipyGifAttachment, type KlipyGif } from "@/features/gifs/api";
 import { relayKlipyEndpoints, reportKlipyShare } from "@/features/gifs/relay";
 import { KlipyGifPicker } from "@/features/gifs/ui/KlipyGifPicker";
+import { useTranslation } from "@/i18n";
 import { useCommunities } from "@/features/communities/useCommunities";
 import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import { Button } from "@/shared/ui/button";
@@ -42,6 +43,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
   onTriggerMouseDown,
   open,
 }: ComposerEmojiPickerProps) {
+  const { t } = useTranslation();
   const [pickerTab, setPickerTab] = React.useState<ComposerPickerTab>("emoji");
   const shouldReduceMotion = useReducedMotion();
   const { activeCommunity } = useCommunities();
@@ -90,7 +92,9 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
           <PopoverTrigger asChild>
             <Button
               aria-label={
-                gifsAvailable ? "Insert emoji or GIF" : "Insert emoji"
+                gifsAvailable
+                  ? t("messages.composer.insert-emoji-or-gif")
+                  : t("messages.composer.insert-emoji")
               }
               data-testid="composer-emoji-button"
               disabled={disabled}
@@ -104,7 +108,9 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
           </PopoverTrigger>
         </TooltipTrigger>
         <TooltipContent>
-          {gifsAvailable ? "Emoji and GIFs" : "Emoji"}
+          {gifsAvailable
+            ? t("messages.composer.tooltip-emoji-and-gifs")
+            : t("messages.composer.tooltip-emoji")}
         </TooltipContent>
       </Tooltip>
       <PopoverContent
@@ -165,7 +171,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
                 value="emoji"
               >
                 <Smile aria-hidden className="h-4 w-4" />
-                Emoji
+                {t("messages.composer.tab-emoji")}
               </TabsTrigger>
               <TabsTrigger
                 className="relative z-10 h-8 gap-1.5 bg-transparent shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:shadow-none"
@@ -173,7 +179,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
                 value="gifs"
               >
                 <Images aria-hidden className="h-4 w-4" />
-                GIFs
+                {t("messages.composer.tab-gifs")}
               </TabsTrigger>
             </TabsList>
             <TabsContent className="m-0" value="emoji">

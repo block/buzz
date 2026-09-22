@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
+import { i18n, useTranslation } from "@/i18n";
 import {
   canManageCommunityMembers,
   shouldWarnMissingMembershipSnapshot,
@@ -31,6 +32,7 @@ import {
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
 import {
   renderSettingsSection,
+  settingsSectionLabel,
   settingsSections,
   type SettingsPanelProps,
   type SettingsSection,
@@ -48,12 +50,14 @@ type SettingsViewProps = SettingsPanelProps & {
   section: SettingsSection;
 };
 
+type SettingsNavGroupId = "personal" | "communities" | "app";
+
 const settingsNavGroups: Array<{
-  label: string;
+  id: SettingsNavGroupId;
   sections: SettingsSection[];
 }> = [
   {
-    label: "Personal",
+    id: "personal",
     sections: [
       "profile",
       "appearance",
@@ -66,14 +70,22 @@ const settingsNavGroups: Array<{
     ],
   },
   {
-    label: "Communities",
+    id: "communities",
     sections: ["hosted-communities", "community-members"],
   },
   {
-    label: "App",
+    id: "app",
     sections: ["agents", "compute", "experimental", "mobile", "updates"],
   },
 ];
+
+function navGroupLabel(id: SettingsNavGroupId): string {
+  return id === "personal"
+    ? i18n.t("settings.sections.group-personal")
+    : id === "communities"
+      ? i18n.t("settings.sections.group-communities")
+      : i18n.t("settings.sections.group-app");
+}
 
 function SettingsSectionButton({
   active,
@@ -85,6 +97,7 @@ function SettingsSectionButton({
   section: (typeof settingsSections)[number];
 }) {
   const Icon = section.icon;
+  const label = settingsSectionLabel(section.value);
 
   return (
     <SidebarMenuItem>
@@ -93,7 +106,7 @@ function SettingsSectionButton({
         data-testid={`settings-nav-${section.value}`}
         isActive={active}
         onClick={() => onSelect(section.value)}
-        tooltip={section.label}
+        tooltip={label}
         type="button"
       >
         <Icon
@@ -104,7 +117,7 @@ function SettingsSectionButton({
               : "text-sidebar-foreground/70",
           )}
         />
-        <SidebarMenuLabel>{section.label}</SidebarMenuLabel>
+        <SidebarMenuLabel>{label}</SidebarMenuLabel>
       </SidebarMenuButton>
     </SidebarMenuItem>
   );
@@ -127,6 +140,7 @@ export function SettingsView({
   onSetSoundForSlot,
   section,
 }: SettingsViewProps) {
+  const { t } = useTranslation();
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const featureState = useFeatureSnapshot();
@@ -234,11 +248,11 @@ export function SettingsView({
               <SidebarMenuButton
                 data-testid="settings-back-to-app"
                 onClick={onClose}
-                tooltip="Back to app"
+                tooltip={t("settings.view.back-to-app")}
                 type="button"
               >
                 <ArrowLeft className="h-4 w-4" />
-                <span>Back to app</span>
+                <span>{t("settings.view.back-to-app")}</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
@@ -251,7 +265,7 @@ export function SettingsView({
               data-testid="community-access-loading"
             >
               <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-              Checking invite permissions…
+              {t("members.settings.checking-invite-permissions")}
             </div>
           ) : null}
           {myMembershipQuery.isError ? (
@@ -261,7 +275,7 @@ export function SettingsView({
             >
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-3.5 w-3.5 text-destructive" />
-                Invite settings could not be checked.
+                {t("settings.view.invite-check-failed")}
               </div>
               <button
                 className="flex items-center gap-1.5 font-medium text-sidebar-foreground underline-offset-2 hover:underline"
@@ -269,7 +283,7 @@ export function SettingsView({
                 type="button"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                Try again
+                {t("settings.common.try-again")}
               </button>
             </div>
           ) : null}
@@ -279,27 +293,33 @@ export function SettingsView({
               data-testid="community-access-snapshot-missing"
             >
               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-              Invite settings are unavailable. Relay recovery may still be in
-              progress.
+              {t("settings.view.invite-settings-unavailable")}
             </div>
           ) : null}
-          {visibleNavGroups.map((group) => (
-            <SidebarGroup key={group.label}>
-              <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu aria-label={`${group.label} settings sections`}>
-                  {group.sections.map((entry) => (
-                    <SettingsSectionButton
-                      active={entry.value === section}
-                      key={entry.value}
-                      onSelect={onSectionChange}
-                      section={entry}
-                    />
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
-          ))}
+          {visibleNavGroups.map((group) => {
+            const groupLabel = navGroupLabel(group.id);
+            return (
+              <SidebarGroup key={group.id}>
+                <SidebarGroupLabel>{groupLabel}</SidebarGroupLabel>
+                <SidebarGroupContent>
+                  <SidebarMenu
+                    aria-label={t("settings.sections.group-aria", {
+                      group: groupLabel,
+                    })}
+                  >
+                    {group.sections.map((entry) => (
+                      <SettingsSectionButton
+                        active={entry.value === section}
+                        key={entry.value}
+                        onSelect={onSectionChange}
+                        section={entry}
+                      />
+                    ))}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            );
+          })}
         </SidebarContent>
 
         <SidebarFooter>

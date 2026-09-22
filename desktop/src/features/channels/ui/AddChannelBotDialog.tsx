@@ -17,6 +17,7 @@ import type { AcpRuntime } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
+import { useTranslation } from "@/i18n";
 
 type AddChannelBotDialogProps = {
   channelId: string | null;
@@ -35,18 +36,11 @@ function toggleValue(values: readonly string[], value: string) {
     : [...values, value];
 }
 
-function formatAgentCountLabel(count: number) {
-  return count === 1 ? "agent" : "agents";
-}
-
+/** Per-failure detail is data only (`name: error`); the English sentence for a
+ * single failure is resolved by the caller through `t()`. */
 function formatBatchFailureSummary(
   failures: ReadonlyArray<{ name: string; error: string }>,
 ) {
-  if (failures.length === 1) {
-    const [failure] = failures;
-    return `Failed to add ${failure.name}: ${failure.error}`;
-  }
-
   return failures
     .map((failure) => `${failure.name}: ${failure.error}`)
     .join("; ");
@@ -62,6 +56,7 @@ export function AddChannelBotDialog({
   onCreateAgent,
   onOpenChange,
 }: AddChannelBotDialogProps) {
+  const { t } = useTranslation();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
   const inChannelPersonaIds = useInChannelPersonaIds(
@@ -178,12 +173,18 @@ export function AddChannelBotDialog({
       );
       if (result.successes.length > 0) {
         setSubmissionNotice(
-          `Added ${result.successes.length} ${formatAgentCountLabel(
-            result.successes.length,
-          )}.`,
+          t("channels.bot.added-agents", { count: result.successes.length }),
         );
       }
-      setSubmissionError(formatBatchFailureSummary(result.failures));
+      const [onlyFailure] = result.failures;
+      setSubmissionError(
+        result.failures.length === 1 && onlyFailure
+          ? t("channels.bot.add-failed", {
+              name: onlyFailure.name,
+              error: onlyFailure.error,
+            })
+          : formatBatchFailureSummary(result.failures),
+      );
     } catch {
       // The mutation error is rendered inline.
     }
@@ -196,18 +197,18 @@ export function AddChannelBotDialog({
     !createBotsMutation.isPending;
   const addButtonLabel = createBotsMutation.isPending
     ? selectedPersonas.length > 1
-      ? `Adding ${selectedPersonas.length}…`
-      : "Adding…"
+      ? t("channels.bot.adding-count", { total: selectedPersonas.length })
+      : t("channels.bot.adding")
     : selectedPersonas.length > 1
-      ? `Add ${selectedPersonas.length} agents`
-      : "Add agent";
+      ? t("channels.bot.add-agents-count", { total: selectedPersonas.length })
+      : t("channels.bot.add-agent");
 
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
       <ChooserDialogContent
         className="max-w-xl"
         data-testid="add-channel-bot-dialog"
-        description="Choose from your agents, or create a new one."
+        description={t("channels.bot.dialog-description")}
         footer={
           <>
             <Button
@@ -216,7 +217,7 @@ export function AddChannelBotDialog({
               type="button"
               variant="outline"
             >
-              Cancel
+              {t("sidebar.common.cancel")}
             </Button>
             <Button
               disabled={!canSubmit}
@@ -233,7 +234,7 @@ export function AddChannelBotDialog({
         headerTestId="add-channel-bot-dialog-header"
         scrollAreaClassName="space-y-5"
         scrollAreaTestId="add-channel-bot-dialog-scroll-area"
-        title="Add agents"
+        title={t("channels.bot.title")}
       >
         <AddChannelBotPersonasSection
           canToggleSelections={!createBotsMutation.isPending}
@@ -265,7 +266,7 @@ export function AddChannelBotDialog({
           <div className="flex gap-3 rounded-lg border border-warning/30 bg-warning-bg px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <p className="text-sm text-warning">
-              Install an agent runtime before adding an agent to this channel.
+              {t("channels.bot.no-runtime-warning")}
             </p>
           </div>
         ) : null}

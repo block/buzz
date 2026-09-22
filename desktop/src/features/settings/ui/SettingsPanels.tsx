@@ -23,6 +23,7 @@ import {
   Volume2,
   type LucideIcon,
 } from "lucide-react";
+import { i18n, useTranslation } from "@/i18n";
 import type {
   DesktopNotificationPermissionState,
   NotificationSettings,
@@ -75,6 +76,7 @@ import {
   SettingsOptionGroupList,
   SettingsOptionRow,
 } from "./SettingsOptionGroup";
+import { LanguageSetting } from "./LanguageSetting";
 import { SegmentedControl } from "@/shared/ui/segmented-control";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
@@ -129,11 +131,55 @@ export function isSettingsSection(value: unknown): value is SettingsSection {
 
 export type SettingsSectionDescriptor = {
   value: SettingsSection;
-  label: string;
   icon: LucideIcon;
   /** If set, this section is only visible when the feature is enabled */
   featureGate?: string;
 };
+
+/**
+ * Localized nav label for a settings section. Call it during render (never at
+ * module scope) so a language switch relabels the sidebar immediately.
+ */
+export function settingsSectionLabel(section: SettingsSection): string {
+  switch (section) {
+    case "appearance":
+      return i18n.t("settings.sections.appearance");
+    case "profile":
+      return i18n.t("settings.sections.profile");
+    case "notifications":
+      return i18n.t("settings.sections.notifications");
+    case "voice":
+      return i18n.t("settings.sections.voice");
+    case "experimental":
+      return i18n.t("settings.sections.experiments");
+    case "agents":
+      return i18n.t("settings.sections.agents");
+    case "channel-templates":
+      return i18n.t("settings.sections.channel-templates");
+    case "compute":
+      return i18n.t("settings.sections.compute");
+    case "shortcuts":
+      return i18n.t("settings.sections.shortcuts");
+    case "hosted-communities":
+      return i18n.t("settings.sections.hosted-communities");
+    case "community-members":
+      return i18n.t("settings.sections.invites");
+    case "moderation":
+      return i18n.t("settings.sections.moderation");
+    case "custom-emoji":
+      return i18n.t("settings.sections.custom-emoji");
+    case "local-archive":
+      return i18n.t("settings.sections.local-archive");
+    case "mobile":
+      return i18n.t("settings.sections.mobile");
+    case "updates":
+      return i18n.t("settings.sections.updates");
+    default: {
+      const exhaustiveCheck: never = section;
+      return exhaustiveCheck;
+    }
+  }
+}
 
 export type SettingsPanelProps = {
   currentPubkey?: string;
@@ -153,85 +199,69 @@ export type SettingsPanelProps = {
 export const settingsSections: SettingsSectionDescriptor[] = [
   {
     value: "appearance",
-    label: "Appearance",
     icon: MonitorCog,
   },
   {
     value: "profile",
-    label: "Profile",
     icon: UserRound,
   },
   {
     value: "notifications",
-    label: "Notifications",
     icon: BellRing,
   },
   {
     value: "voice",
-    label: "Voice",
     icon: Volume2,
   },
   {
     value: "experimental",
-    label: "Experiments",
     icon: FlaskConical,
   },
   {
     value: "agents",
-    label: "Agents",
     icon: Bot,
     featureGate: "managed-agents",
   },
   {
     value: "channel-templates",
-    label: "Channel templates",
     icon: LayoutTemplate,
     featureGate: "channel-templates",
   },
   {
     value: "compute",
-    label: "Compute",
     icon: Cpu,
   },
   {
     value: "shortcuts",
-    label: "Shortcuts",
     icon: Keyboard,
   },
   {
     value: "hosted-communities",
-    label: "Hosted communities",
     icon: MessagesSquare,
   },
   {
     value: "community-members",
-    label: "Invites",
     icon: Ticket,
   },
   {
     value: "moderation",
-    label: "Moderation",
     icon: ShieldAlert,
   },
   {
     value: "custom-emoji",
-    label: "Custom emoji",
     icon: Smile,
     featureGate: "custom-emoji",
   },
   {
     value: "local-archive",
-    label: "Local archive",
     icon: Archive,
   },
   {
     value: "mobile",
-    label: "Mobile",
     icon: Smartphone,
   },
   {
     value: "updates",
-    label: "Updates",
     icon: Download,
   },
 ];
@@ -400,10 +430,11 @@ function SingleThemeTile({
 
 type AppearanceMode = "system" | "light" | "dark";
 
+/** Color modes in picker order; labels resolve at render via `t()`. */
 const APPEARANCE_MODE_OPTIONS = [
-  { mode: "system" as const, label: "System", Icon: SunMoon },
-  { mode: "light" as const, label: "Light", Icon: Sun },
-  { mode: "dark" as const, label: "Dark", Icon: Moon },
+  { mode: "system" as const, Icon: SunMoon },
+  { mode: "light" as const, Icon: Sun },
+  { mode: "dark" as const, Icon: Moon },
 ] as const;
 
 // Reveal/hide motion for the accent picker: a small translate + opacity fade.
@@ -419,6 +450,7 @@ const ACCENT_PICKER_TRANSITION = {
 };
 
 function ThemeSettingsCard() {
+  const { t } = useTranslation();
   const {
     setTheme,
     selectedThemeName,
@@ -436,6 +468,13 @@ function ThemeSettingsCard() {
   const { activeCommunity, communities } = useCommunities();
   const showCommunityScope = communities.length > 1;
   const communityLabel = appearanceCommunityLabel(activeCommunity?.name);
+
+  const modeLabel = (mode: AppearanceMode) =>
+    mode === "system"
+      ? t("settings.appearance.color-mode.option-system")
+      : mode === "light"
+        ? t("settings.appearance.color-mode.option-light")
+        : t("settings.appearance.color-mode.option-dark");
 
   // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
   // so the accent picker is hidden while a Buzz theme is active. `themeName` is
@@ -637,8 +676,8 @@ function ThemeSettingsCard() {
       data-testid="settings-theme"
     >
       <SettingsSectionHeader
-        title="Appearance"
-        description="Choose how Buzz looks and feels."
+        title={t("settings.sections.appearance")}
+        description={t("settings.appearance.page-description")}
       />
 
       <SettingsOptionGroupList>
@@ -657,10 +696,10 @@ function ThemeSettingsCard() {
           }
           title={
             <>
-              Theme
+              {t("settings.appearance.theme.label")}
               {showCommunityScope ? (
                 <span className="ml-1 font-normal text-muted-foreground">
-                  (per community)
+                  {t("settings.appearance.theme.per-community")}
                 </span>
               ) : null}
             </>
@@ -668,22 +707,24 @@ function ThemeSettingsCard() {
         >
           <SettingsOptionRow data-testid="appearance-color-mode-row">
             <div className="min-w-0">
-              <p className="text-sm font-medium">Color mode</p>
+              <p className="text-sm font-medium">
+                {t("settings.appearance.color-mode.label")}
+              </p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Follow your system or choose a light or dark appearance.
+                {t("settings.appearance.color-mode.hint")}
               </p>
             </div>
             <SegmentedControl
               indicatorTestId="appearance-color-mode-indicator"
-              legend="Color mode"
+              legend={t("settings.appearance.color-mode.label")}
               onValueChange={handleModeSelect}
               optionTestIdPrefix="appearance-mode"
-              options={APPEARANCE_MODE_OPTIONS.map(({ mode, label, Icon }) => ({
+              options={APPEARANCE_MODE_OPTIONS.map(({ mode, Icon }) => ({
                 value: mode,
-                label,
+                label: modeLabel(mode),
                 Icon,
               }))}
               testId="appearance-color-mode-control"
@@ -693,16 +734,20 @@ function ThemeSettingsCard() {
 
           <SettingsOptionRow data-testid="theme-style-row">
             <div className="min-w-0">
-              <p className="text-sm font-medium">Theme style</p>
+              <p className="text-sm font-medium">
+                {t("settings.appearance.theme-style.label")}
+              </p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Choose the colors used throughout Buzz.
+                {t("settings.appearance.theme-style.hint")}
               </p>
             </div>
             <button
-              aria-label={`Theme style, ${selectedThemeLabel}`}
+              aria-label={t("settings.appearance.theme-style.aria", {
+                theme: selectedThemeLabel,
+              })}
               aria-controls="theme-style-options"
               aria-expanded={themeStyleExpanded}
               className="flex h-auto min-w-0 items-center gap-2 rounded-md bg-transparent p-0 text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
@@ -788,8 +833,9 @@ function ThemeSettingsCard() {
 
         <SettingsOptionGroup
           data-testid="appearance-preferences-card"
-          title="Preferences"
+          title={t("settings.common.group-preferences")}
         >
+          <LanguageSetting />
           <ConversationDisplaySettings />
           <LinkPreviewStyleSetting />
           <ThreadLayoutSetting />

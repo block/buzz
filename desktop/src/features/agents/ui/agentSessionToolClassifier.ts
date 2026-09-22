@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type {
   AgentActivityAction,
   AgentActivityDescriptor,
@@ -83,24 +84,6 @@ const BUZZ_CLI_READ_VERBS = new Set([
   "notes",
 ]);
 
-const TOOL_CLASS_LABELS: Record<AgentActivityRenderClass, string> = {
-  message: "Message",
-  "relay-op": "Buzz relay op",
-  "file-edit": "File edit",
-  "file-read": "File read",
-  "skill-read": "Skill read",
-  image: "Image",
-  shell: "Shell command",
-  status: "Status",
-  thought: "Thought",
-  plan: "Plan",
-  permission: "Permission",
-  error: "Error",
-  generic: "Tool",
-  "raw-rail": "Raw event",
-  suppressed: "Suppressed",
-};
-
 const providers: ToolClassifierProvider[] = [
   classifyLoadSkillTool,
   classifyDeveloperHarnessTool,
@@ -119,7 +102,9 @@ export function classifyTool(
             renderClass: "error",
             label: descriptor.label.endsWith("failed")
               ? descriptor.label
-              : `${descriptor.label} failed`,
+              : i18n.t("agents.tool-label.failed-suffix", {
+                  label: descriptor.label,
+                }),
           }
         : descriptor;
     }
@@ -139,8 +124,41 @@ export function classifyToolItem(item: ToolItem): AgentActivityDescriptor {
   });
 }
 
-export function renderClassLabel(renderClass: AgentActivityRenderClass) {
-  return TOOL_CLASS_LABELS[renderClass];
+export function renderClassLabel(
+  renderClass: AgentActivityRenderClass,
+): string {
+  switch (renderClass) {
+    case "message":
+      return i18n.t("agents.tool-class.message");
+    case "relay-op":
+      return i18n.t("agents.tool-class.relay-op");
+    case "file-edit":
+      return i18n.t("agents.tool-class.file-edit");
+    case "file-read":
+      return i18n.t("agents.tool-class.file-read");
+    case "skill-read":
+      return i18n.t("agents.tool-class.skill-read");
+    case "image":
+      return i18n.t("agents.tool-class.image");
+    case "shell":
+      return i18n.t("agents.tool-class.shell");
+    case "status":
+      return i18n.t("agents.tool-class.status");
+    case "thought":
+      return i18n.t("agents.tool-class.thought");
+    case "plan":
+      return i18n.t("agents.tool-class.plan");
+    case "permission":
+      return i18n.t("agents.tool-class.permission");
+    case "error":
+      return i18n.t("agents.tool-class.error");
+    case "generic":
+      return i18n.t("agents.tool-class.generic");
+    case "raw-rail":
+      return i18n.t("agents.tool-class.raw-rail");
+    case "suppressed":
+      return i18n.t("agents.tool-class.suppressed");
+  }
 }
 
 function classifyLoadSkillTool(
@@ -152,14 +170,16 @@ function classifyLoadSkillTool(
   if (!isLoadSkill) return null;
 
   const skillRef = getToolString(input.args, ["name"]);
-  const object = skillRef ?? "skill";
+  const object = skillRef ?? i18n.t("agents.tool-object.skill");
   const isSupportingFile = skillRef?.includes("/") ?? false;
 
   return {
     renderClass: "skill-read",
-    label: isSupportingFile ? "Read skill file" : "Read skill",
+    label: isSupportingFile
+      ? i18n.t("agents.tool-label.read-skill-file")
+      : i18n.t("agents.tool-label.read-skill"),
     preview: skillRef,
-    action: { verb: "Read", object },
+    action: { verb: i18n.t("agents.tool-verb.read"), object },
     source: "harness",
     groupKey: isSupportingFile ? "skill:load-file" : "skill:load",
   };
@@ -179,9 +199,12 @@ function classifyDeveloperHarnessTool(
     }
     return {
       renderClass: "shell",
-      label: "Ran command",
+      label: i18n.t("agents.tool-label.ran-command"),
       preview: command,
-      action: { verb: "Ran", object: command ?? "command" },
+      action: {
+        verb: i18n.t("agents.tool-verb.ran"),
+        object: command ?? i18n.t("agents.tool-object.command"),
+      },
       source: "harness",
       groupKey: "shell:command",
     };
@@ -191,9 +214,12 @@ function classifyDeveloperHarnessTool(
     const path = getToolString(input.args, ["path"]);
     return {
       renderClass: "file-read",
-      label: "Read file",
+      label: i18n.t("agents.tool-label.read-file"),
       preview: path,
-      action: { verb: "Read", object: path ?? "file" },
+      action: {
+        verb: i18n.t("agents.tool-verb.read"),
+        object: path ?? i18n.t("agents.tool-object.file"),
+      },
       source: "harness",
       groupKey: "read_file",
     };
@@ -203,11 +229,13 @@ function classifyDeveloperHarnessTool(
     const source = getToolString(input.args, ["source"]);
     return {
       renderClass: "image",
-      label: "Viewed image",
+      label: i18n.t("agents.tool-label.viewed-image"),
       preview: source ? basenameOrUrl(source) : null,
       action: {
-        verb: "Viewed",
-        object: source ? basenameOrUrl(source) : "image",
+        verb: i18n.t("agents.tool-verb.viewed"),
+        object: source
+          ? basenameOrUrl(source)
+          : i18n.t("agents.tool-object.image"),
       },
       source: "harness",
       groupKey: "view_image",
@@ -218,9 +246,12 @@ function classifyDeveloperHarnessTool(
     const path = getToolString(input.args, ["path"]);
     return {
       renderClass: "file-edit",
-      label: "Edited file",
+      label: i18n.t("agents.tool-label.edited-file"),
       preview: path,
-      action: { verb: "Edited", object: path ?? "file" },
+      action: {
+        verb: i18n.t("agents.tool-verb.edited"),
+        object: path ?? i18n.t("agents.tool-object.file"),
+      },
       source: "harness",
       groupKey: "file-edit:str_replace",
     };
@@ -230,9 +261,9 @@ function classifyDeveloperHarnessTool(
     const preview = getTodoPreview(input.args);
     return {
       renderClass: "plan",
-      label: "Updated todos",
+      label: i18n.t("agents.tool-label.updated-todos"),
       preview,
-      action: { verb: "Updated", object: preview },
+      action: { verb: i18n.t("agents.tool-verb.updated"), object: preview },
       source: "harness",
       groupKey: "plan:todo",
     };
@@ -241,9 +272,12 @@ function classifyDeveloperHarnessTool(
   if (kind === "stop_hook") {
     return {
       renderClass: "suppressed",
-      label: "Checked todos",
+      label: i18n.t("agents.tool-label.checked-todos"),
       preview: null,
-      action: { verb: "Checked", object: "todos" },
+      action: {
+        verb: i18n.t("agents.tool-verb.checked"),
+        object: i18n.t("agents.tool-object.todos"),
+      },
       source: "harness",
       groupKey: "suppressed:stop-hook",
     };
@@ -252,9 +286,12 @@ function classifyDeveloperHarnessTool(
   if (kind === "post_compact_hook") {
     return {
       renderClass: "status",
-      label: "Context compacted",
+      label: i18n.t("agents.tool-label.context-compacted"),
       preview: null,
-      action: { verb: "Compacted", object: "context" },
+      action: {
+        verb: i18n.t("agents.tool-verb.compacted"),
+        object: i18n.t("agents.tool-object.context"),
+      },
       source: "harness",
       groupKey: "status:post-compact",
     };
@@ -263,9 +300,12 @@ function classifyDeveloperHarnessTool(
   const preview = genericPreview(input);
   return {
     renderClass: "generic",
-    label: "Ran tool",
+    label: i18n.t("agents.tool-label.ran-tool"),
     preview,
-    action: { verb: "Ran", object: preview ?? "tool" },
+    action: {
+      verb: i18n.t("agents.tool-verb.ran"),
+      object: preview ?? i18n.t("agents.tool-object.tool"),
+    },
     source: "harness",
     groupKey: "generic:dev-mcp",
   };
@@ -304,9 +344,12 @@ function genericDescriptor(
   const preview = genericPreview(input);
   return {
     renderClass: "generic",
-    label: "Ran tool",
+    label: i18n.t("agents.tool-label.ran-tool"),
     preview,
-    action: { verb: "Ran", object: preview ?? "tool" },
+    action: {
+      verb: i18n.t("agents.tool-verb.ran"),
+      object: preview ?? i18n.t("agents.tool-object.tool"),
+    },
     source: "fallback",
     groupKey: `generic:${normalizeToolNameText(input.toolName || input.title)}`,
   };
@@ -382,7 +425,8 @@ export function parseBuzzCliCommand(
 }
 
 function titleForBuzzCli(group: string, verb: string) {
-  if (group === "messages" && verb === "send") return "Send Message";
+  if (group === "messages" && verb === "send")
+    return i18n.t("agents.buzz-cli.send-message");
   return [group, verb]
     .map((part) =>
       part
@@ -415,23 +459,24 @@ function buzzOperationVerbToken(operation: string) {
 }
 
 function buzzOperationVerb(verb: string, tone: AgentActivityTone) {
-  if (verb === "add") return "Added";
-  if (verb === "archive") return "Archived";
-  if (verb === "create") return "Created";
-  if (verb === "delete") return "Deleted";
-  if (verb === "get" || verb === "list" || verb === "members") return "Read";
-  if (verb === "remove") return "Removed";
-  if (verb === "runs") return "Read";
-  if (verb === "search") return "Searched";
-  if (verb === "send") return "Sent";
-  if (verb === "thread") return "Read";
-  if (verb === "unarchive") return "Unarchived";
-  if (tone === "read") return "Read";
-  return "Updated";
+  if (verb === "add") return i18n.t("agents.buzz-verb.added");
+  if (verb === "archive") return i18n.t("agents.buzz-verb.archived");
+  if (verb === "create") return i18n.t("agents.buzz-verb.created");
+  if (verb === "delete") return i18n.t("agents.buzz-verb.deleted");
+  if (verb === "get" || verb === "list" || verb === "members")
+    return i18n.t("agents.buzz-verb.read");
+  if (verb === "remove") return i18n.t("agents.buzz-verb.removed");
+  if (verb === "runs") return i18n.t("agents.buzz-verb.read");
+  if (verb === "search") return i18n.t("agents.buzz-verb.searched");
+  if (verb === "send") return i18n.t("agents.buzz-verb.sent");
+  if (verb === "thread") return i18n.t("agents.buzz-verb.read");
+  if (verb === "unarchive") return i18n.t("agents.buzz-verb.unarchived");
+  if (tone === "read") return i18n.t("agents.buzz-verb.read");
+  return i18n.t("agents.buzz-verb.updated");
 }
 
 function buzzOperationObject(operation: string) {
-  if (isBuzzMessageSend(operation)) return "message";
+  if (isBuzzMessageSend(operation)) return i18n.t("agents.tool-object.message");
   if (operation.includes(".")) {
     const [group] = operation.split(".");
     return group ? group.replace(/[-_]+/g, " ") : "Buzz";

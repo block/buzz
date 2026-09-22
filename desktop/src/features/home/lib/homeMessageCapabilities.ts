@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type { InboxItem } from "@/features/home/lib/inbox";
 
 export function getHomeMessageCapabilities(
@@ -15,9 +16,9 @@ export function getHomeMessageCapabilities(
       ? null
       : item.item.channelId
         ? availableChannelIds.has(item.item.channelId)
-          ? "This item does not support inline replies yet."
-          : "Open the linked channel to reply."
-        : "This inbox item does not have a reply target.";
+          ? i18n.t("home.inbox.reply-no-inline")
+          : i18n.t("home.inbox.reply-open-linked")
+        : i18n.t("home.inbox.reply-no-target");
 
   return {
     canDelete:

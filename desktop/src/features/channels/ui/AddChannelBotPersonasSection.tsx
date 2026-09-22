@@ -3,6 +3,7 @@ import { Check, Plus } from "lucide-react";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { useTranslation } from "@/i18n";
 
 function AgentRow({
   persona,
@@ -17,6 +18,7 @@ function AgentRow({
   inChannel: boolean;
   onToggle: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <button
       aria-pressed={inChannel ? undefined : selected}
@@ -46,7 +48,7 @@ function AgentRow({
       {inChannel ? (
         <span className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-muted-foreground">
           <Check className="h-4 w-4" />
-          In channel
+          {t("channels.bot.in-channel")}
         </span>
       ) : (
         <span
@@ -66,6 +68,7 @@ function AgentRow({
 }
 
 function CreateAgentRow({ onCreateAgent }: { onCreateAgent: () => void }) {
+  const { t } = useTranslation();
   return (
     <button
       className="flex w-full items-center gap-3 rounded-lg border border-border bg-card px-3 py-3 text-left transition-colors hover:bg-accent/50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
@@ -78,10 +81,10 @@ function CreateAgentRow({ onCreateAgent }: { onCreateAgent: () => void }) {
       </span>
       <span className="min-w-0 flex-1">
         <span className="block text-sm font-medium text-foreground">
-          Create a new agent
+          {t("channels.bot.create-new")}
         </span>
         <span className="block text-xs text-muted-foreground">
-          Give it a name, purpose, and instructions.
+          {t("channels.bot.create-new-hint")}
         </span>
       </span>
     </button>
@@ -112,6 +115,7 @@ export function AddChannelBotPersonasSection({
   personas,
   selectedPersonaIds,
 }: AddChannelBotPersonasSectionProps) {
+  const { t } = useTranslation();
   const available = personas.filter(
     (persona) => !inChannelPersonaIds?.has(persona.id),
   );
@@ -127,14 +131,14 @@ export function AddChannelBotPersonasSection({
 
       {isLoading ? (
         <p className="px-3 text-sm text-muted-foreground">
-          Loading your agents…
+          {t("channels.bot.loading")}
         </p>
       ) : null}
 
       {!isLoading && available.length > 0 ? (
         <div className="space-y-1">
           <div className="px-3 pb-1 text-xs font-medium text-muted-foreground">
-            Your agents
+            {t("channels.bot.your-agents")}
           </div>
           {available.map((persona) => (
             <AgentRow
@@ -151,7 +155,7 @@ export function AddChannelBotPersonasSection({
 
       {!isLoading && available.length === 0 && inChannel.length > 0 ? (
         <p className="px-3 text-sm text-muted-foreground">
-          All of your agents are already in this channel.
+          {t("channels.bot.all-agents-in-channel")}
         </p>
       ) : null}
 
@@ -162,7 +166,7 @@ export function AddChannelBotPersonasSection({
       {!isLoading && inChannel.length > 0 ? (
         <div className="space-y-1 border-t border-border pt-3">
           <div className="px-3 pb-1 text-xs font-medium text-muted-foreground">
-            In this channel
+            {t("channels.bot.in-this-channel")}
           </div>
           {inChannel.map((persona) => (
             <AgentRow

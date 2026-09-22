@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Info, Link, Users } from "lucide-react";
 
+import { useTranslation } from "@/i18n";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { AgentPersona } from "@/shared/api/types";
 import { Card } from "@/shared/ui/card";
@@ -37,6 +38,7 @@ export function TeamIdentityCard({
   teamName,
   version,
 }: TeamIdentityCardProps) {
+  const { t } = useTranslation();
   const footerModelLabel = getTeamFooterModelLabel(personas);
   const trimmedDescription = description?.trim();
 
@@ -55,7 +57,11 @@ export function TeamIdentityCard({
                 </span>
               </TooltipTrigger>
               <TooltipContent side="bottom" className="max-w-xs">
-                <p>Linked from {symlinkTarget ?? sourceDir}</p>
+                <p>
+                  {t("agents.team-card.linked-from", {
+                    path: symlinkTarget ?? sourceDir ?? "",
+                  })}
+                </p>
               </TooltipContent>
             </Tooltip>
           ) : null}
@@ -113,6 +119,7 @@ function TeamAvatarRow({
   personas: AgentPersona[];
   teamName: string;
 }) {
+  const { t } = useTranslation();
   const visiblePersonas = personas.slice(0, MAX_VISIBLE_MEMBER_AVATARS);
   const overflowCount = Math.max(0, memberCount - visiblePersonas.length);
   const stackItemCount = visiblePersonas.length + (overflowCount > 0 ? 1 : 0);
@@ -135,7 +142,9 @@ function TeamAvatarRow({
   return (
     <div className="absolute inset-x-0 top-0 bottom-12 flex items-center justify-center">
       <div
-        aria-label={`${teamName} member avatars`}
+        aria-label={t("agents.team-card.member-avatars-aria", {
+          teamName,
+        })}
         className="flex max-w-full items-center justify-center px-4"
         role="img"
       >

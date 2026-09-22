@@ -24,6 +24,17 @@ import { registerHooks } from "node:module";
 import { after, before, test } from "node:test";
 import { JSDOM } from "jsdom";
 
+import { initializeI18n } from "@/i18n";
+
+// The panes render their reopen labels through i18n now, and the assertions
+// below are the English contract — pin English (node reports the host locale)
+// and boot i18n before any component imports or renders.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
+
 // MessageComposer mounts TipTap, which never releases jsdom handles and hangs
 // the node:test process. Stub it to a null component so InboxDetailPane can
 // prove its reopen wiring without pulling the editor in.

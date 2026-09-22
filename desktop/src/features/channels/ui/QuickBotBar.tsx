@@ -5,6 +5,7 @@ import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { useTranslation } from "@/i18n";
 
 type QuickBotBarProps = {
   personas: Array<{
@@ -16,6 +17,7 @@ type QuickBotBarProps = {
 };
 
 export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
+  const { t } = useTranslation();
   const [pendingId, setPendingId] = React.useState<string | null>(null);
 
   // Clear pending state when the mutation finishes
@@ -31,7 +33,7 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
     <div
       className="flex items-center"
       role="toolbar"
-      aria-label="Quick add bots"
+      aria-label={t("channels.bot.quick-add-toolbar")}
     >
       <div
         className={cn(
@@ -52,7 +54,9 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
             <Tooltip key={persona.id}>
               <TooltipTrigger asChild>
                 <button
-                  aria-label={`Add ${persona.displayName}`}
+                  aria-label={t("channels.bot.add-named", {
+                    name: persona.displayName,
+                  })}
                   className={cn(
                     "relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
                     "border border-border/50 shadow-xs",
@@ -87,7 +91,10 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" className="text-xs">
-                Add {instanceName} ({persona.displayName})
+                {t("channels.bot.add-instance", {
+                  instance: instanceName,
+                  name: persona.displayName,
+                })}
               </TooltipContent>
             </Tooltip>
           );

@@ -1,3 +1,5 @@
+import { i18n } from "@/i18n";
+
 const NOTIFICATION_BODY_MAX_LENGTH = 140;
 
 /**
@@ -20,8 +22,8 @@ export function resolveNotificationChannelLabel(
 
 /**
  * Truncate notification body text to {@link NOTIFICATION_BODY_MAX_LENGTH}
- * characters, appending "..." when truncated.  Returns `fallback` when
- * `content` is blank after trimming.
+ * characters, appending the locale's truncation marker when truncated.  Returns
+ * `fallback` when `content` is blank after trimming.
  */
 export function truncateNotificationBody(
   content: string,
@@ -30,7 +32,10 @@ export function truncateNotificationBody(
   const trimmed = content.trim();
   if (trimmed.length === 0) return fallback;
   if (trimmed.length <= NOTIFICATION_BODY_MAX_LENGTH) return trimmed;
-  return `${trimmed.slice(0, NOTIFICATION_BODY_MAX_LENGTH - 3).trimEnd()}...`;
+  // Resolved per call: `i18n` boots after this module is imported, and the
+  // marker's own length is the room the budget has to leave for it.
+  const marker = i18n.t("notifications.toast.body-truncation-marker");
+  return `${trimmed.slice(0, NOTIFICATION_BODY_MAX_LENGTH - marker.length).trimEnd()}${marker}`;
 }
 
 /**
@@ -44,7 +49,10 @@ export function formatNotificationTitle(opts: {
   channelLabel: string | null;
 }): string {
   return opts.channelLabel
-    ? `${opts.prefix} in ${opts.channelLabel}`
+    ? i18n.t("notifications.toast.title-in-channel", {
+        prefix: opts.prefix,
+        channelLabel: opts.channelLabel,
+      })
     : opts.prefix;
 }
 
@@ -55,13 +63,49 @@ export type MessageNotificationSource =
   | "dm"
   | "thread_reply";
 
-const MESSAGE_BODY_FALLBACKS: Record<MessageNotificationSource, string> = {
-  mention: "Something in Buzz needs your attention.",
-  approval: "A workflow is waiting for your approval.",
-  needs_action: "Something in Buzz needs your attention.",
-  dm: "New message",
-  thread_reply: "New reply",
-};
+/**
+ * Neutral body copy for a blank message, per notification source. Resolved at
+ * call time: this module is imported before the catalogs boot.
+ */
+function messageBodyFallback(source: MessageNotificationSource): string {
+  if (source === "approval") {
+    return i18n.t("notifications.toast.body-approval");
+  }
+  if (source === "dm") {
+    return i18n.t("notifications.toast.body-new-message");
+  }
+  if (source === "thread_reply") {
+    return i18n.t("notifications.toast.body-new-reply");
+  }
+  return i18n.t("notifications.toast.body-needs-attention");
+}
+
+/**
+ * Title lead-in for a non-DM notification. The sender's display name leads
+ * whenever their profile resolved; each source degrades to neutral copy
+ * otherwise. Mentions and needs-action rows never invent a name.
+ */
+function messageTitlePrefix(
+  source: MessageNotificationSource,
+  senderName: string | null,
+): string {
+  if (source === "mention") {
+    return senderName
+      ? i18n.t("notifications.toast.title-mention-sender", { senderName })
+      : i18n.t("notifications.toast.title-mention");
+  }
+  if (source === "approval") {
+    return senderName
+      ? i18n.t("notifications.toast.title-approval-sender", { senderName })
+      : i18n.t("notifications.toast.title-approval");
+  }
+  if (source === "thread_reply") {
+    return senderName
+      ? i18n.t("notifications.toast.title-reply-sender", { senderName })
+      : i18n.t("notifications.toast.title-reply");
+  }
+  return senderName ?? i18n.t("notifications.toast.title-needs-action");
+}
 
 /**
  * Canonical copy for every message-shaped desktop notification (home-feed
@@ -83,30 +127,20 @@ export function formatMessageNotification(opts: {
   const { source, content } = opts;
   const senderName = opts.senderName?.trim() || null;
   const channelName = opts.channelName?.trim() || null;
-  const body = truncateNotificationBody(
-    content,
-    MESSAGE_BODY_FALLBACKS[source],
-  );
+  const body = truncateNotificationBody(content, messageBodyFallback(source));
 
   if (source === "dm") {
-    return { title: senderName ?? channelName ?? "Direct message", body };
+    return {
+      title:
+        senderName ??
+        channelName ??
+        i18n.t("notifications.toast.title-direct-message"),
+      body,
+    };
   }
 
   const channelLabel = channelName ? `#${channelName}` : null;
-  const prefix =
-    source === "mention"
-      ? senderName
-        ? `${senderName} mentioned you`
-        : "@Mention"
-      : source === "approval"
-        ? senderName
-          ? `${senderName} requested approval`
-          : "Approval Requested"
-        : source === "thread_reply"
-          ? senderName
-            ? `${senderName} replied`
-            : "Reply"
-          : (senderName ?? "Needs Action");
+  const prefix = messageTitlePrefix(source, senderName);
 
   return { title: formatNotificationTitle({ prefix, channelLabel }), body };
 }

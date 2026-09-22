@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import {
@@ -194,7 +195,10 @@ export async function buildProjectsFromFetcher(
     (events) => ({ ok: true as const, events }),
     (error: unknown) => ({
       ok: false as const,
-      message: error instanceof Error ? error.message : "Unknown error",
+      message:
+        error instanceof Error
+          ? error.message
+          : i18n.t("projects.shared.unknown-error"),
     }),
   );
 

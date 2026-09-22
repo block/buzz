@@ -116,3 +116,15 @@ test("unencodable keys render Unavailable with no copy affordance", async () => 
     }
   }
 });
+
+// <PubKey> renders its accessible names through `useTranslation`, so this file
+// needs a booted i18n instance. The assertions compare against the English
+// source strings, so pin English rather than inheriting the host's system
+// language.
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();

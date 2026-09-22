@@ -6,6 +6,7 @@ import { matchesDetachedToastScope } from "@/features/messages/lib/detachedToast
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { i18n } from "@/i18n";
 import { getErrorMessage } from "./useMentionSendFlow.helpers";
 
 /**
@@ -59,10 +60,10 @@ export function resetDetachedAgentStarts(): void {
  * published — only the wake was refused — so say what actually happened.
  */
 function detachedStartFailureDetail(error: unknown): string {
-  const message = getErrorMessage(error, "Could not start agent.");
+  const message = getErrorMessage(error, i18n.t("messages.agent.start-failed"));
   return message.includes("active community changed") ||
     message.includes("active identity changed")
-    ? "You switched community or identity before it could start."
+    ? i18n.t("messages.agent.switched-before-start")
     : message;
 }
 
@@ -75,7 +76,10 @@ function detachedStartFailureDetail(error: unknown): string {
  */
 function warnAgentMayNotRespond(agentName: string, detail: string): void {
   toast.error(
-    `Could not start ${agentName} — your message was sent, but the agent may not respond. ${detail}`,
+    i18n.t("messages.agent.could-not-start", {
+      agentName,
+      detail,
+    }),
   );
 }
 
@@ -151,7 +155,7 @@ export function useDetachedAgentStart(): (
         // communities.
         warnAgentMayNotRespond(
           agent.name,
-          "Buzz is still connecting to this community — mention the agent again in a moment.",
+          i18n.t("messages.agent.still-connecting"),
         );
         return false;
       }

@@ -38,6 +38,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
+import { useTranslation } from "@/i18n";
 
 type CommunityRailProps = {
   communities: Community[];
@@ -106,13 +107,17 @@ function CommunityButton({
   dragAttributes?: React.HTMLAttributes<HTMLElement>;
   isDragging?: boolean;
 }) {
+  const { t } = useTranslation();
   const { mentionCount, showBadge, showDot, badgeLabel } =
     communityRailIndicators(unread);
 
   const tooltipLabel = showBadge
-    ? `${community.name} — ${mentionCount} mention${mentionCount === 1 ? "" : "s"}`
+    ? t("sidebar.rail.mention-count", {
+        community: community.name,
+        count: mentionCount,
+      })
     : showDot
-      ? `${community.name} — unread`
+      ? t("sidebar.rail.unread-tooltip", { community: community.name })
       : community.name;
 
   return (
@@ -234,6 +239,7 @@ function SortableCommunityButton({
   onMarkAllRead: (community: Community) => void;
   onSetEditingCommunity: (community: Community) => void;
 }) {
+  const { t } = useTranslation();
   const {
     attributes,
     listeners,
@@ -261,7 +267,7 @@ function SortableCommunityButton({
           <>
             <ContextMenuItem onClick={() => onMarkAllRead(community)}>
               <CheckCheck className="h-4 w-4" />
-              Mark all as read
+              {t("sidebar.sections.mark-all-read")}
             </ContextMenuItem>
             <ContextMenuSeparator />
             <ContextMenuItem
@@ -270,17 +276,17 @@ function SortableCommunityButton({
               }}
             >
               <Link2 className="h-4 w-4" />
-              Copy community URL
+              {t("sidebar.rail.copy-url")}
             </ContextMenuItem>
             {canInvite ? (
               <ContextMenuItem onClick={onInvite}>
                 <Ticket className="h-4 w-4" />
-                Invite to community
+                {t("sidebar.rail.invite")}
               </ContextMenuItem>
             ) : null}
             <ContextMenuItem onClick={() => onSetEditingCommunity(community)}>
               <Settings2 className="h-4 w-4" />
-              Community settings
+              {t("sidebar.rail.settings")}
             </ContextMenuItem>
           </>
         }
@@ -312,6 +318,7 @@ export function CommunityRail({
   onUpdateCommunity,
   onReorderCommunities,
 }: CommunityRailProps) {
+  const { t } = useTranslation();
   const { unreadByCommunity, markCommunityRead } = useCommunityUnread(
     communities,
     activeCommunityId,
@@ -373,7 +380,7 @@ export function CommunityRail({
 
   return (
     <nav
-      aria-label="Communities"
+      aria-label={t("sidebar.rail.title")}
       className="relative z-20 flex w-14 shrink-0 flex-col items-center gap-2.5 overflow-y-auto bg-sidebar px-2.5 pb-5 pt-[calc(var(--buzz-top-chrome-height,40px)+7px)]"
       data-testid="community-rail"
     >
@@ -415,7 +422,7 @@ export function CommunityRail({
       <Tooltip>
         <TooltipTrigger asChild>
           <button
-            aria-label="Add community"
+            aria-label={t("sidebar.rail.add")}
             className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 outline-hidden transition-all hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground focus:outline-none focus-visible:outline-none"
             data-testid="community-rail-add"
             onClick={onAddCommunity}
@@ -425,7 +432,7 @@ export function CommunityRail({
           </button>
         </TooltipTrigger>
         <TooltipContent side="right" sideOffset={8}>
-          Add community
+          {t("sidebar.rail.add")}
         </TooltipContent>
       </Tooltip>
       <EditCommunityDialog

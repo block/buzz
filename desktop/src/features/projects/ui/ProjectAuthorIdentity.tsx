@@ -1,5 +1,6 @@
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
+import { useTranslation } from "@/i18n";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -18,8 +19,12 @@ export function ProjectAuthorIdentity({
   pubkey: string;
   testId?: string;
 }) {
+  const { t } = useTranslation();
   const profile = profiles?.[normalizePubkey(pubkey)];
-  const roleLabel = profile?.isAgent === true ? "Agent" : "Person";
+  const roleLabel =
+    profile?.isAgent === true
+      ? t("projects.author-identity.role-agent")
+      : t("projects.author-identity.role-person");
 
   return (
     <span className="inline-flex align-middle">

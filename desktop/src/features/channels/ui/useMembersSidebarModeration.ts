@@ -1,6 +1,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { useTranslation } from "@/i18n";
 import {
   useBanMemberMutation,
   useModerationRestrictionsQuery,
@@ -22,6 +23,7 @@ import type { MemberModerationState } from "./MembersSidebarMemberCard";
  * is open and the caller can moderate.
  */
 export function useMembersSidebarModeration(open: boolean) {
+  const { t } = useTranslation();
   const relayMembershipQuery = useMyRelayMembershipQuery();
   const relayRole = relayMembershipQuery.data?.role;
   const canModerate = relayRole === "owner" || relayRole === "admin";
@@ -55,29 +57,31 @@ export function useMembersSidebarModeration(open: boolean) {
         toast.success(success);
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Moderation action failed",
+          error instanceof Error
+            ? error.message
+            : t("channels.moderation.toast-failed"),
         );
       }
     },
-    [],
+    [t],
   );
 
   const onBan = React.useCallback(
     (member: ChannelMember) =>
       void runModerationAction(
         () => banMutation.mutateAsync({ pubkey: member.pubkey }),
-        "Member banned",
+        t("channels.moderation.toast-banned"),
       ),
-    [banMutation, runModerationAction],
+    [banMutation, runModerationAction, t],
   );
 
   const onUnban = React.useCallback(
     (member: ChannelMember) =>
       void runModerationAction(
         () => unbanMutation.mutateAsync(member.pubkey),
-        "Ban lifted",
+        t("channels.moderation.toast-ban-lifted"),
       ),
-    [unbanMutation, runModerationAction],
+    [unbanMutation, runModerationAction, t],
   );
 
   const onTimeout = React.useCallback(
@@ -88,18 +92,18 @@ export function useMembersSidebarModeration(open: boolean) {
             pubkey: member.pubkey,
             expiresAt: expiresAtSecs,
           }),
-        "Member timed out",
+        t("channels.moderation.toast-timed-out"),
       ),
-    [timeoutMutation, runModerationAction],
+    [timeoutMutation, runModerationAction, t],
   );
 
   const onUntimeout = React.useCallback(
     (member: ChannelMember) =>
       void runModerationAction(
         () => untimeoutMutation.mutateAsync(member.pubkey),
-        "Timeout lifted",
+        t("channels.moderation.toast-timeout-lifted"),
       ),
-    [untimeoutMutation, runModerationAction],
+    [untimeoutMutation, runModerationAction, t],
   );
 
   return {

@@ -23,6 +23,7 @@ import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuot
 import { startLocalStorageSweep } from "@/shared/lib/localStorageSweep";
 import { initializeConversationDensityPreference } from "@/shared/lib/conversationDensityPreference";
 import { initializeFontSizePreference } from "@/shared/lib/fontSizePreference";
+import { initializeI18n } from "@/i18n";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -130,6 +131,9 @@ async function bootstrap() {
   recoverLocalStorageQuotaOnStartup();
   initializeConversationDensityPreference();
   initializeFontSizePreference();
+  // Resolve the language before the first paint so there is no flash of the
+  // wrong language and <html lang> is correct from the start.
+  initializeI18n();
   startLocalStorageSweep();
   await installE2eBridgeIfConfigured();
   await migrateLegacyCommunityStorageBeforeRender();

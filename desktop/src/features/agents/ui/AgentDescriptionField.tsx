@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import {
@@ -36,7 +37,8 @@ export function AgentIdentityFields({
   onDescriptionChange,
   disabled,
 }: AgentIdentityFieldsProps) {
-  const placeholder = "What this agent does, in a sentence";
+  const { t } = useTranslation();
+  const placeholder = t("agents.identity-fields.description-placeholder");
   const descriptionLength = agentDescriptionCharacterCount(description);
   const showCounter =
     descriptionLength >= MAX_AGENT_DESCRIPTION_CHARS - COUNTER_VISIBLE_WITHIN;
@@ -48,7 +50,7 @@ export function AgentIdentityFields({
           className="text-sm font-medium text-foreground"
           htmlFor="persona-display-name"
         >
-          Agent name
+          {t("agents.identity-fields.agent-name")}
         </label>
         <div
           className={cn(
@@ -76,8 +78,10 @@ export function AgentIdentityFields({
           className="text-sm font-medium text-foreground"
           htmlFor="persona-description"
         >
-          Description
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+          {t("agents.team-dialog.description")}
+          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+            {t("sidebar.channel-form.optional")}
+          </span>
         </label>
         <div
           className={cn(

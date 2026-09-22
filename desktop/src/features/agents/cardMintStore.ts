@@ -1,6 +1,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { i18n } from "@/i18n";
 import {
   mintAgentCard,
   NO_OPENAI_KEY_PREFIX,
@@ -109,15 +110,18 @@ export async function runCardMintJob(
       input.memoryLevel,
     );
     updateJob(jobId, { phase: "done", card });
-    toast.success(`${input.agentName}'s card is ready`, {
+    toast.success(i18n.t("agents.card-mint.ready", { name: input.agentName }), {
       action: {
-        label: "View card",
+        label: i18n.t("agents.card-mint.view"),
         onClick: () => viewMintedCardJob(jobId),
       },
       duration: 10_000,
     });
   } catch (error) {
-    let message = error instanceof Error ? error.message : "Card mint failed.";
+    let message =
+      error instanceof Error
+        ? error.message
+        : i18n.t("agents.card-mint.failed");
     if (message.startsWith(NO_OPENAI_KEY_PREFIX)) {
       // The dialog pre-checks the key, so this only happens when the key was
       // removed between dialog-open and mint. The dialog's key-setup panel is
@@ -130,13 +134,15 @@ export async function runCardMintJob(
       // The saved OpenAI key is invalid or expired. Only match the OpenAI-call
       // envelope prefix and the specific Incorrect-API-key message to avoid
       // rewriting unrelated 401s (e.g. "Avatar fetch failed: HTTP 401 …").
-      message =
-        'The OpenAI API key is invalid or expired. Open the mint dialog and use "Update API key" to replace it.';
+      message = i18n.t("agents.card-mint.invalid-key");
     }
     updateJob(jobId, { phase: "error", error: message });
-    toast.error(`Minting ${input.agentName}'s card failed`, {
-      description: message,
-    });
+    toast.error(
+      i18n.t("agents.card-mint.mint-failed", { name: input.agentName }),
+      {
+        description: message,
+      },
+    );
   }
 }
 

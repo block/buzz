@@ -1,3 +1,4 @@
+import { dateTimeFormatter } from "@/shared/lib/formatters";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 
 export function getToolString(
@@ -236,7 +237,7 @@ export function shortenMiddle(value: string, maxLength: number) {
   return `${value.slice(0, edgeLength)}...${value.slice(-edgeLength)}`;
 }
 
-const transcriptTimeFormat = new Intl.DateTimeFormat("en-US", {
+const TRANSCRIPT_TIME_OPTIONS = Object.freeze({
   hour: "numeric",
   hour12: true,
   minute: "2-digit",
@@ -255,7 +256,9 @@ const transcriptTitleTimeFormat = new Intl.DateTimeFormat(undefined, {
 export function formatTranscriptTime(isoTimestamp: string): string | null {
   const date = new Date(isoTimestamp);
   if (Number.isNaN(date.getTime())) return null;
-  return transcriptTimeFormat.format(date);
+  // Locale at call time: an English session keeps printing "5:00 PM", a
+  // zh-Hans one prints the same clock in its own day-period form (FR-006).
+  return dateTimeFormatter(TRANSCRIPT_TIME_OPTIONS).format(date);
 }
 
 export function formatTranscriptTimestampTitle(

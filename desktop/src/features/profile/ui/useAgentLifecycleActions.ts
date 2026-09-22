@@ -9,6 +9,7 @@ import {
 } from "@/features/agents/lib/managedAgentControlActions";
 import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
+import { useTranslation } from "@/i18n";
 import type {
   Channel,
   ManagedAgent,
@@ -31,6 +32,7 @@ export function useAgentLifecycleActions({
   startManagedAgent: (pubkey: string) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
 }) {
+  const { t } = useTranslation();
   const handleAgentPrimaryAction = React.useCallback(async () => {
     if (!managedAgent) return;
 
@@ -45,7 +47,10 @@ export function useAgentLifecycleActions({
         if (managedAgent.backend.type === "local") {
           clearActiveTurnsForAgentOnStop(managedAgent.pubkey);
         }
-        toast.success(result.noticeMessage ?? `Stopped ${managedAgent.name}.`);
+        toast.success(
+          result.noticeMessage ??
+            t("profile.agent-actions.stopped", { name: managedAgent.name }),
+        );
         return;
       }
 
@@ -57,12 +62,14 @@ export function useAgentLifecycleActions({
       });
       toast.success(
         managedAgent.backend.type === "provider"
-          ? `Deploying ${managedAgent.name}.`
-          : `Started ${managedAgent.name}.`,
+          ? t("profile.agent-actions.deploying", { name: managedAgent.name })
+          : t("profile.agent-actions.started", { name: managedAgent.name }),
       );
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Agent action failed.",
+        error instanceof Error
+          ? error.message
+          : t("profile.agent-actions.action-failed"),
       );
     }
   }, [
@@ -72,6 +79,7 @@ export function useAgentLifecycleActions({
     relayAgents,
     startManagedAgent,
     stopManagedAgent,
+    t,
   ]);
 
   const handleAgentRestart = React.useCallback(async () => {
@@ -89,13 +97,17 @@ export function useAgentLifecycleActions({
         stopManagedAgent,
         onStopped: () => clearActiveTurnsForAgentOnStop(managedAgent.pubkey),
       });
-      toast.success(`Restarted ${managedAgent.name}.`);
+      toast.success(
+        t("profile.agent-actions.restarted", { name: managedAgent.name }),
+      );
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Agent restart failed.",
+        error instanceof Error
+          ? error.message
+          : t("profile.agent-actions.restart-failed"),
       );
     }
-  }, [availability, managedAgent, startManagedAgent, stopManagedAgent]);
+  }, [availability, managedAgent, startManagedAgent, stopManagedAgent, t]);
 
   return { handleAgentPrimaryAction, handleAgentRestart };
 }

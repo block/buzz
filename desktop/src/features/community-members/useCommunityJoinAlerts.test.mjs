@@ -169,6 +169,15 @@ function installDOMShim() {
 
 installDOMShim();
 
+// The join-alert copy goes through i18n, which must be booted before any of it is
+// read. Node already defines a global `navigator`, so the shim above leaves it alone;
+// pin the language list here so detection resolves English instead of the host locale.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
+
 // ── localStorage shim ────────────────────────────────────────────────────────
 //
 // Backs the real production ledger read/write. Kept as a plain Map so a test
@@ -259,6 +268,7 @@ import {
   relayMembersQueryKey,
   useRelayMembersQuery,
 } from "@/features/community-members/hooks.ts";
+import { initializeI18n } from "@/i18n";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

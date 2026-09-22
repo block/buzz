@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import type { ManagedAgent, RuntimeConfigSurface } from "@/shared/api/types";
 import { PERSONA_LABEL_OPTIONAL_CLASS } from "./agentConfigOptions";
 import {
@@ -37,6 +38,7 @@ export function EffortPickerField({
   value: string | null;
   onChange: (level: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const { visible, options, selectValue } = effortPickerState({
     backend: agent.backend,
     effortConfigId: config?.effortConfigId,
@@ -54,8 +56,10 @@ export function EffortPickerField({
         className="text-sm font-medium text-foreground"
         htmlFor="edit-agent-effort"
       >
-        Thinking effort
-        <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+        {t("agents.effort.field-label")}
+        <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+          {t("sidebar.channel-form.optional")}
+        </span>
       </label>
       <PersonaDropdownField
         disabled={disabled}
@@ -64,11 +68,11 @@ export function EffortPickerField({
           onChange(effortSelectionToPersistedValue(next))
         }
         options={options}
-        placeholder="Adapter default"
+        placeholder={t("agents.harness.adapter-default")}
         value={selectValue}
       />
       <p className="text-xs text-muted-foreground">
-        Applied at the next session start.
+        {t("agents.effort.applies-next-session")}
       </p>
     </div>
   );

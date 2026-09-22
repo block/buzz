@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { isThreadReply } from "@/features/messages/lib/threading";
 import type { TimelineMessage } from "@/features/messages/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
+import { useTranslation } from "@/i18n";
 
 type Input = {
   activeChannelId: string | null;
@@ -31,6 +32,7 @@ export function useRoutedMessageEdit({
   threadMessages,
   useFocusThreadDrawer,
 }: Input) {
+  const { t } = useTranslation();
   const pendingMainEditRef = React.useRef<TimelineMessage | null>(null);
   const editTargetRef = React.useRef(editTarget);
   editTargetRef.current = editTarget;
@@ -76,7 +78,7 @@ export function useRoutedMessageEdit({
         current.isThreadReply !== isThreadReply(message.tags ?? [])
       ) {
         pendingMainEditRef.current = null;
-        toast.info("Finish or cancel your edit first.");
+        toast.info(t("channels.pane.finish-edit-first"));
         return false;
       }
       if (current?.id === message.id) {
@@ -95,7 +97,7 @@ export function useRoutedMessageEdit({
       onEdit?.(message);
       return Boolean(onEdit);
     },
-    [isSinglePanelView, onCloseThread, onEdit, useFocusThreadDrawer],
+    [isSinglePanelView, onCloseThread, onEdit, t, useFocusThreadDrawer],
   );
   const handleEditLastOwnMainMessage = React.useCallback(() => {
     const target = findLastOwnEditable(mainMessages);

@@ -9,6 +9,7 @@ import type {
 import { ProjectsSortSelect } from "@/features/projects/ui/ProjectsListHeaderBar";
 import { projectsSectionTitle } from "@/features/projects/ui/projectsSectionMeta";
 import { ProjectsToolbar } from "@/features/projects/ui/ProjectsToolbar";
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 
 export function ProjectsSectionSearch({
@@ -24,6 +25,7 @@ export function ProjectsSectionSearch({
   onSortChange: (sort: ProjectsSort) => void;
   sort: ProjectsSort;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const deferredQuery = React.useDeferredValue(query);
@@ -63,8 +65,10 @@ export function ProjectsSectionSearch({
       <Button
         aria-label={
           open
-            ? "Close project search"
-            : `Search ${projectsSectionTitle(filter)}`
+            ? t("projects.section-search.close-project-search")
+            : t("projects.section-search.search-section", {
+                section: projectsSectionTitle(filter),
+              })
         }
         className="group/projects-search relative h-7 w-7 shrink-0 rounded-full border border-border/55 bg-transparent px-0 text-muted-foreground shadow-none hover:border-border hover:bg-muted/25 hover:text-foreground focus-visible:border-border"
         data-testid={
@@ -72,7 +76,13 @@ export function ProjectsSectionSearch({
         }
         onClick={open ? close : () => setOpen(true)}
         size="icon"
-        title={open ? "Close search" : `Search ${projectsSectionTitle(filter)}`}
+        title={
+          open
+            ? t("projects.section-search.close-search")
+            : t("projects.section-search.search-section", {
+                section: projectsSectionTitle(filter),
+              })
+        }
         type="button"
         variant="ghost"
       >

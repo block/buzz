@@ -3,7 +3,9 @@ import * as React from "react";
 import {
   PROJECT_TASK_CATEGORIES,
   type ProjectTaskCategory,
+  projectTaskCategoryLabel,
 } from "@/features/projects/projectTaskCategories";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -47,6 +49,7 @@ export function CreateProjectWorkItemDialog({
   title: string;
   titlePlaceholder: string;
 }) {
+  const { t } = useTranslation();
   const [workItemTitle, setWorkItemTitle] = React.useState("");
   const [body, setBody] = React.useState("");
   const [category, setCategory] = React.useState<ProjectTaskCategory>("issue");
@@ -119,7 +122,11 @@ export function CreateProjectWorkItemDialog({
               form={`${testIdPrefix}-form`}
               type="submit"
             >
-              {isCreating ? "Creating…" : `Create ${itemLabel}`}
+              {isCreating
+                ? t("projects.shared.creating")
+                : itemName === "issue"
+                  ? t("projects.overview.action.create-task")
+                  : t("projects.overview.action.create-review")}
             </Button>
           </div>
         }
@@ -139,7 +146,7 @@ export function CreateProjectWorkItemDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor={`${testIdPrefix}-category`}
               >
-                Category
+                {t("projects.issue.category")}
               </label>
               <div className={FIELD_SHELL_CLASS}>
                 <select
@@ -157,7 +164,7 @@ export function CreateProjectWorkItemDialog({
                 >
                   {PROJECT_TASK_CATEGORIES.map((option) => (
                     <option key={option.value} value={option.value}>
-                      {option.label}
+                      {projectTaskCategoryLabel(option.value)}
                     </option>
                   ))}
                 </select>
@@ -169,7 +176,7 @@ export function CreateProjectWorkItemDialog({
               className="text-sm font-medium text-foreground"
               htmlFor={`${testIdPrefix}-title`}
             >
-              Title
+              {t("projects.shared.title")}
             </label>
             <div
               className={cn(
@@ -198,9 +205,9 @@ export function CreateProjectWorkItemDialog({
               className="text-sm font-medium text-foreground"
               htmlFor={`${testIdPrefix}-body`}
             >
-              Description
+              {t("projects.issue.description")}
               <span className="ml-1 text-xs font-normal text-muted-foreground/50">
-                Optional
+                {t("sidebar.channel-form.optional")}
               </span>
             </label>
             <div className={FIELD_SHELL_CLASS}>

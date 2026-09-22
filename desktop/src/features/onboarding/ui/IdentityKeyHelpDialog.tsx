@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
@@ -41,6 +42,7 @@ export function IdentityKeyHelpDialog({
   inline?: boolean;
   onOpen?: () => void;
 }) {
+  const { t } = useTranslation();
   const [isVisible, setIsVisible] = React.useState(
     inline ? true : hasSeenIdentityKeyHelp,
   );
@@ -71,7 +73,9 @@ export function IdentityKeyHelpDialog({
       type="button"
       variant="link"
     >
-      {inline ? "Learn how identity keys work" : "What’s an identity key?"}
+      {inline
+        ? t("onboarding.key-intro.help-trigger-inline")
+        : t("onboarding.key-intro.help-trigger")}
     </Button>
   );
 
@@ -104,7 +108,7 @@ export function IdentityKeyHelpDialog({
       >
         <div className="mx-auto w-full max-w-[35rem] py-14 text-left max-sm:py-6">
           <DialogTitle className="text-balance pr-8 text-3xl font-normal text-foreground">
-            What’s an identity key?
+            {t("onboarding.key-intro.help-title")}
           </DialogTitle>
           <DialogDescription
             asChild
@@ -121,29 +125,22 @@ export function IdentityKeyHelpDialog({
 }
 
 function IdentityKeyHelpBody() {
+  const { t } = useTranslation();
   return (
     <>
-      <p>
-        Buzz will create a Nostr identity with two parts: a private key that
-        signs you in and a public key you can safely share. You can find your
-        public identity anytime in Buzz settings.
-      </p>
-      <p>
-        This identity belongs to you, not Buzz, and can move with you to another
-        device or compatible Nostr app. Because only you control the private
-        key, Buzz can’t reset or recover it. Keep a backup somewhere safe, and
-        never share it.
-      </p>
+      <p>{t("onboarding.key-intro.help-paragraph-1")}</p>
+      <p>{t("onboarding.key-intro.help-paragraph-2")}</p>
     </>
   );
 }
 
 /** Identity-key explainer content for the onboarding card sheet. */
 export function IdentityKeyHelpContent() {
+  const { t } = useTranslation();
   return (
     <div className="w-full" data-testid="identity-key-help-dialog">
       <h1 className="text-title font-normal text-foreground">
-        What’s an identity key?
+        {t("onboarding.key-intro.help-title")}
       </h1>
       <div
         className="mt-2 w-full space-y-4 text-pretty text-base leading-7 text-foreground/80"

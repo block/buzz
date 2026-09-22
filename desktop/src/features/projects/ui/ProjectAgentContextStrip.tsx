@@ -1,6 +1,7 @@
 import { X } from "lucide-react";
 
 import type { ProjectDetailAgentContext } from "@/features/projects/lib/projectDetailAgentContext";
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import { PROJECT_COLUMN_HEADER_BACKDROP_CLASS } from "./projectPanelStyles";
 
@@ -26,6 +27,7 @@ export function ProjectAgentContextStrip({
   onClose?: () => void;
   sharedBackdrop?: boolean;
 }) {
+  const { t } = useTranslation();
   const label = contextLabel(context);
 
   return (
@@ -41,11 +43,11 @@ export function ProjectAgentContextStrip({
       </p>
       {onClose ? (
         <Button
-          aria-label="Close agent chat"
+          aria-label={t("projects.agent-context-strip.close-chat")}
           className="h-7 w-7 shrink-0"
           onClick={onClose}
           size="icon"
-          title="Close agent chat"
+          title={t("projects.agent-context-strip.close-chat")}
           type="button"
           variant="ghost"
         >

@@ -44,6 +44,7 @@ import {
   recordTimeoutFromRejection,
 } from "@/features/moderation/lib/timeoutStore";
 import { relayClient, setVisibleChannel } from "@/shared/api/relayClient";
+import { useTranslation } from "@/i18n";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
@@ -796,6 +797,7 @@ export function useToggleReactionMutation() {
 }
 
 export function useDeleteMessageMutation(channel: Channel | null) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
 
   return useMutation<void, Error, { eventId: string }>({
@@ -813,7 +815,7 @@ export function useDeleteMessageMutation(channel: Channel | null) {
       );
     },
     onError: (error) => {
-      toast.error(`Failed to delete message: ${error.message}`);
+      toast.error(t("messages.delete.failed", { error: error.message }));
     },
   });
 }

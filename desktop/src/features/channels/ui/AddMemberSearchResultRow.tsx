@@ -5,6 +5,7 @@ import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 import { truncateNpub } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { useTranslation } from "@/i18n";
 
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
   "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
@@ -28,6 +29,7 @@ export function AddMemberSearchResultRow({
   ownerLabel?: string | null;
   user: UserSearchResult;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className={cn(
@@ -37,7 +39,9 @@ export function AddMemberSearchResultRow({
       data-testid={`channel-user-search-result-${user.pubkey}`}
     >
       <button
-        aria-label={`Select ${formatAddCandidateName(user)}`}
+        aria-label={t("channels.invite.select-candidate", {
+          name: formatAddCandidateName(user),
+        })}
         className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
         disabled={disabled}
         onClick={() => onSelect(user)}
@@ -59,7 +63,7 @@ export function AddMemberSearchResultRow({
               </span>
               <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
                 <Bot aria-hidden="true" className="h-4 w-4" />
-                agent
+                {t("channels.invite.agent-label")}
               </span>
               <AgentManagementMarker
                 pubkey={user.pubkey}
@@ -71,7 +75,7 @@ export function AddMemberSearchResultRow({
             </span>
             {ownerLabel ? (
               <span className="block truncate text-xs text-muted-foreground">
-                managed by {ownerLabel}
+                {t("channels.invite.managed-by", { name: ownerLabel })}
               </span>
             ) : null}
           </div>
@@ -91,7 +95,7 @@ export function AddMemberSearchResultRow({
         size="sm"
         type="button"
       >
-        Add
+        {t("channels.invite.add")}
       </Button>
     </div>
   );

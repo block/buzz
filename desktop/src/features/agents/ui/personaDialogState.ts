@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type {
   AgentPersona,
   CreatePersonaInput,
@@ -39,9 +40,9 @@ export function parsePersonaNamePoolText(text: string): string[] {
 
 export function createPersonaDialogState(): PersonaDialogState {
   return {
-    title: "Create agent",
-    description: "Create an agent and start it immediately.",
-    submitLabel: "Create agent",
+    title: i18n.t("agents.persona-dialog.create-agent"),
+    description: i18n.t("agents.persona-dialog.create-description"),
+    submitLabel: i18n.t("agents.persona-dialog.create-agent"),
     initialValues: {
       displayName: "",
       avatarUrl: "",
@@ -56,12 +57,15 @@ export function duplicatePersonaDialogState(
   persona: AgentPersona,
 ): PersonaDialogState {
   return {
-    title: `Duplicate ${persona.displayName}`,
-    description:
-      "Create a new agent by copying this profile and adjusting it as needed.",
-    submitLabel: "Create agent",
+    title: i18n.t("agents.persona-dialog.duplicate-title", {
+      name: persona.displayName,
+    }),
+    description: i18n.t("agents.persona-dialog.duplicate-description"),
+    submitLabel: i18n.t("agents.persona-dialog.create-agent"),
     initialValues: {
-      displayName: `${persona.displayName} copy`,
+      displayName: i18n.t("agents.persona-dialog.copy-name", {
+        name: persona.displayName,
+      }),
       avatarUrl: persona.avatarUrl ?? "",
       description: persona.description ?? undefined,
       systemPrompt: persona.systemPrompt,
@@ -120,9 +124,9 @@ export function editPersonaDialogState(
       }
     : persona;
   return {
-    title: "Edit agent",
+    title: i18n.t("agents.persona-dialog.edit-agent"),
     description: "",
-    submitLabel: "Save changes",
+    submitLabel: i18n.t("agents.persona-dialog.save-changes"),
     initialValues: {
       id: persona.id,
       displayName: persona.displayName,

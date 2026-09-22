@@ -1,3 +1,5 @@
+import { i18n } from "@/i18n";
+
 const DURATION_PARTS_PATTERN =
   /^\s*(?:(\d+)\s*w)?\s*(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?\s*$/i;
 
@@ -57,14 +59,32 @@ export function formatDurationSeconds(totalSeconds: number): string {
   return parts.join(" ");
 }
 
-function verboseUnit(value: number, unit: string): string {
-  return `${value} ${unit}${value === 1 ? "" : "s"}`;
+type DurationUnit = "day" | "hour" | "minute" | "second" | "week";
+
+/**
+ * Verbose unit captions are plural calls, so each unit needs both `_one` and
+ * `_other` forms in the catalogs. The switch keeps every key a literal the
+ * call-site scan can resolve.
+ */
+function verboseUnit(value: number, unit: DurationUnit): string {
+  switch (unit) {
+    case "day":
+      return i18n.t("workflows.duration.unit-day", { count: value });
+    case "hour":
+      return i18n.t("workflows.duration.unit-hour", { count: value });
+    case "minute":
+      return i18n.t("workflows.duration.unit-minute", { count: value });
+    case "second":
+      return i18n.t("workflows.duration.unit-second", { count: value });
+    case "week":
+      return i18n.t("workflows.duration.unit-week", { count: value });
+  }
 }
 
 /** Format whole seconds with fully spelled-out units for summary UI. */
 export function formatDurationSecondsVerbose(totalSeconds: number): string {
   if (!Number.isSafeInteger(totalSeconds) || totalSeconds < 0) return "";
-  if (totalSeconds === 0) return "0 seconds";
+  if (totalSeconds === 0) return i18n.t("workflows.duration.zero-seconds");
 
   const weeks = Math.floor(totalSeconds / SECONDS_PER_WEEK);
   const days = Math.floor((totalSeconds % SECONDS_PER_WEEK) / SECONDS_PER_DAY);

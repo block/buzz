@@ -217,3 +217,15 @@ test("cardLevelFallback_noPerRowTarget_focusesFirstEditableField", () => {
     "card-level trigger must focus the first editable field",
   );
 });
+
+// `missingBinaryRecoveryMessage()` resolves its copy through i18next, so this
+// module needs a booted i18n instance. The assertions compare against the
+// English source strings, so pin English rather than inheriting the host's
+// system language.
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();

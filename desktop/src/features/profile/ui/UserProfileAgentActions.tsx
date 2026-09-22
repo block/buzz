@@ -10,6 +10,7 @@ import {
 
 import type { IdentityArchiveActions } from "@/features/identity-archive/hooks";
 import { ArchiveConfirmDialog } from "@/features/profile/ui/ArchiveConfirmDialog";
+import { useTranslation } from "@/i18n";
 import type { ManagedAgent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -40,6 +41,7 @@ export function UserProfileAgentSettingsMenu({
   onToggleAutoStart?: () => void;
   personaActionKey?: string;
 }) {
+  const { t } = useTranslation();
   const [archiveConfirmOpen, setArchiveConfirmOpen] = React.useState(false);
   const actionKey = managedAgent?.pubkey ?? "persona-draft";
   const personaKey = personaActionKey ?? actionKey;
@@ -59,15 +61,19 @@ export function UserProfileAgentSettingsMenu({
     return null;
   }
 
-  const archiveLabel = isBot ? "Archive agent" : "Archive identity";
-  const unarchiveLabel = isBot ? "Unarchive agent" : "Unarchive identity";
+  const archiveLabel = isBot
+    ? t("profile.agent-management.archive")
+    : t("profile.agent-actions.archive-identity");
+  const unarchiveLabel = isBot
+    ? t("profile.agent-management.unarchive")
+    : t("profile.agent-actions.unarchive-identity");
 
   return (
     <>
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button
-            aria-label="Open profile settings"
+            aria-label={t("profile.agent-actions.open-settings-aria")}
             data-testid="user-profile-settings-menu-trigger"
             size="icon"
             type="button"
@@ -92,10 +98,10 @@ export function UserProfileAgentSettingsMenu({
             >
               <Power className="h-4 w-4 text-muted-foreground" />
               <span className="min-w-0 flex-1 text-sm font-medium">
-                Auto-start
+                {t("profile.agent-actions.auto-start")}
               </span>
               <Switch
-                aria-label="Auto-start"
+                aria-label={t("profile.agent-actions.auto-start")}
                 checked={managedAgent.startOnAppLaunch}
                 data-testid={autoStartSwitchId}
                 disabled={isPending}
@@ -112,7 +118,7 @@ export function UserProfileAgentSettingsMenu({
               onClick={onDuplicatePersona}
             >
               <CopyPlus className="h-4 w-4" />
-              Duplicate
+              {t("profile.agent-actions.duplicate")}
             </DropdownMenuItem>
           ) : null}
           {onExportPersona ? (
@@ -122,7 +128,7 @@ export function UserProfileAgentSettingsMenu({
               onClick={onExportPersona}
             >
               <Download className="h-4 w-4" />
-              Export
+              {t("profile.agent-actions.export")}
             </DropdownMenuItem>
           ) : null}
           {hasArchiveAction && (canToggleAutoStart || hasPrimaryActions) ? (
@@ -136,7 +142,9 @@ export function UserProfileAgentSettingsMenu({
                 onClick={archiveActions.unarchive}
               >
                 <ArchiveRestore className="h-4 w-4" />
-                {archiveActions.isPending ? "Unarchiving…" : unarchiveLabel}
+                {archiveActions.isPending
+                  ? t("profile.agent-management.unarchiving")
+                  : unarchiveLabel}
               </DropdownMenuItem>
             ) : (
               <DropdownMenuItem
@@ -145,7 +153,9 @@ export function UserProfileAgentSettingsMenu({
                 onSelect={() => setArchiveConfirmOpen(true)}
               >
                 <Archive className="h-4 w-4" />
-                {archiveActions.isPending ? "Archiving…" : archiveLabel}
+                {archiveActions.isPending
+                  ? t("profile.agent-management.archiving")
+                  : archiveLabel}
               </DropdownMenuItem>
             )
           ) : null}

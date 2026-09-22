@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
+import { useTranslation } from "@/i18n";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   archiveIdentity,
@@ -119,6 +120,7 @@ export type IdentityArchiveActions = {
 export function useIdentityArchive(
   pubkey: string | null,
 ): IdentityArchiveActions {
+  const { t } = useTranslation();
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
 
@@ -153,28 +155,32 @@ export function useIdentityArchive(
     archiveMutation.mutate(
       { targetPubkey },
       {
-        onSuccess: () => toast.success("Archived on this relay"),
+        onSuccess: () => toast.success(t("identity-archive.archived")),
         onError: (error) =>
           toast.error(
-            `Archive failed: ${error instanceof Error ? error.message : String(error)}`,
+            t("identity-archive.archive-failed", {
+              error: error instanceof Error ? error.message : String(error),
+            }),
           ),
       },
     );
-  }, [archiveMutation, hasTargetPubkey, targetPubkey]);
+  }, [archiveMutation, hasTargetPubkey, t, targetPubkey]);
 
   const unarchive = React.useCallback(() => {
     if (!hasTargetPubkey) return;
     unarchiveMutation.mutate(
       { targetPubkey },
       {
-        onSuccess: () => toast.success("Unarchived on this relay"),
+        onSuccess: () => toast.success(t("identity-archive.unarchived")),
         onError: (error) =>
           toast.error(
-            `Unarchive failed: ${error instanceof Error ? error.message : String(error)}`,
+            t("identity-archive.unarchive-failed", {
+              error: error instanceof Error ? error.message : String(error),
+            }),
           ),
       },
     );
-  }, [hasTargetPubkey, targetPubkey, unarchiveMutation]);
+  }, [hasTargetPubkey, t, targetPubkey, unarchiveMutation]);
 
   return {
     canArchive,

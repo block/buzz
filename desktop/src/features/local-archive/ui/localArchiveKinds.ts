@@ -13,72 +13,98 @@ import {
 // ── Kind groups (derived from shared constants — never raw literals) ──────────
 
 export type KindGroup = {
-  /** Group label shown as a section header. */
+  /**
+   * Stable identifier: React key plus the group's DOM `id` / `data-testid`.
+   * Never rendered — the visible header comes from `labelKey`.
+   */
   label: string;
-  /** Individual kinds in this group, each with a human-readable name. */
-  items: ReadonlyArray<{ kind: number; label: string }>;
+  /** Catalog key for the group label shown as a section header. */
+  labelKey: string;
+  /** Individual kinds in this group, each with a catalog label key. */
+  items: ReadonlyArray<{ kind: number; labelKey: string }>;
 };
 
 /**
  * Ordered list of kind groups presented in the Step 2 checklist.
  * Every item derives its kind value from a named constant in kinds.ts.
+ * Labels stay as catalog keys: `i18n` boots after this module is imported, so
+ * the checklist resolves them at render time (see `KindChecklist`).
  */
 export const KIND_GROUPS: ReadonlyArray<KindGroup> = [
   {
     label: "Messages & posts",
+    labelKey: "local-archive.kinds.messages",
     items: [
       ...CHANNEL_MESSAGE_EVENT_KINDS.map((k) => ({
         kind: k,
-        label: kindLabel(k),
+        labelKey: kindLabelKey(k),
       })),
-      { kind: KIND_STREAM_MESSAGE_DIFF, label: "Message diffs (kind 40008)" },
+      {
+        kind: KIND_STREAM_MESSAGE_DIFF,
+        labelKey: "local-archive.kinds.message-diffs",
+      },
     ],
   },
   {
     label: "Reactions, edits & deletions",
+    labelKey: "local-archive.kinds.reactions-edits-deletions",
     items: CHANNEL_AUX_EVENT_KINDS.map((k) => ({
       kind: k,
-      label: kindLabel(k),
+      labelKey: kindLabelKey(k),
     })),
   },
   {
     label: "Huddle events",
+    labelKey: "local-archive.kinds.huddle-events",
     items: [
-      { kind: KIND_HUDDLE_STARTED, label: "Huddle started" },
-      { kind: KIND_HUDDLE_PARTICIPANT_JOINED, label: "Participant joined" },
-      { kind: KIND_HUDDLE_PARTICIPANT_LEFT, label: "Participant left" },
-      { kind: KIND_HUDDLE_ENDED, label: "Huddle ended" },
+      {
+        kind: KIND_HUDDLE_STARTED,
+        labelKey: "local-archive.kinds.huddle-started",
+      },
+      {
+        kind: KIND_HUDDLE_PARTICIPANT_JOINED,
+        labelKey: "local-archive.kinds.participant-joined",
+      },
+      {
+        kind: KIND_HUDDLE_PARTICIPANT_LEFT,
+        labelKey: "local-archive.kinds.participant-left",
+      },
+      { kind: KIND_HUDDLE_ENDED, labelKey: "local-archive.kinds.huddle-ended" },
     ],
   },
   {
     label: "System messages",
+    labelKey: "local-archive.kinds.system-messages",
     items: [
-      { kind: KIND_SYSTEM_MESSAGE, label: "System messages (kind 40099)" },
+      {
+        kind: KIND_SYSTEM_MESSAGE,
+        labelKey: "local-archive.kinds.system-messages-40099",
+      },
     ],
   },
 ] as const;
 
-/** Human-readable label for a known kind number. */
-function kindLabel(kind: number): string {
+/** Catalog key for a known kind number's label. */
+function kindLabelKey(kind: number): string {
   switch (kind) {
     case 5:
-      return "Event deletions (kind 5)";
+      return "local-archive.kinds.event-deletions";
     case 7:
-      return "Reactions (kind 7)";
+      return "local-archive.kinds.reactions";
     case 9:
-      return "Stream messages (kind 9)";
+      return "local-archive.kinds.stream-messages";
     case 9005:
-      return "Buzz-native deletions (kind 9005)";
+      return "local-archive.kinds.buzz-native-deletions";
     case 40002:
-      return "Stream messages v2 (kind 40002)";
+      return "local-archive.kinds.stream-messages-v2";
     case 40003:
-      return "Message edits (kind 40003)";
+      return "local-archive.kinds.message-edits";
     case 45001:
-      return "Forum posts (kind 45001)";
+      return "local-archive.kinds.forum-posts";
     case 45003:
-      return "Forum comments (kind 45003)";
+      return "local-archive.kinds.forum-comments";
     default:
-      return `Kind ${kind}`;
+      return "local-archive.kinds.generic";
   }
 }
 

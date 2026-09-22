@@ -17,6 +17,7 @@ import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
 } from "@/shared/api/types";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
 import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
@@ -229,6 +230,7 @@ export function AgentConfigFields({
   useCustomSelect = false,
   useChevronSelectIcon = false,
 }: AgentConfigFieldsProps) {
+  const { t } = useTranslation();
   const shouldReduceMotion = useReducedMotion();
   const {
     showAdvancedFields,
@@ -696,7 +698,12 @@ export function AgentConfigFields({
         value: opt.id || AUTO_PROVIDER_DROPDOWN_VALUE,
       })),
     ...(showCustomProviderOption
-      ? [{ label: "Custom provider…", value: CUSTOM_PROVIDER_DROPDOWN_VALUE }]
+      ? [
+          {
+            label: t("agents.config-fields.custom-provider"),
+            value: CUSTOM_PROVIDER_DROPDOWN_VALUE,
+          },
+        ]
       : []),
   ];
   const providerSelect = useCustomSelect ? (
@@ -707,7 +714,7 @@ export function AgentConfigFields({
       options={providerDropdownOptions}
       placeholder={
         showProviderPlaceholderOption
-          ? "Select provider"
+          ? t("agents.config-fields.select-provider")
           : compactProviderZeroLabel
       }
       placeholderClassName={placeholderClassName}
@@ -744,7 +751,7 @@ export function AgentConfigFields({
         className={cn("text-sm font-medium", fieldLabelClassName)}
         htmlFor="global-agent-provider"
       >
-        Provider
+        {t("agents.ai-defaults.provider")}
       </label>
       {!useCustomSelect && useChevronSelectIcon ? (
         <div className="relative">
@@ -759,10 +766,10 @@ export function AgentConfigFields({
       )}
       {isCustomProvider ? (
         <AgentConfigTextInput
-          aria-label="Custom global provider ID"
+          aria-label={t("agents.config-fields.custom-global-provider-id")}
           autoCorrect="off"
           onChange={(e) => handleCustomProviderInput(e.target.value)}
-          placeholder="Custom provider ID"
+          placeholder={t("agents.config-fields.custom-provider-id")}
           usePersonaInputStyle={progressiveDefaults}
           value={providerValue}
         />
@@ -781,7 +788,7 @@ export function AgentConfigFields({
         inheritedRows={bakedGenericRows}
         inheritedRowsLabel="build"
         keyAnnotations={CARD_MINT_KEY_ANNOTATIONS}
-        label="Environment variables"
+        label={t("agents.config-fields.environment-variables")}
         onChange={handleEnvVarsChange}
         requiredKeys={advancedRequiredEnvKeys}
         value={config.env_vars}
@@ -833,7 +840,7 @@ export function AgentConfigFields({
             onIsCustomModelEditingChange={onCustomModelEditingChange}
             onModelChange={handleModelChange}
             placeholderClassName={placeholderClassName}
-            placeholder="Select a model"
+            placeholder={t("mesh-compute.model-picker.select-placeholder")}
             provider={providerForDiscovery}
             fieldClassName={unstyled ? fieldClassName : undefined}
             labelClassName={fieldLabelClassName}
@@ -875,7 +882,7 @@ export function AgentConfigFields({
                 : undefined
             }
             inheritedEffort={bakedEffort ?? undefined}
-            label="Effort"
+            label={t("agents.config-fields.effort")}
             labelClassName={fieldLabelClassName}
             onChange={(value) => {
               const nextEnvVars = { ...config.env_vars };
@@ -914,7 +921,10 @@ export function AgentConfigFields({
             isInherited={apiKeyInherited}
             isRequired={!apiKeyInherited && apiKeyValue.length === 0}
             isValidating={apiKeyValidationPending}
-            label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
+            label={
+              getProviderApiKeyLabel(effectiveProvider) ??
+              t("agents.config-fields.api-key")
+            }
             onValueChange={(value) =>
               onConfigChange({
                 ...config,
@@ -954,7 +964,7 @@ export function AgentConfigFields({
             onClick={() => setAdvancedOpen((current) => !current)}
             type="button"
           >
-            <span>Advanced</span>
+            <span>{t("mesh-compute.card.advanced")}</span>
             <AdvancedRequiredBadge
               show={advancedCredentialMissing}
               testId="global-agent-advanced-required-badge"

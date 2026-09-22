@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { safeNpub } from "@/shared/lib/nostrUtils";
+import { i18n } from "@/i18n";
 
 export const HOSTED_COMMUNITY_SUFFIX = "communities.buzz.xyz";
 export const HOSTED_COMMUNITY_LIMIT = 5;
@@ -68,22 +69,28 @@ export function hostedCommunityErrorMessage(
   fallback: string,
 ) {
   const messages: Record<string, string> = {
-    missing_mapping: "Connect your Buzz identity before creating a community.",
-    invalid_name: "Use lowercase letters, numbers, and hyphens.",
-    taken: "That Buzz address is already taken.",
-    limit_reached: `You've reached the limit of ${HOSTED_COMMUNITY_LIMIT} hosted communities.`,
-    relay_unavailable: "Community provisioning is temporarily unavailable.",
-    identity_already_bound:
-      "This Builderlab account is connected to another Buzz identity.",
-    pubkey_already_bound:
-      "This Buzz identity is connected to another Builderlab account.",
-    not_owner: "Only the community owner can do that.",
-    transferee_not_registered:
-      "That person needs a connected Buzz identity before you can transfer ownership to them.",
+    missing_mapping: i18n.t("communities.api-error.missing-mapping"),
+    invalid_name: i18n.t("communities.api-error.invalid-name"),
+    taken: i18n.t("communities.hosted.address-taken"),
+    limit_reached: i18n.t("communities.api-error.limit-reached", {
+      count: HOSTED_COMMUNITY_LIMIT,
+    }),
+    relay_unavailable: i18n.t("communities.api-error.relay-unavailable"),
+    identity_already_bound: i18n.t(
+      "communities.api-error.identity-already-bound",
+    ),
+    pubkey_already_bound: i18n.t("communities.api-error.pubkey-already-bound"),
+    not_owner: i18n.t("communities.api-error.not-owner"),
+    transferee_not_registered: i18n.t(
+      "communities.api-error.transferee-not-registered",
+    ),
   };
   const message = messages[error?.code ?? ""] ?? error?.message ?? fallback;
   return correlationId
-    ? `${message} Correlation ID: ${correlationId}`
+    ? i18n.t("communities.api-error.with-correlation", {
+        message,
+        correlationId,
+      })
     : message;
 }
 

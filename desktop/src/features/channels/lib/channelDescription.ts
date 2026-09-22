@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type { Channel } from "@/shared/api/types";
 
 /** The authored channel detail shown consistently across channel surfaces. */
@@ -11,12 +12,14 @@ export function getChannelDetail(channel: Channel): string | null {
 
 export function getChannelDescription(channel: Channel | null): string {
   if (!channel) {
-    return "Connect to the relay to browse channels and read messages.";
+    return i18n.t("channels.description.no-relay");
   }
 
   const prefixes = [
-    channel.archivedAt ? "Archived." : null,
-    !channel.isMember ? "Read-only until you join this open channel." : null,
+    channel.archivedAt ? i18n.t("channels.description.archived") : null,
+    !channel.isMember
+      ? i18n.t("channels.description.read-only-until-join")
+      : null,
   ].filter((value) => value && value.trim().length > 0);
 
   // Show only the first non-empty field to avoid duplication when
@@ -29,5 +32,7 @@ export function getChannelDescription(channel: Channel | null): string {
   const prefixText = prefixes.join(" ");
   const parts = [prefixText || null, detail ?? null].filter(Boolean);
 
-  return parts.length > 0 ? parts.join("\n") : "Channel details and activity.";
+  return parts.length > 0
+    ? parts.join("\n")
+    : i18n.t("channels.description.details");
 }

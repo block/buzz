@@ -32,6 +32,7 @@ import {
 } from "@/features/projects/lib/projectSelection";
 import { projectTerminalLabel } from "@/features/projects/ui/useOpenProjectTerminal";
 import { PROJECT_LIST_ROW_META_TEXT_CLASS } from "@/features/projects/ui/projectListRowStyles";
+import { i18n, useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
@@ -63,6 +64,7 @@ export function ProjectPeopleStack({
   profiles?: UserProfileLookup;
   workOwnerPubkey: string;
 }) {
+  const { t } = useTranslation();
   const visible = pubkeys.slice(0, 5);
   const remaining = pubkeys.length - visible.length;
 
@@ -84,7 +86,7 @@ export function ProjectPeopleStack({
           >
             <UserProfilePopover pubkey={pubkey} triggerElement="span">
               <button
-                aria-label={`View ${label}'s profile`}
+                aria-label={t("projects.shared.view-profile", { name: label })}
                 className={cn(
                   "inline-flex focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
                   profile?.isAgent ? "rounded-[30%]" : "rounded-full",
@@ -122,7 +124,7 @@ const PROJECT_STAT_ITEMS = [
     iconClass: "text-primary/60",
     barClass: "bg-primary/60",
     columnClass: "w-24",
-    label: (count: number) => (count === 1 ? "commit" : "commits"),
+    label: (count: number) => i18n.t("projects.card.stat-commits", { count }),
   },
   {
     key: "prCount",
@@ -130,7 +132,7 @@ const PROJECT_STAT_ITEMS = [
     iconClass: "text-primary",
     barClass: "bg-primary",
     columnClass: "w-16",
-    label: (count: number) => (count === 1 ? "review" : "reviews"),
+    label: (count: number) => i18n.t("projects.card.stat-reviews", { count }),
   },
   {
     key: "issueCount",
@@ -138,7 +140,7 @@ const PROJECT_STAT_ITEMS = [
     iconClass: "text-orange-500",
     barClass: "bg-orange-500",
     columnClass: "w-20",
-    label: (count: number) => (count === 1 ? "task" : "tasks"),
+    label: (count: number) => i18n.t("projects.card.stat-tasks", { count }),
   },
 ] as const;
 
@@ -252,37 +254,36 @@ function RepositoryUnavailableIndicator({
 }: {
   reason: ProjectRepoUnavailableReason | undefined;
 }) {
+  const { t } = useTranslation();
   if (!reason) return null;
   const status = {
     authentication: {
-      description: "Buzz could not authenticate with this repository.",
-      label: "Access failed",
+      description: t("projects.card.access-failed-description"),
+      label: t("projects.card.access-failed"),
     },
     missing: {
-      description: "No git repository was found on the Buzz relay.",
-      label: "Uninitialized",
+      description: t("projects.card.uninitialized-description"),
+      label: t("projects.card.uninitialized"),
     },
     access: {
-      description:
-        "You’re not a member of the channel that grants access to this repository.",
-      label: "No access",
+      description: t("projects.card.no-access-description"),
+      label: t("projects.card.no-access"),
     },
     unbound: {
-      description:
-        "The repository has no access channel binding, so the relay cannot authorize reads.",
-      label: "No access channel",
+      description: t("projects.card.no-access-channel-description"),
+      label: t("projects.card.no-access-channel"),
     },
     network: {
-      description: "The Buzz git service could not be reached.",
-      label: "Unreachable",
+      description: t("projects.card.unreachable-description"),
+      label: t("projects.card.unreachable"),
     },
     ref: {
-      description: "The advertised branch is missing from the git remote.",
-      label: "Branch missing",
+      description: t("projects.card.branch-missing-description"),
+      label: t("projects.card.branch-missing"),
     },
     unknown: {
-      description: "Buzz could not load this repository.",
-      label: "Unavailable",
+      description: t("projects.card.unavailable-description"),
+      label: t("projects.card.unavailable"),
     },
   } satisfies Record<
     ProjectRepoUnavailableReason,
@@ -294,7 +295,9 @@ function RepositoryUnavailableIndicator({
     <Tooltip>
       <TooltipTrigger asChild>
         <span
-          aria-label={`Repository ${label.toLowerCase()}`}
+          aria-label={t("projects.card.repository-status-aria", {
+            status: label.toLowerCase(),
+          })}
           className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-amber-600 hover:bg-amber-500/10 dark:text-amber-300"
           role="img"
         >
@@ -314,33 +317,37 @@ export function EmptyState({
 }: {
   onCreateProject: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
       <Folders className="h-10 w-10 text-muted-foreground/40" />
       <div className="space-y-1">
-        <p className="text-sm font-medium text-foreground">No projects yet</p>
+        <p className="text-sm font-medium text-foreground">
+          {t("projects.card.empty-title")}
+        </p>
         <p className="text-sm text-muted-foreground">
-          Projects published to this relay will appear here.
+          {t("projects.card.empty-body")}
         </p>
       </div>
       <Button onClick={onCreateProject} size="sm" type="button">
         <Plus className="h-4 w-4" />
-        Create project
+        {t("projects.card.create-project")}
       </Button>
     </div>
   );
 }
 
 export function EmptyFilteredState() {
+  const { t } = useTranslation();
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 border border-dashed border-border/60 px-4 py-12 text-center">
       <Folders className="h-9 w-9 text-muted-foreground/40" />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">
-          No matching projects
+          {t("projects.card.empty-filtered-title")}
         </p>
         <p className="text-sm text-muted-foreground">
-          Try another owner filter or sort mode.
+          {t("projects.card.empty-filtered-body")}
         </p>
       </div>
     </div>
@@ -354,13 +361,16 @@ function ProjectCardButton({
   project: Project;
   onOpen: (project: Project) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <button
       className="absolute inset-0 z-0 cursor-pointer"
       onClick={() => onOpen(project)}
       type="button"
     >
-      <span className="sr-only">View {project.name}</span>
+      <span className="sr-only">
+        {t("projects.card.view-project", { name: project.name })}
+      </span>
     </button>
   );
 }
@@ -380,11 +390,14 @@ function ProjectActionsMenu({
   onDelete: (project: Project) => Promise<void> | void;
   onOpenTerminal: (project: Project) => Promise<void> | void;
 }) {
+  const { t } = useTranslation();
   const [confirmOpen, setConfirmOpen] = React.useState(false);
 
   return (
     <AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
-      <ProjectListRowMenu label={`More options for ${project.name}`}>
+      <ProjectListRowMenu
+        label={t("projects.card.more-options", { name: project.name })}
+      >
         <CopyShareLinkMenuItem
           link={projectShareLink(project)}
           testId={`project-copy-link-${project.dtag}`}
@@ -411,23 +424,24 @@ function ProjectActionsMenu({
           }}
         >
           <Trash2 className="h-4 w-4" />
-          Delete project
+          {t("projects.card.delete-project")}
         </DropdownMenuItem>
       </ProjectListRowMenu>
       <AlertDialogContent
         data-testid={`project-delete-confirm-${project.dtag}`}
       >
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete project?</AlertDialogTitle>
+          <AlertDialogTitle>
+            {t("projects.card.delete-project-question")}
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            Delete {project.name} from Projects for everyone. This can only be
-            done for projects you own and cannot be undone.
+            {t("projects.card.delete-project-body", { name: project.name })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button disabled={disabled} type="button" variant="outline">
-              Cancel
+              {t("projects.card.cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
@@ -443,7 +457,9 @@ function ProjectActionsMenu({
               type="button"
               variant="destructive"
             >
-              {disabled ? "Deleting..." : "Delete project"}
+              {disabled
+                ? t("projects.card.deleting")
+                : t("projects.card.delete-project")}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>
@@ -482,6 +498,7 @@ export const ProjectGridCard = React.memo(function ProjectGridCard({
   onOpen,
   onOpenTerminal,
 }: ProjectItemProps) {
+  const { t } = useTranslation();
   return (
     <Card
       className="group relative flex h-full min-h-40 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
@@ -539,7 +556,7 @@ export const ProjectGridCard = React.memo(function ProjectGridCard({
           )}
           data-testid="projects-grid-card-body"
         >
-          {project.description || "A shared space for internal git work."}
+          {project.description || t("projects.card.default-description")}
         </p>
 
         <div className="relative z-10 flex items-center px-4 pb-1">

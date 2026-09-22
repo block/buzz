@@ -6,7 +6,25 @@ import {
   KIND_STREAM_MESSAGE_V2,
   KIND_JOB_ACCEPTED,
 } from "../../../shared/constants/kinds.ts";
-import { shouldPlayNotificationSound, slotForFeedKind } from "./sound.ts";
+import { initializeI18n } from "@/i18n";
+import {
+  shouldPlayNotificationSound,
+  SLOT_DESCRIPTIONS,
+  SLOT_LABELS,
+  slotForFeedKind,
+  SOUND_SLOTS,
+} from "./sound.ts";
+
+// The settings rows read `SLOT_LABELS[slot]` / `SLOT_DESCRIPTIONS[slot]`, which
+// resolve through `i18n.t` and return nothing until the singleton boots.
+// English is pinned explicitly before init: node's own `navigator.languages`
+// reports the host system locale — which may be zh-CN — and the copy asserted
+// below is the English contract the settings surface ships.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 test("routes each feed category to its own sound slot", () => {
   assert.equal(slotForFeedKind(KIND_STREAM_MESSAGE_V2, "mention"), "mention");
@@ -65,4 +83,33 @@ test("silences notifications from Huddle backing channels", () => {
     true,
   );
   assert.equal(shouldPlayNotificationSound(null, silentChannelIds), true);
+});
+
+test("every slot renders its English label and description", () => {
+  assert.deepEqual(
+    SOUND_SLOTS.map((slot) => SLOT_LABELS[slot]),
+    [
+      "Direct messages",
+      "@Mentions",
+      "Thread replies",
+      "Needs action",
+      "Agent: job accepted",
+      "Agent: progress update",
+      "Agent: job result",
+      "Agent: job error",
+    ],
+  );
+  assert.deepEqual(
+    SOUND_SLOTS.map((slot) => SLOT_DESCRIPTIONS[slot]),
+    [
+      "When someone messages you directly.",
+      "When someone tags you in a channel.",
+      "When someone replies in a thread you follow or posted in.",
+      "When an approval or reminder is waiting on you.",
+      "When an agent picks up a job.",
+      "While an agent works through a job.",
+      "When an agent finishes a job.",
+      "When an agent job fails.",
+    ],
+  );
 });

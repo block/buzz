@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type { MeshServingUsage } from "@/shared/api/tauriMesh";
 
 /**
@@ -28,10 +29,6 @@ export type MeshServingIndicator = {
   detail: string | null;
 };
 
-function plural(n: number, one: string, many = `${one}s`): string {
-  return n === 1 ? one : many;
-}
-
 /**
  * @param usage  latest snapshot from `meshServingUsage`, or null if not fetched
  * @param isSharing  whether this machine is currently in serve mode (card owns
@@ -56,17 +53,27 @@ export function deriveServingIndicator(
   const hasRemoteConsumers =
     usage.remoteAttempts > 0 || usage.endpointAttempts > 0;
   const active = usage.inflight > 0;
+  const tokensPerSecond = Math.round(usage.tokensPerSecond);
 
   // Remote consumer present (or seen) — the headline case the user asked for.
   if (hasRemoteConsumers) {
     const remote = usage.remoteAttempts + usage.endpointAttempts;
     const label = active
-      ? `In use now by another member · ${usage.inflight} live`
-      : `Used by another member · ${remote} ${plural(remote, "request")}`;
+      ? i18n.t("mesh-compute.serving-indicator.remote-active", {
+          inflight: usage.inflight,
+        })
+      : i18n.t("mesh-compute.serving-indicator.remote-idle", {
+          count: remote,
+        });
     const detail =
       usage.peers > 0
-        ? `${usage.peers} ${plural(usage.peers, "peer")} on the mesh · ${Math.round(usage.tokensPerSecond)} tok/s`
-        : `${Math.round(usage.tokensPerSecond)} tok/s`;
+        ? i18n.t("mesh-compute.serving-indicator.peers-detail", {
+            count: usage.peers,
+            tokensPerSecond,
+          })
+        : i18n.t("mesh-compute.serving-indicator.tokens-per-second", {
+            tokensPerSecond,
+          });
     return { show: true, active, hasRemoteConsumers: true, label, detail };
   }
 
@@ -76,8 +83,12 @@ export function deriveServingIndicator(
       show: true,
       active: true,
       hasRemoteConsumers: false,
-      label: `Serving your agent · ${usage.inflight} live`,
-      detail: `${Math.round(usage.tokensPerSecond)} tok/s`,
+      label: i18n.t("mesh-compute.serving-indicator.local-active", {
+        inflight: usage.inflight,
+      }),
+      detail: i18n.t("mesh-compute.serving-indicator.tokens-per-second", {
+        tokensPerSecond,
+      }),
     };
   }
   if (usage.requestsServed > 0) {
@@ -85,8 +96,10 @@ export function deriveServingIndicator(
       show: true,
       active: false,
       hasRemoteConsumers: false,
-      label: "Idle · no one using it right now",
-      detail: `${usage.requestsServed} ${plural(usage.requestsServed, "request")} served this session`,
+      label: i18n.t("mesh-compute.serving-indicator.idle-right-now"),
+      detail: i18n.t("mesh-compute.serving-indicator.served-this-session", {
+        count: usage.requestsServed,
+      }),
     };
   }
 
@@ -95,7 +108,7 @@ export function deriveServingIndicator(
     show: true,
     active: false,
     hasRemoteConsumers: false,
-    label: "Idle · no one using it yet",
+    label: i18n.t("mesh-compute.serving-indicator.idle-yet"),
     detail: null,
   };
 }

@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import type { AgentTeam } from "@/shared/api/types";
 import {
   AlertDialog,
@@ -24,21 +25,22 @@ export function TeamDeleteDialog({
   onConfirm,
   onOpenChange,
 }: TeamDeleteDialogProps) {
+  const { t } = useTranslation();
   return (
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete team?</AlertDialogTitle>
+          <AlertDialogTitle>{t("agents.team-delete.title")}</AlertDialogTitle>
           <AlertDialogDescription>
             {team
-              ? `Delete "${team.name}". Already-deployed agents are not affected, but this team template will no longer be available.`
-              : "Delete this team."}
+              ? t("agents.team-delete.confirm-name", { name: team.name })
+              : t("agents.team-delete.confirm-no-team")}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {t("agents.team-dialog.cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
@@ -51,7 +53,7 @@ export function TeamDeleteDialog({
               type="button"
               variant="destructive"
             >
-              Delete
+              {t("agents.teams-section.delete")}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>

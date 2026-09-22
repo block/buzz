@@ -1035,3 +1035,15 @@ test("copy normalizes grapheme and empty-row DOM endpoints", async () => {
   });
   assert.equal(reverseCopied.get("text/plain"), "😀é\n\n界");
 });
+
+// Boot i18n for the assertions below: Node defines a global `navigator`, so language
+// detection must be pinned to English before initializeI18n() reads it. The pin is
+// applied to the existing JSDOM navigator because the chord tests above depend on
+// its `platform: "MacIntel"` value.
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis.navigator, "languages", {
+  configurable: true,
+  value: ["en-US", "en"],
+});
+initializeI18n();

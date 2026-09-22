@@ -1,0 +1,4067 @@
+{
+  "_comment": "Baseline of accepted hardcoded user-facing English in the desktop UI (spec NFR-007, PR6). Produced by triaging every candidate from `node scripts/check-hardcoded-strings.mjs --report`: entries are grouped per file+category to keep one surface reason from repeating 200 times, but every literal is recorded individually and matched exactly by `<file>|<kind>|<literal>`; there is no wildcard, prefix or directory allowlist, and only `deferred-pr4-surface` may lean on the group note — every other category requires a per-literal reason. Resolve a candidate by translating it (en.json + zh-Hans.json + t()) or by adding an entry naming one of the categories defined in check-hardcoded-strings.mjs. `true-violation` entries always fail the gate. Entries that no longer match a candidate are reported as stale/advisory: prune them when the owning surface is closed out.",
+  "version": 1,
+  "generatedBy": "PR6 triage of `node scripts/check-hardcoded-strings.mjs --report` on branch i18n-zh-hans",
+  "totals": {
+    "groups": 86,
+    "items": 859,
+    "deferred-pr4-surface": 847,
+    "brand-name": 4,
+    "user-content": 3,
+    "protocol-field": 1,
+    "code-sample": 1,
+    "test-fixture": 3
+  },
+  "entries": [
+    {
+      "file": "src/features/agents/ui/AgentCardMintDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:ariaLabel",
+          "literal": "Memories"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Optional style notes for the art and card text"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to open link"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Choose how much memory the embedded agent carries."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Create {}'s card"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Encrypt the embedded agent so only you and this agent can import it. Anyone else sees just the image."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Including memory needs a linked agent instance — start this agent once to enable it."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Locking needs a linked agent instance — start this agent once to enable it."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "OpenAI key from agent settings"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "OpenAI key from environment"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "OpenAI key from persona settings"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Save key & continue"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Saving…"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "This agent's OpenAI key comes from its linked persona settings — update it there."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "This agent's OpenAI key is set in its own agent settings — update it there."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "This agent's OpenAI key is set in the process environment — update it in your shell or launch config."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Agent only"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Get a key at platform.openai.com"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "in the card, readable by anyone who has the PNG — and cards are made for sharing. Lock the card or only share it with people you trust."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "in your agent defaults env — that's the row to update in Settings if you ever need to change it there."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Lock card"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Memories"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Memory is stored as"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Mint a collectible trading card that doubles as a shareable, importable copy of this agent."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Mint card"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Minting a card costs money — it generates the art and card text through the OpenAI API with your key (typically well under a dollar per mint, billed by OpenAI). The key is saved as"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Update"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Using your saved OpenAI key"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "View minted cards"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Why?"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/AgentCardViewerDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:alt",
+          "literal": "{} trading card"
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Saved {}'s card. Share it — the card IS the agent."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Sent {}'s card."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Retry"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Retrying…"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Send"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Sending…"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "The card carries the agent — anyone who imports this PNG gets a working copy (config only, fresh identity, no memories)."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "The card carries the agent — anyone who imports this PNG gets a working copy (fresh identity) including its {}, stored as plaintext."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "This card is locked: only you and the agent can import it. Anyone else sees just the image."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Couldn’t load your minted cards:"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Every card you’ve minted, newest first. Click one to view, save, or share it."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Loading cards…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Minted cards"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No cards yet — mint one from an agent’s profile."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Reroll"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Save card"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Download card"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/agentConfigControls.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Custom model ID"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Custom provider ID"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Search models"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Custom model ID"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Custom provider ID"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Search models…"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "No matches"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Changing the provider updates the available model list immediately."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Custom provider..."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "LLM provider"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Model"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Custom model..."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Loading models..."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "No models found"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/agentConfigOptions.tsx",
+      "category": "brand-name",
+      "note": "Brand/provider/model name the glossary keeps in English (§1).",
+      "items": [
+        {
+          "kind": "prop:label",
+          "literal": "Databricks",
+          "note": "Provider brand name in a model-provider picker; glossary §1 keeps vendor names in English."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Databricks v2",
+          "note": "Provider brand name plus its API version suffix; nothing here is translatable prose."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "OpenAI-compatible",
+          "note": "Provider option label built from the vendor name OpenAI; glossary §1 keeps vendor names in English."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "OpenRouter",
+          "note": "Provider brand name in a model-provider picker; glossary §1 keeps vendor names in English."
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/agentConfigOptions.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "prop:label",
+          "literal": "Buzz shared compute"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Default model"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/AgentConfigPanel.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Copy {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Edit {}"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Advanced"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Copy {}"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Edit {}"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "MCP servers"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Model settings"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Couldn't load agent configuration."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "active — config is read from that directory. Claude Code keys its login to the config-dir path, so a custom dir creates a new Keychain namespace. The agent will need to re-authenticate unless you also set"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Advanced ("
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Loading configuration…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No config fields available."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "to match your default login."
+        },
+        {
+          "kind": "prop:contextLimit",
+          "literal": "Context limit"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/AgentCreationPreview.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Add {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Choose an emoji first"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Choose custom color"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Edit {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Uploading {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Use {} background"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Paste a URL"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Add {}"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Edit {}"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Drop or browse"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Uploading..."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Apply"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Emoji"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Image"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Remove"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/AgentDefinitionDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Custom provider ID"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "API key"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Choose a provider"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Custom provider ID"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Describe what this agent should do."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Advanced"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Agent instructions"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "LLM provider"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Optional"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Required"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Automatic"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Custom provider..."
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/AgentDescriptionField.tsx",
+      "category": "user-content",
+      "note": "Example of user/agent-authored content (FR-010); a sample name, not UI prose.",
+      "items": [
+        {
+          "kind": "attr:placeholder",
+          "literal": "Fizz",
+          "note": "Example agent name (a made-up pet name). FR-010: user-authored content is never translated."
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/AgentInstanceEditDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:placeholder",
+          "literal": "Agent name"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Choose a provider"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Full path or shell command"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Edit {}"
+        },
+        {
+          "kind": "call:toast",
+          "literal": "{} saved while stopped."
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "{} failed to start: {}"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "{} failed to start."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "{} started."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Save changes"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Saving..."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Advanced"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Agent command"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Agent name"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Avatar is shared identity"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Detected at"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Edit avatar"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Provider"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Custom command"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Custom provider..."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Start now"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/AgentSnapshotImportDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-expr",
+          "literal": "Agent imported"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Import agent snapshot"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "— copy source allowlist to the new agent"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "— start with an empty allowlist (safer)"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": ". Memory is stored as plaintext in the file and will be restored under the new agent's identity."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "A new agent will be created with a fresh keypair. The imported agent is independent of the source — identity never travels."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Agent instructions"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Clear"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Close"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Creating agent…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Full embedded manifest"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Import"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Keep"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "memory entr"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Memory partially restored:"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No memory included — config only."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Profile sync:"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Respond-to allowlist ("
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Review the instructions this agent will follow after import."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "This card is"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "This is the complete portable payload decoded from the file. Secrets, credentials, and source identity are not part of the snapshot format."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "This snapshot includes"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "was created successfully."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "written. The agent exists but some memory entries failed to publish."
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/CommunityCatalogDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "{} is already in My Agents"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "{} is already in your teams"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Add {} from Community Catalog"
+        },
+        {
+          "kind": "attr:description",
+          "literal": "Create, discover, and import agents and teams."
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Create agent"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Import"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Add agent"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Add agent"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Add team"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Added to My Agents"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Added to my teams"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Adding…"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Use app default"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Agent instructions"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Agents"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Choose file"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Discard agent changes?"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Discard changes"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Drop .agent.json or .agent.png to import"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Drop an .agent.json or .agent.png file anywhere in this window, or choose a file."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Import an agent"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Keep editing"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No instructions"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Nothing shared yet"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Shared agents and teams will appear here."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Team instructions"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Teams"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Your changes to this agent will be lost."
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/EditAgentAdvancedFields.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:placeholder",
+          "literal": "Comma-separated"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Current value"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Leave blank to send no ACP system prompt"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Pins this agent to a specific runtime command, overriding the template's runtime."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Restarts this agent automatically when its configuration changes, once it is idle and connected."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "ACP command"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Agent runtime args"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Auto-restart on config change"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Inherit runtime from template"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Optional"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Parallelism"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "System prompt override"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/ManagedAgentRow.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-expr",
+          "literal": "Auto-start"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Local"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Manual start"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Remote"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Configuration"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Configuration changed since this agent started. Restart to apply it."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Configuration missing"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Manage"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Out of date"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Remote deployment"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Runtime"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Status"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Template updated since this agent was created. Respawn to apply the new configuration."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "This agent's configuration is missing — it may still be syncing or was deleted on another device."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Working in #"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/ManagedAgentSessionPanel.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-expr",
+          "literal": "Restart this local agent to attach the observer feed."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Session {}"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Waiting for the next agent turn."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Live ACP session"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Observer not attached"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "The live feed is available for local agents started after this update."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Closed"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Connecting"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Idle"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Live"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Unavailable"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/ModelPicker.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "call:toast.error",
+          "literal": "Couldn't switch all sessions — a channel has multiple agent sessions. Stop and restart the agent with the new model."
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Couldn't switch models — the agent kept its current model."
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Couldn't switch models — the agent wasn't running a turn to switch."
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "That model isn't available for this agent."
+        },
+        {
+          "kind": "call:toast.info",
+          "literal": "Model switch pending — applies when the current turn finishes."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Model switched for this session."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "This agent uses the runtime's default model."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Failed to load models."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Loading models..."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Open to load available models."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "restart to apply"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Retry"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "This runtime does not support switching models."
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/PersonaAdvancedFields.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:placeholder",
+          "literal": "Birch, Compass, Ridge, Thistle"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/PersonaShareDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Share to catalog"
+        },
+        {
+          "kind": "attr:ariaLabel",
+          "literal": "What to include"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Couldn’t copy link. Try again."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Sent a copy of {}"
+        },
+        {
+          "kind": "const:copyStatusLabel",
+          "literal": "Copied"
+        },
+        {
+          "kind": "const:copyStatusLabel",
+          "literal": "Copy link"
+        },
+        {
+          "kind": "const:copyStatusLabel",
+          "literal": "Copying…"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "{}—and anyone with the file link—can view it."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Anyone with the link can view it."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Copy link"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Send"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Sending…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Anyone in this community can find and use a copy. Your agent instruction is shared as plaintext. Memories and secrets aren’t included."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Anyone you share this"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Close"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Export"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "in the snapshot. Only share it with people you trust."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Memory is stored as"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Only share with people you trust."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Share"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Share memories?"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Share settings"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Share to catalog"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "This"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "What’s included"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "with will receive a copy they can add and use. Changes you make later won’t sync."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "{} + all memories"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "{} + core memory"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/RespondToField.tsx",
+      "category": "protocol-field",
+      "note": "Nostr/ACP wire identifier or key format shown verbatim (§1).",
+      "items": [
+        {
+          "kind": "attr:placeholder",
+          "literal": "npub1… or abcdef0123…",
+          "note": "Placeholder showing the literal wire shapes (npub prefix, hex public key); the tokens are protocol text."
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/RespondToField.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Remove {}"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Only me (default)"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Search by name or NIP-05."
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Search people"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "{} valid pubkey{} ready."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "ies are"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "No valid pubkeys yet."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Add"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Add people"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Add pubkey directly"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No matching users."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "not a valid npub or 64-char hex public key and will be ignored."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "One per line, or comma/space-separated. Each entry is an npub (npub1…) or a 64-char hex public key."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Only you and your agents can send instructions."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Paste pubkeys"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Searching…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Selected people"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Who can send instructions"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "You ("
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "You can always use this agent."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Anyone"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Only me (default)"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Selected people"
+        }
+      ]
+    },
+    {
+      "file": "src/features/agents/ui/TeamSnapshotImportDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (agents) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-expr",
+          "literal": ", but {} member{} failed to publish {}."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Import team snapshot"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "successfully with {} member{}."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Team imported"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "— copy source allowlists to new members"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "— start with empty allowlists (safer)"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "A new team will be created with fresh keypairs for all members. The imported team is independent of the source — identity never travels."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Clear"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Close"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Creating team…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Import"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Keep"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Members ("
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "memory entr"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Memory partially restored:"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Profile sync failed for:"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Respond-to allowlist"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "restored across all members."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "This snapshot includes source-environment pubkey allowlists for one or more members. Those identities are not meaningful on your relay."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "was created"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "written across all members."
+        }
+      ]
+    },
+    {
+      "file": "src/features/local-archive/ui/localArchiveKinds.ts",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 long tail (local archive) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "prop:label",
+          "literal": "Huddle events"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Messages & posts"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Reactions, edits & deletions"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "System messages"
+        }
+      ]
+    },
+    {
+      "file": "src/features/mesh-compute/ui/MeshComputeSettingsCard.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 long tail (mesh compute) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:placeholder",
+          "literal": "Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
+        }
+      ]
+    },
+    {
+      "file": "src/features/profile/ui/UserProfilePanelFields.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (profile) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "prop:label",
+          "literal": "ACP command"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Agent profile"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Agent type"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Backend"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Capabilities"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Last error"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Managed by"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "MCP command"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Public key"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Runtime"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Start on launch"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Status"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Who can send instructions"
+        }
+      ]
+    },
+    {
+      "file": "src/features/profile/ui/UserProfilePanelFocusedViews.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (profile) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-text",
+          "literal": "Last error"
+        }
+      ]
+    },
+    {
+      "file": "src/features/profile/ui/UserProfilePanelSections.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (profile) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Edit {}"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Error"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Channels"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Info"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Memories"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Runtime"
+        }
+      ]
+    },
+    {
+      "file": "src/features/profile/ui/UserProfilePanelTabs.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (profile) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Choose active channel feed"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Open activity feed. Last live {}."
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Open full activity. Last live {}."
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Profile sections"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Show #{} activity"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "What archived means"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Activity log"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Agent instructions"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Harness log"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Activity"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Agent configuration"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Info"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Last live {}"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Archived agents do not appear in search, autocomplete, or member-add flows in this space. You can unarchive them at any time."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Latest Activity"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Restart required"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Visibility"
+        }
+      ]
+    },
+    {
+      "file": "src/features/profile/ui/UserProfilePersonaDialogs.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (profile) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:title",
+          "literal": "Agent"
+        }
+      ]
+    },
+    {
+      "file": "src/features/profile/ui/UserProfilePopover.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (profile) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Wave"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Huddle"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "managed by"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Message"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "View activity log"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Working in #"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/lib/projectSelection.ts",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "const:heading",
+          "literal": "Let's talk about these {}:"
+        },
+        {
+          "kind": "const:heading",
+          "literal": "Let's talk about this {}:"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectOriginReference.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-text",
+          "literal": "a private channel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "started privately with"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectPullRequestFilesChangedPanel.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Comment on {} {} line {}"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Loading changed files"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Filter files…"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Add line comment"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to post line comment."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Changes requested."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Line comment posted."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "changed files"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Could not load changed files for this"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "files changed"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Large diff truncated — showing the first"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "lines. Use a local checkout to review the full change."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No changed files are available for this"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No files match this filter."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No textual diff is available for this file."
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectPullRequestInlineComments.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:placeholder",
+          "literal": "Leave a comment on this line…"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectPullRequestsPanel.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Open {} {} line {} in Files changed"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "View {} comments"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "View comments"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "View commit {}"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Copy review link"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Add a comment…"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Activity"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Checks"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Commits"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Description"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Files changed"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "View commit {}"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to post comment."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Changes requested."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Comment posted."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "approved an earlier commit"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "approved these changes"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Collapse review history"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "requested changes"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "requested changes on an earlier commit"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No checks have been reported for this review yet."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Outdated"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Review opened"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Show"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Updates"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectReadmePanel.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:description",
+          "literal": "Add a README to describe setup, usage, and project context."
+        },
+        {
+          "kind": "attr:description",
+          "literal": "Ask an agent to create the initial codebase or connect an existing repository."
+        },
+        {
+          "kind": "attr:description",
+          "literal": "Refresh the repository or ask an agent to investigate."
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Loading README"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Loading repository"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Could not load the README"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "No files have been pushed yet"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "No README yet"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Clone locally"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Cloning…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Chat with an agent"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Clone this repository locally to explore its files, commits, and contributors in Buzz."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Code hosted on"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Last changed"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Open on"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectRepositoryActionsPanel.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:title",
+          "literal": "Create review — choose a repository and branches to compare"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Details"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Open local repository folder"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Open project chat to ask for repository access"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Open terminal"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Active tasks"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Clone"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Cloning…"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Open reviews"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Reviews"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Tasks"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Active"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Ask for access"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Completed"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Contributors"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Create review"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Create task"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Fetch"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Files"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Latest"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Merged"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Open"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Pull"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Push"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Terminal"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectRepositoryLatestCommitRow.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Open commit {}"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectRepositoryManagement.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Add repository"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Manage repository access"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Add repository"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Only the project owner can add repositories"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to update repository access."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Repository \"{}\" added."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Repository \"{}\" created."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Access"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Add"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Updating…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Create new repository"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Repository access channel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Select existing repository"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectRepositoryPanel.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Open {} {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Show next {} entries, {} of {} total"
+        },
+        {
+          "kind": "attr:description",
+          "literal": "Files pushed to this repository will appear here."
+        },
+        {
+          "kind": "attr:description",
+          "literal": "Refresh the repository or check its access settings."
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Loading file"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Loading repository files"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Could not load this file. Try again after refreshing the repository."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Preview unavailable for this file. Large and binary files only show metadata."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Files"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Last changed"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Repository files ·"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Show next"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Showing"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "tracked files"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectRepositorySource.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:title",
+          "literal": "Check for remote changes"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Open repository on {}"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Pull remote commits"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Push local commits"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Clone"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Cloning…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Branches"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Create branch…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Delete"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Fetch"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Open"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Pull"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Push"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Tags"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectRepositoryUnavailableState.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Open repository access channel #{}"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": ", and you’re not a member. Join the channel or ask"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": ", the repository owner,"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Ask for access"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "for an invite."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Repository access is granted through"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Repository access is granted through a channel you can’t see. Ask"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "the repository owner"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsActivityFeed.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Open {} in {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "View {}'s profile"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Loading project activity"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Commits, reviews, review decisions, and tasks will appear here."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "No matching activity"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "No project activity yet"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Try a different search."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Earlier"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Last week"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "This week"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsAgentPromptPage.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Toggle formatting"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Formatting"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to reach the agent"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "No agents available"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Ask"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Ask an agent about your projects"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Clear conversation"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "is working…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No agents available yet — create or start one from the Agents view to ask about your repositories."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Activity"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Release check"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Reviews"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Tasks"
+        },
+        {
+          "kind": "prop:placeholder",
+          "literal": "Are we safe to release this week?"
+        },
+        {
+          "kind": "prop:placeholder",
+          "literal": "Reply to {}…"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsCategoryCreateDialogs.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "call:toast.success",
+          "literal": "Repository \"{}\" created."
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectSelectionDiscussAction.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-text",
+          "literal": "Discuss in a channel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Search channels…"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsIssuesList.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:label",
+          "literal": "More options for {}"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "View task"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsOverviewChatToggle.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "const:label",
+          "literal": "Chat with an agent about {}"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsOverviewContextSheet.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Hide project context"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Show project context"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Hide project context"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Show project context"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsPullRequestsList.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:label",
+          "literal": "More options for {}"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "View review"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsSectionSearch.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Search {}"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Search {}"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsSelectionCountMenu.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-text",
+          "literal": "Clear selection"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsView.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-text",
+          "literal": "Retry"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectsWorkItemsLoadNotice.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-expr",
+          "literal": "Retry"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Retrying..."
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectWorkItemCommunicationActions.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-text",
+          "literal": "Chat with an agent"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectWorkItemContextActions.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:actionLabel",
+          "literal": "Add Reviewer"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectWorkItemContextDetails.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:label",
+          "literal": "Approvals"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Assignees"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Branch"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Comments"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Reviewers"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Status"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/ProjectWorkItemRow.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:label",
+          "literal": "Select {}"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/PullRequestMetaRail.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:label",
+          "literal": "Status"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/PullRequestReviewCard.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Approval summary"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "More review actions"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "What looks good?"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to update status."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Converted to draft."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Marked as ready for review."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Review closed."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Review reopened."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Add an optional summary for the author and other reviewers."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Approve"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Approve review"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Close review"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Convert to draft"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Ready for review"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Reopen review"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/PullRequestReviewersRow.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:label",
+          "literal": "Reviewers"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Search people and agents"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to request review."
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Review requested."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Agent ·"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Add reviewer"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Choose a person or agent to review these changes."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Earlier decision applies to another commit"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No matching people or agents."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Searching…"
+        }
+      ]
+    },
+    {
+      "file": "src/features/projects/ui/RepositoryCards.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (projects/repos/issues/PRs) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:label",
+          "literal": "More options for {}"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "View"
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/ChannelTemplatesSettingsCard.tsx",
+      "category": "user-content",
+      "note": "Example of user/agent-authored content (FR-010); a sample name, not UI prose.",
+      "items": [
+        {
+          "kind": "attr:placeholder",
+          "literal": "Sprint Planning",
+          "note": "Example channel-template name; stands in for user content."
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/ChannelTemplatesSettingsCard.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (settings sections) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:description",
+          "literal": "Save a reusable channel configuration."
+        },
+        {
+          "kind": "attr:description",
+          "literal": "Update this channel template configuration."
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Canvas content here..."
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "What this template is for"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Channel templates"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Create template"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Edit template"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Templates"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to create"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to delete"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to duplicate"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to update"
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Created \"{}\""
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Deleted \"{}\""
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Duplicated as \"{}\""
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Updated \"{}\""
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Create"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Creating..."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Save"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Saving..."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "as placeholders."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Canvas template"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Choose which runtime to use for each agent."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Create"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Default"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Delete"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Delete template"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Description"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Discovering runtimes..."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Duplicate"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Edit"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Loading templates..."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Name"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No ACP runtimes detected. Install one to assign runtimes."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No templates yet. Create one to save a reusable channel configuration."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Runtimes"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Save reusable channel configurations and apply them when creating new channels."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Select teams to include in this template."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Teams"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Use"
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/CustomHarnessForm.tsx",
+      "category": "code-sample",
+      "note": "Command or code shown to the user; translating it breaks it.",
+      "items": [
+        {
+          "kind": "attr:placeholder",
+          "literal": "npm install -g my-harness",
+          "note": "Example shell command for installing a harness; translating a command breaks it (spec §PR6 excludes code examples)."
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/CustomHarnessForm.tsx",
+      "category": "user-content",
+      "note": "Example of user/agent-authored content (FR-010); a sample name, not UI prose.",
+      "items": [
+        {
+          "kind": "attr:placeholder",
+          "literal": "My Runtime",
+          "note": "Example harness name the user invents; stands in for user content."
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/HarnessCatalogDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (settings sections) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "{} is ready"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Loading runtime details"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Loading runtimes"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "adapter?"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Already set up"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Custom harness"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Ready"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Register any ACP-speaking agent tool as a selectable runtime."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Select a runtime on the left, or add a custom one."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Setup"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Update"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Arguments"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Command"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Path"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Source"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Underlying CLI"
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/HarnessesSettingsPanel.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (settings sections) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-text",
+          "literal": "Git Bash"
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/HostedCommunitiesSettingsCard.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (settings sections) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Community address"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Recipient npub"
+        },
+        {
+          "kind": "attr:description",
+          "literal": "Buzz works with any relay. This page is only for relay hosting provided by Block — sign in with a Builderlab account to create and manage Block-hosted communities. Builderlab sign-in is used on this page alone."
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Hosted communities"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Connect Buzz identity"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Create and connect"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Sign in with Builderlab"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Switch to this device's identity"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Account uses"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Archive"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Authentication opens in your browser and returns securely to Buzz. You can use every other part of the app without signing in."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Buzz identity connected"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Checking availability…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Checking sign-in…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Choose the address your team will use to connect."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Connect"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Create a community"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Enter a valid npub that starts with npub1."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "hosted communities. Transfer one to free up a slot before creating another."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Link this account to your Buzz identity"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No hosted communities yet."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Refresh"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Sign in to manage hosted communities"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Sign out"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "That address is already taken."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "That address is available."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "This account is connected to a different Buzz identity"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "This address becomes connectable again. Connections that closed during archival will not reconnect automatically."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "This device"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Transfer"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Transfer ownership"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Unarchive"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Unpair identity"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Unpair this Buzz identity?"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Use lowercase letters, numbers, and single hyphens."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Your Builderlab account will no longer be connected to this Buzz key. You can reconnect any key later, but community actions stay unavailable until you do."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Your communities"
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/MobilePairingCard.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (settings sections) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:title",
+          "literal": "Mobile"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Mobile pairing QR code"
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Copied to clipboard"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Codes confirmed. Pairing your mobile device."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Pair your mobile app"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Paired"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Pairing session ended."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Verification code {} {} ready. Check that it matches on your mobile device, then confirm the codes match."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Your mobile app is now connected to this relay."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Your mobile app is now paired."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Your mobile app will connect after you confirm the code."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Check that the six-digit code matches on both devices, then confirm it."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Codes match"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Confirm mobile code"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Confirmation code"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Connect the Buzz mobile app to this relay by scanning a QR code. The connection is secured with end-to-end encryption and a verification code."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Copy pairing code"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Generate new pairing code"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Open Buzz on your mobile device and scan the code shown here."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Paired"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Pairing code expired."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Pairing mobile device..."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Scan QR code"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Sign in to generate a mobile pairing code."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Start pairing"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Starting pairing..."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Try again"
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/ModerationQueueCard.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (settings sections) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:description",
+          "literal": "Review reported content and take action. Visible to community moderators only."
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Moderation"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Failed to resolve the report"
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Report dismissed"
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Report resolved"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "against this target"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Audit log"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Checking access…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Loading audit log…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Loading reports…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No moderation actions yet."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No open reports. The queue is clear."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "prior action"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Queue"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "reported by"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Resolution"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Resolve"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "The moderation queue is available to community moderators only."
+        },
+        {
+          "kind": "prop:description",
+          "literal": "Block the author from the community."
+        },
+        {
+          "kind": "prop:description",
+          "literal": "No violation — close without action."
+        },
+        {
+          "kind": "prop:description",
+          "literal": "Remove the author from the community."
+        },
+        {
+          "kind": "prop:description",
+          "literal": "Remove the reported content and resolve."
+        },
+        {
+          "kind": "prop:description",
+          "literal": "Route to the platform-safety lane."
+        },
+        {
+          "kind": "prop:description",
+          "literal": "Temporarily mute the author."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Ban author"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Delete content"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Dismiss"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Escalate"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Kick author"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Time out author"
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/ProfileSettingsCard.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (settings sections) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Copy {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Edit profile photo"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Saving avatar"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Saving profile photo"
+        },
+        {
+          "kind": "attr:description",
+          "literal": "Update how your name, avatar, and bio appear across Buzz."
+        },
+        {
+          "kind": "attr:label",
+          "literal": "NIP-05 handle"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "profile info"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Public key"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Display name"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Profile description"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Copy {}"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Edit profile photo"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Identity"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Profile"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Profile info"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Saving profile photo"
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Copied to clipboard"
+        },
+        {
+          "kind": "call:toast.success",
+          "literal": "Profile saved"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Clearing existing profile fields is not supported yet. Blank display name and avatar values are ignored for now."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Copy"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Display name"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Identity details"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Profile description"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Your keypair and NIP-05 handle are fixed for this device."
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/SendFeedbackDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (settings sections) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:alt",
+          "literal": "Attached"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Attach image"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Remove attachment"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "View attached image"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Tell us what went wrong, or share general feedback."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Attach image"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Attaching…"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Send feedback"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Sending…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Attach diagnostics"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Attached image"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Close"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Feedback is sent privately to this Buzz deployment and is not posted to a channel. Attachments are uploaded before you send."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Includes capture time, app version, platform, user agent, and language. No application log lines are collected."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Send feedback"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Bug"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Needs work"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Praise"
+        }
+      ]
+    },
+    {
+      "file": "src/features/settings/ui/VoiceSettingsCard.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (settings sections) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "jsx-expr",
+          "literal": "Mary"
+        }
+      ]
+    },
+    {
+      "file": "src/features/sidebar/data/sidebarData.ts",
+      "category": "test-fixture",
+      "note": "Demo/mock data that never renders in the app.",
+      "items": [
+        {
+          "kind": "prop:title",
+          "literal": "Channels",
+          "note": "Section title of the hardcoded `sidebarSections` demo array in sidebarData.ts; that module has no importer anywhere in src/ (grep `sidebarSections` and `sidebarData` match only the file itself), so the string is never rendered."
+        },
+        {
+          "kind": "prop:title",
+          "literal": "Direct Messages",
+          "note": "Section title of the hardcoded `sidebarSections` demo array in sidebarData.ts; that module has no importer anywhere in src/ (grep `sidebarSections` and `sidebarData` match only the file itself), so the string is never rendered."
+        },
+        {
+          "kind": "prop:title",
+          "literal": "Pinned",
+          "note": "Section title of the hardcoded `sidebarSections` demo array in sidebarData.ts; that module has no importer anywhere in src/ (grep `sidebarSections` and `sidebarData` match only the file itself), so the string is never rendered."
+        }
+      ]
+    },
+    {
+      "file": "src/features/user-status/ui/SetStatusDialog.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 long tail (user status) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "prop:text",
+          "literal": "Commuting"
+        },
+        {
+          "kind": "prop:text",
+          "literal": "In a meeting"
+        },
+        {
+          "kind": "prop:text",
+          "literal": "Out sick"
+        },
+        {
+          "kind": "prop:text",
+          "literal": "Vacationing"
+        },
+        {
+          "kind": "prop:text",
+          "literal": "Working remotely"
+        }
+      ]
+    },
+    {
+      "file": "src/protectedFeatures/bestie/BestieCardBadge.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (protected feature chrome) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "{} is your Bestie"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Bestie"
+        }
+      ]
+    },
+    {
+      "file": "src/protectedFeatures/bestie/BestieGlobalOverlay.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (protected feature chrome) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:ariaLabel",
+          "literal": "Bestie"
+        },
+        {
+          "kind": "attr:ariaLabel",
+          "literal": "Open Bestie"
+        }
+      ]
+    },
+    {
+      "file": "src/protectedFeatures/bestie/BestieMessageAction.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (protected feature chrome) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Ask Bestie about this message"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Ask Bestie"
+        }
+      ]
+    },
+    {
+      "file": "src/protectedFeatures/bestie/BestiePopover.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (protected feature chrome) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Close Bestie"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Message {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Send in Bestie conversation"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Message {}"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Couldn’t message Bestie"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Choose a Bestie"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "How can I help?"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Loading Bestie…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Open one of your local agents and turn on Bestie."
+        }
+      ]
+    },
+    {
+      "file": "src/protectedFeatures/bestie/BestieProfileSection.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (protected feature chrome) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:label",
+          "literal": "Make Bestie"
+        },
+        {
+          "kind": "attr:label",
+          "literal": "Remove Bestie"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Couldn’t update Bestie"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "{} will appear in the floating shortcut and message actions."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "{} will replace {} in the floating shortcut and message actions."
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Make Bestie"
+        },
+        {
+          "kind": "jsx-expr",
+          "literal": "Saving…"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Cancel"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Make"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "your Bestie?"
+        }
+      ]
+    },
+    {
+      "file": "src/protectedFeatures/bestie/BestieSidebarEntry.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (protected feature chrome) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:tooltip",
+          "literal": "Bestie"
+        },
+        {
+          "kind": "call:toast.error",
+          "literal": "Couldn’t open Bestie conversation"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Bestie"
+        }
+      ]
+    },
+    {
+      "file": "src/protectedFeatures/internal.ts",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (protected feature chrome) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "prop:description",
+          "literal": "Try a personal agent that is always close at hand"
+        }
+      ]
+    },
+    {
+      "file": "src/shared/api/invites.ts",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (shared lib) / PR5 (formatters, datetime) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "const:message",
+          "literal": "HTTP {}"
+        }
+      ]
+    },
+    {
+      "file": "src/shared/ui/markdown.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (shared UI primitives) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Download image"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Image controls"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Next image"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Previous image"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Zoom image"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Zoom image: {}"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Full-size image preview. Press Escape or click outside the image to close. Click the image to zoom."
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Copy image"
+        },
+        {
+          "kind": "prop:label",
+          "literal": "Download image"
+        }
+      ]
+    },
+    {
+      "file": "src/shared/ui/sonner.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (shared UI primitives) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "prop:cancelButton",
+          "literal": "group-[.toast]:bg-muted group-[.toast]:text-muted-foreground"
+        }
+      ]
+    },
+    {
+      "file": "src/shared/ui/VideoPlayer.tsx",
+      "category": "deferred-pr4-surface",
+      "note": "PR4 (shared UI primitives) — not yet extracted; spec §7 keeps this surface English on this branch.",
+      "items": [
+        {
+          "kind": "attr:aria-label",
+          "literal": "Close video review"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Hide comments"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "More reactions"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Mute"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Open video review"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Pause review video"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Pause video"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Play review video"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Play video"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Playback speed: {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "React {} at {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Retry loading video"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Seek to {}"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Show comments"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Toggle {} reaction"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Unmute"
+        },
+        {
+          "kind": "attr:aria-label",
+          "literal": "Volume"
+        },
+        {
+          "kind": "attr:ariaLabel",
+          "literal": "Video progress"
+        },
+        {
+          "kind": "attr:ariaLabel",
+          "literal": "Video timeline"
+        },
+        {
+          "kind": "attr:placeholder",
+          "literal": "Leave your comment..."
+        },
+        {
+          "kind": "attr:title",
+          "literal": "More reactions"
+        },
+        {
+          "kind": "attr:title",
+          "literal": "Open video review"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Comment at current frame"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Comments"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Failed to load — tap to retry"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "More reactions"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "No comments yet"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Reply"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Replying to"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Review video comments and timecoded replies."
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Speed"
+        },
+        {
+          "kind": "jsx-text",
+          "literal": "Video review"
+        }
+      ]
+    }
+  ]
+}

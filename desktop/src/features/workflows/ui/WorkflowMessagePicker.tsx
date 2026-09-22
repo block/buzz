@@ -9,6 +9,7 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { useSearchMessagesQuery } from "@/features/search/hooks";
+import { i18n, useTranslation } from "@/i18n";
 import { getChannelWindowEvents } from "@/shared/api/channelWindow";
 import { getEventById } from "@/shared/api/tauri";
 import type { ChannelPageCursor } from "@/shared/api/types";
@@ -27,7 +28,7 @@ const PAGE_SIZE = 25;
 
 function truncateContent(content: string | null): string {
   const normalized = content?.trim().replaceAll(/\s+/g, " ") ?? "";
-  if (!normalized) return "No message body";
+  if (!normalized) return i18n.t("workflows.message-picker.no-body");
   return normalized.length > 120
     ? `${normalized.slice(0, 117)}...`
     : normalized;
@@ -58,6 +59,7 @@ export function WorkflowMessagePicker({
   onEscape?: () => void;
   value: string;
 }) {
+  const { t } = useTranslation();
   const optionRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const [query, setQuery] = React.useState("");
   const [activeIndex, setActiveIndex] = React.useState<number | null>(null);
@@ -235,7 +237,7 @@ export function WorkflowMessagePicker({
               : undefined
           }
           aria-controls={listId}
-          aria-label="Search messages or paste a message ID"
+          aria-label={t("workflows.message-picker.search-aria")}
           aria-expanded="true"
           autoCapitalize="none"
           autoComplete="off"
@@ -286,8 +288,8 @@ export function WorkflowMessagePicker({
           }}
           placeholder={
             channelId
-              ? "Search messages or paste a message ID…"
-              : "Choose a channel first"
+              ? t("workflows.message-picker.search-placeholder")
+              : t("workflows.message-picker.channel-placeholder")
           }
           role="combobox"
           spellCheck={false}
@@ -298,18 +300,18 @@ export function WorkflowMessagePicker({
         searchEventsFetching ||
         exactQuery.isFetching ? (
           <LoaderCircle
-            aria-label="Loading messages"
+            aria-label={t("workflows.message-picker.loading-aria")}
             className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground"
           />
         ) : null}
       </div>
       {invalidDirectResult ? (
         <p className="shrink-0 border-b border-border/70 px-3 py-2 text-xs text-destructive">
-          That message is not available in this channel.
+          {t("workflows.message-picker.invalid-direct")}
         </p>
       ) : null}
       <div
-        aria-label="Messages"
+        aria-label={t("workflows.message-picker.list-aria")}
         className="min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain p-2"
         data-testid="workflow-message-picker-results"
         id={listId}
@@ -352,15 +354,16 @@ export function WorkflowMessagePicker({
             className="flex items-center justify-center gap-2 px-3 py-8 text-sm text-muted-foreground"
             role="status"
           >
-            <LoaderCircle className="h-4 w-4 animate-spin" /> Loading messages…
+            <LoaderCircle className="h-4 w-4 animate-spin" />{" "}
+            {t("workflows.message-picker.loading")}
           </p>
         ) : visibleCandidates.length === 0 ? (
           <p className="px-3 py-8 text-center text-sm text-muted-foreground">
             {failed
-              ? "Couldn’t load messages."
+              ? t("workflows.message-picker.load-error")
               : normalizedQuery
-                ? "No messages found."
-                : "No messages yet."}
+                ? t("workflows.message-picker.search-empty")
+                : t("workflows.message-picker.empty")}
           </p>
         ) : null}
         {failed ? (
@@ -376,7 +379,7 @@ export function WorkflowMessagePicker({
             }}
             type="button"
           >
-            Couldn’t load all messages. Retry
+            {t("workflows.message-picker.retry")}
           </button>
         ) : null}
         {!normalizedQuery && historyQuery.hasNextPage ? (
@@ -387,8 +390,8 @@ export function WorkflowMessagePicker({
             type="button"
           >
             {historyQuery.isFetchingNextPage
-              ? "Loading older messages…"
-              : "Load older messages"}
+              ? t("workflows.message-picker.loading-older")
+              : t("workflows.message-picker.load-older")}
           </button>
         ) : null}
       </div>
@@ -415,9 +418,10 @@ function MessageOption({
   profiles?: UserProfileLookup;
   selected: boolean;
 }) {
+  const { t } = useTranslation();
   const author = candidate.pubkey
     ? resolveUserLabel({ profiles, pubkey: candidate.pubkey })
-    : "Selected message";
+    : t("workflows.message-picker.selected-label");
   const profile = candidate.pubkey
     ? profiles?.[candidate.pubkey.toLowerCase()]
     : undefined;

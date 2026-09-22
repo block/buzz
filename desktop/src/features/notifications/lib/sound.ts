@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import {
   KIND_JOB_ACCEPTED,
   KIND_JOB_ERROR,
@@ -34,15 +35,38 @@ export const SOUND_SLOTS = [
 ] as const;
 export type SoundSlot = (typeof SOUND_SLOTS)[number];
 
+/**
+ * Row labels for the alert-sound slots in the notification settings.
+ *
+ * Resolved through getters rather than stored as module-level literals:
+ * `i18n` boots after this module is imported, while the settings card keeps
+ * reading plain `SLOT_LABELS[slot]` at render time.
+ */
 export const SLOT_LABELS: Record<SoundSlot, string> = {
-  dm: "Direct messages",
-  mention: "@Mentions",
-  thread_reply: "Thread replies",
-  needs_action: "Needs action",
-  job_accepted: "Agent: job accepted",
-  job_progress: "Agent: progress update",
-  job_result: "Agent: job result",
-  job_error: "Agent: job error",
+  get dm() {
+    return i18n.t("sidebar.shell.direct-messages");
+  },
+  get mention() {
+    return i18n.t("notifications.sound.slot-mentions");
+  },
+  get thread_reply() {
+    return i18n.t("notifications.sound.slot-thread-replies");
+  },
+  get needs_action() {
+    return i18n.t("notifications.sound.slot-needs-action");
+  },
+  get job_accepted() {
+    return i18n.t("notifications.sound.slot-agent-job-accepted");
+  },
+  get job_progress() {
+    return i18n.t("notifications.sound.slot-agent-job-progress");
+  },
+  get job_result() {
+    return i18n.t("notifications.sound.slot-agent-job-result");
+  },
+  get job_error() {
+    return i18n.t("notifications.sound.slot-agent-job-error");
+  },
 };
 
 // The agent job protocol (kinds 43001-43006) is defined and queryable but
@@ -56,15 +80,35 @@ export const COMING_SOON_SLOTS: ReadonlySet<SoundSlot> = new Set([
   "job_error",
 ]);
 
+/**
+ * Slot explanations shown as the settings row subcopy (same lazy resolution as
+ * {@link SLOT_LABELS}).
+ */
 export const SLOT_DESCRIPTIONS: Record<SoundSlot, string> = {
-  dm: "When someone messages you directly.",
-  mention: "When someone tags you in a channel.",
-  thread_reply: "When someone replies in a thread you follow or posted in.",
-  needs_action: "When an approval or reminder is waiting on you.",
-  job_accepted: "When an agent picks up a job.",
-  job_progress: "While an agent works through a job.",
-  job_result: "When an agent finishes a job.",
-  job_error: "When an agent job fails.",
+  get dm() {
+    return i18n.t("notifications.sound.desc-direct-messages");
+  },
+  get mention() {
+    return i18n.t("notifications.sound.desc-mentions");
+  },
+  get thread_reply() {
+    return i18n.t("notifications.sound.desc-thread-replies");
+  },
+  get needs_action() {
+    return i18n.t("notifications.sound.desc-needs-action");
+  },
+  get job_accepted() {
+    return i18n.t("notifications.sound.desc-agent-job-accepted");
+  },
+  get job_progress() {
+    return i18n.t("notifications.sound.desc-agent-job-progress");
+  },
+  get job_result() {
+    return i18n.t("notifications.sound.desc-agent-job-result");
+  },
+  get job_error() {
+    return i18n.t("notifications.sound.desc-agent-job-error");
+  },
 };
 
 export const RECOMMENDED_SOUND_BY_SLOT: Record<SoundSlot, SoundName> = {

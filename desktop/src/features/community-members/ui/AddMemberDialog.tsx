@@ -11,6 +11,7 @@ import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
+import { useTranslation } from "@/i18n";
 import type { RelayMemberRole, UserSearchResult } from "@/shared/api/types";
 import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
 import { truncateNpub } from "@/shared/lib/pubkey";
@@ -32,18 +33,11 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 
-const ROLE_OPTIONS: Array<{
-  value: RelayMemberRole;
-  label: string;
-}> = [
-  {
-    value: "member",
-    label: "Member",
-  },
-  {
-    value: "admin",
-    label: "Admin",
-  },
+/** Role ids only — the `value`s are protocol data and the labels resolve at the
+ *  render site, where every label is a literal `t()` key. */
+const ROLE_OPTIONS: Array<{ value: RelayMemberRole }> = [
+  { value: "member" },
+  { value: "admin" },
 ];
 
 function formatSearchUserName(user: UserSearchResult) {
@@ -58,13 +52,18 @@ export function DirectAddMemberForm({
   isOwner,
   onAdded,
   showLabel = true,
-  submitLabel = "Add member",
+  submitLabel,
 }: {
   isOwner: boolean;
   onAdded?: () => void;
   showLabel?: boolean;
   submitLabel?: string;
 }) {
+  const { t } = useTranslation();
+  const roleLabels: Partial<Record<RelayMemberRole, string>> = {
+    member: t("channels.members.role-option-member"),
+    admin: t("channels.members.role-option-admin"),
+  };
   const addMutation = useAddRelayMemberMutation();
   const membersQuery = useRelayMembersQuery();
   const [query, setQuery] = React.useState("");
@@ -131,7 +130,7 @@ export function DirectAddMemberForm({
     [isOwner],
   );
   const selectedRoleLabel =
-    roleOptions.find((option) => option.value === role)?.label ?? "Member";
+    roleLabels[role] ?? t("channels.members.role-option-member");
   const actionTransition = shouldReduceMotion
     ? { duration: 0 }
     : { duration: 0.18, ease: [0.23, 1, 0.32, 1] as const };
@@ -177,13 +176,9 @@ export function DirectAddMemberForm({
         await addMutation.mutateAsync({ pubkey: user.pubkey, role });
       }
       toast.success(
-        selectedUsers.length === 1
-          ? role === "admin"
-            ? "Admin added"
-            : "Member added"
-          : role === "admin"
-            ? "Admins added"
-            : "Members added",
+        role === "admin"
+          ? t("members.add.admin-added", { count: selectedUsers.length })
+          : t("members.add.member-added", { count: selectedUsers.length }),
       );
       reset();
       onAdded?.();
@@ -204,7 +199,7 @@ export function DirectAddMemberForm({
       <div className="space-y-1.5">
         {showLabel ? (
           <label className="text-sm font-medium" htmlFor="member-search">
-            Person
+            {t("members.add.person")}
           </label>
         ) : null}
         <div className="flex gap-2">
@@ -272,7 +267,7 @@ export function DirectAddMemberForm({
                       }}
                       placeholder={
                         selectedUsers.length === 0
-                          ? "Search people or paste an npub"
+                          ? t("members.add.search-placeholder")
                           : ""
                       }
                       ref={searchInputRef}
@@ -293,7 +288,7 @@ export function DirectAddMemberForm({
                         <DropdownMenu modal={false}>
                           <DropdownMenuTrigger asChild>
                             <button
-                              aria-label="Choose member role"
+                              aria-label={t("members.add.choose-role")}
                               className="inline-flex items-center gap-1.5 bg-transparent text-sm text-muted-foreground outline-hidden transition-colors hover:text-foreground focus-visible:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
                               data-testid="member-role"
                               disabled={addMutation.isPending}
@@ -320,7 +315,8 @@ export function DirectAddMemberForm({
                                   key={option.value}
                                   value={option.value}
                                 >
-                                  {option.label}
+                                  {roleLabels[option.value] ??
+                                    t("channels.members.role-option-member")}
                                 </DropdownMenuRadioItem>
                               ))}
                             </DropdownMenuRadioGroup>
@@ -348,7 +344,7 @@ export function DirectAddMemberForm({
               >
                 {userSearchQuery.isLoading ? (
                   <p className="px-3 py-3 text-sm text-muted-foreground">
-                    Searching…
+                    {t("members.add.searching")}
                   </p>
                 ) : searchResults.length > 0 || directResult ? (
                   <>
@@ -368,8 +364,7 @@ export function DirectAddMemberForm({
                   </>
                 ) : (
                   <p className="px-3 py-3 text-sm text-muted-foreground">
-                    No people found. Paste a full npub or hex public key to add
-                    someone directly.
+                    {t("members.add.no-people-found")}
                   </p>
                 )}
               </div>
@@ -391,7 +386,9 @@ export function DirectAddMemberForm({
                   size="sm"
                   type="submit"
                 >
-                  {addMutation.isPending ? "Inviting…" : submitLabel}
+                  {addMutation.isPending
+                    ? t("members.add.inviting")
+                    : (submitLabel ?? t("members.add.add-member"))}
                 </Button>
               </motion.div>
             ) : null}
@@ -399,7 +396,7 @@ export function DirectAddMemberForm({
         </div>
         {isAlreadyMember ? (
           <p className="text-xs text-destructive">
-            This person is already a community member.
+            {t("members.add.already-member")}
           </p>
         ) : null}
         {userSearchQuery.error instanceof Error ? (
@@ -425,6 +422,7 @@ function SearchResult({
   onSelect: () => void;
   user: UserSearchResult;
 }) {
+  const { t } = useTranslation();
   const name = formatSearchUserName(user);
   const isDirectPubkey = user.displayName === null && user.nip05Handle === null;
 
@@ -448,7 +446,7 @@ function SearchResult({
       </span>
       {isDirectPubkey ? (
         <span className="shrink-0 text-xs text-muted-foreground">
-          public key
+          {t("members.add.public-key-hint")}
         </span>
       ) : null}
     </button>
@@ -464,6 +462,7 @@ export function AddMemberDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent
@@ -472,9 +471,9 @@ export function AddMemberDialog({
       >
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
-            <DialogTitle>Add member</DialogTitle>
+            <DialogTitle>{t("members.add.add-member")}</DialogTitle>
             <DialogDescription>
-              Add a person to this community by their public key.
+              {t("members.add.description")}
             </DialogDescription>
           </DialogHeader>
           <div className="px-6 py-4">

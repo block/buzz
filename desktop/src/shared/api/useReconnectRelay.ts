@@ -15,6 +15,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 
+import { i18n } from "@/i18n";
 import { relayClient } from "@/shared/api/relayClient";
 import { isRelayDependentQuery } from "@/shared/api/relayQueryInvalidation";
 import { relayReconnectController } from "@/shared/api/relayReconnectController";
@@ -70,7 +71,7 @@ export function useReconnectRelay(): {
   }, [queryClient]);
 
   onBackstopRef.current = React.useCallback(() => {
-    toast("Still trying to reconnect — check your network.");
+    toast(i18n.t("shared.reconnect.still-trying"));
   }, []);
 
   const reconnect = React.useCallback(async () => {

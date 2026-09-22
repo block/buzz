@@ -10,6 +10,13 @@ import {
   reconcileJoinAlertLedger,
   writeJoinAlertLedger,
 } from "./joinAlerts.ts";
+import { initializeI18n } from "@/i18n";
+
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 const COMMUNITY = "community-1";
 const OWNER = "a".repeat(64);

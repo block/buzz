@@ -17,6 +17,7 @@ import {
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import { buildWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { useProfileQuery } from "@/features/profile/hooks";
+import { useTranslation } from "@/i18n";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel, RelayEvent } from "@/shared/api/types";
@@ -87,6 +88,7 @@ export function useProfileInteractionActions({
   onClose: () => void;
   viewerIsOwner: boolean | undefined;
 }) {
+  const { t } = useTranslation();
   const [pendingAction, setPendingAction] =
     React.useState<ProfileInteractionAction | null>(null);
   const isMountedRef = React.useRef(false);
@@ -134,8 +136,8 @@ export function useProfileInteractionActions({
             error instanceof Error
               ? error.message
               : action === "wave"
-                ? "Couldn't send the wave."
-                : "Couldn't open the direct message.",
+                ? t("profile.interaction.wave-failed")
+                : t("profile.interaction.dm-failed"),
           );
         }
       } finally {
@@ -144,7 +146,7 @@ export function useProfileInteractionActions({
         }
       }
     },
-    [effectivePubkey, onBeforeAction, pendingAction],
+    [effectivePubkey, onBeforeAction, pendingAction, t],
   );
 
   const handleMessage = React.useCallback(() => {

@@ -11,6 +11,8 @@
 
 import * as React from "react";
 
+import { i18n } from "@/i18n";
+
 import {
   NO_RUNTIME_DROPDOWN_VALUE,
   type PersonaDropdownOption,
@@ -23,10 +25,12 @@ import {
  */
 export const ADD_CUSTOM_HARNESS_VALUE = "\u0000add-custom-harness";
 
-export const ADD_CUSTOM_HARNESS_OPTION: PersonaDropdownOption = {
-  label: "Add custom harness…",
-  value: ADD_CUSTOM_HARNESS_VALUE,
-};
+export function addCustomHarnessOption(): PersonaDropdownOption {
+  return {
+    label: i18n.t("agents.harness.add-custom"),
+    value: ADD_CUSTOM_HARNESS_VALUE,
+  };
+}
 
 export type RuntimeDropdownAction =
   | { kind: "add-custom-harness" }

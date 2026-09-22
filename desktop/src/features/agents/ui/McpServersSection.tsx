@@ -1,4 +1,5 @@
 import type * as React from "react";
+import { useTranslation } from "@/i18n";
 import type { ExtensionEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -36,6 +37,7 @@ export function McpServersSection({
   runtimeId,
   variant = "compact",
 }: McpServersSectionProps) {
+  const { t } = useTranslation();
   const isBuzzAgent = runtimeId === "buzz-agent";
 
   if (!shouldRenderMcpServers(runtimeId, extensions)) {
@@ -53,7 +55,9 @@ export function McpServersSection({
       )}
     >
       {variant === "compact" ? (
-        <p className="py-2 text-xs font-medium text-foreground">MCP servers</p>
+        <p className="py-2 text-xs font-medium text-foreground">
+          {t("agents.mcp-servers.title")}
+        </p>
       ) : null}
 
       {isBuzzAgent && buzzAgentSlot ? buzzAgentSlot : null}
@@ -77,7 +81,7 @@ export function McpServersSection({
               : "flex min-h-16 items-center px-4 py-3",
           )}
         >
-          No custom servers configured.
+          {t("agents.mcp-servers.empty")}
         </p>
       )}
 
@@ -102,6 +106,7 @@ function McpServerRow({
   extension: ExtensionEntry;
   variant: "compact" | "profile";
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className={cn(
@@ -118,7 +123,9 @@ function McpServerRow({
         </span>
       </span>
       <span className="shrink-0 text-sm text-muted-foreground">
-        {extension.enabled ? "Enabled" : "Disabled"}
+        {extension.enabled
+          ? t("agents.mcp-servers.enabled")
+          : t("agents.mcp-servers.disabled")}
       </span>
     </div>
   );

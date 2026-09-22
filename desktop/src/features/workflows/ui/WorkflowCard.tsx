@@ -15,6 +15,7 @@ import type { LucideIcon } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
+import { useTranslation } from "@/i18n";
 import type { Workflow } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Switch } from "@/shared/ui/switch";
@@ -91,9 +92,14 @@ function StatusToggle({
   enabled: boolean;
   onToggle: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <Switch
-      aria-label={enabled ? "Disable workflow" : "Enable workflow"}
+      aria-label={
+        enabled
+          ? t("workflows.card.disable")
+          : t("workflows.form.enable-workflow")
+      }
       checked={enabled}
       disabled={disabled}
       onCheckedChange={(checked) => {
@@ -206,6 +212,7 @@ export function WorkflowCard({
   onDuplicate,
   onDelete,
 }: WorkflowCardProps) {
+  const { t } = useTranslation();
   const [triggerAnimationSequence, setTriggerAnimationSequence] =
     React.useState(0);
   const isEnabled = getWorkflowEnabled(workflow.definition);
@@ -238,7 +245,9 @@ export function WorkflowCard({
         onClick={() => onView(workflow)}
         type="button"
       >
-        <span className="sr-only">View {workflow.name}</span>
+        <span className="sr-only">
+          {t("workflows.card.view", { name: workflow.name })}
+        </span>
       </button>
 
       <div className="pointer-events-none relative z-10 flex min-h-48 flex-1 flex-col">

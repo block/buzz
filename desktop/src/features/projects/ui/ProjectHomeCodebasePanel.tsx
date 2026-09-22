@@ -7,6 +7,7 @@ import {
   type Repository,
 } from "@/features/projects/hooks";
 import { resolveProjectDefaultBranch } from "@/features/projects/lib/projectBranches";
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -41,6 +42,7 @@ export function ProjectHomeCodebasePanel({
   projects: Project[];
   repository: Repository | null;
 }) {
+  const { t } = useTranslation();
   const repoStateQuery = useRepoStateQuery(repository);
   const defaultBranch = repository
     ? resolveProjectDefaultBranch(repository.defaultBranch, repoStateQuery.data)
@@ -70,7 +72,7 @@ export function ProjectHomeCodebasePanel({
         data-testid="project-home-codebase-empty"
       >
         <p className="text-sm text-muted-foreground">
-          Attach a repository to browse the file tree beside this channel.
+          {t("projects.home-codebase-panel.attach-hint")}
         </p>
         <ProjectRepositoryManagement
           identityPubkey={identityPubkey}

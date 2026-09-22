@@ -1,6 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import * as React from "react";
 
+import { i18n, useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import {
   AlertDialog,
@@ -16,9 +17,9 @@ import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import {
-  MESSAGE_TEXT_CONDITION_LABELS,
   MESSAGE_TEXT_CONDITION_OPERATORS,
   buildMessageTextCondition,
+  messageTextConditionLabel,
   messageTextConditionNeedsValue,
   parseMessageTextCondition,
 } from "./workflowMessageTextCondition";
@@ -32,10 +33,10 @@ const DEFAULT_CONDITION: MessageTextCondition = {
 type EditorMode = "basic" | "advanced";
 
 function conditionSummary(condition: MessageTextCondition): string {
-  const label = MESSAGE_TEXT_CONDITION_LABELS[condition.operator].toLowerCase();
+  const label = messageTextConditionLabel(condition.operator).toLowerCase();
   if (!messageTextConditionNeedsValue(condition.operator)) return label;
   const value = condition.value.trim();
-  return value ? `${label} “${value}”` : "Any";
+  return value ? `${label} “${value}”` : i18n.t("workflows.text-condition.any");
 }
 
 export function WorkflowMessageTextCondition({
@@ -49,6 +50,7 @@ export function WorkflowMessageTextCondition({
   onChange: (value: string) => void;
   value: string;
 }) {
+  const { t } = useTranslation();
   const initialParsed = React.useRef(parseMessageTextCondition(value));
   const [mode, setMode] = React.useState<EditorMode>(() =>
     value && !initialParsed.current ? "advanced" : "basic",
@@ -117,14 +119,14 @@ export function WorkflowMessageTextCondition({
       >
         {allowAdvanced ? (
           <TabsList
-            aria-label="Condition editor mode"
+            aria-label={t("workflows.condition.mode-aria")}
             className="grid h-9 w-full grid-cols-2 p-0.5"
           >
             <TabsTrigger className="h-8" disabled={disabled} value="basic">
-              Basic
+              {t("workflows.condition.basic")}
             </TabsTrigger>
             <TabsTrigger className="h-8" disabled={disabled} value="advanced">
-              Advanced
+              {t("workflows.condition.advanced")}
             </TabsTrigger>
           </TabsList>
         ) : null}
@@ -133,8 +135,7 @@ export function WorkflowMessageTextCondition({
           <div>
             {hasUnsupportedExpression ? (
               <p className="border-b border-border/50 pb-3 text-xs text-muted-foreground">
-                An advanced expression is active. Choosing a basic filter will
-                replace it.
+                {t("workflows.text-condition.replace-warning")}
               </p>
             ) : null}
             <div className="divide-y divide-border/50">
@@ -147,11 +148,11 @@ export function WorkflowMessageTextCondition({
                   type="button"
                 >
                   <span className="min-w-0 flex-1 truncate text-base font-medium">
-                    Message text
+                    {t("workflows.condition.field-message-text")}
                   </span>
                   <span className="max-w-40 truncate text-sm text-muted-foreground">
                     {hasUnsupportedExpression
-                      ? "Any"
+                      ? t("workflows.text-condition.any")
                       : conditionSummary(condition)}
                   </span>
                   <ChevronRight
@@ -165,7 +166,9 @@ export function WorkflowMessageTextCondition({
                 {expanded && !hasUnsupportedExpression ? (
                   <div className="animate-in space-y-4 pt-1 fade-in slide-in-from-top-1 duration-150 motion-reduce:animate-none">
                     <fieldset>
-                      <legend className="sr-only">Match</legend>
+                      <legend className="sr-only">
+                        {t("workflows.condition.match-legend")}
+                      </legend>
                       <div className="grid grid-cols-2 gap-2.5">
                         {MESSAGE_TEXT_CONDITION_OPERATORS.map((operator) => {
                           const id = `wf-trigger-filter-trigger-text-operator-${operator}`;
@@ -195,9 +198,9 @@ export function WorkflowMessageTextCondition({
                                 )}
                                 htmlFor={id}
                               >
-                                {MESSAGE_TEXT_CONDITION_LABELS[
-                                  operator
-                                ].toLowerCase()}
+                                {messageTextConditionLabel(
+                                  operator,
+                                ).toLowerCase()}
                               </label>
                             </div>
                           );
@@ -207,7 +210,7 @@ export function WorkflowMessageTextCondition({
 
                     {messageTextConditionNeedsValue(condition.operator) ? (
                       <Input
-                        aria-label="Text to match"
+                        aria-label={t("workflows.text-condition.value-aria")}
                         autoCapitalize="off"
                         autoCorrect="off"
                         disabled={disabled}
@@ -218,7 +221,9 @@ export function WorkflowMessageTextCondition({
                             value: event.target.value,
                           })
                         }
-                        placeholder="e.g. deploy"
+                        placeholder={t(
+                          "workflows.text-condition.value-placeholder",
+                        )}
                         value={condition.value}
                       />
                     ) : null}
@@ -230,7 +235,7 @@ export function WorkflowMessageTextCondition({
         ) : (
           <div className="animate-in space-y-2 fade-in duration-150 motion-reduce:animate-none">
             <Input
-              aria-label="Advanced expression"
+              aria-label={t("workflows.condition.advanced-expression-aria")}
               autoCapitalize="off"
               autoCorrect="off"
               disabled={disabled}
@@ -244,7 +249,8 @@ export function WorkflowMessageTextCondition({
               value={advancedDraft}
             />
             <p className="text-xs text-muted-foreground">
-              Use an evalexpr expression with <code>trigger_text</code>.
+              {t("workflows.text-condition.advanced-hint")}{" "}
+              <code>trigger_text</code>.
             </p>
           </div>
         )}
@@ -256,16 +262,17 @@ export function WorkflowMessageTextCondition({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Replace advanced expression?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t("workflows.text-condition.replace-title")}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Choosing a basic filter will replace the entire advanced
-              expression. This cannot be undone.
+              {t("workflows.text-condition.replace-description")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel asChild>
               <Button type="button" variant="outline">
-                Keep advanced expression
+                {t("workflows.text-condition.keep-advanced")}
               </Button>
             </AlertDialogCancel>
             <AlertDialogAction asChild>
@@ -279,7 +286,7 @@ export function WorkflowMessageTextCondition({
                 type="button"
                 variant="destructive"
               >
-                Replace expression
+                {t("workflows.text-condition.replace-confirm")}
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>

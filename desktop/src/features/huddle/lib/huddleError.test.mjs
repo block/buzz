@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { initializeI18n } from "@/i18n/index.ts";
 import { formatHuddleActionError } from "./huddleError.ts";
+
+// `formatHuddleActionError` resolves its copy through `i18n.t`, which returns
+// `undefined` until the singleton boots (`main.tsx` does that in the app).
+// English is pinned explicitly before init: node's own `navigator.languages`
+// reports the host system locale — which may be zh-CN — and every assertion
+// below is the English contract.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 const AUDIO_UNAVAILABLE_MESSAGE =
   "Huddle audio isn’t available on this server. Ask an administrator to turn it on.";

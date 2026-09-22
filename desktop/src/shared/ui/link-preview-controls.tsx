@@ -1,6 +1,7 @@
 import { EllipsisVertical, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 
+import { useTranslation } from "@/i18n";
 import { useAppShell } from "@/app/AppShellContext";
 import {
   setLinkPreviewStyle,
@@ -27,11 +28,7 @@ const CONTROL_BUTTON_CLASS =
 
 const LINK_PREVIEW_STYLE_OPTIONS: {
   value: LinkPreviewStyle;
-  label: string;
-}[] = [
-  { value: "rich", label: "Rich" },
-  { value: "compact", label: "Compact" },
-];
+}[] = [{ value: "rich" }, { value: "compact" }];
 
 export function LinkPreviewControls({
   onRemove,
@@ -40,8 +37,14 @@ export function LinkPreviewControls({
   onRemove?: () => void;
   placement?: "left" | "right";
 }) {
+  const { t } = useTranslation();
   const style = useLinkPreviewStyle();
   const { onOpenSettings } = useAppShell();
+
+  const styleLabel = (value: string) =>
+    value === "rich"
+      ? t("shared.linkPreview.style.rich")
+      : t("shared.linkPreview.style.compact");
 
   const handleStyleChange = (nextStyle: string) => {
     if (
@@ -53,16 +56,17 @@ export function LinkPreviewControls({
 
     setLinkPreviewStyle(nextStyle);
     toast.success(
-      `Link previews set to ${nextStyle === "rich" ? "Rich" : "Compact"}.`,
+      t("shared.linkPreview.style-changed", {
+        style: styleLabel(nextStyle),
+      }),
       {
         action: onOpenSettings
           ? {
-              label: "Appearance",
+              label: t("shared.linkPreview.appearance"),
               onClick: () => onOpenSettings("appearance"),
             }
           : undefined,
-        description:
-          "You can always modify this and other settings in Appearance.",
+        description: t("shared.linkPreview.appearance-hint"),
       },
     );
   };
@@ -77,10 +81,10 @@ export function LinkPreviewControls({
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button
-            aria-label="Link display settings"
+            aria-label={t("shared.linkPreview.controls-aria")}
             className={CONTROL_BUTTON_CLASS}
             size="icon-xs"
-            title="Link display settings"
+            title={t("shared.linkPreview.controls-aria")}
             type="button"
             variant="ghost"
           >
@@ -89,7 +93,9 @@ export function LinkPreviewControls({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" side="right">
           <DropdownMenuSub>
-            <DropdownMenuSubTrigger>Display</DropdownMenuSubTrigger>
+            <DropdownMenuSubTrigger>
+              {t("shared.linkPreview.display")}
+            </DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
               <DropdownMenuRadioGroup
                 onValueChange={handleStyleChange}
@@ -100,7 +106,7 @@ export function LinkPreviewControls({
                     key={option.value}
                     value={option.value}
                   >
-                    {option.label}
+                    {styleLabel(option.value)}
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>
@@ -114,7 +120,7 @@ export function LinkPreviewControls({
                 onClick={onRemove}
               >
                 <EyeOff aria-hidden="true" />
-                Remove preview
+                {t("shared.linkPreview.remove")}
               </DropdownMenuItem>
             </>
           ) : null}

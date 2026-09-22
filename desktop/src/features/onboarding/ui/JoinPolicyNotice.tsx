@@ -1,6 +1,7 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
+import { useTranslation } from "@/i18n";
 import { joinPolicyDocumentUrl, type JoinPolicy } from "@/shared/api/invites";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
@@ -35,6 +36,7 @@ export function JoinPolicyNotice({
 }: JoinPolicyNoticeProps) {
   const ageConfirmationId = React.useId();
   const agreementConfirmationId = React.useId();
+  const { t } = useTranslation();
 
   return (
     <div className="space-y-3 rounded-xl border border-border/70 bg-muted/30 p-4 text-left">
@@ -52,7 +54,7 @@ export function JoinPolicyNotice({
             className="cursor-pointer text-xs leading-5 text-muted-foreground"
             htmlFor={ageConfirmationId}
           >
-            I am 18 years of age or older.
+            {t("onboarding.membership.age-attestation")}
           </label>
         </div>
       ) : null}
@@ -71,7 +73,7 @@ export function JoinPolicyNotice({
             className="cursor-pointer text-xs leading-5 text-muted-foreground"
             htmlFor={agreementConfirmationId}
           >
-            I agree to the Buzz{" "}
+            {t("onboarding.membership.agree-intro")}
             {policy.termsMarkdown ? (
               <Button
                 className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
@@ -82,10 +84,12 @@ export function JoinPolicyNotice({
                 type="button"
                 variant="link"
               >
-                Terms of Service
+                {t("onboarding.membership.terms-link")}
               </Button>
             ) : null}
-            {policy.termsMarkdown && policy.privacyMarkdown ? " and " : null}
+            {policy.termsMarkdown && policy.privacyMarkdown
+              ? t("onboarding.membership.agree-conjunction")
+              : null}
             {policy.privacyMarkdown ? (
               <Button
                 className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
@@ -96,10 +100,10 @@ export function JoinPolicyNotice({
                 type="button"
                 variant="link"
               >
-                Privacy Policy
+                {t("onboarding.membership.privacy-link")}
               </Button>
             ) : null}
-            .
+            {t("onboarding.membership.agree-terminal")}
           </label>
         </div>
       ) : null}

@@ -1,6 +1,7 @@
 import { Clock } from "lucide-react";
 
 import { formatTimeoutRemaining } from "@/features/moderation/lib/timeout";
+import { useTranslation } from "@/i18n";
 
 /**
  * A banner docked to the top edge of the composer while the member is timed
@@ -16,6 +17,7 @@ export function ComposerTimeoutBanner({
   /** Timeout expiry in epoch ms, or null when the relay gave no timestamp. */
   expiresAtMs: number | null;
 }) {
+  const { t } = useTranslation();
   const remaining = formatTimeoutRemaining(expiresAtMs);
 
   return (
@@ -26,8 +28,8 @@ export function ComposerTimeoutBanner({
       <Clock aria-hidden className="h-4 w-4 shrink-0 text-amber-600" />
       <span className="min-w-0">
         {remaining
-          ? `You're timed out by community moderators — ${remaining} left.`
-          : "You're timed out by community moderators."}
+          ? t("moderation.composer.timed-out-remaining", { remaining })
+          : t("channels.pane.placeholder-timeout")}
       </span>
     </div>
   );

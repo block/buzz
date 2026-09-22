@@ -1,14 +1,8 @@
 import { AlertCircle } from "lucide-react";
 
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
+import { useTranslation } from "@/i18n";
 import { Button } from "@/shared/ui/button";
-
-const SECTION_LABELS: Record<ProjectWorkItemSection, string> = {
-  assignments: "assignments",
-  comments: "comments",
-  "pull-request-updates": "review updates",
-  statuses: "statuses",
-};
 
 type ProjectsWorkItemsLoadNoticeProps = {
   error: unknown;
@@ -26,30 +20,45 @@ export function ProjectsWorkItemsLoadNotice({
   onRetry,
   subject,
 }: ProjectsWorkItemsLoadNoticeProps) {
+  const { t } = useTranslation();
   if (!error && failedSections.length === 0) return null;
 
+  const sectionLabels: Record<ProjectWorkItemSection, string> = {
+    assignments: t("projects.work-items-notice.section-assignments"),
+    comments: t("projects.work-items-notice.section-comments"),
+    "pull-request-updates": t(
+      "projects.work-items-notice.section-review-updates",
+    ),
+    statuses: t("projects.work-items-notice.section-statuses"),
+  };
   const displaySubject =
     subject === "pull requests"
-      ? "reviews"
+      ? t("projects.work-items-notice.subject-reviews")
       : subject === "issues"
-        ? "tasks"
+        ? t("projects.work-items-notice.subject-tasks")
         : subject;
   const detailSubject =
     subject === "pull requests"
-      ? "review"
+      ? t("projects.work-items-notice.subject-review")
       : subject === "issues"
-        ? "task"
+        ? t("projects.work-items-notice.subject-task")
         : subject;
   const title = error
-    ? `Could not load ${displaySubject}.`
-    : `Some ${detailSubject} details could not be loaded.`;
+    ? t("projects.work-items-notice.could-not-load", {
+        subject: displaySubject,
+      })
+    : t("projects.work-items-notice.partial-details", {
+        subject: detailSubject,
+      });
   const description = error
     ? error instanceof Error
       ? error.message
-      : "The relay request failed."
-    : `Missing ${failedSections
-        .map((section) => SECTION_LABELS[section])
-        .join(", ")}. The available results are shown below.`;
+      : t("projects.work-items-notice.relay-failed")
+    : t("projects.work-items-notice.missing-sections", {
+        sections: failedSections
+          .map((section) => sectionLabels[section])
+          .join(", "),
+      });
 
   return (
     <div

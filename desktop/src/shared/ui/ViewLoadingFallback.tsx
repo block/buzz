@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import { Card } from "@/shared/ui/card";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -395,6 +396,7 @@ export function ViewLoadingFallback({
   includeHeader = false,
   kind,
 }: ViewLoadingFallbackProps) {
+  const { t } = useTranslation();
   const shouldShowChannelHeader =
     includeHeader && (kind === "channel" || kind === "forum");
 
@@ -404,7 +406,7 @@ export function ViewLoadingFallback({
       {kind === "agents" ? <AgentsLoadingBody /> : null}
       {kind === "workflows" ? <CardListLoadingBody /> : null}
       {kind === "projects" ? (
-        <BuzzLoadingState fill label="Loading projects" />
+        <BuzzLoadingState fill label={t("shared.ui.view-loading.projects")} />
       ) : null}
       {kind === "channel" ? (
         <ChannelLoadingBody hasHeader={shouldShowChannelHeader} />

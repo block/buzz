@@ -1,3 +1,4 @@
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import type { TranscriptItem } from "../agentSessionTypes";
 import type { CompactToolSummary } from "../agentSessionToolSummary";
@@ -28,6 +29,7 @@ export function TodoToolSummary({
   fallbackPreview: string | null;
   item: Extract<TranscriptItem, { type: "tool" }>;
 }) {
+  const { t } = useTranslation();
   const todos = buildTodoDisplayItems(item.args, item.result, fallbackPreview);
   const variant = useAgentSessionTranscriptVariant();
   const isCompactPreview = variant === "compactPreview";
@@ -67,7 +69,7 @@ export function TodoToolSummary({
               isCompactPreview ? "text-xs" : "text-sm",
             )}
           >
-            No todos.
+            {t("agents.tool-summary.no-todos")}
           </p>
         )}
       </ActivityRowContent>

@@ -24,6 +24,7 @@ import {
 import type { ProjectsFilter } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectsActivityDigest } from "@/features/projects/lib/projectsActivityDigest";
 import { useProjectSelection } from "@/features/projects/lib/useProjectSelection";
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ProjectsOverviewPeople } from "./ProjectsOverviewRail";
@@ -163,6 +164,7 @@ export function ProjectsActivityIntro({
 }: {
   digest: ProjectsActivityDigest;
 }) {
+  const { t } = useTranslation();
   return (
     <section
       className="pb-6 pt-8 text-left"
@@ -172,7 +174,7 @@ export function ProjectsActivityIntro({
         className="text-xl font-semibold tracking-tight text-foreground"
         data-testid="projects-page-header"
       >
-        Projects Activity
+        {t("projects.digest.page-title")}
       </h2>
       <p
         className="mt-2 max-w-2xl text-sm text-muted-foreground"
@@ -183,8 +185,8 @@ export function ProjectsActivityIntro({
           <span key={highlight}>
             {index > 0
               ? index === digest.highlights.length - 1
-                ? ", and "
-                : ", "
+                ? t("projects.digest.join-and")
+                : t("projects.digest.join-comma")
               : null}
             <strong className="font-medium text-foreground/90">
               {highlight}

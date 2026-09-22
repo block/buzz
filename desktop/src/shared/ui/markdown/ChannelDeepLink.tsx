@@ -10,6 +10,7 @@ import {
   parseChannelLink,
 } from "@/features/messages/lib/channelLink";
 import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
+import { i18n, useTranslation } from "@/i18n";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -32,20 +33,36 @@ function formatChannelActivity(timestamp: string): string | null {
     0,
     Math.floor((Date.now() - activityAt) / 60_000),
   );
-  if (elapsedMinutes < 1) return "Active just now";
-  if (elapsedMinutes < 60) return `Active ${elapsedMinutes}m ago`;
+  if (elapsedMinutes < 1)
+    return i18n.t("shared.markdown.channel.activity-just-now");
+  if (elapsedMinutes < 60)
+    return i18n.t("shared.markdown.channel.activity-minutes", {
+      count: elapsedMinutes,
+    });
   const elapsedHours = Math.floor(elapsedMinutes / 60);
-  if (elapsedHours < 24) return `Active ${elapsedHours}h ago`;
+  if (elapsedHours < 24)
+    return i18n.t("shared.markdown.channel.activity-hours", {
+      count: elapsedHours,
+    });
   const elapsedDays = Math.floor(elapsedHours / 24);
-  if (elapsedDays < 7) return `Active ${elapsedDays}d ago`;
-  return `Active ${Math.floor(elapsedDays / 7)}w ago`;
+  if (elapsedDays < 7)
+    return i18n.t("shared.markdown.channel.activity-days", {
+      count: elapsedDays,
+    });
+  return i18n.t("shared.markdown.channel.activity-weeks", {
+    count: Math.floor(elapsedDays / 7),
+  });
 }
 
 export function channelTooltipFooter(channel: Channel) {
   const details = [
-    channel.visibility === "private" ? "Private channel" : "Public channel",
-    channel.channelType === "forum" ? "Forum" : null,
-    channel.archivedAt ? "Archived" : null,
+    channel.visibility === "private"
+      ? i18n.t("shared.markdown.channel.private")
+      : i18n.t("shared.markdown.channel.public"),
+    channel.channelType === "forum"
+      ? i18n.t("shared.markdown.channel.forum")
+      : null,
+    channel.archivedAt ? i18n.t("shared.markdown.channel.archived") : null,
     channel.lastMessageAt ? formatChannelActivity(channel.lastMessageAt) : null,
   ];
   return details.filter(Boolean).join(" · ");
@@ -119,6 +136,7 @@ function ChannelPermalinkChipContents({
   label: string;
   openable?: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <ChannelMetadataTooltip channel={channel}>
       <BuzzLinkChip
@@ -126,7 +144,11 @@ function ChannelPermalinkChipContents({
         href={href}
         icon="channel"
         title={href}
-        aria-label={openable ? `Open channel ${label}` : `Channel ${label}`}
+        aria-label={
+          openable
+            ? t("messages.link.open-channel", { name: label })
+            : t("shared.markdown.channel.aria-name", { name: label })
+        }
         interactive={openable && interactive}
         onOpenLink={() => {
           if (openable) onOpenChannel(channelId);
@@ -174,6 +196,7 @@ function ResolvedAuthoredDeepLink({
   onOpenChannel,
   onOpenMessageLink,
 }: AuthoredDeepLinkProps) {
+  const { t } = useTranslation();
   const channel = useChannelReference(channelId);
   const openable = isChannelReferenceOpenable(channel);
   const label = getReactNodeText(children);
@@ -188,7 +211,11 @@ function ResolvedAuthoredDeepLink({
     <BuzzInlineLink
       href={href}
       title={href}
-      aria-label={`${messageLink ? "Open message" : "Open channel"}: ${label}`}
+      aria-label={
+        messageLink
+          ? t("shared.markdown.channel.aria-open-message", { label })
+          : t("shared.markdown.channel.aria-open-channel", { label })
+      }
       interactive={interactive}
       onOpenLink={() =>
         messageLink ? onOpenMessageLink(messageLink) : onOpenChannel(channelId)
@@ -226,6 +253,7 @@ export function AuthoredDeepLinkAnchor({
     onOpenMessageLink,
     resolveChannelReferences,
   } = useMarkdownRuntime();
+  const { t } = useTranslation();
   const openLink = () =>
     messageLink ? onOpenMessageLink(messageLink) : onOpenChannel(channelId);
   const label = getReactNodeText(children);
@@ -235,7 +263,11 @@ export function AuthoredDeepLinkAnchor({
       <BuzzInlineLink
         href={href}
         title={href}
-        aria-label={`${messageLink ? "Open message" : "Open channel"}: ${label}`}
+        aria-label={
+          messageLink
+            ? t("shared.markdown.channel.aria-open-message", { label })
+            : t("shared.markdown.channel.aria-open-channel", { label })
+        }
         interactive={interactive}
         onOpenLink={openLink}
       >
@@ -406,6 +438,7 @@ function ChannelReferenceChip({
   interactive,
   onOpenChannel,
 }: ChannelReferenceChipProps) {
+  const { t } = useTranslation();
   return (
     <ChannelMetadataTooltip channel={channel}>
       <BuzzLinkChip
@@ -415,7 +448,9 @@ function ChannelReferenceChip({
         href={channel ? buildChannelLink(channel.id) : undefined}
         icon="channel"
         aria-label={
-          channel ? `Open channel ${channelName}` : `Channel ${channelName}`
+          channel
+            ? t("messages.link.open-channel", { name: channelName })
+            : t("shared.markdown.channel.aria-name", { name: channelName })
         }
         interactive={Boolean(channel) && interactive}
         onOpenLink={() => {

@@ -9,6 +9,7 @@ import {
   AlertDialogTitle,
 } from "@/shared/ui/alert-dialog";
 import { Button, buttonVariants } from "@/shared/ui/button";
+import { useTranslation } from "@/i18n";
 
 // Archive is relay-scoped + reversible (NIP-IA), so this gates with a calm,
 // reassuring confirmation rather than a destructive warning. The confirm action
@@ -30,8 +31,13 @@ export function ArchiveConfirmDialog({
   isBot: boolean;
   isPending: boolean;
 }) {
-  const title = isBot ? "Archive this agent?" : "Archive this identity?";
-  const subject = isBot ? "this agent" : "this person";
+  const { t } = useTranslation();
+  const title = isBot
+    ? t("profile.archive-confirm.title-agent")
+    : t("profile.archive-confirm.title-identity");
+  const subject = isBot
+    ? t("profile.archive-confirm.subject-agent")
+    : t("profile.archive-confirm.subject-person");
 
   return (
     <AlertDialog onOpenChange={onOpenChange} open={open}>
@@ -39,33 +45,32 @@ export function ArchiveConfirmDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>
-            Archiving hides {subject} from the space.
+            {t("profile.archive-confirm.hides", { subject })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {/* The list + closing paragraph sit outside AlertDialogDescription on
             purpose — that component renders a <p>, which can't legally contain
             a <ul> or another block <p>. */}
         <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
+          <li>{t("profile.archive-confirm.list-search")}</li>
           <li>
-            They won't appear in search, autocomplete, or when adding members
+            {t("profile.archive-confirm.list-scope-before")}
+            <span className="font-medium text-foreground">
+              {t("profile.archive-confirm.list-scope-emphasis")}
+            </span>
+            {t("profile.archive-confirm.list-scope-after")}
           </li>
-          <li>
-            This only affects{" "}
-            <span className="font-medium text-foreground">this space</span> —
-            not their account anywhere else
-          </li>
-          <li>You can unarchive them at any time to restore them</li>
+          <li>{t("profile.archive-confirm.list-restore")}</li>
         </ul>
         {isBot ? (
           <p className="text-sm text-muted-foreground">
-            You can also delete this agent from the profile settings menu if you
-            want to remove the agent instead of hiding it.
+            {t("profile.archive-confirm.bot-note")}
           </p>
         ) : null}
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {t("profile.archive-confirm.cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction
@@ -74,7 +79,9 @@ export function ArchiveConfirmDialog({
             disabled={isPending}
             onClick={onConfirm}
           >
-            {isPending ? "Archiving…" : "Archive"}
+            {isPending
+              ? t("profile.archive-confirm.archiving")
+              : t("profile.archive-confirm.archive")}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

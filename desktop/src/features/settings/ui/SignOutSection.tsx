@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { NsecMaskedDisplay } from "@/features/onboarding/ui/NsecMaskedDisplay";
+import { useTranslation } from "@/i18n";
 import { getNsec, signOut } from "@/shared/api/tauriIdentity";
 import {
   AlertDialog,
@@ -41,6 +42,7 @@ export const SIGNOUT_CONFIRM_PHRASE = "wipe all my data";
  * Only when both gates pass does "Delete my data" become clickable.
  */
 export function SignOutSection() {
+  const { t } = useTranslation();
   const [isOpen, setIsOpen] = React.useState(false);
   const [isPending, setIsPending] = React.useState(false);
 
@@ -89,7 +91,7 @@ export function SignOutSection() {
         setNsecError(
           err instanceof Error
             ? err.message
-            : "Failed to retrieve private key.",
+            : t("settings.signout.nsec-load-failed"),
         );
     } finally {
       if (!fetchCancelledRef.current) setIsNsecLoading(false);
@@ -116,22 +118,24 @@ export function SignOutSection() {
         setIsPending(false);
         setIsOpen(false);
         resetDialogState();
-        toast.error(err instanceof Error ? err.message : "Sign out failed.");
+        toast.error(
+          err instanceof Error
+            ? err.message
+            : t("settings.signout.submit-failed"),
+        );
       });
   }
 
   return (
     <div className="mt-12 pb-6" data-testid="settings-signout">
-      <SettingsOptionGroup title="Sign out">
+      <SettingsOptionGroup title={t("settings.signout.title")}>
         <SettingsOptionRow>
           <div className="min-w-0">
             <p
               className="text-sm font-normal text-muted-foreground/70"
               data-settings-subcopy
             >
-              Removes your identity key and all local app data from this device.
-              Before signing out, create and test a password-protected key
-              backup above — this cannot be undone.
+              {t("settings.signout.description")}
             </p>
           </div>
           <Button
@@ -142,9 +146,14 @@ export function SignOutSection() {
             variant="destructive"
           >
             {isPending ? (
-              <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
+              <Spinner
+                aria-label={t("settings.signout.spinner-aria")}
+                className="h-4 w-4 border-2"
+              />
             ) : null}
-            {isPending ? "Signing out…" : "Delete my data"}
+            {isPending
+              ? t("settings.signout.pending")
+              : t("settings.signout.delete-button")}
           </Button>
         </SettingsOptionRow>
       </SettingsOptionGroup>
@@ -159,20 +168,22 @@ export function SignOutSection() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Sign out and wipe all data?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t("settings.signout.dialog-title")}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              This will delete your identity key, all agent settings, and cached
-              data from this device, then relaunch Buzz into first-run setup.
-              This cannot be undone.
+              {t("settings.signout.dialog-description")}
             </AlertDialogDescription>
           </AlertDialogHeader>
 
           <div className="space-y-3">
             <p className="text-sm font-medium">
-              1. Confirm you can restore your identity
+              {t("settings.signout.backup-step")}
             </p>
             {isNsecLoading ? (
-              <p className="text-sm text-muted-foreground">Loading…</p>
+              <p className="text-sm text-muted-foreground">
+                {t("settings.signout.loading")}
+              </p>
             ) : nsecError ? (
               <p
                 className="text-sm text-destructive"
@@ -198,10 +209,7 @@ export function SignOutSection() {
                   setHasConfirmedBackup(checked === true)
                 }
               />
-              <span>
-                I have tested a key backup or saved this private key somewhere
-                safe.
-              </span>
+              <span>{t("settings.signout.backup-confirm")}</span>
             </label>
           </div>
 
@@ -210,9 +218,9 @@ export function SignOutSection() {
               className="text-sm font-medium"
               htmlFor="signout-confirm-phrase"
             >
-              2. Type{" "}
+              {t("settings.signout.type-prefix")}{" "}
               <span className="font-semibold">"{SIGNOUT_CONFIRM_PHRASE}"</span>{" "}
-              to confirm
+              {t("settings.signout.type-suffix")}
             </label>
             <Input
               autoComplete="off"
@@ -227,7 +235,9 @@ export function SignOutSection() {
           </div>
 
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={isPending}>
+              {t("sidebar.common.cancel")}
+            </AlertDialogCancel>
             {/* A plain Button, not AlertDialogAction: Radix's Action closes
                 the dialog on click, which would drop the pending state while
                 the wipe + restart is still in flight. */}
@@ -240,11 +250,13 @@ export function SignOutSection() {
             >
               {isPending ? (
                 <Spinner
-                  aria-label="Signing out"
+                  aria-label={t("settings.signout.spinner-aria")}
                   className="h-4 w-4 border-2"
                 />
               ) : null}
-              {isPending ? "Signing out…" : "Delete my data"}
+              {isPending
+                ? t("settings.signout.pending")
+                : t("settings.signout.delete-button")}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import type { ObserverEvent, PromptSection } from "./agentSessionTypes";
 import {
   findBuzzToolName,
@@ -44,7 +45,13 @@ export function parsePromptBlocks(
   const parsed = parsePromptText(remainingBlocks.join("\n"));
   return {
     ...parsed,
-    sections: [{ title: "Prompt", body: firstBlock }, ...parsed.sections],
+    sections: [
+      {
+        title: i18n.t("agents.prompt-section.prompt"),
+        body: firstBlock,
+      },
+      ...parsed.sections,
+    ],
   };
 }
 
@@ -66,7 +73,7 @@ export function parsePromptText(text: string): {
     return {
       sections: [],
       userText: text.trim(),
-      userTitle: "Prompt",
+      userTitle: i18n.t("agents.prompt-section.prompt"),
       userPubkey: null,
       userEventId: null,
     };
@@ -88,7 +95,9 @@ export function parsePromptText(text: string): {
   return {
     sections,
     userText: eventContent,
-    userTitle: eventKind ? titleCase(eventKind) : "Buzz event",
+    userTitle: eventKind
+      ? titleCase(eventKind)
+      : i18n.t("agents.prompt-context.buzz-event"),
     userPubkey: eventAuthorPubkey,
     userEventId: eventId,
   };
@@ -224,8 +233,11 @@ export function parseSystemPromptSections(
   }
 
   const instructionFrames = [
-    { header: "[Agent Instructions]", title: "Agent Instructions" },
-    { header: "[System]", title: "System" },
+    {
+      header: "[Agent Instructions]",
+      title: i18n.t("agents.prompt-section.agent-instructions"),
+    },
+    { header: "[System]", title: i18n.t("agents.prompt-section.system") },
   ] as const;
 
   function appendBaseAndWorkspace(raw: string): void {
@@ -244,9 +256,16 @@ export function parseSystemPromptSections(
         const workspaceBody = raw
           .slice(workspaceAt + workspaceMarker.length)
           .trim();
-        if (baseBody) sections.push({ title: "Base", body: baseBody });
+        if (baseBody)
+          sections.push({
+            title: i18n.t("agents.prompt-section.base"),
+            body: baseBody,
+          });
         if (workspaceBody)
-          sections.push({ title: "Workspace", body: workspaceBody });
+          sections.push({
+            title: i18n.t("agents.prompt-section.workspace"),
+            body: workspaceBody,
+          });
         return;
       }
     }
@@ -261,14 +280,25 @@ export function parseSystemPromptSections(
           .trim();
         const baseBody = raw.slice(baseAt + baseMarker.length).trim();
         if (workspaceBody)
-          sections.push({ title: "Workspace", body: workspaceBody });
-        if (baseBody) sections.push({ title: "Base", body: baseBody });
+          sections.push({
+            title: i18n.t("agents.prompt-section.workspace"),
+            body: workspaceBody,
+          });
+        if (baseBody)
+          sections.push({
+            title: i18n.t("agents.prompt-section.base"),
+            body: baseBody,
+          });
         return;
       }
     }
 
     const baseBody = raw.replace(/^\[Base]\n/, "").trim();
-    if (baseBody) sections.push({ title: "Base", body: baseBody });
+    if (baseBody)
+      sections.push({
+        title: i18n.t("agents.prompt-section.base"),
+        body: baseBody,
+      });
   }
 
   const baseAndInstructions = remainder;
@@ -282,7 +312,10 @@ export function parseSystemPromptSections(
       if (instructionsBody)
         sections.push({ title: leadingFrame.title, body: instructionsBody });
       if (teamBody)
-        sections.push({ title: "Team Instructions", body: teamBody });
+        sections.push({
+          title: i18n.t("agents.prompt-section.team-instructions"),
+          body: teamBody,
+        });
     } else {
       const boundary = instructionFrames
         .map((frame) => ({
@@ -305,16 +338,30 @@ export function parseSystemPromptSections(
         if (instructionsBody)
           sections.push({ title: boundary.title, body: instructionsBody });
         if (teamBody)
-          sections.push({ title: "Team Instructions", body: teamBody });
+          sections.push({
+            title: i18n.t("agents.prompt-section.team-instructions"),
+            body: teamBody,
+          });
       }
     }
   }
 
   // ── 5. Append team (modern), core, and canvas sections in producer order ──
   if (modernTeamBody)
-    sections.push({ title: "Team Instructions", body: modernTeamBody });
-  if (coreBody) sections.push({ title: "Core Memory", body: coreBody });
-  if (canvasBody) sections.push({ title: "Channel Canvas", body: canvasBody });
+    sections.push({
+      title: i18n.t("agents.prompt-section.team-instructions"),
+      body: modernTeamBody,
+    });
+  if (coreBody)
+    sections.push({
+      title: i18n.t("agents.prompt-section.core-memory"),
+      body: coreBody,
+    });
+  if (canvasBody)
+    sections.push({
+      title: i18n.t("agents.prompt-section.channel-canvas"),
+      body: canvasBody,
+    });
 
   return sections;
 }
@@ -327,15 +374,15 @@ function parseSemanticStandingSections(
   systemPrompt: string,
 ): PromptSection[] | null {
   const titles: Record<string, string> = {
-    workspace: "Workspace",
-    base: "Base",
-    "agent-instructions": "Agent Instructions",
+    workspace: i18n.t("agents.prompt-section.workspace"),
+    base: i18n.t("agents.prompt-section.base"),
+    "agent-instructions": i18n.t("agents.prompt-section.agent-instructions"),
     // Preserve diagnostics for sessions captured before this tag was renamed.
-    system: "System",
-    "team-instructions": "Team Instructions",
-    "core-memory": "Core Memory",
-    "huddle-instructions": "Huddle Instructions",
-    "channel-canvas": "Channel Canvas",
+    system: i18n.t("agents.prompt-section.system"),
+    "team-instructions": i18n.t("agents.prompt-section.team-instructions"),
+    "core-memory": i18n.t("agents.prompt-section.core-memory"),
+    "huddle-instructions": i18n.t("agents.prompt-section.huddle-instructions"),
+    "channel-canvas": i18n.t("agents.prompt-section.channel-canvas"),
   };
   const tags = Object.keys(titles).join("|");
   // Archived bracket-framed personas may contain literal balanced tag examples.
@@ -349,7 +396,9 @@ function parseSemanticStandingSections(
     return parsed.sections;
   }
 
-  return [{ title: "Prompt", body: systemPrompt }];
+  return [
+    { title: i18n.t("agents.prompt-section.prompt"), body: systemPrompt },
+  ];
 }
 
 function splitSemanticStandingPrefix(text: string): {
@@ -369,15 +418,15 @@ function splitSemanticStandingPrefix(text: string): {
     "channel-canvas",
   ].join("|");
   const titles: Record<string, string> = {
-    workspace: "Workspace",
-    base: "Base",
-    "agent-instructions": "Agent Instructions",
+    workspace: i18n.t("agents.prompt-section.workspace"),
+    base: i18n.t("agents.prompt-section.base"),
+    "agent-instructions": i18n.t("agents.prompt-section.agent-instructions"),
     // Preserve diagnostics for sessions captured before this tag was renamed.
-    system: "System",
-    "team-instructions": "Team Instructions",
-    "core-memory": "Core Memory",
-    "huddle-instructions": "Huddle Instructions",
-    "channel-canvas": "Channel Canvas",
+    system: i18n.t("agents.prompt-section.system"),
+    "team-instructions": i18n.t("agents.prompt-section.team-instructions"),
+    "core-memory": i18n.t("agents.prompt-section.core-memory"),
+    "huddle-instructions": i18n.t("agents.prompt-section.huddle-instructions"),
+    "channel-canvas": i18n.t("agents.prompt-section.channel-canvas"),
   };
   if (hasAmbiguousSemanticBoundary(text, Object.keys(titles))) {
     return { sections, remainder: text };
@@ -465,30 +514,44 @@ function semanticTurnTitle(
 ): string {
   switch (tag) {
     case "context":
-      return "Context";
+      return i18n.t("agents.prompt-context.context");
     case "thread-context":
     case "conversation-context": {
       const label =
-        tag === "thread-context" ? "Thread Context" : "Conversation Context";
-      const truncated = attributes.truncated === "true" ? ", truncated" : "";
-      return `${label} (${attributes.included} of ${attributes.total} messages${truncated})`;
+        tag === "thread-context"
+          ? i18n.t("agents.prompt-context.thread-context")
+          : i18n.t("agents.prompt-context.conversation-context");
+      const truncated =
+        attributes.truncated === "true"
+          ? i18n.t("agents.prompt-context.truncated-suffix")
+          : "";
+      return i18n.t("agents.prompt-context.message-window", {
+        label,
+        included: attributes.included,
+        total: attributes.total,
+        truncated,
+      });
     }
     case "buzz-event":
       return attributes.type ? `Buzz event: ${attributes.type}` : "Buzz event";
     case "buzz-events":
       return `Buzz events — ${attributes.count} events`;
     case "what-you-were-working-on":
-      return "What you were working on";
+      return i18n.t("agents.prompt-context.what-you-were-working-on");
     case "new-message-arrived-while-you-were-working":
       return attributes.count
-        ? `New messages — arrived while you were working — ${attributes.count} events`
-        : "New message — arrived while you were working";
+        ? i18n.t("agents.prompt-context.new-messages-count", {
+            count: Number(attributes.count),
+          })
+        : i18n.t("agents.prompt-context.new-messages");
     case "previous-request-interrupted-before-completion":
-      return "Previous request — interrupted before completion";
+      return i18n.t("agents.prompt-context.previous-request");
     case "new-request-supersedes-previous":
       return attributes.count
-        ? `New request — supersedes previous — ${attributes.count} events`
-        : "New request — supersedes previous";
+        ? i18n.t("agents.prompt-context.new-request-count", {
+            count: Number(attributes.count),
+          })
+        : i18n.t("agents.prompt-context.new-request");
     default:
       return tag;
   }
@@ -515,7 +578,10 @@ function parsePromptSections(text: string): PromptSection[] {
           body: current.body.trim(),
         });
       } else if (preamble.join("\n").trim()) {
-        sections.push({ title: "Prompt", body: preamble.join("\n").trim() });
+        sections.push({
+          title: i18n.t("agents.prompt-section.prompt"),
+          body: preamble.join("\n").trim(),
+        });
       }
       current = { title: header[1], body: "" };
       continue;
@@ -531,7 +597,10 @@ function parsePromptSections(text: string): PromptSection[] {
   if (current) {
     sections.push({ title: current.title, body: current.body.trim() });
   } else if (preamble.join("\n").trim()) {
-    sections.push({ title: "Prompt", body: preamble.join("\n").trim() });
+    sections.push({
+      title: i18n.t("agents.prompt-section.prompt"),
+      body: preamble.join("\n").trim(),
+    });
   }
 
   return sections;
@@ -672,7 +741,10 @@ export function extractToolIdentity(update: Record<string, unknown>): {
     (candidate) => !isGenericToolTitle(candidate),
   );
   const title =
-    asString(update.title) ?? knownName ?? firstSpecific ?? "Tool call";
+    asString(update.title) ??
+    knownName ??
+    firstSpecific ??
+    i18n.t("agents.transcript.tool-call");
   return {
     title,
     toolName: knownName ?? normalizeToolName(firstSpecific ?? title),
@@ -736,7 +808,7 @@ export function describeTurnStarted(payload: unknown): string {
 export function describeSessionResolved(payload: unknown): string {
   const record = asRecord(payload);
   const isNewSession = record.isNewSession === true;
-  return isNewSession ? "New session created." : "";
+  return isNewSession ? i18n.t("agents.transcript.new-session-created") : "";
 }
 
 export function describeRawEvent(event: ObserverEvent): string {

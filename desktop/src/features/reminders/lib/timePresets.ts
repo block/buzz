@@ -1,9 +1,15 @@
+import { i18n } from "@/i18n";
+
 /**
  * Shared reminder time presets — the single source of truth for both the
  * create dialog and the snooze dropdown. Each preset returns a Unix timestamp
  * (seconds) strictly in the future.
  */
 export type TimePreset = {
+  /**
+   * Resolved on every read: `i18n` boots after this module is imported, so a
+   * module-top-level `i18n.t(...)` would freeze `undefined` into the list.
+   */
   label: string;
   getTimestamp: () => number;
 };
@@ -29,12 +35,34 @@ function nextDayAt9am(dayOffset: number): number {
 }
 
 export const TIME_PRESETS: TimePreset[] = [
-  { label: "In 30 minutes", getTimestamp: () => nowSeconds() + 30 * 60 },
-  { label: "In 1 hour", getTimestamp: () => nowSeconds() + 60 * 60 },
-  { label: "In 3 hours", getTimestamp: () => nowSeconds() + 3 * 60 * 60 },
-  { label: "Tomorrow at 9am", getTimestamp: () => nextDayAt9am(1) },
   {
-    label: "Next Monday at 9am",
+    get label() {
+      return i18n.t("reminders.preset.in-30-minutes");
+    },
+    getTimestamp: () => nowSeconds() + 30 * 60,
+  },
+  {
+    get label() {
+      return i18n.t("reminders.preset.in-1-hour");
+    },
+    getTimestamp: () => nowSeconds() + 60 * 60,
+  },
+  {
+    get label() {
+      return i18n.t("reminders.preset.in-3-hours");
+    },
+    getTimestamp: () => nowSeconds() + 3 * 60 * 60,
+  },
+  {
+    get label() {
+      return i18n.t("reminders.preset.tomorrow-9am");
+    },
+    getTimestamp: () => nextDayAt9am(1),
+  },
+  {
+    get label() {
+      return i18n.t("reminders.preset.next-monday-9am");
+    },
     getTimestamp: () => {
       const daysUntilMonday = (8 - new Date().getDay()) % 7 || 7;
       return nextDayAt9am(daysUntilMonday);

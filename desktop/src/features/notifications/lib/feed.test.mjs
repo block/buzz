@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { initializeI18n } from "@/i18n";
 import {
   eligibleFeedNotificationItems,
   enrichFeedItemChannel,
   notificationTitle,
 } from "./feed.ts";
+
+// The feed titles resolve through `i18n.t`, which returns nothing until the
+// singleton boots. English is pinned explicitly before init: node's own
+// `navigator.languages` reports the host system locale — which may be zh-CN —
+// and every assertion below is the English contract.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { languages: ["en-US", "en"], userAgent: "buzz-unit-test" },
+});
+initializeI18n();
 
 const feedItem = (overrides = {}) => ({
   id: "event-id",

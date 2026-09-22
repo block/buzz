@@ -1,5 +1,6 @@
 import { toast } from "sonner";
 
+import { i18n } from "@/i18n";
 import { copyTextToSystemClipboard } from "@/shared/api/tauriMedia";
 
 /**
@@ -19,7 +20,9 @@ export async function writeTextToClipboard(
 /** Copy text and show standard success/error feedback. */
 export function copyTextToClipboard(
   text: string,
-  successMessage = "Copied to clipboard",
+  // A default parameter re-evaluates per call, so the fallback toast follows
+  // a language switch instead of freezing at module evaluation.
+  successMessage: string = i18n.t("shared.clipboard.copied"),
   html?: string,
 ) {
   void writeTextToClipboard(text, html)
@@ -27,6 +30,6 @@ export function copyTextToClipboard(
       toast.success(successMessage);
     })
     .catch(() => {
-      toast.error("Failed to copy to clipboard");
+      toast.error(i18n.t("shared.clipboard.copy-failed"));
     });
 }

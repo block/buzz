@@ -1,12 +1,14 @@
 import type { Workflow } from "@/shared/api/types";
+import { i18n } from "@/i18n";
 import {
+  scheduleFrequencyLabel,
   scheduleFormFromTrigger,
-  SCHEDULE_FREQUENCY_LABELS,
 } from "./workflowSchedule";
 import {
-  ACTION_LABELS,
-  TRIGGER_LABELS,
+  actionTypeLabel,
+  isKnownActionType,
   TRIGGER_TYPES,
+  triggerTypeLabel,
 } from "./workflowFormTypes";
 import type {
   ActionType,
@@ -120,19 +122,21 @@ function getScheduleCardClause(trigger: Record<string, unknown>): string {
 
   switch (schedule.frequency) {
     case "daily":
-      return `Every day at ${schedule.time} UTC`;
+      return i18n.t("workflows.card.schedule-daily", { time: schedule.time });
     case "weekly":
-      return `Every week at ${schedule.time} UTC`;
+      return i18n.t("workflows.card.schedule-weekly", { time: schedule.time });
     case "monthly":
-      return `Every month at ${schedule.time} UTC`;
+      return i18n.t("workflows.card.schedule-monthly", { time: schedule.time });
     case "custom_interval":
       return schedule.customInterval
-        ? `Every ${schedule.customInterval}`
-        : "On a schedule";
+        ? i18n.t("workflows.card.schedule-custom-interval", {
+            interval: schedule.customInterval,
+          })
+        : i18n.t("workflows.card.schedule-on-a-schedule");
     case "custom_cron":
-      return "On a custom schedule";
+      return i18n.t("workflows.card.schedule-custom-cron");
     default:
-      return SCHEDULE_FREQUENCY_LABELS[schedule.frequency];
+      return scheduleFrequencyLabel(schedule.frequency);
   }
 }
 
@@ -142,29 +146,33 @@ function getTriggerCardClause(
 ): string {
   const trigger = asRecord(definition.trigger);
   const triggerType = nonEmptyString(trigger?.on);
-  if (!trigger || !triggerType) return "When this workflow starts";
+  if (!trigger || !triggerType) {
+    return i18n.t("workflows.card.trigger-fallback");
+  }
 
   switch (triggerType) {
     case "message_posted":
       return nonEmptyString(trigger.filter)
-        ? "When a matching message is posted"
-        : "When a message is posted";
+        ? i18n.t("workflows.card.trigger-message-matching")
+        : i18n.t("workflows.card.trigger-message");
     case "reaction_added": {
       const emoji = nonEmptyString(presentedReaction ?? trigger.emoji);
       return emoji
-        ? `When someone reacts with ${emoji}`
-        : "When someone adds a reaction";
+        ? i18n.t("workflows.card.trigger-reaction-with", { emoji })
+        : i18n.t("workflows.card.trigger-reaction");
     }
     case "diff_posted":
       return nonEmptyString(trigger.filter)
-        ? "When a matching diff is posted"
-        : "When a diff is posted";
+        ? i18n.t("workflows.card.trigger-diff-matching")
+        : i18n.t("workflows.card.trigger-diff");
     case "webhook":
-      return "When a webhook arrives";
+      return i18n.t("workflows.card.trigger-webhook");
     case "schedule":
       return getScheduleCardClause(trigger);
     default:
-      return `When ${humanizeIdentifier(triggerType)} happens`;
+      return i18n.t("workflows.card.trigger-unknown", {
+        trigger: humanizeIdentifier(triggerType),
+      });
   }
 }
 
@@ -295,7 +303,9 @@ function getActionCardClause(
   const action = nonEmptyString(step.action);
   if (!action) return null;
 
-  const actionLabel = ACTION_LABELS[action as ActionType];
+  const actionLabel = isKnownActionType(action)
+    ? actionTypeLabel(action)
+    : null;
   const parsedStep: StepFormState | null = actionLabel
     ? {
         action: action as ActionType,
@@ -331,33 +341,52 @@ function getActionCardClause(
   switch (action) {
     case "delay": {
       return configuredDetail
-        ? `wait ${configuredDetail}`
-        : "wait for a moment";
+        ? i18n.t("workflows.card.action-delay-detail", {
+            detail: configuredDetail,
+          })
+        : i18n.t("workflows.card.action-delay");
     }
     case "send_message":
-      if (!configuredDetail) return "send a channel message";
+      if (!configuredDetail)
+        return i18n.t("workflows.card.action-send-message");
       return nonEmptyString(step.text)
-        ? `send ${configuredDetail}`
-        : `send a message in ${configuredDetail}`;
+        ? i18n.t("workflows.card.action-send-text", {
+            detail: configuredDetail,
+          })
+        : i18n.t("workflows.card.action-send-to-channel", {
+            detail: configuredDetail,
+          });
     case "call_webhook":
-      return configuredDetail ? `call ${configuredDetail}` : "call a webhook";
+      return configuredDetail
+        ? i18n.t("workflows.card.action-call-webhook-detail", {
+            detail: configuredDetail,
+          })
+        : i18n.t("workflows.card.action-call-webhook");
     case "send_dm":
       return configuredDetail
-        ? `send ${configuredDetail}`
-        : "send a direct message";
+        ? i18n.t("workflows.card.action-send-dm-detail", {
+            detail: configuredDetail,
+          })
+        : i18n.t("workflows.card.action-send-dm");
     case "request_approval":
       return configuredDetail
-        ? `request approval: ${configuredDetail}`
-        : "request approval";
+        ? i18n.t("workflows.card.action-request-approval-detail", {
+            detail: configuredDetail,
+          })
+        : i18n.t("workflows.card.action-request-approval");
     case "add_reaction": {
       return configuredDetail
-        ? `add a ${configuredDetail} reaction`
-        : "add a reaction";
+        ? i18n.t("workflows.card.action-add-reaction-detail", {
+            detail: configuredDetail,
+          })
+        : i18n.t("workflows.card.action-add-reaction");
     }
     case "set_channel_topic":
       return configuredDetail
-        ? `set the channel topic to ${configuredDetail}`
-        : "update the channel topic";
+        ? i18n.t("workflows.card.action-set-topic-detail", {
+            detail: configuredDetail,
+          })
+        : i18n.t("workflows.card.action-set-topic");
     default: {
       return (actionLabel ?? humanizeIdentifier(action)).toLocaleLowerCase();
     }
@@ -397,11 +426,18 @@ export function getWorkflowCardLabel(
   if (!firstAction) return triggerClause;
 
   const remainingStepCount = steps.length - 1;
-  if (remainingStepCount === 0) return `${triggerClause}, ${firstAction}`;
+  if (remainingStepCount === 0) {
+    return i18n.t("workflows.card.label-with-action", {
+      action: firstAction,
+      trigger: triggerClause,
+    });
+  }
 
-  return `${triggerClause}, ${firstAction}, then ${remainingStepCount} more ${
-    remainingStepCount === 1 ? "step" : "steps"
-  }`;
+  return i18n.t("workflows.card.label-with-action-and-more", {
+    action: firstAction,
+    count: remainingStepCount,
+    trigger: triggerClause,
+  });
 }
 
 export function getWorkflowDescription(
@@ -450,7 +486,8 @@ export function getWorkflowTriggerSummary(
 
   const rawTrigger = asRecord(definition.trigger);
   const triggerType = nonEmptyString(rawTrigger?.on);
-  return triggerType
-    ? (TRIGGER_LABELS[triggerType as TriggerType] ?? triggerType)
-    : null;
+  if (!triggerType) return null;
+  return TRIGGER_TYPES.includes(triggerType as TriggerType)
+    ? triggerTypeLabel(triggerType as TriggerType)
+    : triggerType;
 }

@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import { useRef, useState } from "react";
 
+import { useTranslation } from "@/i18n";
 import { cn } from "@/shared/lib/cn";
 import type { LinkPreviewImageLightboxProps } from "@/shared/ui/rich-link-preview-attachment";
 
@@ -30,6 +31,7 @@ export function createLinkPreviewImageLightbox(
   ImageZoomOverlay: ComponentType<ImageZoomOverlayProps>,
 ): ComponentType<LinkPreviewImageLightboxProps> {
   return function LinkPreviewImageLightbox({ alt, children, className, src }) {
+    const { t } = useTranslation();
     const [lightboxState, setLightboxState] = useState<{
       galleryIndex: number;
       galleryItems?: ImageGalleryItem[];
@@ -80,7 +82,7 @@ export function createLinkPreviewImageLightbox(
     return (
       <>
         <button
-          aria-label={`Zoom image: ${alt}`}
+          aria-label={t("shared.markdown.zoom.image-aria", { alt: alt ?? "" })}
           className={cn(
             "cursor-zoom-in border-0 p-0 text-left focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
             lightboxState && "opacity-0",

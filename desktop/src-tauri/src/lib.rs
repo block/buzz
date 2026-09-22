@@ -551,6 +551,9 @@ pub fn run() {
             unarchive_builderlab_community,
             transfer_builderlab_community,
             title_bar_double_click,
+            // Registered on every host: the command is a no-op off macOS, so
+            // the frontend has one call path instead of a platform check.
+            app_menu::set_app_menu_locale,
             get_identity,
             get_nsec,
             generate_backup_passphrase,

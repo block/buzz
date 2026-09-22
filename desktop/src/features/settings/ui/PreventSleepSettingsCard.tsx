@@ -1,8 +1,10 @@
 import { usePreventSleepContext } from "@/features/agents/usePreventSleep";
+import { useTranslation } from "@/i18n";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 
 export function PreventSleepSettingsCard() {
+  const { t } = useTranslation();
   const { enabled, setEnabled, hasRunningAgents, expired, clearExpired } =
     usePreventSleepContext();
 
@@ -10,7 +12,7 @@ export function PreventSleepSettingsCard() {
     <div className="min-w-0 space-y-3">
       <SettingsOptionGroup
         data-testid="agents-preferences-card"
-        title="Preferences"
+        title={t("settings.common.group-preferences")}
       >
         <SettingsOptionRow>
           <div className="min-w-0">
@@ -18,15 +20,13 @@ export function PreventSleepSettingsCard() {
               className="text-sm font-medium"
               htmlFor="prevent-sleep-switch"
             >
-              Keep awake while agents are active
+              {t("settings.prevent-sleep.label")}
             </label>
             <p
               className="text-sm font-normal text-muted-foreground/70"
               data-settings-subcopy
             >
-              Prevents your computer from sleeping while local agents are
-              running. Automatically releases when all agents stop or after 1
-              hour without agent activity.
+              {t("settings.prevent-sleep.hint")}
             </p>
           </div>
           <Switch
@@ -45,15 +45,13 @@ export function PreventSleepSettingsCard() {
 
       {enabled && !hasRunningAgents && (
         <p className="mt-3 text-sm text-muted-foreground">
-          Waiting for agents to start
+          {t("settings.prevent-sleep.waiting")}
         </p>
       )}
 
       {expired && (
         <p className="mt-3 rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-700 dark:text-yellow-400">
-          Sleep prevention expired after 1 hour without agent activity. It will
-          resume on the next agent activity, or toggle off and on to re-enable
-          now.
+          {t("settings.prevent-sleep.expired")}
         </p>
       )}
     </div>
