@@ -52,7 +52,7 @@ The assertion is a compact JWS carrying the following claims.
 | `iss` | string | Exact issuer URI.  The relay selects an issuer policy by exact match; no normalization is applied. |
 | `sub` | string | Opaque, stable, non-reassignable subject identifier for the account lifetime.  Never an email address or display name. |
 | `nostr_pubkey` | string | Lowercase hexadecimal encoding of exactly one 32-byte Nostr public key.  Other encodings deny. |
-| `aud` | string or array | Audience.  MUST be present.  The relay requires an exact match to the configured audience value for this issuer.  In a multi-community deployment, each configured audience value MUST identify exactly one community/deployment: the one resolved from the connection's `Host`.  A relay MUST NOT configure the same audience value for distinct communities. |
+| `aud` | string or array | Audience.  MUST be present.  The configured audience value for each community MUST be that community's canonical host URI, following the resource-indicator practice in RFC 8707.  One community MUST map to one canonical audience value; distinct communities MUST NOT share an audience value.  The relay MUST require the assertion audience to exactly match the expected audience of the community resolved from the connection's `Host`; issuer policy selection by `iss` MUST NOT broaden this community binding. |
 | `iat` | NumericDate | Issuance time. |
 | `exp` | NumericDate | Expiry time.  MUST be finite.  The deployment MUST configure a positive finite maximum TTL; the relay enforces both the token `exp` and the configured `maximum_assertion_age`. |
 
@@ -111,13 +111,11 @@ This is the entire identity-to-key binding.  There is no relay-side binding
 ledger; the assertion is the binding claim, and it is the assertion issuer's
 responsibility to ensure the assertion names the correct key.
 
-> **Open question — pending issuer input (jm):** The exact format of the
-> audience value that identifies one community/deployment is not defined here.
-> The normative requirement is only that one configured audience value maps to
-> one community, and that distinct communities do not share it.  The
-> verification-time binding between the connection's `Host`-resolved community
-> and the presented audience also awaits that issuer-side mechanism; the `aud`
-> row is a configuration constraint, not yet an enforced verification step.
+Community resolution MUST precede assertion verification.  The relay MUST resolve the
+connection's `Host` to exactly one community and its expected audience; an unknown
+or unresolvable host MUST fail closed with `authorization_unavailable`.
+`VerifyAssertion` MUST compare `aud` with the resolved community's expected audience,
+while `iss` continues to select the issuer policy.
 
 ### Unverified claims
 
@@ -199,7 +197,7 @@ any attacker-controlled `kid` lookup.
 ### Verification procedure
 
 ```text
-VerifyAssertion(token, D, R_t):
+VerifyAssertion(token, expected_aud, D, R_t):
   // 1. Select issuer policy
   (header, claims) := BoundedJwsDecode(token) or DENY(evidence_rejected)
   policy := IssuerRegistry[claims.iss] or DENY(evidence_rejected)
@@ -213,9 +211,9 @@ VerifyAssertion(token, D, R_t):
   key := snapshot.find(header.kid) or DENY(evidence_rejected)
   VerifySignature(token, key) or DENY(evidence_rejected)
 
-  // 4. Validate claims
+  // 4. Validate claims against the resolved community and issuer policy
   AssertExactIss(claims.iss, policy.iss) or DENY(evidence_rejected)
-  AssertAudienceMatch(claims.aud, policy.aud) or DENY(evidence_rejected)
+  AssertAudienceMatch(claims.aud, expected_aud) or DENY(evidence_rejected)
   AssertTimeBounds(claims, policy) or DENY(evidence_rejected)  // [FI-TRACE-ASSERTION-VALIDATION]
   k_claimed := ParseHexKey(claims.nostr_pubkey) or DENY(evidence_rejected)
 
@@ -232,21 +230,24 @@ expired input denies.  A missing JWKS snapshot denies with
 
 On WebSocket upgrade:
 
-1. Extract `Nostr-Federated-Identity` header; missing or malformed → deny
-   `missing_evidence` or `evidence_rejected`.
-2. Call `VerifyAssertion`; any error → deny per the rejection table.
-3. Complete NIP-42 handshake; validate AUTH event, extract `k`.
-4. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
+1. Resolve the connection's `Host` to `community` and derive its
+   `expected_aud`; unknown or unresolvable → deny `authorization_unavailable`.
+2. Extract the compact JWS `token` from `Nostr-Federated-Identity`; missing or
+   malformed → deny `missing_evidence` or `evidence_rejected`.
+3. Call `VerifyAssertion(token, expected_aud, D, R_t)`; any error → deny per the
+   rejection table.
+4. Complete NIP-42 handshake; validate AUTH event, extract `k`.
+5. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
    [FI-TRACE-ASSERTION-KEY-MISMATCH]
-5. Register the session's proven `k` in the relay's session table, making it
+6. Register the session's proven `k` in the relay's session table, making it
    visible to the disconnect close scan.  Registration MUST occur before the
-   deny-set check in step 6.  This ordering ensures any connection that straddles
+   deny-set check in step 7.  This ordering ensures any connection that straddles
    a concurrent disconnect is caught by one side or the other: either the close
-   scan sees the registered session, or the deny-set check (step 6) sees the
+   scan sees the registered session, or the deny-set check (step 7) sees the
    inserted entry.
-6. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
+7. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
    `authorization_denied`.  [FI-TRACE-DENY-SET]
-7. Admit the connection.  The session's authority deadline is the minimum of all
+8. Admit the connection.  The session's authority deadline is the minimum of all
    `authority_deadlines`; see Session policy.
 
 ## Session policy
@@ -730,10 +731,13 @@ mixed-profile fields deny.  [FI-TRACE-TRANSPORT-CLOSED]
 
 On each protected HTTP request:
 
-1. Extract `Nostr-Federated-Identity`; missing or malformed → deny
-   `missing_evidence` or `evidence_rejected`.
-2. Call `VerifyAssertion`; any error → deny per the rejection table.
-3. Validate the NIP-98 `Authorization` event per NIP-98; extract the proven
+1. Resolve the connection's `Host` to `community` and derive its
+   `expected_aud`; unknown or unresolvable → deny `authorization_unavailable`.
+2. Extract the compact JWS `token` from `Nostr-Federated-Identity`; missing or
+   malformed → deny `missing_evidence` or `evidence_rejected`.
+3. Call `VerifyAssertion(token, expected_aud, D, R_t)`; any error → deny per the
+   rejection table.
+4. Validate the NIP-98 `Authorization` event per NIP-98; extract the proven
    pubkey `k` from the event.  An absent, malformed, or invalid NIP-98 event
    → deny `missing_evidence` or `evidence_rejected` as appropriate.
    For requests with an authorization-relevant body, the NIP-98 event MUST
@@ -741,11 +745,11 @@ On each protected HTTP request:
    SHA-256 hash of the exact consumed request body bytes.  An absent,
    duplicate, or mismatched `payload` tag on such a request → deny
    `evidence_rejected`.  [FI-TRACE-HTTP-INGRESS]
-4. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
+5. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
    [FI-TRACE-ASSERTION-KEY-MISMATCH]
-5. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
+6. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
    `authorization_denied`.  [FI-TRACE-DENY-SET]
-6. Admit the request.
+7. Admit the request.
 
 A body is **authorization-relevant** whenever any body byte influences the
 authorization decision, target resource, requested capability, effect
@@ -778,14 +782,15 @@ free text, reason code, issuer, subject, key, claim, or timing hint.
 
 Public class is a function only of evidence the requester supplied, never of
 private per-principal server state; `authorization_unavailable` is the sole
-exception and reveals only that a required dependency is unreadable.
+exception and reveals only that a required dependency or community/Host mapping
+is unavailable.
 
 | Private condition | Public class | Nostr text | HTTP response |
 |---|---|---|---|
 | assertion or proof absent | `missing_evidence` | `auth-required: authentication required` | `401`; `WWW-Authenticate: Nostr`; `Content-Type: text/plain; charset=utf-8`; body `authentication required\n` |
 | malformed, invalid, or expired evidence | `evidence_rejected` | `restricted: evidence rejected` | `403`; `Content-Type: text/plain; charset=utf-8`; body `evidence rejected\n` |
 | assertion–key mismatch; local policy denial; active deny-set entry for pubkey | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; body `authorization denied\n` |
-| required JWKS snapshot unreadable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; body `authorization unavailable\n` |
+| required JWKS snapshot or community/Host resolution unavailable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; body `authorization unavailable\n` |
 
 A denial decided on a WebSocket upgrade is the HTTP response in place of `101`.
 A denial decided on a protected HTTP request is the HTTP response.
@@ -856,7 +861,7 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | ID | Required outcome |
 |---|---|
 | `FI-TRACE-TRANSPORT-CLOSED` | Exact one-header input succeeds; missing, repeated, combined, malformed, and fallback variants deny. |
-| `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and missing-configuration negative denies. |
+| `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and missing-configuration negative denies; an assertion for community A presented on a `Host` resolved to community B denies on the audience mismatch; an unknown or unresolvable `Host` denies `authorization_unavailable`. |
 | `FI-TRACE-TOKEN-CLASS` | `at+jwt` and `nip-fi+jwt` pass only their selected class; ID tokens, wrong or generic types, and cross-class fallback deny. |
 | `FI-TRACE-ASSERTION-KEY-MISMATCH` | Mismatch between `nostr_pubkey` and the NIP-42 proven key denies with the private-state response. |
 | `FI-TRACE-JWKS-ADD` | A key added to the JWKS is accepted after the next snapshot refresh. |
@@ -941,4 +946,5 @@ is bounded before any attacker-controlled lookup.
 - NIP-98 HTTP authorization: <https://github.com/nostr-protocol/nips/blob/ae0fd96907d0767f07fb54ca1de9f197c600cb27/98.md>
 - JWT BCP: <https://www.rfc-editor.org/rfc/rfc8725>
 - JWT access-token profile: <https://www.rfc-editor.org/rfc/rfc9068>
+- Resource Indicators for OAuth 2.0: <https://www.rfc-editor.org/rfc/rfc8707>
 - DPoP: <https://www.rfc-editor.org/rfc/rfc9449>
