@@ -494,18 +494,43 @@ async fn mesh_status_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
     }
 }
 
+/// Origins the bundled desktop app's webview uses. The Tauri desktop app
+/// connects from a `tauri://localhost` (or `http://tauri.localhost`) origin.
+/// These are always added to the allowlist so the desktop client works out of
+/// the box on self-hosted relays — operators only need to list the web domain
+/// in `BUZZ_CORS_ORIGINS`. A custom `tauri://` scheme cannot be reached by a
+/// regular browser page, so allowing it does not widen the browser attack
+/// surface.
+const DESKTOP_WEBVIEW_ORIGINS: &[&str] = &["tauri://localhost", "http://tauri.localhost"];
+
+/// The operator-configured origins, parsed into header values.
+fn parse_configured_origins(cors_origins: &[String]) -> Vec<axum::http::HeaderValue> {
+    cors_origins
+        .iter()
+        .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
+        .collect()
+}
+
+/// The full CORS allowlist: the operator-configured origins plus the desktop
+/// webview origins (always included, deduplicated).
+fn cors_allowlist(cors_origins: &[String]) -> Vec<axum::http::HeaderValue> {
+    let mut origins = parse_configured_origins(cors_origins);
+    for origin in DESKTOP_WEBVIEW_ORIGINS {
+        let header: axum::http::HeaderValue = origin.parse().unwrap();
+        if !origins.contains(&header) {
+            origins.push(header);
+        }
+    }
+    origins
+}
+
 /// Build a CORS layer from the configured origins list.
 fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
     if cors_origins.is_empty() {
         return CorsLayer::permissive();
     }
 
-    let origins: Vec<axum::http::HeaderValue> = cors_origins
-        .iter()
-        .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
-        .collect();
-
-    if origins.is_empty() {
+    if parse_configured_origins(cors_origins).is_empty() {
         tracing::error!(
             "BUZZ_CORS_ORIGINS set but no valid origins could be parsed — \
              refusing to fall back to permissive CORS. Fix the origins or unset \
@@ -515,7 +540,7 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
     }
 
     CorsLayer::new()
-        .allow_origin(AllowOrigin::list(origins))
+        .allow_origin(AllowOrigin::list(cors_allowlist(cors_origins)))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
 }
@@ -1374,6 +1399,77 @@ mod tests {
         assert!(
             !handler_receives_message_with_limit(limit, limit + 1).await,
             "oversized messages must be rejected by the WebSocket parser before the handler sees them"
+        );
+    }
+
+    #[test]
+    fn cors_allowlist_always_includes_desktop_webview_origins() {
+        let configured = vec!["https://relay.example.com".to_string()];
+        let allowlist = cors_allowlist(&configured);
+        let rendered: Vec<String> = allowlist
+            .iter()
+            .map(|o| o.to_str().unwrap().to_string())
+            .collect();
+        assert!(
+            rendered.contains(&"https://relay.example.com".to_string()),
+            "operator-configured origin must be kept"
+        );
+        assert!(
+            rendered.contains(&"tauri://localhost".to_string()),
+            "tauri://localhost must always be allowed"
+        );
+        assert!(
+            rendered.contains(&"http://tauri.localhost".to_string()),
+            "http://tauri.localhost must always be allowed"
+        );
+    }
+
+    #[test]
+    fn cors_allowlist_deduplicates_when_operator_lists_desktop_origins() {
+        let configured = vec![
+            "https://relay.example.com".to_string(),
+            "tauri://localhost".to_string(),
+        ];
+        let allowlist = cors_allowlist(&configured);
+        let rendered: Vec<String> = allowlist
+            .iter()
+            .map(|o| o.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|o| o.as_str() == "tauri://localhost")
+                .count(),
+            1,
+            "tauri://localhost must appear exactly once"
+        );
+        assert_eq!(rendered.len(), 3, "web origin + 2 desktop origins");
+    }
+
+    #[test]
+    fn cors_allowlist_includes_desktop_origins_even_for_invalid_config() {
+        // A NUL byte is a forbidden header byte, so the origin fails to parse
+        // and parse_configured_origins drops it. The allowlist builder still
+        // always resolves the desktop origins (the hard-fail in
+        // build_cors_layer is what rejects this config — it must not serve a
+        // webless allowlist).
+        let configured = vec!["https://relay.example.com/\0".to_string()];
+        assert!(
+            parse_configured_origins(&configured).is_empty(),
+            "control-byte origin must fail to parse"
+        );
+        let allowlist = cors_allowlist(&configured);
+        assert_eq!(
+            allowlist.len(),
+            2,
+            "only the two desktop origins survive an all-invalid config"
+        );
+        assert!(
+            allowlist.iter().any(|o| o
+                .to_str()
+                .map(|s| s == "tauri://localhost")
+                .unwrap_or(false)),
+            "tauri://localhost is always present in the allowlist builder"
         );
     }
 }
