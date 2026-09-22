@@ -117,6 +117,8 @@ jobs:
         run: node --test scripts/ci-selection.test.mjs
       - name: File size policy
         run: just file-size-check
+      - name: Disk space preflight unit tests
+        run: scripts/test-check-disk-space.sh
 
   dead-token-guard:
     name: Dead Token Reference Guard

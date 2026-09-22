@@ -76,6 +76,9 @@ commit-msg:
       run: 'git interpret-trailers --if-exists doNothing --trailer "Signed-off-by: $(git var GIT_COMMITTER_IDENT | sed ''s/ [0-9]* [+-][0-9]*$//'')" --in-place {1}'
 
 pre-push:
+  # Guard each build-heavy job before it reaches Cargo, Node, or Flutter. Keep
+  # branch-skew unguarded and let the existing globs skip documentation-only
+  # pushes. A cold local gate can otherwise consume the disk safety margin.
   parallel: true
   commands:
     branch-skew:
@@ -94,32 +97,32 @@ pre-push:
     rust-tests:
       files: git diff --name-only origin/main...HEAD
       glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
-      run: just test-unit
+      run: ./scripts/check-disk-space.sh && just test-unit
     desktop-check:
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
-      run: just desktop-check
+      run: ./scripts/check-disk-space.sh && just desktop-check
     desktop-typecheck:
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
-      run: just desktop-typecheck
+      run: ./scripts/check-disk-space.sh && just desktop-typecheck
     desktop-test:
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
-      run: just desktop-test
+      run: ./scripts/check-disk-space.sh && just desktop-test
     desktop-tauri-checks:
       # Keep local lint parity with Desktop Core CI for every path that can
       # affect the Tauri crate or its path dependencies. Run clippy and tests
       # serially so parallel pre-push hooks do not contend for Cargo's lock.
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
-      run: just desktop-tauri-clippy && just desktop-tauri-test
+      run: ./scripts/check-disk-space.sh && just desktop-tauri-clippy && just desktop-tauri-test
     mobile-checks:
       # Run analysis and tests serially so parallel pre-push hooks do not
       # contend for shared Flutter state (.dart_tool, shader bundle).
       files: git diff --name-only origin/main...HEAD
       glob: ["mobile/**"]
-      run: just mobile-check && just mobile-test
+      run: ./scripts/check-disk-space.sh && just mobile-check && just mobile-test
