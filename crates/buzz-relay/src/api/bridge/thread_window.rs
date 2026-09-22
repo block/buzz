@@ -52,6 +52,24 @@ fn unavailable(message: &str) -> Error {
     api_error(StatusCode::SERVICE_UNAVAILABLE, message)
 }
 
+fn database_error(context: &str, error: buzz_db::DbError) -> Error {
+    // Pool acquisition and PostgreSQL's statement/lock budgets may expire
+    // before the outer HTTP deadline. They are retryable, not internal faults.
+    let timed_out = match &error {
+        buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut) => true,
+        buzz_db::DbError::Sqlx(sqlx::Error::Database(error)) => {
+            matches!(error.code().as_deref(), Some("57014" | "55P03"))
+        }
+        _ => false,
+    };
+    if timed_out {
+        tracing::warn!(%error, context, "thread window database timeout");
+        unavailable("thread database timeout; retry window")
+    } else {
+        internal_error(&format!("thread {context}: {error}"))
+    }
+}
+
 fn append(events: &mut Vec<Value>, budget: &mut Budget, event: &nostr::Event) -> Result<(), Error> {
     let value = serde_json::to_value(event)
         .map_err(|e| internal_error(&format!("thread serialize: {e}")))?;
@@ -75,7 +93,7 @@ pub(super) async fn query(
         .db
         .get_accessible_channel_ids(tenant.community(), &reader.to_bytes())
         .await
-        .map_err(|e| internal_error(&format!("thread access: {e}")))?;
+        .map_err(|e| database_error("access", e))?;
     if !accessible.contains(&request.channel) {
         return Ok(vec![]);
     }
@@ -83,7 +101,7 @@ pub(super) async fn query(
         .db
         .get_thread_window_with_session(tenant.community(), request)
         .await
-        .map_err(|e| internal_error(&format!("thread window: {e}")))?;
+        .map_err(|e| database_error("window", e))?;
     let reader_bytes = reader.to_bytes();
     let visible = |se: &buzz_core::StoredEvent| {
         event_in_accessible_channel(se, &accessible)
@@ -132,9 +150,7 @@ pub(super) async fn query(
                         let page = session
                             .thread_window_aux(&query, &mut budget.aux)
                             .await
-                            .map_err(|e| {
-                                internal_error(&format!("thread auxiliary closure: {e}"))
-                            })?;
+                            .map_err(|e| database_error("auxiliary closure", e))?;
                         if was_replica && !session.is_replica() {
                             events.truncate(row_count);
                             continue 'closure;
@@ -172,13 +188,14 @@ pub(super) async fn query(
         .db
         .get_accessible_channel_ids(tenant.community(), &reader_bytes)
         .await
-        .map_err(|e| internal_error(&format!("thread final access: {e}")))?;
+        .map_err(|e| database_error("final access", e))?;
     if !current.contains(&request.channel) {
         return Ok(vec![]);
     }
-    // Authorization changed elsewhere during closure: retry the entire window,
-    // not a successful partially filtered closure.
-    if accessible.iter().any(|id| !current.contains(id)) {
+    // Grants can expose auxiliary events omitted from the original closure;
+    // revocations can invalidate included events. Compare complete sets, not
+    // just removed channels (nor query-order-dependent vectors).
+    if accessible.iter().collect::<HashSet<_>>() != current.iter().collect::<HashSet<_>>() {
         return Err(unavailable(
             "thread auxiliary authorization changed; retry window",
         ));

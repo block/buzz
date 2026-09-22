@@ -4,13 +4,16 @@
 -- than blocking ingestion for an unbounded index build. Retry after prebuild.
 SET LOCAL lock_timeout = '1s';
 SET LOCAL statement_timeout = '5s';
-CREATE INDEX IF NOT EXISTS idx_thread_metadata_window
-    ON thread_metadata (community_id, root_event_id, event_created_at DESC, event_id ASC);
-
--- IF NOT EXISTS alone would accept a failed concurrent build, or a same-name
--- index with the wrong order. Neither is a successful deployment.
+-- IF NOT EXISTS still requests a writer-conflicting ShareLock before checking
+-- whether the index exists. Bypass CREATE entirely for prebuilt indexes, then
+-- validate them below; a failed concurrent build must never count as success.
 DO $$
 BEGIN
+    IF to_regclass('public.idx_thread_metadata_window') IS NULL THEN
+        CREATE INDEX idx_thread_metadata_window
+            ON public.thread_metadata (community_id, root_event_id, event_created_at DESC, event_id ASC);
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1 FROM pg_index i
         JOIN pg_class c ON c.oid = i.indexrelid

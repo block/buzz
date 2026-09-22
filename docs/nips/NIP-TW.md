@@ -93,12 +93,17 @@ and 8,192 raw aux candidates (including tombstones and repeated cross-batch
 matches and probes) across both hops and all windows per query; 8 MiB
 serialized events across the query. Retries spend the same allowances;
 corruption and exhausted allowances do not trigger fallback.
-An 8-second deadline spans fresh access lookups, pool waits, selection,
-closure, fallback, final access checks and signing for all windows in one query. New-mode SQL uses
-transaction-local 4-second statement and 1-second lock timeouts, never leaked
-to pooled legacy callers. Any cap/deadline/required-closure/signing failure
-returns an error and no successful partial response or bounds. Query-entry
-authentication retains its existing budgets.
+An 8-second upper deadline spans fresh access lookups, pool waits, selection,
+closure, fallback, final access checks and signing for all windows in one query.
+Selection and auxiliary SQL use transaction-local 4-second statement and
+1-second lock timeouts, never leaked to pooled legacy callers. Authorization
+uses the ordinary writer pool's configured budgets (by default, 5-second lock
+and 3-second pool-acquisition timeouts); these can expire before eight seconds.
+Pool, statement and lock timeouts return retryable HTTP 503 without bounds, as
+does the outer deadline. No minimum wait or exact eight-second response time
+is promised. Any cap/deadline/required-closure/signing failure returns an error
+and no successful partial response or bounds. Query-entry authentication
+retains its existing budgets.
 
 ## Signed bounds: kind 39007
 
@@ -174,7 +179,7 @@ change adds no setting and enables none.
 
 ## Index deployment
 
-Both desired-state schema and additive migration 0049 define:
+Both desired-state schema and additive migration 0048 define:
 
 ```sql
 CREATE INDEX idx_thread_metadata_window
@@ -198,9 +203,11 @@ ON public.thread_metadata (community_id, root_event_id, event_created_at DESC, e
 Inspect `pg_index.indisvalid`, `indisready`, `indislive` and
 `pg_get_indexdef(indexrelid)`. A failed concurrent build can leave an invalid
 same-name index: diagnose, then drop/rebuild it concurrently before upgrading.
-Do not use IF NOT EXISTS to disguise that failure. Migration 0049 validates
-the exact definition and validity, even when the index already exists. Fresh
-small installs create it transactionally. Startup limits lock acquisition to
+Do not use IF NOT EXISTS to disguise that failure. Migration 0048 validates
+the exact definition and validity, even when the index already exists. A
+prebuilt index takes the catalog-only path: no `CREATE INDEX`, since even
+`IF NOT EXISTS` requests a writer-conflicting lock before checking existence.
+Fresh small installs create it transactionally. Startup limits lock acquisition to
 one second and the build to five seconds; larger/busy installs intentionally
 fail deployment rather than hold an unbounded write-blocking lock. Prebuild,
 then retry. Desired-state deployments should likewise prebuild on brownfield
@@ -217,7 +224,7 @@ route labels `thread_window_head` / `thread_window_cursor`, and
 
 Keep the additive index when rolling back the binary; old SQL does not need
 it removed. Run old relays with `BUZZ_AUTO_MIGRATE=false` (the default): an old
-embedded SQLx migrator rejects the newer migration-ledger version 49 with
+embedded SQLx migrator rejects the newer migration-ledger version 48 with
 `VersionMissing`. Do **not** delete ledger rows or rewrite checksums to hide
 this. Roll forward to a capable migrator for future schema changes. Actual
 old-binary boot/read/write verification and production-size build/write-cost

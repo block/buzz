@@ -108,7 +108,17 @@ async fn thread_window_bridge_restarts_both_aux_hops_after_replica_failure() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn thread_window_http_deadline_covers_authorization_wait() {
-    let f = Fixture::new().await;
+    let mut f = Fixture::new().await;
+    // Disable only the optional DB lock budget via production configuration;
+    // the shared HTTP deadline must still cover authorization in this mode.
+    Arc::make_mut(&mut f.state).db = buzz_db::Db::new(&buzz_db::DbConfig {
+        database_url: crate::test_support::database_url(),
+        max_connections: 5,
+        lock_timeout_ms: 0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
     let mut lock = f.pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE channel_members IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *lock)
@@ -169,4 +179,193 @@ async fn thread_window_bounds_rejected_by_ws_event_handler() {
     assert_eq!(ack[1], forged.id.to_hex());
     assert_eq!(ack[2], false);
     assert!(ack[3].as_str().unwrap().contains("relay-only"), "{ack}");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_retries_aux_access_grant_during_closure() {
+    assert_aux_access_change(true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_retries_aux_access_revocation_during_closure() {
+    assert_aux_access_change(false).await;
+}
+
+async fn assert_aux_access_change(grant: bool) {
+    let f = Fixture::new().await;
+    let reply = f.reply(0).await;
+    // A visible first-hop event ensures the closure has a second hop where
+    // polling can pause, even when the cross-channel edit is initially hidden.
+    f.aux(7, &reply, Some(f.channel)).await;
+    let aux_channel = Uuid::new_v4();
+    f.state
+        .db
+        .create_channel_with_id(
+            f.community,
+            aux_channel,
+            "aux-access-change",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &f.keys.public_key().to_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+    let edit = event(
+        &f.keys,
+        aux_channel,
+        40003,
+        "cross-channel edit",
+        Some(&reply),
+        f.root.created_at.as_secs() + 60,
+    );
+    f.state
+        .db
+        .insert_event(f.community, &edit, Some(aux_channel))
+        .await
+        .unwrap();
+    let set_access = "UPDATE channel_members SET removed_at=CASE WHEN $4 THEN NULL ELSE now() END \
+                      WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3";
+    sqlx::query(set_access)
+        .bind(f.community.as_uuid())
+        .bind(aux_channel)
+        .bind(f.keys.public_key().to_bytes().to_vec())
+        .bind(!grant)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let contains_edit = |body: &Value| {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == edit.id.to_hex())
+    };
+    let filter = f.filter();
+    let (status, before) = f.post(&f.keys, "/query", json!([filter])).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    f.bounds(&before, &filter);
+    assert_eq!(
+        contains_edit(&before),
+        !grant,
+        "pre-transition visibility control"
+    );
+
+    let pages = Arc::new(AtomicUsize::new(0));
+    let subscriber = tracing_subscriber::registry().with(AuxPages(pages.clone()));
+    let mut request = Box::pin(
+        f.post(&f.keys, "/query", json!([filter]))
+            .with_subscriber(subscriber),
+    );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        std::future::poll_fn(|cx| {
+            assert!(
+                request.as_mut().poll(cx).is_pending(),
+                "must pause before final authorization"
+            );
+            if pages.load(Ordering::SeqCst) > 0 {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }),
+    )
+    .await
+    .expect("first auxiliary page must complete before transition");
+    assert_eq!(
+        pages.load(Ordering::SeqCst),
+        1,
+        "barrier must precede closure completion"
+    );
+    let changed = sqlx::query(set_access)
+        .bind(f.community.as_uuid())
+        .bind(aux_channel)
+        .bind(f.keys.public_key().to_bytes().to_vec())
+        .bind(grant)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(changed.rows_affected(), 1);
+    let current = f
+        .state
+        .db
+        .get_accessible_channel_ids(f.community, &f.keys.public_key().to_bytes())
+        .await
+        .unwrap();
+    assert!(
+        current.contains(&f.channel),
+        "requested channel stays authorized"
+    );
+    assert_eq!(current.contains(&aux_channel), grant);
+    let (status, interrupted) = request.await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{interrupted}");
+    assert_eq!(
+        interrupted,
+        json!({"error":"thread auxiliary authorization changed; retry window"})
+    );
+
+    let (status, after) = f.post(&f.keys, "/query", json!([filter])).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    f.bounds(&after, &filter);
+    assert_eq!(
+        contains_edit(&after),
+        grant,
+        "retry must use the complete new access set"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_production_authorization_lock_timeout_is_retryable() {
+    let f = Fixture::new().await;
+    let mut lock = f.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE channel_members IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let (status, body) = f.post(&f.keys, "/query", json!([f.filter()])).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        body,
+        json!({"error":"thread database timeout; retry window"})
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(buzz_db::DbConfig::default().lock_timeout_ms)
+    );
+    assert!(started.elapsed() < DEADLINE);
+    lock.rollback().await.unwrap();
+    let (status, recovered) = f.post(&f.keys, "/query", json!([f.filter()])).await;
+    assert_eq!(status, StatusCode::OK, "{recovered}");
+    assert_eq!(f.bounds(&recovered, &f.filter())["has_more"], false);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_database_timeout_classification_uses_sqlstate() {
+    let f = Fixture::new().await;
+    // The adapter handles the same DB failures at initial/final authorization,
+    // selection and aux closure. Exercise actual PostgreSQL statement errors,
+    // not string-matched synthetic errors; unrelated faults stay sanitized 500s.
+    for (sql, expected) in [
+        (
+            "SET statement_timeout='25ms'; SELECT pg_sleep(1)",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        ("SELECT 1/0", StatusCode::INTERNAL_SERVER_ERROR),
+    ] {
+        let mut conn = f.pool.acquire().await.unwrap();
+        let error = sqlx::raw_sql(sql).execute(&mut *conn).await.unwrap_err();
+        let (status, body) = database_error("test", error.into());
+        assert_eq!(status, expected, "{body:?}");
+    }
+    let (status, body) = database_error("pool", buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut));
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body.0,
+        json!({"error":"thread database timeout; retry window"})
+    );
 }

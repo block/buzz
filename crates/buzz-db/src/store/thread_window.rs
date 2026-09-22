@@ -98,20 +98,15 @@ async fn select_window(
             root_in_channel,
         });
     }
-    // Keep the event lookup parameterized by the ordered metadata scan. A
-    // flattened join can choose a full hash join + sort even with the window
-    // index (measured on 100k replies). The event PK makes LIMIT 1 exact; event
-    // kind/channel/deletion checks still precede the outer limit+1 probe.
+    // Order metadata before event lookups. With stale statistics a root-wide
+    // sort can otherwise execute one lateral lookup for every reply first.
+    // OFFSET 0 keeps this boundary without limiting candidates prematurely.
     let mut q = QueryBuilder::new(
         "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.received_at, e.channel_id \
-         FROM thread_metadata tm JOIN LATERAL (SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.received_at, e.channel_id \
-         FROM events e WHERE e.community_id = tm.community_id \
-         AND e.created_at = tm.event_created_at AND e.id = tm.event_id AND e.channel_id = ");
-    q.push_bind(request.channel)
-        .push(" AND e.deleted_at IS NULL AND e.kind = ANY(")
-        .push_bind(request.kinds.iter().map(|k| *k as i32).collect::<Vec<_>>())
-        .push(") LIMIT 1) e ON true WHERE tm.community_id = ")
-        .push_bind(community.as_uuid())
+         FROM (SELECT tm.community_id, tm.event_id, tm.event_created_at \
+         FROM thread_metadata tm WHERE tm.community_id = ",
+    );
+    q.push_bind(community.as_uuid())
         .push(" AND tm.root_event_id = ")
         .push_bind(root)
         .push(" AND tm.channel_id = ")
@@ -132,7 +127,19 @@ async fn select_window(
             .push_bind(id)
             .push("))");
     }
-    q.push(" ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT ")
+    // Fetch by the event PK before testing visibility, so missing statistics
+    // cannot turn a selective live/kind index into a root-wide scan per reply.
+    // PK uniqueness makes the inner LIMIT 1 exact. All eligibility predicates
+    // still precede the *outer* limit+1 that establishes page bounds.
+    q.push(" ORDER BY tm.event_created_at DESC, tm.event_id ASC OFFSET 0) tm \
+        JOIN LATERAL (SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.received_at, e.channel_id, e.deleted_at \
+        FROM events e WHERE e.community_id = tm.community_id \
+        AND e.created_at = tm.event_created_at AND e.id = tm.event_id LIMIT 1) e ON true \
+        WHERE e.channel_id = ")
+        .push_bind(request.channel)
+        .push(" AND e.deleted_at IS NULL AND e.kind = ANY(")
+        .push_bind(request.kinds.iter().map(|k| *k as i32).collect::<Vec<_>>())
+        .push(") ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT ")
         .push_bind(i64::from(request.limit) + 1);
     // Selectivity varies drastically with root/depth/cursor. A cached generic
     // plan can sort the entire root (and exceeded the SQL deadline in paging

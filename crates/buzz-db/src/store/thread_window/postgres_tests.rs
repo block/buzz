@@ -142,6 +142,21 @@ async fn assert_pages(db: &Db, cid: CommunityId, mut req: Request, expected: &[n
 
 async fn cardinalities() {
     let (db, cid, ch, keys, root) = fixture().await;
+    // Keep bulk-ingest statistics deliberately stale in both schema paths.
+    // Otherwise autoanalyze can hide a root-wide sort + repeated broad event
+    // scans that exceeded the production four-second deadline at 10k replies.
+    sqlx::raw_sql(
+        "ALTER TABLE thread_metadata SET (autovacuum_enabled=false); \
+         DO $$ DECLARE part regclass; BEGIN \
+             FOR part IN SELECT inhrelid::regclass FROM pg_inherits \
+                 WHERE inhparent='events'::regclass LOOP \
+                 EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled=false)', part); \
+             END LOOP; \
+         END $$;",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
     for count in [0, 1, 50, 51, 501, 10_000] {
         let root = make_event(
             &keys,

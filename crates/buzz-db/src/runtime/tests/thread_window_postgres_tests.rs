@@ -161,7 +161,11 @@ async fn migration_schema_thread_window_prebuild_validation_and_old_ledger() {
     // Brownfield same-name/wrong-order must not be accepted by IF NOT EXISTS.
     sqlx::query("CREATE INDEX idx_thread_metadata_window ON thread_metadata (community_id,root_event_id,event_created_at ASC,event_id ASC)")
         .execute(&pool).await.unwrap();
-    assert!(migration::run_migrations(&pool).await.is_err());
+    let error = migration::run_migrations(&pool).await.unwrap_err();
+    assert!(
+        error.to_string().contains("invalid or wrong definition"),
+        "must reject the catalog shape, not merely time out: {error}"
+    );
     let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await
@@ -177,7 +181,11 @@ async fn migration_schema_thread_window_prebuild_validation_and_old_ledger() {
     // confined to a disposable test DB on the lane's superuser instance.
     sqlx::query("UPDATE pg_index SET indisvalid=false WHERE indexrelid='idx_thread_metadata_window'::regclass")
         .execute(&pool).await.unwrap();
-    assert!(migration::run_migrations(&pool).await.is_err());
+    let error = migration::run_migrations(&pool).await.unwrap_err();
+    assert!(
+        error.to_string().contains("invalid or wrong definition"),
+        "must reject the catalog shape, not merely time out: {error}"
+    );
     sqlx::query("DROP INDEX CONCURRENTLY idx_thread_metadata_window")
         .execute(&pool)
         .await
@@ -215,4 +223,112 @@ async fn migration_schema_thread_window_prebuild_validation_and_old_ledger() {
         Err(sqlx::migrate::MigrateError::VersionMissing(48))
     ));
     drop_scratch_db(&admin, pool, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() {
+    let admin = PgPool::connect(&admin_url().await).await.unwrap();
+    let (pool, name) = create_scratch_db_through(&admin, "tw_prebuild_writer", Some(47)).await;
+    let community = Uuid::new_v4();
+    let channel = Uuid::new_v4();
+    seed_community_channel(&pool, community, channel, &nostr::Keys::generate()).await;
+    sqlx::query("CREATE INDEX CONCURRENTLY idx_thread_metadata_window ON thread_metadata (community_id,root_event_id,event_created_at DESC,event_id ASC)")
+        .execute(&pool).await.unwrap();
+    let oid: i64 = sqlx::query_scalar("SELECT 'idx_thread_metadata_window'::regclass::oid::bigint")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // Model an ingestion transaction already holding the table's writer lock.
+    // It stays held through every control: releasing it would hide the convoy.
+    let mut writer = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE thread_metadata IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let insert =
+        "INSERT INTO thread_metadata (community_id, channel_id, event_created_at, event_id) \
+                  VALUES ($1, $2, now(), $3)";
+    let mut witness = pool.acquire().await.unwrap();
+    sqlx::query("SET lock_timeout = '200ms'")
+        .execute(&mut *witness)
+        .await
+        .unwrap();
+    sqlx::query(insert)
+        .bind(community)
+        .bind(channel)
+        .bind(vec![1_u8; 32])
+        .execute(&mut *witness)
+        .await
+        .unwrap();
+
+    // Keep the exact migration transaction open after its SQL finishes so a
+    // second insert observes *all* locks it acquired. This is an explicit
+    // overlap barrier, not a race against a fast catalog-only migration.
+    let mut migration_tx = pool.begin().await.unwrap();
+    let result = sqlx::raw_sql(include_str!(
+        "../../../../../migrations/0048_thread_window_index.sql"
+    ))
+    .execute(&mut *migration_tx)
+    .await;
+    let concurrent_insert = sqlx::query(insert)
+        .bind(community)
+        .bind(channel)
+        .bind(vec![2_u8; 32])
+        .execute(&mut *witness)
+        .await;
+    migration_tx.rollback().await.unwrap();
+    sqlx::query(insert)
+        .bind(community)
+        .bind(channel)
+        .bind(vec![3_u8; 32])
+        .execute(&mut *witness)
+        .await
+        .unwrap();
+
+    // Also bind the public migrator: the advisory schema/destruction lock,
+    // ledger write and post-migration catalog checks must work with ingestion.
+    let production_result = migration::run_migrations(&pool).await;
+    sqlx::query(insert)
+        .bind(community)
+        .bind(channel)
+        .bind(vec![4_u8; 32])
+        .execute(&mut *witness)
+        .await
+        .unwrap();
+    let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&mut *witness)
+        .await
+        .unwrap();
+    let final_oid: i64 =
+        sqlx::query_scalar("SELECT 'idx_thread_metadata_window'::regclass::oid::bigint")
+            .fetch_one(&mut *witness)
+            .await
+            .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM thread_metadata WHERE community_id=$1")
+            .bind(community)
+            .fetch_one(&mut *witness)
+            .await
+            .unwrap();
+    drop(witness);
+    writer.rollback().await.unwrap();
+    drop_scratch_db(&admin, pool, &name).await;
+
+    assert!(
+        result.is_ok(),
+        "valid prebuild must bypass write-conflicting CREATE: {result:?}"
+    );
+    assert!(
+        concurrent_insert.is_ok(),
+        "migration must allow metadata inserts: {concurrent_insert:?}"
+    );
+    assert!(
+        production_result.is_ok(),
+        "production migrator must preserve ingestion progress: {production_result:?}"
+    );
+    assert_eq!(version, 48);
+    assert_eq!(final_oid, oid, "prebuild must not be replaced");
+    assert_eq!(count, 4, "all writer witnesses must persist");
 }

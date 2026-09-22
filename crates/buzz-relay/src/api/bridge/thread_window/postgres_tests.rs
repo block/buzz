@@ -30,6 +30,15 @@ impl Fixture {
             .await
             .unwrap();
         let mut state = (*state).clone();
+        // Use production after_connect policy (floor guard, isolation and
+        // session timeouts), not raw SQLx pools that mask deployed failures.
+        state.db = buzz_db::Db::new(&buzz_db::DbConfig {
+            database_url: crate::test_support::database_url(),
+            max_connections: 5,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
         Arc::make_mut(&mut state.config).require_auth_token = true;
         state.nip98_replay = Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(
             state.redis_pool.clone(),
