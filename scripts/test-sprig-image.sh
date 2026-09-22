@@ -16,7 +16,7 @@ assert_run '
   for name in buzz-agent buzz-dev-mcp rg tree buzz git-credential-nostr git-sign-nostr; do
     test "$(readlink "/usr/local/bin/$name")" = sprig
   done
-  test "$(git config --system gpg.x509.program)" = /usr/local/bin/git-sign-nostr
+  ! git config --system --get gpg.x509.program
   ! git config --system --get-all credential.helper
   test "$HOME" = /home/agent
   test "$(pwd)" = /home/agent
@@ -29,15 +29,64 @@ assert_run '
 
 docker run --rm --entrypoint /bin/bash \
   -e BUZZ_RELAY_URL=wss://relay.example.test/ "$IMAGE" -ceu '
-    /usr/local/bin/sprig-entrypoint --help >/dev/null 2>&1 & pid=$!
-    for _ in 1 2 3 4 5; do
-      git config --global --get credential.https://relay.example.test/git.helper >/dev/null 2>&1 && break
-      sleep 0.1
-    done
-    test "$(git config --global --get credential.https://relay.example.test/git.helper)" = /usr/local/bin/git-credential-nostr
-    test "$(git config --global --get credential.https://relay.example.test/git.useHttpPath)" = true
+    /usr/local/bin/sprig-entrypoint --help >/dev/null
+    ! git config --global --get credential.https://relay.example.test/git.helper
     ! git config --global --get-all credential.helper
-    wait "$pid" || true
   '
+
+# Exercise the actual Sprig -> ACP helper dispatch, without a live relay.
+docker run --rm -i --entrypoint /bin/bash "$IMAGE" -seuo pipefail <<'SCRIPT'
+probe_dir=$(mktemp -d)
+trap 'rm -rf "$probe_dir"' EXIT
+export PROBE_DIR="$probe_dir"
+cat > "$probe_dir/adapter" <<'ADAPTER'
+#!/bin/bash
+set -euo pipefail
+cd "$PROBE_DIR"
+git init -q repo
+cd repo
+git -c core.hooksPath=/dev/null commit -s --allow-empty -qm probe
+git tag -m probe probe
+git verify-commit HEAD
+git verify-tag probe
+test "$(git show -s --format=%an HEAD)" = "$(git config user.name)"
+test "$(git show -s --format=%cn HEAD)" = "$(git config user.name)"
+git config nostr.keyfile > ../keyfile
+! git config --get-urlmatch credential.helper https://unrelated.invalid/git/repo
+printf done > ../done
+exec sleep 30
+ADAPTER
+chmod 700 "$probe_dir/adapter"
+# Disposable test key; never used with any relay.
+GIT_AUTHOR_NAME='Inherited Human' GIT_AUTHOR_EMAIL=human@example.invalid \
+GIT_COMMITTER_NAME='Inherited Human' GIT_COMMITTER_EMAIL=human@example.invalid \
+BUZZ_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000001 \
+BUZZ_RELAY_URL=wss://relay.invalid \
+BUZZ_ACP_AGENT_COMMAND="$probe_dir/adapter" BUZZ_ACP_AGENT_ARGS= \
+    buzz-acp > "$probe_dir/log" 2>&1 &
+pid=$!
+for _ in {1..100}; do
+    [[ -f "$probe_dir/done" ]] && break
+    sleep 0.1
+done
+kill -TERM "$pid"
+for _ in {1..50}; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+done
+if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid"
+    wait "$pid" || true
+    cat "$probe_dir/log"
+    exit 1
+fi
+wait "$pid"
+if [[ ! -f "$probe_dir/done" ]]; then
+    cat "$probe_dir/log"
+    exit 1
+fi
+keyfile=$(cat "$probe_dir/keyfile")
+test ! -e "$keyfile"
+SCRIPT
 
 echo "PASS: Sprig image runtime contract ($IMAGE)"

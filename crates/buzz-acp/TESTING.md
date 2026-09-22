@@ -27,3 +27,23 @@ Run the ignored real-adapter test with a built fork checkout:
 BUZZ_TEST_PI_ACP=/absolute/buzz-pi-acp/dist/index.js \
   cargo test -p buzz-acp real_pi_preserves -- --ignored
 ```
+
+## Git bootstrap
+
+`cargo test -p buzz-acp --test git_bootstrap` starts the actual harness with a
+probe adapter, runs real signed commits/tags and scoped credential resolution,
+and verifies key cleanup on startup failure and SIGTERM. No relay is contacted.
+
+To exercise the real runtime boundaries on Unix:
+
+```sh
+cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp
+BUZZ_TEST_BIN_DIR="$PWD/target/debug" cargo test -p buzz-acp git_runtime_tests -- --ignored --nocapture
+```
+
+The Buzz Agent test uses a deterministic local OpenAI-compatible response to
+invoke the actual MCP shell. The Goose test requires an installed, configured
+Goose and uses its provider to invoke the native developer shell. Both operate
+only on temporary local repositories, verify commit/tag signatures and identity,
+check unrelated-remote credential scoping, and assert keyfile removal. They do
+not replace authenticated relay clone/push/readback testing.
