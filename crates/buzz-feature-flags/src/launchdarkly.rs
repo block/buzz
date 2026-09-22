@@ -171,6 +171,10 @@ impl FlagEvaluator for LaunchDarklyEvaluator {
             self.client
                 .float_variation_detail(&context, flag.key(), flag.default() as f64);
 
+        if detail.variation_index.is_none() {
+            return flag.default();
+        }
+
         let Some(value) = detail.value else {
             return flag.default();
         };
@@ -613,6 +617,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_integer_flag_preserves_exact_declared_default_bytes() {
+        let test_data = TestData::new();
+        let evaluator = started_evaluator(&test_data).await;
+        let context =
+            EvaluationContext::for_community(community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"));
+
+        for default in [9_007_199_254_740_993_i64, i64::MAX, i64::MIN] {
+            assert_eq!(
+                evaluator.evaluate_int(
+                    IntegerFlag::new("relay.feature.missing-int-precise-default", default),
+                    &context,
+                ),
+                default,
+                "missing-flag fallback must preserve exact declared default"
+            );
+        }
+
+        evaluator.close();
+    }
+
+    #[tokio::test]
     async fn wrong_type_integer_falls_back_to_declared_default() {
         let test_data = TestData::new();
         test_data
@@ -634,6 +659,63 @@ mod tests {
             evaluator.evaluate_int(IntegerFlag::new("relay.feature.int-bool", -5), &context),
             -5
         );
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn wrong_type_integer_flag_preserves_exact_declared_default_bytes() {
+        let test_data = TestData::new();
+        test_data.update(
+            FlagBuilder::new("relay.feature.int-wrong-type-for-precise-default")
+                .value_for_all(FlagValue::from(true)),
+        );
+        let evaluator = started_evaluator(&test_data).await;
+        let context = EvaluationContext::for_actor(
+            community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            actor(),
+        );
+
+        for default in [9_007_199_254_740_993_i64, i64::MAX, i64::MIN] {
+            assert_eq!(
+                evaluator.evaluate_int(
+                    IntegerFlag::new("relay.feature.int-wrong-type-for-precise-default", default),
+                    &context,
+                ),
+                default,
+                "wrong-type fallback must preserve exact declared default"
+            );
+        }
+
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn provider_not_ready_preserves_exact_declared_default_bytes() {
+        let test_data = TestData::new();
+        test_data.update(
+            FlagBuilder::new("relay.feature.int-provider-not-ready")
+                .value_for_all(FlagValue::from(123_i64)),
+        );
+
+        let config = test_config(&test_data);
+        let client = Client::build(config).expect("launchdarkly test client");
+        let evaluator = LaunchDarklyEvaluator::new(client);
+        let context = EvaluationContext::for_actor(
+            community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            actor(),
+        );
+
+        for default in [9_007_199_254_740_993_i64, i64::MAX, i64::MIN] {
+            assert_eq!(
+                evaluator.evaluate_int(
+                    IntegerFlag::new("relay.feature.int-provider-not-ready", default),
+                    &context,
+                ),
+                default,
+                "provider-not-ready fallback must preserve exact declared default"
+            );
+        }
+
         evaluator.close();
     }
 
