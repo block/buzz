@@ -29,7 +29,8 @@ export type { ChannelSearchKey } from "./channelSearchKeys";
  * (presence flag for the channel-management panel — open/closed only, so it
  * carries a sentinel `"1"` rather than an id), `autoSend` (draft auto-submit
  * trigger — cleared surgically after the auto-submit fires so `thread` and
- * all other panel state are preserved).
+ * all other panel state are preserved), `doc` + `docName` (markdown document
+ * viewer panel — relay media URL and imeta filename).
  */
 
 export type PanelSetterOptions = HistorySearchSetterOptions;
@@ -96,6 +97,21 @@ export function useChannelPanelHistoryState() {
     [applyPatch],
   );
 
+  // `doc` + `docName` travel together: the URL identifies the attachment and
+  // the imeta filename is the only human-readable name (blob URLs are content
+  // hashes), so a doc without a name can't label its panel.
+  const openMarkdownDoc = React.useCallback(
+    (url: string, filename: string, options?: PanelSetterOptions) =>
+      applyPatch({ doc: url, docName: filename }, options),
+    [applyPatch],
+  );
+
+  const closeMarkdownDoc = React.useCallback(
+    (options?: PanelSetterOptions) =>
+      applyPatch({ doc: null, docName: null }, options),
+    [applyPatch],
+  );
+
   const setChannelManagementOpen = React.useCallback(
     (open: boolean, options?: PanelSetterOptions) =>
       applyPatch(
@@ -125,6 +141,10 @@ export function useChannelPanelHistoryState() {
     channelManagementOpen: values.channelManagement != null,
     clearAutoSend,
     clearMessageRouteTarget,
+    closeMarkdownDoc,
+    markdownDocName: values.docName,
+    markdownDocUrl: values.doc,
+    openMarkdownDoc,
     openAgentSessionChannelId: values.agentSessionChannel,
     openAgentSessionPubkey: values.agentSession,
     openProfilePanel,
