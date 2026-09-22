@@ -420,6 +420,21 @@ export class RelayClient {
   ) {
     return this.subscribe(filter, onEvent, onReady, readinessTimeoutMs, signal);
   }
+  /** Prioritize an interactive live consumer without changing its replay filter or pacing. */
+  async subscribeInteractive(
+    filter: RelaySubscriptionFilter,
+    onEvent: (event: RelayEvent) => void,
+  ) {
+    return this.subscribe(
+      filter,
+      onEvent,
+      undefined,
+      undefined,
+      undefined,
+      "interactive",
+    );
+  }
+
   async preconnect() {
     // Explicit re-engagement (reconnect card / community switch): clears the
     // terminal latch and AUTH rejection streak, and bypasses backoff once.
@@ -598,6 +613,7 @@ export class RelayClient {
     onReady?: (readiness: LiveSubscriptionReadiness) => void,
     readinessTimeoutMs = 250,
     signal?: AbortSignal,
+    priority?: "interactive",
   ) {
     const epoch = this.sessionEpoch;
     const sessionSignal = this.liveSessionAbort.signal;
@@ -614,6 +630,7 @@ export class RelayClient {
     const subscription: Extract<RelaySubscription, { mode: "live" }> = {
       mode: "live",
       filter,
+      priority,
       onEvent,
       onRemoved,
     };
@@ -759,9 +776,10 @@ export class RelayClient {
             subId,
             () => isOwned() && queuedGeneration === this.connectionGeneration,
             () =>
-              this.visibleChannelId !== null &&
-              subscription.filter["#h"]?.includes(this.visibleChannelId) ===
-                true
+              subscription.priority === "interactive" ||
+              (this.visibleChannelId !== null &&
+                subscription.filter["#h"]?.includes(this.visibleChannelId) ===
+                  true)
                 ? 0
                 : subscription.filter.limit === 0
                   ? 1

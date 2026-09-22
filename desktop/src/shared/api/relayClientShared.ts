@@ -73,6 +73,8 @@ export type LiveSubscriptionReadiness = "eose" | "closed" | "timeout";
 type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
+  /** Client-side admission only; interactive consumers still obey cooldown/pacing. */
+  priority?: "interactive";
   onEvent: (event: RelayEvent) => void;
   resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
   /** Release readiness/cancellation listeners when this entry is retired. */
