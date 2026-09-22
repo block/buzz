@@ -12,6 +12,8 @@ const AGENT_REMOTE =
   "dddd2222dddd2222dddd2222dddd2222dddd2222dddd2222dddd2222dddd2222";
 const AGENT_FOREIGN =
   "eeee3333eeee3333eeee3333eeee3333eeee3333eeee3333eeee3333eeee3333";
+const AGENT_COMMUNITY =
+  "ffff4444ffff4444ffff4444ffff4444ffff4444ffff4444ffff4444ffff4444";
 
 describe("combineObserverIngestionAgents", () => {
   it("keeps managed agents with their real status", () => {
@@ -82,7 +84,70 @@ describe("combineObserverIngestionAgents", () => {
       [AGENT_REMOTE],
       new Map([[AGENT_REMOTE, ME]]),
       undefined,
+      [AGENT_COMMUNITY],
     );
     assert.deepEqual(result, [{ pubkey: AGENT_LOCAL, status: "running" }]);
+  });
+
+  it("adds catalog community bots as deployed", () => {
+    const result = combineObserverIngestionAgents(
+      [],
+      [],
+      new Map(),
+      ME,
+      [AGENT_COMMUNITY],
+    );
+    assert.deepEqual(result, [
+      { pubkey: AGENT_COMMUNITY, status: "deployed" },
+    ]);
+  });
+
+  it("does not duplicate a community bot that is already managed", () => {
+    const result = combineObserverIngestionAgents(
+      [{ pubkey: AGENT_COMMUNITY, status: "stopped" }],
+      [],
+      new Map(),
+      ME,
+      [AGENT_COMMUNITY],
+    );
+    assert.deepEqual(result, [
+      { pubkey: AGENT_COMMUNITY, status: "stopped" },
+    ]);
+  });
+
+  it("does not duplicate a community bot that is already declared-owned", () => {
+    const result = combineObserverIngestionAgents(
+      [],
+      [AGENT_COMMUNITY],
+      new Map([[AGENT_COMMUNITY, ME]]),
+      ME,
+      [AGENT_COMMUNITY.toUpperCase()],
+    );
+    assert.deepEqual(result, [
+      { pubkey: AGENT_COMMUNITY, status: "deployed" },
+    ]);
+  });
+
+  it("folds community bots alongside managed and owned agents", () => {
+    const result = combineObserverIngestionAgents(
+      [{ pubkey: AGENT_LOCAL, status: "running" }],
+      [AGENT_REMOTE],
+      new Map([[AGENT_REMOTE, ME]]),
+      ME,
+      [AGENT_COMMUNITY],
+    );
+    assert.deepEqual(result, [
+      { pubkey: AGENT_LOCAL, status: "running" },
+      { pubkey: AGENT_REMOTE, status: "deployed" },
+      { pubkey: AGENT_COMMUNITY, status: "deployed" },
+    ]);
+  });
+
+  it("skips empty community bot pubkeys", () => {
+    const result = combineObserverIngestionAgents([], [], new Map(), ME, [
+      "",
+      "   ",
+    ]);
+    assert.deepEqual(result, []);
   });
 });
