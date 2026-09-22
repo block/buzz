@@ -72,10 +72,13 @@ toml = "1.0"
 evalexpr = { workspace = true }
 
 # Process-group kill (safe wrapper around killpg) — Unix-only; kill_process_group
-# has a #[cfg(not(unix))] fallback in acp.rs.
+# has a #[cfg(not(unix))] fallback in acp.rs. `fs` feature is for
+# `nix::fcntl::OFlag::O_NOFOLLOW`, used by the signing-key file guard in lib.rs.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "fs"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"
+# Test-only lock for the secret-file test fixtures (no poisoning to unwrap).
+parking_lot = "0.12"
