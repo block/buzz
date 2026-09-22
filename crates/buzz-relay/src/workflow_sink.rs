@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_FORUM_COMMENT, KIND_STREAM_MESSAGE};
 use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
 use chrono::Utc;
@@ -19,8 +19,16 @@ use uuid::Uuid;
 use crate::handlers::event::dispatch_persistent_event;
 use crate::state::AppState;
 
+fn workflow_message_kind(channel_type: &str, is_reply: bool) -> u32 {
+    if channel_type == "forum" && is_reply {
+        KIND_FORUM_COMMENT
+    } else {
+        KIND_STREAM_MESSAGE
+    }
+}
+
 /// Resolves `@Name` mentions in workflow message text to the pubkeys of the
-/// channel members they name, so the emitted kind:9 carries the `p` tags that
+/// channel members they name, so the emitted message carries the `p` tags that
 /// ACP agent-wake (`event_mentions_agent`) is gated on.
 ///
 /// The client resolves mentions to `p` tags at compose time from an interactive
@@ -287,7 +295,8 @@ impl ActionSink for RelayActionSink {
                 ));
             }
 
-            // 3. Build kind:9 Nostr event
+            // 3. Build a stream message, or a forum comment for a threaded
+            //    reply in a forum channel.
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
             //    - `p` tag attributes the message to the workflow owner
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
@@ -388,7 +397,8 @@ impl ActionSink for RelayActionSink {
                 &author_pubkey_hex,
             )?;
 
-            let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
+            let kind_u32 = workflow_message_kind(&channel.channel_type, reply_ancestry.is_some());
+            let kind = Kind::from(kind_u32 as u16);
             let event = EventBuilder::new(kind, &text)
                 .tags(tags)
                 .sign_with_keys(&state.relay_keypair)
@@ -396,8 +406,6 @@ impl ActionSink for RelayActionSink {
 
             let event_id_hex = event.id.to_hex();
             let event_id_bytes = event.id.as_bytes().to_vec();
-            let kind_u32 = KIND_STREAM_MESSAGE;
-
             let event_created_at = {
                 let ts = event.created_at.as_secs() as i64;
                 chrono::DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
@@ -486,6 +494,22 @@ mod tests {
     // A 64-char hex pubkey built from a single repeated nibble, for readable tests.
     fn pk(nibble: char) -> String {
         std::iter::repeat_n(nibble, 64).collect()
+    }
+
+    #[test]
+    fn threaded_forum_workflow_output_is_a_forum_comment() {
+        assert_eq!(
+            workflow_message_kind("forum", true),
+            buzz_core::kind::KIND_FORUM_COMMENT
+        );
+        assert_eq!(
+            workflow_message_kind("forum", false),
+            buzz_core::kind::KIND_STREAM_MESSAGE
+        );
+        assert_eq!(
+            workflow_message_kind("stream", true),
+            buzz_core::kind::KIND_STREAM_MESSAGE
+        );
     }
 
     #[test]
@@ -701,6 +725,30 @@ mod tests {
             values("p"),
             vec![owner.as_str(), first.as_str(), second.as_str()]
         );
+    }
+
+    #[test]
+    fn hyphenated_agent_name_gets_real_mention_tags() {
+        let owner = pk('1');
+        let agent = pk('2');
+        let members = vec![m("hermes-dev", &agent)];
+        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+
+        append_workflow_mention_tags(
+            &mut tags,
+            "@hermes-dev triage this error",
+            "@hermes-dev triage this error",
+            &members,
+            &owner,
+        )
+        .expect("append mention tags");
+
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["p", agent.as_str()]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz:workflow-mention", agent.as_str()]));
     }
 
     #[test]
