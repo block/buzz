@@ -337,6 +337,11 @@ pub(crate) fn prospective_spawn_config_snapshot(
         }
         EffectiveConfigResult::OrphanedInstance { .. } => (None, None, None),
     };
+    // Match spawn_agent_child: opted-in agents stamp the OpenClaw standing block
+    // into the prospective prompt so toggling the flag badges restart.
+    let prompt = crate::managed_agents::openclaw_workspace_mcp::maybe_inject_standing_instructions(
+        record, prompt,
+    );
 
     SpawnConfigSnapshot::from_inputs(SpawnConfigInputs {
         record,

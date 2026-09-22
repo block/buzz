@@ -11,7 +11,7 @@ export const protectedFeatureDefinitions: FeatureDefinition[] = [
   {
     id: "openclaw-workspace-mcp",
     name: "OpenClaw workspace",
-    description: "Auto-provision short-lived OpenClaw workspace MCP via Hula relay",
+    description: "OpenClaw workspace MCP grant + per-agent remote FS / skill pack mode",
     defaultEnabled: true,
     platforms: ["desktop"],
   },

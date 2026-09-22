@@ -70,6 +70,20 @@ export async function setManagedAgentAutoRestart(
   return fromRawManagedAgent(response);
 }
 
+export async function setManagedAgentUseOpenClawWorkspace(
+  pubkey: string,
+  useOpenClawWorkspace: boolean,
+): Promise<ManagedAgent> {
+  const response = await invokeTauri<RawManagedAgent>(
+    "set_managed_agent_use_openclaw_workspace",
+    {
+      pubkey,
+      useOpenClawWorkspace,
+    },
+  );
+  return fromRawManagedAgent(response);
+}
+
 export async function listManagedAgentRuntimes(): Promise<
   ManagedAgentRuntimeStatus[]
 > {

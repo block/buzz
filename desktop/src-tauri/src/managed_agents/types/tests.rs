@@ -758,6 +758,7 @@ fn summary_fixture(
         last_error_code: None,
         start_on_app_launch: false,
         auto_restart_on_config_change: false,
+        use_openclaw_workspace: false,
         log_path: String::new(),
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: Vec::new(),

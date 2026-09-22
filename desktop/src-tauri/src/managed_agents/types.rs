@@ -133,6 +133,7 @@ impl AgentDefinition {
             env_vars: self.env_vars,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
+            use_openclaw_workspace: false,
             runtime_pid: None,
             backend: BackendKind::default(),
             backend_agent_id: None,
@@ -329,6 +330,10 @@ pub struct ManagedAgentRecord {
     /// frontend only fires when the agent is idle, connected, and local.
     #[serde(default = "default_auto_restart_on_config_change")]
     pub auto_restart_on_config_change: bool,
+    /// Hula: when true, attach OpenClaw workspace MCP + standing skill-pack
+    /// instructions for this UI-managed agent. Default OFF (local Mac FS).
+    #[serde(default)]
+    pub use_openclaw_workspace: bool,
     #[serde(default)]
     pub runtime_pid: Option<u32>,
     #[serde(default)]
@@ -583,6 +588,8 @@ pub struct ManagedAgentSummary {
     pub last_error_code: Option<i64>,
     pub start_on_app_launch: bool,
     pub auto_restart_on_config_change: bool,
+    /// Mirrors `ManagedAgentRecord.use_openclaw_workspace`.
+    pub use_openclaw_workspace: bool,
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,

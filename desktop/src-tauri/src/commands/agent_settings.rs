@@ -111,3 +111,57 @@ pub async fn set_managed_agent_auto_restart(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
+
+#[tauri::command]
+pub async fn set_managed_agent_use_openclaw_workspace(
+    pubkey: String,
+    use_openclaw_workspace: bool,
+    app: AppHandle,
+) -> Result<ManagedAgentSummary, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|error| error.to_string())?;
+
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        if sync_changed {
+            save_managed_agents(&app, &records)?;
+        }
+        for pubkey in &exited_pubkeys {
+            state.clear_agent_session_caches(pubkey);
+        }
+
+        {
+            let record = find_managed_agent_mut(&mut records, &pubkey)?;
+            record.use_openclaw_workspace = use_openclaw_workspace;
+            record.updated_at = now_iso();
+            if use_openclaw_workspace {
+                if let Some(grant) = crate::managed_agents::openclaw_workspace_mcp::load_grant()? {
+                    crate::managed_agents::openclaw_workspace_mcp::ensure_mcp_for_agent(
+                        record, &grant,
+                    )?;
+                }
+                // Missing grant: persist the flag; UI surfaces CTA; spawn refuses.
+            } else {
+                let _ = crate::managed_agents::openclaw_workspace_mcp::remove_mcp_for_agent(record);
+            }
+        }
+
+        save_managed_agents(&app, &records)?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        super::agents::summarize_from_disk(&app, record, &runtimes)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}

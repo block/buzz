@@ -26,7 +26,10 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
-import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
+import {
+  setManagedAgentAutoRestart,
+  setManagedAgentUseOpenClawWorkspace,
+} from "@/shared/api/tauriManagedAgents";
 import { EffortPickerField } from "./EffortPickerField";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
@@ -152,11 +155,9 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
-  // Effort picker is Save-gated: hold the pending selection in dialog state and
-  // embed it in the locked update payload on Save alone (see
-  // resolveEffortSubmission / handleSubmit — PR #4625), never on selection.
-  // `effortTouched` distinguishes "user picked a value" from "showing the
-  // config-surface effective value", so an untouched Save writes nothing.
+  const [useOpenClawWorkspace, setUseOpenClawWorkspace] = React.useState(
+    agent.useOpenClawWorkspace ?? false,
+  );
   const [effortLevel, setEffortLevel] = React.useState<string | null>(null);
   const effortTouched = React.useRef(false);
   const personasQuery = usePersonasQuery();
@@ -208,6 +209,7 @@ export function AgentInstanceEditDialog({
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
+      setUseOpenClawWorkspace(agent.useOpenClawWorkspace ?? false);
       setEffortLevel(null);
       effortTouched.current = false;
       setSetterError(null);
@@ -747,40 +749,34 @@ export function AgentInstanceEditDialog({
             : undefined,
       };
 
-      // Resolve effort before the update so access-change restarts can
-      // snapshot and launch the NEW effort value atomically.
       const effortSubmission = resolveEffortSubmission({
         effortLevel,
         originalEffortLevel:
           configSurfaceQuery.data?.normalized.thinkingEffort?.value ?? null,
         inheritTransition: agentCommandUpdate === "",
       });
-      // Include effort in the locked update when touched (tri-state: absent =
-      // don't touch; null = clear; string = set). Only when effortSubmission.persist.
       if (effortTouched.current && effortSubmission.persist) {
         input.effortLevel = effortSubmission.level;
       }
 
       const result = await updateMutation.mutateAsync(input);
 
-      // Standalone setters — sequenced after the locked update resolves so the
-      // dialog remains fully gated (isSaving) for the COMPLETE Save transaction.
-      // A failure here surfaces as setterError (retryable) and aborts before
-      // close, keeping the dialog open so the user can retry Save.
       try {
         if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
-          // Mirrors start-on-app-launch; not part of UpdateManagedAgentInput so
-          // the frozen update shape stays frozen.
           await setManagedAgentAutoRestart(
             agent.pubkey,
             autoRestartOnConfigChange,
           );
         }
-        // Effort disk write happened inside the locked update. Only need to
-        // invalidate the cache here (when effortTouched && effortSubmission.persist).
-        // If effort was not included (!effortSubmission.persist), nothing to do.
+        if (
+          useOpenClawWorkspace !== (agent.useOpenClawWorkspace ?? false)
+        ) {
+          await setManagedAgentUseOpenClawWorkspace(
+            agent.pubkey,
+            useOpenClawWorkspace,
+          );
+        }
         if (effortTouched.current && effortSubmission.persist) {
-          // Disk write already done; invalidate so the panel tier reflects it.
           await queryClient.invalidateQueries({
             queryKey: agentConfigSurfaceQueryKey(agent.pubkey),
           });
@@ -791,14 +787,8 @@ export function AgentInstanceEditDialog({
       }
 
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
-      // Close via onOpenChange directly — handleOpenChange guards against
-      // mid-save dismissal and must not block the intentional post-success close.
       onOpenChange(false);
       onUpdated?.(result.agent);
-      // The auto-restart policy deliberately never fires for a stopped or
-      // failing agent (a broken agent must not auto-loop), so an edit meant
-      // to FIX one silently waits for a manual start. Offer that start
-      // explicitly instead of relying on the user to know the policy.
       if (!isManagedAgentActive(result.agent)) {
         const startedName = result.agent.name;
         toast(`${startedName} saved while stopped.`, {
@@ -1176,6 +1166,7 @@ export function AgentInstanceEditDialog({
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
+                      useOpenClawWorkspace={useOpenClawWorkspace}
                       disabled={isSaving}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
@@ -1201,6 +1192,7 @@ export function AgentInstanceEditDialog({
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}
                       onAutoRestartChange={setAutoRestartOnConfigChange}
+                      onUseOpenClawWorkspaceChange={setUseOpenClawWorkspace}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onParallelismChange={setParallelism}
@@ -1211,9 +1203,6 @@ export function AgentInstanceEditDialog({
               </AnimatePresence>
             </div>
 
-            {/* Error — covers both the locked update (React Query) and the
-                standalone setters (setterError); setter error takes precedence
-                since the update already committed when it fires. */}
             {displayError != null ? (
               <p className="text-sm text-destructive">{displayError.message}</p>
             ) : null}

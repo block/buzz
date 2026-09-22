@@ -192,6 +192,7 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         env_vars: std::collections::BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: false,
+        use_openclaw_workspace: false,
         runtime_pid: None,
         backend: crate::managed_agents::BackendKind::Local,
         backend_agent_id: None,

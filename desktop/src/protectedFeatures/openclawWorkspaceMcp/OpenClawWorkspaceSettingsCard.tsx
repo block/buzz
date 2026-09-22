@@ -62,11 +62,17 @@ export function OpenClawWorkspaceSettingsCard() {
               {status?.url ? (
                 <span className="block truncate opacity-80">{status.url}</span>
               ) : null}
+              <span className="mt-1 block">
+                OpenClaw FS + skill pack mode is available. Enable it per agent
+                in Advanced → “Use OpenClaw workspace (MCP)”.
+              </span>
             </p>
           ) : (
             <p className="mt-1 text-sm text-muted-foreground/70">
               Join a Hula relay that provisions workspace MCP to connect
-              automatically.
+              automatically. After connecting, turn on “Use OpenClaw workspace
+              (MCP)” on each agent that should use remote FS + skills_list /
+              skills_get (default stays local).
             </p>
           )}
           {error ? (

@@ -365,6 +365,12 @@ export type ManagedAgent = {
   logPath: string;
   startOnAppLaunch: boolean;
   autoRestartOnConfigChange: boolean;
+  /**
+   * Hula: when true, this UI-managed agent uses OpenClaw workspace MCP as its
+   * project filesystem and the MCP skill pack (`skills_list` / `skills_get`).
+   * Default false — local Mac FS / local skills.
+   */
+  useOpenClawWorkspace: boolean;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
   /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */

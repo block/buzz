@@ -150,6 +150,7 @@ export type RawManagedAgent = {
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
+  use_openclaw_workspace?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
   // Pre-feature fixtures may omit these; mapped to "owner-only"/[] in fromRawManagedAgent.
@@ -664,6 +665,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     logPath: agent.log_path,
     startOnAppLaunch: agent.start_on_app_launch,
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
+    useOpenClawWorkspace: agent.use_openclaw_workspace ?? false,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
     respondTo: agent.respond_to ?? "owner-only",

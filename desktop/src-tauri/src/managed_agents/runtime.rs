@@ -331,6 +331,7 @@ pub fn build_managed_agent_summary(
         last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
         auto_restart_on_config_change: record.auto_restart_on_config_change,
+        use_openclaw_workspace: record.use_openclaw_workspace,
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
@@ -645,6 +646,19 @@ pub fn spawn_agent_child(
     let effective_prompt = effective_cfg.system_prompt.value;
     let effective_model = effective_cfg.model.value;
     let effective_provider = effective_cfg.provider.value;
+
+    // Hula OpenClaw workspace: opted-in agents require a grant, get MCP
+    // attached, and receive standing skill-pack instructions. Opted-out agents
+    // stay local (no forced MCP, no prompt pack).
+    if record.use_openclaw_workspace {
+        let grant = super::openclaw_workspace_mcp::load_grant()?;
+        let Some(grant) = grant else {
+            return Err(super::openclaw_workspace_mcp::missing_grant_error());
+        };
+        super::openclaw_workspace_mcp::ensure_mcp_for_agent(record, &grant)?;
+    }
+    let effective_prompt =
+        super::openclaw_workspace_mcp::maybe_inject_standing_instructions(record, effective_prompt);
 
     if let Some(prompt) = &effective_prompt {
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);

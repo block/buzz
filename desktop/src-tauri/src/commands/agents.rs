@@ -646,6 +646,7 @@ pub async fn create_managed_agent(
                 input.start_on_app_launch
             },
             auto_restart_on_config_change: true,
+            use_openclaw_workspace: false,
             runtime_pid: None,
             backend: input.backend.clone(),
             backend_agent_id: None,

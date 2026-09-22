@@ -219,6 +219,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         env_vars: Default::default(),
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
+        use_openclaw_workspace: false,
         runtime_pid: None,
         backend: crate::managed_agents::BackendKind::Local,
         backend_agent_id: None,
