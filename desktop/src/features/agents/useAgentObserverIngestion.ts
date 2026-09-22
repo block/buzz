@@ -7,6 +7,7 @@ import {
 } from "@/features/agents/hooks";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import { useCommunityBotsQuery } from "@/features/community-bots/hooks";
+import { HULA_RESERVED_COMMUNITY_BOT_PUBKEYS } from "@/features/agents/lib/reservedCommunityMentionRouting";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -27,7 +28,7 @@ type IngestionAgent = Pick<ManagedAgent, "pubkey" | "status">;
  * `#p`-addressed to `BUZZ_ACP_AGENT_OWNER`. Those frames arrive on the
  * owner-global subscription, but without registering the bot pubkey they are
  * dropped by the trusted-agent gate — which is why the ACP activity pane stays
- * empty after a successful mention. Catalog pubkeys close that gap.
+ * empty after a successful mention. Catalog + reserved Hula pubkeys close that gap.
  */
 export function combineObserverIngestionAgents(
   managedAgents: readonly IngestionAgent[],
@@ -105,10 +106,14 @@ export function useAgentObserverIngestion() {
   );
 
   const communityBotsQuery = useCommunityBotsQuery(Boolean(currentPubkey));
-  const communityBotPubkeys = React.useMemo(
-    () => (communityBotsQuery.data ?? []).map((bot) => bot.pubkey),
-    [communityBotsQuery.data],
-  );
+  // Mentions hard-route Captain/Mo/Stitch/Quasar/Korg via reserved pubkeys even
+  // when the community-bots catalog is empty. Observer ingest must trust the
+  // same set eagerly, or Activity stays empty after a successful @mention.
+  const communityBotPubkeys = React.useMemo(() => {
+    const catalog = (communityBotsQuery.data ?? []).map((bot) => bot.pubkey);
+    const reserved = Object.values(HULA_RESERVED_COMMUNITY_BOT_PUBKEYS);
+    return [...catalog, ...reserved];
+  }, [communityBotsQuery.data]);
 
   const profilesQuery = useUsersBatchQuery(relayAgentPubkeys, {
     enabled: Boolean(currentPubkey) && relayAgentPubkeys.length > 0,

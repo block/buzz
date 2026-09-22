@@ -150,4 +150,15 @@ describe("combineObserverIngestionAgents", () => {
     ]);
     assert.deepEqual(result, []);
   });
+
+  it("keeps reserved community bot pubkeys trusted without a catalog", () => {
+    // Mirrors mention hard-routing: Activity must ingest Stitch/etc even when
+    // useCommunityBotsQuery returns [].
+    const STITCH =
+      "54d8ee67ae6bb50255b851ac53a5b4d235497e0c8ea6a43d5b05850389c531f7";
+    const result = combineObserverIngestionAgents([], [], new Map(), ME, [
+      STITCH,
+    ]);
+    assert.deepEqual(result, [{ pubkey: STITCH, status: "deployed" }]);
+  });
 });
