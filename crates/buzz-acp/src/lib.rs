@@ -6053,6 +6053,35 @@ mod owner_control_command_tests {
     }
 
     #[test]
+    fn owner_control_command_gate_accepts_rendered_mention_for_every_command() {
+        // Binds the relaxed matcher to the production gate: reverting
+        // `is_owner_control_command` to an exact-content check must fail here.
+        let agent = "ab".repeat(32);
+        let other_agent = "cd".repeat(32);
+        for command in ["!shutdown", "!cancel", "!rotate"] {
+            let content = format!("@Fountain Maintainer {command}");
+
+            let mentioned = make_event(KIND_STREAM_MESSAGE, &content, Some(&agent));
+            assert!(
+                is_owner_control_command(&mentioned, KIND_STREAM_MESSAGE, command, &agent),
+                "{content:?} with this agent's p tag should match"
+            );
+
+            let other = make_event(KIND_STREAM_MESSAGE, &content, Some(&other_agent));
+            assert!(
+                !is_owner_control_command(&other, KIND_STREAM_MESSAGE, command, &agent),
+                "{content:?} tagging another agent should not match"
+            );
+
+            let untagged = make_event(KIND_STREAM_MESSAGE, &content, None);
+            assert!(
+                !is_owner_control_command(&untagged, KIND_STREAM_MESSAGE, command, &agent),
+                "{content:?} without a p tag should not match"
+            );
+        }
+    }
+
+    #[test]
     fn owner_control_command_tolerates_rendered_mention_text() {
         // Desktop/mobile insert the mention as literal text next to the p tag.
         for content in [
