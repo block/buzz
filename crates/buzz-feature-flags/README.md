@@ -272,6 +272,9 @@ actor-free DB APIs.
   malformed values also produce a sanitized diagnostic; missing values do not.
 - LaunchDarkly adapter returns declared defaults when a flag is missing, wrong
   type, or evaluation fails.
+- LaunchDarkly numbers are SDK `f64` values. Integer evaluation accepts only
+  mathematically integral values that convert to `i64` exactly from that `f64`
+  representation; otherwise it returns each flag's declared default.
 - Startup chooses one evaluator at compile time (`StaticEvaluator`,
   `EnvironmentEvaluator`, or LaunchDarkly); provider precedence/stacking is out
   of scope.

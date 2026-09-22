@@ -10,7 +10,6 @@ use crate::{BooleanFlag, EvaluationContext, FlagEvaluator, IntegerFlag};
 
 const COMMUNITY_CONTEXT_KIND: &str = "community";
 const PUBKEY_CONTEXT_KIND: &str = "pubkey";
-const JSON_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
 
 /// Runtime inputs required to initialize a LaunchDarkly-backed evaluator.
 #[derive(Clone)]
@@ -186,12 +185,7 @@ fn strict_f64_to_i64(value: f64) -> Option<i64> {
         return None;
     }
 
-    if value.abs() > JSON_SAFE_INTEGER_MAX as f64 {
-        return None;
-    }
-
-    let integer = value as i64;
-    (integer as f64 == value).then_some(integer)
+    i64::try_from(value as i128).ok()
 }
 
 fn validate_relay_proxy_endpoint(endpoint: &str) -> Result<String, LaunchDarklyInitError> {
@@ -631,23 +625,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integer_variation_honors_json_safe_integer_boundaries() {
+    async fn integer_variation_accepts_exact_large_f64_backed_i64_values() {
         let test_data = TestData::new();
         test_data.update(
-            FlagBuilder::new("relay.feature.int-safe-max")
-                .value_for_all(FlagValue::from(9_007_199_254_740_991_f64)),
+            FlagBuilder::new("relay.feature.int-large-positive")
+                .value_for_all(FlagValue::from(1_152_921_504_606_846_976_i64)),
         );
         test_data.update(
-            FlagBuilder::new("relay.feature.int-safe-min")
-                .value_for_all(FlagValue::from(-9_007_199_254_740_991_f64)),
+            FlagBuilder::new("relay.feature.int-large-negative")
+                .value_for_all(FlagValue::from(-1_152_921_504_606_846_976_i64)),
         );
         test_data.update(
-            FlagBuilder::new("relay.feature.int-out-of-range-positive")
-                .value_for_all(FlagValue::from(9_007_199_254_740_992_f64)),
+            FlagBuilder::new("relay.feature.int-min-boundary")
+                .value_for_all(FlagValue::from(i64::MIN)),
         );
         test_data.update(
-            FlagBuilder::new("relay.feature.int-out-of-range-negative")
-                .value_for_all(FlagValue::from(-9_007_199_254_740_992_f64)),
+            FlagBuilder::new("relay.feature.int-max-rounds-out-of-range")
+                .value_for_all(FlagValue::from(i64::MAX)),
         );
         let evaluator = started_evaluator(&test_data).await;
         let context = EvaluationContext::for_actor(
@@ -656,23 +650,29 @@ mod tests {
         );
 
         assert_eq!(
-            evaluator.evaluate_int(IntegerFlag::new("relay.feature.int-safe-max", 0), &context),
-            9_007_199_254_740_991_i64
-        );
-        assert_eq!(
-            evaluator.evaluate_int(IntegerFlag::new("relay.feature.int-safe-min", 0), &context),
-            -9_007_199_254_740_991_i64
-        );
-        assert_eq!(
             evaluator.evaluate_int(
-                IntegerFlag::new("relay.feature.int-out-of-range-positive", 11),
+                IntegerFlag::new("relay.feature.int-large-positive", 0),
                 &context,
             ),
-            11
+            1_152_921_504_606_846_976_i64
         );
         assert_eq!(
             evaluator.evaluate_int(
-                IntegerFlag::new("relay.feature.int-out-of-range-negative", -12),
+                IntegerFlag::new("relay.feature.int-large-negative", 0),
+                &context,
+            ),
+            -1_152_921_504_606_846_976_i64
+        );
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("relay.feature.int-min-boundary", 11),
+                &context,
+            ),
+            i64::MIN
+        );
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("relay.feature.int-max-rounds-out-of-range", -12),
                 &context,
             ),
             -12
