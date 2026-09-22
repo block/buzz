@@ -6,6 +6,7 @@
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
+import { reservedRoutePubkey } from "@/features/agents/lib/reservedCommunityMentionRouting";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import {
   type MentionCandidateForRanking,
@@ -56,6 +57,7 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   ownerProfiles?: UserProfileLookup;
   profiles?: UserProfileLookup;
   requireExact?: boolean;
+  reservedCommunityBotRoutes?: ReadonlyMap<string, string>;
 }): FlushMentionDebounceResult | null {
   if (opts.debounceTimerRef.current !== null) {
     clearTimeout(opts.debounceTimerRef.current);
@@ -84,9 +86,24 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   }
 
   const normalizedQuery = mention.query.trim().toLowerCase();
-  const exactMatch = opts.requireExact
-    ? ranked.find(({ label }) => label.trim().toLowerCase() === normalizedQuery)
-    : ranked[0];
+  const routedPubkey = reservedRoutePubkey(
+    mention.query,
+    opts.reservedCommunityBotRoutes ?? new Map(),
+  );
+  const routedExact =
+    routedPubkey == null
+      ? undefined
+      : ranked.find(
+          ({ label, candidate }) =>
+            label.trim().toLowerCase() === normalizedQuery &&
+            candidate.pubkey != null &&
+            candidate.pubkey.toLowerCase() === routedPubkey,
+        );
+  const exactMatch = routedExact
+    ? routedExact
+    : opts.requireExact
+      ? ranked.find(({ label }) => label.trim().toLowerCase() === normalizedQuery)
+      : ranked[0];
   const couldBeLongerName = opts.searchableNamesLowerRef.current.some((name) =>
     name.trim().toLowerCase().startsWith(`${normalizedQuery} `),
   );

@@ -22,6 +22,10 @@ import {
   uniqueAutocompleteLabels,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
+  reservedCommunityBotRoutes as buildReservedCommunityBotRoutes,
+} from "@/features/agents/lib/reservedCommunityMentionRouting";
+import { useCommunityBotsQuery } from "@/features/community-bots/hooks";
+import {
   useInfiniteUserSearchQuery,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
@@ -104,6 +108,7 @@ export function useMentions(
   const membersQuery = useChannelMembersQuery(channelId);
   const members = externalMembers ?? membersQuery.data;
   const isArchivedDiscovery = useIsArchivedPredicate();
+  const communityBotsQuery = useCommunityBotsQuery(true);
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
   const channelsQuery = useChannelsQuery();
@@ -241,6 +246,22 @@ export function useMentions(
     () => getMentionMemberPubkeys(channelId, channelsQuery.data, members),
     [channelId, channelsQuery.data, members],
   );
+  const reservedCommunityBotRoutes = React.useMemo(() => {
+    const catalogBots = (communityBotsQuery.data ?? []).map((bot) => ({
+      name: bot.name,
+      pubkey: bot.pubkey,
+    }));
+    const channelBots = (members ?? [])
+      .filter((member) => member.role === "bot")
+      .map((member) => ({
+        name:
+          profiles?.[normalizePubkey(member.pubkey)]?.displayName ??
+          member.displayName ??
+          "",
+        pubkey: member.pubkey,
+      }));
+    return buildReservedCommunityBotRoutes({ catalogBots, channelBots });
+  }, [communityBotsQuery.data, members, profiles]);
   const agentIdentityPubkeys = React.useMemo(
     () =>
       getAgentIdentityPubkeys({
@@ -275,6 +296,7 @@ export function useMentions(
         relayAgentNamesByPubkey,
         relayAgents: relayAgentsQuery.data,
         userSearchResults,
+        reservedCommunityBotRoutes,
       }),
     [
       activePersonaById,
@@ -298,6 +320,7 @@ export function useMentions(
       relayAgentDirectoryReady,
       relayAgentNamesByPubkey,
       relayAgentsQuery.data,
+      reservedCommunityBotRoutes,
     ],
   );
   const mentionCandidatesWithTeams = React.useMemo(
@@ -753,12 +776,13 @@ export function useMentions(
         selectedMentions: mentionMapRef.current,
         selectedDisplayNames: personaMentionMapRef.current.keys(),
         memberCandidates: mentionCandidates,
+        reservedCommunityBotRoutes,
       });
       // Selections are intent, not cached authorization. Never discard a
       // selected key because a refresh removed it from the picker.
       return extracted;
     },
-    [mentionCandidates],
+    [mentionCandidates, reservedCommunityBotRoutes],
   );
   const getSelectedAgentPubkeys = React.useRef(
     () => selectedAgentMentionPubkeysRef.current,
@@ -773,6 +797,7 @@ export function useMentions(
         ? { type: "owned", channelId }
         : { type: "managed-only" },
     sharedChannelIds,
+    channelMemberPubkeys: memberPubkeys,
     refetchManagedAgents: managedAgentsQuery.refetch,
   });
   const extractMentionPersonas = React.useCallback(
@@ -875,6 +900,7 @@ export function useMentions(
             ownerProfiles: ownerProfilesQuery.data?.profiles,
             profiles,
             requireExact: exactMentionSpace,
+            reservedCommunityBotRoutes,
           });
           if (exactMentionSpace && flushed?.type !== "match")
             return { handled: false };
@@ -911,6 +937,7 @@ export function useMentions(
       options?.channelType,
       ownerProfilesQuery.data?.profiles,
       profiles,
+      reservedCommunityBotRoutes,
       setSelected,
       suggestions,
     ],

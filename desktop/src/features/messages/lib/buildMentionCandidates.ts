@@ -3,6 +3,7 @@ import {
   coalesceAutocompleteCandidatesByKey,
   shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
+import { applyReservedCommunityMentionRouting } from "@/features/agents/lib/reservedCommunityMentionRouting";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
   AgentPersona,
@@ -44,6 +45,8 @@ export type BuildMentionCandidatesInput = {
   relayAgentNamesByPubkey: ReadonlyMap<string, string>;
   relayAgents: readonly RelayAgent[] | undefined;
   userSearchResults: readonly UserSearchResult[];
+  /** Reserved community-bot name → pubkey (Captain/Mo/Stitch/Quasar/Korg). */
+  reservedCommunityBotRoutes?: ReadonlyMap<string, string>;
 };
 
 /**
@@ -75,6 +78,7 @@ export function buildMentionCandidates({
   relayAgentNamesByPubkey,
   relayAgents,
   userSearchResults,
+  reservedCommunityBotRoutes,
 }: BuildMentionCandidatesInput): MentionCandidate[] {
   const candidatesByPubkey = new Map<string, MentionCandidate>();
   const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
@@ -236,7 +240,7 @@ export function buildMentionCandidates({
       isAgent: true,
     }))
     .filter((candidate) => candidate.displayName.trim().length > 0);
-  return coalesceAgentAutocompleteCandidates(
+  const coalesced = coalesceAgentAutocompleteCandidates(
     coalesceAutocompleteCandidatesByKey(
       [...candidatesByPubkey.values(), ...personaCandidates],
       globalSearchIdentityKey,
@@ -247,4 +251,7 @@ export function buildMentionCandidates({
       preferredPubkeys: memberPubkeys,
     },
   );
+  return reservedCommunityBotRoutes && reservedCommunityBotRoutes.size > 0
+    ? applyReservedCommunityMentionRouting(coalesced, reservedCommunityBotRoutes)
+    : coalesced;
 }

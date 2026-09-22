@@ -1,3 +1,4 @@
+import { rewriteSelectedMentionsForReservedRoutes } from "@/features/agents/lib/reservedCommunityMentionRouting";
 import { mentionOccurrences } from "@/shared/lib/mentionOccurrences";
 
 export type MentionPubkeyCandidate = {
@@ -70,15 +71,24 @@ export function mentionMatchCandidates({
   selectedDisplayNames,
   memberCandidates,
   competingDisplayNames,
+  reservedCommunityBotRoutes,
 }: {
   selectedMentions: ReadonlyMap<string, string>;
   selectedDisplayNames?: Iterable<string>;
   competingDisplayNames?: Iterable<string>;
   memberCandidates: readonly MentionPubkeyCandidate[];
+  reservedCommunityBotRoutes?: ReadonlyMap<string, string>;
 }): MentionMatch[] {
+  const boundMentions =
+    reservedCommunityBotRoutes && reservedCommunityBotRoutes.size > 0
+      ? rewriteSelectedMentionsForReservedRoutes(
+          selectedMentions,
+          reservedCommunityBotRoutes,
+        )
+      : selectedMentions;
   const selectedLabels = [...(selectedDisplayNames ?? [])];
   const selectedNames = new Set(
-    [...selectedMentions.keys(), ...selectedLabels].map(normalizeDisplayName),
+    [...boundMentions.keys(), ...selectedLabels].map(normalizeDisplayName),
   );
   const candidates: MentionMatch[] = [];
 
@@ -89,7 +99,7 @@ export function mentionMatchCandidates({
     candidates.push({ displayName: trimmedName, pubkey });
   };
 
-  for (const [displayName, pubkey] of selectedMentions) {
+  for (const [displayName, pubkey] of boundMentions) {
     addMatches(displayName, pubkey);
   }
   for (const displayName of selectedLabels) {
@@ -121,9 +131,21 @@ export function extractMentionPubkeys(options: {
   selectedDisplayNames?: Iterable<string>;
   competingDisplayNames?: Iterable<string>;
   memberCandidates: readonly MentionPubkeyCandidate[];
+  reservedCommunityBotRoutes?: ReadonlyMap<string, string>;
 }): string[] {
-  const { text, selectedMentions, memberCandidates } = options;
-  const candidates = mentionMatchCandidates(options);
+  const { text, memberCandidates } = options;
+  const selectedMentions =
+    options.reservedCommunityBotRoutes &&
+    options.reservedCommunityBotRoutes.size > 0
+      ? rewriteSelectedMentionsForReservedRoutes(
+          options.selectedMentions,
+          options.reservedCommunityBotRoutes,
+        )
+      : options.selectedMentions;
+  const candidates = mentionMatchCandidates({
+    ...options,
+    selectedMentions,
+  });
   const winningPubkeys = new Set<string>();
   for (const { candidates: winners } of mentionOccurrences(text, candidates)) {
     const identities = new Set(
