@@ -24,8 +24,8 @@ use std::time::Duration;
 use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_FORUM_COMMENT, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -238,7 +238,7 @@ async fn is_owner_or_sibling(
 ///
 /// `buzz:workflow-owner` alone is not authority: any ordinary event author can
 /// forge custom tags. Attribution is accepted only for a cryptographically
-/// valid kind:9 event signed by the active relay's NIP-11 `self` key, with
+/// valid stream message or forum comment signed by the active relay's NIP-11 `self` key, with
 /// exactly one canonical workflow marker and owner pubkey. The current agent
 /// must also have exactly one canonical `buzz:workflow-mention` tag; legacy `p`
 /// tags are deliberately ignored as author-gate authority because workflows
@@ -248,7 +248,10 @@ fn verified_workflow_owner(
     relay_self: Option<&str>,
     agent_pubkey_hex: &str,
 ) -> Option<String> {
-    if event.kind.as_u16() as u32 != KIND_STREAM_MESSAGE {
+    if !matches!(
+        event.kind.as_u16() as u32,
+        KIND_STREAM_MESSAGE | KIND_FORUM_COMMENT
+    ) {
         return None;
     }
 
@@ -2676,6 +2679,7 @@ async fn tokio_main() -> Result<()> {
                 kinds: config.kinds_override.clone().unwrap_or_else(|| {
                     vec![
                         KIND_STREAM_MESSAGE,
+                        KIND_FORUM_COMMENT,
                         KIND_WORKFLOW_APPROVAL_REQUESTED,
                         KIND_STREAM_REMINDER,
                     ]
@@ -6454,6 +6458,24 @@ mod workflow_owner_tests {
         workflow_mentions: &[&[&str]],
         p_tags: &[&str],
     ) -> nostr::Event {
+        workflow_event_with_kind(
+            signer,
+            Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            owner,
+            marker_tags,
+            workflow_mentions,
+            p_tags,
+        )
+    }
+
+    fn workflow_event_with_kind(
+        signer: &Keys,
+        kind: Kind,
+        owner: Option<&str>,
+        marker_tags: &[&[&str]],
+        workflow_mentions: &[&[&str]],
+        p_tags: &[&str],
+    ) -> nostr::Event {
         let mut tags = Vec::new();
         for marker in marker_tags {
             tags.push(Tag::parse(marker.iter().copied()).expect("workflow marker"));
@@ -6467,7 +6489,7 @@ mod workflow_owner_tests {
         for recipient in p_tags {
             tags.push(Tag::parse(["p", *recipient]).expect("p tag"));
         }
-        EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "scheduled prompt")
+        EventBuilder::new(kind, "scheduled prompt")
             .tags(tags)
             .sign_with_keys(signer)
             .expect("signed event")
@@ -6496,6 +6518,26 @@ mod workflow_owner_tests {
         let agent = Keys::generate().public_key().to_hex();
         let event = workflow_event(
             &relay,
+            Some(&owner),
+            &[&["buzz:workflow", "true"]],
+            &[&["buzz:workflow-mention", agent.as_str()]],
+            &[owner.as_str(), agent.as_str()],
+        );
+
+        assert_eq!(
+            effective_prompt_author(&event, Some(&relay.public_key().to_hex()), &agent),
+            owner
+        );
+    }
+
+    #[test]
+    fn trusted_forum_workflow_comment_uses_owner_for_explicit_target() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = workflow_event_with_kind(
+            &relay,
+            Kind::Custom(buzz_core::kind::KIND_FORUM_COMMENT as u16),
             Some(&owner),
             &[&["buzz:workflow", "true"]],
             &[&["buzz:workflow-mention", agent.as_str()]],
