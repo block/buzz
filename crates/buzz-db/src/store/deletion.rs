@@ -27,6 +27,8 @@ pub const POSTGRES_STORE_NAME: &str = "postgres";
 pub const OBJECT_STORE_NAME: &str = "object_store";
 /// Durable name of the Redis/cache manifest component.
 pub const REDIS_STORE_NAME: &str = "redis";
+/// Owner acknowledgement contract accepted by the first self-serve deletion API.
+pub const OWNER_DELETION_ACKNOWLEDGEMENT_VERSION: i32 = 1;
 
 /// Deployment-global advisory-lock key serializing schema migration with
 /// destructive deletion.
@@ -220,7 +222,7 @@ impl FromStr for DeletionStage {
 }
 
 /// Durable community deletion request.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DeletionRequest {
     /// Request identifier.
     pub id: Uuid,
@@ -233,8 +235,16 @@ pub struct DeletionRequest {
     pub stage: DeletionStage,
     /// Stage at which the current consecutive retry streak started.
     pub retry_stage: Option<DeletionStage>,
-    /// Operator identity that submitted the request.
+    /// Legacy display identity that submitted the request.
     pub requested_by: String,
+    /// Whether the request originated from an operator or authenticated owner intent.
+    pub request_origin: DeletionRequestOrigin,
+    /// Current owner identity authenticated at owner-request admission.
+    pub owner_pubkey: Option<String>,
+    /// Deployment operator that mediated the authenticated owner intent.
+    pub mediating_operator_pubkey: Option<String>,
+    /// Owner-facing destructive-action acknowledgement contract version.
+    pub acknowledgement_version: Option<i32>,
     /// Optional request reason.
     pub reason: Option<String>,
     /// Frozen catalog manifest.
@@ -281,6 +291,47 @@ pub struct DeletionRequest {
     pub aborted_at: Option<DateTime<Utc>>,
     /// Terminal logical-deletion time.
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Durable provenance class for a community deletion request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionRequestOrigin {
+    /// Request was submitted directly by a deployment operator.
+    Operator,
+    /// Request records authenticated owner intent mediated by an operator.
+    Owner,
+}
+
+impl FromStr for DeletionRequestOrigin {
+    type Err = DbError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "operator" => Ok(Self::Operator),
+            "owner" => Ok(Self::Owner),
+            other => Err(DbError::InvalidData(format!(
+                "unknown community deletion request origin: {other}"
+            ))),
+        }
+    }
+}
+
+/// Result of atomically admitting authenticated owner deletion intent.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OwnerDeletionAdmission {
+    /// A new request was created or the stable request UUID converged to its row.
+    Accepted(Box<DeletionRequest>),
+    /// The exact host is absent or the asserted owner is no longer current.
+    NotFoundOrNotOwner,
+    /// The community exists and is current-owner controlled, but is not archived.
+    NotArchived,
+    /// The community is already quiescing, fenced, or deleted.
+    LifecycleConflict,
+    /// The request UUID targets different intent, or another active request exists.
+    RequestConflict,
+    /// The owner acknowledgement contract is not supported.
+    UnsupportedAcknowledgementVersion,
 }
 
 /// Frozen PostgreSQL catalog inventory.
@@ -740,6 +791,131 @@ impl DeletionStore {
                 "community {community_host:?} is missing, already requested, fenced, or tombstoned"
             ))),
         }
+    }
+
+    /// Atomically admit an archived current owner's deletion intent.
+    ///
+    /// `request_id` is both the durable request id and the caller's stable
+    /// correlation/idempotency identity. Replays return the existing request at
+    /// its current stage. This operation only persists intent; it never
+    /// inventories, approves, quiesces, or executes deletion.
+    pub async fn admit_owner_request(
+        &self,
+        normalized_community_host: &str,
+        owner_pubkey: &str,
+        mediating_operator_pubkey: &str,
+        acknowledgement_version: i32,
+        request_id: Uuid,
+    ) -> Result<OwnerDeletionAdmission> {
+        if acknowledgement_version != OWNER_DELETION_ACKNOWLEDGEMENT_VERSION {
+            return Ok(OwnerDeletionAdmission::UnsupportedAcknowledgementVersion);
+        }
+        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let mediating_operator_pubkey = mediating_operator_pubkey.to_ascii_lowercase();
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('buzz-owner-deletion-intent:' || $1::text, 0))",
+        )
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await?;
+
+        if let Some(row) = sqlx::query("SELECT * FROM community_deletion_requests WHERE id = $1")
+            .bind(request_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            let existing = row_to_request(row)?;
+            let converges = existing.community_host == normalized_community_host
+                && existing.request_origin == DeletionRequestOrigin::Owner
+                && existing.owner_pubkey.as_deref() == Some(owner_pubkey.as_str())
+                && existing.acknowledgement_version == Some(acknowledgement_version);
+            tx.rollback().await?;
+            return Ok(if converges {
+                OwnerDeletionAdmission::Accepted(Box::new(existing))
+            } else {
+                OwnerDeletionAdmission::RequestConflict
+            });
+        }
+
+        let target = sqlx::query(
+            "SELECT id, host, archived_at, deletion_state, deleted_at \
+             FROM communities WHERE host = $1 FOR UPDATE",
+        )
+        .bind(normalized_community_host)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(target) = target else {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::NotFoundOrNotOwner);
+        };
+        let community_id: Uuid = target.try_get("id")?;
+        let canonical_host: String = target.try_get("host")?;
+        let deletion_state: String = target.try_get("deletion_state")?;
+        let deleted_at: Option<DateTime<Utc>> = target.try_get("deleted_at")?;
+        if deletion_state != "active" || deleted_at.is_some() {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::LifecycleConflict);
+        }
+
+        let owner_exists = sqlx::query_scalar::<_, String>(
+            "SELECT pubkey FROM relay_members \
+             WHERE community_id = $1 AND pubkey = $2 AND role = 'owner' FOR UPDATE",
+        )
+        .bind(community_id)
+        .bind(&owner_pubkey)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+        if !owner_exists {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::NotFoundOrNotOwner);
+        }
+        if target
+            .try_get::<Option<DateTime<Utc>>, _>("archived_at")?
+            .is_none()
+        {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::NotArchived);
+        }
+        let active_request_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
+             WHERE community_id = $1 AND stage <> 'aborted')",
+        )
+        .bind(community_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if active_request_exists {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::RequestConflict);
+        }
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO community_deletion_requests (
+                id, community_id, community_host, requested_by, request_origin,
+                owner_pubkey, mediating_operator_pubkey, acknowledgement_version
+            ) VALUES ($1, $2, $3, $4, 'owner', $4, $5, $6)
+            ON CONFLICT (community_id) WHERE stage <> 'aborted' DO NOTHING
+            RETURNING *
+            "#,
+        )
+        .bind(request_id)
+        .bind(community_id)
+        .bind(canonical_host)
+        .bind(owner_pubkey)
+        .bind(mediating_operator_pubkey)
+        .bind(acknowledgement_version)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::RequestConflict);
+        };
+        let request = row_to_request(row)?;
+        tx.commit().await?;
+        Ok(OwnerDeletionAdmission::Accepted(Box::new(request)))
     }
 
     /// List requests newest first with a hard bound.
@@ -3112,6 +3288,10 @@ fn row_to_request(row: sqlx::postgres::PgRow) -> Result<DeletionRequest> {
             .map(|stage| stage.parse())
             .transpose()?,
         requested_by: row.try_get("requested_by")?,
+        request_origin: row.try_get::<String, _>("request_origin")?.parse()?,
+        owner_pubkey: row.try_get("owner_pubkey")?,
+        mediating_operator_pubkey: row.try_get("mediating_operator_pubkey")?,
+        acknowledgement_version: row.try_get("acknowledgement_version")?,
         reason: row.try_get("reason")?,
         schema_manifest: row.try_get("schema_manifest")?,
         storage_manifest: row.try_get("storage_manifest")?,
@@ -3416,7 +3596,10 @@ mod tests {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
-    use crate::{CreateCommunityWithOwnerResult, Db, DbConfig};
+    use crate::{
+        relay_members::TransferResult, CreateCommunityWithOwnerResult, Db, DbConfig,
+        UnarchiveCommunityResult,
+    };
 
     async fn store() -> (Db, DeletionStore) {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -3483,6 +3666,220 @@ mod postgres_tests {
             .await
             .expect("freeze inventory");
         (request, inventory)
+    }
+
+    async fn archived_owned_community(db: &Db) -> (String, String, CommunityId) {
+        let host = format!("owner-delete-{}.example", Uuid::new_v4().simple());
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let CreateCommunityWithOwnerResult::Created(created) = db
+            .create_community_with_owner(&host, &owner)
+            .await
+            .expect("create owned community")
+        else {
+            panic!("expected a fresh community")
+        };
+        db.archive_community_owned_by(&host, &owner, "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        (host, owner, created.id)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_admission_requires_current_owner_and_archived_active_target() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+
+        let admitted = store
+            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .await
+            .expect("admit archived owner request");
+        let OwnerDeletionAdmission::Accepted(request) = admitted else {
+            panic!("expected accepted owner request")
+        };
+        assert_eq!(request.id, request_id);
+        assert_eq!(request.community_id, community);
+        assert_eq!(request.community_host, host);
+        assert_eq!(request.stage, DeletionStage::Submitted);
+        assert_eq!(request.request_origin, DeletionRequestOrigin::Owner);
+        assert_eq!(request.owner_pubkey.as_deref(), Some(owner.as_str()));
+        assert_eq!(request.mediating_operator_pubkey.as_deref(), Some(operator));
+        assert_eq!(request.acknowledgement_version, Some(1));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT deletion_state FROM communities WHERE id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("community lifecycle"),
+            "active",
+            "admission must not prematurely quiesce the community"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_admission_rejects_non_archived_non_owner_and_stale_owner() {
+        let (db, store) = store().await;
+        let host = format!("owner-delete-active-{}.example", Uuid::new_v4().simple());
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let replacement = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let outsider = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let CreateCommunityWithOwnerResult::Created(created) = db
+            .create_community_with_owner(&host, &owner)
+            .await
+            .expect("create community")
+        else {
+            panic!("expected fresh community")
+        };
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        assert_eq!(
+            store
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+                .await
+                .expect("non-archived admission result"),
+            OwnerDeletionAdmission::NotArchived
+        );
+        db.archive_community_owned_by(&host, &owner, "protected.example")
+            .await
+            .expect("archive")
+            .expect("owned community");
+        assert_eq!(
+            store
+                .admit_owner_request(&host, &outsider, operator, 1, Uuid::new_v4())
+                .await
+                .expect("non-owner admission result"),
+            OwnerDeletionAdmission::NotFoundOrNotOwner
+        );
+        assert!(matches!(
+            db.transfer_ownership(created.id, &replacement, &owner)
+                .await
+                .expect("rotate owner"),
+            TransferResult::Transferred { .. }
+        ));
+        assert_eq!(
+            store
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+                .await
+                .expect("stale-owner admission result"),
+            OwnerDeletionAdmission::NotFoundOrNotOwner
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_admission_replay_converges_after_stage_advancement_and_rejects_retargeting() {
+        let (db, store) = store().await;
+        let (host, owner, _) = archived_owned_community(&db).await;
+        let (other_host, other_owner, _) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        let OwnerDeletionAdmission::Accepted(first) = store
+            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .await
+            .expect("first admission")
+        else {
+            panic!("expected accepted request")
+        };
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(first.community_id)
+                .await
+                .expect("schema inventory"),
+            storage: empty_storage_manifest(first.community_id),
+        };
+        store
+            .freeze_inventory(first.id, &inventory)
+            .await
+            .expect("advance request");
+
+        let OwnerDeletionAdmission::Accepted(replayed) = store
+            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .await
+            .expect("replay admission")
+        else {
+            panic!("expected converged replay")
+        };
+        assert_eq!(replayed.id, first.id);
+        assert_eq!(replayed.stage, DeletionStage::Inventoried);
+        assert_eq!(
+            store
+                .admit_owner_request(&other_host, &other_owner, operator, 1, request_id)
+                .await
+                .expect("retargeting result"),
+            OwnerDeletionAdmission::RequestConflict
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_owner_admission_duplicates_return_one_stable_request() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        let (first, second) = tokio::join!(
+            store.admit_owner_request(&host, &owner, operator, 1, request_id),
+            store.admit_owner_request(&host, &owner, operator, 1, request_id),
+        );
+        let accepted_id = |result: Result<OwnerDeletionAdmission>| {
+            let OwnerDeletionAdmission::Accepted(request) = result.expect("admission") else {
+                panic!("expected accepted request")
+            };
+            request.id
+        };
+        assert_eq!(accepted_id(first), request_id);
+        assert_eq!(accepted_id(second), request_id);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM community_deletion_requests WHERE community_id = $1 AND stage <> 'aborted'"
+            )
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .expect("active request count"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn accepted_owner_request_blocks_unarchive_and_transfer_and_suppresses_owner_list_row() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let new_owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let OwnerDeletionAdmission::Accepted(_) = store
+            .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+            .await
+            .expect("admit owner request")
+        else {
+            panic!("expected accepted request")
+        };
+
+        assert_eq!(
+            db.unarchive_community_owned_by(&host, &owner)
+                .await
+                .expect("unarchive result"),
+            UnarchiveCommunityResult::DeletionPending
+        );
+        assert_eq!(
+            db.transfer_ownership(community, &new_owner, &owner)
+                .await
+                .expect("transfer result"),
+            TransferResult::DeletionPending
+        );
+        assert!(
+            db.list_communities_owned_by(&owner)
+                .await
+                .expect("owner list")
+                .iter()
+                .all(|row| row.id != community),
+            "accepted deletion requests must not remain actionable archived rows"
+        );
     }
 
     #[tokio::test]

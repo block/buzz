@@ -14,6 +14,18 @@ EVENT, REQ, REST, media, git, search, workflow, or pub/sub handling. Unknown
 hosts fail closed, and NIP-98/API-token stamps must agree with the host-derived
 community rather than overriding it.
 
+Deployment-root community management uses operator-signed NIP-98 HTTP requests.
+`POST /operator/communities/delete` accepts only an exact normalized, archived
+community whose asserted pubkey is still its owner. The caller supplies the
+request UUID as the stable correlation/idempotency identity; the durable row
+records owner intent, mediating operator, and acknowledgement version. Admission
+returns `202` at the `submitted` stage and performs no inventory, approval,
+quiescing, object-store access, or deletion execution synchronously. While that
+non-aborted request exists, unarchive and ownership transfer conflict and owner
+management lists suppress the archived row. Replaying the same UUID converges
+to its current stage; a different UUID conflicts with the existing one-active-
+request invariant until that request is aborted.
+
 Buzz is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 
 ---

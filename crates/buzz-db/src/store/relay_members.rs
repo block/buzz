@@ -444,6 +444,8 @@ pub enum TransferResult {
     /// concurrent transfer or owner rotation has already changed ownership.
     /// The caller must NOT retry blindly — re-read ownership and re-evaluate.
     OwnerConflict,
+    /// Durable deletion intent exists and wins over ownership mutation.
+    DeletionPending,
     /// The transferee already owns the maximum number of communities.
     /// Enforced atomically inside the transfer transaction so concurrent
     /// transfers to the same recipient cannot both pass the limit.
@@ -500,13 +502,16 @@ pub fn owner_count_advisory_lock_key(pubkey_hex: &str) -> i64 {
 ///    so that concurrent transfers to the same recipient serialize. The same
 ///    lock key is also used by `Db::create_community_with_owner` to prevent
 ///    transfer-vs-create races.
-/// 2. Locks the current owner row `FOR UPDATE` and verifies
+/// 2. Locks the community row and rejects any non-aborted deletion request.
+///    Owner-deletion admission takes the same row lock, so whichever operation
+///    commits first makes the other re-evaluate and conflict.
+/// 3. Locks the current owner row `FOR UPDATE` and verifies
 ///    `expected_owner_pubkey` matches. This prevents a stale-owner race where
 ///    a delayed/retried request overwrites a completed transfer.
-/// 3. Enforces the [`MAX_COMMUNITIES_PER_OWNER`] limit on the transferee by
+/// 4. Enforces the [`MAX_COMMUNITIES_PER_OWNER`] limit on the transferee by
 ///    counting owned communities inside the same transaction.
-/// 4. Upserts `new_owner_pubkey` as `owner` (insert or promote).
-/// 5. Demotes every other owner in this community to `member` — **not**
+/// 5. Upserts `new_owner_pubkey` as `owner` (insert or promote).
+/// 6. Demotes every other owner in this community to `member` — **not**
 ///    `admin`, per product decision: the former owner retains no management
 ///    capabilities.
 ///
@@ -533,7 +538,29 @@ pub async fn transfer_ownership(
     )
     .await?;
 
-    // 2. Lock the current owner row FOR UPDATE and verify the expected owner.
+    let community_exists =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM communities WHERE id = $1 FOR UPDATE")
+            .bind(community.as_uuid())
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
+    if !community_exists {
+        tx.rollback().await?;
+        return Ok(TransferResult::NoOwner);
+    }
+    let deletion_pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
+         WHERE community_id = $1 AND stage <> 'aborted')",
+    )
+    .bind(community.as_uuid())
+    .fetch_one(&mut *tx)
+    .await?;
+    if deletion_pending {
+        tx.rollback().await?;
+        return Ok(TransferResult::DeletionPending);
+    }
+
+    // 3. Lock the current owner row FOR UPDATE and verify the expected owner.
     //    FOR UPDATE prevents the stale-owner race: a concurrent transfer that
     //    already changed the owner will block on this lock until our txn
     //    completes (or vice versa), and the expected_owner check will fail.
@@ -570,7 +597,7 @@ pub async fn transfer_ownership(
         existing_owners.iter().find(|p| **p != pubkey).cloned()
     };
 
-    // 3. Enforce the transferee's community ownership limit inside the same
+    // 4. Enforce the transferee's community ownership limit inside the same
     //    transaction that holds the advisory lock. This is the authoritative
     //    check — kgoose's preflight count is advisory only.
     let owned_count: i64 = sqlx::query_scalar(
@@ -585,7 +612,7 @@ pub async fn transfer_ownership(
         return Ok(TransferResult::LimitReached);
     }
 
-    // 4. Upsert the new owner.
+    // 5. Upsert the new owner.
     sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, 'owner', NULL) \
@@ -596,7 +623,7 @@ pub async fn transfer_ownership(
     .execute(&mut *tx)
     .await?;
 
-    // 5. Demote all other owners to member (not admin).
+    // 6. Demote all other owners to member (not admin).
     sqlx::query(
         "UPDATE relay_members SET role = 'member', updated_at = now() \
          WHERE community_id = $1 AND role = 'owner' AND pubkey <> $2",
