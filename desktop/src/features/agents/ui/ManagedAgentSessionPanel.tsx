@@ -36,12 +36,17 @@ import {
   useObserverEvents,
   useArchivedChannelEvents,
 } from "./useObserverEvents";
-import { buildTranscriptState } from "./agentSessionTranscript";
+import {
+  buildTranscriptState,
+  projectPermissionLedgerEvents,
+} from "./agentSessionTranscript";
+import { getManagedAgentPermissionLifecycle } from "@/shared/api/tauriManagedAgents";
 
 type ManagedAgentSessionPanelProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name"> & {
     status: ManagedAgent["status"] | "unknown";
     avatarUrl?: string | null;
+    relayUrl?: string | null;
   };
   autoTail?: boolean;
   channelId?: string | null;
@@ -85,6 +90,36 @@ export function ManagedAgentSessionPanel({
     hasObserver,
     agent.pubkey,
   );
+  const [ledgerRecords, setLedgerRecords] = React.useState<unknown[]>([]);
+  React.useEffect(() => {
+    // A live runtime may reconnect its observer stream. Wait for that stream
+    // to be open, then refresh the authoritative Desktop ledger; idle
+    // runtimes still read it immediately for historical recovery.
+    if (!agent.relayUrl || (hasObserver && connectionState !== "open")) return;
+    let current = true;
+    void getManagedAgentPermissionLifecycle(agent.pubkey, agent.relayUrl)
+      .then((snapshot) => {
+        if (current) setLedgerRecords(snapshot.records);
+      })
+      .catch(() => {
+        if (current) setLedgerRecords([]);
+      });
+    return () => {
+      current = false;
+    };
+  }, [agent.pubkey, agent.relayUrl, connectionState, hasObserver]);
+
+  const ledgerEvents = React.useMemo(
+    () =>
+      scopeByChannel(
+        projectPermissionLedgerEvents(
+          ledgerRecords,
+          hasObserver && connectionState === "open",
+        ),
+        channelId,
+      ),
+    [channelId, connectionState, hasObserver, ledgerRecords],
+  );
 
   // Channel-scoped live events (capped at MAX_OBSERVER_EVENTS) and uncapped
   // archived events from SQLite paging. Both are raw ObserverEvent[] — we merge
@@ -105,8 +140,12 @@ export function ManagedAgentSessionPanel({
   // sorted ascending. Used as the single source for both the transcript and the
   // raw event rail / header count.
   const combinedEvents = React.useMemo(
-    () => mergeObserverEventWindows(scopedLiveEvents, archivedChannelEvents),
-    [scopedLiveEvents, archivedChannelEvents],
+    () =>
+      mergeObserverEventWindows(
+        [...scopedLiveEvents, ...ledgerEvents],
+        archivedChannelEvents,
+      ),
+    [scopedLiveEvents, archivedChannelEvents, ledgerEvents],
   );
 
   // Derive transcript once from the combined raw window. When transcriptOverride

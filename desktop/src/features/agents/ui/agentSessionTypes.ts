@@ -68,6 +68,15 @@ export type TranscriptItemIdentity = {
   channelId?: string | null;
 };
 
+/** A signed-owner decision may only select one option from this ACP request. */
+export type PendingPermissionResolution = {
+  turnId: string;
+  sessionId: string;
+  requestId: string | number;
+  actionDigest: string;
+  options: Array<{ optionId: string; label: string }>;
+};
+
 export type TranscriptItem =
   | ({
       id: string;
@@ -109,6 +118,8 @@ export type TranscriptItem =
       text: string;
       /** Resolved outcome for permission items (e.g. "Approved (allow_once)", "Denied (reject_once)", "Cancelled"). */
       outcome?: string;
+      /** Present only after the harness has created an authenticated owner wait. */
+      pendingResolution?: PendingPermissionResolution;
       timestamp: string;
       descriptor?: AgentActivityDescriptor;
       acpSource?: TranscriptAcpSource;

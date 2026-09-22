@@ -79,6 +79,10 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // for same-session sweep decisions.
     "BUZZ_MANAGED_AGENT",
     "BUZZ_MANAGED_AGENT_START_NONCE",
+    // Desktop chooses the build- and runtime-scoped permission authority path.
+    // A definition-provided replacement could point the harness at another
+    // agent's decisions or an unprotected directory.
+    "BUZZ_ACP_PERMISSION_LEDGER_PATH",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {

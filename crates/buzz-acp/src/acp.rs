@@ -9,11 +9,13 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
+use crate::permission_ledger::{self, PermissionLedger, PermissionRecord, PermissionState};
 use crate::usage::{
     PromptResponseUsage, StandardAdapterKind, StandardUsageTracker, TurnUsage, UsageTracker,
 };
@@ -21,6 +23,35 @@ use crate::usage::{
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+const PERMISSION_DECISION_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// An owner decision delivered through Buzz's signed observer-control channel.
+///
+/// The harness verifies every field against the still-pending ACP request before
+/// writing a response. This is deliberately not an Auto-review override.
+#[derive(Clone, Debug)]
+pub struct PermissionResolution {
+    pub turn_id: String,
+    pub session_id: String,
+    pub request_id: serde_json::Value,
+    pub action_digest: String,
+    pub option_id: String,
+}
+
+#[derive(Debug)]
+struct PendingPermission {
+    ledger_key: String,
+    session_id: String,
+    request_id: serde_json::Value,
+    action_digest: String,
+    option_ids: Vec<String>,
+    expires_at: tokio::time::Instant,
+}
+
+fn permission_action_digest(msg: &serde_json::Value) -> Result<String, AcpError> {
+    let canonical = serde_json::to_vec(msg)?;
+    Ok(hex::encode(Sha256::digest(canonical)))
+}
 
 /// Package and binary name used by Buzz's Pi ACP fork.
 pub(crate) const BUZZ_PI_ACP_NAME: &str = "buzz-pi-acp";
@@ -211,6 +242,14 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
+    /// Per-turn channel for signed owner resolutions of a pending ACP
+    /// permission request. It is independent from cancellation controls: an
+    /// approval must not tear down or replay the agent turn.
+    permission_rx: Option<tokio::sync::mpsc::Receiver<PermissionResolution>>,
+    pending_permission: Option<PendingPermission>,
+    /// One process-shared, Desktop-owned durable ledger. `None` means this is
+    /// not a managed Desktop runtime, so permission requests are cancelled.
+    permission_ledger: Option<std::sync::Arc<std::sync::Mutex<PermissionLedger>>>,
     /// Usage tracker for goose/buzz-agent's cumulative notification format.
     goose_usage: UsageTracker,
     /// Per-turn prompt-response usage and Claude's optional cumulative cost.
@@ -557,6 +596,17 @@ impl AcpClient {
             .take()
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
+        let permission_ledger = match (
+            std::env::var_os("BUZZ_ACP_PERMISSION_LEDGER_PATH"),
+            std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").ok(),
+        ) {
+            (Some(path), Some(start_nonce)) => Some(
+                PermissionLedger::shared(std::path::PathBuf::from(path), start_nonce)
+                    .map_err(AcpError::Protocol)?,
+            ),
+            _ => None,
+        };
+
         Ok(Self {
             child,
             stdin,
@@ -572,6 +622,9 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
+            permission_rx: None,
+            pending_permission: None,
+            permission_ledger,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
@@ -940,6 +993,27 @@ impl AcpClient {
         self.steer_rx = Some(rx);
     }
 
+    /// Install the owner-resolution receiver for one channel turn.
+    pub fn install_permission_rx(&mut self, rx: tokio::sync::mpsc::Receiver<PermissionResolution>) {
+        debug_assert!(
+            self.permission_rx.is_none(),
+            "install_permission_rx: previous turn's receiver was not consumed"
+        );
+        self.permission_rx = Some(rx);
+    }
+
+    #[cfg(test)]
+    fn install_test_permission_ledger(&mut self, name: &str) {
+        let directory = std::env::temp_dir().join(format!(
+            "buzz-acp-permission-fixture-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = directory.join("permission-lifecycle.json");
+        let ledger = PermissionLedger::open(path, format!("fixture-{name}"))
+            .expect("test permission ledger opens");
+        self.permission_ledger = Some(std::sync::Arc::new(std::sync::Mutex::new(ledger)));
+    }
+
     /// Clear any installed steer receiver without consuming it.
     ///
     /// Called by `send_prompt_result` on every exit path of `run_prompt_task`
@@ -948,6 +1022,29 @@ impl AcpClient {
     /// Idempotent — safe to call when `steer_rx` is already `None`.
     pub fn clear_steer_rx(&mut self) {
         self.steer_rx = None;
+        self.permission_rx = None;
+        if let Some(pending) = self.pending_permission.take() {
+            let persisted = self
+                .permission_ledger
+                .as_ref()
+                .and_then(|ledger| ledger.lock().ok())
+                .map(|mut ledger| {
+                    ledger.transition_pending(&pending.ledger_key, PermissionState::Abandoned)
+                })
+                .transpose();
+            self.observe(
+                "permission_abandoned",
+                serde_json::json!({
+                    "requestId": pending.request_id,
+                    "sessionId": pending.session_id,
+                    "actionDigest": pending.action_digest,
+                    "outcome": "agent_session_ended",
+                    "persisted": persisted.is_ok(),
+                }),
+            );
+        }
+        self.pending_permission_id = None;
+        self.permission_responded = false;
     }
 
     /// Returns `true` if no steer receiver is currently installed.
@@ -1044,6 +1141,18 @@ impl AcpClient {
         // but only if we haven't already responded (guards against double-response race).
         if let Some(perm_id) = self.pending_permission_id.clone() {
             if !self.permission_responded {
+                if let Some(pending) = self.pending_permission.as_ref() {
+                    let ledger = self.permission_ledger.as_ref().ok_or_else(|| {
+                        AcpError::Protocol("permission lifecycle ledger is unavailable".into())
+                    })?;
+                    ledger
+                        .lock()
+                        .map_err(|_| {
+                            AcpError::Protocol("permission lifecycle ledger lock poisoned".into())
+                        })?
+                        .transition_pending(&pending.ledger_key, PermissionState::Cancelled)
+                        .map_err(AcpError::Protocol)?;
+                }
                 let response = permission_response_cancelled(&perm_id);
                 self.write_ndjson(&response).await?;
                 tracing::debug!(
@@ -1053,6 +1162,7 @@ impl AcpClient {
             }
             self.pending_permission_id = None;
             self.permission_responded = false;
+            self.pending_permission = None;
         }
 
         // Step 2: send session/cancel notification (no id)
@@ -1199,7 +1309,8 @@ impl AcpClient {
     ///
     /// While waiting, handles:
     /// - `session/update` notifications → logged via tracing
-    /// - `session/request_permission` requests → auto-approved with `allow_once`
+    /// - `session/request_permission` requests → held for an authenticated
+    ///   owner decision that is bound to the exact ACP request
     /// - Any other messages → debug-logged and ignored; if they carry an `id`
     ///   (i.e. they are requests, not notifications), a JSON-RPC -32601 error is sent.
     ///
@@ -1210,10 +1321,34 @@ impl AcpClient {
         expected_id: u64,
     ) -> Result<serde_json::Value, AcpError> {
         loop {
+            // Setup and prompt requests both use this production dispatch loop.
+            // Keep owner resolution in the same loop so an adapter cannot turn a
+            // permission request during setup into the old unconditional allow.
+            let read_result = tokio::select! {
+                _ = async {
+                    match self.pending_permission.as_ref() {
+                        Some(pending) => tokio::time::sleep_until(pending.expires_at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.expire_pending_permission().await?;
+                    continue;
+                }
+                Some(resolution) = async {
+                    match self.permission_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => None,
+                    }
+                } => {
+                    self.resolve_pending_permission(resolution).await?;
+                    continue;
+                }
+                read_result = self.reader.next() => read_result,
+            };
             // LinesCodec::new_with_max_length enforces MAX_LINE_SIZE at the
             // read level — the buffer never grows beyond the limit, preventing
             // OOM from rogue agents writing infinite non-newline bytes.
-            let line = match self.reader.next().await {
+            let line = match read_result {
                 None => return Err(AcpError::AgentExited),
                 Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
                     return Err(AcpError::Protocol(
@@ -1344,6 +1479,7 @@ impl AcpClient {
         // Dropped at scope exit (return paths drain `pending_steer` first
         // so the ack_tx oneshot is never leaked silently).
         let mut steer_rx = self.steer_rx.take();
+        let mut permission_rx = self.permission_rx.take();
 
         // Tracks the in-flight steer write: `(request_id, transport, ack_tx)`.
         // While `Some`, the steer arm is gated off so we don't stack writes,
@@ -1402,6 +1538,24 @@ impl AcpClient {
             // read level — the buffer never grows beyond the limit.
             let read_result = tokio::select! {
                 biased;
+                _ = async {
+                    match self.pending_permission.as_ref() {
+                        Some(pending) => tokio::time::sleep_until(pending.expires_at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.expire_pending_permission().await?;
+                    continue;
+                }
+                Some(resolution) = async {
+                    match permission_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => None,
+                    }
+                } => {
+                    self.resolve_pending_permission(resolution).await?;
+                    continue;
+                }
                 read_result = self.reader.next() => Some(read_result),
                 // Steer arm: gated off whenever a steer write is already in
                 // flight so we don't stack two writes against the same
@@ -1939,89 +2093,233 @@ impl AcpClient {
         }
     }
 
-    /// Auto-approve a `session/request_permission` request from the agent.
+    /// Park a `session/request_permission` until its authenticated owner resolves it.
     ///
-    /// Finds the option with `kind == "allow_once"` and responds with its `optionId`.
-    /// If no `allow_once` option exists, falls back to `reject_once`.
-    ///
-    /// **Critical:** Never hardcode `optionId` — always find it dynamically by `kind`.
-    ///
-    /// The request `id` is stored as `serde_json::Value` to support both numeric
-    /// and string IDs per JSON-RPC 2.0.
+    /// A transcript frame is evidence only. The only route that writes an ACP
+    /// selection is a signed observer-control frame whose request ID, action
+    /// digest, and offered option ID match this exact pending request.
     async fn handle_permission_request(&mut self, msg: &serde_json::Value) -> Result<(), AcpError> {
-        // Extract id as a Value — JSON-RPC 2.0 allows both numeric and string IDs.
         let id = msg
             .get("id")
             .cloned()
             .ok_or_else(|| AcpError::Protocol("permission request missing id".into()))?;
-
-        // Store pending permission id so cancel_with_cleanup can respond to it.
+        let session_id = msg
+            .pointer("/params/sessionId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| AcpError::Protocol("permission request missing sessionId".into()))?;
+        if self.pending_permission.is_some() {
+            return Err(AcpError::Protocol(
+                "received a second permission request while one is pending".into(),
+            ));
+        }
         self.pending_permission_id = Some(id.clone());
-        // Mark as not yet responded — guards against double-response race.
         self.permission_responded = false;
-
         let options = msg["params"]["options"]
             .as_array()
             .ok_or_else(|| AcpError::Protocol("permission request missing options".into()))?;
-
-        tracing::debug!(
-            target: "acp::permission",
-            "session/request_permission id={id}, {} options",
-            options.len()
-        );
-
-        // Find allow_once by kind — NEVER hardcode optionId.
-        let allow_once = options
+        let action_digest = permission_action_digest(msg)?;
+        let option_ids = options
             .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
-
-        let response = if let Some(opt) = allow_once {
-            let option_id = opt["optionId"]
-                .as_str()
-                .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
-            tracing::info!(
-                target: "acp::permission",
-                "auto-approving permission id={id} with allow_once optionId={option_id:?}"
+            .map(|option| {
+                option
+                    .get("optionId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| AcpError::Protocol("permission option missing optionId".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let expires_at = tokio::time::Instant::now() + PERMISSION_DECISION_TTL;
+        let Some(ledger_handle) = self.permission_ledger.as_ref().cloned() else {
+            // A managed owner card without an acknowledged host ledger could
+            // survive neither a dropped observer frame nor a process crash.
+            self.write_ndjson(&permission_response_cancelled(&id))
+                .await?;
+            self.pending_permission_id = None;
+            self.permission_responded = true;
+            self.observe(
+                "permission_unavailable",
+                serde_json::json!({"reason": "durable_ledger_unavailable"}),
             );
-            permission_response_selected(&id, option_id)
-        } else {
-            // No allow_once — fall back to reject_once.
-            tracing::warn!(
-                target: "acp::permission",
-                "no allow_once option found in permission request id={id}, falling back to reject_once"
+            return Ok(());
+        };
+        let expires_at_wall = chrono::Utc::now()
+            .checked_add_signed(
+                chrono::Duration::from_std(PERMISSION_DECISION_TTL).unwrap_or_default(),
+            )
+            .unwrap_or_else(chrono::Utc::now)
+            .to_rfc3339();
+        let persist_result = {
+            let mut ledger = ledger_handle.lock().map_err(|_| {
+                AcpError::Protocol("permission lifecycle ledger lock poisoned".into())
+            })?;
+            let turn_id = self.observer_context.turn_id.clone().ok_or_else(|| {
+                AcpError::Protocol("permission request has no managed turn identity".into())
+            })?;
+            let key = permission_ledger::record_key(
+                ledger.start_nonce(),
+                &turn_id,
+                session_id,
+                &id,
+                &action_digest,
             );
-            let reject = options
-                .iter()
-                .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
-
-            if let Some(opt) = reject {
-                let option_id = opt["optionId"].as_str().unwrap_or("reject");
-                permission_response_selected(&id, option_id)
-            } else {
-                return Err(AcpError::Protocol(
-                    "no suitable permission option found (neither allow_once nor reject_once)"
-                        .into(),
-                ));
+            let record = PermissionRecord {
+                key: key.clone(),
+                channel_id: self.observer_context.channel_id.clone(),
+                start_nonce: ledger.start_nonce().to_owned(),
+                turn_id,
+                session_id: session_id.to_owned(),
+                request_id: id.clone(),
+                action_digest: action_digest.clone(),
+                request: msg.clone(),
+                options: options.clone(),
+                expires_at: expires_at_wall.clone(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                state: PermissionState::Pending,
+            };
+            ledger.record_pending(record).map(|()| key)
+        };
+        let key = match persist_result {
+            Ok(key) => key,
+            Err(error) => {
+                self.write_ndjson(&permission_response_cancelled(&id))
+                    .await?;
+                self.pending_permission_id = None;
+                self.permission_responded = true;
+                self.observe(
+                    "permission_unavailable",
+                    serde_json::json!({"reason": "pending_persist_failed"}),
+                );
+                return Err(AcpError::Protocol(error));
             }
         };
+        self.pending_permission = Some(PendingPermission {
+            ledger_key: key,
+            session_id: session_id.to_owned(),
+            request_id: id.clone(),
+            action_digest: action_digest.clone(),
+            option_ids: option_ids.clone(),
+            expires_at,
+        });
+        self.observe(
+            "permission_pending",
+            serde_json::json!({
+                "requestId": id,
+                "sessionId": session_id,
+                "actionDigest": action_digest,
+                "options": options,
+                "expiresAt": expires_at_wall,
+            }),
+        );
+        Ok(())
+    }
 
-        // Write the response first, then mark as responded.
-        //
-        // Previous ordering (flag-before-write) was intended to guard against a
-        // double-response if a timeout fires between write and flag-set. However,
-        // the deadlock risk is worse: if write_ndjson fails (e.g. WriteTimeout),
-        // the flag would be true but no response was actually sent. Then
-        // cancel_with_cleanup would see permission_responded=true, skip sending
-        // the cancelled outcome, and the agent would hang waiting for a reply
-        // that never arrives — a guaranteed deadlock.
-        //
-        // The correct fix: set the flag AFTER a successful write. The double-
-        // response window (between write completion and flag-set) is negligibly
-        // small and bounded by a single memory store; the deadlock window was
-        // unbounded.
-        self.write_ndjson(&response).await?;
+    async fn resolve_pending_permission(
+        &mut self,
+        resolution: PermissionResolution,
+    ) -> Result<(), AcpError> {
+        let Some(pending) = self.pending_permission.take() else {
+            self.observe(
+                "permission_resolution_rejected",
+                serde_json::json!({"reason": "no_pending_request"}),
+            );
+            return Ok(());
+        };
+        if self.observer_context.turn_id.as_deref() != Some(resolution.turn_id.as_str()) {
+            self.observe(
+                "permission_resolution_rejected",
+                serde_json::json!({"reason": "turn_mismatch"}),
+            );
+            self.pending_permission = Some(pending);
+            return Ok(());
+        }
+        if pending.expires_at <= tokio::time::Instant::now() {
+            self.pending_permission = Some(pending);
+            self.expire_pending_permission().await?;
+            return Ok(());
+        }
+        if pending.session_id != resolution.session_id
+            || pending.request_id != resolution.request_id
+            || pending.action_digest != resolution.action_digest
+            || !pending
+                .option_ids
+                .iter()
+                .any(|id| id == &resolution.option_id)
+        {
+            self.observe(
+                "permission_resolution_rejected",
+                serde_json::json!({"reason": "binding_mismatch"}),
+            );
+            self.pending_permission = Some(pending);
+            return Ok(());
+        }
+        let Some(ledger_handle) = self.permission_ledger.as_ref().cloned() else {
+            self.pending_permission = Some(pending);
+            return Err(AcpError::Protocol(
+                "permission lifecycle ledger is unavailable".into(),
+            ));
+        };
+        {
+            let mut ledger = ledger_handle.lock().map_err(|_| {
+                AcpError::Protocol("permission lifecycle ledger lock poisoned".into())
+            })?;
+            ledger
+                .transition_pending(
+                    &pending.ledger_key,
+                    PermissionState::DecisionConsumed(resolution.option_id.clone()),
+                )
+                .map_err(AcpError::Protocol)?;
+            ledger
+                .transition_consumed_to_delivery_attempt(&pending.ledger_key)
+                .map_err(AcpError::Protocol)?;
+        }
+        let response = permission_response_selected(&pending.request_id, &resolution.option_id);
+        if let Err(error) = self.write_ndjson(&response).await {
+            self.observe(
+                "permission_delivery_unknown",
+                serde_json::json!({"reason": "response_write_failed"}),
+            );
+            return Err(error);
+        }
+        ledger_handle
+            .lock()
+            .map_err(|_| AcpError::Protocol("permission lifecycle ledger lock poisoned".into()))?
+            .transition_delivery_attempt_to_selected(&pending.ledger_key)
+            .map_err(AcpError::Protocol)?;
         self.permission_responded = true;
         self.pending_permission_id = None;
+        self.observe(
+            "permission_resolved",
+            serde_json::json!({"outcome": "selected", "optionId": resolution.option_id}),
+        );
+        Ok(())
+    }
+
+    async fn expire_pending_permission(&mut self) -> Result<(), AcpError> {
+        let Some(pending) = self.pending_permission.take() else {
+            return Ok(());
+        };
+        let Some(ledger_handle) = self.permission_ledger.as_ref().cloned() else {
+            self.pending_permission = Some(pending);
+            return Err(AcpError::Protocol(
+                "permission lifecycle ledger is unavailable".into(),
+            ));
+        };
+        ledger_handle
+            .lock()
+            .map_err(|_| AcpError::Protocol("permission lifecycle ledger lock poisoned".into()))?
+            .transition_pending(&pending.ledger_key, PermissionState::Expired)
+            .map_err(AcpError::Protocol)?;
+        let response = permission_response_cancelled(&pending.request_id);
+        if let Err(error) = self.write_ndjson(&response).await {
+            self.pending_permission = Some(pending);
+            return Err(error);
+        }
+        self.permission_responded = true;
+        self.pending_permission_id = None;
+        self.observe(
+            "permission_expired",
+            serde_json::json!({"outcome": "cancelled"}),
+        );
         Ok(())
     }
 
@@ -3401,6 +3699,185 @@ mod tests {
             .await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert_eq!(result.unwrap()["worked"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn owner_resolution_binds_exact_permission_in_non_idle_dispatch_loop() {
+        // This fixture uses deliberately non-obvious option IDs. The adapter
+        // releases the production request only after it has read the exact
+        // selected response, so an old allow_once response cannot pass it.
+        let permission = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "perm-cedar-17",
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "session-cedar",
+                "title": "fixture request",
+                "options": [
+                    {"optionId": "grant-lantern-9", "kind": "allow_once", "name": "Grant lantern"},
+                    {"optionId": "deny-otter-4", "kind": "reject_once", "name": "Deny otter"}
+                ]
+            }
+        });
+        let permission_wire = serde_json::to_string(&permission).unwrap();
+        let script = format!(
+            r#"read _request
+echo '{}'
+read _decision
+case "$_decision" in
+  *'"id":"perm-cedar-17"'*) ;;
+  *) exit 7 ;;
+esac
+case "$_decision" in
+  *'"outcome":"selected"'*) ;;
+  *) exit 7 ;;
+esac
+case "$_decision" in
+  *'"optionId":"grant-lantern-9"'*) echo '{{"jsonrpc":"2.0","id":0,"result":{{"ok":true}}}}' ;;
+  *) exit 7 ;;
+esac"#,
+            permission_wire.replace('\'', "'\\''")
+        );
+        let mut client = spawn_script(&script).await;
+        client.observer_context.turn_id = Some("turn-cedar".into());
+        client.install_test_permission_ledger("cedar");
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        client.install_permission_rx(rx);
+        let digest = permission_action_digest(&permission).unwrap();
+        let request = client.send_request("fixture/request", serde_json::json!({}));
+        tokio::pin!(request);
+
+        tokio::select! {
+            result = &mut request => panic!("permission auto-resolved before owner decision: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(40)) => {}
+        }
+        tx.send(PermissionResolution {
+            turn_id: "turn-cedar".into(),
+            session_id: "session-cedar".into(),
+            request_id: serde_json::json!("perm-cedar-17"),
+            action_digest: "changed-action".into(),
+            option_id: "grant-lantern-9".into(),
+        })
+        .await
+        .unwrap();
+        tokio::select! {
+            result = &mut request => panic!("changed action resolved permission: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(40)) => {}
+        }
+        tx.send(PermissionResolution {
+            turn_id: "turn-cedar".into(),
+            session_id: "session-cedar".into(),
+            request_id: serde_json::json!("perm-cedar-17"),
+            action_digest: digest.clone(),
+            option_id: "invented-option".into(),
+        })
+        .await
+        .unwrap();
+        tokio::select! {
+            result = &mut request => panic!("unoffered option resolved permission: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(40)) => {}
+        }
+        tx.send(PermissionResolution {
+            turn_id: "turn-cedar".into(),
+            session_id: "session-cedar".into(),
+            request_id: serde_json::json!("perm-cedar-17"),
+            action_digest: digest,
+            option_id: "grant-lantern-9".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(request.await.unwrap()["ok"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn owner_resolution_binds_exact_permission_in_idle_prompt_dispatch_loop() {
+        let permission = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 701,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "session-poppy",
+                "options": [{"optionId": "reject-poppy-2", "kind": "reject_once"}]
+            }
+        });
+        let permission_wire = serde_json::to_string(&permission).unwrap();
+        let script = format!(
+            r#"read _prompt
+echo '{}'
+read _decision
+case "$_decision" in
+  *'"id":701'*) ;;
+  *) exit 7 ;;
+esac
+case "$_decision" in
+  *'"outcome":"selected"'*) ;;
+  *) exit 7 ;;
+esac
+case "$_decision" in
+  *'"optionId":"reject-poppy-2"'*) echo '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}' ;;
+  *) exit 7 ;;
+esac"#,
+            permission_wire.replace('\'', "'\\''")
+        );
+        let mut client = spawn_script(&script).await;
+        client.observer_context.turn_id = Some("turn-poppy".into());
+        client.install_test_permission_ledger("poppy");
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        client.install_permission_rx(rx);
+        let digest = permission_action_digest(&permission).unwrap();
+        let prompt = client.session_prompt_with_idle_timeout(
+            "session-poppy",
+            "fixture prompt",
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        tokio::pin!(prompt);
+        tokio::select! {
+            result = &mut prompt => panic!("permission auto-resolved in idle loop: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(40)) => {}
+        }
+        tx.send(PermissionResolution {
+            turn_id: "turn-poppy".into(),
+            session_id: "session-poppy".into(),
+            request_id: serde_json::json!(701),
+            action_digest: digest,
+            option_id: "reject-poppy-2".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(prompt.await.unwrap(), StopReason::EndTurn);
+    }
+
+    #[tokio::test]
+    async fn cancel_with_cleanup_ends_pending_owner_wait_with_cancelled_outcome() {
+        let script = r#"read _prompt
+echo '{"jsonrpc":"2.0","id":"perm-cancel-8","method":"session/request_permission","params":{"sessionId":"session-cancel","options":[{"optionId":"grant-should-not-appear"}]}}'
+read decision
+case "$decision" in *'"outcome":"cancelled"'*) echo '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"cancelled"}}' ;; *) exit 7 ;; esac"#;
+        let mut client = spawn_script(script).await;
+        client.observer_context.turn_id = Some("turn-cancel".into());
+        client.install_test_permission_ledger("cancel");
+        let result = client
+            .session_prompt_with_idle_timeout(
+                "session-cancel",
+                "fixture prompt",
+                std::time::Duration::from_millis(30),
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AcpError::IdleTimeout(_))),
+            "expected owner wait to remain pending, got {result:?}"
+        );
+        assert_eq!(
+            client
+                .cancel_with_cleanup_grace("session-cancel", std::time::Duration::from_secs(1))
+                .await
+                .unwrap(),
+            StopReason::Cancelled
+        );
+        assert!(client.pending_permission.is_none());
+        assert!(client.pending_permission_id.is_none());
     }
 
     #[tokio::test]

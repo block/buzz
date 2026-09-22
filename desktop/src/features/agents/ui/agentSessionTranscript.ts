@@ -2,6 +2,7 @@ import type {
   AgentActivityDescriptor,
   AgentActivityRenderClass,
   ObserverEvent,
+  PendingPermissionResolution,
   PromptSection,
   ToolStatus,
   TranscriptItem,
@@ -173,13 +174,27 @@ function stringifyPayload(value: unknown) {
 
 function describePermissionRequest(payload: Record<string, unknown>) {
   const params = asRecord(payload.params);
+  const toolCall = asRecord(params.toolCall);
+  const rawInput = asRecord(toolCall.rawInput);
   const title =
     asString(params.title) ??
     asString(params.message) ??
     asString(params.reason) ??
+    asString(toolCall.title) ??
     "Permission requested";
   const toolCallId =
-    asString(params.toolCallId) ?? asString(params.tool_call_id);
+    asString(params.toolCallId) ??
+    asString(params.tool_call_id) ??
+    asString(toolCall.toolCallId) ??
+    asString(toolCall.id);
+  const command = asString(rawInput.command);
+  const cwd = asString(rawInput.cwd);
+  const toolText = Array.isArray(toolCall.content)
+    ? toolCall.content
+        .map((content) => asString(asRecord(content).text))
+        .filter((text): text is string => Boolean(text))
+        .join("\n")
+    : null;
   const options = Array.isArray(params.options)
     ? params.options
         .map((option) => {
@@ -195,6 +210,9 @@ function describePermissionRequest(payload: Record<string, unknown>) {
   const detail: string[] = [];
   if (title !== "Permission requested") detail.push(title);
   if (toolCallId) detail.push(`Tool call: ${toolCallId}`);
+  if (command) detail.push(`Command: ${command}`);
+  if (cwd) detail.push(`Working directory: ${cwd}`);
+  if (toolText) detail.push(toolText);
   if (options.length > 0) detail.push(`Options: ${options.join(", ")}`);
 
   // Build optionId → kind map for outcome labeling on the response.
@@ -257,10 +275,105 @@ function describePermissionOutcome(
  * booleans) so callers can gate on presence without a separate type check.
  */
 function jsonRpcId(value: unknown): string | null {
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number" && Number.isFinite(value))
-    return JSON.stringify(value);
+  const rawId = rawJsonRpcId(value);
+  return rawId === null ? null : JSON.stringify(rawId);
+}
+
+/** Preserve the wire value for a later authenticated owner-resolution call. */
+function rawJsonRpcId(value: unknown): string | number | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
   return null;
+}
+
+/**
+ * Project durable records into the transcript only after the matching runtime
+ * has an open observer connection. A dead harness cannot resume the ACP read,
+ * so its persisted Pending row remains visible as an unavailable history row
+ * without Desktop mutating the single-writer ledger.
+ */
+export function projectPermissionLedgerEvents(
+  records: unknown[],
+  runtimeCanResolve: boolean,
+): ObserverEvent[] {
+  return records.flatMap((record, index) => {
+    if (!record || typeof record !== "object") return [];
+    const value = record as Record<string, unknown>;
+    const channelId =
+      typeof value.channelId === "string" ? value.channelId : null;
+    const sessionId =
+      typeof value.sessionId === "string" ? value.sessionId : null;
+    const turnId = typeof value.turnId === "string" ? value.turnId : null;
+    const timestamp =
+      typeof value.updatedAt === "string"
+        ? value.updatedAt
+        : new Date(0).toISOString();
+    const state = asRecord(value.state);
+    const payload =
+      runtimeCanResolve || asString(state.kind) !== "pending"
+        ? value
+        : { ...value, state: { ...state, kind: "abandoned" } };
+    return [
+      {
+        seq: -1 - index,
+        timestamp,
+        kind: "permission_ledger",
+        agentIndex: null,
+        channelId,
+        sessionId,
+        turnId,
+        payload,
+      },
+    ];
+  });
+}
+
+/**
+ * ACP permits request IDs to repeat in different sessions. A channel can also
+ * hold multiple thread sessions, so no one of those values is a safe owner
+ * decision correlator on its own. Preserve the JSON type in `requestId` so
+ * numeric 1 and string "1" remain distinct.
+ */
+function permissionIdentity(
+  channelId: string | null,
+  sessionId: string | null,
+  turnId: string | null,
+  requestId: string,
+) {
+  return `${channelId ?? "global"}:${sessionId ?? "unknown-session"}:${turnId ?? "unknown-turn"}:${requestId}`;
+}
+
+function ownerResolutionFromPending(
+  payload: Record<string, unknown>,
+  event: ObserverEvent,
+): PendingPermissionResolution | null {
+  const requestId = payload.requestId;
+  const actionDigest = asString(payload.actionDigest);
+  const sessionId = asString(payload.sessionId);
+  const turnId = event.turnId;
+  if (
+    (typeof requestId !== "string" && typeof requestId !== "number") ||
+    !actionDigest ||
+    !sessionId ||
+    !turnId ||
+    !Array.isArray(payload.options)
+  ) {
+    return null;
+  }
+  const options = payload.options.flatMap((value) => {
+    const option = asRecord(value);
+    const optionId = asString(option.optionId);
+    if (!optionId) return [];
+    return [
+      {
+        optionId,
+        label: asString(option.name) ?? asString(option.kind) ?? optionId,
+      },
+    ];
+  });
+  return options.length > 0
+    ? { turnId, sessionId, requestId, actionDigest, options }
+    : null;
 }
 
 function describeFreeformStatus(payload: Record<string, unknown>) {
@@ -786,13 +899,162 @@ export function processTranscriptEvent(
       ctx,
       event.kind,
     );
+  } else if (event.kind === "permission_pending") {
+    const payload = asRecord(event.payload);
+    const requestId = jsonRpcId(payload.requestId);
+    const resolution = ownerResolutionFromPending(payload, event);
+    const pending =
+      requestId && resolution
+        ? d.pendingPermissions.get(
+            permissionIdentity(
+              channelId,
+              resolution.sessionId,
+              resolution.turnId,
+              requestId,
+            ),
+          )
+        : null;
+    const existing = pending ? d.itemsById.get(pending.itemId) : null;
+    // A request is visible before this lifecycle marker. Keep the card inert
+    // unless the exact request, session, and turn all agree.
+    if (
+      pending &&
+      resolution &&
+      existing?.type === "lifecycle" &&
+      existing.turnId === resolution.turnId &&
+      existing.sessionId === resolution.sessionId
+    ) {
+      replaceItem(d, pending.itemId, {
+        ...existing,
+        pendingResolution: resolution,
+      });
+    }
+  } else if (event.kind === "permission_ledger") {
+    const payload = asRecord(event.payload);
+    const request = asRecord(payload.request);
+    const rawRequestId = rawJsonRpcId(payload.requestId);
+    const requestId = jsonRpcId(rawRequestId);
+    const sessionId = asString(payload.sessionId);
+    const turnId = asString(payload.turnId);
+    const digest = asString(payload.actionDigest);
+    const options = Array.isArray(payload.options) ? payload.options : [];
+    const lifecycleState = asRecord(payload.state);
+    const stateKind = asString(lifecycleState.kind);
+    if (
+      Object.keys(request).length === 0 ||
+      !requestId ||
+      rawRequestId === null ||
+      !sessionId ||
+      !turnId ||
+      !digest
+    )
+      return state;
+    const description = describePermissionRequest(request);
+    const canonicalId = permissionIdentity(
+      channelId,
+      sessionId,
+      turnId,
+      requestId,
+    );
+    const existing = d.itemsById.get(`permission:${canonicalId}`);
+    const existingPermission = existing?.type === "lifecycle" ? existing : null;
+    const pendingResolution =
+      stateKind === "pending" && !existingPermission?.outcome
+        ? {
+            turnId,
+            sessionId,
+            requestId: rawRequestId,
+            actionDigest: digest,
+            options: options.flatMap((option) => {
+              const value = asRecord(option);
+              const optionId = asString(value.optionId);
+              return optionId
+                ? [{ optionId, label: asString(value.name) ?? optionId }]
+                : [];
+            }),
+          }
+        : undefined;
+    const outcome =
+      stateKind === "selected"
+        ? describePermissionOutcome(
+            "selected",
+            asString(lifecycleState.reason) ?? null,
+            description.optionNames,
+          )
+        : stateKind === "cancelled" || stateKind === "expired"
+          ? "Cancelled"
+          : stateKind === "delivery_unknown"
+            ? "Delivery unknown (not replayed)"
+            : stateKind === "abandoned" ||
+                stateKind === "decision_consumed" ||
+                stateKind === "delivery_attempted"
+              ? "Unavailable (agent session ended)"
+              : undefined;
+    const item = {
+      id: `permission:${canonicalId}`,
+      type: "lifecycle",
+      renderClass: "permission",
+      title: "Permission request",
+      text: description.text,
+      timestamp: event.timestamp,
+      channelId,
+      turnId,
+      sessionId,
+      pendingResolution,
+      outcome,
+      acpSource: event.kind,
+    } as const;
+    if (existing?.type === "lifecycle") {
+      // A stale fetched Pending row must never re-enable a terminal live card.
+      replaceItem(
+        d,
+        item.id,
+        existingPermission?.outcome && stateKind === "pending"
+          ? existingPermission
+          : item,
+      );
+    } else {
+      pushItem(d, item);
+    }
+    if (pendingResolution) {
+      d.pendingPermissions = new Map(d.pendingPermissions);
+      d.pendingPermissions.set(canonicalId, {
+        itemId: item.id,
+        optionNames: description.optionNames,
+      });
+    }
+  } else if (event.kind === "permission_abandoned") {
+    const payload = asRecord(event.payload);
+    const requestId = jsonRpcId(payload.requestId);
+    const sessionId = asString(payload.sessionId);
+    const key =
+      requestId && sessionId && event.turnId
+        ? permissionIdentity(channelId, sessionId, event.turnId, requestId)
+        : null;
+    const pending = key ? d.pendingPermissions.get(key) : null;
+    const existing = pending ? d.itemsById.get(pending.itemId) : null;
+    if (key && pending && existing?.type === "lifecycle") {
+      replaceItem(d, pending.itemId, {
+        ...existing,
+        outcome: "Unavailable (agent session ended)",
+        pendingResolution: undefined,
+      });
+      d.pendingPermissions = new Map(d.pendingPermissions);
+      d.pendingPermissions.delete(key);
+    }
   } else if (event.kind === "acp_read" || event.kind === "acp_write") {
     const payload = asRecord(event.payload);
     const method = asString(payload.method);
 
     if (method === "session/request_permission") {
       const request = describePermissionRequest(payload);
-      const itemId = `permission:${ch}:${event.turnId ?? event.seq}`;
+      const requestId = jsonRpcId(payload.id);
+      const requestSessionId =
+        asString(asRecord(payload.params).sessionId) ?? ctx.sessionId;
+      const identity = requestId
+        ? permissionIdentity(channelId, requestSessionId, ctx.turnId, requestId)
+        : `${ch}:${requestSessionId ?? "unknown-session"}:${event.turnId ?? event.seq}:${event.seq}`;
+      const itemId = `permission:${identity}`;
       upsertLifecycleItem(
         d,
         itemId,
@@ -806,21 +1068,33 @@ export function processTranscriptEvent(
       );
       // Index by JSON-RPC id so the response (acp_write with result.outcome,
       // no method) can correlate by id rather than by turn/seq.
-      const requestId = jsonRpcId(payload.id);
       if (requestId) {
         d.pendingPermissions = new Map(d.pendingPermissions);
-        d.pendingPermissions.set(requestId, {
-          itemId,
-          optionNames: request.optionNames,
-        });
+        d.pendingPermissions.set(
+          permissionIdentity(
+            channelId,
+            requestSessionId,
+            ctx.turnId,
+            requestId,
+          ),
+          {
+            itemId,
+            optionNames: request.optionNames,
+          },
+        );
       }
     } else if (event.kind === "acp_write" && !method) {
       // Permission response: {"id": <same as request>, "result": {"outcome": {...}}}
       const responseId = jsonRpcId(payload.id);
       const result = asRecord(asRecord(payload.result).outcome);
       const outcomeKind = asString(result.outcome);
-      const pending = responseId ? d.pendingPermissions.get(responseId) : null;
-      if (pending && outcomeKind && responseId) {
+      const responseKey = responseId
+        ? permissionIdentity(channelId, ctx.sessionId, ctx.turnId, responseId)
+        : null;
+      const pending = responseKey
+        ? d.pendingPermissions.get(responseKey)
+        : null;
+      if (pending && outcomeKind && responseKey) {
         const optionId = asString(result.optionId) ?? null;
         const outcomeText = describePermissionOutcome(
           outcomeKind,
@@ -832,10 +1106,11 @@ export function processTranscriptEvent(
           replaceItem(d, pending.itemId, {
             ...existing,
             outcome: outcomeText,
+            pendingResolution: undefined,
           });
           // Remove from pending map — the outcome is now recorded.
           d.pendingPermissions = new Map(d.pendingPermissions);
-          d.pendingPermissions.delete(responseId);
+          d.pendingPermissions.delete(responseKey);
         }
       }
     } else if (event.kind === "acp_write" && method === "session/prompt") {

@@ -792,9 +792,11 @@ pub fn spawn_agent_child(
 
     // Stamp desktop ownership and an unpredictable harness-generation identity.
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
+    let permission_ledger_path = super::managed_agent_permission_ledger_path(app, &runtime_key)?;
     command
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
-        .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
+        .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce)
+        .env("BUZZ_ACP_PERMISSION_LEDGER_PATH", permission_ledger_path);
 
     // Stamp spawn config from values above, BEFORE spawning — a post-spawn
     // re-resolve races config edits and would stamp the wrong values.

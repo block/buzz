@@ -86,6 +86,9 @@ pub struct TaskMeta {
     /// tasks only — all prompt tasks install a steer channel regardless
     /// of the agent's name.
     pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    /// Signed owner decisions for a pending ACP permission request. Unlike the
+    /// one-shot turn control, this never cancels or replays the live turn.
+    pub permission_tx: Option<tokio::sync::mpsc::Sender<crate::acp::PermissionResolution>>,
     /// Successful non-cancelling steers acknowledged while this task owned the
     /// live session. The session ID prevents a late ack from contaminating a
     /// replacement session after task return.
@@ -2265,9 +2268,13 @@ pub async fn run_prompt_task(
     prompt_text: Option<String>,
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
-    control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
+    turn_controls: (
+        Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
+        Option<tokio::sync::mpsc::Receiver<crate::acp::PermissionResolution>>,
+    ),
     turn_id: String,
 ) {
+    let (control_rx, permission_rx) = turn_controls;
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.scope.clone()),
@@ -2281,6 +2288,9 @@ pub async fn run_prompt_task(
         turn_id.clone(),
         turn_started_at.clone(),
     ));
+    if let Some(rx) = permission_rx {
+        agent.acp.install_permission_rx(rx);
+    }
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
@@ -6934,7 +6944,7 @@ done"#
                 Some(format!("heartbeat-{turn}")),
                 Arc::clone(&ctx),
                 result_tx.clone(),
-                None,
+                (None, None),
                 format!("turn-{turn}"),
             )
             .await;
@@ -7056,7 +7066,7 @@ done"#
                 None,
                 Arc::clone(&ctx),
                 result_tx.clone(),
-                None,
+                (None, None),
                 format!("turn-{turn}"),
             )
             .await;
@@ -7267,7 +7277,7 @@ done"#
             None,
             Arc::new(make_context(10)),
             result_tx.clone(),
-            None,
+            (None, None),
             "first-turn".into(),
         )
         .await;
@@ -7286,7 +7296,7 @@ done"#
             None,
             Arc::new(make_context(10)),
             result_tx,
-            None,
+            (None, None),
             "follow-up-turn".into(),
         )
         .await;
@@ -7453,7 +7463,7 @@ done"#
                 None,
                 Arc::clone(&ctx),
                 result_tx.clone(),
-                None,
+                (None, None),
                 turn_id.into(),
             )
             .await;
@@ -7616,7 +7626,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             None,
             Arc::new(ctx),
             result_tx,
-            None,
+            (None, None),
             "next-turn".into(),
         )
         .await;
@@ -8335,6 +8345,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10643,7 +10654,7 @@ done"#
             None,
             Arc::new(ctx),
             result_tx,
-            None,
+            (None, None),
             "indeterminate-project-turn".into(),
         )
         .await;

@@ -36,3 +36,24 @@ export async function switchManagedAgentModel(
     requestId,
   });
 }
+
+/**
+ * Resolve exactly one ACP permission request through the authenticated owner
+ * control path. The harness independently rechecks every binding before it
+ * writes the adapter's selected option response.
+ */
+export async function resolveManagedAgentPermission(
+  pubkey: string,
+  decision: {
+    turnId: string;
+    sessionId: string;
+    requestId: string | number;
+    actionDigest: string;
+    optionId: string;
+  },
+): Promise<void> {
+  await sendAgentObserverControl(pubkey, {
+    type: "resolve_permission",
+    ...decision,
+  });
+}
