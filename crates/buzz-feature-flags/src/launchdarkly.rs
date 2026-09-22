@@ -236,7 +236,9 @@ fn launchdarkly_context(context: &EvaluationContext) -> Result<Context, String> 
 mod tests {
     use super::*;
     use buzz_core::{CommunityId, PublicKey};
-    use launchdarkly_server_sdk::{FlagBuilder, FlagValue, Kind, TestData};
+    use launchdarkly_server_sdk::{
+        Config, FlagBuilder, FlagValue, Kind, NullEventProcessorBuilder, TestData,
+    };
 
     fn community(id: &str) -> CommunityId {
         CommunityId::from_uuid(id.parse().expect("valid community UUID"))
@@ -251,11 +253,16 @@ mod tests {
         Kind::try_from(name).expect("valid LaunchDarkly context kind")
     }
 
-    async fn started_evaluator(test_data: &TestData) -> LaunchDarklyEvaluator {
-        let config = ConfigBuilder::new("sdk-key")
+    fn test_config(test_data: &TestData) -> Config {
+        ConfigBuilder::new("sdk-key")
             .data_source(test_data)
+            .event_processor(&NullEventProcessorBuilder::new())
             .build()
-            .expect("launchdarkly test config");
+            .expect("launchdarkly test config")
+    }
+
+    async fn started_evaluator(test_data: &TestData) -> LaunchDarklyEvaluator {
+        let config = test_config(test_data);
         let client = Client::build(config).expect("launchdarkly test client");
         let evaluator = LaunchDarklyEvaluator::new(client);
         evaluator
@@ -263,6 +270,25 @@ mod tests {
             .await
             .expect("launchdarkly initialized");
         evaluator
+    }
+
+    #[test]
+    fn launchdarkly_test_config_uses_null_event_processor() {
+        let test_data = TestData::new();
+        let config = test_config(&test_data);
+        let endpoints = launchdarkly_server_sdk::ServiceEndpointsBuilder::new()
+            .build()
+            .expect("default service endpoints");
+        let event_processor = config
+            .event_processor_builder()
+            .build(&endpoints, config.sdk_key(), None)
+            .expect("event processor build");
+
+        event_processor.close();
+        assert!(
+            event_processor.flush_blocking(Duration::from_millis(10)),
+            "null event processor should remain a no-op after close"
+        );
     }
 
     #[test]
