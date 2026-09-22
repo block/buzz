@@ -435,6 +435,21 @@ pub enum MessagesCmd {
         #[arg(long = "mention")]
         mentions: Vec<String>,
     },
+    /// Show "typing" in a channel: publish the ephemeral typing indicator (kind 20002)
+    #[command(
+        after_help = "Examples:\n  buzz messages typing --channel <UUID>\n  buzz messages typing --channel <UUID> --for 20\n  buzz messages typing --channel <UUID> --reply-to <EVENT_ID>\n\nBuzz Desktop shows each indicator for about 8 seconds and, for an agent, treats it as the agent's \"working\" signal. There is no \"stopped typing\" event: the last indicator lingers until it expires.\n\nWith --for N, the indicator is re-published every 3 seconds, on a schedule from the start, until N seconds have passed; a refresh that runs late is skipped, not replayed, and no publish outlasts the deadline. The caller owns the lifecycle: run it in the background while reading and composing, and stop the process (or let --for elapse) before or after posting the reply. Agents under buzz-acp do not need this; the harness already refreshes typing for them."
+    )]
+    Typing {
+        /// Channel UUID (from 'buzz channels list')
+        #[arg(long)]
+        channel: String,
+        /// Event ID being replied to, so the indicator shows in that thread
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Refresh the indicator every 3 s for this many seconds (0 publishes once)
+        #[arg(long = "for", default_value_t = 0)]
+        for_secs: u64,
+    },
     /// Send a code diff / patch to a channel
     SendDiff {
         /// Channel UUID
@@ -2368,6 +2383,75 @@ mod tests {
     }
 
     #[test]
+    fn messages_typing_parses_its_flags_and_rejects_bad_input() {
+        let parsed =
+            Cli::try_parse_from(["buzz", "messages", "typing", "--channel", "abc"]).unwrap();
+        match parsed.command {
+            Cmd::Messages(MessagesCmd::Typing {
+                channel,
+                reply_to,
+                for_secs,
+            }) => {
+                assert_eq!(channel, "abc");
+                assert_eq!(reply_to, None);
+                assert_eq!(for_secs, 0, "default is a single publish");
+            }
+            _ => panic!("unexpected parse"),
+        }
+        let parsed = Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "typing",
+            "--channel",
+            "abc",
+            "--for",
+            "20",
+            "--reply-to",
+            "e1",
+        ])
+        .unwrap();
+        match parsed.command {
+            Cmd::Messages(MessagesCmd::Typing {
+                reply_to, for_secs, ..
+            }) => {
+                assert_eq!(for_secs, 20);
+                assert_eq!(reply_to.as_deref(), Some("e1"));
+            }
+            _ => panic!("unexpected parse"),
+        }
+        assert!(
+            Cli::try_parse_from(["buzz", "messages", "typing"]).is_err(),
+            "--channel is required"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "messages",
+                "typing",
+                "--channel",
+                "abc",
+                "--for",
+                "-1"
+            ])
+            .is_err(),
+            "a negative duration is rejected"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "messages",
+                "typing",
+                "--channel",
+                "abc",
+                "--for",
+                "soon"
+            ])
+            .is_err(),
+            "a non-numeric duration is rejected"
+        );
+    }
+
+    #[test]
     fn subcommand_names_are_stable() {
         fn names(cmd: &clap::Command, group: &str) -> Vec<String> {
             let group_cmd = cmd
@@ -2404,6 +2488,7 @@ mod tests {
                 "send",
                 "send-diff",
                 "thread",
+                "typing",
                 "vote"
             ]
         );
@@ -2539,7 +2624,7 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),

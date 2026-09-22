@@ -930,6 +930,123 @@ pub async fn cmd_vote_on_post(
     Ok(())
 }
 
+/// How often a still-typing sender re-publishes the indicator; Buzz Desktop
+/// keeps it on screen for about 8 s after each event.
+const TYPING_REPUBLISH_SECS: u64 = 3;
+
+/// Outcome of a typing run: the last relay response and how many indicators
+/// were published.
+pub(crate) struct TypingRun {
+    pub last_response: String,
+    /// Indicators the relay acknowledged.
+    pub published: u64,
+    /// A publish was abandoned at the deadline while waiting for the relay's
+    /// acknowledgement; it is not counted, and the relay may still have taken it.
+    pub cut_off: bool,
+}
+
+/// Publish the indicator on a fixed schedule until `for_secs` have elapsed.
+///
+/// Ticks are scheduled from the start (0, 3, 6, ... s), not from the end of the
+/// previous publish, so a slow relay cannot stretch the gaps; a tick that is
+/// already in the past when the previous publish returns is skipped, never
+/// replayed. The first publish gets the client's own time budget (the user asked
+/// for at least one); every later publish is bounded by the time left before the
+/// deadline, so the command returns on time even if the relay stalls. A relay
+/// rejection ends the run with that error. `for_secs == 0` publishes once.
+pub(crate) async fn run_typing_loop<F, Fut>(
+    for_secs: u64,
+    interval: std::time::Duration,
+    mut publish: F,
+) -> Result<TypingRun, CliError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<String, CliError>>,
+{
+    let start = tokio::time::Instant::now();
+    let deadline = start + std::time::Duration::from_secs(for_secs);
+    let mut last_response = publish().await?;
+    let mut published = 1u64;
+    let mut cut_off = false;
+    if for_secs == 0 {
+        return Ok(TypingRun {
+            last_response,
+            published,
+            cut_off,
+        });
+    }
+    let mut tick = 1u32;
+    loop {
+        // Next scheduled tick that is still ahead of us; late ones are skipped.
+        let mut next = start + interval * tick;
+        while next <= tokio::time::Instant::now() {
+            tick += 1;
+            next = start + interval * tick;
+        }
+        if next >= deadline {
+            break;
+        }
+        tokio::time::sleep_until(next).await;
+        tick += 1;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, publish()).await {
+            Ok(resp) => {
+                last_response = resp?;
+                published += 1;
+            }
+            Err(_elapsed) => {
+                // The deadline passed mid-publish: stop, do not retry. The relay may
+                // or may not have taken that event; it is reported, not counted.
+                cut_off = true;
+                break;
+            }
+        }
+    }
+    Ok(TypingRun {
+        last_response,
+        published,
+        cut_off,
+    })
+}
+
+/// `buzz messages typing`: publish the typing indicator (kind 20002) for a
+/// channel, once or on a schedule for `--for` seconds. Output is the last relay
+/// response plus the number of indicators published.
+pub async fn cmd_typing(
+    client: &BuzzClient,
+    channel_id: &str,
+    reply_to: Option<&str>,
+    for_secs: u64,
+) -> Result<(), CliError> {
+    let channel = crate::validate::parse_uuid(channel_id)?;
+    let thread_ref = match reply_to {
+        Some(r) => Some(resolve_thread_ref(client, r).await?),
+        None => None,
+    };
+    let run = run_typing_loop(
+        for_secs,
+        std::time::Duration::from_secs(TYPING_REPUBLISH_SECS),
+        || async {
+            let builder = buzz_sdk::build_typing_indicator(channel, thread_ref.as_ref())
+                .map_err(crate::validate::sdk_err)?;
+            let event = client.sign_event(builder)?;
+            client.publish_ephemeral_event(event).await
+        },
+    )
+    .await?;
+    let mut out: serde_json::Value =
+        serde_json::from_str(&normalize_write_response(&run.last_response))
+            .unwrap_or_else(|_| serde_json::json!({ "raw": run.last_response }));
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("published".into(), serde_json::json!(run.published));
+        if run.cut_off {
+            obj.insert("cut_off".into(), serde_json::json!(true));
+        }
+    }
+    println!("{out}");
+    Ok(())
+}
+
 pub async fn dispatch(
     cmd: crate::MessagesCmd,
     client: &BuzzClient,
@@ -960,6 +1077,11 @@ pub async fn dispatch(
             )
             .await
         }
+        MessagesCmd::Typing {
+            channel,
+            reply_to,
+            for_secs,
+        } => cmd_typing(client, &channel, reply_to.as_deref(), for_secs).await,
         MessagesCmd::SendDiff {
             channel,
             diff,
@@ -1078,6 +1200,144 @@ pub async fn dispatch(
         MessagesCmd::Vote { event, direction } => {
             cmd_vote_on_post(client, &event, &direction).await
         }
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::{run_typing_loop, TypingRun};
+    use crate::error::CliError;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    type PublishFut =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, CliError>> + Send>>;
+
+    /// A publisher that records when it was called (paused-clock seconds since
+    /// the test started) and takes `takes` to complete.
+    fn recorder(
+        takes: Duration,
+        fail_on: Option<u64>,
+    ) -> (Arc<Mutex<Vec<u64>>>, impl FnMut() -> PublishFut) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let t0 = tokio::time::Instant::now();
+        let f = move || {
+            let seen = seen.clone();
+            let n = {
+                let mut v = seen.lock().unwrap();
+                v.push(t0.elapsed().as_secs());
+                v.len() as u64
+            };
+            Box::pin(async move {
+                tokio::time::sleep(takes).await;
+                if fail_on == Some(n) {
+                    Err(CliError::Relay {
+                        status: 400,
+                        body: "rejected".into(),
+                    })
+                } else {
+                    Ok(format!("{{\"accepted\":true,\"n\":{n}}}"))
+                }
+            }) as PublishFut
+        };
+        (calls, f)
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn for_zero_publishes_exactly_once() {
+        let (calls, publish) = recorder(Duration::from_millis(200), None);
+        let run: TypingRun = run_typing_loop(0, secs(3), publish).await.unwrap();
+        assert_eq!(run.published, 1);
+        assert_eq!(*calls.lock().unwrap(), vec![0]);
+        assert!(run.last_response.contains("\"n\":1"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ticks_are_scheduled_from_the_start_and_stop_before_the_deadline() {
+        let (calls, publish) = recorder(Duration::from_millis(500), None);
+        let t0 = tokio::time::Instant::now();
+        let run = run_typing_loop(7, secs(3), publish).await.unwrap();
+        // 0, 3, 6; the tick at 9 is past the 7 s deadline and never runs
+        assert_eq!(*calls.lock().unwrap(), vec![0, 3, 6]);
+        assert_eq!(run.published, 3);
+        assert!(!run.cut_off);
+        assert!(t0.elapsed() <= secs(7), "returned at {:?}", t0.elapsed());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_publish_skips_missed_ticks_instead_of_replaying_them() {
+        // each publish takes 4 s: the tick at 3 is missed while the first is in flight
+        let (calls, publish) = recorder(secs(4), None);
+        let run = run_typing_loop(10, secs(3), publish).await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec![0, 6]);
+        assert_eq!(run.published, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_publish_that_outlives_the_deadline_is_cut_off_and_nothing_follows() {
+        // the second publish (at 3 s) would take 30 s; the deadline is 8 s
+        let (calls, publish) = recorder(secs(30), None);
+        let t0 = tokio::time::Instant::now();
+        let run = run_typing_loop(8, secs(3), publish).await;
+        // the first publish had the full budget (30 s) and completed; the run then
+        // continued with the clock at 30 s, past the deadline: no further publish
+        assert_eq!(*calls.lock().unwrap(), vec![0]);
+        assert_eq!(run.unwrap().published, 1);
+        assert!(t0.elapsed() <= secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_second_publish_is_bounded_by_the_remaining_time() {
+        // first publish quick; second (at 3 s) hangs 30 s; deadline 8 s -> cut at 8 s
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let t0 = tokio::time::Instant::now();
+        let publish = move || {
+            let seen = seen.clone();
+            let n = {
+                let mut v = seen.lock().unwrap();
+                v.push(t0.elapsed().as_secs());
+                v.len()
+            };
+            Box::pin(async move {
+                tokio::time::sleep(if n == 1 {
+                    Duration::from_millis(100)
+                } else {
+                    secs(30)
+                })
+                .await;
+                Ok::<String, CliError>("{\"accepted\":true}".into())
+            }) as PublishFut
+        };
+        let run = run_typing_loop(8, secs(3), publish).await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec![0, 3]);
+        assert_eq!(run.published, 1, "the cut-off publish does not count");
+        assert!(run.cut_off, "and the output says a publish was abandoned");
+        assert!(
+            t0.elapsed() <= secs(8) + Duration::from_millis(1),
+            "returned at {:?}",
+            t0.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_rejection_ends_the_run_with_that_error() {
+        let (calls, publish) = recorder(Duration::from_millis(100), Some(2));
+        let err = run_typing_loop(20, secs(3), publish)
+            .await
+            .err()
+            .expect("rejection");
+        assert!(matches!(err, CliError::Relay { status: 400, .. }));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![0, 3],
+            "nothing is published after the rejection"
+        );
     }
 }
 
