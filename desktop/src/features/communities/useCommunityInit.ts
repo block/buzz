@@ -1,3 +1,4 @@
+import { resetChannelWindowRefreshIntents } from "@/features/messages/lib/channelWindowRefreshIntent";
 import { useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { isMacPlatform } from "@/shared/lib/platform";
@@ -68,6 +69,7 @@ async function resetCommunityState({
   relayClient.disconnect();
   await resetNavigationDeepLinkDrain();
   resetRateLimitGate();
+  resetChannelWindowRefreshIntents();
   clearAllDrafts();
   resetAgentObserverStore();
   resetActiveAgentTurnsStore();

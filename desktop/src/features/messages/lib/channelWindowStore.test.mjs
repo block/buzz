@@ -177,13 +177,18 @@ test("same-second live rows enter an exhausted short window regardless of id ord
   );
 });
 
-test("older live rows stay below an exhausted window", () => {
+test("older live rows enter an exhausted window because there is no unretained gap", () => {
   const store = replaceNewestChannelWindow(
     emptyChannelWindowStore(),
     page(null, [event("a", 100)], { hasMore: false }),
   );
 
-  assert.equal(mergeLiveChannelWindowEvent(store, event("old", 99)), store);
+  const withLive = mergeLiveChannelWindowEvent(store, event("old", 99));
+  assert.deepEqual(
+    flattenChannelWindowEvents(withLive).map((e) => e.content),
+    ["old", "a"],
+  );
+  assert.equal(withLive.revision, store.revision);
 });
 
 test("live aux stays separate from authoritative page closure", () => {
@@ -449,4 +454,31 @@ test("exhaustion tracks only a resolved tail page's hasMore", () => {
   );
   assert.equal(channelWindowHistoryExhausted(closed), true);
   assert.equal(channelWindowHasMore(closed), false);
+});
+
+test("local removal updates page rows and overlays without moving cursor boundaries", () => {
+  let store = replaceNewestChannelWindow(
+    emptyChannelWindowStore(),
+    page(null, [event("head", 100), event("boundary", 90)], {
+      aux: [event("page-aux", 95, 7)],
+    }),
+  );
+  store = mergeLiveChannelWindowEvent(store, event("live", 110));
+  store = mergeLiveChannelWindowEvent(store, event("live-aux", 105, 7), false);
+  const before = store;
+  store = mapChannelWindowEvents(store, (event) =>
+    event.content === "head" ? event : null,
+  );
+  assert.deepEqual(
+    flattenChannelWindowEvents(store).map((e) => e.content),
+    ["head"],
+  );
+  assert.equal(store.pages[0].startCursor, before.pages[0].startCursor);
+  assert.equal(store.pages[0].nextCursor, before.pages[0].nextCursor);
+  assert.equal(store.pages[0].hasMore, before.pages[0].hasMore);
+  assert.equal(store.revision, before.revision);
+  assert.equal(
+    mapChannelWindowEvents(store, (e) => e),
+    store,
+  );
 });

@@ -31,6 +31,7 @@ import { MessageRowItem, SystemRow } from "./TimelineMessageRow";
 import { TimelineRowShell } from "./TimelineRowShell";
 import { UnreadDivider } from "./UnreadDivider";
 import { useTimelineRetention } from "./useTimelineRetention";
+import { useHistoryBoundaryIntent } from "./useHistoryBoundaryIntent";
 import { useUpwardPaginationWheel } from "./useUpwardPaginationWheel";
 import { useVirtualizedBottomSettle } from "./useVirtualizedBottomSettle";
 
@@ -447,12 +448,8 @@ function VirtualizedTimelineRows({
   const estimateCallCountRef = React.useRef(0);
   const estimateItemSize = React.useCallback(
     (item: VirtualizedTimelineItem) => {
-      estimateCallCountRef.current += 1;
-      const scroller = hostRef.current?.firstElementChild;
-      if (scroller instanceof HTMLDivElement) {
-        scroller.dataset.virtuaEstimateCallCount = String(
-          estimateCallCountRef.current,
-        );
+      if (import.meta.env?.MODE === "e2e") {
+        estimateCallCountRef.current += 1;
       }
       return estimateVirtualizedTimelineItemHeight(item);
     },
@@ -468,6 +465,16 @@ function VirtualizedTimelineRows({
       ),
     [dayGroups, hideDayDividers, historyExhausted, leadingContent],
   );
+  // Instrument once per commit, never a DOM attribute write per estimated row.
+  React.useLayoutEffect(() => {
+    if (import.meta.env?.MODE !== "e2e") return;
+    const scroller = hostRef.current?.firstElementChild;
+    if (scroller instanceof HTMLDivElement) {
+      scroller.dataset.virtuaEstimateCallCount = String(
+        estimateCallCountRef.current,
+      );
+    }
+  });
   const keys = React.useMemo(() => items.map(virtualizedItemKey), [items]);
   const dayDividerItems = React.useMemo(
     () =>
@@ -491,6 +498,12 @@ function VirtualizedTimelineRows({
   const { arm: armUpwardMomentum } = useUpwardPaginationWheel(
     hostRef,
     cancelBottomSettle,
+  );
+
+  const tryLoadOlder = useHistoryBoundaryIntent(
+    hostRef,
+    onStartReached,
+    armUpwardMomentum,
   );
 
   const updatePinnedDayLabel = React.useCallback(
@@ -726,13 +739,12 @@ function VirtualizedTimelineRows({
       updatePinnedDayLabel(offset);
       if (offset <= 200) {
         // Layout scrolls near the top must not poison the reader's next input.
-        armUpwardMomentum(onStartReached?.() ?? false);
+        tryLoadOlder();
       }
     },
     [
-      armUpwardMomentum,
+      tryLoadOlder,
       onAtBottomStateChange,
-      onStartReached,
       onVirtualizerRangeChanged,
       updatePinnedDayLabel,
     ],
@@ -745,6 +757,7 @@ function VirtualizedTimelineRows({
           ref={listRef}
           className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-[var(--channel-top-chrome-height,4.5rem)]"
           data={items}
+          itemKey={virtualizedItemKey}
           item={VirtualizedTimelineItemShell}
           itemSize={estimateItemSize}
           bufferSize={offscreenBufferSize}

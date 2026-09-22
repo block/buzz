@@ -588,18 +588,31 @@ test.describe("list virtualization", () => {
         capturedRestAnchor: restAnchor !== null,
         sawSpinnerDuringHold,
         anchorDriftAfterCommit,
+        baseHeight,
+        finalHeight: s.scrollHeight,
+        finalOffset: s.scrollTop,
+        requests:
+          (window as unknown as { __CHANNEL_WINDOW_FETCH_COUNT__?: number })
+            .__CHANNEL_WINDOW_FETCH_COUNT__ ?? 0,
+        inflight:
+          (window as unknown as { __CHANNEL_WINDOW_INFLIGHT__?: number })
+            .__CHANNEL_WINDOW_INFLIGHT__ ?? 0,
       };
     });
 
-    // Trip the boundary, then keep real wheel input flowing DOWN (away from
-    // the boundary) through and well past the 300ms fetch resolution — the
-    // mid-gesture window in which the ungated build commits the page.
+    // Position near the boundary; the upward wheel supplies reader intent.
+    // A programmatic scroll alone must not start a page (layout/compensation
+    // scrolls otherwise cascade). Keep wheel input flowing DOWN through fetch.
     await timeline.evaluate((element) => {
       element.scrollTop = 150;
     });
     const box = await timeline.boundingBox();
     if (!box) throw new Error("timeline has no bounding box");
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, -30);
+    await expect(
+      page.getByTestId("message-timeline-fetching-older"),
+    ).toBeVisible();
     for (let burst = 0; burst < 30; burst += 1) {
       await page.mouse.wheel(0, 30);
       await page.waitForTimeout(40);
@@ -607,7 +620,7 @@ test.describe("list virtualization", () => {
 
     const trace = await tracePromise;
     // The page must eventually commit — the gate defers, never strands.
-    expect(trace.commit).not.toBeNull();
+    expect(trace.commit, JSON.stringify(trace)).not.toBeNull();
     // The commit landed only after input quiesced. On the ungated build the
     // deferred snapshot flushes as soon as the fetch resolves — between wheel
     // bursts, a gap far below the quiet window — so this line is the red/green

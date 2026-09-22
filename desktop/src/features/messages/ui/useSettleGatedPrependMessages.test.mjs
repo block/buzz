@@ -37,23 +37,23 @@ test("passes appends through immediately", () => {
   );
 });
 
-test("passes a simultaneous prepend+append (own send) through", () => {
+test("holds a simultaneous prepend+append until explicit release", () => {
   assert.equal(
     selectSettleGatedMessages({
       admitted: rows("a", "b"),
       next: rows("older-1", "a", "b", "sent"),
     }).kind,
-    "pass",
+    "hold",
   );
 });
 
-test("passes deletions inside the admitted window through", () => {
+test("holds a prepend with deletions inside the admitted window", () => {
   assert.equal(
     selectSettleGatedMessages({
       admitted: rows("a", "b", "c"),
       next: rows("older-1", "a", "c"),
     }).kind,
-    "pass",
+    "hold",
   );
 });
 
