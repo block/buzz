@@ -1,8 +1,8 @@
 NIP-CW
 ======
 
-Channel Window
---------------
+Channel and Thread Windows
+--------------------------
 
 `draft` `optional` `relay`
 
@@ -10,11 +10,18 @@ Channel Window
 
 ## Abstract
 
-This NIP defines the **channel window**: a relay-computed, cursor-paged view of a channel's *top-level* timeline, served as ordinary signed Nostr events through an extended NIP-01 filter. One request returns a page of top-level rows in stable keyset order, optionally accompanied by the aux closure and two relay-signed overlay families:
+This NIP defines two relay-computed, cursor-paged views served as ordinary signed Nostr events through extended NIP-01 filters:
+
+- **channel mode** pages a channel's top-level timeline;
+- **thread mode** pages one root's descendants newest-first.
+
+Both modes use stable keyset order and explicit relay-signed exhaustion bounds. A channel-mode request may also include the aux closure and thread-summary overlays:
 
 - the **aux closure** — stored reactions, deletions, and edits targeting the returned rows, with their original authors and signatures (`include_aux`),
 - **thread summaries** — one relay-signed `kind:39005` per row that has replies (`include_summaries`),
-- **window bounds** — exactly one relay-signed `kind:39006` carrying the authoritative `has_more` fact and the next-page cursor.
+- **channel bounds** — exactly one relay-signed `kind:39006` carrying the authoritative `has_more` fact and the next-page cursor.
+
+Thread mode returns reply rows, optional bounded aux closure, and exactly one request-bound `kind:39007` thread-bounds overlay. `39006` and `39007` are deliberately distinct: the existing channel/cursor identity of `39006` cannot disambiguate concurrent roots and MUST NOT be reinterpreted.
 
 The extension adds no endpoint and no envelope. The wire format is the flat array of signed events the query surface already returns; a client that ignores this NIP receives standard behavior everywhere.
 
@@ -30,7 +37,7 @@ A relay that computes thread structure at ingest already knows which events are 
 
 This NIP does not change ingest, storage, or fan-out. Rows returned in a window are ordinary stored events; the overlays are computed per query and never stored.
 
-This NIP does not define thread *reading*. Replies never appear as window rows; fetching a thread's contents is out of scope.
+This NIP does not define around-target retrieval, cross-page snapshot isolation, or a client compatibility fallback. Thread mode starts at the newest reply and continues toward older replies.
 
 This NIP does not require WebSocket REQ support. A relay MAY serve window filters only on an HTTP query surface and ignore the extension fields on REQ (see §Degradation).
 
@@ -41,13 +48,13 @@ This document uses MUST, MUST NOT, SHOULD, MAY, and RECOMMENDED as defined in RF
 - **relay identity**: The keypair whose pubkey the relay advertises (e.g. NIP-11 `self`). All overlay events are signed with it.
 - **row**: A stored, signed event returned as part of the page proper (usually client-authored; Buzz also stores relay-signed events carrying actor provenance). Rows are the only events that count against `limit`.
 - **top-level**: An event that opens a thread rather than replying into one — defined by wire tags in §Top-level Classification.
-- **overlay**: A relay-signed event (`kind:39005`, `kind:39006`) synthesized at query time. Overlays are metadata *about* rows: never a row, never a cursor input, never durable history.
+- **overlay**: A relay-signed event (`kind:39005`, `kind:39006`, or `kind:39007`) synthesized at query time. Overlays are metadata *about* rows: never a row, never a cursor input, never durable history.
 - **composite cursor**: The pair `(created_at, id)` identifying a position in the total order. `created_at` is unix seconds; `id` is a 64-character lowercase hex event id.
 - **scan position**: The composite cursor of the last event the relay's query *retained*, whether or not that event was ultimately delivered as a row (see §Relay Processing step 3). The cursor tracks where the scan stopped, not what the client received.
 
-## Request
+## Channel-mode Request
 
-A window request is a standard filter plus extension fields, submitted wherever the relay accepts filters (for Buzz: the NIP-98-authenticated HTTP bridge `POST /query`):
+A channel-mode window request is a standard filter plus extension fields, submitted wherever the relay accepts filters (for Buzz: the NIP-98-authenticated HTTP bridge `POST /query`):
 
 ```jsonc
 {
@@ -72,7 +79,7 @@ Cursor grammar: `until` MUST be a non-negative integer of unix seconds represent
 
 Offset/page-number pagination MUST NOT be honored on the window path.
 
-## Top-level Classification
+## Channel-mode Top-level Classification
 
 The row set must be reproducible from wire data alone, so the reply/top-level distinction is defined by tags, not by any relay's storage schema.
 
@@ -87,7 +94,7 @@ An event is **top-level** — eligible to be a window row — iff its depth is 0
 
 Storage fallback (fail-open): a relay that indexes this classification at ingest may hold events stored before the index existed, whose depth is unknown. Such events MUST be treated as top-level rather than vanishing from every window. This is a compatibility rule for pre-index data, not a third protocol state — an interoperating implementation classifying from tags alone has no unknown case.
 
-## Relay Processing Algorithm
+## Channel-mode Relay Processing Algorithm
 
 For a valid window filter on an accessible channel (§Access Scoping) the relay MUST:
 
@@ -100,7 +107,7 @@ For a valid window filter on an accessible channel (§Access Scoping) the relay 
 
 The response is the surface's ordinary flat array of signed events — rows first in keyset order, then aux, then summaries, then bounds. Clients MUST partition by kind and MUST NOT rely on array position beyond the ordering of rows.
 
-## Access Scoping
+## Channel-mode Access Scoping
 
 Access is evaluated before any of the steps above. A syntactically valid window request for a channel the requester cannot access — including a channel that does not exist — MUST produce the relay's ordinary access-scoped result for that surface, with **no rows and no overlays**. For Buzz's query surface that ordinary result is an empty array, exactly as any other filter against an inaccessible channel produces.
 
@@ -109,7 +116,7 @@ Two consequences implementers MUST NOT miss:
 - The "exactly one `kind:39006`" guarantee applies only to *served* windows — responses where access succeeded. The absence of a bounds overlay is therefore meaningful: it tells an extension-aware client that no window was served (access-scoped, or the relay does not implement this NIP — see §Degradation).
 - An inaccessible channel is thereby indistinguishable from a nonexistent one, but *not* from an accessible empty channel: the latter is a served window and does return a `39006` (`has_more: false`). This is the same existence-disclosure posture as the relay's ordinary reads — a requester who can query a channel at all was already entitled to know it exists.
 
-## Overlay Event Formats
+## Channel-mode Overlay Event Formats
 
 Overlays are signed by the relay identity and synthesized per response. Both kinds sit in the parameterized-replaceable range, so a client that caches them gets replace-by-`d`-tag semantics from NIP-01 with no special handling. Relays MUST reject client-submitted events of either kind at ingest.
 
@@ -155,7 +162,7 @@ Exactly one per served window response. The **only** authority on exhaustion. Ta
 - `next_cursor` — the composite cursor to echo as `until` + `before_id` for the next page, or `null` iff `has_more` is `false`.
 - Reserved: an `oldest_retained` content field may be added (retention gap signaling) without a wire break. Clients MUST ignore unknown content fields.
 
-## Client Behavior
+## Channel-mode Client Behavior
 
 1. **Head request**: send the window filter with no cursor. Render rows in received order.
 2. **Continue**: read `kind:39006`; if `has_more`, send the same filter with `until = next_cursor.created_at`, `before_id = next_cursor.id`. Repeat until `has_more = false`.
@@ -164,9 +171,187 @@ Exactly one per served window response. The **only** authority on exhaustion. Ta
 5. **Bounds integrity**: a window response missing its `kind:39006`, or carrying more than one, or carrying one whose `d`-tag binding does not echo the request cursor, whose content is not parseable JSON, or whose content violates `has_more = true ⇔ next_cursor ≠ null`, is not a usable page — the client MUST discard it (and MAY retry) rather than guess at exhaustion. Clients SHOULD additionally reject overlays that violate the exact tag cardinality of §Overlay Event Formats or whose content fields have the wrong runtime types (hardening against a malformed or hostile serializer). Cryptographic verification is governed by §Overlay Trust.
 6. **Overlays are metadata**: never render a `39005`/`39006` as a message, never feed one into cursor math, and key cached summaries by their `d` tag (latest wins).
 
+## Thread Mode
+
+`thread_window: true` selects thread mode. It is an additive selector within this NIP, not a reinterpretation of channel mode. `top_level: true` and `kind:39006` retain their existing channel semantics; absent or false `thread_window` retains the legacy oldest-first thread path.
+
+A thread window is a newest-first page of replies served through the existing
+NIP-98-authenticated `POST /query`. The response is a flat array of signed events:
+reply rows, optional auxiliary events, and one relay-signed `kind:39007` bounds
+overlay. No endpoint, subscription, or around-target operation is added.
+
+Absent or false `thread_window` preserves the existing oldest-first
+`depth_limit` / `thread_cursor` behavior. Channel mode and its channel bounds (`kind:39006`) are unchanged.
+
+### Request
+
+Submit the filter in the usual query filter array:
+
+```jsonc
+{
+  "thread_window": true,
+  "#h": ["<channel UUID>"],
+  "#e": ["<root event id>"],
+  "kinds": [9, 40002],
+  "depth_limit": 100,
+  "limit": 50,
+  "include_aux": true,
+  "until": 1751500000,         // continuation: both cursor fields or neither
+  "before_id": "<64-hex id>"
+}
+```
+
+- `#h` and `#e` require exactly one raw entry each. UUIDs and full 64-hex IDs
+  normalize to canonical lowercase text; duplicate entries are not collapsed.
+- `kinds` requires 1–4 entries from conversation kinds 9, 40002, 45001, 45003;
+  it normalizes to sorted, distinct integers.
+- `limit` defaults to 50 (range 1–200); `depth_limit` defaults to 100 (1–100).
+  Out-of-range values reject rather than clamp. `include_aux` defaults to false
+  and must be boolean.
+- `until` is a nonnegative integer Unix timestamp representable by the relay;
+  `before_id` is a full 64-hex ID. Both absent selects the head. Half, null,
+  malformed, fractional, negative or out-of-range cursors reject, never restart.
+- Every other field rejects, including legacy cursor spellings, `top_level`
+  (even false), search, summaries, authors, additional tags, `since`, IDs,
+  offsets and page numbers. Non-boolean `thread_window` also rejects.
+
+Invalid requests return HTTP 400. A query accepts at most four window filters
+and cannot mix them with other query modes.
+
+### Relay processing
+
+1. Refresh channel access from the writer. Inaccessible or nonexistent channels
+   return no rows or bounds. Within the host-derived community, require a
+   conversation-kind root in the requested channel. A root tombstone remains
+   valid; a missing or wrong-channel root serves an empty window without root aux.
+2. Select non-deleted replies at depths 1..`depth_limit`, matching `kinds`, with
+   both event and metadata channel equal to `#h`. Order by `created_at DESC,
+   id ASC`. Continuation keeps `created_at < until OR (created_at = until AND
+   id > before_id)`.
+3. Probe `limit + 1` after **all** predicates. Discard the sentinel before
+   response/aux processing. If it exists, set `has_more: true` and take
+   `next_cursor` from the last retained raw candidate, before reconstruction.
+   Otherwise return `has_more: false, next_cursor: null`. A damaged reply can
+   consume a slot and become the cursor without being delivered; other
+   reconstruction errors fail the request.
+4. If requested, expand the root and retained reconstructed replies: reactions
+   (7), deletions (5/9005), edits (40003), then deletions of those aux IDs.
+   Preserve original signatures and deduplicate by ID. Apply reader access to
+   every event, including channel-less deletions. Deleted aux payloads are
+   omitted but their IDs remain targets for the second hop. Drain each hop
+   with raw cursors; a damaged live aux event fails rather than implying EOF.
+5. Refresh writer access before signing. Revoked access to the requested
+   channel returns no rows or bounds; any other access-set change returns a
+   retryable error. Append exactly one bounds event per served window, including
+   empty and exhausted windows. Root, aux and bounds do not consume `limit`.
+
+### Thread Bounds: kind 39007
+
+Bounds are query-time metadata, never stored. Client submissions MUST be
+rejected at ingest. Tags are exactly one `d`, one `h`, one `e`:
+
+```jsonc
+{
+  "kind": 39007,
+  "pubkey": "<relay identity>",
+  "tags": [
+    ["d", "tw:1:<binding SHA-256 lowercase hex>"],
+    ["h", "<canonical channel UUID>"],
+    ["e", "<lowercase root id>"]
+  ],
+  "content": "{\"version\":1,\"direction\":\"older\",\"has_more\":true,\"next_cursor\":{\"created_at\":1751500000,\"id\":\"<64-hex id>\"}}"
+}
+```
+
+The binding hashes UTF-8 compact JSON of this ordered array, without whitespace
+or a trailing newline, using decimal integers and JSON booleans:
+
+```jsonc
+["tw",1,"older","<host>","<reader hex>","<channel>","<root>",50,100,[9,40002],null,true]
+// slots: discriminator, version, direction, host, reader, channel, root,
+//        limit, depth, sorted unique kinds, request cursor, include_aux
+// cursor: null for head, otherwise [<seconds>,"<lowercase id>"]
+```
+
+Host is the server-resolved normalized authority (`buzz-core/src/tenant.rs`);
+reader is the authenticated lowercase pubkey. Neither comes from filter fields.
+
+Clients MUST verify the expected relay signer and signature, exact tags and
+request binding, version, direction, and `next_cursor == null` iff exhausted.
+Only validated bounds determine exhaustion; row count and the last delivered
+row do not. Echo `next_cursor` as `until` / `before_id` to continue.
+
+An old relay may ignore the flag and return oldest-first history without
+bounds. Missing/invalid bounds prove neither exhaustion nor support. An
+explicit compatibility fallback must restart with clean legacy state, never
+reuse a descending cursor. Signature/binding, authorization, timeout, corruption
+and incomplete-closure failures MUST NOT trigger compatibility fallback.
+This extension implements no client opt-in or fallback.
+
+### Consistency and limits
+
+Thread cursor pages use channel mode's upper-bound replica proof, including terminal pages,
+retaining the proved REPEATABLE READ transaction through rows and aux. Reader
+failure degrades permanently to the writer and restarts both aux hops once
+from the original targets, discarding collected aux but retaining spent budgets.
+Writer follow-ups use a pool, not a pinned snapshot; no cross-page snapshot is
+promised. Reply insertion coverage does not prove freshness of edits, deletions
+or newer aux. Aux is complete within the serving snapshot and never inherits
+reply time bounds. Writer authorization is a point-in-time check, not a lease.
+Head routing keeps the existing default-off bounded-staleness policy.
+
+Limits are shared across all windows and retries in one query:
+
+| Resource | Limit |
+|---|---|
+| Aux scan | 1,000 raw candidates/page; 200 targets/SQL query |
+| Aux work | 64 SQL queries; 8,192 raw candidates, including tombstones, repeated matches and probes |
+| Serialized response | 8 MiB |
+| Whole request after authentication | 8 seconds, including access, pool waits, fallback and signing |
+| Selection/aux transaction | 4-second statement timeout; 1-second lock timeout |
+
+Authorization uses ordinary writer-pool budgets (defaults: 5-second lock and
+3-second acquisition timeout). Pool, statement, lock and outer timeouts return
+retryable HTTP 503; no exact wait is promised. Exhausted budgets, required
+closure or signing failures return an error without partial rows or bounds.
+Corruption and exhausted budgets do not trigger replica fallback. Transaction
+settings do not leak to legacy callers; query-entry authentication is unchanged.
+
+### Deployment
+
+Desired-state schema and additive migration 0048 add an index on the
+unpartitioned `thread_metadata`. On populated databases, prebuild it through
+the approved schema-change workflow before upgrading, outside a transaction
+and coordinated with community deletion/schema maintenance:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_thread_metadata_window
+ON public.thread_metadata (community_id, root_event_id, event_created_at DESC, event_id ASC);
+```
+
+Verify `pg_get_indexdef`, `indisvalid`, `indisready`, and `indislive`. Diagnose
+and rebuild failed same-name indexes; do not hide them with `IF NOT EXISTS`.
+Migration 0048 validates the definition and skips CREATE for a valid prebuild
+(even `CREATE INDEX IF NOT EXISTS` takes a writer-conflicting lock). Fresh
+installs build transactionally with 1-second lock/5-second statement limits;
+busy or larger installs must prebuild and retry. Inspect desired-state plans
+and verify the catalog after apply too.
+
+Keep existing indexes. Reverse scanning this index is ASC/DESC, not legacy
+ASC/ASC. Before rollout, measure representative head, deep, same-second,
+selective kind/depth and legacy plans, index size and write cost; validate the
+actual replica topology. Spans `get_thread_window` / `thread_window_aux`, route
+labels `thread_window_head` / `thread_window_cursor`, pool metrics and
+`buzz_thread_window_response_bytes` expose query and response costs.
+
+For binary rollback, keep the index and set `BUZZ_AUTO_MIGRATE=false` (default).
+Old embedded SQLx migrators reject ledger version 48 with `VersionMissing`.
+Never delete ledger rows or rewrite checksums; roll forward for schema changes.
+Verify old-binary boot/read/write on the upgraded schema before deployment.
+
 ## Degradation
 
-Every extension field in this NIP is an *additional* key on a standard filter, and clients and relays that do not implement it need no changes:
+The channel-mode extension fields in this NIP are *additional* keys on a standard filter, and clients and relays that do not implement it need no changes:
 
 - **Extension-unaware relay**: a tolerant filter parser (one that ignores unknown keys, as common NIP-01 implementations do) serves the filter as a plain `kinds` + `#h` query — a complete, correct, standard event stream. A strict parser may instead reject the filter outright. Both are safe: neither produces a wrong-but-plausible top-level timeline. A client MUST treat *either* signal — a response with no valid `kind:39006`, or an error/unsupported-filter response — as a downgrade, and fall back by reissuing a clean standard filter with all extension keys removed and assembling threads client-side. (Buzz's own WebSocket REQ path is such a tolerant parser: the filter deserializer drops the extension fields, so a window filter on REQ serves the standard query.)
 - **Extension-unaware client**: never sends `top_level`, never sees an overlay kind, and observes a completely standard relay.
@@ -175,20 +360,20 @@ A relay implementing this NIP MAY advertise it in its NIP-11 relay information d
 
 ## Security and Privacy Considerations
 
-Overlays are relay-authored facts about data the requester can already read. A relay MUST apply its normal access scoping to rows and to every aux-closure event, and §Access Scoping governs inaccessible channels: no rows, no overlays, no distinguishable error.
+Overlays are relay-authored facts about data the requester can already read. A relay MUST apply the applicable mode's access rules to rows and to every aux-closure event. Inaccessible channels produce no rows, no overlays, and no distinguishable existence error; thread mode additionally validates the requested root within the host-derived community and channel before serving descendants.
 
 `kind:39005` aggregates thread activity (participant pubkeys, counts, recency) into one event. It only ever describes threads rooted in a channel the requester can read, so it reveals nothing a client could not compute from readable events — it saves round trips, not permissions.
 
-Client-submitted `39005`/`39006` MUST be rejected at ingest (relay-only kinds); a forged overlay accepted into storage could later masquerade as relay-signed state.
+Client-submitted `39005`/`39006`/`39007` events MUST be rejected at ingest (relay-only kinds); a forged overlay accepted into storage could later masquerade as relay-signed state.
 
 ### Overlay Trust
 
-Because `kind:39006` is the pagination authority, a client MUST adopt exactly one of these trust profiles before using the window fast path:
+`kind:39006` and `kind:39007` are the pagination authorities for channel and thread mode respectively. Thread-mode clients MUST perform the signer, signature, tag, and request-binding verification specified in §Thread Bounds. Before using the channel-window fast path, a client MUST adopt exactly one of these trust profiles:
 
-- **Authenticated-transport profile** (what Buzz desktop ships): the client speaks to a relay it deliberately configured as its source of truth, over TLS (HTTPS/WSS) to that configured origin — server-origin authentication comes from the TLS certificate chain, which is what proves the response bytes came from the relay. (NIP-98 request signing and NIP-42 auth run over this channel too, but they authenticate the *requester* to the relay for access control; they are not evidence of response provenance.) The MUST-level structural checks of §Client Behavior step 5 — exactly one bounds, request binding, parseable content, `has_more`/`next_cursor` agreement — are still mandatory and are what #1500 enforces. The SHOULD-level checks of step 5 (exact tag cardinality, runtime field-type validation) and cryptographically binding overlay signatures to the advertised NIP-11 identity are future hardening, to be applied uniformly across all relay-signed reads (with NIP-DV, NIP-IA), not a current guarantee. Under this profile, "relay-signed" is a TLS-origin claim, not a client-verified cryptographic one.
-- **Identity-verified profile**: the client has obtained and trusts the relay identity pubkey out-of-band or via NIP-11. It MUST verify each overlay's event id, Schnorr signature, and signer against that identity, and treat any failure as the §step-5 discard. This is the profile for clients that cannot or do not authenticate their transport end-to-end.
+- **Authenticated-transport profile** (what Buzz desktop ships): the client speaks to a relay it deliberately configured as its source of truth, over TLS (HTTPS/WSS) to that configured origin — server-origin authentication comes from the TLS certificate chain, which is what proves the response bytes came from the relay. (NIP-98 request signing and NIP-42 auth run over this channel too, but they authenticate the *requester* to the relay for access control; they are not evidence of response provenance.) The MUST-level structural checks of §Channel-mode Client Behavior step 5 — exactly one bounds, request binding, parseable content, `has_more`/`next_cursor` agreement — are still mandatory and are what #1500 enforces. The SHOULD-level checks of step 5 (exact tag cardinality, runtime field-type validation) and cryptographically binding channel overlay signatures to the advertised NIP-11 identity are future hardening, to be applied uniformly across relay-signed reads (with NIP-DV, NIP-IA), not a current channel-mode guarantee. Under this profile, "relay-signed" is a TLS-origin claim, not a client-verified cryptographic one.
+- **Identity-verified profile**: the client has obtained and trusts the relay identity pubkey out-of-band or via NIP-11. It MUST verify each overlay's event id, Schnorr signature, and signer against that identity, and treat any failure as the §Channel-mode Client Behavior step-5 discard. This is the profile for clients that cannot or do not authenticate their transport end-to-end.
 
-A client with neither an authenticated transport nor a verifiable relay identity MUST NOT use the window fast path: it falls back to the standard filter (§Degradation), where it verifies every event signature itself.
+A channel-mode client with neither an authenticated transport nor a verifiable relay identity MUST NOT use the channel-window fast path: it falls back to the standard filter (§Degradation), where it verifies every event signature itself. Thread mode has the stricter verification and clean-legacy-restart rules in §Thread Bounds; it MUST NOT downgrade on an invalid signed response.
 
 ## Implementation Gotchas
 

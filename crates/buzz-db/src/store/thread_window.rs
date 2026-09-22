@@ -1,4 +1,4 @@
-//! NIP-TW newest-first reply windows. This path deliberately does not change
+//! NIP-CW thread-mode newest-first reply windows. This path deliberately does not change
 //! legacy forward threads or the permissive generic event reconstruction path.
 
 use buzz_core::{
@@ -394,7 +394,7 @@ async fn writer_aux(
 }
 
 impl ReadSession {
-    /// Strict NIP-TW auxiliary scan on the same proved snapshot, with the
+    /// Strict NIP-CW thread-mode auxiliary scan on the same proved snapshot, with the
     /// existing permanent writer degradation on mid-request replica failure.
     #[datastore_span(name = "thread_window_aux", system = "postgresql")]
     pub async fn thread_window_aux(

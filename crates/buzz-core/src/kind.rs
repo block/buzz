@@ -437,7 +437,7 @@ pub const KIND_THREAD_SUMMARY: u32 = 39005;
 /// content = `{has_more, next_cursor}`. The only authority on exhaustion —
 /// clients must not infer `has_more` from row counts.
 pub const KIND_WINDOW_BOUNDS: u32 = 39006;
-/// NIP-TW query-time bounds, bound to a normalized newest-first thread request.
+/// NIP-CW thread-mode query-time bounds, bound to a normalized newest-first thread request.
 pub const KIND_THREAD_WINDOW_BOUNDS: u32 = 39007;
 
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).

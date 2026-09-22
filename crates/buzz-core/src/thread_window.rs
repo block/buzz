@@ -1,4 +1,4 @@
-//! Strict, canonical NIP-TW requests. Unknown constraints fail rather than
+//! Strict, canonical NIP-CW thread-mode requests. Unknown constraints fail rather than
 //! silently describing different rows from the ones the caller requested.
 
 use chrono::{DateTime, Utc};
@@ -155,7 +155,7 @@ impl Request {
         })
     }
 
-    /// Canonical NIP-TW v1 request identity. SHA-256 over a compact JSON array
+    /// Canonical NIP-CW thread-mode v1 request identity. SHA-256 over a compact JSON array
     /// avoids ambiguous separators and binds all normalized response options.
     /// The host is server-resolved; the reader is the authenticated lowercase
     /// public key. Neither may be taken from filter-supplied fields.

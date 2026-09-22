@@ -1,4 +1,4 @@
-//! NIP-TW bridge adapter. Legacy thread and channel-window code stays separate.
+//! NIP-CW thread-mode bridge adapter. Legacy thread and channel-window code stays separate.
 
 use std::{collections::HashSet, time::Duration};
 
