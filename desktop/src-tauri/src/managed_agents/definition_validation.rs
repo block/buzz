@@ -26,6 +26,9 @@ pub(crate) fn validate_agent_definition_text(
     if display_name.trim().is_empty() {
         return Err("Display name is required".to_string());
     }
+    if super::reserved_agent_names::is_reserved_agent_name(display_name) {
+        return Err(super::reserved_agent_names::reserved_agent_name_error(display_name));
+    }
     let display_name_chars = display_name.chars().count();
     if display_name_chars > MAX_DISPLAY_NAME_CHARS {
         return Err(format!(

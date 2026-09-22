@@ -17,6 +17,10 @@ import {
 } from "@/shared/api/tauri";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
+import {
+  isReservedCommunityAgentName,
+  reservedCommunityAgentNameError,
+} from "@/features/agents/lib/reservedAgentNames";
 import type {
   AcpRuntime,
   AgentPersona,
@@ -324,6 +328,10 @@ export async function provisionChannelManagedAgent(
 
   if (trimmedName.length === 0) {
     throw new Error("Agent name is required.");
+  }
+
+  if (isReservedCommunityAgentName(trimmedName)) {
+    throw new Error(reservedCommunityAgentNameError(trimmedName));
   }
 
   // Smart reuse: if a managed agent with the same personaId already exists

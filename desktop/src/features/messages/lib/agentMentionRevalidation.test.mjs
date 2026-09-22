@@ -217,3 +217,25 @@ test("publication cannot authorize a DM that still has no destination", async ()
     AgentMentionAuthorizationError,
   );
 });
+
+test("channel membership admits directory-less community bots", async () => {
+  assert.deepEqual(
+    await revalidateAgentMentionPubkeys({
+      ...options(),
+      channelMemberPubkeys: new Set([AGENT]),
+      fetchRelayAgents: async () => [],
+    }),
+    [HUMAN, AGENT],
+  );
+});
+
+test("channel membership does not admit non-member agents when directory denies", async () => {
+  await assert.rejects(
+    revalidateAgentMentionPubkeys({
+      ...options(),
+      channelMemberPubkeys: new Set([HUMAN]),
+      fetchRelayAgents: async () => [],
+    }),
+    AgentMentionAuthorizationError,
+  );
+});

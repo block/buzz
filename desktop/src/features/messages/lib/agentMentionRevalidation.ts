@@ -33,6 +33,7 @@ export async function revalidateAgentMentionPubkeys({
   currentPubkey,
   eligibilityScope,
   sharedChannelIds,
+  channelMemberPubkeys,
   refetchManagedAgents,
   fetchRelayAgents,
   phase = "publish",
@@ -43,6 +44,8 @@ export async function revalidateAgentMentionPubkeys({
   currentPubkey: string | null;
   eligibilityScope: AgentEligibilityScope;
   sharedChannelIds: ReadonlySet<string>;
+  /** Destination-channel members. Membership alone authorizes @mention notify. */
+  channelMemberPubkeys?: ReadonlySet<string>;
   refetchManagedAgents: () => Promise<DirectoryResult<ManagedAgent[]>>;
   fetchRelayAgents: (pubkeys: string[]) => Promise<RelayAgent[]>;
 }) {
@@ -52,6 +55,15 @@ export async function revalidateAgentMentionPubkeys({
   if (requestedAgentPubkeys.size === 0) {
     return [...pubkeys];
   }
+
+  const memberPubkeys = new Set(
+    [...(channelMemberPubkeys ?? [])].map((pubkey) => normalizePubkey(pubkey)),
+  );
+  const destinationChannelId =
+    eligibilityScope.type === "channel" || eligibilityScope.type === "owned"
+      ? eligibilityScope.channelId
+      : null;
+  const membershipAuthorizesMentions = destinationChannelId !== null;
 
   const [managedResult, relayAgents] = await Promise.all([
     refetchManagedAgents().catch(() => null),
@@ -75,7 +87,14 @@ export async function revalidateAgentMentionPubkeys({
   });
   const admittedPubkeys = new Set(
     [...agentPubkeys].filter((pubkey) => {
-      const isManagedAgent = managedPubkeys.has(normalizePubkey(pubkey));
+      const normalized = normalizePubkey(pubkey);
+      // Channel membership is sufficient to @mention (matches CLI / notify).
+      // Community bots often lack kind:10100 + NIP-OA directory rows; without
+      // this, Desktop rejects every in-channel bot mention while CLI succeeds.
+      if (membershipAuthorizesMentions && memberPubkeys.has(normalized)) {
+        return true;
+      }
+      const isManagedAgent = managedPubkeys.has(normalized);
       const directoryReady = isManagedAgent || relayDirectoryReady;
       return (
         getAgentMentionAdmission({
@@ -101,6 +120,7 @@ export function useAgentMentionRevalidation({
   currentPubkey,
   eligibilityScope,
   sharedChannelIds,
+  channelMemberPubkeys,
   refetchManagedAgents,
 }: {
   agentPubkeys: ReadonlySet<string>;
@@ -108,6 +128,7 @@ export function useAgentMentionRevalidation({
   currentPubkey: string | null;
   eligibilityScope: AgentEligibilityScope;
   sharedChannelIds: ReadonlySet<string>;
+  channelMemberPubkeys?: ReadonlySet<string>;
   refetchManagedAgents: () => Promise<DirectoryResult<ManagedAgent[]>>;
 }) {
   return React.useCallback(
@@ -135,6 +156,7 @@ export function useAgentMentionRevalidation({
         currentPubkey,
         eligibilityScope: scope,
         sharedChannelIds,
+        channelMemberPubkeys,
         refetchManagedAgents,
         fetchRelayAgents: (requestedPubkeys) =>
           revalidateRelayAgents(
@@ -145,6 +167,7 @@ export function useAgentMentionRevalidation({
     },
     [
       agentPubkeys,
+      channelMemberPubkeys,
       currentPubkey,
       eligibilityScope,
       getSelectedAgentPubkeys,
