@@ -399,6 +399,7 @@ test-unit:
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway
+        cargo nextest run -p buzz-push-gateway --features personal-dev-app-attest
         # Kubernetes backend provider: the decision layers (state machine, GC
         # planner, env precedence, naming, wire) are pure functions with a fake
         # substrate, so they belong in the unit job. Enumerated explicitly

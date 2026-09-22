@@ -117,6 +117,8 @@ run_unit_tests() {
 
   run_test_step "buzz-push-gateway tests" \
     cargo test -p buzz-push-gateway -- --nocapture
+  run_test_step "buzz-push-gateway personal development tests" \
+    cargo test -p buzz-push-gateway --features personal-dev-app-attest -- --nocapture
 
   # Kubernetes backend provider: pure decision layers driven by a fake
   # substrate, no cluster. Mirrors the nextest path in `just test-unit` —
