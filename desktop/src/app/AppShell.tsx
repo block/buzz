@@ -2,6 +2,7 @@ import * as React from "react";
 import { ProtectedGlobalOverlay } from "@protected-feature-components";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
+import { toast } from "sonner";
 import { deriveShellRoute, markAllReadSources } from "@/app/AppShell.helpers";
 import { useTerminalContext } from "@/app/useTerminalContext";
 import { AppShellProvider } from "@/app/AppShellContext";
@@ -625,7 +626,12 @@ export function AppShell() {
     async (channelId: string) => {
       try {
         await hideDmMutation.mutateAsync(channelId);
-      } catch {
+      } catch (error) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : "Failed to close direct message",
+        );
         return;
       }
 
