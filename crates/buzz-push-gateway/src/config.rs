@@ -386,11 +386,35 @@ mod tests {
             ("BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT", "staging"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "31536001"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2.592e+06"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2592000.5"),
             ("BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS", "0"),
         ] {
             let mut env = base();
             env.insert(key.into(), value.into());
             assert!(Config::from_map(&env).is_err(), "accepted {key}={value}");
+        }
+    }
+
+    // The chart test supplies actual Helm-rendered environment values. Keep this
+    // separate from ordinary unit tests, which do not require Helm or fixtures.
+    #[test]
+    #[ignore = "run deploy/charts/buzz-push-gateway/tests/grant-lifetime.sh"]
+    fn helm_rendered_grant_lifetimes() {
+        let path = std::env::var("BUZZ_TEST_HELM_ENV_FILE").unwrap();
+        let cases: Vec<(String, i64, HashMap<String, String>)> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(cases.len(), 9);
+        for (label, expected, rendered) in cases {
+            let mut env = base();
+            env.extend(rendered);
+            let config = Config::from_map(&env).unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(config.max_grant_lifetime_seconds, expected, "{label}");
+            assert_eq!(
+                env["BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS"],
+                expected.to_string(),
+                "{label} must render decimal integer text"
+            );
         }
     }
 
