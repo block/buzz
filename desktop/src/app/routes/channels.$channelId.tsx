@@ -80,6 +80,9 @@ function ChannelRouteComponent() {
         autoSendDraftKey={search.autoSend ?? null}
         channelId={channelId}
         searchHighlight={searchHighlight}
+        hasStreamRouteIntent={Boolean(
+          search.autoSend || search.agentSession || search.profile,
+        )}
         selectedPostId={null}
         targetMessageId={search.messageId ?? null}
         targetReplyId={null}

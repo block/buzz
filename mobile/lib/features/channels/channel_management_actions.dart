@@ -212,8 +212,22 @@ class ChannelActions {
   Future<void> setCanvas({
     required String channelId,
     required String content,
+    bool enforceRevision = false,
+    String? expectedEventId,
   }) async {
     _ensureCommunityValid();
+    if (enforceRevision) {
+      final events = await _session.fetchHistory(
+        NostrFilters.canvas(channelId),
+      );
+      final currentEventId = events.isEmpty ? null : events.first.id;
+      if (currentEventId != expectedEventId) {
+        throw StateError(
+          'Canvas revision conflict: the board changed before this save.',
+        );
+      }
+      _ensureCommunityValid();
+    }
     await _signedEventRelay.submit(
       kind: 40100,
       content: content,
