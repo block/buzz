@@ -30,8 +30,10 @@ import {
   subscribeControlResults,
 } from "@/features/agents/observerRelayStore";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
+import { getAudioMediaLoadSchedulerSnapshot } from "@/features/messages/lib/audioMediaLoadScheduler";
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
 import { selectMockHistory } from "./e2eBridgeHistory.ts";
+import { hasMockSubscription } from "./e2eBridgeSubscriptions.ts";
 export { mockSearchHitMatches };
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type {
@@ -1275,6 +1277,7 @@ declare global {
     __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
       channelName: string;
       kind?: number;
+      exactChannel?: boolean;
     }) => boolean;
     __BUZZ_E2E_HAS_MOCK_OWNER_KIND_SUBSCRIPTION__?: (input: {
       ownerPubkey: string;
@@ -1609,6 +1612,8 @@ declare global {
     __BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__?: number;
     /** Hold renderer-owned media fetches until their cancellation command. */
     __BUZZ_E2E_HOLD_MEDIA_FETCHES__?: boolean;
+    /** Real scheduler ownership, including work not yet admitted to native fetch. */
+    __BUZZ_E2E_AUDIO_LOAD_STATE__?: typeof getAudioMediaLoadSchedulerSnapshot;
     /** Exact active/peak native media-fetch ownership for scheduler tests. */
     __BUZZ_E2E_MEDIA_FETCH_STATE__?: { active: number; peak: number };
     /** Object-URL lifecycle counters installed by the audio E2E regression. */
@@ -5040,22 +5045,19 @@ function emitMockGlobalEvent(event: RelayEvent) {
   }
 }
 
-function hasMockLiveSubscription(channelId: string, kind?: number) {
-  for (const socket of mockSockets.values()) {
-    for (const subscription of socket.subscriptions.values()) {
-      if (
-        (subscription.channelIds.includes(channelId) ||
-          subscription.channelIds.includes(GLOBAL_MOCK_SUBSCRIPTION)) &&
-        (kind === undefined ||
-          !subscription.kinds ||
-          subscription.kinds.includes(kind))
-      ) {
-        return true;
-      }
-    }
-  }
-
-  return false;
+function hasMockLiveSubscription(
+  channelId: string,
+  kind?: number,
+  exactChannel = false,
+) {
+  return [...mockSockets.values()].some((socket) =>
+    hasMockSubscription(
+      socket.subscriptions.values(),
+      channelId,
+      kind,
+      exactChannel,
+    ),
+  );
 }
 
 /**
@@ -11362,6 +11364,7 @@ export function maybeInstallE2eTauriMocks() {
   cancelledMediaFetchIds = new Set<string>();
   mockMediaFetchControllers = new Map<string, AbortController>();
   window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ = 0;
+  window.__BUZZ_E2E_AUDIO_LOAD_STATE__ = getAudioMediaLoadSchedulerSnapshot;
   window.__BUZZ_E2E_MEDIA_FETCH_STATE__ = { active: 0, peak: 0 };
   window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__ = () => {
     const queued = deferredLinkPreviewMetadataQueue.splice(0);
@@ -11618,7 +11621,11 @@ export function maybeInstallE2eTauriMocks() {
       createdAt,
     );
   };
-  window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({ channelName, kind }) => {
+  window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({
+    channelName,
+    kind,
+    exactChannel,
+  }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
     );
@@ -11626,7 +11633,7 @@ export function maybeInstallE2eTauriMocks() {
       throw new Error(`Mock channel ${channelName} not found.`);
     }
 
-    return hasMockLiveSubscription(channel.id, kind);
+    return hasMockLiveSubscription(channel.id, kind, exactChannel);
   };
   window.__BUZZ_E2E_HAS_MOCK_OWNER_KIND_SUBSCRIPTION__ = ({
     ownerPubkey,
