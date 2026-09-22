@@ -106,7 +106,7 @@ export function getProviderEffortConfig(
     return openaiConfig(m);
   }
   if (provider === "databricks_v2") {
-    // Route by model family: claude* → Anthropic tables, gpt-5* → OpenAI tables.
+    // Route by model family: claude* → Anthropic tables, known GPT → OpenAI tables.
     // Non-Claude concrete models (e.g. llama-3) go through MlflowChatCompletions,
     // which applies normalize_effort_for_openai_route → clamps max to xhigh.
     // Route them through openaiConfig to exclude max. Only blank/unknown model
@@ -114,7 +114,7 @@ export function getProviderEffortConfig(
     if (m.startsWith("claude-")) {
       return anthropicConfig(m);
     }
-    if (gpt5FamilyModel(m)) {
+    if (gpt5FamilyModel(m) || gpt6FamilyModel(m)) {
       return openaiConfig(m);
     }
     if (m.length > 0) {
@@ -242,7 +242,37 @@ function gpt5FamilyModel(m: string): boolean {
   );
 }
 
+/** Returns true for known GPT-6 variants with a complete model token. */
+function gpt6FamilyModel(m: string): boolean {
+  return [
+    "gpt-6-sol",
+    "gpt6-sol",
+    "gpt-6-luna",
+    "gpt6-luna",
+    "gpt-6-astra",
+    "gpt6-astra",
+  ].some((token) => gpt5TokenMatches(m, token));
+}
+
 function openaiConfig(m: string): ProviderEffortConfig {
+  if (
+    ["gpt-6-sol", "gpt6-sol", "gpt-6-luna", "gpt6-luna"].some((token) =>
+      gpt5TokenMatches(m, token),
+    )
+  ) {
+    return {
+      validValues: ["none", "low", "medium", "high", "xhigh", "max"],
+      defaultValue: "medium",
+    };
+  }
+  if (
+    ["gpt-6-astra", "gpt6-astra"].some((token) => gpt5TokenMatches(m, token))
+  ) {
+    return {
+      validValues: ["low", "medium", "high", "xhigh", "max"],
+      defaultValue: "medium",
+    };
+  }
   // Check -pro before versioned suffixes (gpt-5-pro contains "gpt-5").
   if (gpt5TokenMatches(m, "gpt-5-pro") || gpt5TokenMatches(m, "gpt5-pro")) {
     return { validValues: ["high"], defaultValue: "high" };

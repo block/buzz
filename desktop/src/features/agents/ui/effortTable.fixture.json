@@ -84,6 +84,34 @@
     "defaultValue": "high"
   },
   {
+    "note": "OpenAI gpt-6-sol: none through max",
+    "provider": "openai",
+    "model": "gpt-6-sol",
+    "validValues": ["none", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "OpenAI gpt-6-luna: none through max",
+    "provider": "openai",
+    "model": "gpt-6-luna",
+    "validValues": ["none", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "OpenAI gpt-6-astra: low through max",
+    "provider": "openai",
+    "model": "gpt-6-astra",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "OpenAI future gpt-6-sol2 remains unknown",
+    "provider": "openai",
+    "model": "gpt-6-sol2",
+    "validValues": ["none", "minimal", "low", "medium", "high", "xhigh"],
+    "defaultValue": "medium"
+  },
+  {
     "note": "OpenAI gpt-5.6: none/low/medium/high/xhigh/max",
     "provider": "openai",
     "model": "gpt-5.6",
@@ -151,6 +179,20 @@
     "provider": "databricks_v2",
     "model": "gpt-5.6-sol",
     "validValues": ["none", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "DatabricksV2 prefixed gpt-6-sol route: OpenAI max-capable table",
+    "provider": "databricks_v2",
+    "model": "goose-gpt-6-sol",
+    "validValues": ["none", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "DatabricksV2 prefixed gpt-6-astra route: no none",
+    "provider": "databricks_v2",
+    "model": "databricks-gpt-6-astra",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
     "defaultValue": "medium"
   },
   {

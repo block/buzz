@@ -154,7 +154,7 @@ impl Llm {
                     |use_responses, request_model| {
                         // Normalize effort for model-specific availability. Startup no longer rejects
                         // `max` for pure OpenAI/Databricks; this per-model table is the single authority
-                        // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
+                        // — it keeps `max` for GPT-6 and gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
                         // models, and still applies corrections like none→minimal on the gpt-5 base.
                         let e =
                             effort.map(|ef| normalize_effort_for_openai_route(ef, request_model));
@@ -968,10 +968,14 @@ fn is_responses_required_error(body: &str) -> bool {
 }
 
 fn databricks_v2_route_for_model(model: &str) -> DatabricksV2Route {
-    // Databricks v2 catalog names currently identify OpenAI-shaped GPT-5
+    // Databricks v2 catalog names currently identify OpenAI-shaped GPT-5/GPT-6
     // models and Anthropic-shaped Claude models by these substrings.
     let lower = model.to_ascii_lowercase();
-    if lower.contains("gpt-5") || lower.contains("gpt5") {
+    if lower.contains("gpt-5")
+        || lower.contains("gpt5")
+        || lower.contains("gpt-6")
+        || lower.contains("gpt6")
+    {
         DatabricksV2Route::OpenAiResponses
     } else if lower.contains("claude") {
         DatabricksV2Route::AnthropicMessages
@@ -2469,6 +2473,11 @@ mod tests {
                 "/ai-gateway/openai/v1/responses",
             ),
             (
+                "databricks-gpt-6-astra",
+                DatabricksV2Route::OpenAiResponses,
+                "/ai-gateway/openai/v1/responses",
+            ),
+            (
                 "databricks-claude-opus-4-7",
                 DatabricksV2Route::AnthropicMessages,
                 "/ai-gateway/anthropic/v1/messages",
@@ -2992,6 +3001,26 @@ mod tests {
             body["reasoning"]["effort"], "max",
             "DBv2 GPT-5.6 route must serialize max to the Responses API"
         );
+    }
+
+    #[test]
+    fn dbv2_gpt6_route_serializes_supported_effort_in_responses_body() {
+        for (model, requested, expected) in [
+            ("gpt-6-sol", ThinkingEffort::None, "none"),
+            ("gpt-6-luna", ThinkingEffort::Max, "max"),
+            ("gpt-6-astra", ThinkingEffort::None, "low"),
+        ] {
+            let normalized = crate::config::normalize_effort_for_openai_route(requested, model);
+            let body = responses_body(
+                &cfg_responses(),
+                "system",
+                &[HistoryItem::User("hi".into())],
+                &[],
+                model,
+                Some(normalized),
+            );
+            assert_eq!(body["reasoning"]["effort"], expected, "model={model}");
+        }
     }
 
     #[test]

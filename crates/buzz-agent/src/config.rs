@@ -305,10 +305,12 @@ fn gpt5_base_matches(lower_model: &str, token: &str) -> bool {
 
 /// Returns the set of `reasoning.effort` values supported by a given OpenAI model family.
 ///
-/// Doc-verified availability (OpenAI model pages, July 2025):
+/// Doc-verified availability (OpenAI model pages):
 ///
 /// | Model        | Supported effort values                   |
 /// |-------------|-------------------------------------------|
+/// | gpt-6-sol/luna | `none, low, medium, high, xhigh, max`   |
+/// | gpt-6-astra | `low, medium, high, xhigh, max`           |
 /// | gpt-5-pro   | `high` only                               |
 /// | gpt-5.6     | `none, low, medium, high, xhigh, max`     |
 /// | gpt-5.5     | `none, low, medium, high, xhigh`          |
@@ -341,6 +343,13 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
         ThinkingEffort::XHigh,
         ThinkingEffort::Max,
     ];
+    const GPT6_ASTRA: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+        ThinkingEffort::XHigh,
+        ThinkingEffort::Max,
+    ];
     const GPT5_5_AND_5_4: &[ThinkingEffort] = &[
         ThinkingEffort::None,
         ThinkingEffort::Low,
@@ -364,7 +373,17 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     let lower = model.to_ascii_lowercase();
     // Check gpt-5-pro before gpt-5.5 / gpt-5.4 etc. to avoid the `-pro` name
     // matching the base "gpt-5" prefix first.
-    if gpt5_token_matches(&lower, "gpt-5-pro") || gpt5_token_matches(&lower, "gpt5-pro") {
+    if ["gpt-6-sol", "gpt6-sol", "gpt-6-luna", "gpt6-luna"]
+        .iter()
+        .any(|token| gpt5_token_matches(&lower, token))
+    {
+        Some(GPT5_6)
+    } else if ["gpt-6-astra", "gpt6-astra"]
+        .iter()
+        .any(|token| gpt5_token_matches(&lower, token))
+    {
+        Some(GPT6_ASTRA)
+    } else if gpt5_token_matches(&lower, "gpt-5-pro") || gpt5_token_matches(&lower, "gpt5-pro") {
         Some(GPT5_PRO)
     } else if gpt5_token_matches(&lower, "gpt-5.6")
         || gpt5_token_matches(&lower, "gpt5.6")
@@ -528,7 +547,9 @@ fn resolve_openai_effort(
 ///
 /// Applies to pure-OpenAI request paths AND DBv2 OpenAI-shaped routes.
 ///
-/// Doc-verified model table (July 2025):
+/// Doc-verified model table:
+/// - `gpt-6-sol`, `gpt-6-luna`: `none, low, medium, high, xhigh, max`
+/// - `gpt-6-astra`: `low, medium, high, xhigh, max`
 /// - `gpt-5-pro`: `high` only
 /// - `gpt-5.6`: `none, low, medium, high, xhigh, max`
 /// - `gpt-5.5`, `gpt-5.4`: `none, low, medium, high, xhigh`
@@ -2230,6 +2251,48 @@ mod tests {
     }
 
     #[test]
+    fn openai_efforts_for_model_gpt6_variants() {
+        let sol_luna = &[
+            ThinkingEffort::None,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ];
+        let astra = &[
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ];
+        for model in ["gpt-6-sol", "gpt-6-luna", "goose-gpt-6-sol"] {
+            assert_eq!(openai_efforts_for_model(model), Some(sol_luna.as_slice()));
+            assert_eq!(
+                normalize_effort_for_openai_route(ThinkingEffort::None, model),
+                ThinkingEffort::None
+            );
+            assert_eq!(
+                normalize_effort_for_openai_route(ThinkingEffort::Max, model),
+                ThinkingEffort::Max
+            );
+        }
+        for model in ["gpt-6-astra", "databricks-gpt-6-astra"] {
+            assert_eq!(openai_efforts_for_model(model), Some(astra.as_slice()));
+            assert_eq!(
+                normalize_effort_for_openai_route(ThinkingEffort::None, model),
+                ThinkingEffort::Low
+            );
+            assert_eq!(
+                normalize_effort_for_openai_route(ThinkingEffort::Max, model),
+                ThinkingEffort::Max
+            );
+        }
+        assert!(openai_efforts_for_model("gpt-6-sol2").is_none());
+    }
+
+    #[test]
     fn openai_efforts_for_model_gpt5_5_includes_xhigh() {
         let supported = openai_efforts_for_model("gpt-5.5").expect("gpt-5.5 must be in table");
         assert!(
@@ -2627,8 +2690,18 @@ mod tests {
             if m.starts_with("claude-") {
                 return anthropic_result(&m);
             }
-            // gpt-5 family check mirrors gpt5FamilyModel in TS.
-            let is_gpt5 = gpt5_token_matches(&m, "gpt-5-pro")
+            // Known GPT family check mirrors gpt5FamilyModel/gpt6FamilyModel in TS.
+            let is_known_gpt = [
+                "gpt-6-sol",
+                "gpt6-sol",
+                "gpt-6-luna",
+                "gpt6-luna",
+                "gpt-6-astra",
+                "gpt6-astra",
+            ]
+            .iter()
+            .any(|token| gpt5_token_matches(&m, token))
+                || gpt5_token_matches(&m, "gpt-5-pro")
                 || gpt5_token_matches(&m, "gpt5-pro")
                 || gpt5_token_matches(&m, "gpt-5.6")
                 || gpt5_token_matches(&m, "gpt5.6")
@@ -2642,7 +2715,7 @@ mod tests {
                 || gpt5_token_matches(&m, "gpt5.1")
                 || gpt5_base_matches(&m, "gpt-5")
                 || gpt5_base_matches(&m, "gpt5");
-            if is_gpt5 {
+            if is_known_gpt {
                 return openai_result(&m);
             }
             if !m.is_empty() {
