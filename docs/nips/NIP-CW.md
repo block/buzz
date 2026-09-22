@@ -269,32 +269,6 @@ authorization failures, timeouts, corruption, or incomplete auxiliary closure
 MUST NOT trigger compatibility fallback. Buzz currently ships no thread-mode
 client opt-in or fallback implementation.
 
-### Consistency, Limits, and Deployment
-
-Cursor pages may use a proved REPEATABLE READ replica snapshot; on replica
-failure the relay retries on the writer and restarts auxiliary closure. No
-snapshot isolation is promised across pages, and insertion coverage does not
-prove that edits, deletions, or newer auxiliary events are current.
-
-A query is bounded to four windows, 64 auxiliary SQL queries, 8,192 raw
-auxiliary candidates, an 8 MiB serialized response, and an 8-second deadline.
-Selection and auxiliary SQL use 4-second statement and 1-second lock timeouts.
-Budget, timeout, closure, or signing failures return no partial page or bounds.
-
-Migration 0048 adds the thread-window index. Populated databases SHOULD prebuild
-it with the approved concurrent schema-change workflow before upgrading:
-
-```sql
-CREATE INDEX CONCURRENTLY idx_thread_metadata_window
-ON public.thread_metadata (community_id, root_event_id, event_created_at DESC, event_id ASC);
-```
-
-The migration validates an existing index and otherwise uses bounded lock and
-statement timeouts. Migration 0048 retains its original NIP-TW wording to
-preserve its SQLx checksum; those references mean this section. Keep the index
-on binary rollback, do not alter migration ledger rows or checksums, and
-measure query plans and write cost before production rollout.
-
 ## Degradation
 
 The channel-mode extension fields in this NIP are *additional* keys on a standard filter, and clients and relays that do not implement it need no changes:
@@ -327,6 +301,7 @@ A channel-mode client with neither an authenticated transport nor a verifiable r
 - The cursor comparison uses `id > $id` (bytewise ascending) because the total order is `created_at DESC, id ASC`. Getting the id inequality backwards drops or duplicates same-second rows — precisely the bug the composite cursor removes.
 - `next_cursor` is the last retained *scan candidate*, not the last delivered row: capture the scan position before per-event reconstruction so a skipped event cannot stall pagination. Clients echo it verbatim and never derive or validate it against the rows they received.
 - **Channel mode only:** events ingested before the relay computed thread metadata have no depth; they MUST be treated as top-level rather than vanishing from channel windows. Thread mode instead requires metadata at depths 1..`depth_limit`.
+- Migration 0048's historical NIP-TW references are frozen for SQLx checksum compatibility and refer to the thread-window index.
 - The `d` tag on `39006` differs per request cursor by design: concurrent pages of one channel coexist in a replaceable-event cache instead of clobbering each other. The per-channel-singleton alternative would make page N overwrite page N+1's bounds.
 
 ## Relation to Other NIPs
