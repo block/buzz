@@ -31,6 +31,7 @@ import {
 } from "@/features/agents/observerRelayStore";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
+import { selectMockHistory } from "./e2eBridgeHistory.ts";
 export { mockSearchHitMatches };
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type {
@@ -4924,36 +4925,10 @@ function emitMockHistory(
   channelIds: string[],
   filter: MockFilter,
 ) {
-  const events = channelIds
-    .flatMap((channelId) => getMockMessageStore(channelId))
-    .filter((event) => {
-      if (filter.kinds && !filter.kinds.includes(event.kind)) {
-        return false;
-      }
-      if (filter.since !== undefined && event.created_at < filter.since) {
-        return false;
-      }
-      if (filter.until !== undefined && event.created_at > filter.until) {
-        return false;
-      }
-      return true;
-    })
-    // Relay order is `created_at DESC, id ASC` — match it (both the WS history
-    // page and the `get_channel_messages_before` keyset are backed by that one
-    // order in production, so the mock must be self-consistent too, else a
-    // same-second slice returned here won't line up with the keyset's tiebreak
-    // and the dense-second escape hatch can't prove completeness). Bare `until`
-    // still can't advance past a second denser than one page; the composite
-    // keyset is the escape hatch.
-    .sort(
-      (left, right) =>
-        right.created_at - left.created_at || left.id.localeCompare(right.id),
-    )
-    .slice(0, filter.limit ?? 50)
-    .sort(
-      (left, right) =>
-        left.created_at - right.created_at || left.id.localeCompare(right.id),
-    );
+  const events = selectMockHistory(
+    new Map(channelIds.map((id) => [id, getMockMessageStore(id)])),
+    [filter],
+  );
 
   const emit = () => {
     for (const event of events) {
@@ -10920,6 +10895,14 @@ function sendToMockSocket(args: {
         kinds: kinds.size > 0 ? [...kinds] : null,
         ownerPubkeys: [...ownerPubkeys],
       });
+      // Live requests still replay stored matches; pacing can admit them after
+      // a publish. Ephemeral/global fixtures are not channel history.
+      const history = new Map(
+        [...channelIds].map((id) => [id, getMockMessageStore(id)]),
+      );
+      for (const event of selectMockHistory(history, filters)) {
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
       sendWsText(socket.handler, ["EOSE", subId]);
       return;
     }

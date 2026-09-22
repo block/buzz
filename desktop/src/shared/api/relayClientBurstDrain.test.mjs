@@ -149,6 +149,119 @@ test("cold setup drains at most one live REQ per 250ms, prioritizes visible chan
   await Promise.all(entries.map((e) => e.promise));
 });
 
+test("observer control-result subscription takes the next paced slot ahead of cold channels", async () => {
+  const { relayClient: client } = await import("./relayClient.ts");
+  const { subscribeToAgentObserverFrames } = await import("./observerRelay.ts");
+  client.wsId = 7;
+  clients.push(client);
+  start(client, 296);
+  await flush();
+  const received = [];
+  const pending = subscribeToAgentObserverFrames("owner", (event) =>
+    received.push(event),
+  );
+  void pending.catch(() => {});
+  await tickTo(249);
+  assert.equal(frames("REQ").length, 1, "observer priority must retain pacing");
+  await tickTo(250);
+  const request = frames("REQ")[1].frame;
+  assert.deepEqual(request[2], {
+    kinds: [24200],
+    "#p": ["owner"],
+    limit: 1000,
+    since: -300,
+  });
+  const result = { id: "result", kind: 24200, tags: [["p", "owner"]] };
+  await deliver(client, ["EVENT", request[1], result]);
+  await deliver(client, ["EOSE", request[1]]);
+  const dispose = await pending;
+  assert.deepEqual(
+    received,
+    [result],
+    "ephemeral control results reach the admitted consumer",
+  );
+  await dispose();
+  await tickTo(266); // Flush the session's existing event batch timer.
+});
+
+test("read-state initialization takes the next paced slot ahead of cold channels", async () => {
+  const { ReadStateManager } = await import(
+    "../../features/channels/readState/readStateManager.ts"
+  );
+  const { KIND_READ_STATE } = await import("../constants/kinds.ts");
+  const previousDocument = globalThis.document;
+  const previousStorage = globalThis.localStorage;
+  const store = new Map();
+  const events = new EventTarget();
+  Object.assign(window, {
+    localStorage: {
+      getItem: (key) => store.get(key) ?? null,
+      setItem: (key, value) => store.set(key, value),
+      removeItem: (key) => store.delete(key),
+    },
+    addEventListener: events.addEventListener.bind(events),
+    removeEventListener: events.removeEventListener.bind(events),
+  });
+  globalThis.localStorage = window.localStorage;
+  globalThis.document = new EventTarget();
+  const client = session();
+  const background = start(client, 296);
+  await flush();
+  onSend = async ({ frame }) => {
+    if (frame[0] === "REQ") await deliver(client, ["EOSE", frame[1]]);
+  };
+  const pubkey = "a".repeat(64);
+  const manager = new ReadStateManager(pubkey, client);
+  let ready = false;
+  const initialized = manager.initialize().then(() => {
+    ready = true;
+  });
+  try {
+    await tickTo(249);
+    assert.equal(
+      ready,
+      false,
+      "initialization must retain its live readiness gate",
+    );
+    assert.equal(
+      frames("REQ").filter(({ frame }) => frame[1].startsWith("live-")).length,
+      1,
+    );
+    await tickTo(250);
+    assert.equal(
+      ready,
+      true,
+      "unread UI must not wait behind 295 cold channels",
+    );
+    await initialized;
+    const live = frames("REQ").filter(({ frame }) =>
+      frame[1].startsWith("live-"),
+    );
+    assert.equal(live.length, 2);
+    assert.equal(
+      live[1].at,
+      250,
+      "read-state must retain ordinary request pacing",
+    );
+    assert.deepEqual(live[1].frame[2], {
+      kinds: [KIND_READ_STATE],
+      authors: [pubkey],
+      "#t": ["read-state"],
+      limit: 500,
+    });
+  } finally {
+    manager.destroy();
+    for (const entry of background) entry.controller.abort();
+    client.disconnect();
+    await initialized;
+    globalThis.document = previousDocument;
+    globalThis.localStorage = previousStorage;
+    delete window.localStorage;
+    delete window.addEventListener;
+    delete window.removeEventListener;
+  }
+});
+
 test("125 refused live subscriptions cannot stampede beside a publish when cooldown releases", async () => {
   const client = session();
   const entries = start(client, 125);

@@ -1316,6 +1316,12 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
     return element && element.scrollHeight > element.clientHeight * 3;
   });
 
+  await page.waitForFunction(() =>
+    window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+      channelName: "general",
+      kind: 39005,
+    }),
+  );
   // Land a genuine prepend first. This is what turns `shift` on; subsequent
   // ordinary list updates and measurements must happen with it cleared.
   const scrollHeightBeforePrepend = (await getTimelineMetrics(page))
