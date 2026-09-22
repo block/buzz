@@ -134,6 +134,13 @@ export function useComposerVoiceNote({
     },
     [acceptsNewAttachment, media.uploadFile],
   );
+  const uploadDeferredFileWhenIdle = React.useCallback(
+    async (readFile: () => Promise<File | null>) => {
+      if (!acceptsNewAttachment()) return;
+      await media.uploadDeferredFile(readFile);
+    },
+    [acceptsNewAttachment, media.uploadDeferredFile],
+  );
   const setPendingImetaWhenIdle = React.useCallback(
     (update: Parameters<typeof media.setPendingImeta>[0]) => {
       if (acceptsNewAttachment()) media.setPendingImeta(update);
@@ -162,6 +169,7 @@ export function useComposerVoiceNote({
     setPendingImetaWhenIdle,
     finish,
     toggle,
+    uploadDeferredFileWhenIdle,
     uploadFileWhenIdle,
   };
 }
