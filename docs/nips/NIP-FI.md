@@ -18,8 +18,9 @@ NIP-FI authorizes a Nostr key when two independent facts agree: a valid
 issuer-qualified identity assertion that names the key, and fresh NIP-42 proof
 of possession of that key.  No relay-side identity state is required.  The
 relay verifies the assertion offline against configured per-issuer JWKS
-snapshots; every identity decision beyond key verification is the assertion
-issuer's responsibility.
+snapshots and enforces the resolved community's audience and issuer
+authorization policy; other identity decisions remain the assertion issuer's
+responsibility.
 
 This NIP defines the assertion contract, the offline verification procedure,
 session lifetime policy, and an authenticated issuer→relay disconnect API.
@@ -40,6 +41,9 @@ this spec.
   OIDC identity provider integration) that authenticates users and mints
   assertions.  The relay trusts only the issuer's assertion; it does not
   contact the IdP directly.
+- **community**: the tenant resolved from a connection's `Host`.  A community
+  has one configured canonical host URI, which is its assertion audience, and
+  an explicit set of issuer URIs authorized to mint assertions for it.
 
 ## Assertion contract
 
@@ -112,10 +116,13 @@ ledger; the assertion is the binding claim, and it is the assertion issuer's
 responsibility to ensure the assertion names the correct key.
 
 Community resolution MUST precede assertion verification.  The relay MUST resolve the
-connection's `Host` to exactly one community and its expected audience; an unknown
-or unresolvable host MUST fail closed with `authorization_unavailable`.
-`VerifyAssertion` MUST compare `aud` with the resolved community's expected audience,
-while `iss` continues to select the issuer policy.
+connection's `Host` to exactly one community, its expected audience, and its
+configured issuer allowlist; an unknown or unresolvable host, or unavailable
+community configuration, MUST fail closed with `authorization_unavailable`.
+After signature verification selects the exact issuer policy by `iss`, the relay
+MUST require that issuer to be authorized for the resolved community.
+`VerifyAssertion` MUST compare `aud` with the resolved community's expected
+audience; issuer policy selection by `iss` MUST NOT broaden either binding.
 
 ### Unverified claims
 
@@ -132,11 +139,12 @@ AssertionPolicyId = H(canonical assertion-policy contract)
 TransportContractId = H(canonical transport contract)
 ```
 
-`AssertionPolicyId` covers the canonical issuer, audience, token class,
-allowed algorithms, key-source contract, identity/key/claim mapping, time and
-size rules, and compiled verifier behavior.  JWKS key rotation changes the
-snapshot, not the policy ID.  `TransportContractId` covers the client-attached
-field, parsing, attachment, and no-fallback semantics.
+`AssertionPolicyId` covers the canonical issuer, community issuer
+association, audience, token class, allowed algorithms, key-source contract,
+identity/key/claim mapping, time and size rules, and compiled verifier
+behavior.  JWKS key rotation changes the snapshot, not the policy ID.
+`TransportContractId` covers the client-attached field, parsing, attachment,
+and no-fallback semantics.
 
 ## Client-attached transport
 
@@ -161,16 +169,39 @@ Failure never falls back to another transport.
 The relay verifies assertions **offline** against configured per-issuer JWKS
 snapshots.  No IdP contact occurs at admission time.
 
+### Community issuer authorization
+
+Each configured community MUST declare an explicit allowlist of issuer URIs
+that may authorize identities for that community.  An issuer policy selected by
+exact `iss` matching is usable only when that issuer is present in the resolved
+community's allowlist.  A global `IssuerRegistry` MAY hold the shared policy and
+JWKS configuration, but it MUST NOT by itself authorize an issuer for every
+community.  Deployments MUST reject a community configuration that has no
+canonical host URI, has an ambiguous Host mapping, or grants an issuer access
+without an explicit community association.
+
+The community allowlist and its canonical audience are deployment policy, not
+claims supplied by the requester.  The relay MUST resolve them before assertion
+verification and MUST fail closed with `authorization_unavailable` when the
+community configuration is missing or unavailable.
+
 ### Multi-issuer registry
 
-The relay maintains one [`IssuerRegistry`](../../crates/buzz-auth/src/nip_fi/config.rs):
-a map from exact `iss` strings to issuer policies.  The `iss` carried in the
-signed token selects exactly one policy; unknown issuers deny.  A
-single-issuer deployment is a registry of length one.  [FI-TRACE-CROSS-DOMAIN-COLLISION]
+The global [`IssuerRegistry`](../../crates/buzz-auth/src/nip_fi/config.rs) remains
+shared for issuer policy and JWKS lookup; community authorization is a separate
+deployment mapping from canonical host URI to
+`(expected_aud, authorized_issuers)`.  `VerifyAssertion` consumes the
+Host-resolved mapping, so a globally known issuer is not implicitly trusted by
+every community.
 
-The existing `FederatedAssertionVerifier<S>` and `ProductionJwksSource<F>`
-(merged in PR 3 / `70895b355`) implement the verification procedure described
-here.  The `nostr_pubkey` claim is unconditionally required — absence rejects
+The verification implementation MUST pass the immutable community configuration
+resolved from `Host` into this procedure.  This shape keeps the expected
+canonical audience and the community's issuer allowlist from coming from
+independent caller inputs.  The existing `FederatedAssertionVerifier<S>` and
+`ProductionJwksSource<F>` (merged in PR 3 / `70895b355`) are the implementation
+components to update for this contract; this specification requires the
+Host-bound API and does not claim that older token-only callers are conformant.
+The `nostr_pubkey` claim is unconditionally required — absence rejects
 regardless of issuer policy (NIP-FI v2, PR #7221).
 
 ### JWKS snapshot
@@ -197,7 +228,11 @@ any attacker-controlled `kid` lookup.
 ### Verification procedure
 
 ```text
-VerifyAssertion(token, expected_aud, D, R_t):
+VerifyAssertion(token, community, D, R_t):
+  // `community` is the immutable result of Host resolution by the caller;
+  // it contains `expected_aud` and the authorized issuer URI allowlist.
+  AssertCommunityConfig(community) or DENY(authorization_unavailable)
+
   // 1. Select issuer policy
   (header, claims) := BoundedJwsDecode(token) or DENY(evidence_rejected)
   policy := IssuerRegistry[claims.iss] or DENY(evidence_rejected)
@@ -213,7 +248,8 @@ VerifyAssertion(token, expected_aud, D, R_t):
 
   // 4. Validate claims against the resolved community and issuer policy
   AssertExactIss(claims.iss, policy.iss) or DENY(evidence_rejected)
-  AssertAudienceMatch(claims.aud, expected_aud) or DENY(evidence_rejected)
+  AssertIssuerAuthorized(policy.iss, community.authorized_issuers) or DENY(authorization_denied)
+  AssertAudienceMatch(claims.aud, community.expected_aud) or DENY(evidence_rejected)
   AssertTimeBounds(claims, policy) or DENY(evidence_rejected)  // [FI-TRACE-ASSERTION-VALIDATION]
   k_claimed := ParseHexKey(claims.nostr_pubkey) or DENY(evidence_rejected)
 
@@ -230,11 +266,12 @@ expired input denies.  A missing JWKS snapshot denies with
 
 On WebSocket upgrade:
 
-1. Resolve the connection's `Host` to `community` and derive its
-   `expected_aud`; unknown or unresolvable → deny `authorization_unavailable`.
+1. Resolve the connection's `Host` to `community`, including its canonical
+   `expected_aud` and configured issuer allowlist; unknown, ambiguous, or
+   unavailable community resolution → deny `authorization_unavailable`.
 2. Extract the compact JWS `token` from `Nostr-Federated-Identity`; missing or
    malformed → deny `missing_evidence` or `evidence_rejected`.
-3. Call `VerifyAssertion(token, expected_aud, D, R_t)`; any error → deny per the
+3. Call `VerifyAssertion(token, community, D, R_t)`; any error → deny per the
    rejection table.
 4. Complete NIP-42 handshake; validate AUTH event, extract `k`.
 5. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
@@ -731,11 +768,12 @@ mixed-profile fields deny.  [FI-TRACE-TRANSPORT-CLOSED]
 
 On each protected HTTP request:
 
-1. Resolve the connection's `Host` to `community` and derive its
-   `expected_aud`; unknown or unresolvable → deny `authorization_unavailable`.
+1. Resolve the connection's `Host` to `community`, including its canonical
+   `expected_aud` and configured issuer allowlist; unknown, ambiguous, or
+   unavailable community resolution → deny `authorization_unavailable`.
 2. Extract the compact JWS `token` from `Nostr-Federated-Identity`; missing or
    malformed → deny `missing_evidence` or `evidence_rejected`.
-3. Call `VerifyAssertion(token, expected_aud, D, R_t)`; any error → deny per the
+3. Call `VerifyAssertion(token, community, D, R_t)`; any error → deny per the
    rejection table.
 4. Validate the NIP-98 `Authorization` event per NIP-98; extract the proven
    pubkey `k` from the event.  An absent, malformed, or invalid NIP-98 event
@@ -861,7 +899,7 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | ID | Required outcome |
 |---|---|
 | `FI-TRACE-TRANSPORT-CLOSED` | Exact one-header input succeeds; missing, repeated, combined, malformed, and fallback variants deny. |
-| `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and missing-configuration negative denies; an assertion for community A presented on a `Host` resolved to community B denies on the audience mismatch; an unknown or unresolvable `Host` denies `authorization_unavailable`. |
+| `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and missing-configuration negative denies; an issuer authorized only for community A cannot authorize community B merely by signing an assertion with community B's audience; an assertion for community A presented on a `Host` resolved to community B denies on the community binding; an unknown, ambiguous, or unresolvable `Host` denies `authorization_unavailable`. |
 | `FI-TRACE-TOKEN-CLASS` | `at+jwt` and `nip-fi+jwt` pass only their selected class; ID tokens, wrong or generic types, and cross-class fallback deny. |
 | `FI-TRACE-ASSERTION-KEY-MISMATCH` | Mismatch between `nostr_pubkey` and the NIP-42 proven key denies with the private-state response. |
 | `FI-TRACE-JWKS-ADD` | A key added to the JWKS is accepted after the next snapshot refresh. |
