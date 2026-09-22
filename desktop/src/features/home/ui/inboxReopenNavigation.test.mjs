@@ -136,6 +136,9 @@ Object.defineProperty(globalThis, "navigator", {
   writable: true,
 });
 globalThis.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
+// JSDOM omits CSS.escape; this fixture uses only selector-safe hex event IDs.
+// Composer layout settlement now exercises the real anchored-scroll lookup.
+globalThis.CSS = { escape: (value) => value };
 dom.window.matchMedia = () => ({
   matches: false,
   addEventListener() {},
