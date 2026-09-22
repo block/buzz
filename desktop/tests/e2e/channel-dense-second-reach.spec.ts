@@ -20,7 +20,7 @@ import { waitForMockChannelHeadReady } from "../helpers/channelHeadReady";
 //   (a) a *continuation* window request fired (cursor != null) — the head load
 //       always issues `get_channel_window`, so only a cursor-bearing request
 //       proves keyset paging engaged, and
-//   (b) every dense-second message becomes reachable (union of rendered rows
+//   (b) every dense-second message becomes reachable (union of viewport-visible rows
 //       equals the full seed) — impossible behind a bare-`until` wall.
 const DENSE_SECOND = 1_700_000_000;
 const DENSE_COUNT = 450; // many multiples of CHANNEL_WINDOW_PAGE_SIZE (50)
@@ -79,15 +79,29 @@ test("dense single second beyond one window page is fully reachable via composit
     return element ? element.scrollHeight > element.clientHeight + 500 : false;
   });
 
-  // Collect the union of dense-second indices ever rendered. Virtualization
-  // only mounts a window of rows, so we accumulate across scroll passes rather
-  // than snapshot once.
-  const renderedDenseIndices = async () =>
+  // Collect only visible rows intersecting the timeline viewport, not mounted
+  // overscan rows. Accumulate across overlapping scroll steps so every seeded
+  // identity must actually become user-reachable.
+  const visibleDenseIndices = async () =>
     timeline.evaluate((element) => {
       const found: number[] = [];
+      const viewport = element.getBoundingClientRect();
       for (const row of (
         element as HTMLDivElement
       ).querySelectorAll<HTMLElement>("[data-message-id]")) {
+        const bounds = row.getBoundingClientRect();
+        if (
+          !row.checkVisibility({
+            checkOpacity: true,
+            checkVisibilityCSS: true,
+          }) ||
+          bounds.bottom <= viewport.top ||
+          bounds.top >= viewport.bottom ||
+          bounds.right <= viewport.left ||
+          bounds.left >= viewport.right
+        ) {
+          continue;
+        }
         const match = row.textContent?.match(/dense (\d+)/);
         if (match) found.push(Number(match[1]));
       }
@@ -111,13 +125,13 @@ test("dense single second beyond one window page is fully reachable via composit
       // row. A 6,000px jump can skip rows even when every page is reachable.
       await page.mouse.wheel(0, -wheelStep);
       await page.waitForTimeout(40);
-      await collectRendered();
+      await collectVisible();
     }
   };
 
   const seen = new Set<number>();
-  const collectRendered = async () => {
-    for (const index of await renderedDenseIndices()) {
+  const collectVisible = async () => {
+    for (const index of await visibleDenseIndices()) {
       seen.add(index);
     }
   };
@@ -139,7 +153,7 @@ test("dense single second beyond one window page is fully reachable via composit
       await expect
         .poll(
           async () => {
-            await collectRendered();
+            await collectVisible();
             return seen.size;
           },
           { timeout: 4_000 },
@@ -148,7 +162,7 @@ test("dense single second beyond one window page is fully reachable via composit
     } catch {
       // No growth this pass — count it toward a genuine stall.
     }
-    await collectRendered();
+    await collectVisible();
     if (seen.size > before) {
       stallStreak = 0;
     } else {
@@ -170,11 +184,9 @@ test("dense single second beyond one window page is fully reachable via composit
   );
   expect(continuationRequests).toBeGreaterThan(0);
 
-  // (b) Reachability parity: the union of paged dense rows crosses far past
-  // one window page — impossible behind a bare-`until` wall, where paging
-  // stalls on the newest slice of the dense second. We assert the vast
-  // majority became reachable; virtualization can drop a few transient rows
-  // between scroll settles, so we allow a small slack rather than demanding
-  // an exact 450.
-  expect(seen.size).toBeGreaterThan(DENSE_COUNT * 0.9);
+  // (b) Every seeded identity must be reachable: cardinality or a percentage
+  // threshold can silently accept an interior gap in the dense second.
+  expect([...seen].sort((a, b) => a - b)).toEqual(
+    Array.from({ length: DENSE_COUNT }, (_, index) => index),
+  );
 });
