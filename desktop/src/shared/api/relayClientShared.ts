@@ -75,6 +75,8 @@ type LiveSubscription = {
   filter: RelaySubscriptionFilter;
   onEvent: (event: RelayEvent) => void;
   resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
+  /** Release readiness/cancellation listeners when this entry is retired. */
+  onRemoved?: () => void;
   lastSeenCreatedAt?: number;
   /**
    * Lower bound of a reconnect backfill window that has not yet completed.

@@ -239,7 +239,30 @@ pub(crate) struct RelaySession {
 
 struct PendingRequest {
     events: Vec<Event>,
+    seen: HashSet<nostr::EventId>,
     complete: oneshot::Sender<Result<Vec<Event>, String>>,
+    deadline: Instant,
+    retry: ClosedRetry,
+}
+
+impl PendingRequest {
+    fn is_active(&self) -> bool {
+        !self.complete.is_closed() && Instant::now() < self.deadline
+    }
+}
+
+// Close before waking, including when fetch_events is dropped during registration.
+// The existing session owner reclaims state; Drop does not spawn another owner.
+struct RequestReceiver<'a> {
+    result: oneshot::Receiver<Result<Vec<Event>, String>>,
+    wake: &'a mpsc::Sender<()>,
+}
+
+impl Drop for RequestReceiver<'_> {
+    fn drop(&mut self) {
+        self.result.close();
+        let _ = self.wake.try_send(());
+    }
 }
 
 /// Desired set plus the write-time record of what has left it.
@@ -304,12 +327,20 @@ impl RelaySession {
         timeout: Duration,
     ) -> Result<Vec<Event>, String> {
         let id = format!("native-fetch-{}", uuid::Uuid::new_v4());
+        let deadline = Instant::now() + timeout;
         let (complete, result) = oneshot::channel();
+        let mut receiver = RequestReceiver {
+            result,
+            wake: &self.wake,
+        };
         self.requests.lock().await.insert(
             id.clone(),
             PendingRequest {
                 events: Vec::new(),
+                seen: HashSet::new(),
                 complete,
+                deadline,
+                retry: ClosedRetry::default(),
             },
         );
         {
@@ -323,7 +354,7 @@ impl RelaySession {
 
         let outcome = tokio::select! {
             _ = self.cancel.cancelled() => Err("relay session cancelled".to_string()),
-            value = tokio::time::timeout(timeout, result) => match value {
+            value = tokio::time::timeout_at(deadline, &mut receiver.result) => match value {
                 Ok(Ok(value)) => value,
                 Ok(Err(_)) => Err("relay request ended before EOSE".to_string()),
                 Err(_) => Err("relay request timed out".to_string()),
@@ -334,12 +365,31 @@ impl RelaySession {
     }
 
     async fn finish_request(&self, id: &str) {
-        self.requests.lock().await.remove(id);
+        let mut requests = self.requests.lock().await;
         let mut state = self.state.lock().await;
+        // Do not leave an orphan transient if the caller drops during cleanup.
+        requests.remove(id);
         state.transient.retain(|subscription| subscription.id != id);
         state.removed.insert(id.to_string());
         drop(state);
         let _ = self.wake.try_send(());
+    }
+
+    // Also called while connecting/backing off: caller cancellation must reclaim
+    // buffers even if authentication never succeeds and reconcile cannot run.
+    async fn prune_cancelled_requests(&self) {
+        let mut requests = self.requests.lock().await;
+        let mut removed = Vec::new();
+        requests.retain(|id, request| {
+            if !request.complete.is_closed() {
+                return true;
+            }
+            removed.push(id.clone());
+            false
+        });
+        let mut state = self.state.lock().await;
+        state.transient.retain(|sub| !removed.contains(&sub.id));
+        state.removed.extend(removed);
     }
 
     /// Replaces the desired subscription set and wakes the loop to reconcile.
@@ -428,7 +478,17 @@ async fn run_session(
             return;
         }
 
-        match NostrWsConnection::connect_authenticated(&relay_url, &keys, auth_tag.as_ref()).await {
+        let connecting =
+            NostrWsConnection::connect_authenticated(&relay_url, &keys, auth_tag.as_ref());
+        tokio::pin!(connecting);
+        let connected = loop {
+            tokio::select! {
+                _ = session.cancel.cancelled() => return,
+                Some(()) = wake_rx.recv() => session.prune_cancelled_requests().await,
+                result = &mut connecting => break result,
+            }
+        };
+        match connected {
             Ok(conn) => {
                 // A connection that authenticated is healthy regardless of how
                 // long it then lived, so backoff resets here rather than on
@@ -445,9 +505,14 @@ async fn run_session(
         if session.cancel.is_cancelled() {
             return;
         }
-        tokio::select! {
-            _ = session.cancel.cancelled() => return,
-            _ = tokio::time::sleep(delay) => {}
+        let backoff = tokio::time::sleep(delay);
+        tokio::pin!(backoff);
+        loop {
+            tokio::select! {
+                _ = session.cancel.cancelled() => return,
+                Some(()) = wake_rx.recv() => session.prune_cancelled_requests().await,
+                _ = &mut backoff => break,
+            }
         }
         delay = (delay * 2).min(RECONNECT_MAX_DELAY);
     }
@@ -496,7 +561,19 @@ async fn run_connection(
         // Earliest pending reopen, or `None` when nothing is scheduled. The arm
         // below is disabled in that case rather than sleeping on a far-future
         // instant, so an idle connection never wakes on this branch.
-        let retry_at = retries.values().filter_map(|retry| retry.due_at).min();
+        let finite_retry_at = session
+            .requests
+            .lock()
+            .await
+            .values()
+            .filter(|request| request.is_active())
+            .filter_map(|request| request.retry.due_at)
+            .min();
+        let retry_at = retries
+            .values()
+            .filter_map(|retry| retry.due_at)
+            .chain(finite_retry_at)
+            .min();
 
         tokio::select! {
             _ = session.cancel.cancelled() => {
@@ -515,6 +592,11 @@ async fn run_connection(
             _ = tokio::time::sleep_until(retry_at.unwrap_or_else(Instant::now)),
                 if retry_at.is_some() =>
             {
+                for request in session.requests.lock().await.values_mut() {
+                    if request.retry.due_at.is_some_and(|due| due <= Instant::now()) {
+                        request.retry.due_at = None;
+                    }
+                }
                 for retry in retries.values_mut() {
                     if retry.due_at.is_some_and(|due| due <= Instant::now()) {
                         retry.due_at = None;
@@ -559,7 +641,9 @@ async fn run_connection(
                                 .await
                                 .get_mut(&subscription_id)
                             {
-                                request.events.push(*event);
+                                if request.is_active() && request.seen.insert(event.id) {
+                                    request.events.push(*event);
+                                }
                             }
                             continue;
                         }
@@ -598,7 +682,17 @@ async fn run_connection(
                         if open.remove(&subscription_id).is_none() {
                             continue;
                         }
-                        if let Some(request) = session.requests.lock().await.remove(&subscription_id) {
+                        let mut requests = session.requests.lock().await;
+                        if let Some(request) = requests.get_mut(&subscription_id) {
+                            // Finite quota recovery belongs to the request, not the
+                            // socket: reconnects and partial EVENTs cannot reset it.
+                            if request.is_active() && classify_closed(&message) == ClosedClass::RateLimited
+                                && request.retry.attempts < 3 {
+                                request.retry.schedule(&message);
+                                continue;
+                            }
+                        }
+                        if let Some(request) = requests.remove(&subscription_id) {
                             let _ = request.complete.send(Err(format!("relay closed request: {message}")));
                             let mut state = session.state.lock().await;
                             state.transient.retain(|subscription| subscription.id != subscription_id);
@@ -607,6 +701,7 @@ async fn run_connection(
                             let _ = session.wake.try_send(());
                             continue;
                         }
+                        drop(requests);
                         let retry = retries.entry(subscription_id.clone()).or_default();
                         retry.schedule(&message);
                         eprintln!(
@@ -620,8 +715,12 @@ async fn run_connection(
                         // is what keeps an intermittent relay from ratcheting
                         // its way to the 30s ceiling and staying there.
                         let was_open = open.contains_key(&subscription_id);
-                        if let Some(request) = session.requests.lock().await.remove(&subscription_id) {
-                            let _ = request.complete.send(Ok(request.events));
+                        let mut requests = session.requests.lock().await;
+                        if requests.contains_key(&subscription_id) && !was_open { continue; }
+                        if let Some(request) = requests.remove(&subscription_id) {
+                            let result = if request.is_active() { Ok(request.events) }
+                                else { Err("relay request timed out or cancelled".to_string()) };
+                            let _ = request.complete.send(result);
                             let mut state = session.state.lock().await;
                             state.transient.retain(|subscription| subscription.id != subscription_id);
                             state.removed.insert(subscription_id.clone());
@@ -629,6 +728,7 @@ async fn run_connection(
                             let _ = session.wake.try_send(());
                             continue;
                         }
+                        drop(requests);
                         retries.remove(&subscription_id);
                         // The relay is running a subscription this socket does
                         // not think is open, so the two disagree. EOSE is the
@@ -676,6 +776,7 @@ async fn reconcile(
     // `set_subscriptions` land in the gap, spending its removal against a
     // desired set captured before it — reopening a subscription the caller had
     // just dropped, with no record left to catch it on the next pass.
+    session.prune_cancelled_requests().await;
     let (desired, removed) = {
         let mut state = session.state.lock().await;
         let removed = std::mem::take(&mut state.removed);
@@ -683,8 +784,9 @@ async fn reconcile(
             state
                 .desired
                 .iter()
-                .chain(&state.transient)
                 .cloned()
+                .map(|sub| (sub, false))
+                .chain(state.transient.iter().cloned().map(|sub| (sub, true)))
                 .collect::<Vec<_>>(),
             removed,
         )
@@ -699,7 +801,7 @@ async fn reconcile(
     }
 
     for id in open.keys().cloned().collect::<Vec<_>>() {
-        if desired.iter().any(|s| s.id == id) {
+        if desired.iter().any(|(s, _)| s.id == id) {
             continue;
         }
         if conn
@@ -712,7 +814,7 @@ async fn reconcile(
         open.remove(&id);
     }
 
-    for sub in desired {
+    for (sub, finite) in desired {
         // A filter change under the same id must reopen, not be skipped: the
         // relay replaces a subscription by id, so re-sending REQ is the update.
         if open.get(&sub.id) == Some(&sub.filter) {
@@ -724,6 +826,22 @@ async fn reconcile(
         // the speed of the event loop.
         if retries.get(&sub.id).is_some_and(ClosedRetry::is_blocked) {
             continue;
+        }
+        if session.cancel.is_cancelled() {
+            return false;
+        }
+        if finite {
+            let requests = session.requests.lock().await;
+            if !requests
+                .get(&sub.id)
+                .is_some_and(|request| request.is_active() && !request.retry.is_blocked())
+            {
+                continue;
+            }
+        }
+        // The request-lock acquisition above can suspend through shutdown.
+        if session.cancel.is_cancelled() {
+            return false;
         }
         if conn
             .send_raw(&serde_json::json!(["REQ", sub.id, sub.filter]))
@@ -786,7 +904,9 @@ impl ClosedRetry {
                     .unwrap_or(CLOSED_RATE_LIMIT_DEFAULT);
                 // The longer of the two: a short hint must not undercut a
                 // backoff already grown by repeated rejections.
-                self.due_at = Some(Instant::now() + self.backoff().max(hinted));
+                self.due_at = Instant::now().checked_add(self.backoff().max(hinted));
+                // An unrepresentable hint is a hold, never an immediate retry.
+                self.terminal = self.due_at.is_none();
                 self.attempts = self.attempts.saturating_add(1);
             }
             ClosedClass::Retryable => {

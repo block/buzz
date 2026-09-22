@@ -132,13 +132,34 @@ test("null hint uses 10s default", () => {
   assert.equal(isRateLimited(), false);
 });
 
-test("zero hint uses 10s default (0s gate would be swallowed)", () => {
+test("explicit zero hint adds no cooldown or timer", async () => {
   reset(0);
+  assert.equal(
+    parseRateLimitHint("rate-limited: quota exceeded; retry in 0s"),
+    0,
+  );
   activateRateLimit(0);
-  tickTo(9_999);
-  assert.equal(isRateLimited(), true);
-  tickTo(10_001);
   assert.equal(isRateLimited(), false);
+  assert.equal(pendingTimers.size, 0);
+  await waitForRateLimit();
+});
+
+test("explicit zero neither shortens nor extends another active deadline", async () => {
+  reset(0);
+  activateRateLimit(4);
+  let settled = false;
+  const waiting = waitForRateLimit().then(() => {
+    settled = true;
+  });
+  setFakeNow(3000);
+  activateRateLimit(0);
+  assert.equal(rateLimitRemainingMs(), 1000);
+  assert.equal(pendingTimers.size, 1);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  tickTo(4000);
+  await waiting;
+  assert.equal(settled, true);
 });
 
 test("negative hint uses 10s default", () => {
