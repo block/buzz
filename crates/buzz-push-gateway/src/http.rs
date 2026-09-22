@@ -24,6 +24,7 @@ use nostr::{
     Event, JsonUtil, Timestamp,
 };
 use std::{
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -44,9 +45,8 @@ pub struct AppState {
     pub grant_keyring: Arc<GrantKeyring>,
     pub authority: Arc<dyn AuthorityStore>,
     pub token_keyring: Arc<TokenKeyring>,
-    /// Server-owned dogfood application identity and APNs transport. The wire
-    /// profile selector is fixed and App Attest verifies the configured app ID.
-    pub profile: Arc<ProfileRuntime>,
+    /// Server-owned application identities keyed by their closed wire profile.
+    pub profiles: Arc<HashMap<AppProfile, Arc<ProfileRuntime>>>,
     /// Security-sensitive endpoints and audiences derived from one gateway origin.
     pub gateway_urls: Arc<GatewayUrls>,
     pub max_grant_lifetime_seconds: i64,
@@ -176,9 +176,10 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    if r.app_profile != AppProfile::BuzzIosDogfood {
-        return error(StatusCode::BAD_REQUEST, "invalid_request");
-    }
+    let profile = match s.profiles.get(&r.app_profile) {
+        Some(profile) => Arc::clone(profile),
+        None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
     if r.v != WIRE_VERSION
         || r.endpoint_epoch != 1
         || r.expires_at <= now
@@ -206,8 +207,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
     let verified =
-        match s
-            .profile
+        match profile
             .app_attest
             .verify_attestation(&r.attestation, &r.key_id, signed.as_bytes())
         {
@@ -304,13 +304,13 @@ async fn verify_installation_assertion<T: serde::Serialize>(
         s.authority.installation(installation_id, now).await
     }
     .map_err(authority_error)?;
-    if installation.profile != AppProfile::BuzzIosDogfood {
-        return Err(error(StatusCode::NOT_FOUND, "not_authorized"));
-    }
+    let profile = s
+        .profiles
+        .get(&installation.profile)
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "not_authorized"))?;
     let transcript = transcript(domain, signed)
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
-    let verified = s
-        .profile
+    let verified = profile
         .app_attest
         .verify_assertion(
             assertion,
@@ -712,15 +712,17 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             .await;
         return error(StatusCode::NOT_FOUND, "invalid_grant");
     }
-    if permit.authority.profile != AppProfile::BuzzIosDogfood {
-        crate::metrics::record_delivery_error("profile_disabled");
-        let _ = s
-            .authority
-            .finish_delivery(permit, DeliveryDisposition::Retryable)
-            .await;
-        return error(StatusCode::SERVICE_UNAVAILABLE, "configuration_fault");
-    }
-    let transport = Arc::clone(&s.profile.transport);
+    let transport = match s.profiles.get(&permit.authority.profile) {
+        Some(profile) => Arc::clone(&profile.transport),
+        None => {
+            crate::metrics::record_delivery_error("profile_disabled");
+            let _ = s
+                .authority
+                .finish_delivery(permit, DeliveryDisposition::Retryable)
+                .await;
+            return error(StatusCode::SERVICE_UNAVAILABLE, "configuration_fault");
+        }
+    };
     let endpoint = match s.token_keyring.open(&permit.authority.token_ciphertext) {
         Ok(token) => hex::encode(token),
         Err(_) => {
@@ -902,10 +904,13 @@ mod request_limit_tests {
             token_keyring: Arc::new(
                 TokenKeyring::new(vec![TokenKey::new("test", &[2; 32]).unwrap()]).unwrap(),
             ),
-            profile: Arc::new(ProfileRuntime {
-                app_attest: Arc::new(app_attest),
-                transport: Arc::new(NeverTransport),
-            }),
+            profiles: Arc::new(HashMap::from([(
+                AppProfile::BuzzIosDogfood,
+                Arc::new(ProfileRuntime {
+                    app_attest: Arc::new(app_attest),
+                    transport: Arc::new(NeverTransport),
+                }),
+            )])),
             gateway_urls: Arc::new(
                 GatewayUrls::from_origin("https://push.example".parse().unwrap()).unwrap(),
             ),
@@ -1050,6 +1055,14 @@ mod transcript_vector_tests {
     }
 
     #[test]
+    fn endpoint_fingerprints_cannot_replay_across_profiles() {
+        assert_ne!(
+            endpoint_fingerprint(AppProfile::BuzzIosDogfood, b"same-token"),
+            endpoint_fingerprint(AppProfile::BuzzIosCustom, b"same-token")
+        );
+    }
+
+    #[test]
     fn enroll_transcript_vector() {
         let t = EnrollTranscript {
             v: 1,
@@ -1063,6 +1076,25 @@ mod transcript_vector_tests {
             expires_at: 1_752_624_000,
         };
         assert_vector("enroll", &transcript("buzz.push.enroll.v1", &t).unwrap());
+    }
+
+    #[test]
+    fn custom_enroll_transcript_vector_is_profile_bound() {
+        let t = EnrollTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/installations",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            key_id: KEY_ID,
+            app_profile: AppProfile::BuzzIosCustom,
+            endpoint: ENDPOINT,
+            endpoint_epoch: 1,
+            expires_at: 1_752_624_000,
+        };
+        assert_vector(
+            "enroll_custom",
+            &transcript("buzz.push.enroll.v1", &t).unwrap(),
+        );
     }
 
     #[test]

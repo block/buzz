@@ -43,6 +43,7 @@ void main() {
               origin: 'wss://relay.example',
               executorKeyId: 'key',
               executorPubkey: 'pubkey',
+              appProfile: buzzIosDogfoodAppProfile,
               transport: 'apns',
               maxLeaseTtlSeconds: 3600,
               maxContentLength: 4096,

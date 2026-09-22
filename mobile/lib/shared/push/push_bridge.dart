@@ -198,6 +198,7 @@ Future<List<BuzzPushEndpointGrant>> readBuzzPushEndpointGrants() async {
   try {
     final raw = await _channel.invokeListMethod<dynamic>('endpointGrants', {
       'gatewayUrl': Env.pushGatewayUrl,
+      'appProfile': Env.pushAppProfile,
     });
     final grants = [
       for (final value in raw ?? const [])
@@ -224,6 +225,7 @@ Future<BuzzPushEndpointGrant> enrollBuzzPush(
   final raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {
     'relayUrl': relayUrl,
     'gatewayUrl': gatewayUrl,
+    'appProfile': Env.pushAppProfile,
   });
   if (raw == null) {
     throw StateError('Native push enrollment returned no grant.');
@@ -323,6 +325,7 @@ Future<void> _registerBuzzPushCommunitySnapshot(
       strict ? 'syncAgeGatePushSnapshot' : 'syncPushSnapshot',
       {
         'section': 'communities',
+        'appProfile': Env.pushAppProfile,
         'communities': [for (final snapshot in snapshots) snapshot.toJson()],
         'signingKeys': signingKeys,
         if (strict) 'settleFence': settleFence,

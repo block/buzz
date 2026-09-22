@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
@@ -302,7 +303,7 @@ BuzzPushEndpointGrant _grant({required int expiresAt}) => BuzzPushEndpointGrant(
   installationId: '0' * 32,
   endpointGrant: 'opaque',
   endpointHash: 'b' * 64,
-  appProfile: 'buzz-ios-dogfood',
+  appProfile: buzzDevPushAppProfile,
   endpointEpoch: 1,
   generation: 1,
   expiresAt: expiresAt,

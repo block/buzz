@@ -80,6 +80,7 @@ void main() {
             expect(call.method, 'syncAgeGatePushSnapshot');
             expect(call.arguments, {
               'section': 'communities',
+              'appProfile': Env.pushAppProfile,
               'communities': <Object?>[],
               'signingKeys': <String, String>{},
               'settleFence': true,
@@ -191,7 +192,10 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(_channel, (call) async {
       expect(call.method, 'endpointGrants');
-      expect(call.arguments, {'gatewayUrl': Env.pushGatewayUrl});
+      expect(call.arguments, {
+        'gatewayUrl': Env.pushGatewayUrl,
+        'appProfile': Env.pushAppProfile,
+      });
       return [_grantMap('opaque-grant')];
     });
 
@@ -261,10 +265,12 @@ void main() {
         {
           'relayUrl': 'wss://relay.example/',
           'gatewayUrl': 'https://gateway-one.example/',
+          'appProfile': Env.pushAppProfile,
         },
         {
           'relayUrl': 'wss://relay.example/',
           'gatewayUrl': 'https://gateway-two.example/',
+          'appProfile': Env.pushAppProfile,
         },
       ]);
       expect(methods, [
@@ -277,6 +283,7 @@ void main() {
       expect(snapshotArguments, [
         {
           'section': 'communities',
+          'appProfile': Env.pushAppProfile,
           'communities': [
             {
               'id': 'community-id',

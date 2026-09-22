@@ -12,7 +12,7 @@
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the six gateway tables, not DDL. |
+| `DATABASE_URL` or `DATABASE_URL_FILE` | PostgreSQL authority/admission store. Runtime credentials need DML on the six gateway tables, not DDL. Prefer the read-only file form; setting both fails startup. |
 | `BUZZ_PUSH_GATEWAY_ORIGIN` | Exact externally reachable HTTPS origin. No credentials, port, path, query, or fragment. The gateway derives its transport routes from it; NIP-PL v1 App Attest audiences remain the registered `https://push.buzz.xyz/v1/...` constants. |
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
@@ -21,8 +21,12 @@
 | `BUZZ_PUSH_DOGFOOD_APNS_TOPIC` | Server-owned APNs topic. Never accepted from a client. |
 | `BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT` | `production` or `sandbox`, selected by deployment configuration. |
 | `BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH` | Read-only certificate/private-key PEM. |
-| `BUZZ_PUSH_GRANT_KEYS` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
-| `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
+| `BUZZ_PUSH_CUSTOM_APP_ATTEST_APP_ID` | Optional custom profile's exact Apple App Attest application identifier (`TEAMID.bundle-id`). Requires every other `BUZZ_PUSH_CUSTOM_*` setting. |
+| `BUZZ_PUSH_CUSTOM_APNS_TOPIC` | Optional custom profile's APNs topic; must equal the bundle-id suffix of its App Attest application ID. |
+| `BUZZ_PUSH_CUSTOM_APNS_ENVIRONMENT` | Optional custom profile's `production` or `sandbox` APNs environment. |
+| `BUZZ_PUSH_CUSTOM_APNS_CERT_PATH` | Optional custom profile's read-only combined certificate/private-key PEM. |
+| `BUZZ_PUSH_GRANT_KEYS` or `BUZZ_PUSH_GRANT_KEYS_FILE` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. Prefer the read-only file form. |
+| `BUZZ_PUSH_TOKEN_KEYS` or `BUZZ_PUSH_TOKEN_KEYS_FILE` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. Prefer the read-only file form. |
 
 The current MVP serves the dogfood application identity
 (`xyz.block.buzz.dogfood.mobile`). App Attest must cryptographically validate
@@ -31,17 +35,32 @@ the server-owned APNs topic, certificate-backed connection pool, and
 environment. No client request or relay grant can supply or override an APNs
 topic.
 
-This MVP has exactly one compiled-in application profile,
-`buzz-ios-dogfood`. The chart value
+The gateway has two closed application profile identifiers:
+`buzz-ios-dogfood` and the optional `buzz-ios-custom`. The chart value
 `profiles.dogfood.appAttestAppId` is rendered as
-`BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID`; the gateway rejects startup when it is
-missing or empty. The exact `TEAMID.bundle-id` is environment-owned,
+`BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID`; the upstream chart rejects a render when
+it is missing or empty. The exact `TEAMID.bundle-id` is environment-owned,
 non-secret deployment configuration. The chart's production values file leaves
 it empty deliberately so a production renderer must supply it from the GitOps
 environment rather than baking a Block team identifier into this repository.
-Supporting another application identity requires an explicit code, schema,
-chart, credential, and deployment change; this gateway does not currently
-select among multiple application profiles.
+The custom profile is disabled by default and is all-or-nothing: enabling
+`profiles.custom` requires its application ID, topic, APNs environment, and
+combined certificate/private-key PEM Secret reference. Those values remain
+environment-owned. The stable custom identifier supports one universal
+iPhone/iPad bundle; sandbox and production credentials must be deployed as
+separate configurations, never silently rebound under a running installation.
+The gateway binary accepts a complete custom profile without dogfood
+credentials for private self-hosted deployments, but still rejects startup
+when neither profile is complete. The upstream Helm chart continues to require
+its dogfood profile unless a deployment-specific chart contract explicitly
+selects custom-only operation.
+
+The chart mounts runtime database and AEAD keyring values as mode-0400,
+read-only files and passes only their paths to the process. The migration Job
+does the same for its separately privileged database URL. A self-hosted
+non-Kubernetes deployment should use the corresponding `*_FILE` settings and
+read-only secret mounts rather than putting secret values in container
+environment variables.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 
@@ -143,7 +162,14 @@ Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
 the established strict boolean parser rejects unknown values and the default is
 false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
 exact HTTPS `/v1/deliveries/apns` URL. An absent or explicitly empty URL while
-enabled is a startup error. Only an enabled relay
+enabled is a startup error. The relay advertises and accepts only the dogfood
+profile by default. Set `BUZZ_PUSH_APP_PROFILE_MODE` to `dogfood`, `custom`, or
+`both` so the relay's advertised and accepted set exactly matches the connected
+gateway runtimes. Unknown values fail startup. Select `custom` or `both` only
+after the connected gateway has the complete `buzz-ios-custom` identity
+configured; this keeps NIP-11 advertisement, lease validation, and gateway
+authority coherent.
+Only an enabled relay
 advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
 matcher and delivery worker. Relays retain lease matching, authorization, durable
 jobs/retries, and generation checks; they receive only opaque capabilities and
@@ -175,20 +201,22 @@ capability—not a raw APNs token—into the encrypted relay lease.
 
 ## Internal dogfood evaluation and rollback
 
-The MVP is ready to enable only when the configured gateway's sole dogfood
+The dogfood evaluation is ready to enable only when the configured gateway's dogfood
 profile is configured with its server-owned App Attest app ID, APNs topic,
 production certificate identity, and production APNs environment, and only the
 selected internal relay deployments set `BUZZ_PUSH_ENABLED=true`. Every iOS
 artifact contains the native push bridge and Notification Service Extension,
 but the client remains inactive until its current authenticated relay
 advertises a fully valid NIP-11 `nip-pl` descriptor. There is no App Store
-gateway profile in this MVP.
+gateway profile. Custom artifacts select `buzz-ios-custom` with the
+`BUZZ_PUSH_APP_PROFILE` Dart define; stock artifacts continue to default to
+`buzz-ios-dogfood`.
 
 Physical-device validation must use an application whose App Attest identity
-and APNs topic match the configured dogfood profile. The current gateway cannot
-enroll `xyz.block.buzz.mobile` or another bundle identifier merely by changing
-deployment values: adding another identity requires the explicit multi-profile
-work described above.
+and APNs topic match the selected profile. The gateway enrolls a custom artifact
+only when the relay advertises `buzz-ios-custom` and the gateway has that exact
+profile configured. Changing an environment name without selecting the profile
+cannot rebind an existing installation.
 
 Dogfood end-to-end release validation starts after this feature reaches `main`:
 publish the next immutable `mobile-vX.Y.Z-rc.N` candidate from the exact current

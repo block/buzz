@@ -89,6 +89,45 @@ void main() {
     });
   });
 
+  test('selects and publishes the custom APNs profile coherently', () async {
+    final customDescriptor = _descriptor(
+      relay.public,
+      appProfile: buzzIosCustomAppProfile,
+    );
+    final customGrant = _grant(
+      relay.public,
+      appProfile: buzzIosCustomAppProfile,
+    );
+    final publication = await publishBuzzDevPushLease(
+      grant: customGrant,
+      descriptor: customDescriptor,
+      nsec: signer.nsec,
+      memberPubkey: signer.public,
+      subscriptions: [
+        BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: const [9], pTags: [signer.public]),
+          notificationClass: 'default',
+        ),
+      ],
+      now: () => now,
+      submit:
+          ({required kind, required content, required tags, createdAt}) async =>
+              const NostrEvent(
+                id: 'accepted-id',
+                pubkey: '',
+                createdAt: 0,
+                kind: 0,
+                tags: [],
+                content: 'saved',
+                sig: '',
+              ),
+    );
+    expect(
+      jsonDecode(publication.plaintext)['app_profile'],
+      buzzIosCustomAppProfile,
+    );
+  });
+
   test('uses the community lease address instead of the endpoint id', () async {
     List<List<String>>? submittedTags;
 
@@ -388,8 +427,13 @@ Future<void> _deliverAcknowledgement(
   session.debugHandleMessage(acknowledgements.removeAt(0));
 }
 
-BuzzPushLeaseDescriptor _descriptor(String relayPubkey) =>
-    BuzzPushLeaseDescriptor.fromRelayInformation(_descriptorJson(relayPubkey));
+BuzzPushLeaseDescriptor _descriptor(
+  String relayPubkey, {
+  String appProfile = buzzIosDogfoodAppProfile,
+}) => BuzzPushLeaseDescriptor.fromRelayInformation(
+  _descriptorJson(relayPubkey),
+  appProfile: appProfile,
+);
 
 Map<String, dynamic> _descriptorJson(String relayPubkey) => {
   'supported_extensions': ['nip-er', 'nip-pl'],
@@ -400,6 +444,7 @@ Map<String, dynamic> _descriptorJson(String relayPubkey) => {
     ],
     'app_profiles': [
       {'id': 'buzz-ios-dogfood', 'transport': 'apns'},
+      {'id': 'buzz-ios-custom', 'transport': 'apns'},
     ],
     'push_kinds': [9, 40002, 45001, 45003],
     'h_grammar': 'uuid-v4-lowercase',
@@ -423,13 +468,16 @@ Map<String, dynamic> _descriptorJson(String relayPubkey) => {
   },
 };
 
-BuzzPushEndpointGrant _grant(String relayPubkey) => BuzzPushEndpointGrant(
+BuzzPushEndpointGrant _grant(
+  String relayPubkey, {
+  String appProfile = buzzIosDogfoodAppProfile,
+}) => BuzzPushEndpointGrant(
   relayOrigin: 'wss://tenant.example:8443',
   relayPubkey: relayPubkey,
   installationId: 'c' * 32,
   endpointGrant: 'opaque-grant',
   endpointHash: 'd' * 64,
-  appProfile: 'buzz-ios-dogfood',
+  appProfile: appProfile,
   endpointEpoch: 1,
   generation: 1,
   expiresAt: 1756212000,

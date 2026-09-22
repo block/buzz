@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-out=$(mktemp); production_out=$(mktemp); route_out=$(mktemp); datadog_out=$(mktemp)
-trap 'rm -f "$out" "$production_out" "$route_out" "$datadog_out" "${monitoring_out:-}"' EXIT
+out=$(mktemp); production_out=$(mktemp); route_out=$(mktemp); custom_out=$(mktemp); datadog_out=$(mktemp)
+trap 'rm -f "$out" "$production_out" "$route_out" "$custom_out" "$datadog_out" "${monitoring_out:-}"' EXIT
 gateway_origin_arg=(--set 'gatewayOrigin=https://push.example')
 
 # Generic values require the deployment-owned gateway origin.
@@ -28,8 +28,18 @@ helm template push deploy/charts/buzz-push-gateway \
   --set 'httpRoute.parentRefs[0].namespace=gateway-system' \
   >"$route_out"
 
+helm template push deploy/charts/buzz-push-gateway \
+  "${gateway_origin_arg[@]}" \
+  --set profiles.custom.enabled=true \
+  --set 'profiles.custom.appAttestAppId=CUSTOMTEAM.example.custom.buzz' \
+  --set 'profiles.custom.apnsTopic=example.custom.buzz' \
+  --set profiles.custom.apnsEnvironment=production \
+  --set profiles.custom.apnsCert.secretName=custom-apns \
+  --set profiles.custom.apnsCert.secretKey=identity.pem \
+  >"$custom_out"
+
 env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml -rset \
-  - "$out" "$production_out" "$route_out" <<'RUBY'
+  - "$out" "$production_out" "$route_out" "$custom_out" <<'RUBY'
 def assert!(condition, detail = "assertion failed")
   raise detail unless condition
 end
@@ -65,7 +75,8 @@ assert!(j.dig("spec", "template", "metadata", "labels") == migration)
 assert!(svc.dig("spec", "selector") != j.dig("spec", "template", "metadata", "labels"))
 jenv = j.dig("spec", "template", "spec", "containers", 0, "env").to_h { |entry| [entry["name"], entry] }
 assert!(jenv.dig("BUZZ_PUSH_RUNTIME_DATABASE_ROLE", "value") == "buzz_push_gateway_runtime")
-assert!(jenv.fetch("DATABASE_URL").key?("valueFrom"))
+assert!(jenv.dig("DATABASE_URL_FILE", "value") == "/run/buzz/migration-secrets/database-url")
+assert!(!jenv.key?("DATABASE_URL"))
 assert!(j.dig("spec", "template", "spec", "containers", 0, "args") == ["--migrate-only"])
 assert!(j.dig("metadata", "annotations") == {
   "helm.sh/hook" => "pre-install,pre-upgrade",
@@ -75,18 +86,23 @@ assert!(j.dig("metadata", "annotations") == {
 env_names = d.dig("spec", "template", "spec", "containers", 0, "env")
   .map { |entry| entry["name"] }.to_set
 required = Set.new(%w[
-  DATABASE_URL BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH
+  DATABASE_URL_FILE BUZZ_PUSH_GRANT_KEYS_FILE BUZZ_PUSH_TOKEN_KEYS_FILE
+  BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH
   BUZZ_PUSH_DOGFOOD_APNS_TOPIC BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID
-  BUZZ_PUSH_GRANT_KEYS BUZZ_PUSH_TOKEN_KEYS BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS
-  BUZZ_PUSH_GATEWAY_ORIGIN
+  BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS BUZZ_PUSH_GATEWAY_ORIGIN
 ])
 assert!(required.subset?(env_names))
 gateway_origin = d.dig("spec", "template", "spec", "containers", 0, "env")
   .find { |entry| entry["name"] == "BUZZ_PUSH_GATEWAY_ORIGIN" }
 assert!(gateway_origin["value"] == "https://push.example")
 assert!(!env_names.any? { |name| name.include?("APP_STORE") })
+assert!(!env_names.any? { |name| name.start_with?("BUZZ_PUSH_CUSTOM_") })
 apns_volume = d.dig("spec", "template", "spec", "volumes").find { |volume| volume["name"] == "apns-dogfood" }
 assert!(apns_volume.dig("secret", "defaultMode") == 0o400, apns_volume.inspect)
+runtime_secret = d.dig("spec", "template", "spec", "volumes").find { |volume| volume["name"] == "runtime-secrets" }
+assert!(runtime_secret.dig("secret", "defaultMode") == 0o400, runtime_secret.inspect)
+runtime_mount = d.dig("spec", "template", "spec", "containers", 0, "volumeMounts").find { |mount| mount["name"] == "runtime-secrets" }
+assert!(runtime_mount["readOnly"] == true, runtime_mount.inspect)
 assert!(d.dig("spec", "replicas") >= 2)
 assert!(!xs.any? { |x| x["kind"] == "HTTPRoute" })
 # Observability is opt-in: default render exposes no scrape CRDs and 8081 stays
@@ -120,6 +136,15 @@ assert!(production_image == "ghcr.io/block/buzz-push-gateway@sha256:#{"a" * 64}"
 route = YAML.load_stream(File.read(ARGV[2])).compact.find { |x| x["kind"] == "HTTPRoute" }
 assert!(!route.dig("spec", "parentRefs").empty?)
 assert!(route.dig("spec", "hostnames") == ["push.example"])
+custom = YAML.load_stream(File.read(ARGV[3])).compact.find { |x| x["kind"] == "Deployment" }
+custom_env = custom.dig("spec", "template", "spec", "containers", 0, "env").to_h { |entry| [entry["name"], entry["value"]] }
+assert!(custom_env["BUZZ_PUSH_CUSTOM_APP_ATTEST_APP_ID"] == "CUSTOMTEAM.example.custom.buzz")
+assert!(custom_env["BUZZ_PUSH_CUSTOM_APNS_TOPIC"] == "example.custom.buzz")
+custom_mount = custom.dig("spec", "template", "spec", "containers", 0, "volumeMounts").find { |mount| mount["name"] == "apns-custom" }
+assert!(custom_mount["readOnly"] == true, custom_mount.inspect)
+custom_volume = custom.dig("spec", "template", "spec", "volumes").find { |volume| volume["name"] == "apns-custom" }
+assert!(custom_volume.dig("secret", "secretName") == "custom-apns")
+assert!(custom_volume.dig("secret", "defaultMode") == 0o400)
 RUBY
 
 # A gateway origin is a required deployment input, even when HTTPRoute is off.
@@ -134,6 +159,17 @@ for invalid_origin in 'http://push.example' 'https://push.example:8443' 'https:/
     exit 1
   fi
 done
+
+# A custom profile is all-or-nothing; an identity without its topic,
+# environment, and combined PEM mount must never render.
+if helm template push deploy/charts/buzz-push-gateway \
+  "${gateway_origin_arg[@]}" \
+  --set profiles.custom.enabled=true \
+  --set 'profiles.custom.appAttestAppId=CUSTOMTEAM.example.custom.buzz' \
+  >/dev/null 2>&1; then
+  echo 'expected partially configured custom profile to fail' >&2
+  exit 1
+fi
 
 # Legacy token-auth values must fail rather than silently selecting the default
 # certificate Secret.

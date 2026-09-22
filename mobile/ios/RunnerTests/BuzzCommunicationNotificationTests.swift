@@ -399,6 +399,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
           methodName: "syncAgeGatePushSnapshot",
           arguments: [
             "section": "communities",
+            "appProfile": BuzzDevPushEnrollmentDriver.appProfile,
             "communities": [[String: Any]](),
             "signingKeys": [String: String](),
             "settleFence": false,
@@ -413,14 +414,94 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     wait(for: [completed], timeout: 1)
   }
 
-  func testMetadataAuthorityUsesCurrentAppProfileForMatchingRelay() {
-    let correctProfile = grant(
+  func testCommunitySnapshotRejectsUnsupportedAppProfile() {
+    let bridge = BuzzPushSnapshotBridge(
+      appGroupIdentifier: nil,
+      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
+      keychainAccessGroup: nil
+    )
+    var completed = false
+
+    XCTAssertTrue(
+      bridge.handle(
+        FlutterMethodCall(
+          methodName: "syncPushSnapshot",
+          arguments: [
+            "section": "communities",
+            "appProfile": "other-profile",
+            "communities": [[String: Any]](),
+            "signingKeys": [String: String](),
+          ]
+        )
+      ) { value in
+        XCTAssertEqual((value as? FlutterError)?.code, "invalid_arguments")
+        completed = true
+      }
+    )
+
+    XCTAssertTrue(completed)
+  }
+
+  func testCommunitySnapshotUsesSelectedCustomProfileForEnrichment() throws {
+    let customProfile = grant(
+      appProfile: BuzzDevPushEnrollmentDriver.customAppProfile,
+      generation: 2,
+      metadataPubkey: String(repeating: "a", count: 64)
+    )
+    let dogfoodProfile = grant(
+      appProfile: BuzzDevPushEnrollmentDriver.appProfile,
+      generation: 99,
+      metadataPubkey: String(repeating: "b", count: 64)
+    )
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let bridge = BuzzPushSnapshotBridge(
+      appGroupIdentifier: nil,
+      endpointGrantStore: StubEndpointGrantStore(records: [dogfoodProfile, customProfile]),
+      keychainAccessGroup: nil,
+      containerURL: { directory },
+      replaceSigningKeys: { _, _ in }
+    )
+    let completed = expectation(description: "custom profile snapshot enriched")
+
+    XCTAssertTrue(
+      bridge.handle(
+        FlutterMethodCall(
+          methodName: "syncPushSnapshot",
+          arguments: [
+            "section": "communities",
+            "appProfile": BuzzDevPushEnrollmentDriver.customAppProfile,
+            "communities": [[
+              "id": "community-id",
+              "name": "Community",
+              "relayUrl": "wss://relay.example/",
+              "pubkey": NSNull(),
+              "policies": [[String: Any]](),
+            ]],
+            "signingKeys": [String: String](),
+          ]
+        )
+      ) { value in
+        XCTAssertNil(value)
+        completed.fulfill()
+      }
+    )
+    wait(for: [completed], timeout: 1)
+
+    let snapshotURL = directory.appendingPathComponent(BuzzPushPresentationCacheStore.fileName)
+    let snapshot = BuzzPushPresentationCacheSnapshot.decode(try Data(contentsOf: snapshotURL))
+    XCTAssertEqual(snapshot.communities.first?.relayMetadataPubkey, customProfile.relayMetadataPubkey)
+  }
+
+  func testMetadataAuthorityUsesSelectedDogfoodProfileForMatchingRelay() {
+    let dogfoodProfile = grant(
       appProfile: BuzzDevPushEnrollmentDriver.appProfile,
       generation: 2,
       metadataPubkey: String(repeating: "a", count: 64)
     )
-    let wrongProfile = grant(
-      appProfile: "other-profile",
+    let customProfile = grant(
+      appProfile: BuzzDevPushEnrollmentDriver.customAppProfile,
       generation: 99,
       metadataPubkey: String(repeating: "b", count: 64)
     )
@@ -428,9 +509,10 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     XCTAssertEqual(
       BuzzPushSnapshotBridge.relayMetadataPubkey(
         relayURL: "wss://relay.example/",
-        grants: [wrongProfile, correctProfile]
+        appProfile: BuzzDevPushEnrollmentDriver.appProfile,
+        grants: [customProfile, dogfoodProfile]
       ),
-      correctProfile.relayMetadataPubkey
+      dogfoodProfile.relayMetadataPubkey
     )
   }
 
@@ -454,6 +536,31 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       expiresAt: 1_900_000_000
     )
   }
+}
+
+private final class StubEndpointGrantStore: BuzzPushEndpointGrantStore {
+  private let storedRecords: [BuzzPushEndpointGrantRecord]
+
+  init(records: [BuzzPushEndpointGrantRecord]) {
+    storedRecords = records
+  }
+
+  func records() throws -> [BuzzPushEndpointGrantRecord] { storedRecords }
+  func save(_: BuzzPushEndpointGrantRecord) throws {}
+
+  func pendingEnrollment(
+    gatewayOrigin _: String,
+    relayOrigin _: String,
+    appProfile _: String
+  ) throws -> BuzzPushPendingEnrollmentRecord? { nil }
+
+  func savePendingEnrollment(_: BuzzPushPendingEnrollmentRecord) throws {}
+
+  func removePendingEnrollment(
+    gatewayOrigin _: String,
+    relayOrigin _: String,
+    appProfile _: String
+  ) throws {}
 }
 
 final class BuzzPushNotificationResponseTests: XCTestCase {

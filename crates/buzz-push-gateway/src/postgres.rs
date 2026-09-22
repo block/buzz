@@ -71,10 +71,7 @@ fn ts(v: DateTime<Utc>) -> i64 {
     v.timestamp()
 }
 fn profile(v: &str) -> Result<AppProfile, AuthorityError> {
-    match v {
-        "buzz-ios-dogfood" => Ok(AppProfile::BuzzIosDogfood),
-        _ => Err(AuthorityError::Unavailable),
-    }
+    AppProfile::try_from(v).map_err(|()| AuthorityError::Unavailable)
 }
 fn db(_: sqlx::Error) -> AuthorityError {
     AuthorityError::Unavailable
@@ -101,7 +98,15 @@ impl AuthorityStore for PostgresAuthorityStore {
                     AND COALESCE(has_table_privilege(current_user, to_regclass($1), 'SELECT'), false)
                     AND COALESCE(has_table_privilege(current_user, to_regclass($1), 'INSERT'), false)
                     AND COALESCE(has_table_privilege(current_user, to_regclass($1), 'UPDATE'), false)
-                    AND COALESCE(has_table_privilege(current_user, to_regclass($1), 'DELETE'), false)",
+                    AND COALESCE(has_table_privilege(current_user, to_regclass($1), 'DELETE'), false)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pg_class
+                        WHERE oid = to_regclass($1)
+                          AND (
+                            pg_has_role(current_user, relowner, 'USAGE')
+                            OR pg_has_role(current_user, relowner, 'SET')
+                          )
+                    )",
             )
             .bind(format!("public.{table}"))
             .fetch_one(&mut *tx)
@@ -629,6 +634,37 @@ mod postgres_tests {
         assert!(
             runtime.ready().await.is_ok(),
             "migrated least-privilege runtime is ready"
+        );
+        let migration_role: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&migration_pool)
+            .await
+            .expect("read migration role");
+        let migration_role = format!("\"{}\"", migration_role.replace('"', "\"\""));
+        sqlx::query(AssertSqlSafe(format!(
+            "ALTER TABLE push_gateway_installations OWNER TO {runtime_role}"
+        )))
+        .execute(&migration_pool)
+        .await
+        .expect("make runtime role a table owner");
+        assert!(
+            runtime.ready().await.is_err(),
+            "table ownership must fail the DML-only readiness contract"
+        );
+        sqlx::query(AssertSqlSafe(format!(
+            "ALTER TABLE push_gateway_installations OWNER TO {migration_role}"
+        )))
+        .execute(&migration_pool)
+        .await
+        .expect("restore migration role as table owner");
+        // PostgreSQL drops the runtime role's explicit ACL while that role is
+        // the owner. Re-running the idempotent migration path must restore the
+        // least-privilege DML grants before readiness can recover.
+        PostgresAuthorityStore::apply_migrations_and_grants(&migration_pool, &runtime_role)
+            .await
+            .expect("restore runtime grants after ownership repair");
+        assert!(
+            runtime.ready().await.is_ok(),
+            "restoring ownership and grants returns readiness"
         );
         let legacy_uniqueness_constraints: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_constraint

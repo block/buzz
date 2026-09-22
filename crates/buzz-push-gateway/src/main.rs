@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
     if std::env::args().nth(1).as_deref() == Some("--migrate-only") {
-        let database_url = std::env::var("DATABASE_URL")?;
+        let database_url = buzz_push_gateway::config::database_url_from_env()?;
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect(&database_url)
@@ -36,8 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let c = Config::from_env()?;
     let metrics_handle = buzz_push_gateway::metrics::install()?;
     let app_attest_root = fs::read(&c.app_attest_root_cert_path)?;
-    let configured = &c.profile;
-    let profile = {
+    let mut profiles = std::collections::HashMap::new();
+    for (id, configured) in &c.profiles {
         let transport = Arc::new(ApnsTransport::certificate(
             &fs::read(&configured.apns_cert_path)?,
             configured.apns_topic.clone(),
@@ -47,11 +47,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             configured.app_attest_app_id.clone(),
             app_attest_root.clone(),
         )?;
-        buzz_push_gateway::http::ProfileRuntime {
-            app_attest: Arc::new(apple),
-            transport,
-        }
-    };
+        profiles.insert(
+            *id,
+            Arc::new(buzz_push_gateway::http::ProfileRuntime {
+                app_attest: Arc::new(apple),
+                transport,
+            }),
+        );
+    }
     let grant_keyring = GrantKeyring::new(
         c.grant_keys
             .iter()
@@ -69,6 +72,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&c.database_url)
         .await?;
     let authority = Arc::new(PostgresAuthorityStore::new(pool));
+    // Refuse to open either listener unless the runtime role sees the complete
+    // schema, has the required DML grants, and cannot perform database/schema
+    // DDL. The readiness endpoint repeats this check for ongoing health.
+    authority.ready().await?;
     authority
         .reap_expired(chrono::Utc::now().timestamp())
         .await?;
@@ -94,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             grant_keyring: Arc::new(grant_keyring),
             authority,
             token_keyring: Arc::new(token_keyring),
-            profile: Arc::new(profile),
+            profiles: Arc::new(profiles),
             gateway_urls: Arc::new(c.gateway_urls),
             max_grant_lifetime_seconds: c.max_grant_lifetime_seconds,
             max_installation_lifetime_seconds: c.max_installation_lifetime_seconds,

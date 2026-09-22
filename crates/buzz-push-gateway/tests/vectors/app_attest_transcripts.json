@@ -21,6 +21,12 @@
       "sha256": "58274bd9e9a86489fe5bae36aecbe89618824433189405ff4de8b18b58384270"
     },
     {
+      "name": "enroll_custom",
+      "domain": "buzz.push.enroll.v1",
+      "transcript": "buzz.push.enroll.v1\n{\"v\":1,\"audience\":\"https://push.buzz.xyz/v1/installations\",\"challenge_id\":\"11111111-1111-4111-8111-111111111111\",\"challenge\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"key_id\":\"qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=\",\"app_profile\":\"buzz-ios-custom\",\"endpoint\":\"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20\",\"endpoint_epoch\":1,\"expires_at\":1752624000}",
+      "sha256": "63b659e7b7bea343c3b7831147c63f8224c2322a6d5a95eaeb5952ecf36de2d6"
+    },
+    {
       "name": "delegate",
       "domain": "buzz.push.delegate.v1",
       "transcript": "buzz.push.delegate.v1\n{\"v\":1,\"audience\":\"https://push.buzz.xyz/v1/delegations\",\"challenge_id\":\"11111111-1111-4111-8111-111111111111\",\"challenge\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"installation_handle\":\"22222222-2222-4222-8222-222222222222\",\"endpoint_epoch\":1,\"generation\":1,\"relay_pubkey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"not_before\":1752620000,\"expires_at\":1752624000}",

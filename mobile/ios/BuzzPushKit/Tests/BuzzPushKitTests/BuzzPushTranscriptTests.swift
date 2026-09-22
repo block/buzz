@@ -82,6 +82,19 @@ final class BuzzPushTranscriptTests: XCTestCase {
         ))
     }
 
+    func testCustomEnrollVector() throws {
+        try assertMatchesVector("enroll_custom", BuzzPushTranscript.enroll(
+            gatewayOrigin: Self.gatewayOrigin,
+            challengeId: Self.challengeId,
+            challenge: Self.challenge,
+            keyId: Self.keyId,
+            appProfile: "buzz-ios-custom",
+            endpoint: Self.endpoint,
+            endpointEpoch: 1,
+            expiresAt: Self.expiresAt
+        ))
+    }
+
     func testDelegateVector() throws {
         try assertMatchesVector("delegate", BuzzPushTranscript.delegate(
             gatewayOrigin: Self.gatewayOrigin,
@@ -133,7 +146,7 @@ final class BuzzPushTranscriptTests: XCTestCase {
     func testAllFixtureVectorsCovered() throws {
         XCTAssertEqual(
             Set(try Self.fixture().vectors.map(\.name)),
-            ["enroll", "delegate", "rotate_endpoint", "revoke_delegation", "revoke_installation"],
+            ["enroll", "enroll_custom", "delegate", "rotate_endpoint", "revoke_delegation", "revoke_installation"],
             "fixture gained or lost a vector; add/remove the matching known-answer test"
         )
     }

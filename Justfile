@@ -837,6 +837,7 @@ mobile-check:
 # Run mobile tests
 mobile-test:
     /bin/bash ./scripts/test-mobile-gateway-recipes.sh
+    /bin/sh ./scripts/test-mobile-ios-production-shell.sh
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test test/shared/push/push_unconfigured_build_test.dart
 

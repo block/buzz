@@ -64,6 +64,35 @@ pub struct AppProfile<'a> {
     pub transport: &'a str,
 }
 
+const DOGFOOD_APP_PROFILES: &[AppProfile<'static>] = &[AppProfile {
+    id: "buzz-ios-dogfood",
+    transport: "apns",
+}];
+const CUSTOM_APP_PROFILES: &[AppProfile<'static>] = &[AppProfile {
+    id: "buzz-ios-custom",
+    transport: "apns",
+}];
+const BOTH_APP_PROFILES: &[AppProfile<'static>] = &[
+    AppProfile {
+        id: "buzz-ios-dogfood",
+        transport: "apns",
+    },
+    AppProfile {
+        id: "buzz-ios-custom",
+        transport: "apns",
+    },
+];
+
+pub(crate) const fn supported_app_profiles(
+    mode: crate::config::PushAppProfileMode,
+) -> &'static [AppProfile<'static>] {
+    match mode {
+        crate::config::PushAppProfileMode::Dogfood => DOGFOOD_APP_PROFILES,
+        crate::config::PushAppProfileMode::Custom => CUSTOM_APP_PROFILES,
+        crate::config::PushAppProfileMode::Both => BOTH_APP_PROFILES,
+    }
+}
+
 pub struct LeaseLimits<'a> {
     pub expected_origin: &'a str,
     pub author_hex: &'a str,
@@ -491,10 +520,7 @@ pub async fn accept(
     let limits = LeaseLimits {
         expected_origin: &origin,
         author_hex: &author_hex,
-        app_profiles: &[AppProfile {
-            id: "buzz-ios-dogfood",
-            transport: "apns",
-        }],
+        app_profiles: supported_app_profiles(state.config.push_app_profile_mode),
         supported_classes: &["default"],
         push_kinds: PUSH_KINDS,
         max_subscriptions: 16,
@@ -585,6 +611,7 @@ fn canonical_origin(relay_url: &str, host: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PushAppProfileMode;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     fn event(tags: Vec<Tag>) -> Event {
@@ -593,6 +620,23 @@ mod tests {
             .custom_created_at(Timestamp::from(1_000_u64))
             .sign_with_keys(&Keys::generate())
             .unwrap()
+    }
+
+    #[test]
+    fn configured_profile_mode_is_the_exact_lease_allowlist() {
+        let ids = |mode| {
+            supported_app_profiles(mode)
+                .iter()
+                .map(|profile| profile.id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(ids(PushAppProfileMode::Dogfood), ["buzz-ios-dogfood"]);
+        assert_eq!(ids(PushAppProfileMode::Custom), ["buzz-ios-custom"]);
+        assert_eq!(
+            ids(PushAppProfileMode::Both),
+            ["buzz-ios-dogfood", "buzz-ios-custom"]
+        );
     }
 
     #[test]
@@ -720,6 +764,28 @@ mod tests {
             validate_plaintext(&body, &limits()).unwrap_err(),
             "generation must be a positive safe integer"
         );
+    }
+
+    #[test]
+    fn custom_profile_is_accepted_only_when_explicitly_advertised() {
+        let body = parse_plaintext(r##"{"v":1,"origin":"o","generation":1,"active":true,"app_profile":"buzz-ios-custom","transport":"apns","endpoint":"token","subscriptions":[{"filter":{"kinds":[9],"#p":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]},"class":"default"}]}"##, 4096).unwrap();
+        assert_eq!(
+            validate_plaintext(&body, &limits()).unwrap_err(),
+            "app profile not supported"
+        );
+        let profiles = [
+            AppProfile {
+                id: "p",
+                transport: "apns",
+            },
+            AppProfile {
+                id: "buzz-ios-custom",
+                transport: "apns",
+            },
+        ];
+        let mut configured = limits();
+        configured.app_profiles = &profiles;
+        assert!(validate_plaintext(&body, &configured).is_ok());
     }
 
     #[test]

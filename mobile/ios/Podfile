@@ -38,6 +38,13 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    # Xcode 27 refuses deployment targets below iOS 15. Several pods still
+    # declare 10.0–13.0 minimums, so lift them to the app's own floor.
+    target.build_configurations.each do |config|
+      if config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'].to_f < 16.0
+        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '16.0'
+      end
+    end
   end
   # Flutter creates plugin symlinks during installation, so load the upstream
   # helper here rather than requiring an existing Pods install at parse time.

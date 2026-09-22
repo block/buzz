@@ -64,6 +64,7 @@ const _descriptor = BuzzPushLeaseDescriptor(
   executorKeyId: 'relay-v1',
   executorPubkey:
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  appProfile: buzzIosDogfoodAppProfile,
   transport: 'apns',
   maxLeaseTtlSeconds: 3600,
   maxContentLength: 4096,

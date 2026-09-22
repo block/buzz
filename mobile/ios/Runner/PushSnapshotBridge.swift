@@ -6,9 +6,10 @@ import UserNotifications
 
 final class BuzzPushSnapshotBridge {
   private let containerURL: () -> URL?
-  private let endpointGrantStore: BuzzPushEndpointGrantKeychainStore
+  private let endpointGrantStore: BuzzPushEndpointGrantStore
   private let interactionDeletionDeadline: BuzzInteractionDeletionDeadline
   private let keychainAccessGroup: String?
+  private let replaceSigningKeys: ([String: String], String?) throws -> Void
   private let queue = DispatchQueue(
     label: "xyz.block.buzz.push-snapshot",
     qos: .utility
@@ -21,9 +22,12 @@ final class BuzzPushSnapshotBridge {
 
   init(
     appGroupIdentifier: String?,
-    endpointGrantStore: BuzzPushEndpointGrantKeychainStore,
+    endpointGrantStore: BuzzPushEndpointGrantStore,
     keychainAccessGroup: String?,
     containerURL: (() -> URL?)? = nil,
+    replaceSigningKeys: @escaping ([String: String], String?) throws -> Void = {
+      try BuzzPushKeychain.replace(signingKeys: $0, accessGroup: $1)
+    },
     interactionDeletionDeadline: BuzzInteractionDeletionDeadline =
       BuzzInteractionDeletionDeadline(
         timeout: 5,
@@ -45,6 +49,7 @@ final class BuzzPushSnapshotBridge {
     }
     self.endpointGrantStore = endpointGrantStore
     self.keychainAccessGroup = keychainAccessGroup
+    self.replaceSigningKeys = replaceSigningKeys
     self.interactionDeletionDeadline = interactionDeletionDeadline
   }
 
@@ -143,13 +148,18 @@ final class BuzzPushSnapshotBridge {
   ) {
     guard let communities = arguments["communities"] as? [[String: Any]],
       let signingKeys = arguments["signingKeys"] as? [String: String],
+      let appProfile = arguments["appProfile"] as? String,
+      [
+        BuzzDevPushEnrollmentDriver.appProfile,
+        BuzzDevPushEnrollmentDriver.customAppProfile,
+      ].contains(appProfile),
       communities.count <= BuzzPushPresentationCacheStore.maximumCommunities,
       !requiresStore || arguments["settleFence"] is Bool
     else {
       result(
         FlutterError(
           code: "invalid_arguments",
-          message: "Expected bounded communities and signing keys.",
+          message: "Expected an app profile, bounded communities, and signing keys.",
           details: nil
         )
       )
@@ -191,6 +201,7 @@ final class BuzzPushSnapshotBridge {
           guard let relayURL = community["relayUrl"] as? String,
             let relayMetadataPubkey = Self.relayMetadataPubkey(
               relayURL: relayURL,
+              appProfile: appProfile,
               grants: grants
             )
           else { return community }
@@ -201,10 +212,7 @@ final class BuzzPushSnapshotBridge {
         let decoded = try JSONDecoder().decode([PushLeaseCommunity].self, from: data)
         // Ordinary snapshot maintenance never changes age access.
         try store.replaceCommunities(decoded)
-        try BuzzPushKeychain.replace(
-          signingKeys: signingKeys,
-          accessGroup: self.keychainAccessGroup
-        )
+        try replaceSigningKeys(signingKeys, self.keychainAccessGroup)
         Self.complete(result, value: nil)
       } catch {
         Self.complete(
@@ -221,13 +229,14 @@ final class BuzzPushSnapshotBridge {
 
   static func relayMetadataPubkey(
     relayURL: String,
+    appProfile: String,
     grants: [BuzzPushEndpointGrantRecord]
   ) -> String? {
     guard let origin = BuzzPushPresentationCacheStore.canonicalRelayOrigin(relayURL) else {
       return nil
     }
     return grants.filter {
-      $0.appProfile == BuzzDevPushEnrollmentDriver.appProfile
+      $0.appProfile == appProfile
         && BuzzPushPresentationCacheStore.canonicalRelayOrigin($0.relayOrigin) == origin
     }.max {
       $0.generation < $1.generation

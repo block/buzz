@@ -67,6 +67,16 @@ async fn bootstrap_refuses_legacy_data_before_migrations_and_allows_initialized_
             .await
             .expect_err("invalid role after successful initialization");
         assert!(error.to_string().contains("runtime database role"));
+        for profile in ["buzz-ios-dogfood", "buzz-ios-custom"] {
+            let accepted: bool = sqlx::query_scalar(
+                "SELECT $1::text IN ('buzz-ios-dogfood', 'buzz-ios-custom') AND pg_get_constraintdef(oid) LIKE '%' || $1 || '%' FROM pg_constraint WHERE conrelid='push_gateway_installations'::regclass AND conname='push_gateway_installations_app_profile_check'",
+            )
+            .bind(profile)
+            .fetch_one(&pool)
+            .await
+            .expect("inspect migrated profile allowlist");
+            assert!(accepted, "migrated schema accepts {profile}");
+        }
     }
     sqlx::raw_sql(AssertSqlSafe(format!(
         "SET search_path TO public; DROP SCHEMA {schema} CASCADE"
