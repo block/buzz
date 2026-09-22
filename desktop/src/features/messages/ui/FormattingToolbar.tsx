@@ -167,6 +167,9 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
 
     const range = pendingSelectionRef.current;
     pendingSelectionRef.current = null;
+    // Toolbar activation blurs the editor. Focus synchronously so the formatting
+    // dispatch maps its selection to the DOM before typing can beat chain.focus's frame.
+    editor.view.focus();
     const chain = editor.chain();
 
     if (

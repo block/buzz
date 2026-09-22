@@ -1,3 +1,4 @@
+import { useMentionAdmissionEditor } from "@/features/messages/lib/useMentionAdmissionEditor";
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
@@ -239,6 +240,12 @@ function ForumComposerVisit({
     },
   });
 
+  useMentionAdmissionEditor(
+    richText.editor,
+    formRef,
+    mentions.cancelMentionAutocomplete,
+    mentions.onMentionEditorSelectionChange,
+  );
   const linkEditor = useLinkEditor(richText);
   onEditLinkRef.current = linkEditor.openFromClick;
   onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
@@ -249,16 +256,24 @@ function ForumComposerVisit({
   const applyMentionInsert = React.useCallback(
     (suggestion: MentionSuggestion) => {
       if (isSubmissionPendingRef.current) return;
-      const { cursor } = richText.getPlainTextAndCursor();
-      const { replaceFromOffset, replaceToOffset, insertText } =
-        mentions.insertMention(suggestion, cursor);
-      richText.replacePlainTextRange(
-        replaceFromOffset,
-        replaceToOffset,
-        insertText,
+      void mentions.admitMentionSelection(
+        suggestion,
+        richText.getPlainTextAndCursor,
+        () => {
+          if (isSubmissionPendingRef.current) return;
+          const { cursor } = richText.getPlainTextAndCursor();
+          const { replaceFromOffset, replaceToOffset, insertText } =
+            mentions.insertMention(suggestion, cursor);
+          richText.replacePlainTextRange(
+            replaceFromOffset,
+            replaceToOffset,
+            insertText,
+          );
+        },
       );
     },
     [
+      mentions.admitMentionSelection,
       mentions.insertMention,
       richText.getPlainTextAndCursor,
       richText.replacePlainTextRange,

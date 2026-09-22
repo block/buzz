@@ -1,3 +1,4 @@
+import { refreshDirectoryAfterMembershipChange } from "@/features/channels/membershipDirectorySync";
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -36,7 +37,17 @@ export function useCreateProjectMutation() {
 
   return useMutation({
     mutationFn: (input: CreateProjectInput) =>
-      createProject(input, resumeRef.current),
+      createProject(
+        {
+          ...input,
+          agents: input.agents?.map((agent) => ({
+            ...agent,
+            onMembershipAdded: () =>
+              refreshDirectoryAfterMembershipChange(queryClient),
+          })),
+        },
+        resumeRef.current,
+      ),
     onSuccess: async ({ channel, project }, input) => {
       markProjectDataAuthoritative(project, "local-write");
       addProjectToSidebar(

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyReusableAgentAccessPolicy } from "./channelAgents.ts";
+import {
+  applyReusableAgentAccessPolicy,
+  attachManagedAgentToChannel,
+} from "./channelAgents.ts";
 
 const AGENT_PUBKEY = "a".repeat(64);
 const ALLOWED_PUBKEY = "b".repeat(64);
@@ -146,4 +149,35 @@ test("the write is reported even when the update hands back an unchanged record"
   assert.equal(result.wrote, true);
   assert.equal(result.agent.respondTo, agent.respondTo);
   assert.deepEqual(result.agent.respondToAllowlist, agent.respondToAllowlist);
+});
+
+test("attachment signals accepted membership before startup fails; rejected adds do not signal", async (t) => {
+  const order = [];
+  let accepted = true;
+  t.after(
+    installTauriInvoke(async (command) => {
+      if (command === "add_channel_members")
+        return accepted
+          ? { added: [AGENT_PUBKEY], errors: [] }
+          : { added: [], errors: [{ pubkey: AGENT_PUBKEY, error: "denied" }] };
+      if (command === "start_managed_agent") {
+        order.push("start");
+        throw new Error("startup failed");
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    }),
+  );
+  const input = {
+    agent: managedAgent({ backend: { type: "local" }, status: "stopped" }),
+    onMembershipAdded: () => order.push("accepted"),
+  };
+  await assert.rejects(
+    attachManagedAgentToChannel("channel", input),
+    /startup failed/,
+  );
+  assert.deepEqual(order, ["accepted", "start"]);
+  order.length = 0;
+  accepted = false;
+  await assert.rejects(attachManagedAgentToChannel("channel", input), /denied/);
+  assert.deepEqual(order, []);
 });

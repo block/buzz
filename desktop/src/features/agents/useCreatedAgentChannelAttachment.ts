@@ -1,3 +1,5 @@
+import { refreshDirectoryAfterMembershipChange } from "@/features/channels/membershipDirectorySync";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { attachManagedAgentToChannel } from "./channelAgents";
@@ -8,11 +10,13 @@ type TargetChannel = Pick<Channel, "id" | "name">;
 async function attach(
   created: CreateManagedAgentResponse,
   targetChannel: TargetChannel,
+  onMembershipAdded: () => void,
 ) {
   const attached = await attachManagedAgentToChannel(targetChannel.id, {
     agent: created.agent,
     role: "bot",
     ensureRunning: true,
+    onMembershipAdded,
   });
   created.agent = attached.agent;
 }
@@ -21,6 +25,7 @@ function showAttachmentFailure(
   created: CreateManagedAgentResponse,
   targetChannel: TargetChannel,
   cause: unknown,
+  onMembershipAdded: () => void,
   toastId?: string | number,
 ) {
   const error = cause instanceof Error ? cause.message : "Failed to add agent.";
@@ -35,7 +40,7 @@ function showAttachmentFailure(
           description: `Adding ${created.agent.name} to #${targetChannel.name}…`,
           id,
         });
-        void attach(created, targetChannel).then(
+        void attach(created, targetChannel, onMembershipAdded).then(
           () => {
             toast.success("Agent created", {
               description: `Added ${created.agent.name} to #${targetChannel.name}`,
@@ -43,7 +48,13 @@ function showAttachmentFailure(
             });
           },
           (retryCause: unknown) => {
-            showAttachmentFailure(created, targetChannel, retryCause, id);
+            showAttachmentFailure(
+              created,
+              targetChannel,
+              retryCause,
+              onMembershipAdded,
+              id,
+            );
           },
         );
       },
@@ -53,6 +64,9 @@ function showAttachmentFailure(
 
 /** Keeps creation successful when its optional channel attachment fails. */
 export function useCreatedAgentChannelAttachment() {
+  const queryClient = useQueryClient();
+  const onMembershipAdded = () =>
+    refreshDirectoryAfterMembershipChange(queryClient);
   async function presentCreatedAgent(
     created: CreateManagedAgentResponse,
     targetChannel?: TargetChannel | null,
@@ -63,10 +77,10 @@ export function useCreatedAgentChannelAttachment() {
     }
 
     try {
-      await attach(created, targetChannel);
+      await attach(created, targetChannel, onMembershipAdded);
       toast.success("Agent created");
     } catch (cause) {
-      showAttachmentFailure(created, targetChannel, cause);
+      showAttachmentFailure(created, targetChannel, cause, onMembershipAdded);
     }
   }
 

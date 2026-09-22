@@ -1025,7 +1025,7 @@ test("defers agent mentions until DM members finish loading", async ({
   expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
     commandCount(baselineCommands, "add_channel_members"),
   );
-  await expect(input).toContainText("before members resolve");
+  await expect(input).toHaveText("Ask @alice  before members resolve");
 
   await page.waitForTimeout(5_100);
   await threadPanel.getByTestId("send-message").click();
@@ -1036,7 +1036,18 @@ test("defers agent mentions until DM members finish loading", async ({
   expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
     commandCount(baselineCommands, "add_channel_members"),
   );
-  await expect(input).toHaveText("@alice ");
+  await expect
+    .poll(() =>
+      readOutgoingMentionPubkeys(page, "Ask @alice  before members resolve"),
+    )
+    .toEqual([TEST_IDENTITIES.alice.pubkey]);
+  await expect(input).toHaveText("");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
+  await expect(
+    threadPanel.getByTestId(
+      `composer-address-lock-${TEST_IDENTITIES.alice.pubkey}`,
+    ),
+  ).toHaveCount(0);
   await expect(threadPanel).toContainText("before members resolve");
 });
 
@@ -3050,6 +3061,10 @@ test("mentioning an in-channel stopped managed agent publishes first and starts 
     )
     .toBeGreaterThan(baselineStartCount);
 
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "Hey @fizz  can you help?"))
+    .toEqual([IN_CHANNEL_MANAGED_AGENT_PUBKEY]);
+
   // The detached start carries a replay floor so the spawned harness's first
   // REQ replays past the just-published message.
   const startCall = (await readCommandPayloadLog(page))
@@ -3472,6 +3487,9 @@ test("a deploy held across an A→B→A community round-trip is not fired twice"
     await expect(
       page.getByTestId("message-row").filter({ hasText: text }),
     ).toBeVisible();
+    await expect
+      .poll(() => readOutgoingMentionPubkeys(page, `Hey @portal  ${text}`))
+      .toEqual([OUT_OF_CHANNEL_PROVIDER_AGENT_PUBKEY]);
   };
 
   const baselineCommands = await readCommandLog(page);

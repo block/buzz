@@ -1,3 +1,4 @@
+import { refreshDirectoryAfterMembershipChange } from "@/features/channels/membershipDirectorySync";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -311,7 +312,11 @@ export function useManagedAgentActions() {
     const channelIds = getAgentChannelIds(pubkey);
     if (channelIds.length === 0) return;
     await Promise.allSettled(
-      channelIds.map((channelId) => removeChannelMember(channelId, pubkey)),
+      channelIds.map((channelId) =>
+        removeChannelMember(channelId, pubkey).then(() => {
+          refreshDirectoryAfterMembershipChange(queryClient);
+        }),
+      ),
     );
     // Direct writes bypass the member mutations' invalidation; without this,
     // the deleted agent stays in cached rosters for the freshness window.

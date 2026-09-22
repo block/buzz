@@ -1,3 +1,4 @@
+import { refreshDirectoryAfterMembershipChange } from "@/features/channels/membershipDirectorySync";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -132,7 +133,14 @@ export function useApplyTemplate() {
     if (inputs.length === 0) return;
 
     try {
-      const result = await createChannelManagedAgents(channelId, inputs);
+      const result = await createChannelManagedAgents(
+        channelId,
+        inputs.map((input) => ({
+          ...input,
+          onMembershipAdded: () =>
+            refreshDirectoryAfterMembershipChange(queryClient),
+        })),
+      );
       if (result.failures.length > 0) {
         const { toast } = await import("sonner");
         toast.warning(

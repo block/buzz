@@ -1,4 +1,9 @@
 import * as React from "react";
+import { displayedMentionChoice } from "./displayedMentionChoice";
+import {
+  useMentionAdmission,
+  useStableMentionSuggestions,
+} from "./useMentionAdmission";
 import {
   useManagedAgentsQuery,
   usePersonasQuery,
@@ -12,7 +17,6 @@ import {
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import {
-  filterCachedAgentSuggestions,
   getAgentIdentityPubkeys,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
@@ -66,7 +70,11 @@ import {
   formatTeamMention,
   type MentionCandidate,
 } from "./mentionCandidates";
-import { buildMentionCandidates } from "./buildMentionCandidates";
+import {
+  buildMentionCandidates,
+  refreshMentionCandidateDefinitions,
+  type BuildMentionCandidatesInput,
+} from "./buildMentionCandidates";
 const MENTION_DEBOUNCE_MS = 120,
   MENTION_SUGGESTION_LIMIT = 50;
 type UseMentionsOptions = {
@@ -94,7 +102,7 @@ export function useMentions(
   selectedAgentMentionNamesRef.current = selectedAgentMentionNames;
   const mentionMapRef = React.useRef<Map<string, string>>(new Map());
   const personaMentionMapRef = React.useRef<Map<string, string>>(new Map());
-  const previousSuggestionsRef = React.useRef<MentionSuggestion[]>([]);
+  const autocompleteGenerationRef = React.useRef(0);
   const mentionSearchQuery = mentionQuery?.trim() ?? "";
   const canSearchGlobalPeople = mentionSearchQuery.length > 0;
   const identityQuery = useIdentityQuery();
@@ -251,31 +259,30 @@ export function useMentions(
       }),
     [managedAgentPubkeys, members, profiles, relayAgentsQuery.data],
   );
-  const mentionCandidates = React.useMemo<MentionCandidate[]>(
-    () =>
-      buildMentionCandidates({
-        activeAgentPubkeys,
-        activePersonaById,
-        activePersonas,
-        canSearchGlobalUsers,
-        currentPubkey,
-        isArchived: isArchivedDiscovery,
-        managedAgentDirectoryReady,
-        managedAgentNamesByPubkey,
-        managedAgentPersonaIds,
-        managedAgentPersonaIdsByPubkey,
-        managedAgents: managedAgentsQuery.data,
-        memberPubkeys,
-        members,
-        mentionChannelId,
-        mentionableAgentPubkeys,
-        personaNameByPubkey,
-        profiles,
-        relayAgentDirectoryReady,
-        relayAgentNamesByPubkey,
-        relayAgents: relayAgentsQuery.data,
-        userSearchResults,
-      }),
+  const mentionCandidateInput = React.useMemo<BuildMentionCandidatesInput>(
+    () => ({
+      activeAgentPubkeys,
+      activePersonaById,
+      activePersonas,
+      canSearchGlobalUsers,
+      currentPubkey,
+      isArchived: isArchivedDiscovery,
+      managedAgentDirectoryReady,
+      managedAgentNamesByPubkey,
+      managedAgentPersonaIds,
+      managedAgentPersonaIdsByPubkey,
+      managedAgents: managedAgentsQuery.data,
+      memberPubkeys,
+      members,
+      mentionChannelId,
+      mentionableAgentPubkeys,
+      personaNameByPubkey,
+      profiles,
+      relayAgentDirectoryReady,
+      relayAgentNamesByPubkey,
+      relayAgents: relayAgentsQuery.data,
+      userSearchResults,
+    }),
     [
       activePersonaById,
       activeAgentPubkeys,
@@ -299,6 +306,10 @@ export function useMentions(
       relayAgentNamesByPubkey,
       relayAgentsQuery.data,
     ],
+  );
+  const mentionCandidates = React.useMemo<MentionCandidate[]>(
+    () => buildMentionCandidates(mentionCandidateInput),
+    [mentionCandidateInput],
   );
   const mentionCandidatesWithTeams = React.useMemo(
     () => [
@@ -418,37 +429,10 @@ export function useMentions(
       void userSearchQuery.fetchNextPage();
     }
   }, [userSearchQuery]);
-  const suggestions = React.useMemo<MentionSuggestion[]>(() => {
-    if (mentionQuery === null) {
-      return [];
-    }
-    if (matchingSuggestions.length > 0) {
-      return matchingSuggestions;
-    }
-    if (userSearchQuery.isFetching) {
-      return filterCachedAgentSuggestions(
-        previousSuggestionsRef.current,
-        mentionCandidatesWithTeams,
-      );
-    }
-    return [];
-  }, [
+  const suggestions = useStableMentionSuggestions(
+    `${channelId}:${options?.channelType}:${currentPubkey}:${autocompleteGenerationRef.current}:${mentionQuery}:${mentionStartIndex}`,
     matchingSuggestions,
-    mentionCandidatesWithTeams,
-    mentionQuery,
-    userSearchQuery.isFetching,
-  ]);
-  React.useEffect(() => {
-    if (mentionQuery === null) {
-      previousSuggestionsRef.current = [];
-      return;
-    }
-    if (matchingSuggestions.length > 0) {
-      previousSuggestionsRef.current = matchingSuggestions;
-    } else if (!userSearchQuery.isFetching) {
-      previousSuggestionsRef.current = [];
-    }
-  }, [matchingSuggestions, mentionQuery, userSearchQuery.isFetching]);
+  );
   const mentionSelection = useMentionSelection(suggestions);
   const { mentionSelectedIndex, setMentionSelectedIndex: setSelected } =
     mentionSelection;
@@ -561,11 +545,13 @@ export function useMentions(
       }
       trimMapToSize(mentions, 200);
       trimMapToSize(personaMentions, 200);
+      const startIndex =
+        mentionPickerOriginRef.current === "explicit"
+          ? selectionEnd
+          : (flushedMentionStartIndexRef.current ?? mentionStartIndex);
       mentionPickerOriginRef.current = null;
       setMentionQuery(null);
       setSelected(0);
-      const startIndex =
-        flushedMentionStartIndexRef.current ?? mentionStartIndex;
       flushedMentionStartIndexRef.current = null;
       return {
         replaceFromOffset: startIndex,
@@ -683,13 +669,27 @@ export function useMentions(
     () => mentionPickerOriginRef.current === "inline",
     [],
   );
-  const autocompleteGenerationRef = React.useRef(0);
+  const [, refreshMentionRequest] = React.useReducer(
+    (value: number) => value + 1,
+    0,
+  );
   const updateMentionQuery = React.useCallback(
     (value: string, cursorPosition: number) => {
       mentionSelection.clearAgentSelectionPreference();
       const generation = ++autocompleteGenerationRef.current;
       latestValueRef.current = value;
       latestCursorRef.current = cursorPosition;
+      // An explicit tray is not a search derived from the document. Editing
+      // retires its old rows/preparation, but presents fresh rows at the new caret.
+      if (mentionPickerOriginRef.current === "explicit") {
+        if (debounceTimerRef.current !== null) {
+          clearTimeout(debounceTimerRef.current);
+          debounceTimerRef.current = null;
+        }
+        setMentionStartIndex(cursorPosition);
+        refreshMentionRequest();
+        return;
+      }
       const activeInlineMention = detectPrefixQuery(
         "@",
         value,
@@ -775,6 +775,76 @@ export function useMentions(
     sharedChannelIds,
     refetchManagedAgents: managedAgentsQuery.refetch,
   });
+  const admitMentionSelection = useMentionAdmission({
+    generation: autocompleteGenerationRef,
+    isPending: () => debounceTimerRef.current !== null,
+    channelId,
+    channelType: options?.channelType,
+    currentPubkey,
+    agentPubkeys: agentIdentityPubkeys,
+    personaIds: activePersonaIds,
+    revalidate: revalidateMentionPubkeys,
+    validateSuggestion: async (suggestion) => {
+      if (!suggestion.personaId && !suggestion.teamId) return;
+      const [freshPersonas, freshManagedAgents] = await Promise.all([
+        personasQuery.refetch(),
+        managedAgentsQuery.refetch(),
+      ]);
+      if (freshManagedAgents.error || !freshManagedAgents.data)
+        throw new Error(
+          "Could not check persona linkage. Choose a mention again.",
+        );
+      if (freshPersonas.error || !freshPersonas.data)
+        throw new Error(
+          "Could not check this persona. Choose a mention again.",
+        );
+      if (
+        (suggestion.teamMembers ?? [suggestion]).some(
+          (recipient) =>
+            recipient.personaId &&
+            !freshPersonas.data.some(
+              (persona) =>
+                persona.id === recipient.personaId && persona.isActive,
+            ),
+        )
+      )
+        throw new Error("That persona is no longer available.");
+      const freshCandidates = refreshMentionCandidateDefinitions(
+        mentionCandidateInput,
+        freshPersonas.data,
+        freshManagedAgents.data,
+      );
+      if (
+        suggestion.personaId &&
+        !freshCandidates.some(
+          (candidate) =>
+            candidate.personaId === suggestion.personaId &&
+            candidate.pubkey === suggestion.pubkey &&
+            candidate.kind === suggestion.kind,
+        )
+      )
+        throw new Error("This persona's recipient changed. Choose it again.");
+      if (suggestion.teamId) {
+        const freshTeams = await teamsQuery.refetch();
+        if (freshTeams.error || !freshTeams.data)
+          throw new Error("Could not check this team. Choose a mention again.");
+        const fresh = buildTeamMentionCandidates(
+          freshTeams.data,
+          freshPersonas.data,
+          freshCandidates,
+        ).find((team) => team.teamId === suggestion.teamId);
+        const identities = (rows: MentionSuggestion["teamMembers"]) =>
+          JSON.stringify(rows?.map((row) => [row.pubkey, row.personaId]));
+        if (
+          !fresh ||
+          identities(fresh.teamMembers) !== identities(suggestion.teamMembers)
+        )
+          throw new Error(
+            "This team's recipients changed. Choose the team again.",
+          );
+      }
+    },
+  });
   const extractMentionPersonas = React.useCallback(
     (text: string): PersonaMentionTarget[] =>
       extractMentionPersonasFromMaps(
@@ -789,6 +859,9 @@ export function useMentions(
       ),
     [activePersonaById, mentionCandidates],
   );
+  const retireMentionSelection = React.useCallback(() => {
+    autocompleteGenerationRef.current += 1;
+  }, []);
   const cancelMentionAutocomplete = React.useCallback(() => {
     autocompleteGenerationRef.current += 1;
     if (debounceTimerRef.current !== null) {
@@ -801,6 +874,16 @@ export function useMentions(
     setMentionQuery(null);
     setSelected(0);
   }, [mentionSelection.clearAgentSelectionPreference, setSelected]);
+  const onMentionEditorSelectionChange = React.useCallback(() => {
+    if (mentionPickerOriginRef.current !== "explicit") {
+      cancelMentionAutocomplete();
+      return;
+    }
+    // Caret movement within the editor invalidates an in-flight choice, not
+    // the explicitly opened tray. Re-render so only new rows own the new action.
+    autocompleteGenerationRef.current += 1;
+    refreshMentionRequest();
+  }, [cancelMentionAutocomplete]);
   const clearMentions = React.useCallback(() => {
     cancelMentionAutocomplete();
     mentionMapRef.current.clear();
@@ -848,50 +931,44 @@ export function useMentions(
         );
         return { handled: true };
       }
-      // Shift+Tab is deliberately not a select: it is the keyboard route out
-      // of the editor — into this overlay's Options controls where the
-      // composer offers them, otherwise the browser's own backward focus
-      // move — so those controls stay reachable.
-      if (
-        exactMentionSpace ||
-        (event.key === "Tab" && !event.shiftKey) ||
-        (event.key === "Enter" &&
-          !event.ctrlKey &&
-          !event.metaKey &&
-          !event.altKey &&
-          !event.shiftKey)
-      ) {
-        if (debounceTimerRef.current !== null || exactMentionSpace) {
-          const flushed = flushMentionDebounce({
-            debounceTimerRef,
-            latestValueRef,
-            latestCursorRef,
-            searchableNamesLowerRef,
-            candidates: mentionCandidatesWithTeams,
-            activePersonaIds,
-            agentProvenanceReady: agentDirectoriesReady,
-            channelType: options?.channelType,
-            currentPubkey,
-            ownerProfiles: ownerProfilesQuery.data?.profiles,
-            profiles,
-            requireExact: exactMentionSpace,
-          });
-          if (exactMentionSpace && flushed?.type !== "match")
-            return { handled: false };
-          event.preventDefault();
-          if (flushed?.type === "match") {
-            flushedMentionStartIndexRef.current = flushed.startIndex;
-            mentionPickerOriginRef.current = "inline";
-            setMentionQuery(null); // reset so dropdown closes
-            return { handled: true, suggestion: flushed.suggestion };
-          }
-          if (flushed?.type === "no-match") {
-            setMentionQuery(null);
-            return { handled: true };
-          }
-        }
+      const displayedChoice = displayedMentionChoice(
+        event,
+        suggestions,
+        mentionSelectedIndex,
+        debounceTimerRef.current !== null,
+      );
+      if (displayedChoice.handled) {
         event.preventDefault();
-        return { handled: true, suggestion: suggestions[mentionSelectedIndex] };
+        return displayedChoice;
+      }
+      if (exactMentionSpace) {
+        const flushed = flushMentionDebounce({
+          debounceTimerRef,
+          latestValueRef,
+          latestCursorRef,
+          searchableNamesLowerRef,
+          candidates: mentionCandidatesWithTeams,
+          activePersonaIds,
+          agentProvenanceReady: agentDirectoriesReady,
+          channelType: options?.channelType,
+          currentPubkey,
+          ownerProfiles: ownerProfilesQuery.data?.profiles,
+          profiles,
+          requireExact: exactMentionSpace,
+        });
+        if (exactMentionSpace && flushed?.type !== "match")
+          return { handled: false };
+        event.preventDefault();
+        if (flushed?.type === "match") {
+          flushedMentionStartIndexRef.current = flushed.startIndex;
+          mentionPickerOriginRef.current = "inline";
+          setMentionQuery(null); // reset so dropdown closes
+          return { handled: true, suggestion: flushed.suggestion };
+        }
+        if (flushed?.type === "no-match") {
+          setMentionQuery(null);
+          return { handled: true };
+        }
       }
       if (event.key === "Escape") {
         event.preventDefault();
@@ -916,6 +993,9 @@ export function useMentions(
     ],
   );
   return {
+    admitMentionSelection,
+    retireMentionSelection,
+    onMentionEditorSelectionChange,
     bindPastedMentionIdentities: pasteBinding.bindPastedMentionIdentities,
     cancelMentionAutocomplete,
     clearMentions,

@@ -1,3 +1,4 @@
+import { refreshDirectoryAfterMembershipChange } from "@/features/channels/membershipDirectorySync";
 import { useEffect, useEffectEvent } from "react";
 import {
   type QueryClient,
@@ -379,6 +380,7 @@ export function useChannelSubscription(channel: Channel | null) {
           payload.type === "member_left" ||
           payload.type === "member_removed"
         ) {
+          refreshDirectoryAfterMembershipChange(queryClient, event.id);
           void queryClient.invalidateQueries({
             queryKey: ["channels", channelId, "members"],
           });

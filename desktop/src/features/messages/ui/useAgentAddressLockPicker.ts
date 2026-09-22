@@ -1,4 +1,5 @@
 import * as React from "react";
+import type { MentionAdmissionOwner } from "../lib/useMentionAdmission";
 
 import { mentionOccurrences } from "@/shared/lib/mentionOccurrences";
 import { stripImplicitAgentMentionPrefix } from "@/features/messages/lib/stripImplicitAgentMentions";
@@ -16,6 +17,7 @@ import type { MentionSuggestion } from "./MentionAutocomplete";
 
 export function useAgentAddressLockPicker({
   applyAutocompleteEdit,
+  canCommitSelection,
   audience,
   audienceScope,
   mentions,
@@ -28,6 +30,7 @@ export function useAgentAddressLockPicker({
   richText,
 }: {
   applyAutocompleteEdit: (edit: AutocompleteEdit) => void;
+  canCommitSelection?: () => boolean;
   audience: ReturnType<typeof usePersistentAgentAudience>;
   audienceScope: string | null;
   mentions: UseMentionsResult;
@@ -142,11 +145,17 @@ export function useAgentAddressLockPicker({
     (pubkey: string) => {
       const normalized = normalizePubkey(pubkey);
       if (!audienceScope || !normalized) return;
+      mentions.retireMentionSelection();
       unpinnedAgentPubkeysRef.current.add(normalized);
       const excludePubkey = audience.excludePubkey ?? audience.removePubkey;
       excludePubkey(normalized);
     },
-    [audience.excludePubkey, audience.removePubkey, audienceScope],
+    [
+      audience.excludePubkey,
+      audience.removePubkey,
+      audienceScope,
+      mentions.retireMentionSelection,
+    ],
   );
   const removeAddressedAgent = React.useCallback(
     (pubkey: string) => {
@@ -190,7 +199,9 @@ export function useAgentAddressLockPicker({
       unpinAddressedAgent,
     ],
   );
-  const toggleAlwaysAddressAgent = React.useCallback(
+  const canCommitSelectionRef = React.useRef(canCommitSelection);
+  canCommitSelectionRef.current = canCommitSelection;
+  const commitToggleAlwaysAddressAgent = React.useCallback(
     (
       suggestion: MentionSuggestion,
       options: { preserveMention?: boolean } = {},
@@ -208,6 +219,7 @@ export function useAgentAddressLockPicker({
           `Stopped automatically mentioning ${suggestion.displayName}`,
         );
       } else {
+        if (canCommitSelectionRef.current?.() === false) return;
         unpinnedAgentPubkeysRef.current.delete(pubkey);
         const label =
           mentions.registerMentionPubkey(suggestion.displayName, pubkey, {
@@ -291,8 +303,9 @@ export function useAgentAddressLockPicker({
     ],
   );
 
-  const selectMentionSuggestion = React.useCallback(
+  const commitMentionSuggestion = React.useCallback(
     (suggestion: MentionSuggestion) => {
+      if (canCommitSelectionRef.current?.() === false) return;
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
       if (suggestion.isAgent && pubkey && audienceScope) {
         const { cursor } = richText.getPlainTextAndCursor();
@@ -339,6 +352,44 @@ export function useAgentAddressLockPicker({
       onPulseAddressLock,
       richText.getPlainTextAndCursor,
       trackMentionAddressedAgent,
+    ],
+  );
+
+  const selectMentionSuggestion = React.useCallback(
+    (suggestion: MentionSuggestion) =>
+      mentions.admitMentionSelection(
+        suggestion,
+        richText.getPlainTextAndCursor,
+        () => commitMentionSuggestion(suggestion),
+      ),
+    [
+      mentions.admitMentionSelection,
+      richText.getPlainTextAndCursor,
+      commitMentionSuggestion,
+    ],
+  );
+  const toggleAlwaysAddressAgent = React.useCallback(
+    (
+      suggestion: MentionSuggestion,
+      options: { preserveMention?: boolean; owner?: MentionAdmissionOwner } = {},
+    ) => {
+      // Removal is always available, including after authority is revoked.
+      if (lockedAgentPubkeys.has(normalizePubkey(suggestion.pubkey ?? ""))) {
+        commitToggleAlwaysAddressAgent(suggestion, options);
+        return;
+      }
+      return mentions.admitMentionSelection(
+        suggestion,
+        richText.getPlainTextAndCursor,
+        () => commitToggleAlwaysAddressAgent(suggestion, options),
+        options.owner,
+      );
+    },
+    [
+      lockedAgentPubkeys,
+      mentions.admitMentionSelection,
+      richText.getPlainTextAndCursor,
+      commitToggleAlwaysAddressAgent,
     ],
   );
 

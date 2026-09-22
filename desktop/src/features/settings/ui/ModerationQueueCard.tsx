@@ -1,3 +1,4 @@
+import { refreshDirectoryAfterMembershipChange } from "@/features/channels/membershipDirectorySync";
 import { useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ChevronDown, ShieldAlert } from "lucide-react";
 import { useMemo } from "react";
@@ -414,6 +415,7 @@ function QueueTab() {
       // 9040/9005/9001 lands do we resolve every open report about this target.
       await enforceResolution(group, action, banMutation.mutateAsync);
       if (action === "kick" && group.channelId != null) {
+        refreshDirectoryAfterMembershipChange(queryClient);
         // The kick writes the roster directly (no member mutation); without
         // this, the kicked identity stays in the cached roster for the
         // freshness window.

@@ -430,8 +430,21 @@ for (const stage of ["add", "publish"] as const) {
         await expect(
           page.getByRole("button", { name: "Remove attachment" }),
         ).toBeVisible();
-      if (replacement !== null)
+      if (replacement === "") {
+        // Native Select All updates the editor selection synchronously; fill("")
+        // instead races a synthetic DOM Range against selectionchange/Delete.
+        const input = page.getByTestId("message-input");
+        const selectAll = await page.evaluate(() =>
+          /mac|iphone|ipad|ipod/i.test(navigator.platform)
+            ? "Meta+A"
+            : "Control+A",
+        );
+        await input.press(selectAll);
+        await input.press("Delete");
+        await expect(input).toHaveText("");
+      } else if (replacement !== null) {
         await page.getByTestId("message-input").fill(replacement);
+      }
       await navigate(1);
       await releaseForumGate(page);
       expect(

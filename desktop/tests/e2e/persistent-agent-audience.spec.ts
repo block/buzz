@@ -601,7 +601,14 @@ test("the mention button opens settings and can undo an address", async ({
   await expect(
     composer.getByRole("button", { name: "Mention someone" }),
   ).toBeVisible();
-  await input.fill("");
+  // Delete a genuinely selected editor document, not fill("")'s DOM-only
+  // Range that can race selectionchange and leave the old draft untouched.
+  const selectAll = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform) ? "Meta+A" : "Control+A",
+  );
+  await input.press(selectAll);
+  await input.press("Delete");
+  await expect(input).toHaveText("");
 
   await menu
     .getByRole("button", { name: "Mention Morgarita", exact: true })

@@ -325,3 +325,34 @@ test("same-name teammates are bound sequentially without replacing either recipi
     ["first", "second"],
   );
 });
+
+test("production Enter/Tab selection uses only the displayed identity and never pending reranking", async () => {
+  const { displayedMentionChoice } = await import(
+    "./displayedMentionChoice.ts"
+  );
+  const rows = [{ pubkey: "displayed-a" }, { pubkey: "displayed-b" }];
+  for (const key of ["Enter", "Tab"]) {
+    const event = {
+      key,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+    };
+    assert.equal(
+      displayedMentionChoice(event, rows, 1, false).suggestion,
+      rows[1],
+    );
+    assert.deepEqual(displayedMentionChoice(event, rows, 1, true), {
+      handled: true,
+      suggestion: undefined,
+    });
+    for (const modifier of ["ctrlKey", "metaKey", "altKey", "shiftKey"]) {
+      assert.equal(
+        displayedMentionChoice({ ...event, [modifier]: true }, rows, 1, false)
+          .handled,
+        false,
+      );
+    }
+  }
+});

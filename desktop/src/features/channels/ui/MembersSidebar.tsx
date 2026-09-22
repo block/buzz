@@ -1,3 +1,4 @@
+import { refreshDirectoryAfterMembershipChange } from "@/features/channels/membershipDirectorySync";
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { UserRoundPlus, X } from "lucide-react";
@@ -576,6 +577,8 @@ export function MembersSidebar({
           await attachManagedAgentToChannel(channelId, {
             agent: managedAgent,
             ensureRunning: true,
+            onMembershipAdded: () =>
+              refreshDirectoryAfterMembershipChange(queryClient),
           });
           await invalidateChannelState(queryClient, channelId);
         } catch (error) {

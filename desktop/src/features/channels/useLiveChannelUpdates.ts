@@ -18,6 +18,7 @@ import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
+  KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import {
@@ -25,6 +26,7 @@ import {
   type TrailingDebounce,
 } from "@/shared/lib/trailingDebounce";
 
+import { refreshDirectoryAfterMembershipChange } from "./membershipDirectorySync";
 import { isDmNotifiableKind } from "./isDmNotifiableKind";
 import { refreshChannelsWhenIdle } from "./refreshChannelsWhenIdle";
 
@@ -332,6 +334,22 @@ export function useLiveChannelUpdates(
         ) {
           options.onThreadReplyDesktopNotification?.(channelId, event);
         }
+      }
+    }
+
+    // Background membership changes must also retire stale directory evidence.
+    if (event.kind === KIND_SYSTEM_MESSAGE) {
+      try {
+        const payload = JSON.parse(event.content) as { type?: string };
+        if (
+          payload.type === "member_joined" ||
+          payload.type === "member_left" ||
+          payload.type === "member_removed"
+        ) {
+          refreshDirectoryAfterMembershipChange(queryClient, event.id);
+        }
+      } catch {
+        // Non-JSON system messages do not describe membership changes.
       }
     }
 

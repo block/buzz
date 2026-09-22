@@ -1,3 +1,4 @@
+import { useMentionAdmissionEditor } from "@/features/messages/lib/useMentionAdmissionEditor";
 import * as React from "react";
 import { EditorContent } from "@tiptap/react";
 import {
@@ -313,6 +314,12 @@ function MessageComposerImpl({
       }
     },
   });
+  useMentionAdmissionEditor(
+    richText.editor,
+    formRef,
+    mentions.cancelMentionAutocomplete,
+    mentions.onMentionEditorSelectionChange,
+  );
   const linkEditor = useLinkEditor(richText);
   syncContentRefFromEditorRef.current = () => {
     const markdown = richText.getMarkdown();
@@ -349,6 +356,8 @@ function MessageComposerImpl({
   });
   const addressedMentionRestore = useAddressedAgentMentionRestore({
     audiencePubkeys: persistentAudience.pubkeys,
+    audienceScope,
+    getComposerRevision,
     channelId,
     enabled: keepMentionedAgentsPinned,
   });
@@ -458,6 +467,7 @@ function MessageComposerImpl({
     toggleAlwaysAddressAgent,
   } = useAgentAddressLockPicker({
     applyAutocompleteEdit,
+    canCommitSelection: () => !isSubmitLockedRef.current && !composerDisabled,
     audience: persistentAudience,
     audienceScope,
     mentions,
@@ -628,6 +638,7 @@ function MessageComposerImpl({
     ) {
       return;
     }
+    mentions.cancelMentionAutocomplete();
     isSubmitLockedRef.current = true;
     setIsSubmitLocked(true);
     onPreparingMentionSendChange?.(true);
@@ -675,6 +686,7 @@ function MessageComposerImpl({
     mentionSendFlow.isPreparingMentionSend,
     mentionSendFlow.sendMessageWithMentionFlow,
     mentions.clearMentions,
+    mentions.cancelMentionAutocomplete,
     richText.clearContent,
     richText.setContent,
     setComposerContent,

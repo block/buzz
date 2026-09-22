@@ -36,6 +36,8 @@ export type AttachManagedAgentToChannelInput = {
   agent: ManagedAgent;
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
+  /** Called immediately after accepted membership, before a possible start failure. */
+  onMembershipAdded?: () => void;
   /**
    * When set, a needed start/deploy is handed to this callback instead of
    * being awaited: the attach resolves as soon as the membership write lands
@@ -58,6 +60,8 @@ export type EnsureChannelAgentPresetInput = {
   runtime: ChannelAgentRuntime;
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
+  /** Called immediately after accepted membership, before a possible start failure. */
+  onMembershipAdded?: () => void;
 };
 
 export type EnsureChannelAgentPresetResult =
@@ -85,6 +89,8 @@ export type CreateChannelManagedAgentInput = {
   model?: string;
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
+  /** Called immediately after accepted membership, before a possible start failure. */
+  onMembershipAdded?: () => void;
   backend?: ManagedAgentBackend;
   /**
    * Inbound author gate mode. Omitted = linked persona default, then
@@ -180,6 +186,7 @@ export async function attachManagedAgentToChannel(
     pubkeys: [input.agent.pubkey],
     role,
   });
+  if (membershipResult.added.length > 0) input.onMembershipAdded?.();
   const membershipError = membershipResult.errors.find(
     (error) => normalizePubkey(error.pubkey) === agentPubkey,
   );
@@ -285,6 +292,7 @@ export async function ensureChannelAgentPresetInChannel(
       agent: existingAgent,
       role,
       ensureRunning,
+      onMembershipAdded: input.onMembershipAdded,
     });
     return {
       ...attached,
@@ -307,6 +315,7 @@ export async function ensureChannelAgentPresetInChannel(
     agent: created.agent,
     role,
     ensureRunning,
+    onMembershipAdded: input.onMembershipAdded,
   });
 
   return {
@@ -438,6 +447,7 @@ export async function createChannelManagedAgent(
     role: input.role ?? "bot",
     ensureRunning: input.ensureRunning ?? true,
     detachedStart: input.detachedStart,
+    onMembershipAdded: input.onMembershipAdded,
   });
 
   return {

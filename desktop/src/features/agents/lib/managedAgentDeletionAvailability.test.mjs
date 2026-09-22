@@ -467,3 +467,47 @@ test("successful cached snapshot remains authoritative during refetch; only sett
   });
   assert.equal(surface.current().getAvailability(PK), undefined);
 });
+
+for (const owner of ["agents", "profile"]) {
+  test(`${owner} cleanup retires admission per accepted removal while another removal is pending or rejected`, async (t) => {
+    const { getMembershipAdmissionEpoch } = await import(
+      "../../channels/membershipDirectorySync.ts"
+    );
+    setup();
+    directory[0].channelIds = ["channel", "second-channel"];
+    t.after(() => {
+      directory[0].channelIds = ["channel"];
+    });
+    handlers.set("get_presence", () => ({ [PK]: "offline" }));
+    const removals = new Map();
+    handlers.set(
+      "remove_channel_member",
+      ({ channelId }) =>
+        new Promise((resolve, reject) => {
+          removals.set(channelId, { resolve, reject });
+        }),
+    );
+    const surface = mount(owner);
+    await waitFor(() =>
+      assert.equal(surface.current().getAvailability(PK), "offline"),
+    );
+    let pending;
+    act(() => {
+      pending =
+        owner === "agents"
+          ? surface.current().handleDelete(PK)
+          : surface.current().deleteManagedAgentRecord(agent);
+    });
+    await waitFor(() => assert.equal(removals.size, 2));
+    const before = getMembershipAdmissionEpoch();
+    await act(async () => {
+      removals.get("channel").resolve();
+    });
+    assert.equal(getMembershipAdmissionEpoch(), before + 1);
+    await act(async () => {
+      removals.get("second-channel").reject(new Error("removal denied"));
+      await pending;
+    });
+    assert.equal(getMembershipAdmissionEpoch(), before + 1);
+  });
+}

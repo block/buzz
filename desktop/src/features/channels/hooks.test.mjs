@@ -372,3 +372,125 @@ test("invalidateChannelMembersRosters dedupes and targets member keys", async ()
     ["channels", "ch-b", "members"],
   ]);
 });
+
+// Exercise public mutation hooks, including native acceptance, rather than
+// calling the directory invalidator directly.
+test("accepted membership mutations retire directory reads; rejected/no-op adds do not", async () => {
+  const { JSDOM } = await import("jsdom");
+  const React = await import("react");
+  const { QueryClientProvider } = await import("@tanstack/react-query");
+  const hooks = await import("./hooks.ts");
+  const { resetMembershipDirectorySync } = await import(
+    "./membershipDirectorySync.ts"
+  );
+  const dom = new JSDOM("<!doctype html><html><body></body></html>");
+  Object.assign(globalThis, {
+    document: dom.window.document,
+    window: dom.window,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const { act, renderHook, cleanup } = await import("@testing-library/react");
+  const cases = [
+    [
+      "useAddChannelMembersMutation",
+      "add_channel_members",
+      { pubkeys: ["peer"], role: "member", channelId: "captured" },
+      { added: ["peer"], errors: [] },
+    ],
+    [
+      "useRemoveChannelMemberMutation",
+      "remove_channel_member",
+      "peer",
+      undefined,
+    ],
+    ["useJoinChannelMutation", "join_channel", undefined, undefined],
+    ["useLeaveChannelMutation", "leave_channel", undefined, undefined],
+  ];
+  try {
+    for (const [hookName, command, input, response] of cases) {
+      for (const accepted of [false, true]) {
+        const client = new QueryClient({
+          defaultOptions: {
+            queries: { retry: false, gcTime: Infinity },
+            mutations: { retry: false },
+          },
+        });
+        client.setQueryData(["relay-agents"], ["old"]);
+        const oldRead = deferred();
+        const reading = client
+          .fetchQuery({
+            queryKey: ["relay-agents"],
+            queryFn: () => oldRead.promise,
+            staleTime: 0,
+          })
+          .catch(() => undefined);
+        const calls = [];
+        dom.window.__TAURI_INTERNALS__ = {
+          invoke: async (name, args) => {
+            calls.push([name, args]);
+            assert.equal(name, command);
+            if (!accepted) throw new Error("denied");
+            return response;
+          },
+        };
+        const hook = renderHook(() => hooks[hookName]("channel"), {
+          wrapper: ({ children }) =>
+            React.createElement(QueryClientProvider, { client }, children),
+        });
+        try {
+          await act(async () => {
+            if (accepted) await hook.result.current.mutateAsync(input);
+            else await assert.rejects(hook.result.current.mutateAsync(input));
+          });
+          assert.equal(calls.length, 1);
+          assert.equal(calls[0][1].channelId, input?.channelId ?? "channel");
+          assert.equal(
+            client.getQueryState(["relay-agents"]).isInvalidated,
+            accepted,
+            `${hookName}: accepted=${accepted}`,
+          );
+          oldRead.resolve(["stale-positive"]);
+          await reading;
+          assert.deepEqual(
+            client.getQueryData(["relay-agents"]),
+            accepted ? ["old"] : ["stale-positive"],
+          );
+        } finally {
+          hook.unmount();
+          resetMembershipDirectorySync();
+          client.clear();
+        }
+      }
+    }
+    const client = new QueryClient();
+    client.setQueryData(["relay-agents"], []);
+    dom.window.__TAURI_INTERNALS__.invoke = async () => ({
+      added: [],
+      errors: [{ pubkey: "peer", error: "denied" }],
+    });
+    const hook = renderHook(
+      () => hooks.useAddChannelMembersMutation("channel"),
+      {
+        wrapper: ({ children }) =>
+          React.createElement(QueryClientProvider, { client }, children),
+      },
+    );
+    try {
+      await act(async () => {
+        await hook.result.current.mutateAsync({
+          pubkeys: ["peer"],
+          role: "member",
+        });
+      });
+      assert.equal(client.getQueryState(["relay-agents"]).isInvalidated, false);
+    } finally {
+      hook.unmount();
+      client.clear();
+    }
+  } finally {
+    cleanup();
+    resetMembershipDirectorySync();
+    dom.window.close();
+  }
+});

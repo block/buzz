@@ -94,6 +94,10 @@
 
 .rich-text-composer .tiptap {
   @apply text-message font-normal tracking-normal;
+  /* Editing whitespace is an application invariant, not a mounted editor's
+     shared runtime stylesheet: that sheet can disappear during route remounts.
+     Collapsing trailing spaces joins selected mention labels to the next word. */
+  white-space: break-spaces;
   outline: none;
   min-height: 1lh;
   padding-block: 0.0625rem;
