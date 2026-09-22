@@ -9,7 +9,10 @@ import type { AgentModelsResponse, ManagedAgent } from "@/shared/api/types";
 import { getAgentModels, updateManagedAgent } from "@/shared/api/tauri";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { awaitLiveSwitchOutcome } from "@/features/agents/lib/liveSwitchOutcome";
-import { subscribeControlResults } from "@/features/agents/observerRelayStore";
+import {
+  ensureRelayObserverSubscription,
+  subscribeControlResults,
+} from "@/features/agents/observerRelayStore";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import {
   useAgentConfigSurface,
@@ -128,6 +131,7 @@ export function ModelPicker({
         subscribe: (listener) =>
           subscribeControlResults(agent.pubkey, listener),
         sendSwitches: async () => {
+          await ensureRelayObserverSubscription();
           await Promise.all(
             channelIds.map((channelId) =>
               switchManagedAgentModel(

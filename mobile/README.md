@@ -2,6 +2,9 @@
 
 Flutter mobile client for Buzz.
 
+See [VISION_MOBILE.md](../VISION_MOBILE.md) for intended behavior and
+architecture.
+
 ## Setup
 
 Use the Flutter SDK pinned by the repository. Activate Hermit from the repo

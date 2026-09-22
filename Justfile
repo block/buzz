@@ -365,6 +365,7 @@ test-unit:
     ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        cargo nextest run -p buzz-audit --lib
         # buzz-auth NIP-FI verifier doctests. The sealed-authority
         # `compile_fail` doctests prove the default-feature public API alone
         # cannot forge the issuer→JWKS authority; nextest does not run
@@ -390,7 +391,7 @@ test-unit:
         cargo nextest run -p buzz-media --lib \
             -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys)'
         cargo nextest run -p buzz-admin \
-            -E 'test(=storage_snapshot_tests::failed_fold_never_invokes_snapshot_persistence)'
+            -E 'test(storage_snapshot)'
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the
