@@ -68,6 +68,16 @@ fn relay_readme_documents_fail_closed_launchdarkly_startup_contract() {
         "README.md must show LaunchDarkly startup via start_with_default_executor_and_wait"
     );
     assert!(
+        readme.contains("async fn build_feature_flag_evaluator"),
+        "README.md must declare LaunchDarkly build_feature_flag_evaluator as async"
+    );
+    assert!(
+        readme.contains(
+            "start_with_default_executor_and_wait(Duration::from_secs(5))\n        .await"
+        ),
+        "README.md must await start_with_default_executor_and_wait"
+    );
+    assert!(
         readme.contains("fail-closed"),
         "README.md must state fail-closed startup policy"
     );

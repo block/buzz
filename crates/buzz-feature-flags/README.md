@@ -150,7 +150,7 @@ fn build_feature_flag_evaluator(config: FeatureFlagRuntimeConfig) -> RelayCompos
 }
 
 #[cfg(feature = "launchdarkly-feature-flags")]
-fn build_feature_flag_evaluator(
+async fn build_feature_flag_evaluator(
     config: FeatureFlagRuntimeConfig,
 ) -> Result<RelayCompositionRoot, RelayStartupError> {
     let mut runtime_config = LaunchDarklyRuntimeConfig::new(config.sdk_key);
@@ -164,6 +164,7 @@ fn build_feature_flag_evaluator(
     );
     owner
         .start_with_default_executor_and_wait(Duration::from_secs(5))
+        .await
         .map_err(RelayStartupError::LaunchDarklyStart)?;
 
     let feature_flags: Arc<dyn FlagEvaluator> = owner.clone();
