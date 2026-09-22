@@ -6094,6 +6094,11 @@ mod owner_control_command_tests {
             // words between the mention and the command are treated as part
             // of the mention text.
             "@Fountain Maintainer please !rotate",
+            // Desktop qualifies a label with the pubkey when two selected
+            // mentions share a display name, and one message may address
+            // several agents; each agent still needs its own p tag.
+            "@Fountain Maintainer (abababab) !rotate",
+            "@Fountain Maintainer @Other Agent !rotate",
         ] {
             assert!(
                 control_command_content_matches(content, "!rotate"),
