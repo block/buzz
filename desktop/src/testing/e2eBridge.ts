@@ -1253,6 +1253,8 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    /** Seed the image `read_clipboard_image` returns, as raw PNG bytes. */
+    __BUZZ_E2E_SET_MOCK_CLIPBOARD_IMAGE__?: (png: number[] | null) => void;
     /** Release a mock media proxy held at port 0 and return its ready port. */
     __BUZZ_E2E_RELEASE_MEDIA_PROXY__?: () => number;
     /** Release mock send events that were stored but withheld from live subscribers. */
@@ -1639,6 +1641,9 @@ const CHANNEL_WINDOW_AUX_DELETION_KINDS = new Set([
 // asserts against this exact port.
 const MOCK_MEDIA_PROXY_PORT = 54321;
 let mockMediaProxyPort = MOCK_MEDIA_PROXY_PORT;
+
+/** PNG bytes `read_clipboard_image` returns; seeded per spec. */
+let mockClipboardImagePng: ArrayBuffer | null = null;
 
 // A relay-hosted custom emoji used by the reaction guard. Its URL matches
 // `rewriteRelayUrl()`'s `/media/{64-hex}.{ext}` pattern on the relay origin, so
@@ -11562,6 +11567,9 @@ export function maybeInstallE2eTauriMocks() {
     persistMockHuddle();
     await emitMockHuddleState();
   };
+  window.__BUZZ_E2E_SET_MOCK_CLIPBOARD_IMAGE__ = (png) => {
+    mockClipboardImagePng = png ? new Uint8Array(png).buffer : null;
+  };
   window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ = ({
     channelName,
     content,
@@ -14569,6 +14577,10 @@ export function maybeInstallE2eTauriMocks() {
         return;
       case "read_clipboard_text":
         return navigator.clipboard.readText();
+      case "read_clipboard_image":
+        return mockClipboardImagePng
+          ? mockClipboardImagePng.slice(0)
+          : new ArrayBuffer(0);
       case "get_event":
         return handleGetEvent(
           payload as Parameters<typeof handleGetEvent>[0],
