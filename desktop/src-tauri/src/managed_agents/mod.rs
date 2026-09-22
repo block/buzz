@@ -102,6 +102,10 @@ pub use repos::{
     write_persisted_repos_dir,
 };
 pub use restore::*;
+pub(crate) use runtime::provider_env::{
+    merge_runtime_provider_env_layers, provider_is_http_base_url, validate_provider_env_urls,
+    validate_provider_value,
+};
 pub use runtime::*;
 pub use runtime_commands::*;
 pub use runtime_types::*;
