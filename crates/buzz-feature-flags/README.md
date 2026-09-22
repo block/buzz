@@ -42,7 +42,9 @@ For each flag key:
 Example: `relay.feature.query-v2` → `BUZZ_FEATURE_FLAG_RELAY_FEATURE_QUERY_V2`.
 
 Normalized names must be unique across declared flags. Collisions (for example
-`a-b` and `a_b`) intentionally map to the same environment variable.
+`a-b` and `a_b`) intentionally map to the same environment variable. Enforcing
+uniqueness belongs in a future flag registry; this crate does not add a
+registry yet.
 
 ## Relay Artifact Contract (not yet wired into `buzz-relay`)
 
@@ -59,9 +61,10 @@ exactly one provider at compile time:
 allow adapter code to compile in tests.
 
 The relay artifact boundary, not this reusable crate, owns exact-one
-enforcement. That keeps `buzz-feature-flags` free to compile multiple adapters
-for tests while ensuring a staging or production relay artifact cannot choose a
-different evaluator at runtime.
+enforcement. Consumer integration PRs must carry `exact-one compile_error guards`
+verbatim/equivalently. That keeps `buzz-feature-flags` free to compile multiple
+adapters for tests while ensuring a staging or production relay artifact cannot
+choose a different evaluator at runtime.
 
 This repository currently adds the crate and adapter, but does **not** yet wire
 relay `AppState` or handlers to consume it. `crates/buzz-relay/Cargo.toml`
@@ -77,11 +80,13 @@ into server components.
 
 ```rust
 use std::sync::Arc;
+use std::time::Duration;
 
 use buzz_feature_flags::{EnvironmentEvaluator, FlagEvaluator, StaticEvaluator};
 #[cfg(feature = "launchdarkly-feature-flags")]
 use buzz_feature_flags::launchdarkly::{
     LaunchDarklyEvaluator, LaunchDarklyInitError, LaunchDarklyRuntimeConfig,
+    LaunchDarklyStartError,
 };
 
 #[cfg(not(any(
@@ -119,6 +124,12 @@ struct RelayCompositionRoot {
     launchdarkly_lifecycle: Option<Arc<LaunchDarklyEvaluator>>,
 }
 
+#[cfg(feature = "launchdarkly-feature-flags")]
+enum RelayStartupError {
+    LaunchDarklyInit(LaunchDarklyInitError),
+    LaunchDarklyStart(LaunchDarklyStartError),
+}
+
 #[cfg(feature = "static-feature-flags")]
 fn build_feature_flag_evaluator(_config: FeatureFlagRuntimeConfig) -> RelayCompositionRoot {
     RelayCompositionRoot {
@@ -141,13 +152,20 @@ fn build_feature_flag_evaluator(config: FeatureFlagRuntimeConfig) -> RelayCompos
 #[cfg(feature = "launchdarkly-feature-flags")]
 fn build_feature_flag_evaluator(
     config: FeatureFlagRuntimeConfig,
-) -> Result<RelayCompositionRoot, LaunchDarklyInitError> {
+) -> Result<RelayCompositionRoot, RelayStartupError> {
     let mut runtime_config = LaunchDarklyRuntimeConfig::new(config.sdk_key);
     if let Some(relay_proxy_endpoint) = config.relay_proxy_endpoint {
         runtime_config = runtime_config.with_relay_proxy_endpoint(relay_proxy_endpoint);
     }
 
-    let owner = Arc::new(LaunchDarklyEvaluator::from_runtime_config(runtime_config)?);
+    let owner = Arc::new(
+        LaunchDarklyEvaluator::from_runtime_config(runtime_config)
+            .map_err(RelayStartupError::LaunchDarklyInit)?,
+    );
+    owner
+        .start_with_default_executor_and_wait(Duration::from_secs(5))
+        .map_err(RelayStartupError::LaunchDarklyStart)?;
+
     let feature_flags: Arc<dyn FlagEvaluator> = owner.clone();
     Ok(RelayCompositionRoot {
         feature_flags,
@@ -161,6 +179,10 @@ Each relay feature produces exactly one `build_feature_flag_evaluator` path, and
 runtime config carries only the selected provider's settings. There is no
 runtime provider enum, no provider-name environment variable, and no fallback
 selector.
+
+Startup is fail-closed: if the selected provider fails initialization (including
+`start_with_default_executor_and_wait` for LaunchDarkly), relay startup must
+return an error and stop rather than falling back to another evaluator.
 
 The extra concrete `Arc` is an owner/lifecycle handle to that same evaluator,
 not a layered provider. Consumers receive only the cloned `Arc<dyn
@@ -286,6 +308,13 @@ Testing expectations:
 - Run the relay-artifact compile contract in
   `tests/relay_feature_selection_contract.rs`, including zero-feature and
   multiple-feature rejection.
+- Keep `tests/fixtures/relay-feature-selection/Cargo.lock` checked in for the
+  nested `--locked` compile contract. Regenerate it from repo root with:
+
+```bash
+cargo generate-lockfile --manifest-path crates/buzz-feature-flags/tests/fixtures/relay-feature-selection/Cargo.toml
+```
+
 - When `buzz-db` adopts flag-gated query selection, add parity tests proving
   old/new query paths return equivalent rows, ordering, and transactional
   behavior for the same inputs.

@@ -6,12 +6,19 @@ use std::{
 };
 use tempfile::TempDir;
 
+const FIXTURE_LOCK_REGEN_RECIPE: &str =
+    "cargo generate-lockfile --manifest-path crates/buzz-feature-flags/tests/fixtures/relay-feature-selection/Cargo.toml";
+
 fn fixture_manifest() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/relay-feature-selection/Cargo.toml")
 }
 
 fn fixture_lockfile() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/relay-feature-selection/Cargo.lock")
+}
+
+fn crate_readme() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")
 }
 
 fn cargo_bin() -> OsString {
@@ -36,14 +43,49 @@ fn cargo_check(target_dir: &Path, case_name: &str, features: &[&str]) -> std::pr
 
     command
         .output()
-        .unwrap_or_else(|error| panic!("failed to run cargo check for {case_name}: {error}"))
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to run cargo check for {case_name}: {error}\nfixture lock regeneration recipe: `{FIXTURE_LOCK_REGEN_RECIPE}`"
+            )
+        })
+}
+
+#[test]
+fn relay_fixture_lock_regeneration_recipe_is_documented() {
+    let readme = std::fs::read_to_string(crate_readme()).expect("read crate README");
+    assert!(
+        readme.contains(FIXTURE_LOCK_REGEN_RECIPE),
+        "README.md must document fixture lock regeneration with `{FIXTURE_LOCK_REGEN_RECIPE}`"
+    );
+}
+
+#[test]
+fn relay_readme_documents_fail_closed_launchdarkly_startup_contract() {
+    let readme = std::fs::read_to_string(crate_readme()).expect("read crate README");
+
+    assert!(
+        readme.contains("start_with_default_executor_and_wait"),
+        "README.md must show LaunchDarkly startup via start_with_default_executor_and_wait"
+    );
+    assert!(
+        readme.contains("fail-closed"),
+        "README.md must state fail-closed startup policy"
+    );
+    assert!(
+        readme.contains("exact-one compile_error guards"),
+        "README.md must require exact-one compile_error guards in the consumer"
+    );
+    assert!(
+        readme.contains("future flag registry"),
+        "README.md must defer environment-name uniqueness enforcement to a future registry"
+    );
 }
 
 #[test]
 fn relay_artifact_provider_features_require_exactly_one_selection() {
     assert!(
         fixture_lockfile().is_file(),
-        "relay feature selection fixture must check in Cargo.lock for locked nested cargo runs"
+        "relay feature selection fixture must check in Cargo.lock for locked nested cargo runs\nregenerate it with `{FIXTURE_LOCK_REGEN_RECIPE}`"
     );
 
     let target_dir = TempDir::new().expect("temp target dir");

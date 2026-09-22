@@ -1249,6 +1249,7 @@ name = "buzz-feature-flags"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "http",
  "launchdarkly-server-sdk",
  "tempfile",
  "thiserror 2.0.18",
