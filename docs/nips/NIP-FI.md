@@ -119,8 +119,11 @@ Community resolution MUST precede assertion verification.  The relay MUST resolv
 connection's `Host` to exactly one community, its expected audience, and its
 configured issuer allowlist; an unknown or unresolvable host, or unavailable
 community configuration, MUST fail closed with `authorization_unavailable`.
-After signature verification selects the exact issuer policy by `iss`, the relay
-MUST require that issuer to be authorized for the resolved community.
+After bounded decoding looks up the exact issuer policy by `iss`, the relay MUST
+immediately require that issuer to be authorized for the resolved community
+before touching any issuer-specific dependency, including JWKS.  An untrusted
+`iss` is used only to select or reject a candidate policy; it grants no
+authority.  Signature verification remains mandatory before acceptance.
 `VerifyAssertion` MUST compare `aud` with the resolved community's expected
 audience; issuer policy selection by `iss` MUST NOT broaden either binding.
 
@@ -226,9 +229,10 @@ VerifyAssertion(token, community, D, R_t):
   // it contains `expected_aud` and the authorized issuer URI allowlist.
   AssertCommunityConfig(community) or DENY(authorization_unavailable)
 
-  // 1. Select issuer policy
+  // 1. Select issuer policy and authorize it for this community
   (header, claims) := BoundedJwsDecode(token) or DENY(evidence_rejected)
   policy := IssuerRegistry[claims.iss] or DENY(evidence_rejected)
+  AssertIssuerAuthorized(policy.iss, community.authorized_issuers) or DENY(evidence_rejected)
 
   // 2. Validate token class, typ, and algorithm
   ValidateTokenClass(policy, header) or DENY(evidence_rejected)
@@ -239,9 +243,8 @@ VerifyAssertion(token, community, D, R_t):
   key := snapshot.find(header.kid) or DENY(evidence_rejected)
   VerifySignature(token, key) or DENY(evidence_rejected)
 
-  // 4. Validate claims against the resolved community and issuer policy
+  // 4. Validate remaining claims against the resolved community and issuer policy
   AssertExactIss(claims.iss, policy.iss) or DENY(evidence_rejected)
-  AssertIssuerAuthorized(policy.iss, community.authorized_issuers) or DENY(evidence_rejected)
   AssertAudienceMatch(claims.aud, community.expected_aud) or DENY(evidence_rejected)
   AssertTimeBounds(claims, policy) or DENY(evidence_rejected)  // [FI-TRACE-ASSERTION-VALIDATION]
   k_claimed := ParseHexKey(claims.nostr_pubkey) or DENY(evidence_rejected)
@@ -251,8 +254,9 @@ VerifyAssertion(token, community, D, R_t):
 ```
 
 The verifier is **fail-closed**: any unreadable, missing, ambiguous, or
-expired input denies.  A missing JWKS snapshot denies with
-`authorization_unavailable`; all other failures deny with `evidence_rejected`.
+expired input denies.  A missing or unavailable JWKS snapshot or community
+configuration denies with `authorization_unavailable`; all other failures deny
+with `evidence_rejected`.
 [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
 
 ### Admission at connection
@@ -275,11 +279,14 @@ On WebSocket upgrade:
    ensures any connection that straddles a concurrent disconnect is caught by
    one side or the other: either the close scan sees the registered session, or
    the deny-set check (step 7) sees the inserted entry.  Both checks use the
-   same `(iss, k)` key.
+   same `(iss, k)` key.  A concurrent disconnect close scan MAY cancel this
+   registered connection before step 8; cancellation is terminal, so a
+   cancelled connection MUST NOT be admitted.
 7. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
    `authorization_denied`.  [FI-TRACE-DENY-SET]
-8. Admit the connection.  The session's authority deadline is the minimum of all
-   `authority_deadlines`; see Session policy.
+8. Admit the connection only if it remains live and uncancelled.  The session's
+   authority deadline is the minimum of all `authority_deadlines`; see Session
+   policy.
 
 ## Session policy
 
@@ -343,9 +350,11 @@ A disconnect call causes the relay to:
    denied `authorization_denied` until `now >= until`.  If the deny set is at
    capacity and a new entry cannot be inserted, the relay MUST reject the command
    `503`; no sessions are closed and no replay state is consumed.
-2. Close all live WebSocket connections admitted under the command's
-   issuer whose proven `k` equals the target pubkey, synchronously.  Sessions
-   admitted under another issuer are not affected.
+2. Close all live WebSocket connections registered under the command's issuer
+   whose proven `k` equals the target pubkey, whether or not admission has
+   completed, synchronously.  Disconnect cancellation is terminal: a cancelled
+   in-progress connection MUST NOT be subsequently admitted.  Connections
+   registered under another issuer are not affected.
 
 The deny set is held **in relay memory only** — no durable storage, no schema
 changes.  A relay restart MAY forget active deny entries.  If the issuer stops
@@ -545,13 +554,15 @@ performs all pure authorization checks and then, as its single atomic admission
 mutation (step 7), simultaneously reserves the `(iss, jti)` replay identity and
 inserts the deny entry — both or neither.  A capacity failure at that step rejects
 `503`; neither the jti nor the deny entry is recorded, and the caller may safely
-retry the same signed command.  On success, the relay closes all live sessions
-admitted under the command's issuer (`claims.iss`) whose proven `k` equals
-`CommandResult.target_pubkey`.  This close scan matches the same
-`(iss, target_pubkey)` key as the deny entry; sessions admitted under another
-issuer are not affected.  The `until` expiry is taken exclusively from the
-signed command JWT claim; the request body carries no `until` field.  An unknown
-or unprovable pubkey is not an error; the relay responds `200`
+retry the same signed command.  On success, the relay closes all live connections
+registered under the command's issuer (`claims.iss`) whose proven `k` equals
+`CommandResult.target_pubkey`, whether or not admission has completed.
+Disconnect cancellation is terminal: a cancelled in-progress connection MUST NOT
+be subsequently admitted.  This close scan matches the same
+`(iss, target_pubkey)` key as the deny entry; connections registered under
+another issuer are not affected.  The `until` expiry is taken exclusively from
+the signed command JWT claim; the request body carries no `until` field.  An
+unknown or unprovable pubkey is not an error; the relay responds `200`
 with `{"disconnected": true}`.  An `until` value in the past is not an error;
 sessions are closed.  Absent an active same-key deny entry the past-`until`
 creates no future denial; if an active entry already exists it remains unchanged
@@ -824,8 +835,8 @@ is unavailable.
 | Private condition | Public class | Nostr text | HTTP response |
 |---|---|---|---|
 | assertion or proof absent | `missing_evidence` | `auth-required: authentication required` | `401`; `WWW-Authenticate: Nostr`; `Content-Type: text/plain; charset=utf-8`; body `authentication required\n` |
-| malformed, invalid, or expired evidence | `evidence_rejected` | `restricted: evidence rejected` | `403`; `Content-Type: text/plain; charset=utf-8`; body `evidence rejected\n` |
-| assertion–key mismatch; local policy denial; active deny-set entry for pubkey | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; body `authorization denied\n` |
+| unknown or community-unauthorized issuer; malformed, invalid, or expired evidence | `evidence_rejected` | `restricted: evidence rejected` | `403`; `Content-Type: text/plain; charset=utf-8`; body `evidence rejected\n` |
+| assertion–key mismatch; active deny-set entry for pubkey | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; body `authorization denied\n` |
 | required JWKS snapshot or community/Host resolution unavailable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; body `authorization unavailable\n` |
 
 A denial decided on a WebSocket upgrade is the HTTP response in place of `101`.
@@ -897,14 +908,14 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | ID | Required outcome |
 |---|---|
 | `FI-TRACE-TRANSPORT-CLOSED` | Exact one-header input succeeds; missing, repeated, combined, malformed, and fallback variants deny. |
-| `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and missing-configuration negative denies; an issuer authorized only for community A cannot authorize community B merely by signing an assertion with community B's audience; an assertion for community A presented on a `Host` resolved to community B denies on the community binding; an unknown, ambiguous, or unresolvable `Host` denies `authorization_unavailable`. |
+| `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and missing-configuration negative denies; a missing or unavailable community configuration denies `authorization_unavailable`; a known-but-community-unauthorized issuer denies `evidence_rejected` without touching its key source, indistinguishably from an unknown issuer, including when that issuer's snapshot is unavailable; an issuer authorized only for community A cannot authorize community B merely by signing an assertion with community B's audience; an assertion for community A presented on a `Host` resolved to community B denies on the community binding; an unknown, ambiguous, or unresolvable `Host` denies `authorization_unavailable`. |
 | `FI-TRACE-TOKEN-CLASS` | `at+jwt` and `nip-fi+jwt` pass only their selected class; ID tokens, wrong or generic types, and cross-class fallback deny. |
 | `FI-TRACE-ASSERTION-KEY-MISMATCH` | Mismatch between `nostr_pubkey` and the NIP-42 proven key denies with the private-state response. |
 | `FI-TRACE-JWKS-ADD` | A key added to the JWKS is accepted after the next snapshot refresh. |
 | `FI-TRACE-JWKS-REMOVE` | Connections verified under a removed key deny on next revalidation or reconnect. |
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
-| `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions — absent an active same-key entry it creates no future denial, while an active entry remains unchanged under the merge rule; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; capacity is evaluated per issuer — one issuer's capacity exhaustion MUST NOT reject another issuer's command; a connection that passes the deny-set check before a concurrent deny-entry insertion but completes admission after MUST still be terminated (the session's proven `k` and admitting issuer are registered before the deny-set check, ensuring the close scan catches it); a disconnect command from one issuer MUST NOT close a same-key session admitted under a different issuer; two overlapping commands for the same `(iss, pubkey)` in either delivery order result in `until = max(until_A, until_B)` — delivery order does not shorten the longer deny; a past-`until` command arriving over an active entry leaves the active entry's `until` unchanged; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
+| `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions — absent an active same-key entry it creates no future denial, while an active entry remains unchanged under the merge rule; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; capacity is evaluated per issuer — one issuer's capacity exhaustion MUST NOT reject another issuer's command; a connection that passes the deny-set check before a concurrent deny-entry insertion but completes admission after MUST still be terminated (the session's proven `k` and admitting issuer are registered before the deny-set check, ensuring the close scan catches it); a registered-but-not-admitted connection caught by the close scan MUST be cancelled terminally and MUST NOT later be admitted; a disconnect command from one issuer MUST NOT close a same-key session admitted under a different issuer; two overlapping commands for the same `(iss, pubkey)` in either delivery order result in `until = max(until_A, until_B)` — delivery order does not shorten the longer deny; a past-`until` command arriving over an active entry leaves the active entry's `until` unchanged; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
 | `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny `evidence_rejected`; a missing `Authorization` field denies `missing_evidence`; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface.  For kind-24242 (Blossom) proofs on media routes: a `t=upload` proof with valid `x`, `server`, `expiration`, and freshness is admitted on `PUT /upload`; a `t=get` proof with valid `server`, `expiration`, and freshness is admitted on `GET\|HEAD /media/{hash…}`; a kind-24242 proof on any other route denies; an upload proof with absent or mismatched `server` tag denies; a read proof with absent or mismatched `server` tag denies; a proof with a duplicate, missing, or out-of-range `expiration` tag denies; a proof dated more than 5 seconds in the future denies; a proof older than 60 seconds denies; key mismatch between assertion `nostr_pubkey` and the kind-24242 event pubkey denies; an active deny-set entry denies. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
@@ -935,10 +946,13 @@ assertions.  If the issuer continues issuing assertions, access continues.
 
 For the deny-until-TTL disconnect model (issuer issues a successful disconnect
 call with an `until` timestamp), the relay inserts a deny entry for the target
-pubkey with expiry `until` and then closes all matching sessions synchronously.
-Here, matching means sessions admitted under that issuer whose proven `k` equals
-that target pubkey; sessions admitted under another issuer are not affected.  Any
-subsequent admission attempt for that pubkey is denied `authorization_denied`
+pubkey with expiry `until` and then closes all matching connections synchronously.
+Here, matching means connections registered under that issuer whose proven `k`
+equals that target pubkey, whether or not admission has completed; disconnect
+cancellation is terminal, so a cancelled in-progress connection MUST NOT be
+subsequently admitted.  Connections registered under another issuer are not
+affected.  Any subsequent admission attempt for that pubkey under the same issuer
+is denied `authorization_denied`
 until `now >= until`.  The `until` ceiling enforced by the relay is
 `now + skew + maximum_assertion_age`; this limits how long a deny entry may last —
 it does not ensure denial outlasts all live assertions.  A short or past
