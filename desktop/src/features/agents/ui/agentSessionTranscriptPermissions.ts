@@ -1,4 +1,7 @@
-import type { ObserverEvent, PendingPermissionResolution } from "./agentSessionTypes";
+import type {
+  ObserverEvent,
+  PendingPermissionResolution,
+} from "./agentSessionTypes";
 import { asRecord, asString } from "./agentSessionUtils";
 
 export function describePermissionRequest(payload: Record<string, unknown>) {
