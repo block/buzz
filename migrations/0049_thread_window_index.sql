@@ -1,5 +1,5 @@
 -- Newest-first thread keyset index. Additive: legacy root/parent indexes remain.
--- Brownfield operators MUST prebuild concurrently as documented in NIP-TW.
+-- Brownfield operators MUST prebuild concurrently as documented in NIP-CW thread mode.
 -- Startup is deliberately bounded: a busy/large table fails deployment rather
 -- than blocking ingestion for an unbounded index build. Retry after prebuild.
 SET LOCAL lock_timeout = '1s';
@@ -23,6 +23,6 @@ BEGIN
           AND pg_get_indexdef(i.indexrelid) =
               'CREATE INDEX idx_thread_metadata_window ON public.thread_metadata USING btree (community_id, root_event_id, event_created_at DESC, event_id)'
     ) THEN
-        RAISE EXCEPTION 'idx_thread_metadata_window invalid or wrong definition; see NIP-TW index deployment';
+        RAISE EXCEPTION 'idx_thread_metadata_window invalid or wrong definition; see NIP-CW thread-mode deployment';
     END IF;
 END $$;
