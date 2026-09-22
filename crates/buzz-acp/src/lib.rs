@@ -4571,6 +4571,20 @@ fn dispatch_pending(
         queue.requeue_preserve_timestamps(batch);
         queue.mark_complete(scope);
     }
+    // Surface dead-lettered cancelled batches as user-visible failure notices.
+    // They are parked by `flush_next` (never returned as flushable batches, so
+    // they cannot be re-prompted); the notice is what `handle_prompt_result`
+    // would have posted for a normal dead-letter via `requeue()`.
+    for batch in queue.take_dead_letters() {
+        spawn_failure_notice(
+            Some(&ctx.rest_client),
+            &batch,
+            "⚠️ I couldn't process the last request after multiple cancel+merge \
+             redispatches (the turn kept getting interrupted). Please re-send \
+             if it's still needed."
+                .to_string(),
+        );
+    }
     tracing::debug!(
         dispatched = dispatched_channels.len(),
         queue_depth = queue.pending_channels(),

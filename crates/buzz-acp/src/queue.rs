@@ -233,6 +233,13 @@ pub struct EventQueue {
     /// merge into the scope (delivering fresh traffic proves the channel is
     /// healthy) and on `drain`.
     cancelled_redispatch_counts: HashMap<SessionScope, u32>,
+    /// Dead-lettered cancelled batches, parked here by the `flush_next`
+    /// fallback when the cancel+merge redispatch budget is exhausted. The
+    /// dispatch loop drains these via [`take_dead_letters`](Self::take_dead_letters)
+    /// and posts a user-visible failure notice per batch. (Never returned
+    /// through `flush_next`: every `Some(batch)` from there is prompted to
+    /// the agent, which would defeat the dead-letter.)
+    dead_letters: Vec<FlushBatch>,
     /// Events withheld from `queues` while a goose-native steer is in flight
     /// for that event. Invisible to `flush_next` / `has_flushable_work` /
     /// `drain` (the events have been moved out of `queues`), so the queue's
@@ -268,6 +275,7 @@ impl EventQueue {
             cancelled_batches: HashMap::new(),
             cancel_reasons: HashMap::new(),
             cancelled_redispatch_counts: HashMap::new(),
+            dead_letters: Vec::new(),
             withheld_native_steer: HashMap::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
         }
@@ -485,13 +493,22 @@ impl EventQueue {
                                 MAX_CANCELLED_REDISPATCHES,
                                 cancelled.len(),
                             );
-                            return Some(FlushBatch {
+                            // Park the dead-lettered batch for the dispatch
+                            // loop to turn into a user-visible failure
+                            // notice. Do NOT return it as a flushable batch:
+                            // `flush_next` has no dead-letter consumer, so a
+                            // returned batch would be re-prompted like any
+                            // other (one more full base-prompt cost, and a
+                            // `Cancelled` outcome would re-seed the loop via
+                            // `requeue_as_cancelled` with a fresh budget).
+                            self.dead_letters.push(FlushBatch {
                                 channel_id: scope.channel_id(),
                                 scope,
                                 events: cancelled,
                                 cancelled_events: vec![],
                                 cancel_reason: None,
                             });
+                            return None;
                         }
                         // Exponential backoff between cancel+merge redispatches
                         // (same schedule as `requeue`), so a persistently
@@ -611,6 +628,13 @@ impl EventQueue {
         self.in_flight_deadlines.remove(&scope);
         self.in_flight_batch_sizes.remove(&scope);
         let now = Instant::now();
+        // Healthy completion clears the cancel+merge redispatch budget too
+        // (a stale counter would tax later cancel episodes with instant
+        // backoff and premature dead-lettering). Only clear when the scope
+        // has no pending cancelled batch: a cancelled turn that just failed
+        // again requeues via `requeue_as_cancelled` BEFORE `mark_complete`,
+        // and its episode must keep its count.
+        let no_pending_cancelled = !self.cancelled_batches.contains_key(&scope);
         match self.retry_after.get(&scope) {
             // Active throttle → scope was requeued; keep retry_counts intact.
             Some(&deadline) if deadline > now => {}
@@ -619,9 +643,15 @@ impl EventQueue {
             Some(_) => {
                 self.retry_after.remove(&scope);
                 self.retry_counts.remove(&scope);
+                if no_pending_cancelled {
+                    self.cancelled_redispatch_counts.remove(&scope);
+                }
             }
             None => {
                 self.retry_counts.remove(&scope);
+                if no_pending_cancelled {
+                    self.cancelled_redispatch_counts.remove(&scope);
+                }
             }
         }
     }
@@ -960,6 +990,14 @@ impl EventQueue {
         // removing in_flight_scopes would disable auto-expiry and leave a
         // wedged task permanently blocking the scope.
         ids
+    }
+
+    /// Drain dead-lettered cancelled batches parked by the `flush_next`
+    /// fallback. The dispatch loop calls this each cycle and posts a
+    /// user-visible failure notice per batch (they are NOT returned through
+    /// `flush_next`, where every batch is prompted to the agent).
+    pub fn take_dead_letters(&mut self) -> Vec<FlushBatch> {
+        std::mem::take(&mut self.dead_letters)
     }
 
     /// Whether a prompt is currently in-flight for the given scope (or channel,
@@ -3912,19 +3950,50 @@ mod tests {
             q.retry_after
                 .insert(conv(ch), Instant::now() - Duration::from_secs(1));
         }
-        // The final dispatch consumes the batch and returns it dead-lettered.
-        // The stale cancel_reason from the last requeue_as_cancelled rides
-        // along (flush_next removes it), but the queue state is cleared.
-        let dead = q.flush_next().expect("dead-letter flush");
-        assert_eq!(dead.events.len(), 1, "dead-lettered batch returned");
+        // The final dispatch crosses the threshold and dead-letters: flush_next
+        // returns None (never a flushable batch, which the dispatch loop would
+        // re-prompt) and parks the batch for take_dead_letters().
+        assert!(
+            q.flush_next().is_none(),
+            "budget-exhausted flush must return None, not a batch"
+        );
+        let dead = q.take_dead_letters();
+        assert_eq!(dead.len(), 1, "dead-lettered batch parked for notice");
+        assert_eq!(dead[0].events.len(), 1);
         // Queue state is fully cleared: no further work, no stale throttle.
         assert!(
             q.flush_next().is_none(),
             "dead-lettered batch must not be re-flushed"
         );
+        assert!(q.take_dead_letters().is_empty(), "drained once");
         assert!(!q.cancelled_batches.contains_key(&conv(ch)));
         assert!(!q.retry_after.contains_key(&conv(ch)));
         assert!(!q.cancelled_redispatch_counts.contains_key(&conv(ch)));
+    }
+
+    #[test]
+    fn test_healthy_completion_clears_cancelled_redispatch_budget() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Build up a partial budget, then have the redispatched turn SUCCEED
+        // (no requeue_as_cancelled before mark_complete): the budget must
+        // reset so a later cancel episode starts from a clean slate.
+        q.push(make_queued(ch, "seed"));
+        let batch = q.flush_next().expect("initial flush");
+        q.requeue_as_cancelled(batch, CancelReason::Steer);
+        q.mark_complete(ch);
+        let first = q.flush_next().expect("first fallback flush");
+        // The redispatched prompt completes successfully this time: no cancel,
+        // no retry throttle armed (attempt 1), so mark_complete sees a healthy
+        // completion with no pending cancelled batch.
+        assert!(!q.retry_after.contains_key(&conv(ch)));
+        drop(first);
+        q.mark_complete(ch);
+        assert!(
+            !q.cancelled_redispatch_counts.contains_key(&conv(ch)),
+            "healthy completion must reset the redispatch budget"
+        );
     }
 
     #[test]
