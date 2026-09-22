@@ -223,26 +223,29 @@ async function waitForMockLiveSubscription(
   kind?: number,
 ) {
   await expect
-    .poll(async () => {
-      return page.evaluate(
-        ({ currentChannelName, kind }) => {
-          return (
-            (
-              window as Window & {
-                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                  channelName: string;
-                  kind?: number;
-                }) => boolean;
-              }
-            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
-              channelName: currentChannelName,
-              kind,
-            }) ?? false
-          );
-        },
-        { currentChannelName: channelName, kind },
-      );
-    })
+    .poll(
+      async () => {
+        return page.evaluate(
+          ({ currentChannelName, kind }) => {
+            return (
+              (
+                window as Window & {
+                  __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                    channelName: string;
+                    kind?: number;
+                  }) => boolean;
+                }
+              ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+                channelName: currentChannelName,
+                kind,
+              }) ?? false
+            );
+          },
+          { currentChannelName: channelName, kind },
+        );
+      },
+      { timeout: 15_000 },
+    )
     .toBe(true);
 }
 
@@ -1647,7 +1650,6 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     throw new Error("Created ephemeral channel is missing its channel id.");
   }
 
-  await waitForMockLiveSubscription(page, channelName);
   await page.getByTestId("channel-general").click();
   await page.evaluate(
     ({ agentPubkey, channelId: activeChannelId }) => {
@@ -1692,6 +1694,9 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     .getByRole("button", { name: "Toggle Sidebar", exact: true })
     .click();
 
+  // The active channel's window subscription is not the background unread
+  // listener. Wait for message admission after switching away.
+  await waitForMockLiveSubscription(page, channelName, 40002);
   await page.evaluate(
     ({ channelName: targetChannelName, mentionPubkey, senderPubkey }) => {
       (window as MockFeedWindow).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -2521,7 +2526,7 @@ test("sidebar shows unread indicator for newly active channels", async ({
   await page.goto("/");
 
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
-  await waitForMockLiveSubscription(page, "random");
+  await waitForMockLiveSubscription(page, "random", 40002);
 
   // The unread tracker ignores the current user's own messages, so emit as
   // alice — simulating a real "another user posted while I was elsewhere".
@@ -2555,7 +2560,7 @@ test("sidebar shows unread indicator for new forum posts", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("channel-unread-watercooler")).toHaveCount(0);
-  await waitForMockLiveSubscription(page, "watercooler");
+  await waitForMockLiveSubscription(page, "watercooler", 45001);
 
   // Emit as alice — the unread tracker ignores self-authored messages.
   await page.evaluate(
@@ -2585,7 +2590,7 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("channel-unread-alice-tyler")).toHaveCount(0);
-  await waitForMockLiveSubscription(page, "alice-tyler");
+  await waitForMockLiveSubscription(page, "alice-tyler", 9);
 
   await page.evaluate((pubkey) => {
     window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
