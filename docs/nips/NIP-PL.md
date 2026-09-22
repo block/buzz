@@ -73,7 +73,7 @@ This document uses MUST, MUST NOT, SHOULD, SHOULD NOT, MAY, and RECOMMENDED as d
 }
 ```
 
-- `d` MUST be generated from at least 128 bits of randomness by the installation, and MUST be distinct per origin — cross-origin unlinkability is a guarantee of this NIP, not a nicety. It MUST NOT contain or be derived from a hardware identifier, advertising identifier, APNs token, FCM registration token, UnifiedPush endpoint, or other transport identifier. Reinstalling the application MUST create a new `d`; transport-token rotation within the same installation MUST retain `d` and replace the existing lease.
+- `d` MUST be generated from at least 128 bits of randomness by the installation, and MUST be distinct per origin — cross-origin unlinkability is a guarantee of this NIP, not a nicety. It MUST NOT contain or be derived from a hardware identifier, advertising identifier, APNs token, FCM direct-send installation ID, UnifiedPush endpoint, or other transport identifier. Reinstalling the application MUST create a new `d`; transport-token rotation within the same installation MUST retain `d` and replace the existing lease.
 - `expiration` (NIP-40) is REQUIRED and MUST satisfy `now − allowed_skew < expiration ≤ now + max_lease_ttl` at acceptance (`invalid: lease ttl too long` / `invalid: lease already expired`; `max_lease_ttl` descriptor-advertised, default 30 days; RECOMMENDED `allowed_skew` 15 minutes). The executor MUST stop matching once it passes. Inactive (tombstone) replacements carry a public `expiration` under the same bound; it dates the tombstone, not any matching. Expiry is the self-healing backstop for every abuse and leak below.
 - `exec` names the descriptor encryption key the content was produced for (see Executor Discovery).
 - Public tags are exactly one `d`, one `expiration`, one `exec`, and at most one `alt`, each with exactly one value; duplicated tags, extra tags, or extra tag values MUST be rejected. The executor MUST reject a lease carrying filter, kind, author, endpoint, or platform data in public tags.
@@ -228,7 +228,22 @@ The APNs application body is the exact UTF-8 byte constant `{"aps":{"alert":{"bo
 
 ### FCM
 
-A future FCM profile MUST define one gateway-owned constant data message with identical noninterference semantics. Until that constant and its wire tests are registered, FCM is not a conforming v1 public-gateway profile.
+The registered Buzz Android profile is `buzz-android-fcm`. The gateway sends one
+fixed FCM HTTP v1 message: data is exactly `{"wake":"1"}` and Android
+presentation is the fixed title `Buzz`, fixed body `Reconnect to your relay
+now`, channel `buzz_messages`, high priority, and collapse key
+`buzz-reconnect`. The endpoint token is the only installation-specific value.
+No relay URL, event identifier, sender, channel, unread count, or event content
+enters the provider payload. Provider TTL is bounded by the delivery request
+expiry and FCM's 28-day maximum.
+
+Android installation enrollment uses Firebase App Check backed by Play
+Integrity to prove the configured application identity. A non-exportable P-256
+Android Keystore key signs the canonical enrollment and subsequent mutation
+transcripts. The gateway verifies App Check against Google's JWKS, then stores
+only the public installation key and encrypted FCM token. Debug builds use
+Firebase's explicitly registered App Check debug provider; release builds never
+fall back from Play Integrity.
 
 ### UnifiedPush (optional)
 
@@ -258,14 +273,18 @@ A pubkey-only client cannot create, replace, or revoke a lease. If a platform en
 
 Implementations MUST NOT interpret this section as NIP-26 delegation. A future specification may define a narrowly scoped installation authorization for unattended endpoint rotation, but such a capability is neither required nor implied here.
 
-## Public APNs Gateway Profile (Buzz, normative)
+## Public Push Gateway Profiles (Buzz, normative)
 
-This section registers the public last-hop profile served at `https://push.buzz.xyz`. It is an optional profile of NIP-PL, but every requirement in this section is normative for implementations that use it. The gateway is stateful: it retains installation authority, encrypted APNs-token custody, relay delegations, replay reservations, and endpoint quotas. The relay remains the executor and retains lease acceptance, matching, tenant authorization, endpoint uniqueness, coalescing, durable jobs/retries, and lease-generation invalidation.
+This section registers the public last-hop profiles served at `https://push.buzz.xyz`. They are optional profiles of NIP-PL, but every requirement in this section is normative for implementations that use them. The gateway is stateful: it retains installation authority, encrypted APNs/FCM-token custody, relay delegations, replay reservations, and endpoint quotas. The relay remains the executor and retains lease acceptance, matching, tenant authorization, endpoint uniqueness, coalescing, durable jobs/retries, and lease-generation invalidation.
 
 ### Registered values and lease mapping
 
-The registered `app_profile` value is `buzz-ios-dogfood`. It identifies the
-closed Buzz dogfood application identity, not an APNs transport environment.
+The registered `app_profile` values are `buzz-ios-dogfood` and
+`buzz-android-fcm`. They identify closed Buzz application identities, not push
+transport environments. The iOS profile uses App Attest and APNs; the Android
+profile uses Firebase App Check with Play Integrity and FCM HTTP v1.
+
+`buzz-ios-dogfood` identifies the closed Buzz dogfood application identity.
 The canonical gateway owns its exact App Attest application identifier, APNs
 topic, certificate-backed connection pool, and APNs environment. Enrollment
 succeeds only when App Attest cryptographically verifies the configured
@@ -275,21 +294,30 @@ leaves gateway custody after enrollment.
 
 The opaque string returned as `endpoint_grant` by `POST /v1/delegations` is the **delivery capability**. For this profile, the active lease plaintext's `endpoint` member MUST contain that `endpoint_grant`, not the raw APNs token. `transport` MUST be `apns`, and `app_profile` MUST equal the profile sealed into the grant. Base-protocol endpoint uniqueness, rotation, hashing, and coalescing operate on this opaque lease `endpoint` within an origin. A capability is scoped to one installation, relay signing pubkey, endpoint epoch, generation, and expiry; grants independently issued to different relays are intentionally distinct. The gateway separately enforces global installation-endpoint uniqueness using `(app_profile, SHA-256(token))`. A public-profile relay MUST treat `endpoint` as opaque and MUST NOT parse or transform it.
 
+For `buzz-android-fcm`, the same opaque-capability mapping applies with
+`transport` equal to `fcm`; the raw FCM registration endpoint (currently the
+Firebase Installation ID used for direct-send) remains solely in
+gateway custody.
+
 ### Common HTTP and value rules
 
 All routes below accept only `POST`. Clients MUST send `Content-Type: application/json`; bodies are UTF-8 JSON and MUST be at most 8192 bytes, except `POST /v1/installations`, whose body MUST be at most 23896 bytes. That installation-only ceiling is derived from the maximum permitted base64-encoded 16384-byte App Attest object, the maximum 512-byte APNs endpoint encoded as hex, and 1024 bytes for the remaining closed envelope. A body over its applicable limit is rejected with HTTP `413` before JSON parsing. Every request object is closed: unknown members, duplicate members at any depth, missing or incorrectly typed members, trailing non-whitespace data, or a `v` other than integer `1` are `400 {"error":"invalid_request"}`. Integers are signed JSON integers in the ranges stated below. Unix times are integer seconds. UUIDs use the canonical lowercase hyphenated representation. Relay pubkeys are exactly 64 lowercase hexadecimal characters. APNs endpoints are non-empty, even-length lowercase hexadecimal strings encoding at most 512 bytes. Challenges are exactly 32 bytes encoded as unpadded URL-safe base64. `key_id`, `attestation`, and `assertion` use padded or unpadded standard base64 as accepted by Apple's App Attest API; decoded key ids are exactly 32 bytes, attestations are 1..16384 bytes, and assertions are 1..1024 bytes. An `endpoint_grant`, including its key-id prefix, MUST be at most 4096 bytes.
 
 Handler responses are UTF-8 `application/json`. Closed error bodies are `{"error":"invalid_request"}`, `{"error":"invalid_attestation"}`, `{"error":"not_authorized"}`, `{"error":"invalid_auth"}`, `{"error":"invalid_grant"}`, `{"error":"installation_conflict"}`, `{"error":"rate_limited"}`, `{"error":"temporarily_unavailable"}`, `{"error":"configuration_fault"}`, or `{"error":"not_ready"}`. Authority, custody, and quota rejection MUST NOT reveal whether an installation, delegation, or endpoint exists. Delivery grant, authority, and replay failures collapse to `404 invalid_grant`; endpoint quota exhaustion uses `429 rate_limited`; storage failures use `503 temporarily_unavailable`.
 
-### Exact App Attest transcript construction
+The Android enrollment route uses the same 23896-byte envelope ceiling. Its
+FCM endpoint and App Check token are each capped at 4096 bytes; its public key
+and ECDSA signature use standard base64 as specified below.
 
-Every App Attest operation signs a **transcript**, not the received request bytes. Transcript bytes are UTF-8 bytes of:
+### Exact installation transcript construction
+
+Every installation-authority operation signs a **transcript**, not the received request bytes. Transcript bytes are UTF-8 bytes of:
 
 ```
 <domain> + "\\n" + <compact ordered JSON object>
 ```
 
-The JSON object has no insignificant whitespace and members appear in the exact order shown below. Strings use JSON escaping for quotation mark, reverse solidus, and U+0000..U+001F; all authority-bearing strings admitted by this profile are ASCII. UUID strings are canonical lowercase-hyphenated. Integers use shortest decimal notation. The fixed `audience` value is part of the signed object and prevents cross-route use. For enrollment, these exact transcript bytes are the App Attest `clientData` supplied to attestation verification. For every assertion route, `clientDataHash = SHA-256(transcript bytes)` is verified by App Attest. The separately stored challenge must equal the request `challenge`, is single-use, expires after 300 seconds, and is consumed only after successful cryptographic verification. Assertion `signCount` MUST strictly increase atomically for the installation.
+The JSON object has no insignificant whitespace and members appear in the exact order shown below. Strings use JSON escaping for quotation mark, reverse solidus, and U+0000..U+001F; all authority-bearing strings admitted by this profile are ASCII. UUID strings are canonical lowercase-hyphenated. Integers use shortest decimal notation. The fixed `audience` value is part of the signed object and prevents cross-route use. For iOS enrollment, these exact transcript bytes are the App Attest `clientData` supplied to attestation verification; for each later iOS route, `clientDataHash = SHA-256(transcript bytes)` is verified by App Attest. Android signs the transcript bytes with ECDSA/SHA-256 using its enrolled Keystore key. The separately stored challenge must equal the request `challenge`, is single-use, expires after 300 seconds, and is consumed only after successful cryptographic verification. App Attest assertion `signCount` MUST strictly increase atomically for the iOS installation.
 
 ### Challenge
 
@@ -331,12 +359,38 @@ The client MUST durably journal the exact attested enrollment request before its
 
 Invalid attestation is `401 invalid_attestation`; a consumed or expired challenge is `404 not_authorized`. After successful attestation verification, a key or token owned by a different live installation is `409 installation_conflict`; the conflicting request does not replace existing live authority. A fresh verified enrollment may replace expired or revoked ownership so an app that missed its renewal window can recover.
 
+#### Android installation enrollment
+
+`POST /v1/installations/android` enrolls the `buzz-android-fcm` profile:
+
+```json
+{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","public_key":"<standard-base64 SEC1 key>","app_check_token":"<Firebase App Check JWT>","app_profile":"buzz-android-fcm","endpoint":"<FCM Firebase Installation ID>","endpoint_epoch":1,"expires_at":<unix-seconds>,"assertion":"<standard-base64 DER ECDSA signature>"}
+```
+
+`public_key` MUST decode to an uncompressed 65-byte SEC1 P-256 public key.
+`app_check_token` MUST be no more than 4096 bytes and MUST validate as an RS256
+Firebase App Check token whose issuer and audience match the configured project
+number and whose subject equals the configured Android Firebase app ID. The
+endpoint MUST be a non-empty FCM direct-send Firebase Installation ID of no more than 4096 ASCII
+bytes. `assertion` MUST decode to a DER-encoded P-256 ECDSA/SHA-256 signature of
+domain `buzz.push.enroll-android.v1` followed by this ordered object:
+
+```json
+{"v":1,"audience":"https://push.buzz.xyz/v1/installations/android","challenge_id":"<uuid>","challenge":"<challenge>","public_key":"<standard-base64 SEC1 key>","app_profile":"buzz-android-fcm","endpoint":"<FCM Firebase Installation ID>","endpoint_epoch":1,"expires_at":<unix-seconds>}
+```
+
+The private key MUST remain non-exportable in Android Keystore. The gateway
+stores only the public key and encrypted endpoint token. Success and idempotent
+recovery use the same response and authority rules as iOS enrollment. Invalid
+App Check or ECDSA proof is `401 invalid_attestation`; inability to refresh the
+App Check signing-key set is `503 temporarily_unavailable`.
+
 ### Relay delegation and capability issuance
 
 `POST /v1/delegations`
 
 ```json
-{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<positive-integer>,"generation":<positive-integer>,"relay_pubkey":"<64-lowercase-hex>","not_before":<unix-seconds>,"expires_at":<unix-seconds>,"assertion":"<standard-base64 CBOR>"}
+{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<positive-integer>,"generation":<positive-integer>,"relay_pubkey":"<64-lowercase-hex>","not_before":<unix-seconds>,"expires_at":<unix-seconds>,"assertion":"<standard-base64 profile assertion>"}
 ```
 
 `not_before <= now + 300`, `not_before < expires_at`, and `expires_at <= now + configured_max_grant_lifetime`. The endpoint epoch MUST equal the current installation epoch. For each `(installation_handle, relay_pubkey)`, generation MUST strictly increase. A successful delegation atomically extends the authenticated installation lifetime through at least the delegation's `expires_at`, allowing renewal without duplicate token enrollment. Transcript domain `buzz.push.delegate.v1`; ordered object:
@@ -345,7 +399,12 @@ Invalid attestation is `401 invalid_attestation`; a consumed or expired challeng
 {"v":1,"audience":"https://push.buzz.xyz/v1/delegations","challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<integer>,"generation":<integer>,"relay_pubkey":"<hex>","not_before":<integer>,"expires_at":<integer>}
 ```
 
-Success `201`: `{"endpoint_grant":"<opaque-capability>"}`. The sealed grant contains no APNs token. Grant-key rotation MUST retain decrypt-only predecessor keys through the maximum lifetime of grants they issued.
+Success `201`: `{"endpoint_grant":"<opaque-capability>"}`. The sealed grant contains no provider token. Grant-key rotation MUST retain decrypt-only predecessor keys through the maximum lifetime of grants they issued.
+
+For `buzz-ios-dogfood`, `assertion` is the App Attest CBOR assertion. For
+`buzz-android-fcm`, it is a DER-encoded P-256 ECDSA/SHA-256 signature made by
+the enrolled Android Keystore key. The profile-specific proof covers the same
+canonical delegation transcript.
 
 ### Endpoint rotation
 
@@ -395,7 +454,7 @@ Success is `200 {"status":"revoked"}`. The revocation atomically invalidates the
 
 ### Relay delivery
 
-`POST /v1/deliveries/apns` has the exact externally configured URL `https://push.buzz.xyz/v1/deliveries/apns`. Request:
+`POST /v1/deliveries` has the exact externally configured URL `https://push.buzz.xyz/v1/deliveries`. The legacy `/v1/deliveries/apns` route MAY remain available during migration but MUST NOT be advertised by new deployments. Request:
 
 ```json
 {"v":1,"endpoint_grant":"<opaque-capability>","request_id":"<uuid>","expires_at":<unix-seconds>}
@@ -403,21 +462,21 @@ Success is `200 {"status":"revoked"}`. The revocation atomically invalidates the
 
 The relay supplies a NIP-98 `Authorization: Nostr <standard-base64-event-json>` header for method `POST`, the exact URL above, and the SHA-256 payload hash of the **received request body bytes**. The gateway verifies the NIP-98 event signature, timestamp under NIP-98 rules, method, URL, and payload; the event pubkey is the relay identity. It decrypts `endpoint_grant`, requires that signer, current installation/delegation, endpoint epoch and generation, and both `now <= request.expires_at <= grant.expires_at`. Every NIP-98 event id is burned at admission.
 
-The relay's durable job UUID is `request_id` and becomes the stable APNs `apns-id`. Delivery replay/quota reservation is one transaction. The commit of that transaction is send-begin: a revocation or rotation commit that completes first prevents the old-capability send; a send admitted first may finish. Terminal outcomes retain the `(relay_pubkey, request_id)` reservation; transient/configuration outcomes release it only after provider processing so a fresh NIP-98 event may retry the same job. Endpoint quota is charged once per admitted attempt and never refunded. A crash before transient cleanup can reject that id until its bounded request expiry; exactly-once provider delivery is not guaranteed.
+The relay's durable job UUID is `request_id`; the APNs profile also uses it as the stable `apns-id`. Delivery replay/quota reservation is one transaction. The commit of that transaction is send-begin: a revocation or rotation commit that completes first prevents the old-capability send; a send admitted first may finish. Terminal outcomes retain the `(relay_pubkey, request_id)` reservation; transient/configuration outcomes release it only after provider processing so a fresh NIP-98 event may retry the same job. Endpoint quota is charged once per admitted attempt and never refunded. A crash before transient cleanup can reject that id until its bounded request expiry; exactly-once provider delivery is not guaranteed.
 
 Responses:
 
-- `200 {"status":"accepted"}` — APNs accepted; terminal reservation retained.
+- `200 {"status":"accepted"}` — the selected provider accepted the message; terminal reservation retained.
 - `410 {"status":"invalid_endpoint","generation":<integer>,"invalid_at":<unix-seconds-or-null>}` — permanent endpoint invalidation; terminal reservation retained. The relay applies it only if that generation remains current.
-- `503 {"status":"retry","retry_after_seconds":<positive-integer-or-null>}` — transient APNs outcome; request reservation released after processing.
+- `503 {"status":"retry","retry_after_seconds":<positive-integer-or-null>}` — transient provider outcome; request reservation released after processing.
 - `503 {"error":"configuration_fault"}` — provider configuration fault; request reservation released after processing.
-- `400 {"error":"invalid_request"}` — malformed request or permanent APNs request fault; a provider-reached permanent fault is terminal.
+- `400 {"error":"invalid_request"}` — malformed request or permanent provider request fault; a provider-reached permanent fault is terminal.
 - `401 {"error":"invalid_auth"}` — absent or invalid NIP-98 authorization.
 - `404 {"error":"invalid_grant"}` — capability, signer, authority, replay, or expiry rejection.
 - `429 {"error":"rate_limited"}` — endpoint delivery quota exhausted.
 - `503 {"error":"temporarily_unavailable"}` — durable authority/custody/disposition failure.
 
-The gateway performs one APNs request, except that an APNs expired-provider-token response permits one credential refresh and one retry. The application body is always the exact constant registered in the APNs transport profile above; no request or grant field enters it.
+The gateway performs one provider request, except that an expired provider credential permits one credential refresh and one retry. The application body is always the exact constant registered in the selected transport profile above; no request or grant field enters it.
 
 ## Implementation Notes (Buzz, non-normative)
 

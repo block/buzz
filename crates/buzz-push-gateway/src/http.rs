@@ -2,6 +2,7 @@
 use crate::{
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
     app_attest::AppAttestVerifier,
+    app_check::{AppCheckError, AppCheckTokenVerifier},
     authority::{
         AuthorityError, AuthorityStore, Challenge, Delegation, DeliveryDisposition, NewInstallation,
     },
@@ -13,7 +14,7 @@ use crate::{
 use axum::{
     body::Bytes,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -23,6 +24,7 @@ use nostr::{
     nips::nip98::{verify_auth_header, HttpMethod},
     Event, JsonUtil, Timestamp,
 };
+use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -39,6 +41,13 @@ pub struct ProfileRuntime {
     pub transport: Arc<dyn PushTransport>,
 }
 
+/// Firebase App Check authority and FCM sender for the Android profile.
+#[derive(Clone)]
+pub struct AndroidProfileRuntime {
+    pub app_check: Arc<dyn AppCheckTokenVerifier>,
+    pub transport: Arc<dyn PushTransport>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub grant_keyring: Arc<GrantKeyring>,
@@ -49,6 +58,7 @@ pub struct AppState {
     pub profile: Arc<ProfileRuntime>,
     /// Security-sensitive endpoints and audiences derived from one gateway origin.
     pub gateway_urls: Arc<GatewayUrls>,
+    pub android_profile: Option<Arc<AndroidProfileRuntime>>,
     pub max_grant_lifetime_seconds: i64,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
@@ -59,7 +69,7 @@ pub struct AppState {
 fn error(status: StatusCode, code: &'static str) -> Response {
     (status, Json(ErrorBody { error: code })).into_response()
 }
-fn valid_endpoint(v: &str) -> bool {
+fn valid_apns_endpoint(v: &str) -> bool {
     !v.is_empty()
         && v.len() <= MAX_ENDPOINT_HEX_BYTES * 2
         && v.len().is_multiple_of(2)
@@ -100,15 +110,26 @@ fn authority_error(e: AuthorityError) -> Response {
 fn installation_conflict() -> Response {
     error(StatusCode::CONFLICT, "installation_conflict")
 }
-fn endpoint_bytes(endpoint: &str) -> Option<Vec<u8>> {
-    valid_endpoint(endpoint)
-        .then(|| hex::decode(endpoint).ok())
-        .flatten()
+fn endpoint_bytes(profile: AppProfile, endpoint: &str) -> Option<Vec<u8>> {
+    match profile {
+        AppProfile::BuzzIosDogfood => valid_apns_endpoint(endpoint)
+            .then(|| hex::decode(endpoint).ok())
+            .flatten(),
+        AppProfile::BuzzAndroidFcm => (!endpoint.is_empty()
+            && endpoint.len() <= 4096
+            && endpoint.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+            }))
+        .then(|| endpoint.as_bytes().to_vec()),
+    }
 }
 fn endpoint_fingerprint(profile: AppProfile, token: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(b"buzz-apns-endpoint-v1\0");
+    h.update(match profile {
+        AppProfile::BuzzIosDogfood => b"buzz-apns-endpoint-v1\0".as_slice(),
+        AppProfile::BuzzAndroidFcm => b"buzz-fcm-endpoint-v1\0".as_slice(),
+    });
     h.update(profile.as_str().as_bytes());
     h.update([0]);
     h.update(token);
@@ -172,7 +193,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
     let now = (s.now)();
-    let token = match endpoint_bytes(&r.endpoint) {
+    let token = match endpoint_bytes(r.app_profile, &r.endpoint) {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
@@ -284,6 +305,160 @@ struct AssertionChallenge<'a> {
     text: &'a str,
 }
 
+#[derive(serde::Serialize)]
+struct AndroidEnrollTranscript<'a> {
+    v: u8,
+    audience: &'static str,
+    challenge_id: uuid::Uuid,
+    challenge: &'a str,
+    public_key: &'a str,
+    app_profile: AppProfile,
+    endpoint: &'a str,
+    endpoint_epoch: i64,
+    expires_at: i64,
+}
+
+fn verify_android_signature(public_key: &[u8], assertion: &str, signed: &[u8]) -> Result<(), ()> {
+    let key = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| ())?;
+    let signature_bytes = STANDARD.decode(assertion).map_err(|_| ())?;
+    if signature_bytes.is_empty() || signature_bytes.len() > 80 {
+        return Err(());
+    }
+    let signature = Signature::from_der(&signature_bytes).map_err(|_| ())?;
+    key.verify(signed, &signature).map_err(|_| ())
+}
+
+async fn enroll_android(State(s): State<AppState>, body: Bytes) -> Response {
+    let r: AndroidInstallationEnrollRequest = match crate::strict_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
+    let runtime = match s.android_profile.as_ref() {
+        Some(runtime) if r.app_profile == AppProfile::BuzzAndroidFcm => runtime,
+        _ => return error(StatusCode::SERVICE_UNAVAILABLE, "profile_disabled"),
+    };
+    let now = (s.now)();
+    let token = match endpoint_bytes(r.app_profile, &r.endpoint) {
+        Some(token) => token,
+        None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
+    if r.v != WIRE_VERSION
+        || r.endpoint_epoch != 1
+        || r.expires_at <= now
+        || r.expires_at > now.saturating_add(s.max_installation_lifetime_seconds)
+    {
+        return error(StatusCode::BAD_REQUEST, "invalid_request");
+    }
+    let challenge = match decode_challenge(&r.challenge) {
+        Some(challenge) => challenge,
+        None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
+    let public_key = match STANDARD.decode(&r.public_key) {
+        Ok(key) if key.len() == 65 => key,
+        _ => return error(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
+    let signed = match transcript(
+        "buzz.push.enroll-android.v1",
+        &AndroidEnrollTranscript {
+            v: r.v,
+            audience: "https://push.buzz.xyz/v1/installations/android",
+            challenge_id: r.challenge_id,
+            challenge: &r.challenge,
+            public_key: &r.public_key,
+            app_profile: r.app_profile,
+            endpoint: &r.endpoint,
+            endpoint_epoch: r.endpoint_epoch,
+            expires_at: r.expires_at,
+        },
+    ) {
+        Some(signed) => signed,
+        None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
+    if verify_android_signature(&public_key, &r.assertion, signed.as_bytes()).is_err() {
+        return error(StatusCode::UNAUTHORIZED, "invalid_attestation");
+    }
+    match runtime.app_check.verify(&r.app_check_token).await {
+        Ok(()) => {}
+        Err(AppCheckError::Invalid) => {
+            return error(StatusCode::UNAUTHORIZED, "invalid_attestation")
+        }
+        Err(AppCheckError::Unavailable) => {
+            return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
+        }
+    }
+    use sha2::{Digest, Sha256};
+    let key_id = Sha256::digest(&public_key).to_vec();
+    let fingerprint = endpoint_fingerprint(r.app_profile, &token);
+    match s
+        .authority
+        .matching_installation(
+            &key_id,
+            r.app_profile,
+            fingerprint,
+            r.endpoint_epoch,
+            r.expires_at,
+            now,
+        )
+        .await
+    {
+        Ok(Some(existing)) if existing.app_attest_public_key == public_key => {
+            return (
+                StatusCode::CREATED,
+                Json(InstallationEnrollResponse {
+                    installation_handle: existing.id,
+                    endpoint_epoch: existing.endpoint_epoch,
+                    expires_at: existing.expires_at,
+                }),
+            )
+                .into_response();
+        }
+        Ok(Some(_)) => return error(StatusCode::NOT_FOUND, "not_authorized"),
+        Ok(None) => {}
+        Err(error) => return authority_error(error),
+    }
+    if let Err(error) = s
+        .authority
+        .consume_challenge(r.challenge_id, challenge, now)
+        .await
+    {
+        return authority_error(error);
+    }
+    let ciphertext = match s.token_keyring.seal(&token) {
+        Ok(ciphertext) => ciphertext,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+    };
+    let id = uuid::Uuid::new_v4();
+    if let Err(error) = s
+        .authority
+        .create_installation(
+            NewInstallation {
+                id,
+                app_attest_key_id: key_id,
+                app_attest_public_key: public_key,
+                assertion_counter: 0,
+                profile: r.app_profile,
+                token_ciphertext: ciphertext,
+                token_fingerprint: fingerprint,
+                endpoint_epoch: r.endpoint_epoch,
+                expires_at: r.expires_at,
+            },
+            now,
+        )
+        .await
+    {
+        return authority_error(error);
+    }
+    (
+        StatusCode::CREATED,
+        Json(InstallationEnrollResponse {
+            installation_handle: id,
+            endpoint_epoch: r.endpoint_epoch,
+            expires_at: r.expires_at,
+        }),
+    )
+        .into_response()
+}
+
 async fn verify_installation_assertion<T: serde::Serialize>(
     s: &AppState,
     installation_id: uuid::Uuid,
@@ -304,35 +479,51 @@ async fn verify_installation_assertion<T: serde::Serialize>(
         s.authority.installation(installation_id, now).await
     }
     .map_err(authority_error)?;
-    if installation.profile != AppProfile::BuzzIosDogfood {
-        return Err(error(StatusCode::NOT_FOUND, "not_authorized"));
-    }
     let transcript = transcript(domain, signed)
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
-    let verified = s
-        .profile
-        .app_attest
-        .verify_assertion(
-            assertion,
-            transcript.as_bytes(),
-            &installation.app_attest_public_key,
-            installation.assertion_counter,
-            challenge.text,
-            challenge.text,
-        )
-        .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid_attestation"))?;
+    let next_counter = match installation.profile {
+        AppProfile::BuzzIosDogfood => Some(
+            s.profile
+                .app_attest
+                .verify_assertion(
+                    assertion,
+                    transcript.as_bytes(),
+                    &installation.app_attest_public_key,
+                    installation.assertion_counter,
+                    challenge.text,
+                    challenge.text,
+                )
+                .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid_attestation"))?
+                .counter,
+        ),
+        AppProfile::BuzzAndroidFcm => {
+            if s.android_profile.is_none() {
+                return Err(error(StatusCode::SERVICE_UNAVAILABLE, "profile_disabled"));
+            }
+            verify_android_signature(
+                &installation.app_attest_public_key,
+                assertion,
+                transcript.as_bytes(),
+            )
+            .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid_attestation"))?;
+            None
+        }
+    };
     s.authority
         .consume_challenge(challenge.id, challenge_bytes, now)
         .await
         .map_err(authority_error)?;
-    s.authority
-        .advance_assertion_counter(
-            installation_id,
-            installation.assertion_counter,
-            verified.counter,
-        )
-        .await
-        .map_err(authority_error)
+    if let Some(next_counter) = next_counter {
+        s.authority
+            .advance_assertion_counter(
+                installation_id,
+                installation.assertion_counter,
+                next_counter,
+            )
+            .await
+            .map_err(authority_error)?;
+    }
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -443,10 +634,6 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
         Ok(r) => r,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    let token = match endpoint_bytes(&r.endpoint) {
-        Some(v) => v,
-        None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
-    };
     if r.v != WIRE_VERSION
         || r.endpoint_epoch < 1
         || r.new_endpoint_epoch != r.endpoint_epoch.saturating_add(1)
@@ -460,6 +647,10 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
     {
         Ok(i) => i,
         Err(e) => return authority_error(e),
+    };
+    let token = match endpoint_bytes(installation.profile, &r.endpoint) {
+        Some(v) => v,
+        None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
     let t = RotateTranscript {
         v: r.v,
@@ -618,7 +809,7 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
     }
 }
 
-async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn deliver(State(s): State<AppState>, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
     let r: DeliveryRequest = match crate::strict_json::from_slice(&body) {
         Ok(x) => x,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
@@ -637,9 +828,14 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         Some(x) => x,
         None => return error(StatusCode::UNAUTHORIZED, "invalid_auth"),
     };
+    let delivery_url = match uri.path() {
+        "/v1/deliveries" => &s.gateway_urls.delivery,
+        "/v1/deliveries/apns" => &s.gateway_urls.legacy_delivery,
+        _ => return error(StatusCode::NOT_FOUND, "not_found"),
+    };
     let relay = match verify_auth_header(
         auth,
-        &s.gateway_urls.delivery,
+        delivery_url,
         HttpMethod::POST,
         Timestamp::now(),
         Some(&body),
@@ -712,16 +908,32 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             .await;
         return error(StatusCode::NOT_FOUND, "invalid_grant");
     }
-    if permit.authority.profile != AppProfile::BuzzIosDogfood {
-        crate::metrics::record_delivery_error("profile_disabled");
-        let _ = s
-            .authority
-            .finish_delivery(permit, DeliveryDisposition::Retryable)
-            .await;
-        return error(StatusCode::SERVICE_UNAVAILABLE, "configuration_fault");
-    }
-    let transport = Arc::clone(&s.profile.transport);
+    let (transport, is_fcm) = match permit.authority.profile {
+        AppProfile::BuzzIosDogfood => (Arc::clone(&s.profile.transport), false),
+        AppProfile::BuzzAndroidFcm => match s.android_profile.as_ref() {
+            Some(runtime) => (Arc::clone(&runtime.transport), true),
+            None => {
+                crate::metrics::record_delivery_error("profile_disabled");
+                let _ = s
+                    .authority
+                    .finish_delivery(permit, DeliveryDisposition::Retryable)
+                    .await;
+                return error(StatusCode::SERVICE_UNAVAILABLE, "configuration_fault");
+            }
+        },
+    };
     let endpoint = match s.token_keyring.open(&permit.authority.token_ciphertext) {
+        Ok(token) if is_fcm => match String::from_utf8(token) {
+            Ok(endpoint) => endpoint,
+            Err(_) => {
+                crate::metrics::record_delivery_error("token_custody");
+                let _ = s
+                    .authority
+                    .finish_delivery(permit, DeliveryDisposition::Retryable)
+                    .await;
+                return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+            }
+        },
         Ok(token) => hex::encode(token),
         Err(_) => {
             crate::metrics::record_delivery_error("token_custody");
@@ -742,7 +954,11 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
     let delivery = tokio::spawn(async move {
         let started = std::time::Instant::now();
         let outcome = transport.send(attempt, &endpoint).await;
-        crate::metrics::record_apns_delivery(outcome, started.elapsed().as_secs_f64());
+        if is_fcm {
+            crate::metrics::record_fcm_delivery(outcome, started.elapsed().as_secs_f64());
+        } else {
+            crate::metrics::record_apns_delivery(outcome, started.elapsed().as_secs_f64());
+        }
         let disposition = match outcome {
             DeliveryOutcome::Retry { .. } | DeliveryOutcome::ConfigurationFault => {
                 DeliveryDisposition::Retryable
@@ -821,6 +1037,7 @@ pub fn router_with_metrics(
 ) -> (Router, Router) {
     let enrollment = Router::new()
         .route("/v1/installations", post(enroll))
+        .route("/v1/installations/android", post(enroll_android))
         .layer(RequestBodyLimitLayer::new(MAX_ENROLL_REQUEST_BYTES));
     let standard_requests = Router::new()
         .route("/v1/installations/challenges", post(challenge))
@@ -828,6 +1045,7 @@ pub fn router_with_metrics(
         .route("/v1/delegations/revoke", post(revoke_delegation))
         .route("/v1/installations/endpoint", post(rotate_endpoint))
         .route("/v1/installations/revoke", post(revoke_installation))
+        .route("/v1/deliveries", post(deliver))
         .route("/v1/deliveries/apns", post(deliver))
         .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES));
     let public = Router::new()
@@ -868,6 +1086,7 @@ pub fn router_with_metrics(
 mod request_limit_tests {
     use super::*;
     use crate::{
+        app_check::{AppCheckError, AppCheckTokenVerifier},
         authority::MemoryAuthorityStore,
         grant::{GrantKey, GrantKeyring},
         token::{TokenKey, TokenKeyring},
@@ -876,6 +1095,17 @@ mod request_limit_tests {
     use tower::ServiceExt;
 
     struct NeverTransport;
+
+    struct TestAppCheck;
+
+    #[async_trait::async_trait]
+    impl AppCheckTokenVerifier for TestAppCheck {
+        async fn verify(&self, token: &str) -> Result<(), AppCheckError> {
+            (token == "valid-app-check")
+                .then_some(())
+                .ok_or(AppCheckError::Invalid)
+        }
+    }
 
     #[async_trait::async_trait]
     impl PushTransport for NeverTransport {
@@ -909,6 +1139,7 @@ mod request_limit_tests {
             gateway_urls: Arc::new(
                 GatewayUrls::from_origin("https://push.example".parse().unwrap()).unwrap(),
             ),
+            android_profile: None,
             max_grant_lifetime_seconds: 86_400,
             max_installation_lifetime_seconds: 86_400,
             endpoint_quota_window_seconds: 60,
@@ -965,6 +1196,157 @@ mod request_limit_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn android_enrollment_binds_app_check_and_keystore_signature_seams() {
+        use axum::body::to_bytes;
+        use p256::ecdsa::{signature::Signer, SigningKey};
+
+        let mut state = state();
+        state.android_profile = Some(Arc::new(AndroidProfileRuntime {
+            app_check: Arc::new(TestAppCheck),
+            transport: Arc::new(NeverTransport),
+        }));
+        let (public, _) = router(state);
+        let challenge_response = public
+            .clone()
+            .oneshot(
+                Request::post("/v1/installations/challenges")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"v":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(challenge_response.status(), StatusCode::OK);
+        let challenge: serde_json::Value = serde_json::from_slice(
+            &to_bytes(challenge_response.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let challenge_id: uuid::Uuid = challenge["challenge_id"].as_str().unwrap().parse().unwrap();
+        let challenge_value = challenge["challenge"].as_str().unwrap();
+        let signing_key = SigningKey::from_slice(&[7; 32]).unwrap();
+        let public_key = STANDARD.encode(
+            signing_key
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes(),
+        );
+        let endpoint = "fcm-token:abc_def-123";
+        let expires_at = fixed_now() + 60;
+        let signed = transcript(
+            "buzz.push.enroll-android.v1",
+            &AndroidEnrollTranscript {
+                v: WIRE_VERSION,
+                audience: "https://push.buzz.xyz/v1/installations/android",
+                challenge_id,
+                challenge: challenge_value,
+                public_key: &public_key,
+                app_profile: AppProfile::BuzzAndroidFcm,
+                endpoint,
+                endpoint_epoch: 1,
+                expires_at,
+            },
+        )
+        .unwrap();
+        let signature: p256::ecdsa::Signature = signing_key.sign(signed.as_bytes());
+        let body = serde_json::to_vec(&AndroidInstallationEnrollRequest {
+            v: WIRE_VERSION,
+            challenge_id,
+            challenge: challenge_value.to_owned(),
+            public_key,
+            app_check_token: "valid-app-check".into(),
+            app_profile: AppProfile::BuzzAndroidFcm,
+            endpoint: endpoint.into(),
+            endpoint_epoch: 1,
+            expires_at,
+            assertion: STANDARD.encode(signature.to_der().as_bytes()),
+        })
+        .unwrap();
+        let response = public
+            .clone()
+            .oneshot(
+                Request::post("/v1/installations/android")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let enrollment: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        let installation_handle: uuid::Uuid = enrollment["installation_handle"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let challenge_response = public
+            .clone()
+            .oneshot(
+                Request::post("/v1/installations/challenges")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"v":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let challenge: serde_json::Value = serde_json::from_slice(
+            &to_bytes(challenge_response.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let challenge_id: uuid::Uuid = challenge["challenge_id"].as_str().unwrap().parse().unwrap();
+        let challenge_value = challenge["challenge"].as_str().unwrap();
+        let relay_pubkey = "a".repeat(64);
+        let not_before = fixed_now() - 1;
+        let delegation_expires_at = fixed_now() + 60;
+        let signed = transcript(
+            "buzz.push.delegate.v1",
+            &DelegateTranscript {
+                v: WIRE_VERSION,
+                audience: "https://push.buzz.xyz/v1/delegations",
+                challenge_id,
+                challenge: challenge_value,
+                installation_handle,
+                endpoint_epoch: 1,
+                generation: 1,
+                relay_pubkey: &relay_pubkey,
+                not_before,
+                expires_at: delegation_expires_at,
+            },
+        )
+        .unwrap();
+        let signature: p256::ecdsa::Signature = signing_key.sign(signed.as_bytes());
+        let response = public
+            .oneshot(
+                Request::post("/v1/delegations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&DelegationRequest {
+                            v: WIRE_VERSION,
+                            challenge_id,
+                            challenge: challenge_value.to_owned(),
+                            installation_handle,
+                            endpoint_epoch: 1,
+                            generation: 1,
+                            relay_pubkey,
+                            not_before,
+                            expires_at: delegation_expires_at,
+                            assertion: STANDARD.encode(signature.to_der().as_bytes()),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 
     #[test]

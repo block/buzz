@@ -171,6 +171,34 @@ for names and app-rendered avatar thumbnails. It never fetches an avatar URL;
 missing, stale, or invalid enrichment falls back to the verified message with a
 short sender pubkey, community subtitle, and no image.
 
+### Android push capability
+
+Android uses FCM HTTP v1 direct-send through the same public push gateway and
+relay lease flow. The app registers its Firebase Installation ID (FID), proves
+its identity with Firebase App Check backed by Play
+Integrity, creates a non-exportable P-256 installation key in Android Keystore,
+and sends Firebase only the fixed `wake=1` payload. Message, sender, community,
+and relay content are never included in the FCM request.
+
+Provide these public Firebase Android values to Gradle for release builds (and
+for physical-device debug builds that exercise push):
+
+```text
+BUZZ_ANDROID_FIREBASE_PROJECT_ID
+BUZZ_ANDROID_FIREBASE_APPLICATION_ID
+BUZZ_ANDROID_FIREBASE_API_KEY
+BUZZ_ANDROID_FIREBASE_SENDER_ID
+```
+
+They are compiled into `BuildConfig`; none is a server credential. The gateway
+separately needs the matching project number, App Check application ID, and a
+read-only FCM service-account JSON mount as described in
+`docs/push-gateway-deployment.md`. Register the release signing certificate
+with the Firebase Android app, enable Play Integrity for App Check, and enforce
+App Check only after a physical-device enrollment succeeds. Debug builds use
+Firebase's debug App Check provider and require that device's debug token to be
+registered in the Firebase console.
+
 ## Checks
 
 ```bash

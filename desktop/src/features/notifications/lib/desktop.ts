@@ -6,10 +6,14 @@ import {
   onAction,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
-import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
+import {
+  isLinuxPlatform,
+  isMacPlatform,
+  isWindowsPlatform,
+} from "@/shared/lib/platform";
 
-// Backend event emitted when a native Linux notification is clicked or a
-// queued macOS activation becomes available. See src-tauri notification code.
+// Backend event emitted when a native Linux/Windows notification is clicked or
+// a queued macOS activation becomes available. See src-tauri notification code.
 const NATIVE_NOTIFICATION_ACTIVATED_EVENT = "native-notification-activated";
 const TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS = "take_pending_activations";
 const MACOS_NOTIFICATION_PERMISSION_STATE = "notification_permission_state";
@@ -128,6 +132,14 @@ function shouldUseMacDevelopmentFallback(error: unknown): boolean {
 }
 
 export async function getDesktopNotificationPermissionState(): Promise<DesktopNotificationPermissionState> {
+  // The notification plugin's injected Windows shim initializes its Web
+  // Notification permission to `denied` before its asynchronous native check
+  // can settle. Desktop Windows permission is granted by the native plugin, so
+  // do not let that shim race disable notifications for the whole session.
+  if (isTauri() && isWindowsPlatform()) {
+    return "granted";
+  }
+
   if (!hasNotificationApi()) {
     return "unsupported";
   }
@@ -165,6 +177,10 @@ let pendingPermissionRequest: Promise<DesktopNotificationPermissionState> | null
   null;
 
 export async function requestDesktopNotificationAccess(): Promise<DesktopNotificationPermissionState> {
+  if (isTauri() && isWindowsPlatform()) {
+    return "granted";
+  }
+
   if (!hasNotificationApi()) {
     return "unsupported";
   }
@@ -422,10 +438,15 @@ export async function sendDesktopNotification(
     return false;
   }
 
-  // Linux needs a retained D-Bus connection. macOS needs a native notification
-  // center delegate because the Tauri plugin does not deliver desktop clicks.
+  // Linux needs a retained D-Bus connection. Windows needs a retained WinRT
+  // activation handle and must bypass the plugin's racy permission shim. macOS
+  // needs a native notification center delegate because the Tauri plugin does
+  // not deliver desktop clicks.
   // See src-tauri/src/commands/notifications.rs.
-  if (isTauri() && (isLinuxPlatform() || isMacPlatform())) {
+  if (
+    isTauri() &&
+    (isLinuxPlatform() || isMacPlatform() || isWindowsPlatform())
+  ) {
     try {
       await invoke("show_native_notification", {
         title: payload.title,

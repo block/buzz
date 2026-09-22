@@ -256,10 +256,13 @@ fn push_descriptor(
             "pubkey": relay_keypair.public_key().to_hex(),
             "current": true
         }],
-        "app_profiles": [{"id": "buzz-ios-dogfood", "transport": "apns"}],
+        "app_profiles": [
+            {"id": "buzz-ios-dogfood", "transport": "apns"},
+            {"id": "buzz-android-fcm", "transport": "fcm"}
+        ],
         "push_kinds": crate::handlers::push_lease::PUSH_KINDS,
         "h_grammar": "uuid-v4-lowercase",
-        "class_support": {"apns": ["default"]},
+        "class_support": {"apns": ["default"], "fcm": ["default"]},
         "limitation": {
             "max_lease_ttl": 2592000,
             "max_leases_per_pubkey": 16,
@@ -428,6 +431,17 @@ mod tests {
         assert_eq!(
             descriptor["push_kinds"],
             serde_json::json!(crate::handlers::push_lease::PUSH_KINDS)
+        );
+        assert_eq!(
+            descriptor["app_profiles"],
+            serde_json::json!([
+                {"id": "buzz-ios-dogfood", "transport": "apns"},
+                {"id": "buzz-android-fcm", "transport": "fcm"}
+            ])
+        );
+        assert_eq!(
+            descriptor["class_support"]["fcm"],
+            serde_json::json!(["default"])
         );
     }
 

@@ -14,6 +14,9 @@ production_args=(
   --set 'image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   --set 'gatewayOrigin=https://push.example'
   --set 'profiles.dogfood.appAttestAppId=REALTEAM.xyz.block.buzz.dogfood.mobile'
+  --set 'profiles.android.firebaseProjectId=buzz-production'
+  --set 'profiles.android.firebaseProjectNumber=123456789'
+  --set 'profiles.android.firebaseAppId=1:123456789:android:abc'
   --set 'networkPolicy.postgresEgressCidrs[0]=10.42.0.0/16'
 )
 helm lint deploy/charts/buzz-push-gateway "${production_args[@]}" >/dev/null
@@ -117,6 +120,16 @@ assert!(!production.any? { |x| x["kind"] == "HTTPRoute" })
 production_deployment = production.find { |x| x["kind"] == "Deployment" }
 production_image = production_deployment.dig("spec", "template", "spec", "containers", 0, "image")
 assert!(production_image == "ghcr.io/block/buzz-push-gateway@sha256:#{"a" * 64}", production_image.inspect)
+production_container = production_deployment.dig("spec", "template", "spec", "containers", 0)
+production_env = production_container.fetch("env").to_h { |entry| [entry["name"], entry] }
+assert!(production_env.dig("BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_ID", "value") == "buzz-production")
+assert!(production_env.dig("BUZZ_PUSH_ANDROID_FIREBASE_PROJECT_NUMBER", "value") == "123456789")
+assert!(production_env.dig("BUZZ_PUSH_ANDROID_FIREBASE_APP_ID", "value") == "1:123456789:android:abc")
+assert!(production_env.dig("BUZZ_PUSH_ANDROID_FCM_SERVICE_ACCOUNT_PATH", "value") == "/run/buzz/fcm-android/service-account.json")
+fcm_mount = production_container.fetch("volumeMounts").find { |mount| mount["name"] == "fcm-android" }
+assert!(fcm_mount["readOnly"] == true, fcm_mount.inspect)
+fcm_volume = production_deployment.dig("spec", "template", "spec", "volumes").find { |volume| volume["name"] == "fcm-android" }
+assert!(fcm_volume.dig("secret", "defaultMode") == 0o400, fcm_volume.inspect)
 route = YAML.load_stream(File.read(ARGV[2])).compact.find { |x| x["kind"] == "HTTPRoute" }
 assert!(!route.dig("spec", "parentRefs").empty?)
 assert!(route.dig("spec", "hostnames") == ["push.example"])
@@ -180,7 +193,10 @@ xs = YAML.load_stream(File.read(ARGV[0])).compact
 pm = xs.find { |x| x["kind"] == "PodMonitor" }
 endpoint = pm.dig("spec", "podMetricsEndpoints", 0)
 assert!(endpoint["port"] == "health" && endpoint["path"] == "/metrics", endpoint.inspect)
-assert!(!xs.find { |x| x["kind"] == "PrometheusRule" }.dig("spec", "groups").empty?)
+prometheus_rule = xs.find { |x| x["kind"] == "PrometheusRule" }
+assert!(!prometheus_rule.dig("spec", "groups").empty?)
+alert_names = prometheus_rule.dig("spec", "groups").flat_map { |group| group.fetch("rules") }.map { |rule| rule["alert"] }.to_set
+assert!(Set["PushGatewayConfigurationFault", "PushGatewayHighApnsRetryRate", "PushGatewayHighFcmRetryRate"].subset?(alert_names))
 np = xs.find do |x|
   x["kind"] == "NetworkPolicy" && x.dig("metadata", "name") == "push-buzz-push-gateway"
 end

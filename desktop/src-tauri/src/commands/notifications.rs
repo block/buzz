@@ -7,18 +7,19 @@
 //! the notification the instant it appears — so notifications never show.
 //! See tauri-apps/plugins-workspace#2566 and hoodie/notify-rust#218.
 //!
-//! We side-step the plugin on Linux by posting the notification from a
-//! dedicated thread that holds the connection open (via `wait_for_action`)
-//! until the notification is closed. The same wait surfaces the default click
-//! action, which we forward to the frontend so it can focus the window and
-//! route to the notification target.
+//! We side-step the plugin on Linux and Windows by posting the notification
+//! from a dedicated thread that holds the native activation handle until the
+//! notification closes. The same wait surfaces a click and forwards it to the
+//! frontend so it can focus the window and route to the notification target.
 
 pub(crate) const NATIVE_NOTIFICATION_ACTIVATED_EVENT: &str = "native-notification-activated";
 
 /// Show a desktop notification natively.
 ///
-/// Linux uses the connection-preserving D-Bus path described above. macOS uses
-/// one application-lifetime `UNUserNotificationCenterDelegate`; it does not
+/// Linux uses the connection-preserving D-Bus path described above. Windows
+/// uses a retained WinRT toast handle and reports posting failures instead of
+/// losing them in the plugin's detached task. macOS uses one
+/// application-lifetime `UNUserNotificationCenterDelegate`; it does not
 /// allocate a listener or waiter for each notification.
 #[tauri::command]
 pub async fn show_native_notification(
@@ -39,10 +40,101 @@ pub async fn show_native_notification(
         crate::macos_notifications::show(title, body, target).await
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::show(app, title, body, target).await
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = (&app, &title, &body, &target);
-        Err("show_native_notification is only supported on Linux and macOS".to_string())
+        Err("show_native_notification is unsupported on this platform".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows {
+    use super::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
+    use notify_rust::{Notification, NotificationResponse};
+    use std::path::Path;
+    use tauri::Emitter;
+
+    pub async fn show(
+        app: tauri::AppHandle,
+        title: String,
+        body: Option<String>,
+        target: Option<serde_json::Value>,
+    ) -> Result<(), String> {
+        let (posted_tx, posted_rx) = tokio::sync::oneshot::channel();
+
+        std::thread::spawn(move || {
+            let mut builder = Notification::new();
+            builder.summary(&title);
+            if let Some(body) = body.as_deref() {
+                builder.body(body);
+            }
+            let current_exe = tauri::utils::platform::current_exe().ok();
+            if should_use_registered_app_id(current_exe.as_deref()) {
+                builder.app_id(&app.config().identifier);
+            }
+
+            let handle = match builder.show() {
+                Ok(handle) => {
+                    let _ = posted_tx.send(Ok(()));
+                    handle
+                }
+                Err(error) => {
+                    let message = format!("failed to post native Windows notification: {error}");
+                    eprintln!("buzz-desktop: {message}");
+                    let _ = posted_tx.send(Err(message));
+                    return;
+                }
+            };
+
+            let _ = handle.wait_for_response(|response: &NotificationResponse| {
+                if response.is_default_action() {
+                    if let Some(target) = target.as_ref() {
+                        let _ = app.emit(NATIVE_NOTIFICATION_ACTIVATED_EVENT, target);
+                    }
+                }
+            });
+        });
+
+        posted_rx
+            .await
+            .map_err(|_| "native Windows notification worker stopped before posting".to_string())?
+    }
+
+    fn should_use_registered_app_id(executable: Option<&Path>) -> bool {
+        let Some(directory) = executable.and_then(Path::parent) else {
+            return false;
+        };
+        let directory = directory.to_string_lossy().replace('/', "\\");
+        !directory.ends_with("\\target\\debug") && !directory.ends_with("\\target\\release")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::should_use_registered_app_id;
+        use std::path::Path;
+
+        #[test]
+        fn development_executables_use_the_unregistered_fallback() {
+            assert!(!should_use_registered_app_id(Some(Path::new(
+                r"C:\repo\desktop\src-tauri\target\debug\buzz.exe",
+            ))));
+            assert!(!should_use_registered_app_id(Some(Path::new(
+                r"C:\repo\desktop\src-tauri\target\release\buzz.exe",
+            ))));
+        }
+
+        #[test]
+        fn installed_executables_use_the_bundled_app_id() {
+            assert!(should_use_registered_app_id(Some(Path::new(
+                r"C:\Program Files\Buzz\buzz.exe",
+            ))));
+            assert!(!should_use_registered_app_id(None));
+        }
     }
 }
 

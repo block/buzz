@@ -1,8 +1,10 @@
 use buzz_push_gateway::{
     apns::ApnsTransport,
     app_attest::AppAttestVerifier,
+    app_check::FirebaseAppCheckVerifier,
     authority::AuthorityStore,
     config::Config,
+    fcm::FcmTransport,
     grant::{GrantKey, GrantKeyring},
     postgres::PostgresAuthorityStore,
     router_with_metrics,
@@ -10,13 +12,32 @@ use buzz_push_gateway::{
     AppState,
 };
 use std::{
-    fs,
+    fs::File,
+    io::{self, Read},
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
 };
 use tracing_subscriber::EnvFilter;
+
+const MAX_CREDENTIAL_FILE_BYTES: u64 = 1024 * 1024;
+
+fn read_credential(path: &Path) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(MAX_CREDENTIAL_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "credential file exceeds the one-megabyte limit",
+        ));
+    }
+    Ok(bytes)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -35,11 +56,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let c = Config::from_env()?;
     let metrics_handle = buzz_push_gateway::metrics::install()?;
-    let app_attest_root = fs::read(&c.app_attest_root_cert_path)?;
+    let app_attest_root = read_credential(&c.app_attest_root_cert_path)?;
     let configured = &c.profile;
     let profile = {
         let transport = Arc::new(ApnsTransport::certificate(
-            &fs::read(&configured.apns_cert_path)?,
+            &read_credential(&configured.apns_cert_path)?,
             configured.apns_topic.clone(),
             configured.apns_environment,
         )?);
@@ -51,6 +72,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             app_attest: Arc::new(apple),
             transport,
         }
+    };
+    let android_profile = match &c.android_profile {
+        Some(configured) => {
+            let transport = FcmTransport::service_account(
+                &read_credential(&configured.service_account_path)?,
+                &configured.firebase_project_id,
+            )?;
+            let app_check = FirebaseAppCheckVerifier::new(
+                configured.firebase_project_number.clone(),
+                configured.firebase_app_id.clone(),
+            )?;
+            Some(Arc::new(buzz_push_gateway::http::AndroidProfileRuntime {
+                app_check: Arc::new(app_check),
+                transport: Arc::new(transport),
+            }))
+        }
+        None => None,
     };
     let grant_keyring = GrantKeyring::new(
         c.grant_keys
@@ -96,6 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             token_keyring: Arc::new(token_keyring),
             profile: Arc::new(profile),
             gateway_urls: Arc::new(c.gateway_urls),
+            android_profile,
             max_grant_lifetime_seconds: c.max_grant_lifetime_seconds,
             max_installation_lifetime_seconds: c.max_installation_lifetime_seconds,
             endpoint_quota_window_seconds: c.endpoint_quota_window_seconds,

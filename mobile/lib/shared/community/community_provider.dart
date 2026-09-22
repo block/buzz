@@ -77,8 +77,9 @@ final communityStorageProvider = Provider<CommunityStorage>((ref) {
   return CommunityStorage();
 });
 
-typedef CommunitySnapshotWriter =
-    Future<void> Function(List<Community> communities);
+typedef CommunitySnapshotWriter = Future<void> Function(
+  List<Community> communities,
+);
 
 /// Exports persisted communities to the notification service extension.
 final communitySnapshotWriterProvider = Provider<CommunitySnapshotWriter>((
@@ -91,8 +92,10 @@ final _communitySnapshotSyncProvider = Provider<_CommunitySnapshotSync>((ref) {
   return _CommunitySnapshotSync(ref.read(communitySnapshotWriterProvider));
 });
 
-typedef CommunityPushLeaseDeactivator =
-    Future<void> Function(Community community, {int? generation});
+typedef CommunityPushLeaseDeactivator = Future<void> Function(
+  Community community, {
+  int? generation,
+});
 
 final communityPushLeaseDeactivatorProvider =
     Provider<CommunityPushLeaseDeactivator>((ref) {
@@ -100,8 +103,9 @@ final communityPushLeaseDeactivatorProvider =
           _deactivateCommunityPushLease(community, generation: generation);
     });
 
-typedef CommunityPushLeaseRevocationEnqueuer =
-    Future<bool> Function(Community community);
+typedef CommunityPushLeaseRevocationEnqueuer = Future<bool> Function(
+  Community community,
+);
 
 final communityPushLeaseRevocationEnqueuerProvider =
     Provider<CommunityPushLeaseRevocationEnqueuer>((ref) {
@@ -130,12 +134,14 @@ Future<void> _deactivateCommunityPushLease(
   }
   final decoded = nostr.Nip19.decode(payload: nsec);
   final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
-  final descriptor = await fetchBuzzPushLeaseDescriptor(community.relayUrl);
+  final descriptor = await fetchBuzzPushLeaseDescriptorForCurrentPlatform(
+    community.relayUrl,
+  );
   final matchingGrant = (await readBuzzPushEndpointGrants())
       .where(
         (grant) =>
             grant.relayOrigin == descriptor.origin &&
-            grant.appProfile == buzzDevPushAppProfile,
+            grant.appProfile == descriptor.appProfile,
       )
       .firstOrNull;
   if (matchingGrant == null) {

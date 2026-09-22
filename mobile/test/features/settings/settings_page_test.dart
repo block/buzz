@@ -53,9 +53,8 @@ void main() {
           child: MaterialApp(
             theme: AppTheme.light(),
             builder: (context, child) => MediaQuery(
-              data: MediaQuery.of(
-                context,
-              ).copyWith(textScaler: TextScaler.linear(2)),
+              data: MediaQuery.of(context)
+                  .copyWith(textScaler: TextScaler.linear(2)),
               child: child!,
             ),
             home: SettingsPage(
@@ -115,6 +114,52 @@ void main() {
       findsOneWidget,
     );
     expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('shows notification controls and Android permission state', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final community = Community.create(
+      name: 'Team',
+      relayUrl: 'wss://relay.example',
+    ).copyWith(pushNotificationsEnabled: true);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          activeCommunityProvider.overrideWith((ref) async => community),
+          appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
+          buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
+            () async => BuzzPushAuthorizationStatus.denied,
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            invitePageBuilder: (_) => const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('push-notifications-enabled')),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Enabled in Buzz, but disabled in Android Settings'),
+      findsOneWidget,
+    );
+    expect(find.text('Open Android Notification Settings'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
 

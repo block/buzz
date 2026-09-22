@@ -105,6 +105,19 @@ if (debugIdSuffix != null && !debugIdSuffix.matches(Regex("""\.[a-z][a-z0-9_]*""
     )
 }
 val debugAppName = appOverrides.getProperty("appName")?.takeIf { it.isNotBlank() }
+fun buildConfigString(name: String): String =
+    providers.environmentVariable(name).orNull.orEmpty()
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+val firebaseConfigNames =
+    listOf(
+        "BUZZ_ANDROID_FIREBASE_PROJECT_ID",
+        "BUZZ_ANDROID_FIREBASE_APPLICATION_ID",
+        "BUZZ_ANDROID_FIREBASE_API_KEY",
+        "BUZZ_ANDROID_FIREBASE_SENDER_ID",
+    )
+val missingFirebaseConfigValues =
+    firebaseConfigNames.filter { providers.environmentVariable(it).orNull.isNullOrBlank() }
 if (
     debugAppName != null &&
         !debugAppName.matches(Regex("""[A-Za-z0-9][A-Za-z0-9 ._()\-]{0,39}"""))
@@ -160,6 +173,26 @@ android {
         versionName = flutter.versionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resValue("string", "app_name", "Buzz")
+        buildConfigField(
+            "String",
+            "BUZZ_FIREBASE_PROJECT_ID",
+            "\"${buildConfigString("BUZZ_ANDROID_FIREBASE_PROJECT_ID")}\"",
+        )
+        buildConfigField(
+            "String",
+            "BUZZ_FIREBASE_APPLICATION_ID",
+            "\"${buildConfigString("BUZZ_ANDROID_FIREBASE_APPLICATION_ID")}\"",
+        )
+        buildConfigField(
+            "String",
+            "BUZZ_FIREBASE_API_KEY",
+            "\"${buildConfigString("BUZZ_ANDROID_FIREBASE_API_KEY")}\"",
+        )
+        buildConfigField(
+            "String",
+            "BUZZ_FIREBASE_SENDER_ID",
+            "\"${buildConfigString("BUZZ_ANDROID_FIREBASE_SENDER_ID")}\"",
+        )
     }
 
     signingConfigs {
@@ -194,11 +227,21 @@ android {
             }
         }
     }
+
+    buildFeatures {
+        buildConfig = true
+    }
 }
 
 dependencies {
     implementation("com.google.android.play:age-signals:0.0.4")
     implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("androidx.core:core-ktx:1.16.0")
+    implementation(platform("com.google.firebase:firebase-bom:34.18.0"))
+    implementation("com.google.firebase:firebase-appcheck-playintegrity")
+    debugImplementation("com.google.firebase:firebase-appcheck-debug")
+    implementation("com.google.firebase:firebase-installations")
+    implementation("com.google.firebase:firebase-messaging")
 
     testImplementation(kotlin("test"))
 
@@ -210,6 +253,12 @@ dependencies {
 gradle.taskGraph.whenReady {
     val buildsRelease = allTasks.any { task ->
         task.project == project && task.name in setOf("assembleRelease", "bundleRelease")
+    }
+    if (buildsRelease && missingFirebaseConfigValues.isNotEmpty()) {
+        throw GradleException(
+            "Release builds require Firebase configuration for Android notifications. Missing: " +
+                missingFirebaseConfigValues.sorted().joinToString(", "),
+        )
     }
     if (buildsRelease && externalReleaseSigning) {
         // External signing: the unsigned bundle goes to the central APK
