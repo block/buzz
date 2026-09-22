@@ -238,3 +238,123 @@ for (const cooldown of [false, true]) {
       assert.ok(requests()[i].at - requests()[i - 1].at >= 250);
   });
 }
+
+// Exercise the session's reconnect entry point; only replacement socket
+// establishment is fake. Hook registration, reset, replay and delivery are real.
+for (const visibleChannel of [null, "cold-295"]) {
+  test(`companion TTS retains priority across reconnect (visible=${visibleChannel})`, async () => {
+    await mountTts();
+    await advance(250);
+    const original = ttsRequests()[0].frame;
+    const event = {
+      id: "before-reconnect",
+      kind: 9,
+      pubkey: "agent",
+      created_at: 1001,
+      tags: [["h", "huddle"]],
+      content: "Already spoken",
+      sig: "",
+    };
+    await act(async () => {
+      await deliver(["EVENT", original[1], event]);
+      await deliver(["EOSE", original[1]]);
+      await flush();
+    });
+    assert.equal(spoken.length, 1);
+    relayClient.setVisibleChannelId(visibleChannel);
+    relayClient.resetConnection(new Error("socket lost"));
+    window.clearTimeout(relayClient.reconnectTimeout);
+    relayClient.reconnectTimeout = null;
+    relayClient.wsId = 8;
+    writes.length = 0;
+    await deliver(["NOTICE", "rate-limited: quota exceeded; retry in 4s"]);
+    const replay = relayClient.replayLiveSubscriptions();
+    await advance(3999);
+    assert.equal(requests().length, 0, "priority cannot bypass cooldown");
+    await advance(1);
+    assert.equal(requests().length, 8, "retain the reconnect batch cap");
+    const firstChannels = requests().map(({ frame }) => frame[2]["#h"][0]);
+    assert.deepEqual(
+      firstChannels.slice(0, visibleChannel ? 2 : 1),
+      visibleChannel ? [visibleChannel, "huddle"] : ["huddle"],
+      "visible and interactive tie in registration order ahead of cold work",
+    );
+    assert.deepEqual(
+      ttsRequests()[0].frame,
+      original,
+      "retain replay filter and owner",
+    );
+    assert.equal(relayClient.visibleChannelId, visibleChannel);
+    const replayStart = now;
+    await act(async () => {
+      await deliver(["EVENT", original[1], event]);
+      await deliver([
+        "EVENT",
+        original[1],
+        { ...event, id: "after-reconnect", content: "New speech" },
+      ]);
+      await deliver(["EOSE", original[1]]);
+      await flush();
+    });
+    assert.deepEqual(
+      spoken.map(({ text }) => text),
+      ["Already spoken", "New speech"],
+    );
+    await advance(49);
+    assert.equal(requests().length, 8, "retain inter-batch delay");
+    await advance(1);
+    assert.equal(requests().length, 16);
+    await deliver(["NOTICE", "rate-limited: quota exceeded; retry in 4s"]);
+    await advance(3999);
+    assert.equal(requests().length, 16, "recheck cooldown between batches");
+    await advance(1);
+    assert.equal(requests().length, 24);
+    await advance(2000);
+    await replay;
+    relayClient.reconnectWaiters.settle();
+    await flush();
+    assert.equal(
+      requests().length,
+      297,
+      "all background owners recover exactly once",
+    );
+    assert.equal(new Set(requests().map(({ frame }) => frame[1])).size, 297);
+    for (let i = 8; i < requests().length; i += 8)
+      assert.ok(requests()[i].at - requests()[i - 1].at >= 50);
+    assert.equal(requests()[0].at, replayStart);
+    await advance(1000);
+    assert.equal(
+      requests().length,
+      297,
+      "retired startup drain cannot duplicate replay",
+    );
+  });
+}
+
+test("unmounting the companion TTS hook during reconnect cooldown cancels its owner", async () => {
+  const hook = await mountTts();
+  await advance(250);
+  const id = ttsRequests()[0].frame[1];
+  relayClient.resetConnection(new Error("socket lost"));
+  window.clearTimeout(relayClient.reconnectTimeout);
+  relayClient.reconnectTimeout = null;
+  relayClient.wsId = 8;
+  writes.length = 0;
+  await deliver(["NOTICE", "rate-limited: quota exceeded; retry in 4s"]);
+  const replay = relayClient.replayLiveSubscriptions();
+  await act(async () => {
+    hook.unmount();
+    await flush();
+  });
+  assert.equal(relayClient.subscriptions.has(id), false);
+  await advance(6000);
+  await replay;
+  relayClient.reconnectWaiters.settle();
+  await flush();
+  assert.equal(
+    ttsRequests().length,
+    0,
+    "reconnect must not resurrect a departed huddle",
+  );
+  assert.equal(requests().length, 296);
+});
