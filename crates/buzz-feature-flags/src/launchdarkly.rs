@@ -255,6 +255,13 @@ mod tests {
             .expect("launchdarkly test config")
     }
 
+    fn default_test_config(test_data: &TestData) -> Config {
+        ConfigBuilder::new("sdk-key")
+            .data_source(test_data)
+            .build()
+            .expect("launchdarkly default test config")
+    }
+
     async fn started_evaluator(test_data: &TestData) -> LaunchDarklyEvaluator {
         let config = test_config(test_data);
         let client = Client::build(config).expect("launchdarkly test client");
@@ -270,6 +277,7 @@ mod tests {
     fn launchdarkly_test_config_uses_null_event_processor() {
         let test_data = TestData::new();
         let config = test_config(&test_data);
+        let default_config = default_test_config(&test_data);
         let endpoints = launchdarkly_server_sdk::ServiceEndpointsBuilder::new()
             .build()
             .expect("default service endpoints");
@@ -277,11 +285,20 @@ mod tests {
             .event_processor_builder()
             .build(&endpoints, config.sdk_key(), None)
             .expect("event processor build");
+        let default_event_processor = default_config
+            .event_processor_builder()
+            .build(&endpoints, default_config.sdk_key(), None)
+            .expect("default event processor build");
 
         event_processor.close();
+        default_event_processor.close();
         assert!(
             event_processor.flush_blocking(Duration::from_millis(10)),
             "null event processor should remain a no-op after close"
+        );
+        assert!(
+            !default_event_processor.flush_blocking(Duration::from_millis(10)),
+            "default event processor should fail flush_blocking after close"
         );
     }
 
