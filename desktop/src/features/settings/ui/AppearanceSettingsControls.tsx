@@ -369,6 +369,116 @@ export function LinkPreviewStyleSetting() {
   );
 }
 
+/** Native window glass rows sit below theme and accent choices. */
+export function GlassBackgroundSetting() {
+  const {
+    glassBackground,
+    glassBackgroundSupported,
+    glassOpacity,
+    setGlassBackground,
+    setGlassOpacity,
+  } = useTheme();
+  const shouldReduceMotion = useReducedMotion();
+
+  if (isLinuxPlatform()) return null;
+
+  const shouldShowOpacity = glassBackgroundSupported && glassBackground;
+  const opacityRow = (
+    <SettingsOptionRow data-testid="glass-opacity-row">
+      <div className="min-w-0">
+        <p className="text-sm font-medium">Glass opacity</p>
+        <p
+          className="text-sm font-normal text-muted-foreground/70"
+          data-settings-subcopy
+          id="glass-opacity-description"
+        >
+          Lower values reveal more of the desktop blur.
+        </p>
+      </div>
+      <div className="flex w-64 shrink-0 items-center">
+        <AvatarFramingSlider
+          ariaDescribedBy="glass-opacity-description"
+          ariaLabel="Glass opacity"
+          ariaValueText={`${glassOpacity}% opacity`}
+          compact
+          handleAlwaysVisible
+          max={GLASS_OPACITY_MAX}
+          min={GLASS_OPACITY_MIN}
+          onChange={setGlassOpacity}
+          onReset={() => setGlassOpacity(DEFAULT_GLASS_OPACITY)}
+          resetLabel="Reset glass opacity"
+          resetTestId="glass-opacity-reset"
+          resetValue={DEFAULT_GLASS_OPACITY}
+          testId="glass-opacity-slider"
+          value={glassOpacity}
+        />
+      </div>
+    </SettingsOptionRow>
+  );
+
+  return (
+    <>
+      <SettingsOptionRow data-testid="glass-background-row">
+        <div className="min-w-0">
+          <label
+            className="text-sm font-medium"
+            htmlFor="glass-background-switch"
+          >
+            Glass background
+          </label>
+          <p
+            className="text-sm font-normal text-muted-foreground/70"
+            data-settings-subcopy
+          >
+            {glassBackgroundSupported
+              ? "Blur the desktop behind navigation while keeping content solid."
+              : "Available in the macOS desktop app."}
+          </p>
+        </div>
+        <Switch
+          checked={glassBackgroundSupported && glassBackground}
+          data-testid="glass-background-toggle"
+          disabled={!glassBackgroundSupported}
+          id="glass-background-switch"
+          onCheckedChange={setGlassBackground}
+        />
+      </SettingsOptionRow>
+      {shouldReduceMotion ? (
+        shouldShowOpacity ? (
+          opacityRow
+        ) : null
+      ) : (
+        <AnimatePresence initial={false}>
+          {shouldShowOpacity ? (
+            <motion.div
+              animate={{ height: "auto", opacity: 1, y: 0 }}
+              className="overflow-hidden"
+              exit={{ height: 0, opacity: 0, y: -6 }}
+              initial={{ height: 0, opacity: 0, y: -6 }}
+              key="glass-opacity"
+              transition={{
+                duration: 0.25,
+                ease: [0.23, 1, 0.32, 1],
+              }}
+            >
+              {opacityRow}
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+      )}
+    </>
+  );
+}
+
+/** Compact thread preference row in the Appearance preferences card. */
+/**
+ * Abstract diagram for the thread layout preview, in the same soft-block
+ * style as the links sample: a rounded frame holding a channel surface and a
+ * thread surface, with light skeleton bars. Inline SVG (not a data-URL image)
+ * so fills reference theme tokens directly and follow light/dark and accent
+ * changes automatically. Only the panel proportions change between modes.
+ */
+
 export function AccentPickerContent({
   accentColor,
   isDark,
