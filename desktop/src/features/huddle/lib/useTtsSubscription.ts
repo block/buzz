@@ -285,7 +285,7 @@ export function useTtsSubscription(
     const seenOrder: string[] = [];
     const MAX_SEEN_EVENTS = 5000;
     relayClient
-      .subscribeLive(
+      .subscribeInteractive(
         buildHuddleTtsLiveFilter(ephemeralChannelId, replaySince),
         (event) => {
           if (disposed) return;

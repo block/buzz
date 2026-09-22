@@ -46,9 +46,11 @@ async function mount() {
     setTimeout: window.setTimeout,
     clearTimeout: window.clearTimeout,
     internals: window.__TAURI_INTERNALS__,
+    now: Date.now,
   };
   const timers = new Map();
-  let now = 0;
+  let now = Date.now();
+  Date.now = () => now;
   let nextTimer = 0;
   window.setTimeout = (fn, ms) => {
     timers.set(++nextTimer, { fn, at: now + ms });
@@ -111,7 +113,28 @@ async function mount() {
     act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
+  const tick = async (ms) => {
+    await act(async () => {
+      const target = now + ms;
+      let fired = 0;
+      for (;;) {
+        const next = [...timers]
+          .filter(([, timer]) => timer.at <= target)
+          .sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+        if (!next) break;
+        assert.ok(++fired < 1000, "timer loop must make progress");
+        now = next[1].at;
+        timers.delete(next[0]);
+        next[1].fn();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      now = target;
+    });
+    await settle();
+  };
   await settle();
+  // Admit both subscriptions through the production drain before testing CLOSED.
+  await tick(500);
   assert.equal(sent.filter(([type]) => type === "REQ").length, 2);
   const ids = sent.filter(([type]) => type === "REQ").map(([, id]) => id);
   return {
@@ -128,18 +151,7 @@ async function mount() {
       act(async () => {
         await deliver(["CLOSED", id, reason], generation);
       }),
-    async tick(ms) {
-      await act(async () => {
-        now += ms;
-        for (const [id, timer] of [...timers]) {
-          if (timer.at <= now) {
-            timers.delete(id);
-            timer.fn();
-          }
-        }
-      });
-      await settle();
-    },
+    tick,
     async respond(channels = rawChannels) {
       assert.equal(
         reads.length,
@@ -171,6 +183,7 @@ async function mount() {
       window.setTimeout = original.setTimeout;
       window.clearTimeout = original.clearTimeout;
       window.__TAURI_INTERNALS__ = original.internals;
+      Date.now = original.now;
     },
   };
 }

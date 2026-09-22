@@ -44,13 +44,14 @@ export function parseRateLimitHint(msg: string): number | null {
  *
  * If the gate is already active, the expiry is pushed forward to the maximum of
  * the existing expiry and the new hint — overlapping hints never shrink the
- * window. Non-positive or absent hints use the 10-second default; a 0s gate
- * would resolve immediately and swallow the signal.
+ * window. An explicit zero adds no hold; it is not a missing hint and does not
+ * clear an existing deadline. Negative or absent hints use the 10-second default.
  *
  * Note: buzz-acp uses a 5s no-hint default; desktop deliberately uses 10s here
  * for a wider back-off window on degraded connections.
  */
 export function activateRateLimit(retryInSeconds: number | null): void {
+  if (retryInSeconds === 0) return;
   const durationMs =
     (retryInSeconds != null && retryInSeconds > 0
       ? Math.min(retryInSeconds, MAX_HINT_SECONDS)

@@ -153,6 +153,33 @@ pub(crate) async fn unread_catch_up(
     // particular do not move the lease into a task or narrow its scope.
     let session = relay_client.session(relay_url.clone(), keys).await;
 
+    let (fetched, failures) = fetch_channels(session.handle(), &request).await?;
+
+    let current_keys = state.signing_keys()?;
+    if current_keys.public_key().to_hex() != owner
+        || crate::relay::relay_ws_url_with_override(&state) != relay_url
+    {
+        return Err("unread catch-up scope changed while fetching".to_string());
+    }
+
+    let membership = crate::observed_unread::load_membership(
+        &app,
+        &crate::observed_unread::ObservedUnreadScope {
+            pubkey: owner,
+            relay_url,
+        },
+    )?;
+    let mut channels = classify_batch(&request, fetched, &membership);
+    channels.extend(failures);
+    Ok(UnreadCatchUpResponse { channels })
+}
+
+// Shared production boundary: original per-channel filters, finite requests,
+// and error partitioning. Scope/membership checks remain in the command above.
+async fn fetch_channels(
+    session: std::sync::Arc<crate::native_relay_client::RelaySession>,
+    request: &UnreadCatchUpRequest,
+) -> Result<(Vec<FetchedChannel>, Vec<ChannelResult>), String> {
     let concurrency = std::sync::Arc::new(Semaphore::new(8));
     let mut pending = JoinSet::new();
     // One command replaces N renderer invokes while the shared session still
@@ -163,7 +190,7 @@ pub(crate) async fn unread_catch_up(
             .acquire_owned()
             .await
             .map_err(|error| error.to_string())?;
-        let session = session.handle();
+        let session = std::sync::Arc::clone(&session);
         pending.spawn(async move {
             let _permit = permit;
             let kinds: &[u32] = if channel.channel_type == "dm" {
@@ -217,23 +244,7 @@ pub(crate) async fn unread_catch_up(
 
     fetched.sort_by_key(|item| item.order);
 
-    let current_keys = state.signing_keys()?;
-    if current_keys.public_key().to_hex() != owner
-        || crate::relay::relay_ws_url_with_override(&state) != relay_url
-    {
-        return Err("unread catch-up scope changed while fetching".to_string());
-    }
-
-    let membership = crate::observed_unread::load_membership(
-        &app,
-        &crate::observed_unread::ObservedUnreadScope {
-            pubkey: owner,
-            relay_url,
-        },
-    )?;
-    let mut channels = classify_batch(&request, fetched, &membership);
-    channels.extend(failures);
-    Ok(UnreadCatchUpResponse { channels })
+    Ok((fetched, failures))
 }
 
 fn classify_batch(
@@ -667,3 +678,7 @@ mod tests {
         assert_eq!(actual, expected);
     }
 }
+
+#[cfg(test)]
+#[path = "unread_catch_up_recovery_tests.rs"]
+mod recovery_tests;
