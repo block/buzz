@@ -62,6 +62,11 @@ impl AppAttestVerifier {
             environment,
         })
     }
+    /// Exact server-selected environment accepted by this verifier.
+    pub fn environment(&self) -> AppAttestEnvironment {
+        self.environment
+    }
+
     /// `client_data` is the exact canonical enrollment transcript represented by
     /// the challenge string passed to `attestKey`; callers must include every
     /// authority-bearing enrollment field in it.
@@ -143,16 +148,55 @@ fn verify_attestation_environment(
         .map()
         .map_err(|_| AppAttestError::Invalid)?
         .ok_or(AppAttestError::Invalid)?;
+    if count != 3 {
+        return Err(AppAttestError::Invalid);
+    }
     let mut auth_data = None;
+    let mut format_seen = false;
+    let mut statement_seen = false;
     for _ in 0..count {
-        let key = decoder.str().map_err(|_| AppAttestError::Invalid)?;
-        if key == "authData" {
-            if auth_data.is_some() {
-                return Err(AppAttestError::Invalid);
+        match decoder.str().map_err(|_| AppAttestError::Invalid)? {
+            "authData" if auth_data.is_none() => {
+                auth_data = Some(decoder.bytes().map_err(|_| AppAttestError::Invalid)?);
             }
-            auth_data = Some(decoder.bytes().map_err(|_| AppAttestError::Invalid)?);
-        } else {
-            decoder.skip().map_err(|_| AppAttestError::Invalid)?;
+            "fmt" if !format_seen => {
+                if decoder.str().map_err(|_| AppAttestError::Invalid)? != "apple-appattest" {
+                    return Err(AppAttestError::Invalid);
+                }
+                format_seen = true;
+            }
+            "attStmt" if !statement_seen => {
+                // appattest 0.1.1 treats indefinite containers as empty without
+                // consuming their contents. Accept only the definite schema so
+                // its cursor cannot reinterpret nested fields as root fields.
+                if decoder.map().map_err(|_| AppAttestError::Invalid)? != Some(2) {
+                    return Err(AppAttestError::Invalid);
+                }
+                let mut certs_seen = false;
+                let mut receipt_seen = false;
+                for _ in 0..2 {
+                    match decoder.str().map_err(|_| AppAttestError::Invalid)? {
+                        "x5c" if !certs_seen => {
+                            let count = decoder
+                                .array()
+                                .map_err(|_| AppAttestError::Invalid)?
+                                .filter(|count| (1..=3).contains(count))
+                                .ok_or(AppAttestError::Invalid)?;
+                            for _ in 0..count {
+                                decoder.bytes().map_err(|_| AppAttestError::Invalid)?;
+                            }
+                            certs_seen = true;
+                        }
+                        "receipt" if !receipt_seen => {
+                            decoder.bytes().map_err(|_| AppAttestError::Invalid)?;
+                            receipt_seen = true;
+                        }
+                        _ => return Err(AppAttestError::Invalid),
+                    }
+                }
+                statement_seen = true;
+            }
+            _ => return Err(AppAttestError::Invalid),
         }
     }
     if decoder.position() != cbor.len() {
@@ -427,6 +471,101 @@ mod tests {
                 dev.challenge.as_bytes()
             )
             .is_err());
+    }
+
+    #[cfg(feature = "personal-dev-app-attest")]
+    #[test]
+    fn nested_statement_cannot_bypass_environment_fence() {
+        for (json, environment, decoy_aaguid) in [
+            (
+                WRONG_AAGUID_FIXTURE_JSON,
+                AppAttestEnvironment::Production,
+                &b"appattest\0\0\0\0\0\0\0"[..],
+            ),
+            (
+                GOOD_FIXTURE_JSON,
+                AppAttestEnvironment::Development,
+                &b"appattestdevelop"[..],
+            ),
+        ] {
+            let fixture = fixture(json);
+            let original = STANDARD.decode(&fixture.attestation_b64).unwrap();
+            let mut decoder = minicbor::Decoder::new(&original);
+            let count = decoder.map().unwrap().unwrap();
+            let mut auth = &[][..];
+            let mut statement = &[][..];
+            for _ in 0..count {
+                let key = decoder.str().unwrap();
+                let start = decoder.position();
+                decoder.skip().unwrap();
+                match key {
+                    "authData" => auth = &original[start..decoder.position()],
+                    "attStmt" => statement = &original[start..decoder.position()],
+                    _ => {}
+                }
+            }
+            let mut decoy = [0u8; 53];
+            decoy[37..53].copy_from_slice(decoy_aaguid);
+            let mut buffer = vec![0; original.len() + 256];
+            let mut encoder =
+                minicbor::Encoder::new(minicbor::encode::write::Cursor::new(buffer.as_mut_slice()));
+            encoder
+                .map(5)
+                .unwrap()
+                .str("fmt")
+                .unwrap()
+                .str("apple-appattest")
+                .unwrap()
+                .str("authData")
+                .unwrap()
+                .bytes(&decoy)
+                .unwrap()
+                .str("attStmt")
+                .unwrap()
+                .begin_map()
+                .unwrap()
+                .str("attStmt")
+                .unwrap();
+            use minicbor::encode::Write;
+            encoder.writer_mut().write_all(statement).unwrap();
+            encoder.str("authData").unwrap();
+            encoder.writer_mut().write_all(auth).unwrap();
+            encoder
+                .end()
+                .unwrap()
+                .str("padding1")
+                .unwrap()
+                .u8(0)
+                .unwrap()
+                .str("padding2")
+                .unwrap()
+                .u8(0)
+                .unwrap();
+            let length = encoder.writer().position();
+            let malicious = &buffer[..length];
+            // Prove this envelope reaches valid signed material in the dependency.
+            Attestation::from_cbor_bytes(malicious)
+                .unwrap()
+                .verify(
+                    &fixture.challenge,
+                    &fixture.app_id,
+                    &fixture.key_id_b64,
+                    fixture.root_cert_pem.as_bytes(),
+                )
+                .unwrap();
+            let mut verifier = verifier(&fixture.app_id, fixture.root_cert_pem.as_bytes());
+            verifier.environment = environment;
+            assert!(
+                verifier
+                    .verify_attestation(
+                        &STANDARD.encode(malicious),
+                        &fixture.key_id_b64,
+                        fixture.challenge.as_bytes(),
+                    )
+                    .is_err(),
+                "cross-environment nested statement accepted: {environment:?}"
+            );
+        }
     }
 
     #[test]
