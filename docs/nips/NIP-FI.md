@@ -52,7 +52,7 @@ The assertion is a compact JWS carrying the following claims.
 | `iss` | string | Exact issuer URI.  The relay selects an issuer policy by exact match; no normalization is applied. |
 | `sub` | string | Opaque, stable, non-reassignable subject identifier for the account lifetime.  Never an email address or display name. |
 | `nostr_pubkey` | string | Lowercase hexadecimal encoding of exactly one 32-byte Nostr public key.  Other encodings deny. |
-| `aud` | string or array | Audience.  MUST be present.  The relay requires an exact match to the configured audience value for this issuer. |
+| `aud` | string or array | Audience.  MUST be present.  The relay requires an exact match to the configured audience value for this issuer.  In a multi-community deployment, each configured audience value MUST identify exactly one community/deployment: the one resolved from the connection's `Host`.  A relay MUST NOT configure the same audience value for distinct communities. |
 | `iat` | NumericDate | Issuance time. |
 | `exp` | NumericDate | Expiry time.  MUST be finite.  The deployment MUST configure a positive finite maximum TTL; the relay enforces both the token `exp` and the configured `maximum_assertion_age`. |
 
@@ -110,6 +110,19 @@ denies any token whose `nostr_pubkey` does not match the NIP-42 `pubkey`.
 This is the entire identity-to-key binding.  There is no relay-side binding
 ledger; the assertion is the binding claim, and it is the assertion issuer's
 responsibility to ensure the assertion names the correct key.
+
+> **Open question — pending issuer input (jm):** The exact format of the
+> audience value that identifies one community/deployment is not defined here.
+> The normative requirement is only that one configured audience value maps to
+> one community, and that distinct communities do not share it.
+
+### Unverified claims
+
+Relays MUST ignore claims they do not verify.  An unverified claim — including
+`sid`, `jti`, or issuer-private blocks such as `enterprise_identity` — grants no
+authority and MUST NOT be logged or exposed in discovery or error responses.
+Issuers SHOULD minimize claims in assertions visible to relays to reduce
+unnecessary disclosure.
 
 ### Policy identity
 
@@ -271,6 +284,9 @@ detail; the relay never sees anything other than a new upgrade request.
 A client whose session expired due to normal TTL expiry may reconnect
 immediately provided the issuer can supply a fresh assertion.  Session expiry
 does not imply key revocation or identity loss; that is the issuer's domain.
+Clients SHOULD proactively obtain a fresh assertion before expiry and reconnect
+with it.  Nothing in this section forbids early re-exchange; renewal remains
+out of band rather than an in-band session operation.
 
 ## Admin disconnect API
 
@@ -786,6 +802,10 @@ normative behavior for them:
 - Identity↔key registry, key ownership records, and the one-identity one-key
   constraint: issuer-side.
 - Key rotation, re-enrollment after device loss: issuer-side.
+- Per-session (`sid`-level) revocation: issuer-side.  The relay's revocation
+  primitive is identity-wide (see Admin disconnect API); individual
+  session/device logout is handled by assertion expiry within the configured
+  TTL window.
 - Revocation signaling to the issuer/IdP: issuer-side; the issuer stops
   issuing assertions, which closes the relay window within assertion TTL.
 - Directory integration and account-offboarding automation: issuer-side.
