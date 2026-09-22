@@ -690,7 +690,7 @@ The following cardinality rules apply to all kind-24242 proofs:
 Every kind-24242 proof MUST be subject to the full NIP-FI per-request pairing
 requirement: full assertion verification, exact key equality between the
 assertion's `nostr_pubkey` claim and the kind-24242 event's public key, and
-deny-map enforcement (see Admission procedure, steps 1–5).
+deny-map enforcement (see Admission procedure, steps 1–6).
 
 The effectiveness of deny-map enforcement is contingent on the real
 issuer-scoped deny map.  Until that map is operational, the stub implementation
