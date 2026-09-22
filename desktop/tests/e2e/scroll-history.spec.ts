@@ -182,17 +182,72 @@ test("preserves user scroll while older channel history loads", async ({
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
 
-  // Use the `deep-history` channel: its store is seeded with 600 messages,
-  // more than CHANNEL_HISTORY_LIMIT (300, hooks.ts), so the cold load windows
-  // to the newest 300 and leaves ~300 genuinely older messages behind the
-  // `until` cursor. A shallow seed (store < 300) is fully drained by the cold
-  // load, so the wheel `fetchOlder` returns only already-cached duplicates that
-  // dedup to zero net growth -- the anchor never has a real prepend to hold and
-  // the assertion would measure virtualizer re-measure, not scroll preservation.
+  // The 600-row seed exceeds the 50-row head window, leaving genuinely older
+  // pages behind its composite cursor. A fully drained seed would only measure
+  // virtualizer re-measurement, not scroll preservation across real growth.
   await page.getByTestId("channel-deep-history").click();
   await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
+
+  // This tests steady-state prepending, not early scrolling during startup.
+  // Admission precedes EOSE and the hook's post-subscribe head refresh, which
+  // replaces paged tails. Observe that refresh through the existing IPC journal
+  // and query state before collecting the baseline; admission alone can race it.
+  await page.waitForFunction(() => {
+    const channelId = "feedf00d-0000-4000-8000-000000000007";
+    if (
+      !window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+        channelName: "deep-history",
+        kind: 39005,
+      })
+    ) {
+      return false;
+    }
+    const commands = window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [];
+    const liveIndex = commands.findIndex(({ command, payload }) => {
+      if (command !== "plugin:websocket|send") return false;
+      const message = (payload as { message?: { type: string; data: string } })
+        ?.message;
+      if (message?.type !== "Text") return false;
+      const [type, id, ...filters] = JSON.parse(message.data);
+      return (
+        type === "REQ" &&
+        id.startsWith("live-") &&
+        filters.some(
+          (filter: { kinds?: number[]; "#h"?: string[] }) =>
+            filter.kinds?.includes(39005) && filter["#h"]?.includes(channelId),
+        )
+      );
+    });
+    const refreshed = commands
+      .slice(liveIndex + 1)
+      .some(({ command, payload }) => {
+        const args = payload as { channelId?: string; cursor?: unknown } | null;
+        return (
+          command === "get_channel_window" &&
+          args?.channelId === channelId &&
+          args.cursor === null
+        );
+      });
+    const state = window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState([
+      "channel-messages",
+      channelId,
+    ]);
+    return (
+      liveIndex >= 0 &&
+      refreshed &&
+      state?.status === "success" &&
+      state.fetchStatus === "idle"
+    );
+  });
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+  await expect
+    .poll(async () => {
+      const { scrollHeight, scrollTop, clientHeight } =
+        await getTimelineMetrics(page);
+      return scrollHeight - scrollTop - clientHeight;
+    })
+    .toBeLessThanOrEqual(2);
   await page.waitForFunction(() => {
     const element = document.querySelector(
       '[data-testid="message-timeline"]',
