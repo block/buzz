@@ -26,9 +26,12 @@ async function withStorage(storage, run) {
 }
 
 test("missing, malformed, and unreadable preferences default to split", async () => {
-  for (const stored of [null, "side-by-side", "{bad-json"]) {
+  for (const stored of [null, "side-by-side", "{bad-json", "focus"]) {
     await withStorage(
-      { getItem: (key) => (key === KEY ? stored : null), setItem() {} },
+      {
+        getItem: (key) => (key === KEY ? stored : null),
+        setItem() {},
+      },
       ({ getThreadViewMode }) => {
         assert.equal(getThreadViewMode(), "split");
       },
@@ -48,23 +51,27 @@ test("missing, malformed, and unreadable preferences default to split", async ()
   );
 });
 
-test("loads and writes the stored split preference", async () => {
+test("HulaBuzz ignores focus writes and stays on split", async () => {
   const writes = [];
   await withStorage(
     {
-      getItem: (key) => (key === KEY ? "split" : null),
+      getItem: (key) => (key === KEY ? "focus" : null),
       setItem: (key, value) => writes.push([key, value]),
     },
     ({ getThreadViewMode, setThreadViewMode }) => {
       assert.equal(getThreadViewMode(), "split");
       setThreadViewMode("focus");
-      assert.equal(getThreadViewMode(), "focus");
-      assert.deepEqual(writes, [[KEY, "focus"]]);
+      assert.equal(getThreadViewMode(), "split");
+      // Stale focus is rewritten to split on module load and/or set.
+      assert.ok(
+        writes.some(([key, value]) => key === KEY && value === "split"),
+        `expected a split rewrite, got ${JSON.stringify(writes)}`,
+      );
     },
   );
 });
 
-test("keeps the in-memory choice when persistence fails", async () => {
+test("keeps split when persistence fails", async () => {
   await withStorage(
     {
       getItem: () => null,

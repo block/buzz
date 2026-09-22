@@ -56,14 +56,12 @@ import {
   withAccentPreviewVars,
 } from "@/shared/theme/useThemePreviewVars";
 import { appearanceCommunityLabel } from "../lib/appearanceScopeCopy";
-import { WindowsSettings } from "@/features/popout/ui/WindowsSettings";
 import {
   AccentPickerContent,
   ConversationDisplaySettings,
   GlassBackgroundSetting,
   LinkPreviewStyleSetting,
   ProminentActiveTabSetting,
-  ThreadLayoutSetting,
 } from "./AppearanceSettingsControls";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
@@ -811,15 +809,8 @@ function ThemeSettingsCard() {
         >
           <ConversationDisplaySettings />
           <LinkPreviewStyleSetting />
-          <ThreadLayoutSetting />
         </SettingsOptionGroup>
 
-        <SettingsOptionGroup
-          data-testid="windows-settings-card"
-          title="Windows"
-        >
-          <WindowsSettings />
-        </SettingsOptionGroup>
       </SettingsOptionGroupList>
     </section>
   );

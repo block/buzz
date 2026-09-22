@@ -34,7 +34,6 @@ import {
   ThreadPanelSurface,
   useThreadPanelSurface,
 } from "@/features/channels/ui/ThreadPanelSurface";
-import { ThreadViewModeToggle } from "@/features/channels/ui/ThreadViewModeToggle";
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
 import {
   THREAD_FOCUS_SLIVER_WIDTH_PX,
@@ -489,7 +488,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     showIdleAuxiliaryOverThread,
     markExitComplete,
   );
-  const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
+  const { layoutScrollTargetId, resolveScrollTarget } =
     useThreadViewModeSwitch({
       activeThreadHeadId: threadHeadMessage?.id ?? null,
       externalScrollTargetId: threadScrollTargetId,
@@ -590,11 +589,9 @@ export const ChannelPane = React.memo(function ChannelPane({
           </IdleAuxiliaryPanel>,
         )
       : null;
-  const threadHeaderLeading = useSplitAuxiliaryPane ? (
-    <ThreadViewModeToggle onChange={changeThreadViewMode} />
-  ) : undefined;
+  // HulaBuzz locks thread layout to split — no focus/split header toggle.
   const threadLayoutProps = getThreadPanelLayout({
-    headerLeading: threadHeaderLeading,
+    headerLeading: undefined,
     isFocusDrawer: useFocusThreadDrawer,
     isSinglePanelView,
     useSplitAuxiliaryPane,
