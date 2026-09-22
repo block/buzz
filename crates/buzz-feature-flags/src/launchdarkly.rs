@@ -1,3 +1,4 @@
+use http::Uri;
 use launchdarkly_server_sdk::{
     BuildError, Client, ConfigBuildError, ConfigBuilder, Context, ContextBuilder,
     MultiContextBuilder,
@@ -54,12 +55,26 @@ pub enum LaunchDarklyInitError {
     /// Caller provided an empty relay-proxy endpoint.
     #[error("launchdarkly relay proxy endpoint must not be empty")]
     EmptyRelayProxyEndpoint,
+    /// Caller provided an invalid relay-proxy endpoint.
+    #[error("launchdarkly relay proxy endpoint must be an absolute http(s) URI with authority")]
+    InvalidRelayProxyEndpoint(InvalidRelayProxyEndpointReason),
     /// LaunchDarkly SDK config build failed.
     #[error("launchdarkly config build failed: {0}")]
     ConfigBuild(#[from] ConfigBuildError),
     /// LaunchDarkly SDK client build failed.
     #[error("launchdarkly client build failed: {0}")]
     ClientBuild(#[from] BuildError),
+}
+
+/// Why a relay-proxy endpoint failed pre-validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidRelayProxyEndpointReason {
+    /// Endpoint could not be parsed as a URI.
+    MalformedUri,
+    /// Endpoint scheme is not `http` or `https`.
+    InvalidScheme,
+    /// Endpoint has no authority section (`host[:port]`).
+    MissingAuthority,
 }
 
 /// Errors starting a LaunchDarkly evaluator and waiting for initialization.
@@ -105,6 +120,7 @@ impl LaunchDarklyEvaluator {
             if relay_proxy_endpoint.is_empty() {
                 return Err(LaunchDarklyInitError::EmptyRelayProxyEndpoint);
             }
+            let relay_proxy_endpoint = validate_relay_proxy_endpoint(&relay_proxy_endpoint)?;
             let mut service_endpoints = launchdarkly_server_sdk::ServiceEndpointsBuilder::new();
             service_endpoints.relay_proxy(&relay_proxy_endpoint);
             builder = builder.service_endpoints(&service_endpoints);
@@ -178,6 +194,28 @@ fn strict_f64_to_i64(value: f64) -> Option<i64> {
     (integer as f64 == value).then_some(integer)
 }
 
+fn validate_relay_proxy_endpoint(endpoint: &str) -> Result<String, LaunchDarklyInitError> {
+    let parsed = endpoint.parse::<Uri>().map_err(|_| {
+        LaunchDarklyInitError::InvalidRelayProxyEndpoint(
+            InvalidRelayProxyEndpointReason::MalformedUri,
+        )
+    })?;
+
+    if !matches!(parsed.scheme_str(), Some("http" | "https")) {
+        return Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
+            InvalidRelayProxyEndpointReason::InvalidScheme,
+        ));
+    }
+
+    if parsed.authority().is_some() {
+        return Ok(endpoint.to_owned());
+    }
+
+    Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
+        InvalidRelayProxyEndpointReason::MissingAuthority,
+    ))
+}
+
 fn launchdarkly_context(context: &EvaluationContext) -> Result<Context, String> {
     let mut community = ContextBuilder::new(context.community().to_string());
     community.kind(COMMUNITY_CONTEXT_KIND);
@@ -236,6 +274,85 @@ mod tests {
         assert!(!debug.contains("super-secret-sdk-key"));
         assert!(debug.contains("[REDACTED]"));
         assert!(debug.contains("https://relay.internal"));
+    }
+
+    #[test]
+    fn malformed_relay_proxy_endpoint_returns_typed_error_without_panic() {
+        let result = std::panic::catch_unwind(|| {
+            LaunchDarklyEvaluator::from_runtime_config(
+                LaunchDarklyRuntimeConfig::new("sdk-key")
+                    .with_relay_proxy_endpoint("not a valid endpoint"),
+            )
+        });
+
+        assert!(
+            result.is_ok(),
+            "invalid endpoint should return Err, not panic"
+        );
+        assert!(matches!(
+            result.expect("catch_unwind result"),
+            Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(_))
+        ));
+    }
+
+    #[test]
+    fn relay_proxy_endpoint_rejects_non_http_scheme_and_missing_authority() {
+        let invalid_scheme = LaunchDarklyEvaluator::from_runtime_config(
+            LaunchDarklyRuntimeConfig::new("sdk-key")
+                .with_relay_proxy_endpoint("ftp://relay.internal:8030"),
+        );
+        assert!(matches!(
+            invalid_scheme,
+            Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
+                InvalidRelayProxyEndpointReason::InvalidScheme
+            ))
+        ));
+
+        for endpoint in [
+            "https://",
+            "http:///missing-authority",
+            "https:///still-missing-authority",
+        ] {
+            let result = LaunchDarklyEvaluator::from_runtime_config(
+                LaunchDarklyRuntimeConfig::new("sdk-key").with_relay_proxy_endpoint(endpoint),
+            );
+            assert!(matches!(
+                result,
+                Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn relay_proxy_endpoint_accepts_absolute_http_and_https_uris() {
+        let valid_cases = [
+            "http://relay.internal:8030",
+            "https://relay.internal",
+            "https://relay.internal:8443/path-prefix",
+        ];
+
+        for endpoint in valid_cases {
+            let result = LaunchDarklyEvaluator::from_runtime_config(
+                LaunchDarklyRuntimeConfig::new("sdk-key").with_relay_proxy_endpoint(endpoint),
+            );
+
+            assert!(
+                result.is_ok(),
+                "expected valid endpoint {endpoint} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_proxy_endpoint_error_does_not_leak_raw_endpoint_value() {
+        let endpoint = "https://bad endpoint with spaces";
+        let error = LaunchDarklyEvaluator::from_runtime_config(
+            LaunchDarklyRuntimeConfig::new("sdk-key").with_relay_proxy_endpoint(endpoint),
+        )
+        .expect_err("invalid endpoint should fail");
+
+        assert!(!format!("{error}").contains(endpoint));
+        assert!(!format!("{error:?}").contains(endpoint));
     }
 
     #[tokio::test]

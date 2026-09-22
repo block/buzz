@@ -12,6 +12,7 @@ launchdarkly = ["dep:launchdarkly-server-sdk"]
 
 [dependencies]
 buzz-core = { workspace = true }
+http = "1"
 launchdarkly-server-sdk = { version = "3", optional = true }
 thiserror = { workspace = true }
 
