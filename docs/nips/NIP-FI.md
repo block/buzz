@@ -114,7 +114,10 @@ responsibility to ensure the assertion names the correct key.
 > **Open question — pending issuer input (jm):** The exact format of the
 > audience value that identifies one community/deployment is not defined here.
 > The normative requirement is only that one configured audience value maps to
-> one community, and that distinct communities do not share it.
+> one community, and that distinct communities do not share it.  The
+> verification-time binding between the connection's `Host`-resolved community
+> and the presented audience also awaits that issuer-side mechanism; the `aud`
+> row is a configuration constraint, not yet an enforced verification step.
 
 ### Unverified claims
 
@@ -338,7 +341,7 @@ is immediately expired); this is not an error.
 
 The deny entry is keyed `(iss, target_pubkey)` and applies to admission
 across **all communities** served by the relay under that issuer.
-Identity-level revocation is intentionally not community-partial: a key revoked
+Key-level revocation is intentionally not community-partial: a key revoked
 by its issuer loses access in every community that issuer governs.
 
 In a deployment with multiple relay processes, the deployment MUST propagate
@@ -803,9 +806,11 @@ normative behavior for them:
   constraint: issuer-side.
 - Key rotation, re-enrollment after device loss: issuer-side.
 - Per-session (`sid`-level) revocation: issuer-side.  The relay's revocation
-  primitive is identity-wide (see Admin disconnect API); individual
-  session/device logout is handled by assertion expiry within the configured
-  TTL window.
+  primitive is pubkey-scoped and community-wide, keyed `(iss, target_pubkey)`
+  (see Admin disconnect API).  If an issuer revokes an entire identity, it
+  enumerates and disconnects each key it has asserted for that identity.
+  Individual session/device logout is handled by assertion expiry within the
+  configured TTL window.
 - Revocation signaling to the issuer/IdP: issuer-side; the issuer stops
   issuing assertions, which closes the relay window within assertion TTL.
 - Directory integration and account-offboarding automation: issuer-side.
