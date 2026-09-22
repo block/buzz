@@ -275,6 +275,26 @@ test("unknown, non-channel, unrelated and old-generation CLOSED do not refresh c
   }
 });
 
+test("a different restricted CLOSED reason does not refresh channels", async () => {
+  const h = await mount();
+  try {
+    await h.close(h.ids[0], "restricted: not a channel member");
+    assert.equal(
+      h.relayClient.subscriptions.has(h.ids[0]),
+      false,
+      "the known channel subscription is still terminal",
+    );
+    await h.tick(500);
+    assert.equal(
+      h.reads.length,
+      0,
+      "only the exact revocation reason refreshes",
+    );
+  } finally {
+    h.restore();
+  }
+});
+
 test("unmount cancels queued invalidation and removes its session listener", async () => {
   const h = await mount();
   try {
