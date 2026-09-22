@@ -4,6 +4,11 @@ import type {
 } from "./agentSessionTypes";
 import { asRecord, asString } from "./agentSessionUtils";
 
+export const permissionTerminalObserverOutcomes: Record<string, string> = {
+  permission_abandoned: "Unavailable (agent session ended)",
+  permission_delivery_unknown: "Delivery unknown (not replayed)",
+};
+
 export function describePermissionRequest(payload: Record<string, unknown>) {
   const params = asRecord(payload.params);
   const toolCall = asRecord(params.toolCall);

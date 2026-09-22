@@ -34,6 +34,7 @@ import {
   jsonRpcId,
   ownerResolutionFromPending,
   permissionIdentity,
+  permissionTerminalObserverOutcomes,
   rawJsonRpcId,
 } from "./agentSessionTranscriptPermissions";
 import {
@@ -770,7 +771,7 @@ export function processTranscriptEvent(
         optionNames: description.optionNames,
       });
     }
-  } else if (event.kind === "permission_abandoned") {
+  } else if (Object.hasOwn(permissionTerminalObserverOutcomes, event.kind)) {
     const payload = asRecord(event.payload);
     const requestId = jsonRpcId(payload.requestId);
     const sessionId = asString(payload.sessionId);
@@ -783,7 +784,7 @@ export function processTranscriptEvent(
     if (key && pending && existing?.type === "lifecycle") {
       replaceItem(d, pending.itemId, {
         ...existing,
-        outcome: "Unavailable (agent session ended)",
+        outcome: permissionTerminalObserverOutcomes[event.kind],
         pendingResolution: undefined,
       });
       d.pendingPermissions = new Map(d.pendingPermissions);

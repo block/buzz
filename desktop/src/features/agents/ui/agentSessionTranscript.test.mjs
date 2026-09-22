@@ -1181,6 +1181,43 @@ test("buildTranscript merges ledger and live permission state into one terminal 
   assert.match(permissions[0].text, /Working directory: \/workspace\/repo/);
 });
 
+test("SDK cancellation makes the live card inert and persists an inert reconnect card", () => {
+  const pendingSnapshot = makePermissionLedgerEvent();
+  const liveRequest = makePermissionRequest(1, "req-17");
+  liveRequest.payload.params.sessionId = "session-1";
+  const cancelledResponse = makePermissionResponse(2, "req-17", "cancelled");
+  const stalePendingSnapshot = makePermissionLedgerEvent({ seq: -2 });
+  const [liveCard] = buildTranscript([
+    pendingSnapshot,
+    liveRequest,
+    cancelledResponse,
+    stalePendingSnapshot,
+  ]).filter((item) => item.renderClass === "permission");
+  assert.equal(liveCard.outcome, "Cancelled");
+  assert.equal(liveCard.pendingResolution, undefined);
+
+  const [reconnectCard] = buildTranscript([
+    makePermissionLedgerEvent({ state: { kind: "cancelled" } }),
+  ]).filter((item) => item.renderClass === "permission");
+  assert.equal(reconnectCard.outcome, "Cancelled");
+  assert.equal(reconnectCard.pendingResolution, undefined);
+});
+
+test("failed cancellation response delivery makes the live card inert", () => {
+  const pendingSnapshot = makePermissionLedgerEvent();
+  const deliveryUnknown = {
+    ...pendingSnapshot,
+    seq: 2,
+    kind: "permission_delivery_unknown",
+    payload: { requestId: "req-17", sessionId: "session-1" },
+  };
+  const [card] = buildTranscript([pendingSnapshot, deliveryUnknown]).filter(
+    (item) => item.renderClass === "permission",
+  );
+  assert.equal(card.outcome, "Delivery unknown (not replayed)");
+  assert.equal(card.pendingResolution, undefined);
+});
+
 test("buildTranscript keeps same request ids in different channels separate", () => {
   const channelOne = makePermissionLedgerEvent({ channelId: "channel-1" });
   const channelTwo = makePermissionLedgerEvent({ channelId: "channel-2" });

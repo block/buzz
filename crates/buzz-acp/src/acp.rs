@@ -38,7 +38,7 @@ pub struct PermissionResolution {
     pub option_id: String,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct PendingPermission {
     ledger_key: String,
     session_id: String,
@@ -1412,6 +1412,11 @@ impl AcpClient {
                     "session/request_permission" => {
                         self.handle_permission_request(&msg).await?;
                     }
+                    "$/cancel_request" if msg.get("id").is_none() => {
+                        let session_id = self.observer_context.session_id.clone();
+                        self.handle_permission_cancel_request(&msg, session_id.as_deref())
+                            .await?;
+                    }
                     other => {
                         // If the unknown message has an id, it's a request expecting a reply.
                         // Silence would cause the agent to hang waiting for a response.
@@ -1879,6 +1884,10 @@ impl AcpClient {
                             "session/request_permission" => {
                                 self.handle_permission_request(&msg).await?;
                             }
+                            "$/cancel_request" if msg.get("id").is_none() => {
+                                self.handle_permission_cancel_request(&msg, Some(session_id))
+                                    .await?;
+                            }
                             other => {
                                 // If the unknown message has an id, it's a request expecting a reply.
                                 // Silence would cause the agent to hang waiting for a response.
@@ -2210,6 +2219,77 @@ impl AcpClient {
                 "expiresAt": expires_at_wall,
             }),
         );
+        Ok(())
+    }
+
+    /// Cancel only the still-pending permission request named by the ACP SDK.
+    /// Persist a terminal state before replying, so a failed pipe write can
+    /// never leave an executable owner decision behind.
+    async fn handle_permission_cancel_request(
+        &mut self,
+        msg: &serde_json::Value,
+        active_session_id: Option<&str>,
+    ) -> Result<(), AcpError> {
+        let Some(request_id) = msg.pointer("/params/requestId") else {
+            self.observe(
+                "permission_cancellation_rejected",
+                serde_json::json!({"reason": "missing_request_id"}),
+            );
+            return Ok(());
+        };
+        let Some(pending) = self.pending_permission.as_ref().cloned() else {
+            self.observe(
+                "permission_cancellation_rejected",
+                serde_json::json!({"reason": "no_pending_request"}),
+            );
+            return Ok(());
+        };
+        let supplied_session_id = msg.pointer("/params/sessionId");
+        if request_id != &pending.request_id
+            || self.pending_permission_id.as_ref() != Some(&pending.request_id)
+            || self.permission_responded
+            || active_session_id.is_some_and(|id| id != pending.session_id.as_str())
+            || supplied_session_id
+                .is_some_and(|id| id.as_str() != Some(pending.session_id.as_str()))
+        {
+            self.observe(
+                "permission_cancellation_rejected",
+                serde_json::json!({"reason": "binding_mismatch"}),
+            );
+            return Ok(());
+        }
+        let ledger_handle = self.permission_ledger.as_ref().cloned().ok_or_else(|| {
+            AcpError::Protocol("permission lifecycle ledger is unavailable".into())
+        })?;
+        ledger_handle
+            .lock()
+            .map_err(|_| AcpError::Protocol("permission lifecycle ledger lock poisoned".into()))?
+            .transition_pending(&pending.ledger_key, PermissionState::Cancelled)
+            .map_err(AcpError::Protocol)?;
+        let response = permission_response_cancelled(&pending.request_id);
+        if let Err(error) = self.write_ndjson(&response).await {
+            // The bytes may or may not have reached the adapter. Keep the
+            // owner card terminal and never replay a decision after recovery.
+            ledger_handle
+                .lock()
+                .map_err(|_| {
+                    AcpError::Protocol("permission lifecycle ledger lock poisoned".into())
+                })?
+                .transition_cancelled_to_delivery_unknown(&pending.ledger_key)
+                .map_err(AcpError::Protocol)?;
+            self.observe(
+                "permission_delivery_unknown",
+                serde_json::json!({
+                    "reason": "cancellation_response_write_failed",
+                    "requestId": pending.request_id,
+                    "sessionId": pending.session_id,
+                }),
+            );
+            return Err(error);
+        }
+        self.pending_permission = None;
+        self.pending_permission_id = None;
+        self.permission_responded = true;
         Ok(())
     }
 
@@ -3702,6 +3782,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sdk_cancel_request_cancels_only_exact_pending_permission_in_non_idle_loop() {
+        let permission = serde_json::json!({
+            "jsonrpc": "2.0", "id": "17", "method": "session/request_permission",
+            "params": {"sessionId": "session-cedar", "options": [{"optionId": "grant-cedar"}]}
+        });
+        let output =
+            std::env::temp_dir().join(format!("buzz-acp-cancel-non-idle-{}", uuid::Uuid::new_v4()));
+        let script = format!(
+            r#"read _request
+echo '{}'
+echo '{{"jsonrpc":"2.0","method":"$/cancel_request","params":{{"requestId":17}}}}'
+if read -t 1 _unexpected; then exit 7; fi
+echo '{{"jsonrpc":"2.0","method":"$/cancel_request","params":{{"requestId":"17","sessionId":"other-session"}}}}'
+if read -t 1 _unexpected; then exit 7; fi
+echo '{{"jsonrpc":"2.0","method":"$/cancel_request","params":{{"requestId":"17"}}}}'
+read _cancelled
+printf '%s\n' "$_cancelled" > '{}'
+echo '{{"jsonrpc":"2.0","method":"$/cancel_request","params":{{"requestId":"17"}}}}'
+sleep 0.15
+if read -t 1 _unexpected; then exit 7; fi
+echo '{{"jsonrpc":"2.0","id":0,"result":{{"ok":true}}}}'"#,
+            serde_json::to_string(&permission)
+                .unwrap()
+                .replace('\'', "'\\''"),
+            output.display(),
+        );
+        let mut client = spawn_script(&script).await;
+        client.observer_context.turn_id = Some("turn-cedar".into());
+        client.observer_context.session_id = Some("session-cedar".into());
+        let observer = crate::observer::ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        client.install_test_permission_ledger("cancel-non-idle");
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        client.install_permission_rx(rx);
+        {
+            let request = client.send_request("fixture/request", serde_json::json!({}));
+            tokio::pin!(request);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !output.exists() {
+                tokio::select! {
+                    result = &mut request => panic!("request completed before cancellation: {result:?}"),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+            tx.send(PermissionResolution {
+                turn_id: "turn-cedar".into(),
+                session_id: "session-cedar".into(),
+                request_id: serde_json::json!("17"),
+                action_digest: permission_action_digest(&permission).unwrap(),
+                option_id: "grant-cedar".into(),
+            })
+            .await
+            .unwrap();
+            assert_eq!(request.await.unwrap()["ok"], serde_json::json!(true));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            "{\"id\":\"17\",\"jsonrpc\":\"2.0\",\"result\":{\"outcome\":{\"outcome\":\"cancelled\"}}}\n"
+        );
+        std::fs::remove_file(output).unwrap();
+        assert!(client.pending_permission.is_none());
+        assert!(client.pending_permission_id.is_none());
+        let ledger = client.permission_ledger.as_ref().unwrap().lock().unwrap();
+        let key = permission_ledger::record_key(
+            ledger.start_nonce(),
+            "turn-cedar",
+            "session-cedar",
+            &serde_json::json!("17"),
+            &permission_action_digest(&permission).unwrap(),
+        );
+        assert_eq!(ledger.get(&key).unwrap().state, PermissionState::Cancelled);
+        assert!(observer.snapshot().iter().any(|event| {
+            event.kind == "permission_resolution_rejected"
+                && event.payload["reason"] == "no_pending_request"
+        }));
+    }
+
+    #[tokio::test]
+    async fn sdk_cancel_request_failed_response_write_stays_terminal_and_refuses_owner() {
+        let mut client = spawn_script("exec sleep 10").await;
+        client.observer_context.turn_id = Some("turn-failed-write".into());
+        client.observer_context.session_id = Some("session-failed-write".into());
+        let observer = crate::observer::ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        client.install_test_permission_ledger("cancel-failed-write");
+        let permission = serde_json::json!({
+            "jsonrpc": "2.0", "id": "failure-id", "method": "session/request_permission",
+            "params": {"sessionId": "session-failed-write", "options": [{"optionId": "grant"}]}
+        });
+        client.handle_permission_request(&permission).await.unwrap();
+        client.child.kill().await.unwrap();
+        client.child.wait().await.unwrap();
+        let cancellation = serde_json::json!({
+            "jsonrpc": "2.0", "method": "$/cancel_request",
+            "params": {"requestId": "failure-id"}
+        });
+        assert!(client
+            .handle_permission_cancel_request(&cancellation, Some("session-failed-write"))
+            .await
+            .is_err());
+        let ledger_key = client
+            .pending_permission
+            .as_ref()
+            .unwrap()
+            .ledger_key
+            .clone();
+        assert_eq!(
+            client.pending_permission_id,
+            Some(serde_json::json!("failure-id"))
+        );
+        let ledger = client.permission_ledger.as_ref().unwrap().clone();
+        assert_eq!(
+            ledger.lock().unwrap().get(&ledger_key).unwrap().state,
+            PermissionState::DeliveryUnknown
+        );
+        client
+            .resolve_pending_permission(PermissionResolution {
+                turn_id: "turn-failed-write".into(),
+                session_id: "session-failed-write".into(),
+                request_id: serde_json::json!("failure-id"),
+                action_digest: permission_action_digest(&permission).unwrap(),
+                option_id: "grant".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            ledger.lock().unwrap().get(&ledger_key).unwrap().state,
+            PermissionState::DeliveryUnknown
+        );
+        assert!(observer.snapshot().iter().any(|event| {
+            event.kind == "permission_delivery_unknown"
+                && event.payload["requestId"] == "failure-id"
+        }));
+    }
+
+    #[tokio::test]
     async fn owner_resolution_binds_exact_permission_in_non_idle_dispatch_loop() {
         // This fixture uses deliberately non-obvious option IDs. The adapter
         // releases the production request only after it has read the exact
@@ -3787,6 +4006,92 @@ esac"#,
         .await
         .unwrap();
         assert_eq!(request.await.unwrap()["ok"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn sdk_cancel_request_cancels_only_exact_pending_permission_in_idle_loop() {
+        let permission = serde_json::json!({
+            "jsonrpc": "2.0", "id": 701, "method": "session/request_permission",
+            "params": {"sessionId": "session-poppy", "options": [{"optionId": "grant-poppy"}]}
+        });
+        let output =
+            std::env::temp_dir().join(format!("buzz-acp-cancel-idle-{}", uuid::Uuid::new_v4()));
+        let script = format!(
+            r#"read _prompt
+echo '{}'
+echo '{{"jsonrpc":"2.0","method":"$/cancel_request","params":{{"requestId":"701"}}}}'
+if read -t 1 _unexpected; then exit 7; fi
+echo '{{"jsonrpc":"2.0","method":"$/cancel_request","params":{{"requestId":701,"sessionId":"other-session"}}}}'
+if read -t 1 _unexpected; then exit 7; fi
+echo '{{"jsonrpc":"2.0","method":"$/cancel_request","params":{{"requestId":701}}}}'
+read _cancelled
+printf '%s\n' "$_cancelled" > '{}'
+echo '{{"jsonrpc":"2.0","method":"$/cancel_request","params":{{"requestId":701}}}}'
+sleep 0.15
+if read -t 1 _unexpected; then exit 7; fi
+echo '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"#,
+            serde_json::to_string(&permission)
+                .unwrap()
+                .replace('\'', "'\\''"),
+            output.display(),
+        );
+        let mut client = spawn_script(&script).await;
+        client.observer_context.turn_id = Some("turn-poppy".into());
+        client.observer_context.session_id = Some("session-poppy".into());
+        let observer = crate::observer::ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        client.install_test_permission_ledger("cancel-idle");
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        client.install_permission_rx(rx);
+        {
+            let prompt = client.session_prompt_with_idle_timeout(
+                "session-poppy",
+                "fixture prompt",
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(10),
+            );
+            tokio::pin!(prompt);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !output.exists() {
+                tokio::select! {
+                    result = &mut prompt => panic!("prompt completed before cancellation: {result:?}"),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+            tx.send(PermissionResolution {
+                turn_id: "turn-poppy".into(),
+                session_id: "session-poppy".into(),
+                request_id: serde_json::json!(701),
+                action_digest: permission_action_digest(&permission).unwrap(),
+                option_id: "grant-poppy".into(),
+            })
+            .await
+            .unwrap();
+            assert_eq!(prompt.await.unwrap(), StopReason::EndTurn);
+        }
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            "{\"id\":701,\"jsonrpc\":\"2.0\",\"result\":{\"outcome\":{\"outcome\":\"cancelled\"}}}\n"
+        );
+        std::fs::remove_file(output).unwrap();
+        assert!(client.pending_permission.is_none());
+        assert!(client.pending_permission_id.is_none());
+        let ledger = client.permission_ledger.as_ref().unwrap().lock().unwrap();
+        let key = permission_ledger::record_key(
+            ledger.start_nonce(),
+            "turn-poppy",
+            "session-poppy",
+            &serde_json::json!(701),
+            &permission_action_digest(&permission).unwrap(),
+        );
+        assert_eq!(ledger.get(&key).unwrap().state, PermissionState::Cancelled);
+        assert!(observer.snapshot().iter().any(|event| {
+            event.kind == "permission_resolution_rejected"
+                && event.payload["reason"] == "no_pending_request"
+        }));
     }
 
     #[tokio::test]

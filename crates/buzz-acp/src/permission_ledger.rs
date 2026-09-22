@@ -212,6 +212,25 @@ impl PermissionLedger {
         Ok(())
     }
 
+    /// Record ambiguous delivery of a cancelled ACP response without reviving owner authority.
+    pub fn transition_cancelled_to_delivery_unknown(&mut self, key: &str) -> Result<(), String> {
+        self.ensure_healthy()?;
+        let previous = self.records.clone();
+        let record = self
+            .records
+            .get_mut(key)
+            .ok_or_else(|| "permission lifecycle record is missing".to_string())?;
+        if record.state != PermissionState::Cancelled {
+            return Err("permission lifecycle record is not cancelled".into());
+        }
+        record.state = PermissionState::DeliveryUnknown;
+        record.updated_at = chrono::Utc::now().to_rfc3339();
+        if let Err(error) = self.persist() {
+            self.handle_persist_error(previous, error)?;
+        }
+        Ok(())
+    }
+
     pub fn transition_delivery_attempt_to_selected(&mut self, key: &str) -> Result<(), String> {
         self.ensure_healthy()?;
         let previous = self.records.clone();
@@ -438,6 +457,38 @@ mod tests {
         assert_eq!(
             restarted.get("record").unwrap().state,
             PermissionState::Selected("opaque-allow".into())
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cancelled_response_delivery_unknown_is_durable_and_never_reopens() {
+        let temp = std::env::temp_dir().join(format!("buzz-acp-ledger-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp).unwrap();
+        let path = temp.join("permission-lifecycle.json");
+        let mut ledger = PermissionLedger::open(path.clone(), "generation-a".into()).unwrap();
+        ledger.record_pending(record("record")).unwrap();
+        assert!(ledger
+            .transition_cancelled_to_delivery_unknown("record")
+            .is_err());
+        ledger
+            .transition_pending("record", PermissionState::Cancelled)
+            .unwrap();
+        ledger
+            .transition_cancelled_to_delivery_unknown("record")
+            .unwrap();
+        assert!(ledger
+            .transition_cancelled_to_delivery_unknown("record")
+            .is_err());
+        assert!(ledger
+            .transition_pending("record", PermissionState::DecisionConsumed("allow".into()))
+            .is_err());
+        drop(ledger);
+
+        let restarted = PermissionLedger::open(path, "generation-b".into()).unwrap();
+        assert_eq!(
+            restarted.get("record").unwrap().state,
+            PermissionState::DeliveryUnknown
         );
         fs::remove_dir_all(temp).unwrap();
     }
