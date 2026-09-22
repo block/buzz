@@ -137,6 +137,24 @@ test("remarkSpoilers: groups block nodes between delimiter paragraphs", () => {
   assert.equal(tree.children[1].children[0].children[0].type, "image");
 });
 
+test("remarkSpoilers: leaves collapsed GFM table separators as text", () => {
+  const value =
+    "| Time | Purpose ||---:|---|| 0:00 | Frame strategy || 3:30 | Orient the board |";
+  const tree = runPlugin({
+    type: "root",
+    children: [{ type: "paragraph", children: [{ type: "text", value }] }],
+  });
+
+  assert.equal(
+    tree.children[0].children.some((child) => child.type === "spoiler"),
+    false,
+  );
+  assert.equal(
+    tree.children[0].children.map((child) => child.value ?? "").join(""),
+    value,
+  );
+});
+
 test("remarkSpoilers: leaves unmatched delimiters as text", () => {
   const tree = runPlugin({
     type: "root",

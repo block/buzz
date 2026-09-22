@@ -63,8 +63,15 @@ let cacheGeneration = 0;
 /** `useSyncExternalStore` listeners for relay-origin changes. */
 const relayOriginListeners = new Set<() => void>();
 
+/** `useSyncExternalStore` listeners for media-proxy port changes. */
+const mediaProxyPortListeners = new Set<() => void>();
+
 function notifyRelayOriginListeners(): void {
   for (const listener of relayOriginListeners) listener();
+}
+
+function notifyMediaProxyPortListeners(): void {
+  for (const listener of mediaProxyPortListeners) listener();
 }
 
 /**
@@ -105,6 +112,18 @@ export function subscribeRelayOrigin(listener: () => void): () => void {
   relayOriginListeners.add(listener);
   return () => {
     relayOriginListeners.delete(listener);
+  };
+}
+
+/**
+ * Subscribe to media-proxy port changes. Returns a stable unsubscribe function
+ * for `useSyncExternalStore` consumers that need to re-run `rewriteRelayUrl`
+ * once the async Tauri proxy lookup has resolved.
+ */
+export function subscribeMediaProxyPort(listener: () => void): () => void {
+  mediaProxyPortListeners.add(listener);
+  return () => {
+    mediaProxyPortListeners.delete(listener);
   };
 }
 
@@ -188,7 +207,10 @@ async function fetchProxyPort(): Promise<number | null> {
           deadline,
         );
         if (port !== null && port > 0 && generation === cacheGeneration) {
-          cachedPort = port;
+          if (cachedPort !== port) {
+            cachedPort = port;
+            notifyMediaProxyPortListeners();
+          }
         }
       } catch {
         // invoke failed (e.g. Tauri IPC not ready yet) — keep retrying
@@ -209,6 +231,19 @@ async function fetchProxyPort(): Promise<number | null> {
   return cachedPort;
 }
 
+/**
+ * Ensure the relay-origin lookup is active after a community cache reset.
+ *
+ * Consumers that classify relay-owned URLs may render before any media URL
+ * asks for the proxy port. Starting the shared fetch here keeps host
+ * classification independent from incidental image/video rendering.
+ */
+export function ensureRelayOriginFetch(): void {
+  if (!portPromise && typeof window !== "undefined") {
+    portPromise = fetchProxyPort();
+  }
+}
+
 /** Eagerly fetch the port at module load so it's ready by first render. */
 // The try/catch inside fetchProxyPort handles non-Tauri environments gracefully
 // (invoke will throw, we retry until timeout, then give up — no side effects).
@@ -227,8 +262,12 @@ if (typeof window !== "undefined") {
  */
 export function resetMediaCaches(): void {
   cacheGeneration += 1;
+  const hadCachedPort = cachedPort !== null;
   cachedPort = null;
   portPromise = null;
+  if (hadCachedPort) {
+    notifyMediaProxyPortListeners();
+  }
   if (cachedRelayOrigin !== null) {
     cachedRelayOrigin = null;
     notifyRelayOriginListeners();
@@ -244,6 +283,14 @@ export function resetMediaCaches(): void {
  */
 export function getCachedRelayOrigin(): string | null {
   return cachedRelayOrigin;
+}
+
+/**
+ * The localhost proxy port if it has been resolved, else `null`. Synchronous
+ * best-effort read of the same cache `rewriteRelayUrl` uses.
+ */
+export function getCachedMediaProxyPort(): number | null {
+  return cachedPort;
 }
 
 /**
@@ -285,7 +332,7 @@ export function rewriteRelayUrl(url: string): string {
   }
 
   if (!portPromise && typeof window !== "undefined") {
-    portPromise = fetchProxyPort();
+    ensureRelayOriginFetch();
   }
 
   return `buzz-media://localhost/media/${m[1]}`;

@@ -5,6 +5,7 @@ import {
   fuzzyStandardEmoji,
   normalizeShortcode,
   rankByShortcode,
+  rankShortcodeMatchesFirst,
   scoreShortcodeMatch,
 } from "./emojiSearch.ts";
 
@@ -75,6 +76,35 @@ test("rankByShortcode respects the limit", () => {
   }));
   const ranked = rankByShortcode("smi", items, (i) => i.code, 2);
   assert.equal(ranked.length, 2);
+});
+
+test("exact shortcode matches rank ahead of weaker custom shortcode matches", () => {
+  const items = [
+    { code: "bufo_joy", source: "custom" },
+    { code: "joy", source: "standard" },
+    { code: "joy_cat", source: "custom" },
+    { code: "face_with_tears_of_joy", source: "standard" },
+  ];
+  const ranked = rankShortcodeMatchesFirst("joy", items, (item) => item.code);
+
+  assert.deepEqual(
+    ranked.map((item) => item.code),
+    ["joy", "joy_cat", "bufo_joy", "face_with_tears_of_joy"],
+  );
+});
+
+test("semantic results stay ahead of loose shortcode matches", () => {
+  const items = [
+    { code: "frowning_face", source: "semantic" },
+    { code: "sandwich", source: "custom" },
+    { code: "sad", source: "standard" },
+  ];
+  const ranked = rankShortcodeMatchesFirst("sad", items, (item) => item.code);
+
+  assert.deepEqual(
+    ranked.map((item) => item.code),
+    ["sad", "frowning_face", "sandwich"],
+  );
 });
 
 test("fuzzyStandardEmoji surfaces point_up for `pointup`", () => {

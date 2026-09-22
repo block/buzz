@@ -4,7 +4,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../shared/theme/theme.dart';
-import '../../profile/user_cache_provider.dart';
+import '../../../shared/widgets/buzz_loading_indicator.dart';
+import '../../../shared/profile/user_cache_provider.dart';
 import '../date_formatters.dart';
 import 'observer_models.dart';
 import 'observer_subscription.dart';
@@ -189,13 +190,10 @@ class _EmptyState extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox(
-            width: 24,
-            height: 24,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: context.colors.onSurfaceVariant,
-            ),
+          BuzzLoadingIndicator(
+            size: 28,
+            color: context.colors.onSurfaceVariant,
+            semanticLabel: 'Waiting for agent activity',
           ),
           const SizedBox(height: Grid.xxs),
           Text(

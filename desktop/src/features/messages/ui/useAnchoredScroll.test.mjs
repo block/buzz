@@ -7,7 +7,7 @@ import {
   shouldIgnorePinnedCenterScroll,
   shouldSettleForSplitPanel,
   shouldSettleVirtualizedBottom,
-} from "./useAnchoredScroll.ts";
+} from "./anchoredScrollPolicy.ts";
 
 function fakeContainer({ clientHeight, scrollHeight, scrollTop }) {
   const writes = [];

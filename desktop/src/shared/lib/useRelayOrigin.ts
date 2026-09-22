@@ -1,6 +1,10 @@
 import * as React from "react";
 
-import { getCachedRelayOrigin, subscribeRelayOrigin } from "./mediaUrl";
+import {
+  ensureRelayOriginFetch,
+  getCachedRelayOrigin,
+  subscribeRelayOrigin,
+} from "./mediaUrl";
 
 /**
  * The resolved relay origin, re-rendering when it resolves or changes.
@@ -16,9 +20,11 @@ import { getCachedRelayOrigin, subscribeRelayOrigin } from "./mediaUrl";
  * "not yet downloadable" (fail closed).
  */
 export function useRelayOrigin(): string | null {
-  return React.useSyncExternalStore(
+  const origin = React.useSyncExternalStore(
     subscribeRelayOrigin,
     getCachedRelayOrigin,
     () => null,
   );
+  React.useEffect(ensureRelayOriginFetch, []);
+  return origin;
 }

@@ -7,16 +7,17 @@ use serde::Deserialize;
 
 use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    RelayMeshConfig, RespondTo,
+    CatalogSource, RelayMeshConfig, RespondTo,
 };
+use crate::managed_agents::AcpSessionPolicy;
 
 /// The NIP-AP behavioral group as one grouped request field.
 ///
 /// Grouped (not flat) because `update_persona` has legacy callers that don't
 /// send behavioral fields at all — flat replace semantics would silently wipe
 /// a stored behavior group on every team-import edit. Absent group = don't touch the
-/// stored behavior group; present group = validate and replace the fields as a unit
-/// (mode and allowlist must travel together).
+/// stored behavior group; present group = validate and replace all four fields as a
+/// unit (mode and allowlist must travel together).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersonaBehaviorRequest {
@@ -26,6 +27,9 @@ pub struct PersonaBehaviorRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub parallelism: Option<u32>,
+    /// Absent inside a present behavior group selects the channel default.
+    #[serde(default)]
+    pub session_policy: Option<AcpSessionPolicy>,
 }
 
 /// Validate a behavior group and apply it onto a persona record.
@@ -68,6 +72,7 @@ pub fn apply_persona_behavior(
         Vec::new()
     };
     record.parallelism = behavior.parallelism;
+    record.session_policy = behavior.session_policy.unwrap_or_default();
     Ok(())
 }
 
@@ -76,6 +81,9 @@ pub fn apply_persona_behavior(
 pub struct CreatePersonaRequest {
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// Optional short, PUBLIC description (max 280 chars).
+    #[serde(default)]
+    pub description: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
     pub runtime: Option<String>,
@@ -91,6 +99,10 @@ pub struct CreatePersonaRequest {
     /// NIP-AP behavioral group. Absent = behavior group stays unset.
     #[serde(default)]
     pub behavior: Option<PersonaBehaviorRequest>,
+    /// Set when this persona is a copy of another owner's shared catalog entry,
+    /// so the catalog can tell an already-added foreign persona from a new one.
+    #[serde(default)]
+    pub catalog_source: Option<CatalogSource>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,6 +111,10 @@ pub struct UpdatePersonaRequest {
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// Optional short, PUBLIC description (max 280 chars). The dialog always
+    /// sends the current value, so absent and empty both clear it.
+    #[serde(default)]
+    pub description: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
     pub runtime: Option<String>,
@@ -249,6 +265,16 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+    /// Absent = don't touch. `null` = clear the canonical effort column
+    /// (revert to inherited default). `"value"` = set the column.
+    ///
+    /// When present, persisted inside the locked update/restart transaction
+    /// so that an access-policy-change restart snapshots and launches the new
+    /// effort value rather than the old one. Uses the same
+    /// `apply_picker_effort_level` logic (via `apply_effort_update`) so
+    /// the record-scope alias sweep runs atomically with the column write.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub effort_level: Option<Option<String>>,
 }
 
 #[cfg(test)]
@@ -265,6 +291,8 @@ mod tests {
 
     fn record_without_quad() -> AgentDefinition {
         AgentDefinition {
+            session_policy: Default::default(),
+            description: None,
             id: "p-1".to_string(),
             display_name: "Test".to_string(),
             avatar_url: None,
@@ -275,8 +303,11 @@ mod tests {
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
+            team_catalog_source: None,
             env_vars: BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
@@ -301,18 +332,21 @@ mod tests {
     #[test]
     fn present_behavior_replaces_all_four_as_a_unit() {
         let mut record = record_with_quad();
+        record.session_policy = AcpSessionPolicy::Thread;
         apply_persona_behavior(
             &mut record,
             Some(PersonaBehaviorRequest {
                 respond_to: Some(RespondTo::Anyone),
                 respond_to_allowlist: Vec::new(),
                 parallelism: None,
+                session_policy: None,
             }),
         )
         .unwrap();
         assert_eq!(record.respond_to.as_deref(), Some("anyone"));
         assert!(record.respond_to_allowlist.is_empty());
         assert_eq!(record.parallelism, None);
+        assert_eq!(record.session_policy, AcpSessionPolicy::Channel);
     }
 
     #[test]
@@ -394,6 +428,7 @@ mod tests {
                 respond_to: Some(RespondTo::Allowlist),
                 respond_to_allowlist: vec!["c".repeat(64)],
                 parallelism: Some(3),
+                session_policy: Some(AcpSessionPolicy::Thread),
             }),
         )
         .unwrap();
@@ -401,6 +436,7 @@ mod tests {
         assert_eq!(content.respond_to.as_deref(), Some("allowlist"));
         assert_eq!(content.respond_to_allowlist, vec!["c".repeat(64)]);
         assert_eq!(content.parallelism, Some(3));
+        assert_eq!(content.session_policy, AcpSessionPolicy::Thread);
     }
 
     #[test]
@@ -427,5 +463,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(record.parallelism, Some(8));
+    }
+
+    /// The catalog copy path is the only caller that sends this field, and it
+    /// sends camelCase from TS. Without it deserializing, the copy silently
+    /// lands with no provenance and duplicate-add returns.
+    #[test]
+    fn create_request_deserializes_camel_case_catalog_source() {
+        let request: CreatePersonaRequest = serde_json::from_str(
+            r#"{
+                "displayName": "Copy",
+                "avatarUrl": null,
+                "systemPrompt": "Prompt",
+                "catalogSource": { "ownerPubkey": "abc", "personaId": "helper" }
+            }"#,
+        )
+        .expect("camelCase catalogSource payload from TS should deserialize");
+        assert_eq!(
+            request.catalog_source,
+            Some(CatalogSource {
+                owner_pubkey: "abc".to_string(),
+                persona_id: "helper".to_string(),
+            })
+        );
+    }
+
+    /// Ordinary agent creation never sends the field.
+    #[test]
+    fn create_request_without_catalog_source_is_not_a_catalog_copy() {
+        let request: CreatePersonaRequest = serde_json::from_str(
+            r#"{ "displayName": "Fresh", "avatarUrl": null, "systemPrompt": "Prompt" }"#,
+        )
+        .expect("a create payload without provenance should deserialize");
+        assert_eq!(request.catalog_source, None);
     }
 }

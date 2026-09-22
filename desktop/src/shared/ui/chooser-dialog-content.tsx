@@ -2,7 +2,12 @@ import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 
-import { DialogContent, DialogHeader, DialogTitle } from "./dialog";
+import {
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "./dialog";
 
 type ChooserDialogContentProps = React.ComponentPropsWithoutRef<
   typeof DialogContent
@@ -13,6 +18,7 @@ type ChooserDialogContentProps = React.ComponentPropsWithoutRef<
   footerTestId?: string;
   contentClassName?: string;
   headerClassName?: string;
+  headerSubtitle?: React.ReactNode;
   headerTestId?: string;
   scrollAreaClassName?: string;
   scrollAreaTestId?: string;
@@ -33,6 +39,7 @@ export const ChooserDialogContent = React.forwardRef<
       footerClassName,
       footerTestId,
       headerClassName,
+      headerSubtitle,
       headerTestId,
       scrollAreaClassName,
       scrollAreaTestId,
@@ -56,6 +63,9 @@ export const ChooserDialogContent = React.forwardRef<
         data-testid={headerTestId}
       >
         <DialogTitle>{title}</DialogTitle>
+        {headerSubtitle ? (
+          <DialogDescription>{headerSubtitle}</DialogDescription>
+        ) : null}
       </DialogHeader>
 
       <div

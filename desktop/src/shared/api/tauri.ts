@@ -1,8 +1,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
-  activateRateLimit,
-  parseRateLimitHint,
-} from "@/shared/api/relayRateLimitGate";
+  fromRawInstallRuntimeResult,
+  type RawInstallRuntimeResult,
+} from "@/shared/api/installTypes";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -21,7 +21,6 @@ import type {
   RelayEvent,
   SearchMessagesInput,
   SearchMessagesResponse,
-  SendChannelMessageResult,
   SetCanvasInput,
   SetCanvasResult,
   ThreadCursor,
@@ -39,6 +38,8 @@ import type {
 } from "@/shared/api/types";
 
 export * from "@/shared/api/tauriChannels";
+export { sendChannelMessage } from "@/shared/api/tauriMessages";
+export { getEventById, getEventsByIds } from "@/shared/api/tauriEvents";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
@@ -58,11 +59,9 @@ type RawFeedItem = {
   created_at: number;
   channel_id: string | null;
   channel_name: string;
-  // Native FeedItemInfo.channel_type is Option<String>: serde emits `null`,
-  // never omits the key.
   channel_type: string | null;
   tags: string[][];
-  category: "mention" | "needs_action" | "activity" | "agent_activity";
+  category: HomeFeedResponse["feed"]["mentions"][number]["category"];
 };
 
 type RawHomeFeedResponse = {
@@ -95,16 +94,9 @@ type RawSearchResponse = {
   found: number;
 };
 
-type RawSendChannelMessageResult = {
-  event_id: string;
-  parent_event_id: string | null;
-  root_event_id: string | null;
-  depth: number;
-  created_at: number;
-};
-
 type RawRelayAgent = {
   pubkey: string;
+  owner_pubkey?: string | null;
   name: string;
   agent_type: string;
   channels: string[];
@@ -114,6 +106,7 @@ type RawRelayAgent = {
   respond_to?: RelayAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
+import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent = {
   pubkey: string;
   name: string;
@@ -131,6 +124,7 @@ export type RawManagedAgent = {
   idle_timeout_seconds: number | null;
   max_turn_duration_seconds: number | null;
   parallelism: number;
+  session_policy?: ManagedAgent["sessionPolicy"];
   system_prompt: string | null;
   avatar_url?: string | null;
   model: string | null;
@@ -139,6 +133,7 @@ export type RawManagedAgent = {
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
   needs_restart: boolean;
+  restart_diff?: RawRestartDiffEntry[];
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
   pid: number | null;
@@ -154,8 +149,7 @@ export type RawManagedAgent = {
   auto_restart_on_config_change?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
-  // Optional: pre-feature mock fixtures may omit these. Mapped to
-  // `"owner-only"` / `[]` in `fromRawManagedAgent`.
+  // Pre-feature fixtures may omit these; mapped to "owner-only"/[] in fromRawManagedAgent.
   respond_to?: ManagedAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
@@ -184,40 +178,28 @@ export type RawAcpRuntimeCatalogEntry = {
   model_env_var?: string | null;
   provider_env_var?: string | null;
   thinking_env_var?: string | null;
+  max_tokens_env_var?: string | null;
+  context_limit_env_var?: string | null;
+  max_rounds_env_var?: string | null;
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
-  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
   requires_external_cli?: boolean;
   underlying_cli_path: string | null;
   node_required: boolean;
-  /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
   auth_status: AuthStatus;
   login_hint?: string;
   source: "builtin" | "preset" | "custom";
-  /**
-   * Definition-level env vars for `source: custom` entries.
-   * Omitted/absent for builtin and preset — skipped in Rust serialization when empty.
-   */
+  /** Definition-level env vars for `source: custom` entries; absent for builtin/preset. */
   definition_env?: Record<string, string>;
+  max_parallelism?: number;
+  effort_canonical_values?: string[] | null;
 };
 
-export type RawInstallStepResult = {
-  step: string;
-  command: string;
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exit_code: number | null;
-  hint?: string;
-};
-
-export type RawInstallRuntimeResult = {
-  success: boolean;
-  steps: RawInstallStepResult[];
-  restarted_count: number;
-  failed_restart_count: number;
-};
+export type {
+  RawInstallRuntimeResult,
+  RawInstallStepResult,
+} from "./installTypes";
 
 type RawGitBashPrerequisite = {
   available: boolean;
@@ -295,18 +277,6 @@ function toTauriError(error: unknown): Error {
   }
 }
 
-/**
- * Inspect a Tauri error message and activate the shared rate-limit gate when
- * the Rust relay layer emitted an HTTP 429 response (`relay rate-limited:` prefix).
- *
- * Extracted so it can be unit-tested without mocking the Tauri invoke bridge.
- */
-export function applyTauriRateLimitIfNeeded(message: string): void {
-  if (message.startsWith("relay rate-limited:")) {
-    activateRateLimit(parseRateLimitHint(message));
-  }
-}
-
 export async function invokeTauri<T>(
   command: string,
   args?: Record<string, unknown>,
@@ -314,11 +284,9 @@ export async function invokeTauri<T>(
   try {
     return await tauriInvoke<T>(command, args);
   } catch (error) {
-    const err = toTauriError(error);
-    // Rust emits `relay rate-limited:` for HTTP 429 responses. Activate the
-    // shared gate so the TS relay client backs off for the same window.
-    applyTauriRateLimitIfNeeded(err.message);
-    throw err;
+    // HTTP backoff lives in Rust. Do not apply its separate ApiCalls quota
+    // to the WebSocket gate, but preserve the failure for the caller.
+    throw toTauriError(error);
   }
 }
 
@@ -469,17 +437,15 @@ export async function searchMessages(
     q: input.q,
     limit: input.limit,
     channelId: input.channelId,
+    authors: input.authors,
+    since: input.since,
+    until: input.until,
   });
 
   return {
     hits: response.hits.map(fromRawSearchHit),
     found: response.found,
   };
-}
-
-export async function getEventById(eventId: string): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("get_event", { eventId });
-  return JSON.parse(eventJson) as RelayEvent;
 }
 
 type RawThreadCursor = {
@@ -544,39 +510,6 @@ export async function getThreadReplies(
   };
 }
 
-export async function sendChannelMessage(
-  channelId: string,
-  content: string,
-  parentEventId?: string | null,
-  mediaTags?: string[][],
-  mentionPubkeys?: string[],
-  kind?: number,
-  emojiTags?: string[][],
-  mentionTags?: string[][],
-): Promise<SendChannelMessageResult> {
-  const response = await invokeTauri<RawSendChannelMessageResult>(
-    "send_channel_message",
-    {
-      channelId,
-      content,
-      parentEventId,
-      mediaTags: mediaTags ?? null,
-      emojiTags: emojiTags ?? null,
-      mentionTags: mentionTags ?? null,
-      mentionPubkeys: mentionPubkeys ?? null,
-      kind: kind ?? null,
-    },
-  );
-
-  return {
-    eventId: response.event_id,
-    parentEventId: response.parent_event_id,
-    rootEventId: response.root_event_id,
-    depth: response.depth,
-    createdAt: response.created_at,
-  };
-}
-
 export type BlobDescriptor = {
   url: string;
   sha256: string;
@@ -601,11 +534,11 @@ export async function uploadMedia(
     isTemp,
   });
 }
-
-export async function pickAndUploadMedia(): Promise<BlobDescriptor[]> {
-  return invokeTauri<BlobDescriptor[]>("pick_and_upload_media", {});
+export async function pickAndUploadMedia(
+  progressId?: string,
+): Promise<BlobDescriptor[]> {
+  return invokeTauri<BlobDescriptor[]>("pick_and_upload_media", { progressId });
 }
-
 export async function uploadMediaBytes(
   data: number[],
   filename?: string,
@@ -619,23 +552,7 @@ export async function uploadMediaBytes(
   });
 }
 
-export async function editMessage(
-  channelId: string,
-  eventId: string,
-  content: string,
-  mediaTags?: string[][],
-  emojiTags?: string[][],
-  mentionPubkeys?: string[],
-): Promise<void> {
-  await invokeTauri("edit_message", {
-    channelId,
-    eventId,
-    content,
-    mediaTags: mediaTags ?? [],
-    emojiTags: emojiTags ?? [],
-    mentionPubkeys: mentionPubkeys ?? null,
-  });
-}
+export { editMessage } from "@/shared/api/editMessage";
 
 export async function deleteMessage(
   channelId: string,
@@ -676,10 +593,10 @@ export async function createAuthEvent(input: {
   const eventJson = await invokeTauri<string>("create_auth_event", input);
   return JSON.parse(eventJson) as RelayEvent;
 }
-
 function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
   return {
     pubkey: agent.pubkey,
+    ownerPubkey: agent.owner_pubkey ?? null,
     name: agent.name,
     agentType: agent.agent_type,
     channels: agent.channels,
@@ -708,15 +625,16 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     idleTimeoutSeconds: agent.idle_timeout_seconds,
     maxTurnDurationSeconds: agent.max_turn_duration_seconds,
     parallelism: agent.parallelism,
+    sessionPolicy: agent.session_policy ?? "channel",
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
     modelSource: agent.model_source ?? null,
-    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
     needsRestart: agent.needs_restart ?? false,
+    restartDiff: agent.restart_diff ?? [],
     envVars: agent.env_vars ?? {},
     status: agent.status,
     pid: agent.pid,
@@ -732,8 +650,6 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
-    // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.
-    // Real agent records always include them (defaulted server-side).
     respondTo: agent.respond_to ?? "owner-only",
     respondToAllowlist: agent.respond_to_allowlist ?? [],
   };
@@ -754,6 +670,9 @@ export function fromRawAcpRuntimeCatalogEntry(
     modelEnvVar: entry.model_env_var ?? null,
     providerEnvVar: entry.provider_env_var ?? null,
     thinkingEnvVar: entry.thinking_env_var ?? null,
+    maxTokensEnvVar: entry.max_tokens_env_var ?? null,
+    contextLimitEnvVar: entry.context_limit_env_var ?? null,
+    maxRoundsEnvVar: entry.max_rounds_env_var ?? null,
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
@@ -763,28 +682,11 @@ export function fromRawAcpRuntimeCatalogEntry(
     authStatus: entry.auth_status,
     loginHint: entry.login_hint ?? null,
     source: entry.source,
-    // Map definition_env (snake_case from Rust) to definitionEnv (camelCase).
-    // Absent when empty (Rust serialization skips empty BTreeMap) — default to {}.
     definitionEnv: entry.definition_env ?? {},
-  };
-}
-
-function fromRawInstallRuntimeResult(
-  raw: RawInstallRuntimeResult,
-): InstallRuntimeResult {
-  return {
-    success: raw.success,
-    steps: raw.steps.map((step) => ({
-      step: step.step,
-      command: step.command,
-      success: step.success,
-      stdout: step.stdout,
-      stderr: step.stderr,
-      exitCode: step.exit_code,
-      hint: step.hint,
-    })),
-    restartedCount: raw.restarted_count,
-    failedRestartCount: raw.failed_restart_count,
+    effortCanonicalValues: entry.effort_canonical_values ?? null,
+    ...(entry.max_parallelism !== undefined && {
+      maxParallelism: entry.max_parallelism,
+    }),
   };
 }
 
@@ -941,12 +843,6 @@ export async function discoverGitBashPrerequisite(): Promise<GitBashPrerequisite
   );
 }
 
-export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
-  return (
-    await invokeTauri<RawAcpRuntimeCatalogEntry[]>("discover_acp_providers")
-  ).map(fromRawAcpRuntimeCatalogEntry);
-}
-
 /** Input shape for creating or updating a custom harness. */
 export type HarnessDefinitionInput = {
   id: string;
@@ -1048,9 +944,8 @@ export type RuntimeFileConfigSubset = {
 };
 
 /**
- * Get the file-layer config for a runtime so dialogs can show
- * "Set in goose config" instead of surfacing a false required-field marker.
- * Returns `null` when the runtime has no config file or it cannot be parsed.
+ * Get the file-layer config for a runtime so dialogs can show "Set in goose config" instead of
+ * surfacing a false required-field marker. Returns `null` when unavailable or unparseable.
  */
 export async function getRuntimeFileConfig(
   runtimeId: string,
@@ -1064,13 +959,9 @@ export async function getRuntimeFileConfig(
 }
 
 /**
- * Return the key names of all non-empty baked build env vars.
- *
- * Internal (Block) builds bake provider credentials into the binary at compile
- * time. This returns the *key names only* — never the values — so dialogs can
- * treat them as satisfied without exposing secrets to the frontend.
- *
- * OSS builds return an empty array (no baked env).
+ * Return the key names of all non-empty baked build env vars. Internal (Block) builds bake
+ * provider credentials into the binary at compile time; this returns *key names only* (never
+ * values) so dialogs treat them as satisfied without exposing secrets. OSS builds return [].
  */
 export async function getBakedBuildEnvKeys(): Promise<string[]> {
   return invokeTauri<string[]>("get_baked_build_env_keys");
@@ -1081,7 +972,7 @@ export async function getBakedBuildEnvKeys(): Promise<string[]> {
  *
  * The value is already masked in Rust for secret keys (keys not in the
  * explicit safe-to-reveal allowlist: `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL`,
- * `DATABRICKS_HOST`, `DATABRICKS_MODEL`). Non-allowlisted keys have their
+ * `DATABRICKS_HOST`, `DATABRICKS_MODEL`, `DATABRICKS_MODEL_FILTER`). Non-allowlisted keys have their
  * values replaced with `••••••`. Non-secret values are shown as-is.
  * Empty-value keys are filtered out.
  */
@@ -1152,8 +1043,6 @@ export async function nip44DecryptFromSelf(
   return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
 }
 
-// ── NIP-AB device pairing ───────────────────────────────────────────────────
-
 export async function startPairing(): Promise<string> {
   return invokeTauri<string>("start_pairing");
 }
@@ -1166,22 +1055,6 @@ export async function cancelPairing(): Promise<void> {
   await invokeTauri("cancel_pairing");
 }
 
-export async function applyCommunity(
-  relayUrl: string,
-  nsec?: string,
-  token?: string,
-  reposDir?: string,
-  agentManagedProfiles?: boolean,
-): Promise<void> {
-  await invokeTauri("apply_workspace", {
-    relayUrl,
-    nsec: nsec ?? null,
-    token: token ?? null,
-    reposDir: reposDir ?? null,
-    agentManagedProfiles: agentManagedProfiles ?? false,
-  });
-}
-
 // Validate a candidate repos dir without mutating the filesystem. Rejects
 // with a human-readable reason; resolves for a valid or empty path.
 export async function validateReposDir(dir: string): Promise<void> {
@@ -1190,9 +1063,6 @@ export async function validateReposDir(dir: string): Promise<void> {
 
 export const setPreventSleepActive = (active: boolean) =>
   invokeTauri("set_prevent_sleep_active", { active });
-
-export const setAgentManagedProfiles = (enabled: boolean) =>
-  invokeTauri("set_agent_managed_profiles", { enabled });
 
 /** Returns true on macOS, Windows, and Linux AppImage installs.
  *  Returns false on Linux non-AppImage packages (e.g. .deb) where

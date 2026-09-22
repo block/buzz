@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 mod coordinator;
-pub(crate) use coordinator::{publish_current_status_once, publish_stopped_status_once};
+pub(crate) use coordinator::{publish_current_status_once, publish_stopped_status_once_at};
 pub use coordinator::{start_coordinator, MeshCoordinator, KIND_BUZZ_MESH_MEMBER_STATUS};
 
 mod discovery;
@@ -14,6 +14,7 @@ pub(crate) use discovery::{
 use discovery::{device_name_from_status, endpoint_id_from_status, enrich_status_payload_identity};
 
 mod catalog;
+pub(crate) use catalog::canonical_curated_model_id;
 pub use catalog::{model_catalog, MeshModelCatalog};
 
 mod identity;
@@ -33,9 +34,9 @@ mod usage;
 pub use usage::{serving_usage_from_payload, MeshServingUsage};
 
 mod transport_policy;
+use transport_policy::{iroh_relay_mode, sdk_iroh_relay_config, validate_advertised_endpoint};
 #[cfg(test)]
-use transport_policy::iroh_relay_mode_from;
-use transport_policy::{iroh_relay_mode, validate_advertised_endpoint, IrohRelayMode};
+use transport_policy::{iroh_relay_mode_from, IrohRelayMode};
 
 use mesh_llm_sdk::{client, serve, EmbeddedNodeHandle, MeshDiscoveryMode, TrustPolicy};
 use serde::{Deserialize, Serialize};
@@ -200,6 +201,11 @@ pub struct StartMeshNodeRequest {
     /// accepted from the frontend and contains no relay address.
     #[serde(default, skip_deserializing)]
     pub mesh_name: Option<String>,
+    /// Relay this runtime's community membership and discovery are bound to.
+    /// Injected by the backend when sharing starts and retained across UI
+    /// workspace switches; moving a share requires an explicit stop/start.
+    #[serde(default, skip_deserializing)]
+    pub relay_url: Option<String>,
     /// Mesh owner ids admitted to this node (the member roster from
     /// member-signed discovery notes). `None` = caller did not resolve a roster
     /// (tests, direct invocations): the node runs without allowlist
@@ -308,17 +314,20 @@ pub const MESH_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// before the node starts. Without this the download happens *inside*
 /// `serve::start()` where the UI can only show a frozen "starting…" state.
 /// Already-installed models return immediately from the cache scan.
-async fn ensure_model_downloaded(model: &str) -> anyhow::Result<()> {
-    let model_owned = model.to_string();
-    let installed = tokio::task::spawn_blocking(move || {
+async fn model_is_installed(model: &str) -> bool {
+    let model_owned = model.replace("@main", "");
+    tokio::task::spawn_blocking(move || {
         let cache = mesh_llm_node::models::default_huggingface_cache_dir();
         mesh_llm_node::models::scan_installed_models(cache)
             .iter()
-            .any(|m| m.model_ref.contains(&model_owned))
+            .any(|m| m.model_ref.replace("@main", "").contains(&model_owned))
     })
     .await
-    .unwrap_or(false);
-    if installed {
+    .unwrap_or(false)
+}
+
+async fn ensure_model_downloaded(model: &str) -> anyhow::Result<()> {
+    if model_is_installed(model).await {
         return Ok(());
     }
     mesh_llm_host_runtime::models::download_model_ref_with_progress_details(model, true)
@@ -367,13 +376,10 @@ impl DesktopMeshRuntime {
                 if let Some(mesh_name) = request.mesh_name.as_deref() {
                     builder = builder.mesh_name(mesh_name);
                 }
-                builder = match iroh_relay_mode()? {
-                    IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
-                    IrohRelayMode::Default => builder.disable_iroh_relays(false),
-                    IrohRelayMode::Custom(urls) => builder
-                        .disable_iroh_relays(false)
-                        .iroh_relays(urls.into_iter().map(|url| url.to_string())),
-                };
+                let (disable_iroh_relays, iroh_relays) = sdk_iroh_relay_config(iroh_relay_mode()?);
+                builder = builder
+                    .disable_iroh_relays(disable_iroh_relays)
+                    .iroh_relays(iroh_relays);
                 if let Some(max_vram_gb) = request.max_vram_gb {
                     builder = builder.max_vram_gb(max_vram_gb as f64);
                 }
@@ -407,13 +413,10 @@ impl DesktopMeshRuntime {
                 if let Some(mesh_name) = request.mesh_name.as_deref() {
                     builder = builder.mesh_name(mesh_name);
                 }
-                builder = match iroh_relay_mode()? {
-                    IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
-                    IrohRelayMode::Default => builder.disable_iroh_relays(false),
-                    IrohRelayMode::Custom(urls) => builder
-                        .disable_iroh_relays(false)
-                        .iroh_relays(urls.into_iter().map(|url| url.to_string())),
-                };
+                let (disable_iroh_relays, iroh_relays) = sdk_iroh_relay_config(iroh_relay_mode()?);
+                builder = builder
+                    .disable_iroh_relays(disable_iroh_relays)
+                    .iroh_relays(iroh_relays);
                 if let Some(join_token) = request.join_token.as_deref() {
                     builder = builder.join_token(join_token);
                 }

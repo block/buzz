@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import {
+  boundMuteStore,
   DEFAULT_STORE,
   mergeStores,
   mutedChannelIdsFromStore,
@@ -14,7 +15,10 @@ import {
 import { ChannelMuteSyncManager } from "./channelMutesSync";
 import type { RemoteMutes } from "./channelMutesSync";
 
-export function useChannelMutes(pubkey: string | undefined): {
+export function useChannelMutes(
+  pubkey: string | undefined,
+  relayUrl?: string,
+): {
   mutedChannelIds: Set<string>;
   muteChannel: (channelId: string) => void;
   unmuteChannel: (channelId: string) => void;
@@ -31,7 +35,7 @@ export function useChannelMutes(pubkey: string | undefined): {
   const lastAppliedEventId = React.useRef("");
 
   React.useEffect(() => {
-    if (!pubkey) {
+    if (!pubkey || !relayUrl) {
       setStore(DEFAULT_STORE);
       lastAppliedRemoteTs.current = 0;
       lastAppliedEventId.current = "";
@@ -40,12 +44,12 @@ export function useChannelMutes(pubkey: string | undefined): {
     setStore(readChannelMutesStore(pubkey));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
-    managerRef.current = new ChannelMuteSyncManager(pubkey);
+    managerRef.current = new ChannelMuteSyncManager(pubkey, relayUrl);
     return () => {
       managerRef.current?.destroy();
       managerRef.current = null;
     };
-  }, [pubkey]);
+  }, [pubkey, relayUrl]);
 
   React.useEffect(() => {
     if (!pubkey) {
@@ -86,24 +90,22 @@ export function useChannelMutes(pubkey: string | undefined): {
   );
 
   React.useEffect(() => {
-    if (!pubkey) return;
+    if (!pubkey || !relayUrl) return;
     let cancelled = false;
-    void managerRef.current?.fetchRemoteMutes().then((remote) => {
+    const local = readChannelMutesStore(pubkey);
+    void managerRef.current?.bootstrap(local).then((result) => {
       if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelMutesStore(pubkey);
-        if (Object.keys(local.channels).length > 0) {
-          managerRef.current?.publishMutes(local);
-        }
+      if (result.action === "apply-remote") {
+        setStore(applyRemote(result.data));
       }
+      // "hold": seed already performed by bootstrap (if first-sync), or blocked.
     });
     return () => {
       cancelled = true;
     };
-  }, [pubkey, applyRemote]);
+  }, [pubkey, relayUrl, applyRemote]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: relayUrl is intentional — rebinds subscription when the active relay changes even though it is not used inside the effect body directly (the manager via managerRef.current carries it)
   React.useEffect(() => {
     if (!pubkey) return;
     let unsub: (() => Promise<void>) | null = null;
@@ -124,16 +126,17 @@ export function useChannelMutes(pubkey: string | undefined): {
       cancelled = true;
       if (unsub) void unsub();
     };
-  }, [pubkey, applyRemote]);
+  }, [pubkey, relayUrl, applyRemote]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: relayUrl is intentional — rebinds reconnect listener when the active relay changes (community switch) even though it is not referenced directly inside the effect body
   React.useEffect(() => {
     if (!pubkey) return;
     let cancelled = false;
     const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteMutes().then((remote) => {
+      void managerRef.current?.fetchRemoteMutes().then((result) => {
         if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
+        if (result.status === "found") {
+          setStore(applyRemote(result.data));
         }
         const pending = managerRef.current?.getPendingMuteStore();
         if (pending) {
@@ -145,7 +148,7 @@ export function useChannelMutes(pubkey: string | undefined): {
       cancelled = true;
       unsub();
     };
-  }, [pubkey, applyRemote]);
+  }, [pubkey, relayUrl, applyRemote]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: store.channels is the relevant dep — the outer store identity can change without channels changing (e.g., on reconnect writes)
   const mutedChannelIds = React.useMemo(
@@ -161,10 +164,13 @@ export function useChannelMutes(pubkey: string | undefined): {
         updatedAt: Math.floor(Date.now() / 1000),
       };
       setStore((prev) => {
-        const next: ChannelMuteStore = {
-          version: 1,
-          channels: { ...prev.channels, [channelId]: entry },
-        };
+        const next = boundMuteStore(
+          {
+            version: 1,
+            channels: { ...prev.channels, [channelId]: entry },
+          },
+          channelId,
+        );
         if (!writeChannelMutesStore(pubkey, next)) return prev;
         managerRef.current?.publishMutes(next);
         return next;

@@ -3,7 +3,7 @@ use tauri::{AppHandle, Manager};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        load_managed_agents, managed_agent_log_path, read_log_tail, BackendKind,
+        latest_managed_agent_log_path, load_managed_agents, read_log_tail, BackendKind,
         ManagedAgentLogResponse,
     },
 };
@@ -29,7 +29,7 @@ pub async fn get_managed_agent_log(
             return Err("logs are not available for remote agents".to_string());
         }
 
-        let log_path = managed_agent_log_path(&app, &pubkey)?;
+        let log_path = latest_managed_agent_log_path(&app, &pubkey)?;
         Ok(ManagedAgentLogResponse {
             content: read_log_tail(&log_path, line_count.unwrap_or(120) as usize)?,
             log_path: log_path.display().to_string(),

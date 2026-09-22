@@ -6,6 +6,7 @@ import {
   buildChannelAuxFilter,
   buildChannelReactionAuxFilter,
   buildChannelStructuralAuxFilter,
+  buildHuddleTtsLiveFilter,
 } from "./relayChannelFilters.ts";
 
 const CHANNEL = "36411e44-0e2d-4cfe-bd6e-567eb169db9f";
@@ -13,6 +14,15 @@ const IDS = [
   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 ];
+
+test("huddle TTS filter includes a bounded startup replay for both message kinds", () => {
+  assert.deepEqual(buildHuddleTtsLiveFilter(CHANNEL, 1_725_100_000), {
+    kinds: [9, 40002],
+    "#h": [CHANNEL],
+    since: 1_725_100_000,
+    limit: 50,
+  });
+});
 
 // Regression: reaction (kind:7) and reaction-removal (kind:5) events carry only
 // an `e` tag, no channel `h` tag. An `#h`-scoped aux query never matches them,

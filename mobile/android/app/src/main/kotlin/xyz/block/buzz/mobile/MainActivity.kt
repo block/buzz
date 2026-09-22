@@ -1,21 +1,70 @@
 package xyz.block.buzz.mobile
 
+
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.ColorSpace
 import android.graphics.ImageDecoder
 import android.media.MediaExtractor
+import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.os.Build
 import androidx.annotation.RequiresApi
-import io.flutter.embedding.android.FlutterActivity
+import com.google.android.play.agesignals.AgeSignalsException
+import com.google.android.play.agesignals.model.AgeSignalsErrorCode
+import com.google.android.play.agesignals.AgeSignalsAccessRequest
+import com.google.android.play.agesignals.AgeSignalsManagerFactory
+import com.google.android.play.agesignals.AgeSignalsRequest
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.UUID
+
+internal fun ageSignalPayload(ageUpper: Int?, ageLower: Int? = null): Map<String, Any?> {
+    val validRange = (ageUpper == null || ageUpper >= 0) &&
+        (ageLower == null || (ageLower >= 0 && (ageUpper == null || ageLower <= ageUpper)))
+    return mapOf(
+        "status" to "signal",
+        "ageUpper" to if (validRange) ageUpper else null,
+    )
+}
+
+internal fun noAgeSignalPayload(): Map<String, Any?> {
+    return mapOf(
+        "status" to "noSignal",
+        "ageUpper" to null,
+    )
+}
+
+internal fun replyWithAgeSignalError(
+    result: MethodChannel.Result,
+    error: Exception,
+) {
+    // Missing/outdated Play installations and non-Play installs cannot supply
+    // a signal. Preserve Buzz's unsupported-environment no-signal policy.
+    // Other failures remain distinguishable; Flutter preserves access on errors.
+    if (error is AgeSignalsException && error.errorCode in setOf(
+            AgeSignalsErrorCode.API_NOT_AVAILABLE,
+            AgeSignalsErrorCode.PLAY_STORE_NOT_FOUND,
+            AgeSignalsErrorCode.PLAY_SERVICES_NOT_FOUND,
+            AgeSignalsErrorCode.PLAY_STORE_VERSION_OUTDATED,
+            AgeSignalsErrorCode.PLAY_SERVICES_VERSION_OUTDATED,
+            AgeSignalsErrorCode.APP_NOT_OWNED,
+        )
+    ) {
+        result.success(noAgeSignalPayload())
+        return
+    }
+    result.error(
+        "age_signal_unavailable",
+        "The age signal request failed.",
+        error.javaClass.simpleName,
+    )
+}
 
 internal object AndroidImageProcessor {
     fun decodeSrgbBitmap(bytes: ByteArray): Bitmap? {
@@ -76,11 +125,19 @@ internal object AndroidImageProcessor {
     }
 }
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
     private var mediaUploadChannel: MethodChannel? = null
+    private var ageSignalChannel: MethodChannel? = null
+    private val ageSignalRequest = AgeSignalRequest()
+    private var huddleMediaPlugin: HuddleMediaPlugin? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        huddleMediaPlugin = HuddleMediaPlugin(
+            this,
+            flutterEngine.dartExecutor.binaryMessenger,
+        )
 
         mediaUploadChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -97,10 +154,58 @@ class MainActivity : FlutterActivity() {
                     TRANSCODE_VIDEO_TO_MP4_METHOD -> {
                         handleTranscodeVideoToMp4(call.arguments, result)
                     }
+                    GENERATE_VIDEO_POSTER_METHOD -> {
+                        handleGenerateVideoPoster(call.arguments, result)
+                    }
+                    PACKAGE_VOICE_NOTE_FOR_UPLOAD_METHOD -> {
+                        handlePackageVoiceNoteForUpload(call.arguments, result)
+                    }
+                    REQUIRES_LEGACY_MEDIA_STORAGE_PERMISSION_METHOD -> {
+                        result.success(Build.VERSION.SDK_INT <= Build.VERSION_CODES.P)
+                    }
                     else -> result.notImplemented()
                 }
             }
         }
+
+        ageSignalChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            AGE_SIGNAL_CHANNEL,
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    REQUEST_AGE_SIGNAL_METHOD -> {
+                        val manager by lazy { AgeSignalsManagerFactory.create(applicationContext) }
+                        ageSignalRequest.start(
+                            result,
+                            requestAccess = {
+                                manager.requestAgeSignalsAccess(
+                                    AgeSignalsAccessRequest.builder().setActivity(this).build(),
+                                )
+                            },
+                            checkAge = { manager.checkAgeSignals(AgeSignalsRequest.builder().build()) },
+                        )
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        huddleMediaPlugin?.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    }
+
+    override fun onDestroy() {
+        ageSignalRequest.retire()
+        huddleMediaPlugin?.dispose()
+        huddleMediaPlugin = null
+        super.onDestroy()
     }
 
     private fun handleSanitizeImageForUpload(
@@ -272,6 +377,82 @@ class MainActivity : FlutterActivity() {
         }.start()
     }
 
+    private fun handleGenerateVideoPoster(
+        arguments: Any?,
+        result: MethodChannel.Result,
+    ) {
+        val sourcePath = arguments as? String ?: run {
+            invalidArguments(result, "Expected source file path as String.")
+            return
+        }
+
+        Thread {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(sourcePath)
+                val source = retriever.getFrameAtTime(
+                    0,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                ) ?: retriever.getFrameAtTime(
+                    100_000,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                ) ?: throw IllegalArgumentException("Unable to decode a video frame.")
+                val scale = minOf(1f, 720f / maxOf(source.width, source.height))
+                val frame = if (scale < 1f) {
+                    Bitmap.createScaledBitmap(
+                        source,
+                        (source.width * scale).toInt(),
+                        (source.height * scale).toInt(),
+                        true,
+                    ).also { source.recycle() }
+                } else {
+                    source
+                }
+                val bytes = AndroidImageProcessor.encodeAndScrub(
+                    frame,
+                    Bitmap.CompressFormat.JPEG,
+                ) ?: throw IllegalArgumentException("Unable to encode a video preview.")
+                frame.recycle()
+                result.success(bytes)
+            } catch (e: Exception) {
+                result.error(
+                    "poster_failed",
+                    "Unable to create a video preview.",
+                    e.message,
+                )
+            } finally {
+                retriever.release()
+            }
+        }.start()
+    }
+
+    private fun handlePackageVoiceNoteForUpload(
+        arguments: Any?,
+        result: MethodChannel.Result,
+    ) {
+        val sourcePath = arguments as? String ?: run {
+            invalidArguments(result, "Expected source file path as String.")
+            return
+        }
+
+        Thread {
+            try {
+                result.success(
+                    AndroidVoiceNotePackager.packageForUpload(
+                        sourcePath = sourcePath,
+                        cacheDirectory = cacheDir,
+                    ),
+                )
+            } catch (error: Exception) {
+                result.error(
+                    "transcode_failed",
+                    "Unable to assemble voice note for upload.",
+                    error.message,
+                )
+            }
+        }.start()
+    }
+
     private fun invalidArguments(
         result: MethodChannel.Result,
         message: String,
@@ -281,8 +462,14 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val MEDIA_UPLOAD_CHANNEL = "buzz/media_upload"
+        private const val AGE_SIGNAL_CHANNEL = "buzz/age_signal"
+        private const val REQUEST_AGE_SIGNAL_METHOD = "requestAgeSignal"
         private const val SANITIZE_IMAGE_FOR_UPLOAD_METHOD = "sanitizeImageForUpload"
         private const val TRANSCODE_IMAGE_TO_JPEG_METHOD = "transcodeImageToJpeg"
         private const val TRANSCODE_VIDEO_TO_MP4_METHOD = "transcodeVideoToMp4"
+        private const val GENERATE_VIDEO_POSTER_METHOD = "generateVideoPoster"
+        private const val PACKAGE_VOICE_NOTE_FOR_UPLOAD_METHOD = "packageVoiceNoteForUpload"
+        private const val REQUIRES_LEGACY_MEDIA_STORAGE_PERMISSION_METHOD =
+            "requiresLegacyMediaStoragePermission"
     }
 }

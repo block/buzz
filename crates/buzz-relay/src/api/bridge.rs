@@ -3,6 +3,8 @@
 //! These endpoints provide HTTP access to the relay's Nostr protocol,
 //! authenticated via NIP-98 signed events.
 
+mod read_state_snapshot;
+
 use std::sync::Arc;
 
 use axum::{
@@ -21,7 +23,9 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
-async fn enforce_http_admission(
+mod thread_roots;
+
+pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
     pubkey: &nostr::PublicKey,
@@ -39,14 +43,14 @@ async fn enforce_http_admission(
     {
         Ok(()) => Ok(()),
         Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "quota").increment(1);
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "quota", "bucket" => "api_calls").increment(1);
             Err(api_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
             ))
         }
         Err(crate::admission::AdmissionError::Unavailable) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "unavailable").increment(1);
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "unavailable", "bucket" => "api_calls").increment(1);
             Err(api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "rate-limited: shared admission unavailable",
@@ -55,17 +59,28 @@ async fn enforce_http_admission(
     }
 }
 
+/// Values retained from an already-verified bridge authentication event.
+#[derive(Debug)]
+pub(crate) struct VerifiedBridgeAuth {
+    pub(crate) pubkey: nostr::PublicKey,
+    pub(crate) event_id_bytes: [u8; 32],
+    pub(crate) signed_created_at: Option<u64>,
+}
+
+type BridgeAuthResult = Result<VerifiedBridgeAuth, (StatusCode, Json<Value>)>;
+
 /// Verify bridge auth: NIP-98 (production) or X-Pubkey (dev mode).
 ///
-/// Returns the authenticated public key and an event ID for replay detection.
-/// For X-Pubkey dev mode, the event ID is a zero hash (no replay concern).
+/// Returns the authenticated public key, an event ID for replay detection, and
+/// the verified signed auth timestamp. For X-Pubkey dev mode, the event ID is
+/// a zero hash and the timestamp is absent.
 pub(crate) fn verify_bridge_auth(
     headers: &HeaderMap,
     method: &str,
     url: &str,
     body: Option<&[u8]>,
     require_auth_token: bool,
-) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+) -> BridgeAuthResult {
     verify_bridge_auth_with_options(headers, method, url, body, require_auth_token, false)
 }
 
@@ -76,7 +91,7 @@ pub(crate) fn verify_bridge_auth_with_options(
     body: Option<&[u8]>,
     require_auth_token: bool,
     require_payload: bool,
-) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+) -> BridgeAuthResult {
     // Try NIP-98 first (Authorization: Nostr <base64>)
     if let Some(auth_str) = headers
         .get("authorization")
@@ -111,7 +126,11 @@ pub(crate) fn verify_bridge_auth_with_options(
         let pubkey = buzz_auth::verify_nip98_event(&event_json, url, method, body)
             .map_err(|e| api_error(StatusCode::UNAUTHORIZED, &format!("NIP-98: {e}")))?;
 
-        return Ok((pubkey, event_id_bytes));
+        return Ok(VerifiedBridgeAuth {
+            pubkey,
+            event_id_bytes,
+            signed_created_at: Some(event.created_at.as_secs()),
+        });
     }
 
     // Dev-mode fallback: X-Pubkey header (only when require_auth_token is false)
@@ -120,7 +139,11 @@ pub(crate) fn verify_bridge_auth_with_options(
             let pubkey = nostr::PublicKey::from_hex(hex_val)
                 .map_err(|_| api_error(StatusCode::UNAUTHORIZED, "invalid X-Pubkey hex"))?;
             // Zero event ID — no replay detection needed for dev mode
-            return Ok((pubkey, [0u8; 32]));
+            return Ok(VerifiedBridgeAuth {
+                pubkey,
+                event_id_bytes: [0u8; 32],
+                signed_created_at: None,
+            });
         }
     }
 
@@ -274,6 +297,14 @@ fn extract_before_id(raw: &Value) -> BeforeId {
     }
 }
 
+fn extract_buzz_channel(raw: &Value) -> Option<&str> {
+    raw.get("#buzz-channel")
+        .and_then(Value::as_array)
+        .filter(|values| values.len() == 1)
+        .and_then(|values| values.first())
+        .and_then(Value::as_str)
+}
+
 /// True when the raw filter opts into a bridge extension flag (`top_level`,
 /// `include_summaries`, `include_aux`). Absent or non-boolean = false.
 fn extension_flag(raw: &Value, key: &str) -> bool {
@@ -393,6 +424,83 @@ const WINDOW_AUX_DELETE_KINDS: [u32; 2] = [
     buzz_core::kind::KIND_NIP29_DELETE_EVENT,
 ];
 
+/// Page size for one aux-closure hop. Matches the DB clamp
+/// (`buzz_db::DEFAULT_MAX_PAGE_LIMIT`) so each page is one full query.
+const AUX_PAGE_LIMIT: i64 = buzz_db::DEFAULT_MAX_PAGE_LIMIT;
+/// Upper bound on pages drained per hop: 64k aux events referencing one page
+/// of rows is far past any real thread; past it we log and stop rather than
+/// loop forever against a pathological write pattern.
+const AUX_MAX_PAGES: usize = 64;
+
+fn build_aux_query(
+    community: buzz_core::CommunityId,
+    target_ids: Vec<String>,
+    kinds: &[u32],
+) -> buzz_db::EventQuery {
+    let mut query = buzz_db::EventQuery::for_community(community);
+    query.kinds = Some(kinds.iter().map(|kind| *kind as i32).collect());
+    query.e_tags = Some(target_ids);
+    query
+}
+
+/// Where an aux hop reads from: the window path pins the request's proved
+/// read session; the thread path takes the routed display-read fast path.
+enum AuxReader<'a> {
+    Session(&'a mut buzz_db::ReadSession),
+    Routed(&'a buzz_db::Db, &'static str),
+    #[cfg(test)]
+    Fake(&'a mut (dyn FnMut(&buzz_db::EventQuery) -> Vec<buzz_core::StoredEvent> + Send)),
+}
+
+impl AuxReader<'_> {
+    async fn fetch(
+        &mut self,
+        query: &buzz_db::EventQuery,
+    ) -> buzz_db::Result<Vec<buzz_core::StoredEvent>> {
+        match self {
+            AuxReader::Session(session) => session.query_events(query).await,
+            AuxReader::Routed(db, path) => db.query_events_routed(path, query).await,
+            #[cfg(test)]
+            AuxReader::Fake(fetch) => Ok(fetch(query)),
+        }
+    }
+}
+
+/// Drain every event matching `query`, walking the `(created_at, id)` keyset
+/// cursor `query_events` already orders by until a short page. An aux hop
+/// over a reaction-heavy page can exceed a single page clamp, and because
+/// results are newest-first a one-shot query silently drops the *oldest*
+/// edits and deletions — rendering original or deleted content, not merely
+/// losing decoration.
+async fn query_all_pages(
+    mut query: buzz_db::EventQuery,
+    page_limit: i64,
+    reader: &mut AuxReader<'_>,
+) -> buzz_db::Result<Vec<buzz_core::StoredEvent>> {
+    query.limit = Some(page_limit);
+    let mut events = Vec::new();
+    for _ in 0..AUX_MAX_PAGES {
+        let page = reader.fetch(&query).await?;
+        let next = if page.len() as i64 >= page_limit {
+            page.last().map(|se| (se.event.created_at, se.event.id))
+        } else {
+            None
+        };
+        events.extend(page);
+        let Some((created_at, id)) = next else {
+            return Ok(events);
+        };
+        query.until = chrono::DateTime::from_timestamp(created_at.as_secs() as i64, 0);
+        query.before_id = Some(id.to_bytes().to_vec());
+    }
+    tracing::warn!(
+        pages = AUX_MAX_PAGES,
+        events = events.len(),
+        "aux closure hop exceeded page cap; returning truncated closure"
+    );
+    Ok(events)
+}
+
 /// Serve one `top_level: true` channel-window filter on the bridge `/query`
 /// path (docs/bridge-channel-window.md). Appends, in order: row events, the
 /// aux closure (`include_aux`), `39005` thread-summary overlays
@@ -462,9 +570,9 @@ async fn handle_channel_window_filter(
         .as_ref()
         .map(|ks| ks.iter().map(|k| k.as_u16() as u32).collect());
 
-    let window = state
+    let (window, mut session) = state
         .db
-        .get_channel_window(
+        .get_channel_window_with_session(
             tenant.community(),
             ch_id,
             limit,
@@ -485,21 +593,26 @@ async fn handle_channel_window_filter(
 
     // 2. Aux closure: reactions/deletions/edits targeting retained rows, plus
     //    deletions targeting those aux events (the transitive second hop).
-    //    One round trip for the client instead of an #e fan-out.
+    //    One round trip for the client instead of an #e fan-out. Runs in the
+    //    SAME request transaction that served the window: when the page came
+    //    from a proved replica session, the heartbeat observation anchored a
+    //    REPEATABLE READ snapshot, so the aux hops see exactly the state the
+    //    proof covered — another pooled session (or even another autocommit
+    //    statement) could sit at a different replay position.
     if extension_flag(raw, "include_aux") && !row_ids_hex.is_empty() {
         let mut seen_aux: std::collections::HashSet<nostr::EventId> =
             std::collections::HashSet::new();
         let mut hop_ids = row_ids_hex.clone();
         for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
-            let mut aux_query = buzz_db::EventQuery::for_community(tenant.community());
-            aux_query.kinds = Some(hop_kinds.iter().map(|k| *k as i32).collect());
-            aux_query.e_tags = Some(std::mem::take(&mut hop_ids));
-            aux_query.limit = Some(1000);
-            let aux_events = state
-                .db
-                .query_events(&aux_query)
-                .await
-                .map_err(|e| internal_error(&format!("window aux error: {e}")))?;
+            let aux_query =
+                build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+            let aux_events = query_all_pages(
+                aux_query,
+                AUX_PAGE_LIMIT,
+                &mut AuxReader::Session(&mut session),
+            )
+            .await
+            .map_err(|e| internal_error(&format!("window aux error: {e}")))?;
             for se in aux_events {
                 if !seen_aux.insert(se.event.id) {
                     continue;
@@ -633,7 +746,11 @@ pub async fn submit_event(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/events");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -646,16 +763,25 @@ pub async fn submit_event(
     // runs inside the helper.  The thin wrapper here owns the single terminal
     // attribution line so it fires for every outcome, including admission/
     // replay/membership failures that previously returned before any log fired.
-    let outcome =
-        submit_event_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let outcome = submit_event_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    )
+    .await;
 
     match &outcome {
-        SubmitOutcome::Ok { accepted, .. } => {
+        SubmitOutcome::Ok { accepted, kind, .. } => {
             tracing::info!(
                 pubkey = %pubkey_hex,
                 route = "/events",
                 status = 200u16,
                 accepted,
+                kind,
                 "HTTP bridge request"
             );
         }
@@ -709,6 +835,7 @@ enum SubmitOutcome {
     /// Ingest pipeline ran and returned a result (accepted or not).
     Ok {
         accepted: bool,
+        kind: u32,
         response: Json<Value>,
     },
     /// JSON parse failure before ingest — log category/line/column, not msg.
@@ -754,6 +881,7 @@ async fn submit_event_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    signed_auth_created_at: Option<u64>,
 ) -> SubmitOutcome {
     // Admission and replay checks fire before body parse — a 429 or replay
     // reject on a malformed body must still be attributed.
@@ -796,18 +924,23 @@ async fn submit_event_authed(
     };
 
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
-    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     let nip_oa_owner = match super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        signed_auth_created_at,
     )
     .await
     {
         Ok(owner) => owner.or_else(|| {
             if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
+                super::relay_members::extract_nip_oa_owner(
+                    &pubkey_bytes,
+                    auth_tag,
+                    signed_auth_created_at,
+                )
             } else {
                 None
             }
@@ -839,6 +972,7 @@ async fn submit_event_authed(
             }));
             SubmitOutcome::Ok {
                 accepted: result.accepted,
+                kind: kind_u32,
                 response,
             }
         }
@@ -901,7 +1035,11 @@ pub async fn query_events(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -914,8 +1052,16 @@ pub async fn query_events(
     // helper.  The single terminal attribution line fires here from the Result
     // so every outcome — including admission/replay/membership failures that
     // previously returned before any log — is attributed.
-    let result =
-        query_events_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let result = query_events_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    )
+    .await;
     match &result {
         Ok(Json(Value::Array(events))) => {
             tracing::info!(
@@ -951,17 +1097,19 @@ async fn query_events_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    signed_auth_created_at: Option<u64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     enforce_http_admission(state, tenant, &pubkey).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
-    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        signed_auth_created_at,
     )
     .await?;
 
@@ -974,6 +1122,8 @@ async fn query_events_authed(
         .map(|v| serde_json::from_value(v.clone()))
         .collect::<Result<_, _>>()
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
+        .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
     // P-gated kinds (gift wraps, member notifications, observer frames) require
     // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
@@ -997,11 +1147,23 @@ async fn query_events_authed(
         ));
     }
 
+    if read_state_snapshot::requested(&raw_filters) {
+        return read_state_snapshot::query(state, tenant, &pubkey, &raw_filters).await;
+    }
+
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let accessible_channels = state
+    let mut accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    repair_requested_channel_access(
+        state,
+        tenant,
+        &filters,
+        &pubkey_bytes,
+        &mut accessible_channels,
+    )
+    .await?;
 
     if filters.iter().any(|f| f.search.is_some()) {
         if has_mixed_search_filters(&filters) {
@@ -1022,17 +1184,39 @@ async fn query_events_authed(
         .await;
     }
 
-    if let Some(presence_events) = synthesize_presence(state, tenant, &filters).await {
-        return Ok(Json(Value::Array(presence_events)));
+    if let Some(presence_result) =
+        synthesize_presence(&state.pubsub, &state.relay_keypair, tenant, &filters).await
+    {
+        return presence_result.map(|events| Json(Value::Array(events)));
     }
 
     let mut events: Vec<Value> = Vec::new();
     let mut handled: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
+    let ownership_targets: usize = raw_filters
+        .iter()
+        .zip(&filters)
+        .filter(|(raw, _)| extension_flag(raw, "resolve_thread_roots"))
+        .map(|(_, filter)| filter.ids.as_ref().map_or(0, |ids| ids.len()))
+        .sum();
+    if ownership_targets > 100 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "resolve_thread_roots permits at most 100 targets per request",
+        ));
+    }
+    // Resolve reply owners from retained thread metadata, including tombstones.
+    for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+        if extension_flag(raw, "resolve_thread_roots") {
+            events.extend(thread_roots::query(state, tenant, filter, &accessible_channels).await?);
+            handled.insert(idx);
+        }
+    }
+
     // Channel-window filters (`top_level: true`) — the GUI read-model surface.
     // Dispatched first: a window filter is never a feed/thread/catchall query.
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
-        if !extension_flag(raw, "top_level") {
+        if handled.contains(&idx) || !extension_flag(raw, "top_level") {
             continue;
         }
         handle_channel_window_filter(
@@ -1083,7 +1267,8 @@ async fn query_events_authed(
             let type_events = match canonical {
                 "mentions" => state
                     .db
-                    .query_feed_mentions(
+                    .query_feed_mentions_routed(
+                        "bridge_feed",
                         tenant.community(),
                         &pubkey_bytes,
                         &accessible_channels,
@@ -1094,7 +1279,8 @@ async fn query_events_authed(
                     .map_err(|e| internal_error(&format!("feed mentions error: {e}")))?,
                 "needs_action" => state
                     .db
-                    .query_feed_needs_action(
+                    .query_feed_needs_action_routed(
+                        "bridge_feed",
                         tenant.community(),
                         &pubkey_bytes,
                         &accessible_channels,
@@ -1105,7 +1291,13 @@ async fn query_events_authed(
                     .map_err(|e| internal_error(&format!("feed needs_action error: {e}")))?,
                 "activity" => state
                     .db
-                    .query_feed_activity(tenant.community(), &accessible_channels, since, remaining)
+                    .query_feed_activity_routed(
+                        "bridge_feed",
+                        tenant.community(),
+                        &accessible_channels,
+                        since,
+                        remaining,
+                    )
                     .await
                     .map_err(|e| internal_error(&format!("feed activity error: {e}")))?,
                 _ => continue,
@@ -1178,6 +1370,8 @@ async fn query_events_authed(
             .await
             .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
 
+        let mut thread_row_ids = Vec::with_capacity(thread_replies.len() + 1);
+        thread_row_ids.push(root_hex.to_string());
         for reply in thread_replies {
             let se = reply.stored_event;
             if !event_in_accessible_channel(&se, &accessible_channels) {
@@ -1189,8 +1383,43 @@ async fn query_events_authed(
             if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
                 continue;
             }
+            thread_row_ids.push(se.event.id.to_hex());
             if let Ok(v) = serde_json::to_value(&se.event) {
                 events.push(v);
+            }
+        }
+
+        if extension_flag(raw, "include_aux") && !thread_row_ids.is_empty() {
+            let mut seen_aux = std::collections::HashSet::new();
+            let mut hop_ids = thread_row_ids;
+            for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+                let aux_query =
+                    build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+                let aux_events = query_all_pages(
+                    aux_query,
+                    AUX_PAGE_LIMIT,
+                    &mut AuxReader::Routed(&state.db, "bridge_thread_aux"),
+                )
+                .await
+                .map_err(|e| internal_error(&format!("thread aux query error: {e}")))?;
+                for se in aux_events {
+                    if !seen_aux.insert(se.event.id)
+                        || !event_in_accessible_channel(&se, &accessible_channels)
+                        || !buzz_core::filter::reader_authorized_for_event(
+                            &se.event,
+                            &authed_pubkey_hex,
+                        )
+                    {
+                        continue;
+                    }
+                    hop_ids.push(se.event.id.to_hex());
+                    if let Ok(value) = serde_json::to_value(&se.event) {
+                        events.push(value);
+                    }
+                }
+                if hop_ids.is_empty() {
+                    break;
+                }
             }
         }
         handled.insert(idx);
@@ -1219,15 +1448,19 @@ async fn query_events_authed(
             tenant.community(),
         )
         .await;
-        crate::handlers::req::apply_access_scope_to_query(
+        crate::handlers::req::apply_channel_scope_to_query(
             &mut query,
+            filter,
             extract_channel_from_filter(filter),
             &accessible_channels,
         );
-        // Persona visibility pushdown: must mirror WS REQ so that a page of newer
-        // private personas does not starve older shared ones off the candidate page.
-        if crate::handlers::req::filter_can_match_persona_shared_kinds(filter) {
-            query.persona_reader = Some(pubkey_bytes.clone());
+        if let Some(channel) = extract_buzz_channel(raw) {
+            query.custom_tag = Some(("buzz-channel".into(), channel.into()));
+        }
+        // Shared-gated visibility pushdown: must mirror WS REQ so that a page of
+        // newer private events does not starve older shared ones off the page.
+        if crate::handlers::req::filter_can_match_shared_gated_kinds(filter) {
+            query.shared_gated_reader = Some(pubkey_bytes.clone());
         }
 
         match extract_before_id(raw) {
@@ -1271,7 +1504,7 @@ async fn query_events_authed(
     let db = state.db.clone();
     let mut catchall_results = stream::iter(catchall_queries.into_iter().map(|(idx, query)| {
         let db = db.clone();
-        async move { (idx, db.query_events(&query).await) }
+        async move { (idx, db.query_events_routed("bridge_query", &query).await) }
     }))
     .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
 
@@ -1309,6 +1542,39 @@ async fn query_events_authed(
     Ok(Json(Value::Array(events)))
 }
 
+async fn repair_requested_channel_access(
+    state: &AppState,
+    tenant: &TenantContext,
+    filters: &[nostr::Filter],
+    pubkey_bytes: &[u8],
+    accessible_channels: &mut Vec<uuid::Uuid>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    for filter in filters {
+        let Some(requested) =
+            crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
+        else {
+            continue;
+        };
+        for channel_id in requested {
+            if accessible_channels.contains(&channel_id) {
+                continue;
+            }
+            let is_member = state
+                .db
+                .is_member(tenant.community(), channel_id, pubkey_bytes)
+                .await
+                .map_err(|e| internal_error(&format!("channel membership confirmation: {e}")))?;
+            crate::handlers::req::resolve_request_local_access(
+                accessible_channels,
+                channel_id,
+                true,
+                Some(is_member),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
 ///
 /// Enforces channel access: only counts events in channels the user can access.
@@ -1336,7 +1602,11 @@ pub async fn count_events(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -1349,8 +1619,16 @@ pub async fn count_events(
     // helper.  The single terminal attribution line fires here from the Result
     // so every outcome — including admission/replay/membership failures that
     // previously returned before any log — is attributed.
-    let result =
-        count_events_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let result = count_events_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    )
+    .await;
     match &result {
         Ok(Json(value)) => {
             let count = value.get("count").and_then(Value::as_u64);
@@ -1384,22 +1662,26 @@ async fn count_events_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    signed_auth_created_at: Option<u64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     enforce_http_admission(state, tenant, &pubkey).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
-    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        signed_auth_created_at,
     )
     .await?;
 
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
+        .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
     // P-gated kinds enforcement — same as WS REQ and /query.
     let authed_pubkey_hex = pubkey.to_hex();
@@ -1423,10 +1705,18 @@ async fn count_events_authed(
     }
 
     // Get channels this user can access.
-    let accessible_channels = state
+    let mut accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    repair_requested_channel_access(
+        state,
+        tenant,
+        &filters,
+        &pubkey_bytes,
+        &mut accessible_channels,
+    )
+    .await?;
 
     let mut total: u64 = 0;
     for filter in &filters {
@@ -1441,16 +1731,26 @@ async fn count_events_authed(
                     filter,
                     &authed_pubkey_hex,
                 );
-        // Force per-event fallback for filters that can match kind:30175 —
-        // the fast SQL count_events() path has no per-event gate and would
-        // over-count foreign unshared persona events (existence leak).
-        let needs_persona_filtering =
-            crate::handlers::req::filter_can_match_persona_shared_kinds(filter);
+        // Force per-event fallback for filters that can match a shared-gated
+        // kind — the fast SQL count_events() path has no per-event gate and
+        // would over-count foreign unshared events (existence leak).
+        let needs_shared_gate_filtering =
+            crate::handlers::req::filter_can_match_shared_gated_kinds(filter);
 
         // If filter targets a specific channel, verify access.
-        if let Some(ch_id) = extract_channel_from_filter(filter) {
-            if !accessible_channels.contains(&ch_id) {
-                continue; // Skip filters targeting inaccessible channels.
+        if crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
+            .is_some()
+        {
+            let ch_id = extract_channel_from_filter(filter);
+            let requested = crate::handlers::req::extract_channel_ids_from_filters(
+                std::slice::from_ref(filter),
+            )
+            .unwrap_or_default();
+            if !requested
+                .iter()
+                .any(|channel_id| accessible_channels.contains(channel_id))
+            {
+                continue;
             }
             // Channel is accessible — count with pushability check.
             let mut query = crate::handlers::req::build_event_query_from_filter(
@@ -1460,10 +1760,16 @@ async fn count_events_authed(
                 tenant.community(),
             )
             .await;
-            // Persona visibility pushdown: same as REQ and /query paths, so the
-            // fallback's query_events call doesn't over-fetch private persona rows.
-            if needs_persona_filtering {
-                query.persona_reader = Some(pubkey_bytes.clone());
+            crate::handlers::req::apply_channel_scope_to_query(
+                &mut query,
+                filter,
+                ch_id,
+                &accessible_channels,
+            );
+            // Shared-gated visibility pushdown: same as REQ and /query paths, so
+            // the fallback's query_events call doesn't over-fetch private rows.
+            if needs_shared_gate_filtering {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
                 !authors.is_empty()
@@ -1474,9 +1780,9 @@ async fn count_events_authed(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
-                && !needs_persona_filtering
+                && !needs_shared_gate_filtering
             {
-                match state.db.count_events(&query).await {
+                match state.db.count_events_routed("bridge_count", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         return Err(internal_error(&format!("count error: {e}")));
@@ -1486,7 +1792,11 @@ async fn count_events_authed(
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
                 crate::handlers::req::apply_count_fallback_limit(&mut q);
-                match state.db.query_events(&q).await {
+                match state
+                    .db
+                    .query_events_routed_bounded("bridge_count_fallback", &q)
+                    .await
+                {
                     Ok(stored_events) => {
                         if crate::handlers::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
@@ -1525,10 +1835,10 @@ async fn count_events_authed(
             )
             .await;
             query.channel_ids = Some(accessible_channels.to_vec());
-            // Persona visibility pushdown: pre-filter before ORDER/LIMIT on the
-            // fallback query_events path.
-            if needs_persona_filtering {
-                query.persona_reader = Some(pubkey_bytes.clone());
+            // Shared-gated visibility pushdown: pre-filter before ORDER/LIMIT on
+            // the fallback query_events path.
+            if needs_shared_gate_filtering {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
 
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
@@ -1540,10 +1850,10 @@ async fn count_events_authed(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
-                && !needs_persona_filtering
+                && !needs_shared_gate_filtering
             {
                 query.limit = None;
-                match state.db.count_events(&query).await {
+                match state.db.count_events_routed("bridge_count", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         return Err(internal_error(&format!("count error: {e}")));
@@ -1552,7 +1862,11 @@ async fn count_events_authed(
             } else {
                 // Fallback: query a bounded candidate set + post-filter.
                 crate::handlers::req::apply_count_fallback_limit(&mut query);
-                match state.db.query_events(&query).await {
+                match state
+                    .db
+                    .query_events_routed_bounded("bridge_count_fallback", &query)
+                    .await
+                {
                     Ok(stored_events) => {
                         if crate::handlers::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
@@ -1725,7 +2039,7 @@ async fn handle_bridge_search(
         let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
         let stored_events = state
             .db
-            .get_events_by_ids(tenant.community(), &id_refs)
+            .get_events_by_ids_routed("bridge_search_hydrate", tenant.community(), &id_refs)
             .await
             .map_err(|e| internal_error(&format!("search fetch error: {e}")))?;
 
@@ -1872,6 +2186,26 @@ pub async fn workflow_webhook(
     }
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
 
+    // SEC-006: the webhook secret authenticates the *caller*, but the run
+    // executes with the workflow **owner's** standing authority — so the
+    // secret alone is insufficient. Immediately before run creation, reject
+    // disabled/inactive workflows and recheck the owner's current channel
+    // membership (and role, for exfiltration-capable definitions). Fail
+    // closed with the same generic 404 as the lookups above so a
+    // revoked-owner workflow is indistinguishable from a nonexistent one.
+    if !workflow.enabled || workflow.status != buzz_db::workflow::WorkflowStatus::Active {
+        return Err(not_found("workflow not found"));
+    }
+    let Some(wf_channel_id) = workflow.channel_id else {
+        // No channel scope means no channel authority to verify — fail closed.
+        return Err(not_found("workflow not found"));
+    };
+    state
+        .workflow_engine
+        .check_owner_authority(community_id, wf_channel_id, &workflow.owner_pubkey, &def)
+        .await
+        .map_err(|_| not_found("workflow not found"))?;
+
     let run_id = state
         .db
         .create_workflow_run(community_id, id, None, trigger_ctx_json.as_ref())
@@ -1895,7 +2229,10 @@ pub async fn workflow_webhook(
                         buzz_db::workflow::RunStatus::Failed,
                         0,
                         &serde_json::json!([]),
-                        Some(&format!("definition parse error: {e}")),
+                        Some(buzz_db::workflow::WorkflowRunFailure {
+                            code: "invalid_definition",
+                            message: &format!("definition parse error: {e}"),
+                        }),
                     )
                     .await
                 {
@@ -1934,12 +2271,19 @@ pub async fn workflow_webhook(
 /// presence from Redis instead of querying the DB (ephemeral events are never
 /// stored, and kind:40902 snapshots are relay-generated on demand).
 ///
-/// Returns `Some(events)` if handled, `None` to fall through to normal query.
+/// Returns `None` when the filters are not a presence query (fall through to
+/// the normal query path). Returns `Some(Ok(events))` when a presence snapshot
+/// was produced — an empty vec is an authoritative "all offline" answer.
+/// Returns `Some(Err(_))` when the backing Redis lookup failed: callers must
+/// propagate that as an error response rather than a fake-empty success, so a
+/// consumer cannot mistake a backend outage for an authoritative snapshot.
+#[allow(clippy::type_complexity)]
 async fn synthesize_presence(
-    state: &AppState,
+    pubsub: &buzz_pubsub::PubSubManager,
+    relay_keypair: &nostr::Keys,
     tenant: &buzz_core::tenant::TenantContext,
     filters: &[nostr::Filter],
-) -> Option<Vec<Value>> {
+) -> Option<Result<Vec<Value>, (StatusCode, Json<Value>)>> {
     use buzz_core::kind::{KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE};
 
     // Only intercept if every filter targets kind:20001 or 40902 with authors.
@@ -1959,22 +2303,23 @@ async fn synthesize_presence(
     }
 
     if all_pubkeys.is_empty() {
-        return Some(Vec::new());
+        return Some(Ok(Vec::new()));
     }
 
     // Dedup pubkeys.
     all_pubkeys.sort_by_key(|pk| pk.to_hex());
     all_pubkeys.dedup();
 
-    // Look up Redis.
-    let presence_map = state
-        .pubsub
-        .get_presence_bulk(tenant, &all_pubkeys)
-        .await
-        .unwrap_or_default();
+    // Look up Redis. A lookup failure must surface as an error, not a
+    // fake-empty success — otherwise a Redis outage is indistinguishable from
+    // an authoritative all-offline snapshot to the consumer.
+    let presence_map = match pubsub.get_presence_bulk(tenant, &all_pubkeys).await {
+        Ok(map) => map,
+        Err(e) => return Some(Err(internal_error(&format!("presence lookup: {e}")))),
+    };
 
     if presence_map.is_empty() {
-        return Some(Vec::new());
+        return Some(Ok(Vec::new()));
     }
 
     // Synthesize kind:20001 events signed by the relay.
@@ -1986,20 +2331,30 @@ async fn synthesize_presence(
     let mut events = Vec::with_capacity(presence_map.len());
     for (pubkey_hex, status) in &presence_map {
         // Build a synthetic event: relay-signed, content = status, p-tag = subject.
-        let tags = vec![nostr::Tag::parse(["p", pubkey_hex]).ok()?];
-        let event =
-            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
-                .tags(tags)
-                .custom_created_at(nostr::Timestamp::from(now))
-                .sign_with_keys(&state.relay_keypair)
-                .ok()?;
+        // A build/sign failure here is an internal fault, not a "not a presence
+        // query" signal, so surface it as an error rather than falling through.
+        let tags = match nostr::Tag::parse(["p", pubkey_hex]) {
+            Ok(tag) => vec![tag],
+            Err(e) => return Some(Err(internal_error(&format!("presence tag: {e}")))),
+        };
+        let event = match nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16),
+            status,
+        )
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(now))
+        .sign_with_keys(relay_keypair)
+        {
+            Ok(event) => event,
+            Err(e) => return Some(Err(internal_error(&format!("presence sign: {e}")))),
+        };
 
         if let Ok(v) = serde_json::to_value(&event) {
             events.push(v);
         }
     }
 
-    Some(events)
+    Some(Ok(events))
 }
 
 // ── Moderation queue reads (L6 — Quinn) ───────────────────────────────────────
@@ -2047,8 +2402,11 @@ async fn authorize_moderation_read(
         _ => path.to_string(),
     };
     let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
-    let (pubkey, event_id_bytes) =
-        verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
+    let VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        ..
+    } = verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
     check_nip98_replay(state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
@@ -2200,7 +2558,7 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
     use std::sync::Mutex;
@@ -2257,6 +2615,155 @@ mod tests {
         assert!(!has_mixed_search_filters(&filters));
     }
 
+    /// Production-wiring seam for the Redis-outage boundary. Drives the real
+    /// `synthesize_presence` with a `PubSubManager` whose pool points at a
+    /// closed port, so the `get_presence_bulk` lookup fails. A presence-snapshot
+    /// filter must yield `Some(Err(500))` — never `Some(Ok([]))`, which would
+    /// let a consumer mistake a backend outage for an authoritative all-offline
+    /// snapshot. Restoring `unwrap_or_default()` inside `synthesize_presence`
+    /// turns this red (it would return `Some(Ok([]))`), which is what protects
+    /// the error-mapping seam Thufir found otherwise mutation-unprotected.
+    #[tokio::test]
+    async fn synthesize_presence_surfaces_redis_failure_as_error_response() {
+        use buzz_core::kind::KIND_PRESENCE_SNAPSHOT;
+
+        // Pool at a closed port: get_presence_bulk's connection attempt fails.
+        let dead_pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("pool builds lazily");
+        let pubsub = buzz_pubsub::PubSubManager::new("redis://127.0.0.1:1", dead_pool)
+            .await
+            .expect("PubSubManager::new performs no IO");
+        let relay_keypair = Keys::generate();
+        let tenant = fresh_tenant("relay.example");
+
+        // A presence-snapshot query for a concrete author reaches the Redis
+        // lookup (an empty author set would short-circuit to an empty snapshot).
+        let filters = vec![nostr::Filter::new()
+            .kind(Kind::Custom(KIND_PRESENCE_SNAPSHOT as u16))
+            .author(Keys::generate().public_key())];
+
+        let result = synthesize_presence(&pubsub, &relay_keypair, &tenant, &filters).await;
+
+        match result {
+            Some(Err((status, _))) => assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "a Redis lookup failure must surface as HTTP 500"
+            ),
+            other => panic!(
+                "a Redis outage must yield Some(Err(500)), not a fake-empty success: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn thread_aux_query_targets_root_and_replies() {
+        let tenant = fresh_tenant("relay.example");
+        let targets = vec!["root".to_string(), "reply".to_string()];
+        let query = build_aux_query(tenant.community(), targets.clone(), &WINDOW_AUX_KINDS);
+
+        assert_eq!(query.e_tags, Some(targets));
+        assert_eq!(
+            query.kinds,
+            Some(WINDOW_AUX_KINDS.iter().map(|kind| *kind as i32).collect())
+        );
+        assert_eq!(query.limit, None);
+        assert_eq!(query.until, None);
+        assert_eq!(query.before_id, None);
+    }
+
+    fn aux_event(keys: &Keys, created_at: u64, content: &str) -> buzz_core::StoredEvent {
+        let ev = EventBuilder::new(Kind::Custom(7), content)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap();
+        buzz_core::StoredEvent::new(ev, None)
+    }
+
+    /// Carl/#6572: a one-shot `limit=1000` aux query is newest-first, so the
+    /// oldest reactions/edits/deletions past the clamp vanished. The paged
+    /// drain must walk the keyset cursor until a short page and return every
+    /// event exactly once.
+    #[tokio::test]
+    async fn query_all_pages_drains_past_the_page_clamp() {
+        let keys = Keys::generate();
+        // Newest-first store: 5 events, two sharing a second so the id
+        // tiebreak is exercised.
+        let mut store = [
+            aux_event(&keys, 50, "e"),
+            aux_event(&keys, 40, "d1"),
+            aux_event(&keys, 40, "d2"),
+            aux_event(&keys, 30, "c"),
+            aux_event(&keys, 10, "a"),
+        ];
+        store.sort_by(|l, r| {
+            r.event
+                .created_at
+                .cmp(&l.event.created_at)
+                .then(l.event.id.cmp(&r.event.id))
+        });
+        let expected: Vec<_> = store.iter().map(|se| se.event.id).collect();
+        let mut calls = Vec::new();
+
+        let tenant = fresh_tenant("relay.example");
+        let query = build_aux_query(tenant.community(), vec!["root".into()], &WINDOW_AUX_KINDS);
+        let mut fetch = |q: &buzz_db::EventQuery| {
+            calls.push((q.limit, q.until, q.before_id.clone()));
+            // Emulate `query_events_on`: `created_at < until OR
+            // (created_at = until AND id > before_id)`, newest-first, limit.
+            let page: Vec<_> = store
+                .iter()
+                .filter(|se| match (q.until, q.before_id.as_deref()) {
+                    (Some(until), Some(before)) => {
+                        let ts = se.event.created_at.as_secs() as i64;
+                        ts < until.timestamp()
+                            || (ts == until.timestamp()
+                                && se.event.id.as_bytes().as_slice() > before)
+                    }
+                    _ => true,
+                })
+                .take(q.limit.unwrap() as usize)
+                .cloned()
+                .collect();
+            page
+        };
+        let events = query_all_pages(query, 2, &mut AuxReader::Fake(&mut fetch))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            events.iter().map(|se| se.event.id).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(calls.len(), 3, "2 full pages + 1 short page");
+        assert!(calls.iter().all(|(limit, _, _)| *limit == Some(2)));
+        assert_eq!(calls[0].1, None);
+        // Second page resumes from the last row of the first (ts 40, larger id).
+        assert_eq!(calls[1].1.unwrap().timestamp(), 40);
+        assert_eq!(
+            calls[1].2.as_deref(),
+            Some(store[1].event.id.as_bytes().as_slice())
+        );
+        assert_eq!(calls[2].1.unwrap().timestamp(), 30);
+    }
+
+    #[tokio::test]
+    async fn query_all_pages_stops_at_one_short_page() {
+        let tenant = fresh_tenant("relay.example");
+        let query = build_aux_query(tenant.community(), vec!["root".into()], &WINDOW_AUX_KINDS);
+        let mut calls = 0;
+        let mut fetch = |_q: &buzz_db::EventQuery| {
+            calls += 1;
+            Vec::new()
+        };
+        let events = query_all_pages(query, 1000, &mut AuxReader::Fake(&mut fetch))
+            .await
+            .unwrap();
+        assert!(events.is_empty());
+        assert_eq!(calls, 1);
+    }
+
     #[test]
     fn bridge_search_mode_extension_defaults_to_full_text() {
         assert_eq!(
@@ -2286,8 +2793,6 @@ mod tests {
     /// replay of the same event id in the same community is rejected. The same
     /// id in a different community still succeeds, proving the key is scoped by
     /// server-resolved tenant rather than global process memory.
-    #[tokio::test]
-    #[ignore = "requires Redis"]
     async fn nip98_replay_guard_rejects_cross_pod_replay_on_bridge_path() {
         let pool = redis_pool();
         let pod_a = buzz_pubsub::RedisNip98ReplayGuard::new(pool.clone());
@@ -2315,8 +2820,6 @@ mod tests {
     /// rejection. A single guard instance, called twice with the same
     /// `TenantContext` and the same event id, MUST reject the second call.
     /// Bites if `try_mark`'s admit/reject mapping is reversed or no-op'd.
-    #[tokio::test]
-    #[ignore = "requires Redis"]
     async fn nip98_replay_guard_rejects_same_pod_same_community_replay() {
         let pool = redis_pool();
         let pod = buzz_pubsub::RedisNip98ReplayGuard::new(pool);
@@ -2331,6 +2834,20 @@ mod tests {
             .await
             .expect_err("same-pod replay of the same id+community must reject");
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    mod external_infra_redis_tests {
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn nip98_replay_guard_rejects_cross_pod_replay_on_bridge_path() {
+            super::nip98_replay_guard_rejects_cross_pod_replay_on_bridge_path().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn nip98_replay_guard_rejects_same_pod_same_community_replay() {
+            super::nip98_replay_guard_rejects_same_pod_same_community_replay().await;
+        }
     }
 
     /// Attack 3 fail-closed guard: a stateless worker that loses Redis MUST
@@ -2510,13 +3027,20 @@ mod tests {
         let tenant_a = fresh_tenant("host-a.example");
         let expected_url = nip98_expected_url(config_relay_url, &tenant_a, "/events");
 
-        let (pubkey, _event_id_bytes) =
-            verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
-                .expect("matching-host NIP-98 event must verify");
+        let VerifiedBridgeAuth {
+            pubkey,
+            signed_created_at,
+            ..
+        } = verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
+            .expect("matching-host NIP-98 event must verify");
         assert_eq!(
             pubkey,
             keys.public_key(),
             "returned pubkey must be the signer's"
+        );
+        assert!(
+            signed_created_at.is_some(),
+            "verified NIP-98 auth must retain its signed timestamp"
         );
     }
 
@@ -2559,7 +3083,7 @@ mod tests {
             Some("limit=20&status=open"),
         );
 
-        let (pubkey, _event_id_bytes) =
+        let VerifiedBridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("query-bearing moderation read must verify against the same query");
         assert_eq!(pubkey, keys.public_key());
@@ -2616,7 +3140,7 @@ mod tests {
             Some("limit=20"),
         );
 
-        let (pubkey, _event_id_bytes) =
+        let VerifiedBridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("audit query-bearing read must verify");
         assert_eq!(pubkey, keys.public_key());
@@ -2641,7 +3165,7 @@ mod tests {
         );
         assert_eq!(expected_url, "https://host-a.example/moderation/restricted");
 
-        let (pubkey, _event_id_bytes) =
+        let VerifiedBridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("query-less restricted read must verify against the bare path");
         assert_eq!(pubkey, keys.public_key());
@@ -2911,6 +3435,22 @@ mod tests {
     }
 
     #[test]
+    fn extract_buzz_channel_requires_one_string_value() {
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": ["channel-a"]})),
+            Some("channel-a")
+        );
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": ["channel-a", "channel-b"]})),
+            None
+        );
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": [42]})),
+            None
+        );
+    }
+
+    #[test]
     fn extract_before_id_valid_hex() {
         let hex = "a".repeat(64);
         let raw = serde_json::json!({ "before_id": hex });
@@ -3000,6 +3540,27 @@ mod tests {
         // Can't size a page without a limit.
         let raw = serde_json::json!({ "kinds": [0], "page": 2 });
         assert_eq!(extract_page_offset(&raw, None), None);
+    }
+
+    /// Offsets are sized from the *clamped* limit the DB will honor, not from
+    /// what the client asked for. `filter_to_query_params` clamps an absent or
+    /// over-ceiling `limit` to `DEFAULT_MAX_PAGE_LIMIT` (guarded in
+    /// `handlers::req::tests::req_filter_limit_clamps_to_advertised_nip11_max_limit`)
+    /// and that clamped value is what arrives here — so page N starts exactly
+    /// N-1 full pages in. Sizing from an unclamped limit would step past rows
+    /// the previous page never returned.
+    #[test]
+    fn extract_page_offset_sizes_pages_from_clamped_limit() {
+        let clamped = buzz_db::DEFAULT_MAX_PAGE_LIMIT;
+
+        assert_eq!(
+            extract_page_offset(&serde_json::json!({ "page": 2 }), Some(clamped)),
+            Some(clamped)
+        );
+        assert_eq!(
+            extract_page_offset(&serde_json::json!({ "page": 3 }), Some(clamped)),
+            Some(clamped * 2)
+        );
     }
 
     #[test]
@@ -3296,8 +3857,6 @@ mod tests {
         }
     }
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-
     /// Build an AppState suitable for handler-level bridge tests.
     ///
     /// - `require_auth_token = false` → X-Pubkey dev-mode fallback active.
@@ -3308,9 +3867,9 @@ mod tests {
     /// - Redis pool points at the local dev instance for the admission check.
     ///
     /// Returns `None` when local Postgres is not reachable.
-    async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+    pub(super) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
-        config.database_url = TEST_DB_URL.to_string();
+        config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -3318,7 +3877,9 @@ mod tests {
         config.require_auth_token = false;
         config.require_relay_membership = false;
 
-        let pool = sqlx::PgPool::connect(TEST_DB_URL).await.ok()?;
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))

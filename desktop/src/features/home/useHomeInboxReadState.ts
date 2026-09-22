@@ -1,7 +1,7 @@
 import * as React from "react";
 
+import type { ForcedUnreadSource } from "@/features/channels/forcedUnreadStore";
 import type { InboxItem } from "@/features/home/lib/inbox";
-import { maxReadAt } from "@/features/channels/readState/readStateFormat";
 import {
   getThreadReference,
   isThreadReply,
@@ -26,12 +26,25 @@ type UseHomeInboxReadStateOptions = {
   markChannelRead: (
     channelId: string,
     readAt: string | null | undefined,
+    options?: {
+      preserveForcedUnread?: boolean;
+      topLevelOnly?: boolean;
+    },
+  ) => void;
+  /** Force a channel's unread indicator without rolling back its NIP-RS marker. */
+  markChannelUnread: (channelId: string, source?: ForcedUnreadSource) => void;
+  /** Remove only the named owner of a channel's forced-unread indicator. */
+  clearChannelUnreadSource: (
+    channelId: string,
+    source: ForcedUnreadSource,
   ) => void;
   /** Advance the thread read marker to the given unix-seconds timestamp. */
   markThreadRead: (rootId: string, timestamp: number) => void;
+  /** Advance a reply's per-message read marker to the given unix-seconds timestamp. */
+  markMessageRead: (messageId: string, timestamp: number) => void;
   /** Local fallback: mark a non-channel item done. */
   markDoneLocal: (id: string) => void;
-  /** Local inbox row override: mark an item unread without touching the channel. */
+  /** Local inbox row override: mark an item unread alongside its channel emphasis. */
   markUnreadLocal: (id: string) => void;
   /** Local fallback: undo a non-channel item done. */
   undoDoneLocal: (id: string) => void;
@@ -46,7 +59,8 @@ function getInboxThreadRootId(item: InboxItem): string | null {
     return null;
   }
 
-  return getThreadReference(item.item.tags).rootId;
+  const thread = getThreadReference(item.item.tags);
+  return thread.rootId ?? thread.parentId;
 }
 
 export function getGroupedChannelReadTimestamp(
@@ -81,6 +95,21 @@ export function hasGroupedUnreadOverride(
   return getGroupedInboxItemIds(item).some((id) => localUnreadSet.has(id));
 }
 
+export function hasRemainingChannelUnreadOverride(
+  items: InboxItem[],
+  localUnreadSet: ReadonlySet<string>,
+  channelId: string,
+  clearedItemIds: ReadonlySet<string>,
+): boolean {
+  return items.some(
+    (candidate) =>
+      candidate.item.channelId === channelId &&
+      getGroupedInboxItemIds(candidate).some(
+        (id) => localUnreadSet.has(id) && !clearedItemIds.has(id),
+      ),
+  );
+}
+
 export function resolveInboxItemReadAt(
   item: InboxItem,
   options: {
@@ -95,10 +124,10 @@ export function resolveInboxItemReadAt(
   const channelId = item.item.channelId;
   const threadRootId = getInboxThreadRootId(item);
   if (threadRootId) {
-    return maxReadAt(
-      options.getThreadReadAt(threadRootId, channelId),
-      options.getMessageReadAt?.(item.item.id) ?? null,
-    );
+    if (options.getMessageReadAt) {
+      return options.getMessageReadAt(item.item.id);
+    }
+    return options.getThreadReadAt(threadRootId, channelId);
   }
 
   return channelId ? options.getChannelReadAt(channelId) : null;
@@ -110,9 +139,10 @@ export function resolveInboxItemReadAt(
  * belong to a channel (reminders etc.).
  *
  * "Mark as read" on channel-backed items is routed through `markChannelRead`;
- * thread rows use their own `thread:<root>` marker so they do not affect the
- * sidebar channel dot. "Mark unread" is item-local: it only reopens the
- * specific inbox row and must not light up the channel.
+ * thread rows advance the same per-message markers as the channel thread
+ * panel, plus the aggregate `thread:<root>` marker for compatibility. "Mark
+ * unread" keeps its per-item local override and also restores the source
+ * channel's forced-unread indicator so channel surfaces agree with Inbox.
  */
 export function useHomeInboxReadState({
   items,
@@ -123,7 +153,10 @@ export function useHomeInboxReadState({
   localDoneSet,
   localUnreadSet = EMPTY_ITEM_SET,
   markChannelRead,
+  markChannelUnread,
+  clearChannelUnreadSource,
   markThreadRead,
+  markMessageRead,
   markDoneLocal,
   markUnreadLocal,
   undoDoneLocal,
@@ -178,41 +211,82 @@ export function useHomeInboxReadState({
     (itemId: string) => {
       const item = itemById.get(itemId);
       const localUnreadIds = item ? getGroupedInboxItemIds(item) : [itemId];
+      const clearedItemIds = new Set(localUnreadIds);
       for (const id of localUnreadIds) {
         undoUnreadLocal(id);
       }
+      const channelId = item?.item.channelId ?? null;
+      if (
+        channelId &&
+        !hasRemainingChannelUnreadOverride(
+          items,
+          localUnreadSet,
+          channelId,
+          clearedItemIds,
+        )
+      ) {
+        clearChannelUnreadSource(channelId, "inbox");
+      }
       const threadRootId = item ? getInboxThreadRootId(item) : null;
       if (item && threadRootId) {
+        const markedReplyIds = new Set<string>();
+        for (const reply of [item.item, ...item.groupItems]) {
+          if (!isThreadReply(reply.tags) || markedReplyIds.has(reply.id)) {
+            continue;
+          }
+          markedReplyIds.add(reply.id);
+          markMessageRead(reply.id, reply.createdAt);
+        }
         markThreadRead(threadRootId, item.latestActivityAt);
         const groupedChannelRead = getGroupedChannelReadTimestamp(item);
         if (groupedChannelRead) {
           markChannelRead(
             groupedChannelRead.channelId,
             new Date(groupedChannelRead.timestamp * 1_000).toISOString(),
+            { preserveForcedUnread: true, topLevelOnly: true },
           );
         }
         return;
       }
 
-      const channelId = item?.item.channelId ?? null;
       if (item && channelId) {
         markChannelRead(
           channelId,
           new Date(item.latestActivityAt * 1_000).toISOString(),
+          { preserveForcedUnread: true },
         );
         return;
       }
       markDoneLocal(itemId);
     },
-    [itemById, markChannelRead, markDoneLocal, markThreadRead, undoUnreadLocal],
+    [
+      itemById,
+      items,
+      clearChannelUnreadSource,
+      localUnreadSet,
+      markChannelRead,
+      markDoneLocal,
+      markMessageRead,
+      markThreadRead,
+      undoUnreadLocal,
+    ],
   );
 
   const markItemUnread = React.useCallback(
     (itemId: string) => {
       undoDoneLocal(itemId);
       markUnreadLocal(itemId);
+      const item = itemById.get(itemId);
+      const channelId = item?.item.channelId ?? null;
+      // The Inbox override owns the durable thread dot, while the channel force
+      // restores timeline-level emphasis after the user leaves the channel.
+      // Opening the channel clears the bolding but leaves the thread dot until
+      // the thread itself is opened or marked read.
+      if (channelId && item) {
+        markChannelUnread(channelId, "inbox");
+      }
     },
-    [markUnreadLocal, undoDoneLocal],
+    [itemById, markChannelUnread, markUnreadLocal, undoDoneLocal],
   );
 
   return { effectiveDoneSet, markItemRead, markItemUnread };

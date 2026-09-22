@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { TimelineMessage } from "@/features/messages/types";
 import { cn } from "@/shared/lib/cn";
+import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 import { Skeleton } from "@/shared/ui/skeleton";
 
 const TIMELINE_SKELETON_CACHE_PREFIX = "buzz-timeline-skeleton-shape.v1";
@@ -35,6 +36,7 @@ export type TimelineSkeletonRowShape = {
 
 type TimelineSkeletonCachePayload = {
   rows: TimelineSkeletonRowShape[];
+  updatedAt: number;
   version: 1;
 };
 
@@ -133,11 +135,12 @@ function writeTimelineSkeletonRows(
 
   const payload: TimelineSkeletonCachePayload = {
     rows: rows.slice(0, 4),
+    updatedAt: Date.now(),
     version: 1,
   };
 
   try {
-    window.localStorage.setItem(cacheKey, JSON.stringify(payload));
+    setLocalStorageItemWithRecovery(cacheKey, JSON.stringify(payload));
   } catch {
     // localStorage can be unavailable or full in embedded webviews.
   }

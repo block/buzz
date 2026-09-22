@@ -32,7 +32,7 @@ export type ConfigNudgeRequirement =
        * Determines which message and CTA the nudge card shows:
        * - "available"         → tooling installed, needs login
        * - "adapter_missing"   → CLI installed but ACP adapter missing
-       * - "adapter_outdated"  → ACP adapter present but from deprecated package; reinstall required
+       * - "adapter_outdated"  → ACP adapter present but unsupported/outdated; reinstall required
        * - "cli_missing"       → ACP adapter installed but CLI missing
        * - "not_installed"     → neither adapter nor CLI found
        */

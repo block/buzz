@@ -2,10 +2,11 @@ import {
   CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
-  HOME_MENTION_EVENT_KINDS,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
+  KIND_STREAM_MESSAGE,
+  KIND_STREAM_MESSAGE_V2,
   KIND_STREAM_MESSAGE_EDIT,
 } from "@/shared/constants/kinds";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
@@ -38,6 +39,26 @@ export function buildChannelFilter(
   }
 
   return filter;
+}
+
+/**
+ * Huddle TTS message filter with a bounded startup replay window.
+ *
+ * The Huddle window and agent membership snapshot can finish mounting just
+ * after the first agent reply is stored. Replaying only the caller-provided
+ * startup window closes that race; event-id dedup in the consumer prevents a
+ * stored row from being spoken twice when it is also delivered live.
+ */
+export function buildHuddleTtsLiveFilter(
+  channelId: string,
+  since: number,
+): RelaySubscriptionFilter {
+  return {
+    kinds: [KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2],
+    "#h": [channelId],
+    since,
+    limit: 50,
+  };
 }
 
 /**
@@ -137,19 +158,5 @@ export function buildGlobalStreamFilter(
   return {
     kinds: [...CHANNEL_EVENT_KINDS],
     limit,
-  };
-}
-
-export function buildChannelMentionFilter(
-  channelId: string,
-  pubkey: string,
-  limit: number,
-): RelaySubscriptionFilter {
-  return {
-    kinds: [...HOME_MENTION_EVENT_KINDS],
-    "#h": [channelId],
-    "#p": [pubkey],
-    limit,
-    since: Math.floor(Date.now() / 1_000),
   };
 }

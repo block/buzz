@@ -1,25 +1,42 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
-import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/mentions/mention_bindings.dart';
+import '../../shared/mentions/mention_tags.dart';
+import '../../shared/deeplink/deep_link.dart';
+import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/emoji/emoji_data_provider.dart';
+import '../../shared/emoji/emoji_only.dart';
+import 'channels_provider.dart';
 import 'media_viewer_page.dart';
+import 'message_content/link_normalizer.dart';
 import 'message_media.dart';
+import 'voice_note_attachment.dart';
+
+part 'message_content/media_carousel.dart';
+part 'message_content/inline_components.dart';
+part 'message_content/token_pill.dart';
+part 'message_content/video_preview.dart';
 
 const _messageMediaMaxInlineWidth = 320.0;
 const _messageMediaMaxImageHeight = 240.0;
@@ -92,9 +109,33 @@ class MessageContent extends HookConsumerWidget {
   /// mentioned user's pubkey.
   final void Function(String pubkey)? onMentionTap;
 
+  /// Opens the message's thread from the full-screen image viewer.
+  final VoidCallback? onMediaReply;
+
+  /// Opens message-specific actions for an image in the full-screen viewer.
+  final MediaViewerMoreAction? onMediaMore;
+
   final TextStyle? baseStyle;
 
+  /// Alignment applied to rendered markdown text.
+  final TextAlign? textAlign;
+
   final int? maxLines;
+
+  /// Render a body that is nothing but emoji at [kEmojiOnlyFontSize], the way
+  /// desktop's `MessageRow` does. Off by default: previews, search hits, and
+  /// notification rows want a message to occupy its usual line height whatever
+  /// it contains.
+  final bool scaleEmojiOnly;
+
+  /// Allows a multi-image carousel to reclaim leading space reserved by the
+  /// surrounding message layout, while keeping its image count aligned with
+  /// the message body.
+  final double mediaCarouselLeadingOverflow;
+
+  /// Allows a multi-image carousel to continue through the trailing page
+  /// gutter while keeping its first image and count aligned with the body.
+  final double mediaCarouselTrailingOverflow;
 
   const MessageContent({
     super.key,
@@ -105,122 +146,254 @@ class MessageContent extends HookConsumerWidget {
     this.tags = const [],
     this.onChannelTap,
     this.onMentionTap,
+    this.onMediaReply,
+    this.onMediaMore,
     this.baseStyle,
+    this.textAlign,
     this.maxLines,
+    this.scaleEmojiOnly = false,
+    this.mediaCarouselLeadingOverflow = 0,
+    this.mediaCarouselTrailingOverflow = 0,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final style =
+    final baseTextStyle =
         baseStyle ??
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
+    final resolvedMentionNames = mentionNames;
+    final signedMentionPubkeys = mentionedPubkeysFromTags(tags);
+    final mentionBindings = renderedMentionBindings(
+      content,
+      mentionNames,
+      signedMentionPubkeys,
+    );
+    final resolvedAgentMentionPubkeys = {
+      ...agentMentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
+    };
+    final resolvedChannelNames = channelNames.isNotEmpty
+        ? channelNames
+        : <String, String>{
+            for (final channel
+                in ref.watch(channelsProvider).asData?.value ?? const [])
+              channel.name.toLowerCase(): channel.id,
+          };
+    final channelHandler = useRef(onChannelTap)..value = onChannelTap;
+    final resolvedChannelTap = useMemoized(
+      () => (String channelId) {
+        final handler = channelHandler.value;
+        if (handler != null) {
+          handler(channelId);
+        } else {
+          ref
+              .read(pendingDeepLinkProvider.notifier)
+              .open(Uri(scheme: 'buzz', host: 'channel', path: channelId));
+        }
+      },
+      const [],
+    );
+    final replyHandler = useRef(onMediaReply)..value = onMediaReply;
+    final moreHandler = useRef(onMediaMore)..value = onMediaMore;
+    final mediaReply = useMemoized(
+      () =>
+          () => replyHandler.value?.call(),
+      const [],
+    );
+    final mediaMore = useMemoized(
+      () =>
+          (BuildContext context, String url) =>
+              moreHandler.value?.call(context, url),
+      const [],
+    );
+    final channelPresentationKey = [
+      for (final entry
+          in (resolvedChannelNames.entries.toList()
+            ..sort((a, b) => a.key.compareTo(b.key))))
+        '${entry.key}\u0000${entry.value}',
+    ].join('\u0001');
     final imetaByUrl = parseImetaTags(tags);
+    final trailingGallery = maxLines == null
+        ? _extractTrailingImageGallery(content, imetaByUrl)
+        : null;
+    final markdownContent = trailingGallery?.content ?? content;
     final customEmoji = _mergeCustomEmoji(
       customEmojiFromTags(tags),
       ref.watch(customEmojiListProvider),
     );
+    final mentionPresentationKey = [
+      for (final entry
+          in (resolvedMentionNames.entries.toList()
+            ..sort((a, b) => a.key.compareTo(b.key))))
+        '${entry.key}\u0000${entry.value}',
+      ...(resolvedAgentMentionPubkeys.toList()..sort()),
+      ...(signedMentionPubkeys.toList()..sort()),
+    ].join('\u0001');
+
+    // Decided here rather than by the caller: this is where the event's own
+    // emoji tags and the community palette have already been merged, and a
+    // `:shortcode:` only counts as emoji if it resolves against that palette.
+    final emojiOnly =
+        scaleEmojiOnly &&
+        isEmojiOnlyMessage(
+          markdownContent,
+          nativeEmoji: ref.watch(nativeEmojiGlyphsProvider),
+          customEmoji: customEmoji,
+        );
+    final style = emojiOnly
+        ? baseTextStyle?.copyWith(
+            fontSize: kEmojiOnlyFontSize,
+            height: kEmojiOnlyHeight,
+          )
+        : baseTextStyle;
+    final inlineCustomEmojiSize = emojiOnly
+        ? kEmojiOnlyCustomEmojiSize
+        : kCustomEmojiInlineSize;
+
+    final linkNormalizedContent = useMemoized(
+      () => normalizeBareLinks(markdownContent),
+      [markdownContent],
+    );
 
     final finalContent = useMemoized(() {
-      // Convert autolinks and bare URLs to standard markdown links,
-      // but skip content inside backticks (inline code / fenced blocks).
-      final buffer = StringBuffer();
-      final parts = content.split('`');
-      for (var i = 0; i < parts.length; i++) {
-        if (i.isOdd) {
-          // Inside backticks — preserve as-is.
-          buffer.write('`${parts[i]}`');
-        } else {
-          // 1. Angle-bracket autolinks: <https://...>
-          var segment = parts[i].replaceAllMapped(
-            RegExp(r'<(https?://[^>]+)>'),
-            (m) => '[${m[1]}](${m[1]})',
-          );
-          // 2. Bare URLs not already inside markdown link/image syntax.
-          //    Negative lookbehind avoids matching URLs preceded by ]( or =
-          //    which are already part of markdown links or imeta tags.
-          segment = segment.replaceAllMapped(
-            RegExp(r'(?<![(\]=])https?://[^\s)>\]]+'),
-            (m) {
-              final url = m[0]!;
-              // Skip if this URL is already a markdown link label that equals
-              // the URL (produced by step 1 or authored as [url](url)).
-              final start = m.start;
-              if (start >= 1 && segment[start - 1] == '[') return url;
-              return '[$url]($url)';
-            },
-          );
-          buffer.write(segment);
-        }
-      }
-      final processed = buffer.toString();
-
       // Replace spaces with non-breaking spaces inside known mention names
       // so the gpt_markdown combined regex can match multi-word names
       // even when caseSensitive is not preserved.
       // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = processed.split('`');
+      final mentionParts = linkNormalizedContent.split('`');
       final mentionBuf = StringBuffer();
       for (var i = 0; i < mentionParts.length; i++) {
         if (i.isOdd) {
           mentionBuf.write('`${mentionParts[i]}`');
         } else {
           var segment = mentionParts[i];
-          for (final name in mentionNames.values) {
-            if (name.contains(' ')) {
-              final normalizedName = _markdownMentionName(name);
-              segment = segment.replaceAllMapped(
-                RegExp('@${RegExp.escape(name)}', caseSensitive: false),
-                (m) => '@$normalizedName',
-              );
-            }
+          for (final range in mentionOccurrences(
+            segment,
+            mentionBindings.keys,
+          ).reversed) {
+            segment = segment.replaceRange(
+              range.start,
+              range.end,
+              '@${_markdownMentionName(range.label)}',
+            );
           }
           mentionBuf.write(segment);
         }
       }
-      final mentionProcessed = mentionBuf.toString();
+      var result = mentionBuf.toString();
 
       // Ensure channel links at the very start of content don't get
       // swallowed by markdown processing.
-      var result = mentionProcessed;
       if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(result)) {
         result = '\u200B$result';
       }
       return result;
-    }, [content, mentionNames]);
+    }, [linkNormalizedContent, mentionPresentationKey]);
 
-    return GptMarkdown(
-      finalContent,
-      style: style,
-      followLinkColor: false,
-      codeBuilder: (context, name, code, closed) =>
-          _MessageCodeBlock(name: name, code: code),
-      linkBuilder: (context, linkText, url, linkStyle) =>
-          _buildLink(context, ref, linkText, url, linkStyle, style),
-      imageBuilder: (context, imageUrl) =>
-          _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
-      maxLines: maxLines,
-      inlineComponents: [
-        _MentionMd(
-          mentionNames: mentionNames,
-          agentMentionPubkeys: agentMentionPubkeys,
-          onMentionTap: onMentionTap,
+    final inlineComponents = _useMessageInlineComponents(
+      content: content,
+      finalContent: finalContent,
+      mentionNames: resolvedMentionNames,
+      bindings: mentionBindings,
+      agentPubkeys: resolvedAgentMentionPubkeys,
+      channelNames: resolvedChannelNames,
+      customEmoji: customEmoji,
+      emojiSize: inlineCustomEmojiSize,
+      tags: tags,
+      hasMediaReply: onMediaReply != null,
+      hasMediaMore: onMediaMore != null,
+      onMentionTap: onMentionTap,
+      onChannelTap: resolvedChannelTap,
+    );
+
+    final markdown = KeyedSubtree(
+      key: ValueKey(
+        '$finalContent\u0000$mentionPresentationKey\u0000$channelPresentationKey',
+      ),
+      child: GptMarkdown(
+        finalContent,
+        style: style,
+        followLinkColor: false,
+        // normalizeBareLinks() already turns bare URLs into Markdown links;
+        // gpt_markdown 1.2.0 autolinks by default, so both would run.
+        autolink: false,
+        codeBuilder: (context, name, code, closed) =>
+            _MessageCodeBlock(name: name, code: code),
+        linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
+          context,
+          ref,
+          linkText,
+          url,
+          imetaByUrl[url],
+          linkStyle,
+          style,
+          resolvedChannelTap,
+          resolvedChannelNames,
         ),
-        CustomEmojiMd(customEmoji),
-        _ChannelLinkMd(channelNames: channelNames, onChannelTap: onChannelTap),
-        ...MarkdownComponent.inlineComponents,
+        imageBuilder: (context, imageUrl, _, _) => _buildMedia(
+          context,
+          imageUrl,
+          imetaByUrl[imageUrl],
+          onReply: onMediaReply == null ? null : mediaReply,
+          onMore: onMediaMore == null ? null : mediaMore,
+        ),
+        textAlign: textAlign,
+        maxLines: maxLines,
+        inlineComponents: inlineComponents,
+      ),
+    );
+    if (trailingGallery == null) return markdown;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (trailingGallery.content.trim().isNotEmpty) markdown,
+        _MessageImageCarousel(
+          key: ValueKey(
+            trailingGallery.items.map((item) => item.url).join('\u0000'),
+          ),
+          items: trailingGallery.items,
+          leadingOverflow: mediaCarouselLeadingOverflow,
+          trailingOverflow: mediaCarouselTrailingOverflow,
+          onReply: onMediaReply,
+          onMore: onMediaMore,
+        ),
       ],
     );
   }
 
-  Widget _buildMedia(BuildContext context, String imageUrl, ImetaEntry? imeta) {
+  Widget _buildMedia(
+    BuildContext context,
+    String imageUrl,
+    ImetaEntry? imeta, {
+    VoidCallback? onReply,
+    MediaViewerMoreAction? onMore,
+  }) {
     final mediaKind = classifyMediaUrl(imageUrl, imeta: imeta);
+    if (mediaKind == MessageMediaKind.audio) {
+      return Padding(
+        padding: const EdgeInsets.only(top: Grid.half),
+        child: VoiceNoteAttachment.remote(
+          url: imageUrl,
+          duration: Duration(
+            milliseconds: ((imeta?.duration ?? 0) * 1000).round(),
+          ),
+        ),
+      );
+    }
     if (mediaKind == MessageMediaKind.video) {
-      return _MessageVideoPreview(url: imageUrl, imeta: imeta);
+      return _MessageVideoPreview(
+        url: imageUrl,
+        imeta: imeta,
+        onReply: onReply,
+      );
     }
     return _MessageImagePreview(
       url: imageUrl,
       imeta: imeta,
       semanticLabel: imeta?.alt ?? 'Message image',
+      onReply: onReply,
+      onMore: onMore,
     );
   }
 
@@ -229,8 +402,11 @@ class MessageContent extends HookConsumerWidget {
     WidgetRef ref,
     InlineSpan linkText,
     String url,
+    ImetaEntry? imeta,
     TextStyle linkStyle,
     TextStyle? fallbackStyle,
+    void Function(String channelId) resolvedChannelTap,
+    Map<String, String> resolvedChannelNames,
   ) {
     String text = '';
     linkText.visitChildren((span) {
@@ -241,13 +417,109 @@ class MessageContent extends HookConsumerWidget {
     });
 
     final baseStyle = fallbackStyle ?? linkStyle;
+    if (imeta != null &&
+        classifyMediaUrl(url, imeta: imeta) == MessageMediaKind.audio) {
+      return _buildMedia(context, url, imeta);
+    }
+    final uri = Uri.tryParse(url);
+    final buzzLink = uri?.scheme == 'buzz'
+        ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)
+        : null;
+    final isBuzzLink =
+        buzzLink is ChannelDeepLink ||
+        buzzLink is MessageDeepLink ||
+        buzzLink is EntityDeepLink;
+    final isCanonicalBuzzLabel = isBuzzLink && text == url;
+    final buzzPresentation = switch (buzzLink) {
+      ChannelDeepLink(:final channelId) => (
+        icon: LucideIcons.hash,
+        label:
+            _channelNameForId(resolvedChannelNames, channelId) ??
+            channelId.substring(0, math.min(8, channelId.length)),
+        semanticLabel:
+            'Open channel ${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))}',
+        interactive: true,
+      ),
+      MessageDeepLink(:final channelId, :final messageId) => (
+        icon: LucideIcons.messageSquare,
+        label:
+            '${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))} · ${messageId.substring(0, math.min(8, messageId.length))}',
+        semanticLabel:
+            'Open message ${messageId.substring(0, math.min(8, messageId.length))} in channel ${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))}',
+        interactive: true,
+      ),
+      EntityDeepLink(:final type, :final repository, :final eventId) => (
+        icon: switch (type) {
+          'repo' => LucideIcons.folderGit2,
+          'pr' => LucideIcons.gitPullRequest,
+          _ => LucideIcons.circleDot,
+        },
+        label: type == 'repo'
+            ? repository
+            : '$repository · ${eventId!.substring(0, 8)}',
+        semanticLabel: switch (type) {
+          'repo' => 'Repository $repository',
+          'pr' =>
+            'Pull request ${eventId!.substring(0, 8)} in repository $repository',
+          _ => 'Issue ${eventId!.substring(0, 8)} in repository $repository',
+        },
+        interactive: false,
+      ),
+      _ => null,
+    };
+
+    final authoredLinkStyle = baseStyle.copyWith(
+      color: context.colors.primary,
+      decoration: TextDecoration.underline,
+      decorationColor: context.colors.primary,
+    );
+    final linkTextWidget = isCanonicalBuzzLabel
+        ? Text(
+            text,
+            style: baseStyle.copyWith(
+              color: context.colors.primary,
+              fontWeight: FontWeight.w600,
+            ),
+          )
+        : Text.rich(TextSpan(style: authoredLinkStyle, children: [linkText]));
+
+    final renderedLink = isCanonicalBuzzLabel && buzzPresentation != null
+        ? _TokenPill(
+            key: ValueKey('buzz-link-chip:$url'),
+            icon: buzzPresentation.icon,
+            interactive: buzzPresentation.interactive,
+            semanticLabel: buzzPresentation.semanticLabel,
+            text: buzzPresentation.label,
+            textStyle: baseStyle.copyWith(fontWeight: FontWeight.w600),
+          )
+        : linkTextWidget;
+
+    // Mobile has no repo/PR/issue destination yet. Keep these presentation-only
+    // instead of exposing a control whose tap cannot do anything.
+    if (buzzLink is EntityDeepLink) {
+      return IgnorePointer(child: renderedLink);
+    }
 
     return GestureDetector(
       onTap: () async {
         final uri = Uri.tryParse(url);
-        if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+        if (uri == null) return;
+
+        // Rendered channel URLs must use the same callback as `#channel`
+        // references so detail-page callers can suppress self-navigation.
+        // Message and join links still need the top-level authenticated
+        // dispatcher.
+        if (uri.scheme == 'buzz') {
+          final deepLink = parseBuzzDeepLink(uri);
+          if (deepLink case ChannelDeepLink(:final channelId)) {
+            resolvedChannelTap(channelId);
+          } else if (deepLink is MessageDeepLink ||
+              deepLink is InviteDeepLink) {
+            ref.read(pendingDeepLinkProvider.notifier).open(uri);
+          }
           return;
         }
+        if (uri.scheme != 'http' && uri.scheme != 'https') return;
 
         final auth = ref.read(mediaGetAuthServiceProvider);
         if (!auth.isRelayMediaUrl(url)) {
@@ -268,14 +540,7 @@ class MessageContent extends HookConsumerWidget {
           );
         }
       },
-      child: Text(
-        text,
-        style: baseStyle.copyWith(
-          color: context.colors.primary,
-          decoration: TextDecoration.underline,
-          decorationColor: context.colors.primary,
-        ),
-      ),
+      child: renderedLink,
     );
   }
 }
@@ -298,17 +563,22 @@ class _MessageImagePreview extends HookConsumerWidget {
   final String url;
   final ImetaEntry? imeta;
   final String semanticLabel;
+  final VoidCallback? onReply;
+  final MediaViewerMoreAction? onMore;
 
   const _MessageImagePreview({
     required this.url,
     required this.imeta,
     required this.semanticLabel,
+    required this.onReply,
+    required this.onMore,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final heroTag = useMemoized(() => Object());
     final layout = _resolveImagePreviewLayout(context, imeta?.aspectRatio);
+    final previewDecodeWidth = layout.width ?? _messageMediaMaxWidth(context);
 
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half),
@@ -318,6 +588,10 @@ class _MessageImagePreview extends HookConsumerWidget {
           imageUrl: url,
           heroTag: heroTag,
           semanticLabel: semanticLabel,
+          previewDecodeWidth: previewDecodeWidth,
+          aspectRatio: imeta?.aspectRatio,
+          onReply: onReply,
+          onMore: onMore,
         ),
         child: _MessageMediaPreviewFrame(
           previewKey: ValueKey('message-media-image-preview:$url'),
@@ -325,92 +599,20 @@ class _MessageImagePreview extends HookConsumerWidget {
           width: layout.width,
           height: layout.height,
           constraints: layout.constraints,
-          child: Hero(
+          child: MediaViewerHero(
             tag: heroTag,
-            child: MediaImage(
-              url: url,
-              fit: layout.fit,
-              semanticLabel: semanticLabel,
-              errorBuilder: (_, _, _) => _MediaPreviewFallback(
-                icon: LucideIcons.imageOff,
-                label: 'Image unavailable',
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(Radii.md),
+              child: MediaImage(
+                url: url,
+                decodeWidth: previewDecodeWidth,
+                fit: layout.fit,
+                semanticLabel: semanticLabel,
+                errorBuilder: (_, _, _) => _MediaPreviewFallback(
+                  icon: LucideIcons.imageOff,
+                  label: 'Image unavailable',
+                ),
               ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MessageVideoPreview extends StatelessWidget {
-  final String url;
-  final ImetaEntry? imeta;
-
-  const _MessageVideoPreview({required this.url, required this.imeta});
-
-  @override
-  Widget build(BuildContext context) {
-    final rawAspectRatio = imeta?.aspectRatio ?? (16 / 9);
-    final aspectRatio = rawAspectRatio.clamp(0.75, 1.91);
-    final posterUrl = imeta?.posterUrl;
-
-    return Padding(
-      padding: const EdgeInsets.only(top: Grid.half),
-      child: GestureDetector(
-        onTap: () =>
-            openVideoViewer(context, videoUrl: url, posterUrl: posterUrl),
-        child: _MessageMediaPreviewFrame(
-          previewKey: ValueKey('message-media-video-preview:$url'),
-          backgroundColor: Colors.black,
-          child: AspectRatio(
-            aspectRatio: aspectRatio.toDouble(),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (posterUrl != null)
-                  MediaImage(
-                    url: posterUrl,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) => const _MediaPreviewFallback(
-                      icon: LucideIcons.video,
-                      label: 'Video preview unavailable',
-                    ),
-                  )
-                else
-                  const _MediaPreviewFallback(
-                    icon: LucideIcons.video,
-                    label: 'Video attachment',
-                  ),
-                const ColoredBox(color: Color.fromRGBO(0, 0, 0, 0.28)),
-                Center(
-                  child: Container(
-                    width: 52,
-                    height: 52,
-                    decoration: const BoxDecoration(
-                      color: Color.fromRGBO(0, 0, 0, 0.6),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      LucideIcons.play,
-                      color: Colors.white,
-                      size: 24,
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: Grid.xxs,
-                  right: Grid.xxs,
-                  bottom: Grid.xxs,
-                  child: Text(
-                    'Video',
-                    style: context.textTheme.labelSmall?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
             ),
           ),
         ),
@@ -564,9 +766,9 @@ class _MessageCodeBlock extends HookWidget {
     }
 
     final codeBaseStyle = TextStyle(
-      fontFamily: 'GeistMono',
-      fontSize: 13,
-      height: 1.5,
+      fontFamily: CodeStyle.fontFamily,
+      fontSize: CodeStyle.fontSize,
+      height: CodeStyle.lineHeight,
       color: context.colors.onSurface,
     );
     final isDark = context.theme.brightness == Brightness.dark;
@@ -578,11 +780,9 @@ class _MessageCodeBlock extends HookWidget {
     return Container(
       margin: const EdgeInsets.only(top: Grid.half),
       decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest.withValues(alpha: 0.6),
+        color: CodeStyle.background(context.colors),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: context.colors.outline.withValues(alpha: 0.7),
-        ),
+        border: Border.all(color: CodeStyle.border(context.colors)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -650,16 +850,20 @@ class _MessageCodeBlock extends HookWidget {
 }
 
 class _MentionMd extends InlineMd {
+  final Map<String, Set<String>> bindings;
+  final Map<String, String> displayLabels;
   final Map<String, String> mentionNames;
   final Set<String> agentMentionPubkeys;
   final void Function(String pubkey)? onMentionTap;
   late final RegExp _exp = _buildPrefixPattern(
     prefix: '@',
-    knownNames: _mentionAliases(mentionNames.values),
+    knownNames: bindings.keys.map(_markdownMentionName),
     genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
   );
 
   _MentionMd({
+    required this.bindings,
+    required this.displayLabels,
     required this.mentionNames,
     required this.agentMentionPubkeys,
     this.onMentionTap,
@@ -680,22 +884,25 @@ class _MentionMd extends InlineMd {
     }
 
     final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
-    String? displayName;
-    String? pubkey;
-    for (final entry in mentionNames.entries) {
-      final entryName = entry.value.toLowerCase();
-      final firstName = entryName.split(RegExp(r'\s+')).first;
-      if (entryName == name || firstName == name) {
-        displayName = entry.value;
-        pubkey = entry.key;
-        break;
-      }
+    final matches = bindings[name] ?? const <String>{};
+    final pubkey = matches.length == 1 ? matches.single : null;
+    if (bindings.containsKey(name) && matches.length != 1) {
+      return TextSpan(text: text, style: config.style);
     }
+    final displayName = name.contains(RegExp(r'\([0-9a-f]{64}\)'))
+        ? displayLabels[name]
+        : mentionNames[pubkey];
 
     final isAgent =
         pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
+    final fullLabel = displayName ?? raw.substring(1);
+    final visibleLabel = fullLabel.replaceAllMapped(
+      RegExp(r'\(([0-9a-f]{64})\)'),
+      (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
+    );
     final pill = _MentionPill(
-      label: displayName ?? raw.substring(1),
+      label: visibleLabel,
+      semanticsLabel: fullLabel,
       isAgent: isAgent,
       textStyle: config.style,
     );
@@ -704,7 +911,7 @@ class _MentionMd extends InlineMd {
       alignment: PlaceholderAlignment.baseline,
       baseline: TextBaseline.alphabetic,
       child: pubkey != null && onMentionTap != null
-          ? GestureDetector(onTap: () => onMentionTap!(pubkey!), child: pill)
+          ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
           : pill,
     );
   }
@@ -712,11 +919,13 @@ class _MentionMd extends InlineMd {
 
 class _MentionPill extends StatelessWidget {
   final String label;
+  final String? semanticsLabel;
   final bool isAgent;
   final TextStyle? textStyle;
 
   const _MentionPill({
     required this.label,
+    this.semanticsLabel,
     required this.isAgent,
     this.textStyle,
   });
@@ -757,129 +966,19 @@ class _MentionPill extends StatelessWidget {
               size: fontSize * 0.95,
               color: context.colors.primary,
             ),
-            const SizedBox(width: Grid.quarter),
+            const SizedBox(width: Grid.quarter + 1),
           ] else
             Transform.translate(
               offset: const Offset(0, -Grid.quarter),
               child: Text('@', style: style),
             ),
-          Text(label, style: style),
+          Flexible(
+            child: Text(label, style: style, semanticsLabel: semanticsLabel),
+          ),
         ],
       ),
     );
   }
 }
 
-class _ChannelLinkMd extends InlineMd {
-  final Map<String, String> channelNames;
-  final void Function(String channelId)? onChannelTap;
-  late final RegExp _exp = _buildPrefixPattern(
-    prefix: '#',
-    knownNames: channelNames.keys,
-    genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_-]*',
-  );
-
-  _ChannelLinkMd({required this.channelNames, this.onChannelTap});
-
-  @override
-  RegExp get exp => _exp;
-
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    final GptMarkdownConfig config,
-  ) {
-    final raw = exp.firstMatch(text.trim())?.group(0);
-    if (raw == null) {
-      return TextSpan(text: text, style: config.style);
-    }
-
-    final channelId = channelNames[raw.substring(1).toLowerCase()];
-    final child = _TokenPill(
-      text: raw,
-      textStyle: config.style?.copyWith(fontWeight: FontWeight.w500),
-    );
-
-    return WidgetSpan(
-      alignment: PlaceholderAlignment.baseline,
-      baseline: TextBaseline.alphabetic,
-      child: channelId != null && onChannelTap != null
-          ? GestureDetector(onTap: () => onChannelTap!(channelId), child: child)
-          : child,
-    );
-  }
-}
-
-class _TokenPill extends StatelessWidget {
-  final String text;
-  final TextStyle? textStyle;
-
-  const _TokenPill({required this.text, this.textStyle});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-      decoration: BoxDecoration(
-        color: context.colors.primary.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(Radii.sm),
-      ),
-      child: Text(
-        text,
-        style:
-            textStyle?.copyWith(color: context.colors.primary) ??
-            context.textTheme.bodyMedium?.copyWith(
-              color: context.colors.primary,
-            ),
-      ),
-    );
-  }
-}
-
-RegExp _buildPrefixPattern({
-  required String prefix,
-  required Iterable<String> knownNames,
-  required String genericTokenPattern,
-}) {
-  final names =
-      knownNames
-          .map((name) => name.trim())
-          .where((name) => name.isNotEmpty)
-          .toSet()
-          .toList()
-        ..sort((a, b) => b.length.compareTo(a.length));
-
-  final escapedPrefix = RegExp.escape(prefix);
-  const leadingBoundary = r'(?<![\w./:-])';
-  const trailingBoundary = r'(?=$|[\s,;.!?:)\]}])';
-
-  if (names.isEmpty) {
-    return RegExp(
-      '$leadingBoundary$escapedPrefix(?:$genericTokenPattern)$trailingBoundary',
-      caseSensitive: false,
-      multiLine: true,
-    );
-  }
-
-  final knownAlternatives = names.map(RegExp.escape).join('|');
-  return RegExp(
-    '$leadingBoundary$escapedPrefix(?:(?:$knownAlternatives)$trailingBoundary|(?:$genericTokenPattern)$trailingBoundary)',
-    caseSensitive: false,
-    multiLine: true,
-  );
-}
-
 String _markdownMentionName(String name) => name.replaceAll(' ', '\u00A0');
-
-Iterable<String> _mentionAliases(Iterable<String> mentionNames) sync* {
-  for (final name in mentionNames) {
-    final trimmed = name.trim();
-    if (trimmed.isEmpty) continue;
-    yield _markdownMentionName(trimmed);
-    final firstName = trimmed.split(RegExp(r'\s+')).first;
-    if (firstName.isNotEmpty) {
-      yield firstName;
-    }
-  }
-}

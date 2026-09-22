@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   getGroupedChannelReadTimestamp,
   getGroupedInboxItemIds,
+  hasRemainingChannelUnreadOverride,
   hasGroupedUnreadOverride,
   resolveInboxItemReadAt,
 } from "./useHomeInboxReadState.ts";
@@ -125,6 +126,47 @@ test("grouped unread override matches any item represented by the row", () => {
   );
 });
 
+test("remaining channel unread override ignores the row being cleared", () => {
+  const firstReply = feedItem({
+    id: "first-reply",
+    createdAt: 200,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", "first-root", "", "root"],
+      ["e", "first-parent", "", "reply"],
+    ],
+  });
+  const secondReply = feedItem({
+    id: "second-reply",
+    createdAt: 300,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", "second-root", "", "root"],
+      ["e", "second-parent", "", "reply"],
+    ],
+  });
+  const items = [inboxItem([firstReply]), inboxItem([secondReply])];
+
+  assert.equal(
+    hasRemainingChannelUnreadOverride(
+      items,
+      new Set(["first-reply", "second-reply"]),
+      CHANNEL_ID,
+      new Set(["first-reply"]),
+    ),
+    true,
+  );
+  assert.equal(
+    hasRemainingChannelUnreadOverride(
+      items,
+      new Set(["first-reply"]),
+      CHANNEL_ID,
+      new Set(["first-reply"]),
+    ),
+    false,
+  );
+});
+
 test("thread inbox row without a marker ignores local done fallback", () => {
   const replyItem = feedItem({
     id: "reply-event",
@@ -168,7 +210,7 @@ test("thread inbox row read state includes per-message marker", () => {
   );
 });
 
-test("thread inbox row read state uses newest thread or message marker", () => {
+test("thread inbox row read state follows the per-message marker", () => {
   const replyItem = feedItem({
     id: "reply-event",
     createdAt: 200,
@@ -185,6 +227,30 @@ test("thread inbox row read state uses newest thread or message marker", () => {
       getThreadReadAt: () => 250,
       getMessageReadAt: () => 200,
     }),
-    250,
+    200,
   );
+});
+
+test("parent-only replies use their parent as the thread read context", () => {
+  const replyItem = feedItem({
+    id: "reply-event",
+    createdAt: 200,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", "parent-event", "", "reply"],
+    ],
+  });
+  let resolvedRootId = null;
+
+  assert.equal(
+    resolveInboxItemReadAt(inboxItem([replyItem]), {
+      getChannelReadAt: () => 100,
+      getThreadReadAt: (rootId) => {
+        resolvedRootId = rootId;
+        return 150;
+      },
+    }),
+    150,
+  );
+  assert.equal(resolvedRootId, "parent-event");
 });

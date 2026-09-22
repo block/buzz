@@ -58,7 +58,7 @@ class _FormatButton extends StatelessWidget {
       message: tooltip,
       child: InkWell(
         borderRadius: BorderRadius.circular(Radii.sm),
-        onTap: onTap,
+        onTap: () => _runComposerAction(onTap),
         child: Padding(
           padding: const EdgeInsets.all(Grid.xxs),
           child: Icon(icon, size: 18, color: context.colors.primary),
@@ -80,7 +80,7 @@ class _ComposeAction extends StatelessWidget {
       width: 36,
       height: 36,
       child: IconButton(
-        onPressed: onTap,
+        onPressed: () => _runComposerAction(onTap),
         icon: Icon(icon, size: 20, color: context.colors.onSurfaceVariant),
         padding: EdgeInsets.zero,
         visualDensity: VisualDensity.compact,

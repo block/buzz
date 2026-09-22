@@ -1,5 +1,38 @@
 //! Media storage configuration.
 
+use std::str::FromStr;
+
+/// S3 URL addressing style shared by media and Git/CAS storage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum S3AddressingStyle {
+    /// Put the bucket in the request path (`https://endpoint/bucket/key`).
+    ///
+    /// This preserves compatibility with the bundled MinIO deployments, whose
+    /// internal DNS only resolves the endpoint hostname.
+    #[default]
+    Path,
+    /// Put the bucket in the hostname (`https://bucket.endpoint/key`).
+    ///
+    /// This is the standard S3 form and is required by providers such as new
+    /// Railway Storage Buckets.
+    Virtual,
+}
+
+impl FromStr for S3AddressingStyle {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "path" => Ok(Self::Path),
+            "virtual" => Ok(Self::Virtual),
+            _ => Err(format!(
+                "BUZZ_S3_ADDRESSING_STYLE must be 'path' or 'virtual', got {value:?}"
+            )),
+        }
+    }
+}
+
 fn default_max_video_bytes() -> u64 {
     524_288_000 // 500 MB
 }
@@ -31,6 +64,9 @@ pub struct MediaConfig {
     /// the value is not meaningfully checked.
     #[serde(default = "default_s3_region")]
     pub s3_region: String,
+    /// S3 URL addressing style. Defaults to path style for MinIO compatibility.
+    #[serde(default)]
+    pub s3_addressing_style: S3AddressingStyle,
     /// Maximum upload size for images (bytes). Default: 50 MB.
     pub max_image_bytes: u64,
     /// Maximum upload size for animated GIFs (bytes). Default: 10 MB.
@@ -123,7 +159,8 @@ impl MediaConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::MediaConfig;
+    use super::{MediaConfig, S3AddressingStyle};
+    use std::str::FromStr;
 
     fn valid_config() -> MediaConfig {
         MediaConfig {
@@ -132,6 +169,7 @@ mod tests {
             s3_secret_key: "s".to_string(),
             s3_bucket: "buzz-media".to_string(),
             s3_region: "us-east-1".to_string(),
+            s3_addressing_style: S3AddressingStyle::Path,
             max_image_bytes: 1,
             max_gif_bytes: 1,
             max_video_bytes: 1,
@@ -140,6 +178,35 @@ mod tests {
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
+        }
+    }
+
+    #[test]
+    fn addressing_style_parses_supported_values() {
+        assert_eq!(
+            S3AddressingStyle::from_str("path"),
+            Ok(S3AddressingStyle::Path)
+        );
+        assert_eq!(
+            S3AddressingStyle::from_str("virtual"),
+            Ok(S3AddressingStyle::Virtual)
+        );
+    }
+
+    #[test]
+    fn addressing_style_defaults_to_path() {
+        assert_eq!(S3AddressingStyle::default(), S3AddressingStyle::Path);
+    }
+
+    #[test]
+    fn addressing_style_rejects_unknown_or_ambiguous_values() {
+        for invalid in ["", "auto", "PATH", "virtual-hosted"] {
+            let error =
+                S3AddressingStyle::from_str(invalid).expect_err("must reject invalid style");
+            assert!(
+                error.contains("BUZZ_S3_ADDRESSING_STYLE must be 'path' or 'virtual'"),
+                "unexpected error for {invalid:?}: {error}"
+            );
         }
     }
 

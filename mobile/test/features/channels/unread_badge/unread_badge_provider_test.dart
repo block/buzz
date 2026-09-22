@@ -4,7 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
 
@@ -55,7 +55,7 @@ void main() {
   ProviderContainer buildContainer({
     required List<Channel> channels,
     Map<String, int> readContexts = const {},
-    Set<String> locallyForcedChannelIds = const {},
+    Map<String, String> forcedUnreadContexts = const {},
     bool readStateReady = true,
     Map<String, int> highPriorityMap = const {},
     Map<String, List<ObservedUnreadEvent>>? observedEventsByChannel,
@@ -77,7 +77,7 @@ void main() {
               pubkey: 'me',
               contexts: readContexts,
               version: 1,
-              locallyForcedChannelIds: locallyForcedChannelIds,
+              forcedUnreadContexts: forcedUnreadContexts,
             ),
           ),
         ),
@@ -259,7 +259,7 @@ void main() {
       final container = buildContainer(
         channels: [makeChannel(id: 'ch-a', lastMessageAtSeconds: t20)],
         readContexts: {'ch-a': t30},
-        locallyForcedChannelIds: {'ch-a'},
+        forcedUnreadContexts: {'ch-a': 'ch-a'},
       );
       addTearDown(container.dispose);
 

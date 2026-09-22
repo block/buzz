@@ -53,8 +53,20 @@ app.kubernetes.io/component: relay
 {{- end -}}
 
 {{- define "buzz.image" -}}
+{{- if .Values.image.digest -}}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
+{{- else -}}
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "buzz.imageRevision" -}}
+{{- if .Values.image.digest -}}
+{{- .Values.image.digest -}}
+{{- else -}}
+{{- default .Chart.AppVersion .Values.image.tag -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

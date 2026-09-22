@@ -4,13 +4,57 @@
 //! `(pubkey, kind, d_tag)` where `d_tag` is the plaintext persona slug.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
-use buzz_core_pkg::kind::KIND_PERSONA;
+use buzz_core_pkg::kind::{event_is_shared, KIND_PERSONA};
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
 use super::{AgentDefinition, ManagedAgentRecord};
 use crate::app_state::AppState;
+
+/// Serializes the retention-store flush publisher per `(relay, owner)` scope,
+/// keyed by the canonical retention database path. The flush re-reads each row
+/// then awaits a relay POST; a second concurrent flush of the SAME scope must
+/// not publish a deletion tombstone in that gap and strand a purged head after
+/// it. Keying by scope (not process-wide) keeps the serialization no broader
+/// than the durable invariant — retention is scoped per `(relay, owner)` — so
+/// an unresponsive relay in one community cannot block publication in another.
+/// A `LazyLock` static (rather than an `AppState` field) keeps the invariant at
+/// its acquisition site and out of the size-ratcheted `app_state.rs`; the map
+/// only ever grows one small entry per active scope.
+static FLUSH_PUBLISHER_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Resolve the per-scope publisher mutex for `db_path`, inserting one on first
+/// use. The std-mutex guard is released before the caller awaits the returned
+/// async mutex, so it never spans an await point.
+fn flush_publisher_lock(db_path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks: MutexGuard<'_, _> = FLUSH_PUBLISHER_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(
+        locks
+            .entry(db_path.to_path_buf())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
+}
+
+/// Bounds how long one retained row may hold the per-scope publisher lock while
+/// awaiting the relay. `submit_signed_event_at_with_keys` first waits on the
+/// process-wide admission gate (up to 300s on a 429) and then POSTs on the
+/// app-wide `http_client`, whose builder configures only pool options —
+/// reqwest leaves connect/read/total timeouts unset, so a relay that accepts
+/// the connection and never finishes the response would otherwise pin the lock
+/// forever. A healthy admission wait + POST + body parse completes far inside
+/// this bound; a timeout takes the same `Err` path as a relay rejection, so the
+/// row stays pending for the next 30s sweep and a timed-out tombstone keeps its
+/// replacement deferred this pass. A live 300s admission gate therefore
+/// surfaces as timeout-pending rather than a held lock — the correct durable
+/// behavior, since the sweep retries.
+const PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The JSON body stored in a persona event's content field.
 ///
@@ -48,6 +92,18 @@ pub struct PersonaEventContent {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// Optional short, PUBLIC description (max 280 chars). Appended after the
+    /// pre-existing fields so records without one serialize byte-identically
+    /// to the pre-description era — existing content bytes and event ids are
+    /// unchanged. EXCLUDED from [`persona_content_hash`]: description is
+    /// display metadata, not spawn-relevant config, so a description-only edit
+    /// must not badge linked instances as needing a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// ACP conversation boundary. Appended to preserve the historical field
+    /// order and omitted for the default channel behavior.
+    #[serde(default, skip_serializing_if = "super::AcpSessionPolicy::is_channel")]
+    pub session_policy: super::AcpSessionPolicy,
 }
 
 /// Derive the d-tag (persona slug) from a `AgentDefinition`.
@@ -138,7 +194,11 @@ pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, Str
         .map_err(|e| format!("failed to serialize persona content: {e}"))?;
 
     let d_tag = persona_d_tag(record);
-    let tags = vec![Tag::parse(["d", d_tag.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
+    let mut tags =
+        vec![Tag::parse(["d", d_tag.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
+    if record.shared {
+        tags.push(Tag::parse(["shared", "true"]).map_err(|e| format!("invalid shared tag: {e}"))?);
+    }
 
     Ok(EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), content_json).tags(tags))
 }
@@ -181,6 +241,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         id: d_tag.clone(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
+        description: content.description,
         system_prompt: content.system_prompt.unwrap_or_default(),
         runtime: content.runtime,
         model: content.model,
@@ -188,12 +249,16 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         name_pool: content.name_pool,
         is_builtin: false,
         is_active: true,
+        shared: event_is_shared(event),
         source_team: None,
         source_team_persona_slug: Some(d_tag),
+        catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
         parallelism: content.parallelism,
+        session_policy: content.session_policy,
         created_at: created_at.clone(),
         updated_at: created_at,
     })
@@ -218,9 +283,49 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
 /// Returns the number of events the relay accepted. Best-effort: a relay
 /// failure on one row leaves it pending for the next sweep and does not abort
 /// the remaining rows.
+#[cfg(test)]
 pub async fn flush_pending_events(
     db_path: &std::path::Path,
     state: &AppState,
+) -> Result<u32, String> {
+    let relay_url = crate::relay::relay_ws_url_with_override(state);
+    let owner_keys = state.signing_keys()?;
+    flush_pending_events_at(db_path, state, &relay_url, &owner_keys).await
+}
+
+/// Resolve and flush only the currently active `(relay, owner)` scope.
+///
+/// The scope snapshots its relay, owner keys, and database path together
+/// before network work starts. Switching communities during the flush cannot
+/// redirect rows from the old scope into the new relay.
+pub async fn flush_active_pending_events(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<u32, String> {
+    let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    flush_pending_events_at(&scope.db_path, state, &scope.relay_url, &scope.owner_keys).await
+}
+
+pub fn active_pending_event(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    kind: u32,
+    d_tag: &str,
+) -> Result<bool, String> {
+    let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    let owner_pubkey = scope.owner_keys.public_key().to_hex();
+    let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
+    Ok(
+        crate::managed_agents::retention::get_retained_event(&conn, kind, &owner_pubkey, d_tag)?
+            .is_some_and(|event| event.pending_sync),
+    )
+}
+
+pub(crate) async fn flush_pending_events_at(
+    db_path: &std::path::Path,
+    state: &AppState,
+    relay_url: &str,
+    owner_keys: &nostr::Keys,
 ) -> Result<u32, String> {
     use crate::managed_agents::retention::{
         deferred_behind_failed_tombstone, get_pending_sync, get_retained_event, mark_synced,
@@ -228,6 +333,21 @@ pub async fn flush_pending_events(
     };
     use nostr::JsonUtil;
 
+    // Serialize the whole flush for THIS retention scope into a single
+    // publisher. Concurrent callers exist (the 30s sweep, the team-share
+    // toggle, managed-policy updates), and the re-read→POST await gap below
+    // would otherwise let a second flush of the same scope publish a deletion
+    // tombstone between this flush's row re-read and its POST, landing a purged
+    // head after its tombstone. Held across snapshot, re-read, POST, and
+    // mark_synced so the only interleavings are head-before-tombstone or
+    // purged-row-skip. Keyed by the canonical scope db_path — never
+    // process-wide — so a stalled relay in one community cannot block
+    // publication in another (retention is scoped per `(relay, owner)`).
+    let publisher_lock = flush_publisher_lock(db_path);
+    let _publisher_guard = publisher_lock.lock().await;
+
+    let owner_pubkey = owner_keys.public_key().to_hex();
+    let relay_api_base = crate::relay::relay_http_base_url(relay_url);
     let pending = {
         let conn = open_retention_db(db_path)?;
         get_pending_sync(&conn)?
@@ -237,6 +357,9 @@ pub async fn flush_pending_events(
     let mut failed_tombstones: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
     for row in pending {
+        if row.pubkey != owner_pubkey {
+            continue;
+        }
         if deferred_behind_failed_tombstone(row.kind, &row.pubkey, &row.d_tag, &failed_tombstones) {
             continue; // its tombstone failed this sweep; next sweep re-orders them
         }
@@ -256,28 +379,65 @@ pub async fn flush_pending_events(
         let event = nostr::Event::from_json(&current.raw_event)
             .map_err(|e| format!("failed to parse retained event '{}': {e}", current.d_tag))?;
 
-        // NIP-IA requests are freshness-checked by the relay (±120s on
-        // `created_at`), so a request retained while the relay was
-        // unreachable would be permanently stale. Re-sign with a fresh
-        // timestamp at publish time; kind, tags, and content are preserved,
-        // and `mark_synced` below still compares against the retained row's
-        // original `created_at`/`content`, which are untouched.
-        let is_archive_request =
-            buzz_core_pkg::kind::is_identity_archive_request_kind(current.kind);
-        let event = if is_archive_request {
+        // Relay ingest rejects any event whose `created_at` is more than
+        // ±900s from server time (`crates/buzz-relay/src/handlers/ingest.rs`
+        // MAX_TIMESTAMP_DRIFT_SECS). A kind:5 tombstone is signed strictly past
+        // the head it retracts, so its retained `created_at` is the domination
+        // floor `f`: any publish at `t >= f` still soft-deletes the head (NIP-09
+        // only clears coordinate versions with `created_at <= t`). Reconcile the
+        // two constraints at publish time so a byte-frozen future-dated
+        // tombstone can never age out of the acceptance window and strand the
+        // head live forever:
+        //   f <= now         → re-date to `now` (dominates, in-window)
+        //   now < f <= now+900 → publish at `f` (dominates, in-window)
+        //   f > now+900       → no acceptable timestamp yet; leave pending and
+        //                       block its replacement, converging as the wall
+        //                       clock advances toward `f`.
+        // A boundary publish the relay still rejects self-heals: the submit
+        // error below re-queues it for the next sweep.
+        const RELAY_ACCEPT_WINDOW_SECS: i64 = 900;
+        let event = if current.kind == 5 {
+            let now = nostr::Timestamp::now().as_secs() as i64;
+            if current.created_at - now > RELAY_ACCEPT_WINDOW_SECS {
+                // Its replacement must keep deferring behind the unpublished
+                // tombstone so a re-created head is never wiped out of order.
+                failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
+                continue;
+            }
+            redate_tombstone(&event, now.max(current.created_at), owner_keys)?
+        } else if buzz_core_pkg::kind::is_identity_archive_request_kind(current.kind) {
+            // NIP-IA requests are freshness-checked by the relay (±120s on
+            // `created_at`), so a request retained while the relay was
+            // unreachable would be permanently stale. Re-sign with a fresh
+            // timestamp at publish time; kind, tags, and content are preserved,
+            // and `mark_synced` below still compares against the retained row's
+            // original `created_at`/`content`, which are untouched.
             resign_with_fresh_timestamp(&event, state)?
         } else {
             event
         };
 
-        if crate::relay::submit_signed_event(&event, state)
-            .await
-            .is_err()
-        {
+        // Bound the relay await: the admission gate can wait up to 300s and the
+        // shared http_client sets no request timeout, so a non-responding relay
+        // would otherwise hold the per-scope publisher lock indefinitely. A
+        // timeout is treated exactly like a relay rejection — the row stays
+        // pending for the next sweep and a timed-out tombstone keeps its
+        // replacement deferred this pass.
+        let submit = tokio::time::timeout(
+            PUBLISH_TIMEOUT,
+            crate::relay::submit_signed_event_at_with_keys(
+                &event,
+                state,
+                &relay_api_base,
+                owner_keys,
+            ),
+        )
+        .await;
+        if !matches!(submit, Ok(Ok(_))) {
             if current.kind == 5 {
                 failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
             }
-            continue; // relay unreachable — stays pending for the next sweep
+            continue; // relay unreachable, rejected, or timed out — stays pending
         }
 
         let conn = open_retention_db(db_path)?;
@@ -318,6 +478,27 @@ fn resign_with_fresh_timestamp(
         .map_err(|e| format!("failed to re-sign retained event: {e}"))
 }
 
+/// Re-sign a retained kind:5 tombstone at `created_at`, preserving its `a`-tag
+/// coordinate and (empty) content.
+///
+/// The flush loop chooses `created_at` in `[floor, now+900]` so the deletion
+/// both dominates the head it retracts (NIP-09 `created_at <=` soft-delete) and
+/// clears the relay's ±900s ingest window. Signing at the original owner keys
+/// keeps the event authored by the same identity that owns the coordinate; the
+/// `mark_synced` compare-and-clear below still keys on the retained row's
+/// untouched `created_at`/`content`, so a concurrent edit is never masked.
+fn redate_tombstone(
+    event: &nostr::Event,
+    created_at: i64,
+    owner_keys: &nostr::Keys,
+) -> Result<nostr::Event, String> {
+    nostr::EventBuilder::new(event.kind, event.content.clone())
+        .tags(event.tags.iter().cloned())
+        .custom_created_at(nostr::Timestamp::from(created_at as u64))
+        .sign_with_keys(owner_keys)
+        .map_err(|e| format!("failed to re-sign tombstone: {e}"))
+}
+
 /// SHA-256 (lowercase hex) of a persona's canonical content JSON.
 ///
 /// The drift indicator compares this digest, not event timestamps, to decide
@@ -325,9 +506,18 @@ fn resign_with_fresh_timestamp(
 /// clock skew and export/import round-trips. `PersonaEventContent` field order
 /// is fixed by the struct definition, so `serde_json` produces a stable
 /// canonical encoding.
+///
+/// `description` is deliberately EXCLUDED from the hashed projection: it is
+/// public display metadata, not spawn-relevant config, so a description-only
+/// edit must not flip the "restart required" drift badge on linked instances.
+/// Guarded by `description_change_does_not_change_content_hash`.
 pub fn persona_content_hash(content: &PersonaEventContent) -> String {
     use sha2::{Digest, Sha256};
-    let json = serde_json::to_vec(content).unwrap_or_default();
+    let hashed = PersonaEventContent {
+        description: None,
+        ..content.clone()
+    };
+    let json = serde_json::to_vec(&hashed).unwrap_or_default();
     let digest = Sha256::digest(&json);
     hex::encode(digest)
 }
@@ -355,6 +545,8 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
         respond_to: record.respond_to.clone(),
         respond_to_allowlist: record.respond_to_allowlist.clone(),
         parallelism: record.parallelism,
+        description: record.description.clone(),
+        session_policy: record.session_policy,
     }
 }
 
@@ -409,12 +601,12 @@ pub fn persona_snapshot(persona: &AgentDefinition) -> PersonaSnapshot {
 /// This is the single apply used by every snapshot-apply site: the spawn
 /// re-pin (`start_local_agent_with_preflight`), the launch backfill and
 /// restore re-snapshot (`restore.rs`), and the prospective re-snapshot inside
-/// `spawn_config_hash` — so a future `PersonaSnapshot` field addition
-/// propagates to all of them at once.
+/// `prospective_spawn_config_snapshot` — so a future `PersonaSnapshot` field
+/// addition propagates to all of them at once.
 ///
 /// Deliberately does NOT touch `updated_at`: persistence stamps are the
-/// caller's concern, and `spawn_config_hash` (which applies this to a clone)
-/// must stay pure.
+/// caller's concern, and the prospective snapshot (which applies this to a
+/// clone) must stay pure.
 pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
     let snapshot = persona_snapshot(persona);
     if let Some(prompt) = snapshot.system_prompt {
@@ -423,23 +615,43 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
     record.model = snapshot.model;
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;
-    // Drop a stale create-time harness pin when the definition names a
-    // different known runtime; custom commands stay pinned.
-    if let Some(def_runtime) = persona
+    record.session_policy = persona.session_policy;
+    // Drop a stale create-time harness pin when the definition switches to a
+    // different known runtime (builtin, static preset, or loaded custom). A pin
+    // that names an unknown/custom command is always kept.
+    //
+    // Both sides are resolved through the canonical harness-identity resolver
+    // (`canonical_harness_command`) which accepts either a runtime id OR a
+    // command string — covering aliases (e.g. "claude-code-acp"), path prefixes
+    // ("/usr/local/bin/goose"), and harnesses whose id ≠ command. The persona
+    // runtime side is resolved via `command_for_runtime_id` (id-only input is
+    // sufficient there since persona.runtime is always an authoritative id).
+    //
+    // Comparison is on canonical primary commands so "goose", "/usr/local/bin/goose",
+    // and runtime id "goose" all represent the same harness; the stale pin is
+    // dropped only when the canonical commands differ.
+    if let Some(new_cmd) = persona
         .runtime
         .as_deref()
         .map(str::trim)
         .filter(|r| !r.is_empty())
-        .and_then(crate::managed_agents::known_acp_runtime_exact)
+        .and_then(super::command_for_runtime_id)
     {
-        if let Some(pin_runtime) = record
+        if let Some(pin) = record
             .agent_command_override
             .as_deref()
-            .and_then(crate::managed_agents::known_acp_runtime)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
         {
-            if !std::ptr::eq(pin_runtime, def_runtime) {
-                record.agent_command_override = None;
+            // Resolve the pin via the canonical resolver (accepts id OR command).
+            if let Some(pin_cmd) = super::canonical_harness_command(pin) {
+                if pin_cmd != new_cmd {
+                    // Known harness switched to a different known harness — drop stale pin.
+                    record.agent_command_override = None;
+                }
+                // Same harness: keep the pin (e.g. explicit path override for same runtime).
             }
+            // Custom/unknown pin: always keep.
         }
     }
     // env_vars stay overrides-only. Self-heal records written before the env
@@ -457,8 +669,9 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
 /// paths re-pin it to its linked persona, without mutating `record` itself.
 ///
 /// Every decision made ahead of the real re-pin — the relay-mesh preflight in
-/// `start_local_agent_with_preflight`, the restart-badge hash in
-/// `spawn_config_hash` — needs to reason about spawn-time state, not
+/// `start_local_agent_with_preflight`, the restart-badge snapshot in
+/// `prospective_spawn_config_snapshot` — needs to reason about spawn-time
+/// state, not
 /// pre-snapshot bytes, so a persona edit that flips a field (e.g. `provider`
 /// to/from relay-mesh) between saves is reflected in the decision instead of
 /// the stale value the real [`apply_persona_snapshot`] is about to overwrite
@@ -466,7 +679,7 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
 /// so the spawn-time stamp and later recomputes agree when nothing changed.
 ///
 /// Orphaned records (persona deleted) pass through unchanged: the caller's
-/// own orphan handling — refusing to spawn, hashing as `(None, None, None)`
+/// own orphan handling — refusing to spawn, snapshotting as `(None, None, None)`
 /// — runs on the real record downstream, not on this preview.
 pub fn preview_prospective_persona_snapshot(
     record: &ManagedAgentRecord,
@@ -480,5 +693,7 @@ pub fn preview_prospective_persona_snapshot(
     }
     preview
 }
+#[cfg(test)]
+mod stale_pin_tests;
 #[cfg(test)]
 mod tests;

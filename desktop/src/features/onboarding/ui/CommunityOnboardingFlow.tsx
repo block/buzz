@@ -30,14 +30,15 @@ import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
-import { Input } from "@/shared/ui/input";
 import { MembershipDenied } from "./MembershipDenied";
-import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { OnboardingCard, useOnboardingCardLayout } from "./OnboardingCard";
+import { OnboardingFooter } from "./OnboardingFooter";
+import { OnboardingInput } from "./OnboardingInput";
 import {
-  ONBOARDING_PRIMARY_CTA_CLASS,
-  OnboardingChrome,
-} from "./OnboardingChrome";
-import { OnboardingFooter, OnboardingFooterProvider } from "./OnboardingFooter";
+  type OnboardingTransitionDirection,
+  OnboardingSlideTransition,
+} from "./OnboardingSlideTransition";
 
 function isRelayMembershipDeniedError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -52,7 +53,7 @@ function isRelayMembershipDeniedError(error: unknown): boolean {
 const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
   Fizz: "/onboarding/starter-team/fizz.png",
   Honey: "/onboarding/starter-team/honey.png",
-  Bumble: "/onboarding/starter-team/bumble.png",
+  Pollen: "/onboarding/starter-team/pollen.png",
 };
 
 /** Fade duration for the "entering" curtain over the mounting app. */
@@ -81,6 +82,7 @@ function AvatarCircle({
   previewName: string;
   triggerRef?: React.Ref<HTMLButtonElement>;
 }) {
+  const cardLayout = useOnboardingCardLayout();
   const emojiAvatar = parseEmojiAvatarDataUrl(avatarUrl);
   const presentation = useAvatarPresentation(avatarUrl);
   const hasAvatar =
@@ -97,7 +99,10 @@ function AvatarCircle({
     >
       {emojiAvatar ? (
         <span
-          className="flex h-36 w-36 items-center justify-center overflow-hidden rounded-full text-5xl shadow-xs"
+          className={cn(
+            "flex items-center justify-center overflow-hidden rounded-full shadow-xs",
+            "size-28 text-4xl min-[44rem]:size-36 min-[44rem]:text-5xl",
+          )}
           style={{ backgroundColor: emojiAvatar.color }}
         >
           {emojiAvatar.emoji}
@@ -105,13 +110,21 @@ function AvatarCircle({
       ) : hasAvatar ? (
         <ProfileAvatar
           avatarUrl={avatarUrl}
-          className="h-36 w-36 rounded-full text-4xl"
+          className={cn(
+            "rounded-full",
+            "size-28 text-3xl min-[44rem]:size-36 min-[44rem]:text-4xl",
+          )}
           label={previewName}
           testId="community-avatar-circle"
         />
       ) : (
         <span
-          className="flex h-36 w-36 items-center justify-center rounded-full bg-white/30 text-[var(--buzz-onboarding-backup-ink)] transition-colors group-hover:bg-white/40"
+          className={cn(
+            "flex items-center justify-center rounded-full text-[var(--buzz-onboarding-backup-ink)] transition-colors",
+            cardLayout
+              ? "size-28 border border-[#e2e2e2] bg-[#f9f9f9] group-hover:bg-[#f3f3f3] min-[44rem]:size-36"
+              : "size-36 bg-white/30 group-hover:bg-white/40",
+          )}
           data-testid="community-avatar-empty"
         >
           <Plus className="h-7 w-7" aria-hidden="true" />
@@ -153,13 +166,27 @@ export function CommunityOnboardingFlow({
   const systemColorScheme = useSystemColorScheme();
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
+  const [localAvatarPreviewUrl, setLocalAvatarPreviewUrl] = React.useState<
+    string | null
+  >(null);
+  const [avatarSquishKey, setAvatarSquishKey] = React.useState(0);
+  const [transitionDirection, setTransitionDirection] =
+    React.useState<OnboardingTransitionDirection>("forward");
   const avatarPresentation = useAvatarPresentation(avatarUrl);
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
   const [isAvatarEditorOpen, setIsAvatarEditorOpen] = React.useState(false);
+  const [animatedPreviewEl, setAnimatedPreviewEl] =
+    React.useState<HTMLDivElement | null>(null);
+  const [isAnimatedPreviewActive, setIsAnimatedPreviewActive] =
+    React.useState(false);
+  const [animatedPreviewCaption, setAnimatedPreviewCaption] = React.useState<
+    string | null
+  >(null);
   const [starterPersonas, setStarterPersonas] = React.useState<AgentPersona[]>(
     [],
   );
   const [isPending, setIsPending] = React.useState(false);
+  const checkedProfileTransactionRef = React.useRef<string | null>(null);
   const [starterChannelFailureCount, setStarterChannelFailureCount] =
     React.useState(0);
   const [deniedPubkey, setDeniedPubkey] = React.useState("");
@@ -172,6 +199,9 @@ export function CommunityOnboardingFlow({
   const avatarEditorContentRef = React.useRef<HTMLDivElement | null>(null);
   const [avatarEditorDialogHeight, setAvatarEditorDialogHeight] =
     React.useState<number | null>(null);
+  const animateEmojiAvatarChange = React.useCallback(() => {
+    setAvatarSquishKey((key) => key + 1);
+  }, []);
 
   // Also fetch on "entering": the curtain is a fresh mount of this component,
   // so the team-intro fetch from the pre-curtain instance isn't in this state.
@@ -184,7 +214,7 @@ export function CommunityOnboardingFlow({
     void listPersonas()
       .then((personas) =>
         setStarterPersonas(
-          ["Fizz", "Honey", "Bumble"].flatMap((name) => {
+          ["Fizz", "Honey", "Pollen"].flatMap((name) => {
             const persona = personas.find(
               (candidate) => candidate.displayName === name,
             );
@@ -279,10 +309,28 @@ export function CommunityOnboardingFlow({
   const backToProfile = React.useCallback(() => {
     if (isPending) return;
     setStarterChannelFailureCount(0);
+    setTransitionDirection("backward");
     update({ stage: "profile", error: undefined });
   }, [isPending, update]);
 
   const isProfileStage = transaction?.stage === "profile";
+  React.useEffect(() => {
+    if (!isProfileStage || !transaction) return;
+    if (checkedProfileTransactionRef.current === transaction.id) return;
+
+    checkedProfileTransactionRef.current = transaction.id;
+    void getProfile()
+      .then((profile) => {
+        if (profile.hasProfileEvent) {
+          setTransitionDirection("forward");
+          update({ stage: "team-intro", error: undefined }, transaction.id);
+        }
+      })
+      .catch(() => {
+        // Discovery is best-effort. Staying on the profile step preserves the
+        // existing path when the relay cannot answer the lookup.
+      });
+  }, [isProfileStage, transaction, update]);
   const isTeamStage =
     transaction?.stage === "team-intro" ||
     transaction?.stage === "finalizing" ||
@@ -410,6 +458,7 @@ export function CommunityOnboardingFlow({
         deferredAvatar?.cancel();
         throw error;
       }
+      setTransitionDirection("forward");
       update({ stage: "team-intro", error: undefined });
     } catch (error) {
       if (isRelayMembershipDeniedError(error)) {
@@ -431,270 +480,352 @@ export function CommunityOnboardingFlow({
   return (
     <div
       className={cn(
-        "buzz-onboarding-neutral-theme buzz-startup-shell flex h-dvh justify-center overflow-y-auto px-4 text-foreground",
-        isProfileStage || isTeamStage
-          ? "items-start pb-36 pt-[106px]"
-          : "items-stretch",
         isCurtainFading &&
           "pointer-events-none opacity-0 transition-opacity ease-out motion-reduce:transition-none",
       )}
-      data-system-color-scheme={systemColorScheme}
-      data-testid="community-onboarding-flow"
       style={
         isCurtainFading
           ? { transitionDuration: `${ENTERING_CURTAIN_FADE_MS}ms` }
           : undefined
       }
     >
-      <StartupWindowDragRegion />
-      {isProfileStage || isTeamStage ? (
-        <OnboardingChrome current={isTeamStage ? 7 : 6} />
-      ) : null}
-      <OnboardingFooterProvider>
-        <div
-          className={cn(
-            "relative w-full text-center",
-            isProfileStage
-              ? "buzz-onboarding-step-frame flex max-w-[500px] flex-col items-center"
-              : isTeamStage
-                ? "buzz-onboarding-step-frame flex max-w-[760px] flex-col items-center"
-                : "flex min-h-dvh max-w-[560px] flex-col justify-center py-8",
-          )}
-          data-testid="community-onboarding-body"
+      <OnboardingCard
+        allowWideContent={isTeamStage}
+        backAction={
+          isProfileStage
+            ? {
+                disabled: isPending || isUploadingAvatar,
+                onClick: onCancel,
+                testId: "community-profile-back",
+              }
+            : isTeamStage
+              ? {
+                  disabled: isPending || transaction.stage === "entering",
+                  onClick: backToProfile,
+                  testId: "community-team-intro-back",
+                }
+              : undefined
+        }
+        current={isTeamStage ? 7 : isProfileStage ? 6 : 5}
+        systemColorScheme={systemColorScheme}
+        testId="community-onboarding-flow"
+      >
+        <OnboardingSlideTransition
+          direction={transitionDirection}
+          transitionKey={`community-${isProfileStage ? "profile" : isTeamStage ? "team" : transaction.stage}-${transitionDirection}`}
         >
-          {transaction.stage === "claiming" ||
-          transaction.stage === "connecting" ? (
-            <>
-              <Users className="mx-auto h-10 w-10" />
-              <h1 className="mt-5 text-title font-normal">
-                Joining {transaction.communityName}
-              </h1>
-              <p className="mt-3 text-sm text-foreground/80">
-                {transaction.error ??
-                  (transaction.stage === "claiming"
-                    ? "Accepting your invite…"
-                    : "Connecting securely…")}
-              </p>
-              <div className="mt-6 flex justify-center gap-3">
-                {transaction.error ? (
-                  <Button className="rounded-full px-6" onClick={retry}>
-                    Retry
-                  </Button>
-                ) : null}
-                <Button
-                  className="rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
-                  onClick={onCancel}
-                  variant="ghost"
-                >
-                  Cancel
-                </Button>
-              </div>
-            </>
-          ) : isProfileStage ? (
-            <>
-              <div
-                className={cn(
-                  "flex min-h-0 w-full flex-1 flex-col transition-[filter,opacity] duration-200 ease-out",
-                  isAvatarEditorOpen &&
-                    "pointer-events-none opacity-45 blur-[3px]",
-                )}
-                data-testid="community-profile-main"
-              >
-                <div className="shrink-0">
-                  <h1 className="text-title font-normal">Build your profile</h1>
-                  <p className="mx-auto mt-3 max-w-[380px] text-sm leading-6 text-foreground/80">
-                    Add a name and avatar. They’ll show up on your messages,
-                    reactions, and agent handoffs.
-                  </p>
-                </div>
-                <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center pt-8">
-                  <AvatarCircle
-                    avatarUrl={avatarUrl}
-                    onClick={() => setIsAvatarEditorOpen(true)}
-                    previewName={displayName.trim() || "Your profile"}
-                    triggerRef={avatarTriggerRef}
-                  />
-                  <label
-                    className="mt-7 block w-full max-w-[412px] text-left"
-                    htmlFor="community-display-name"
-                  >
-                    <span className="mb-2 block pl-4 text-sm text-foreground">
-                      Your username
-                    </span>
-                    <Input
-                      aria-label="Community username"
-                      autoCapitalize="none"
-                      autoComplete="username"
-                      autoCorrect="off"
-                      className="h-14 rounded-2xl border-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.28)] bg-[rgb(var(--buzz-onboarding-avatar-dialog-bg)/0.95)] px-5 text-sm shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.5)] md:text-sm"
-                      data-testid="community-profile-name-key"
-                      disabled={isPending || isUploadingAvatar}
-                      id="community-display-name"
-                      onChange={(event) => setDisplayName(event.target.value)}
-                      placeholder="Enter your username here"
-                      ref={nameInputRef}
-                      spellCheck={false}
-                      type="text"
-                      value={displayName}
-                    />
-                  </label>
-                </div>
-                {transaction.error ? (
-                  <p className="mt-4 text-sm text-destructive">
-                    {transaction.error}
-                  </p>
-                ) : null}
-              </div>
-              <OnboardingFooter
-                className={cn(
-                  "transition-[filter,opacity] duration-200 ease-out",
-                  isAvatarEditorOpen &&
-                    "pointer-events-none opacity-45 blur-[3px]",
-                )}
-              >
-                <Button
-                  className={`${ONBOARDING_PRIMARY_CTA_CLASS} w-20`}
-                  data-testid="community-profile-next"
-                  disabled={
-                    !displayName.trim() || isPending || isUploadingAvatar
-                  }
-                  onClick={() => void saveProfile()}
-                  type="button"
-                >
-                  Next
-                </Button>
-                <Button
-                  className="h-9 w-20 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
-                  data-testid="community-profile-back"
-                  disabled={isPending || isUploadingAvatar}
-                  onClick={onCancel}
-                  type="button"
-                  variant="ghost"
-                >
-                  Back
-                </Button>
-              </OnboardingFooter>
-              <Dialog
-                onOpenChange={(open) => setIsAvatarEditorOpen(open)}
-                open={isAvatarEditorOpen}
-              >
-                <DialogContent
-                  className="buzz-onboarding-neutral-theme w-[min(calc(100vw-2rem),560px)] max-w-[560px] gap-0 overflow-hidden rounded-[18px] bg-[rgb(var(--buzz-onboarding-avatar-dialog-bg))] px-8 pb-6 pt-10 text-sm text-foreground shadow-[0_28px_90px_rgb(var(--buzz-onboarding-avatar-dialog-shadow)_/_0.28),0_8px_28px_rgb(var(--buzz-onboarding-avatar-dialog-shadow)_/_0.18)] transition-[height] duration-[250ms] ease-out"
-                  closeButtonClassName="right-6 top-6 h-10 w-10 rounded-full bg-[rgb(var(--buzz-onboarding-avatar-action-bg))] text-[rgb(var(--buzz-onboarding-avatar-action-fg))] hover:bg-[rgb(var(--buzz-onboarding-avatar-action-bg)/0.9)] hover:text-[rgb(var(--buzz-onboarding-avatar-action-fg))]"
-                  data-system-color-scheme="light"
-                  data-testid="community-avatar-editor-key-frame"
-                  onCloseAutoFocus={(event) => {
-                    event.preventDefault();
-                    avatarTriggerRef.current?.focus();
-                  }}
-                  overlayVariant="transparent"
-                  style={
-                    avatarEditorDialogHeight === null
-                      ? undefined
-                      : { height: avatarEditorDialogHeight }
-                  }
-                >
-                  <DialogTitle className="sr-only">
-                    Edit your avatar
-                  </DialogTitle>
-                  <div ref={avatarEditorContentRef}>
-                    <ProfileAvatarEditor
-                      avatarUrl={avatarUrl}
-                      disabled={isPending}
-                      donePending={isUploadingAvatar}
-                      emojiPickerTheme="auto"
-                      emojiPickerThemeVars={NEUTRAL_EMOJI_PICKER_THEME_VARS}
-                      onDone={() => setIsAvatarEditorOpen(false)}
-                      onUploadingChange={setIsUploadingAvatar}
-                      onUrlChange={setAvatarUrl}
-                      presentation="onboarding-modal"
-                      previewName={displayName.trim() || "Your profile"}
-                      testIdPrefix="community-avatar"
-                    />
-                  </div>
-                </DialogContent>
-              </Dialog>
-            </>
-          ) : (
-            <>
-              <h1 className="text-title font-normal">Meet your starter team</h1>
-              <p className="mx-auto mt-3 max-w-[400px] text-sm leading-6 text-foreground/80">
-                Buzz lets you bring multiple agents into the same workspace.
-                Your team will help you get started using Buzz.
-              </p>
-              <div className="flex w-full flex-1 items-center justify-center py-10">
-                {starterPersonas.length > 0 ? (
-                  <div className="flex flex-wrap justify-center gap-8">
-                    {starterPersonas.map((persona) => {
-                      const animationUrl =
-                        STARTER_PERSONA_ANIMATIONS[persona.displayName];
-                      return (
-                        <div
-                          className="flex w-40 flex-col items-center gap-3"
-                          key={persona.id}
-                        >
-                          {animationUrl ? (
-                            <img
-                              alt={`${persona.displayName} animated character`}
-                              className="h-40 w-40 object-contain"
-                              data-testid={`starter-persona-${persona.displayName.toLowerCase()}`}
-                              src={animationUrl}
-                            />
-                          ) : (
-                            <ProfileAvatar
-                              avatarUrl={persona.avatarUrl}
-                              className="h-28 w-28 text-3xl"
-                              label={persona.displayName}
-                            />
-                          )}
-                          <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
-                            {persona.displayName}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : null}
-              </div>
-              {transaction.error ? (
-                <p className="text-sm text-destructive">
-                  {transaction.error}
-                  {starterChannelFailureCount === 1 ? " Try again." : null}
+          <div
+            className={cn(
+              "relative mx-auto w-full text-center",
+              isProfileStage
+                ? "flex max-w-[500px] flex-col items-center"
+                : isTeamStage
+                  ? "flex max-w-[760px] flex-col items-center"
+                  : "flex min-h-full max-w-[560px] flex-col justify-center",
+            )}
+            data-testid="community-onboarding-body"
+          >
+            {transaction.stage === "claiming" ||
+            transaction.stage === "connecting" ? (
+              <>
+                <Users className="mx-auto h-10 w-10" />
+                <h1 className="mt-5 text-title font-normal">
+                  Joining {transaction.communityName}
+                </h1>
+                <p className="mt-3 text-sm text-foreground/80">
+                  {transaction.error ??
+                    (transaction.stage === "claiming"
+                      ? "Accepting your invite…"
+                      : "Connecting securely…")}
                 </p>
-              ) : null}
-              <OnboardingFooter>
-                <Button
-                  className={ONBOARDING_PRIMARY_CTA_CLASS}
-                  data-testid="community-team-intro-enter"
-                  disabled={isPending || transaction.stage === "entering"}
-                  onClick={() =>
-                    void (starterChannelFailureCount >= 2
-                      ? finish()
-                      : finalize())
-                  }
-                >
-                  {isPending || transaction.stage === "entering" ? (
-                    <LoadingDots label="Preparing Welcome" />
-                  ) : starterChannelFailureCount >= 2 ? (
-                    "Skip for now"
-                  ) : (
-                    "Take me to Buzz"
+                <div className="mt-6 flex justify-center gap-3">
+                  {transaction.error ? (
+                    <Button className="rounded-full px-6" onClick={retry}>
+                      Retry
+                    </Button>
+                  ) : null}
+                  <Button
+                    className="rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
+                    onClick={onCancel}
+                    variant="ghost"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            ) : isProfileStage ? (
+              <>
+                <div
+                  className={cn(
+                    "flex min-h-0 w-full flex-1 flex-col transition-[filter,opacity] duration-200 ease-out",
+                    isAvatarEditorOpen &&
+                      "pointer-events-none opacity-45 blur-[3px]",
                   )}
-                </Button>
-                <Button
-                  className="h-9 rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
-                  data-testid="community-team-intro-back"
-                  disabled={isPending || transaction.stage === "entering"}
-                  onClick={backToProfile}
-                  variant="ghost"
+                  data-testid="community-profile-main"
                 >
-                  Back
-                </Button>
-              </OnboardingFooter>
-            </>
-          )}
-        </div>
-      </OnboardingFooterProvider>
+                  <div className="shrink-0">
+                    <h1 className="text-title font-normal">
+                      Build your profile
+                    </h1>
+                    <p className="mx-auto mt-3 max-w-[380px] text-sm leading-6 text-foreground/80">
+                      Add a name and avatar. They’ll show up on your messages,
+                      reactions, and agent handoffs.
+                    </p>
+                  </div>
+                  <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center pt-6">
+                    <AvatarCircle
+                      avatarUrl={avatarUrl}
+                      onClick={() => setIsAvatarEditorOpen(true)}
+                      previewName={displayName.trim() || "Your profile"}
+                      triggerRef={avatarTriggerRef}
+                    />
+                    <label
+                      className="mt-4 block w-full max-w-[412px] text-left"
+                      htmlFor="community-display-name"
+                    >
+                      <span className="mb-2 block pl-4 text-sm text-foreground">
+                        Your username
+                      </span>
+                      <OnboardingInput
+                        aria-label="Community username"
+                        autoCapitalize="none"
+                        autoComplete="username"
+                        autoCorrect="off"
+                        data-testid="community-profile-name-key"
+                        disabled={isPending || isUploadingAvatar}
+                        id="community-display-name"
+                        onChange={(event) => setDisplayName(event.target.value)}
+                        placeholder="Enter your username here"
+                        ref={nameInputRef}
+                        spellCheck={false}
+                        type="text"
+                        value={displayName}
+                      />
+                    </label>
+                  </div>
+                  {transaction.error ? (
+                    <p className="mt-4 text-sm text-destructive">
+                      {transaction.error}
+                    </p>
+                  ) : null}
+                </div>
+                <OnboardingFooter
+                  className={cn(
+                    "transition-[filter,opacity] duration-200 ease-out",
+                    isAvatarEditorOpen &&
+                      "pointer-events-none opacity-45 blur-[3px]",
+                  )}
+                >
+                  <Button
+                    className={`${ONBOARDING_PRIMARY_CTA_CLASS} w-20`}
+                    data-testid="community-profile-next"
+                    disabled={
+                      !displayName.trim() || isPending || isUploadingAvatar
+                    }
+                    onClick={() => void saveProfile()}
+                    type="button"
+                  >
+                    Next
+                  </Button>
+                </OnboardingFooter>
+                <Dialog
+                  onOpenChange={(open) => setIsAvatarEditorOpen(open)}
+                  open={isAvatarEditorOpen}
+                >
+                  <DialogContent
+                    className="buzz-onboarding-neutral-theme w-[min(calc(100vw-2rem),920px)] max-w-[920px] gap-0 overflow-hidden rounded-[18px] bg-[rgb(var(--buzz-onboarding-avatar-dialog-bg))] px-8 pb-6 pt-10 text-sm text-foreground shadow-[0_28px_90px_rgb(var(--buzz-onboarding-avatar-dialog-shadow)_/_0.28),0_8px_28px_rgb(var(--buzz-onboarding-avatar-dialog-shadow)_/_0.18)] transition-[height] duration-[250ms] ease-out"
+                    closeButtonClassName="right-6 top-6 h-10 w-10 rounded-full bg-[rgb(var(--buzz-onboarding-avatar-action-bg))] text-[rgb(var(--buzz-onboarding-avatar-action-fg))] hover:bg-[rgb(var(--buzz-onboarding-avatar-action-bg)/0.9)] hover:text-[rgb(var(--buzz-onboarding-avatar-action-fg))]"
+                    data-system-color-scheme="light"
+                    data-testid="community-avatar-editor-key-frame"
+                    onCloseAutoFocus={(event) => {
+                      event.preventDefault();
+                      avatarTriggerRef.current?.focus();
+                    }}
+                    overlayVariant="transparent"
+                    style={
+                      avatarEditorDialogHeight === null
+                        ? undefined
+                        : { height: avatarEditorDialogHeight }
+                    }
+                  >
+                    <DialogTitle className="sr-only">
+                      Edit your avatar
+                    </DialogTitle>
+                    <div
+                      className="grid items-center gap-8 md:grid-cols-[240px_minmax(0,1fr)]"
+                      ref={avatarEditorContentRef}
+                    >
+                      <div
+                        className="flex min-h-[320px] flex-col items-center justify-center gap-3 px-6 py-8"
+                        data-testid="community-avatar-live-preview-panel"
+                      >
+                        <div className="relative h-48 w-48">
+                          <div
+                            className="pointer-events-none absolute inset-0 z-10"
+                            data-testid="community-avatar-animated-preview-slot"
+                            ref={setAnimatedPreviewEl}
+                          />
+                          {isAnimatedPreviewActive
+                            ? null
+                            : (() => {
+                                if (localAvatarPreviewUrl) {
+                                  return (
+                                    <ProfileAvatar
+                                      avatarUrl={localAvatarPreviewUrl}
+                                      className="h-full w-full rounded-full text-5xl"
+                                      label={
+                                        displayName.trim() || "Your profile"
+                                      }
+                                      testId="community-avatar-live-preview"
+                                    />
+                                  );
+                                }
+                                const emojiAvatar =
+                                  parseEmojiAvatarDataUrl(avatarUrl);
+                                return emojiAvatar ? (
+                                  <div
+                                    aria-label={`${displayName.trim() || "Your profile"} avatar`}
+                                    className="flex h-full w-full items-center justify-center overflow-hidden rounded-full text-6xl shadow-xs"
+                                    data-testid="community-avatar-live-preview"
+                                    role="img"
+                                    style={{
+                                      backgroundColor: emojiAvatar.color,
+                                    }}
+                                  >
+                                    <span
+                                      className={cn(
+                                        avatarSquishKey > 0 &&
+                                          "buzz-avatar-squish",
+                                      )}
+                                      data-testid="community-avatar-live-preview-emoji"
+                                      key={avatarSquishKey}
+                                    >
+                                      {emojiAvatar.emoji}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <ProfileAvatar
+                                    avatarUrl={
+                                      localAvatarPreviewUrl || avatarUrl || null
+                                    }
+                                    className="h-full w-full rounded-full text-5xl"
+                                    label={displayName.trim() || "Your profile"}
+                                    testId="community-avatar-live-preview"
+                                  />
+                                );
+                              })()}
+                        </div>
+                        {animatedPreviewCaption ? (
+                          <p className="text-center text-sm text-muted-foreground">
+                            {animatedPreviewCaption}
+                          </p>
+                        ) : null}
+                      </div>
+                      <ProfileAvatarEditor
+                        animatedPreviewContainer={animatedPreviewEl}
+                        avatarUrl={avatarUrl}
+                        disabled={isPending}
+                        donePending={isUploadingAvatar}
+                        emojiPickerTheme="auto"
+                        emojiPickerThemeVars={NEUTRAL_EMOJI_PICKER_THEME_VARS}
+                        onDone={() => setIsAvatarEditorOpen(false)}
+                        onAnimatedPreviewActiveChange={
+                          setIsAnimatedPreviewActive
+                        }
+                        onAnimatedPreviewCaptionChange={
+                          setAnimatedPreviewCaption
+                        }
+                        onEmojiAvatarChange={animateEmojiAvatarChange}
+                        onLocalPreviewChange={setLocalAvatarPreviewUrl}
+                        onUploadingChange={setIsUploadingAvatar}
+                        onUrlChange={setAvatarUrl}
+                        presentation="onboarding-modal"
+                        previewName={displayName.trim() || "Your profile"}
+                        testIdPrefix="community-avatar"
+                      />
+                    </div>
+                  </DialogContent>
+                </Dialog>
+              </>
+            ) : (
+              <>
+                <h1 className="text-title font-normal">
+                  Meet your starter team
+                </h1>
+                <p className="mx-auto mt-3 max-w-[400px] text-sm leading-6 text-foreground/80">
+                  Buzz lets you bring multiple agents into the same workspace.
+                  Your team will help you get started using Buzz.
+                </p>
+                <div className="flex w-full flex-1 items-center justify-center py-6">
+                  {starterPersonas.length > 0 ? (
+                    <div className="grid w-full grid-cols-3 gap-6">
+                      {starterPersonas.map((persona) => {
+                        const animationUrl =
+                          STARTER_PERSONA_ANIMATIONS[persona.displayName];
+                        return (
+                          <div
+                            className="flex min-w-0 flex-col items-center gap-2"
+                            key={persona.id}
+                          >
+                            {animationUrl ? (
+                              <img
+                                alt={`${persona.displayName} animated character`}
+                                className="size-24 object-contain"
+                                data-testid={`starter-persona-${persona.displayName.toLowerCase()}`}
+                                src={animationUrl}
+                              />
+                            ) : (
+                              <ProfileAvatar
+                                avatarUrl={persona.avatarUrl}
+                                className="size-24 text-3xl"
+                                label={persona.displayName}
+                              />
+                            )}
+                            <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
+                              {persona.displayName}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+                {transaction.error ? (
+                  <p className="text-sm text-destructive">
+                    {transaction.error}
+                    {starterChannelFailureCount === 1 ? " Try again." : null}
+                  </p>
+                ) : null}
+                <OnboardingFooter>
+                  <Button
+                    className={ONBOARDING_PRIMARY_CTA_CLASS}
+                    data-testid="community-team-intro-enter"
+                    disabled={isPending || transaction.stage === "entering"}
+                    onClick={() => void finalize()}
+                  >
+                    {isPending || transaction.stage === "entering" ? (
+                      <LoadingDots label="Preparing Welcome" />
+                    ) : (
+                      "Take me to Buzz"
+                    )}
+                  </Button>
+                  {starterChannelFailureCount >= 2 ? (
+                    <Button
+                      className="h-9 rounded-full px-5 hover:bg-foreground/10"
+                      data-testid="community-team-intro-skip"
+                      disabled={isPending || transaction.stage === "entering"}
+                      onClick={() => void finish()}
+                      variant="ghost"
+                    >
+                      Skip for now
+                    </Button>
+                  ) : null}
+                </OnboardingFooter>
+              </>
+            )}
+          </div>
+        </OnboardingSlideTransition>
+      </OnboardingCard>
     </div>
   );
 }

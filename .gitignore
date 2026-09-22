@@ -3,6 +3,10 @@
 /dist/
 /admin-web/dist/
 
+# Python cache
+__pycache__/
+*.pyc
+
 # lefthook-generated hook scripts (machine-specific)
 .hooks/
 

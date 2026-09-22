@@ -17,7 +17,8 @@ export function buildThreadActivityFeedItems(
       // is present in the active community's channel set. Rows persisted under
       // a different relay's scope key should never reach this function, but
       // this filter is the last line of defense against cross-community leaks.
-      if (channelById.get(item.channelId) === undefined) return false;
+      const channel = channelById.get(item.channelId);
+      if (channel === undefined) return false;
       const rootId = getThreadReference(item.tags).rootId;
       return !rootId || !mutedRootIds.has(rootId);
     })

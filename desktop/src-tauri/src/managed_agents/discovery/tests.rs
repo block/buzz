@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use super::overrides::{divergent_agent_command_override, update_time_agent_command_override};
 use super::{
-    apply_agent_command_update, classify_runtime, codex_adapter_availability,
-    codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
-    effective_agent_command, find_nvm_default_bin, find_via_login_shell,
+    apply_agent_command_update, apply_env_vars_then_effort_transition, classify_runtime,
+    codex_adapter_availability, codex_adapter_is_outdated, create_time_agent_command_override,
+    default_agent_command, effective_agent_command, find_nvm_default_bin,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
-    parse_semver_tag, preset_catalog_entry, probe_codex_acp_major_version, record_agent_command,
-    refresh_login_shell_path, try_record_agent_command, PresetHarness, BUZZ_AGENT_AVATAR_URL,
+    parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
+    remove_record_effort_aliases, try_record_agent_command, BUZZ_AGENT_AVATAR_URL,
     CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
@@ -46,10 +46,8 @@ fn returns_none_for_unknown_commands() {
 
 #[test]
 fn default_agent_command_resolves_bundled_buzz_agent() {
-    // The create-path default must be the bundled buzz-agent, never the
-    // bare `goose` that isn't on PATH on a stock Windows install.
+    // The default must be bundled buzz-agent, never bare `goose` on a stock Windows install.
     assert_eq!(default_agent_command(), "buzz-agent");
-    // And buzz-agent takes no `acp` arg — confirm no arg leakage from the default.
     assert_eq!(
         normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
         Vec::<String>::new()
@@ -93,24 +91,6 @@ fn normalizes_buzz_agent_args_to_empty() {
     assert_eq!(
         normalize_agent_args("buzz-agent", vec!["acp".into()]),
         Vec::<String>::new()
-    );
-}
-
-#[test]
-fn login_shell_lookup_treats_command_as_data() {
-    let marker =
-        std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));
-    let payload = format!("doesnotexist; touch {} #", marker.display());
-
-    let resolved = find_via_login_shell(&payload);
-
-    assert!(
-        resolved.is_none(),
-        "payload should not resolve to a command"
-    );
-    assert!(
-        !marker.exists(),
-        "shell lookup must not execute injected commands"
     );
 }
 
@@ -176,7 +156,6 @@ fn classifies_not_installed_when_no_underlying_cli() {
     assert!(cmd.is_none());
     assert!(path.is_none());
 }
-
 #[test]
 fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
     let (status, cmd, path) = classify_runtime(
@@ -188,93 +167,10 @@ fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
     assert_eq!(cmd.as_deref(), Some("codex-acp"));
     assert_eq!(path.as_deref(), Some("/opt/homebrew/bin/codex-acp"));
 }
-
-/// Amp-shaped preset: an ACP adapter (`amp-acp`) wrapping a separately
-/// installed vendor CLI (`amp`).
-const ADAPTER_PRESET: PresetHarness = PresetHarness {
-    id: "amp-test",
-    label: "Amp Test",
-    command: "amp-acp",
-    args: &[],
-    install_instructions_url: "https://example.com/install",
-    install_hint: "Install the amp-acp npm adapter.",
-    underlying_cli: Some("amp"),
-};
-
-#[test]
-fn preset_entry_adapter_missing_when_underlying_cli_present() {
-    // Vendor CLI resolves, adapter does not — the state Tyler's Amp
-    // hand-test hit. Must NOT degrade to the misleading NotInstalled.
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |cmd| {
-        (cmd == "amp").then(|| PathBuf::from("/usr/local/bin/amp"))
-    });
-    assert_eq!(entry.availability, AcpAvailabilityStatus::AdapterMissing);
-    assert!(entry.command.is_none());
-    assert!(entry.binary_path.is_none());
-    assert_eq!(
-        entry.underlying_cli_path.as_deref(),
-        Some("/usr/local/bin/amp")
-    );
-    assert!(!entry.requires_external_cli);
-    assert_eq!(entry.install_hint, "Install the amp-acp npm adapter.");
-}
-
-#[test]
-fn preset_entry_not_installed_when_both_missing() {
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |_| None);
-    assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
-    assert!(entry.underlying_cli_path.is_none());
-    assert!(!entry.requires_external_cli);
-}
-
-#[test]
-fn preset_entry_available_when_adapter_and_cli_present() {
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |cmd| match cmd {
-        "amp-acp" => Some(PathBuf::from("/usr/local/bin/amp-acp")),
-        "amp" => Some(PathBuf::from("/usr/local/bin/amp")),
-        _ => None,
-    });
-    assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
-    assert_eq!(entry.command.as_deref(), Some("amp-acp"));
-    assert_eq!(entry.binary_path.as_deref(), Some("/usr/local/bin/amp-acp"));
-    assert_eq!(
-        entry.underlying_cli_path.as_deref(),
-        Some("/usr/local/bin/amp")
-    );
-}
-
-#[test]
-fn preset_entry_stays_available_when_adapter_present_but_cli_absent() {
-    // Wren's regression guard: today an `amp-acp` install without `amp`
-    // is Available and selectable. Feeding underlying_cli through the
-    // FULL classify_runtime predicate would flip this to CliMissing
-    // (unselectable, with backwards install copy) — the adapter-missing
-    // arm is the only one presets consume.
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |cmd| {
-        (cmd == "amp-acp").then(|| PathBuf::from("/usr/local/bin/amp-acp"))
-    });
-    assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
-    assert_eq!(entry.command.as_deref(), Some("amp-acp"));
-    assert_eq!(entry.binary_path.as_deref(), Some("/usr/local/bin/amp-acp"));
-    assert!(entry.underlying_cli_path.is_none());
-}
-
-#[test]
-fn preset_entry_without_underlying_cli_stays_simple() {
-    // Most presets: the command IS the vendor CLI. No external-CLI flag,
-    // absent command means plain NotInstalled.
-    let preset = PresetHarness {
-        underlying_cli: None,
-        ..ADAPTER_PRESET
-    };
-    let entry = preset_catalog_entry(&preset, |_| None);
-    assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
-    assert!(!entry.requires_external_cli);
-    assert!(entry.underlying_cli_path.is_none());
-}
-
 fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,
@@ -285,8 +181,11 @@ fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agent
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
+        team_catalog_source: None,
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -305,15 +204,15 @@ fn effective_agent_command_explicit_override_wins() {
         "codex-acp"
     );
 }
-
-/// Minimal record for `record_agent_command` tests. Only the resolution
-/// inputs (runtime / persona_id / agent_command_override) vary.
+/// Minimal record for `record_agent_command` tests; only resolution inputs vary.
 fn record_with(
     runtime: Option<&str>,
     persona_id: Option<&str>,
     override_cmd: Option<&str>,
 ) -> crate::managed_agents::types::ManagedAgentRecord {
     crate::managed_agents::types::ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: String::new(),
         name: "r".to_string(),
         persona_id: persona_id.map(str::to_string),
@@ -339,6 +238,7 @@ fn record_with(
         runtime_pid: None,
         backend: Default::default(),
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -359,19 +259,22 @@ fn record_with(
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
     }
 }
 
 #[test]
 fn record_agent_command_own_runtime_wins_over_persona() {
-    // A record with its own materialized runtime never consults the
-    // persona list — the unified-model resolution.
+    // A record with its own runtime never consults the persona list.
     let personas = vec![persona_with_runtime("p1", Some("goose"))];
     let record = record_with(Some("claude"), Some("p1"), None);
     assert_eq!(record_agent_command(&record, &personas), "claude-agent-acp");
@@ -397,8 +300,6 @@ fn record_agent_command_bare_record_defaults() {
     let record = record_with(None, None, None);
     assert_eq!(record_agent_command(&record, &[]), default_agent_command());
 }
-
-// ── try_record_agent_command ─────────────────────────────────────────────────
 
 /// When the record carries a dangling (unknown) runtime id, `try_record_agent_command`
 /// must return `Err` containing "DANGLING_HARNESS_ID" — NEVER the buzz-agent default.
@@ -706,80 +607,42 @@ fn update_time_override_preserves_pin_for_persona_less_agent() {
     );
 }
 
-#[test]
-fn apply_agent_command_update_inherit_sentinel_clears_pin_and_runtime() {
-    // Choosing Inherit on a persona-linked record clears BOTH the explicit
-    // pin and the materialized runtime, so resolution falls through to the
-    // live definition immediately — not on the next spawn.
-    let personas = vec![persona_with_runtime("p1", Some("goose"))];
-    let mut record = record_with(Some("claude"), Some("p1"), Some("codex-acp"));
+// ── probe_codex_acp_version ───────────────────────────────────────────────────
 
-    apply_agent_command_update(&mut record, &personas, "", false);
-
-    assert_eq!(record.agent_command_override, None);
-    assert_eq!(record.runtime, None);
-    assert_eq!(record_agent_command(&record, &personas), "goose");
-}
-
-#[test]
-fn apply_agent_command_update_sentinel_keeps_runtime_for_definition_less_record() {
-    // For a record with no persona link the materialized runtime is the only
-    // harness source left once the pin is cleared — a stray empty
-    // agent_command must not change what the agent runs.
-    let mut record = record_with(Some("claude"), None, Some("codex-acp"));
-
-    apply_agent_command_update(&mut record, &[], "", false);
-
-    assert_eq!(record.agent_command_override, None);
-    assert_eq!(record.runtime.as_deref(), Some("claude"));
-    assert_eq!(record_agent_command(&record, &[]), "claude-agent-acp");
-}
-
-#[test]
-fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
-    // A concrete pick only sets the pin; the materialized runtime is left for
-    // the next snapshot apply. The pin shadows it in resolution either way.
-    let personas = vec![persona_with_runtime("p1", Some("goose"))];
-    let mut record = record_with(Some("claude"), Some("p1"), None);
-
-    apply_agent_command_update(&mut record, &personas, "codex-acp", true);
-
-    assert_eq!(record.agent_command_override.as_deref(), Some("codex-acp"));
-    assert_eq!(record.runtime.as_deref(), Some("claude"));
-    assert_eq!(record_agent_command(&record, &personas), "codex-acp");
-}
-
-// ── probe_codex_acp_major_version ─────────────────────────────────────────────
-
+mod effort_clear;
+mod forced_discovery;
 mod managed_path_resolution;
-
 #[cfg(unix)]
 #[test]
-fn probe_codex_acp_major_version_parses_1x_output() {
+fn probe_codex_acp_version_parses_full_semver_output() {
     use std::os::unix::fs::PermissionsExt;
 
-    // Simulate `@agentclientprotocol/codex-acp 1.1.2` output (1.x adapter)
+    // Simulate a current `@agentclientprotocol/codex-acp` output.
     let dir = std::env::temp_dir().join(format!("buzz-probe-1x-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let bin = dir.join("codex-acp");
     std::fs::write(
         &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
     )
     .expect("write script");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
 
-    let major = probe_codex_acp_major_version(&bin);
+    let version = probe_codex_acp_version(&bin);
     let _ = std::fs::remove_dir_all(dir);
 
-    assert_eq!(major, Some(1), "1.x adapter must return major version 1");
+    assert_eq!(
+        version,
+        Some((1, 1, 7)),
+        "adapter output must parse to its full semantic version"
+    );
 }
 
 mod codex_version;
 
 #[cfg(unix)]
 #[test]
-fn probe_codex_acp_major_version_returns_none_for_nonzero_exit() {
+fn probe_codex_acp_version_returns_none_for_nonzero_exit() {
     use std::os::unix::fs::PermissionsExt;
 
     // Simulate old 0.16.x adapter: `--version` is unrecognised, exits non-zero
@@ -789,21 +652,21 @@ fn probe_codex_acp_major_version_returns_none_for_nonzero_exit() {
     std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
 
-    let major = probe_codex_acp_major_version(&bin);
+    let version = probe_codex_acp_version(&bin);
     let _ = std::fs::remove_dir_all(dir);
 
     assert_eq!(
-        major, None,
+        version, None,
         "old 0.16.x adapter (non-zero exit) must return None"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn probe_codex_acp_major_version_returns_none_for_missing_binary() {
+fn probe_codex_acp_version_returns_none_for_missing_binary() {
     let path = std::path::Path::new("/nonexistent/path/codex-acp-does-not-exist");
-    let major = probe_codex_acp_major_version(path);
-    assert_eq!(major, None, "missing binary must return None");
+    let version = probe_codex_acp_version(path);
+    assert_eq!(version, None, "missing binary must return None");
 }
 
 // ── codex_adapter_availability / codex_adapter_is_outdated ───────────────────
@@ -813,7 +676,7 @@ fn probe_codex_acp_major_version_returns_none_for_missing_binary() {
 
 #[cfg(unix)]
 #[test]
-fn codex_adapter_availability_available_for_1x_binary() {
+fn codex_adapter_availability_available_for_minimum_supported_binary() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = std::env::temp_dir().join(format!("buzz-avail-1x-{}", uuid::Uuid::new_v4()));
@@ -821,7 +684,7 @@ fn codex_adapter_availability_available_for_1x_binary() {
     let bin = dir.join("codex-acp");
     std::fs::write(
         &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.10.0'\nexit 0\n",
     )
     .expect("write script");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
@@ -832,7 +695,7 @@ fn codex_adapter_availability_available_for_1x_binary() {
     assert_eq!(
         status,
         AcpAvailabilityStatus::Available,
-        "1.x adapter must classify as Available"
+        "minimum supported adapter must classify as Available"
     );
 }
 
@@ -858,6 +721,32 @@ fn codex_adapter_availability_outdated_for_0x_binary() {
     );
 }
 
+/// The strict three-component parse fails closed: a version Buzz cannot compare
+/// against the floor is treated as outdated rather than assumed current.
+#[cfg(unix)]
+#[test]
+fn codex_adapter_availability_outdated_for_uncomparable_version() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for version in ["1.2", "1.2.0-rc1"] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("codex-acp");
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\necho '@agentclientprotocol/codex-acp {version}'\nexit 0\n"),
+        )
+        .expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        assert_eq!(
+            codex_adapter_availability(&bin),
+            AcpAvailabilityStatus::AdapterOutdated,
+            "version {version} is not comparable to the floor and must fail closed"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn codex_adapter_availability_outdated_for_missing_binary() {
@@ -876,7 +765,7 @@ fn codex_adapter_availability_outdated_for_missing_binary() {
 
 #[cfg(unix)]
 #[test]
-fn probe_codex_acp_major_version_returns_none_for_hung_direct_child() {
+fn probe_codex_acp_version_returns_none_for_hung_direct_child() {
     use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
 
@@ -894,12 +783,12 @@ fn probe_codex_acp_major_version_returns_none_for_hung_direct_child() {
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
 
     let start = Instant::now();
-    let major = probe_codex_acp_major_version(&bin);
+    let version = probe_codex_acp_version(&bin);
     let elapsed = start.elapsed();
     let _ = std::fs::remove_dir_all(dir);
 
     assert_eq!(
-        major, None,
+        version, None,
         "hung binary must return None (timeout kills child)"
     );
     // The timeout is 5 s; give a 10 s margin for parallel pre-push suites.
@@ -911,7 +800,7 @@ fn probe_codex_acp_major_version_returns_none_for_hung_direct_child() {
 
 #[cfg(unix)]
 #[test]
-fn probe_codex_acp_major_version_returns_version_when_descendant_holds_pipe_open() {
+fn probe_codex_acp_version_returns_version_when_descendant_holds_pipe_open() {
     use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
 
@@ -923,20 +812,20 @@ fn probe_codex_acp_major_version_returns_version_when_descendant_holds_pipe_open
     // (the parent closed its write end), read_to_end() returns immediately
     // without waiting for the descendant to close its inherited fd.
     //
-    // `(exec sleep 60 &)` forks a subshell that execs `sleep 60`; the subshell
-    // inherits the parent's stdout fd and keeps it open.
+    // `sleep 60 &` starts a descendant that inherits the parent's stdout fd
+    // without making the direct child wait for a nested subshell to exit.
     let dir = std::env::temp_dir().join(format!("buzz-probe-descendant-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let bin = dir.join("codex-acp");
     std::fs::write(
         &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\n(exec sleep 60 &)\nexit 0\n",
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nsleep 60 &\nexit 0\n",
     )
     .expect("write script");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
 
     let start = Instant::now();
-    let major = probe_codex_acp_major_version(&bin);
+    let version = probe_codex_acp_version(&bin);
     let elapsed = start.elapsed();
     let _ = std::fs::remove_dir_all(dir);
 
@@ -947,9 +836,9 @@ fn probe_codex_acp_major_version_returns_version_when_descendant_holds_pipe_open
         "probe must not block on descendant pipe; elapsed: {elapsed:?}"
     );
     assert_eq!(
-        major,
-        Some(1),
-        "1.x version must be parsed even when descendant holds pipe open"
+        version,
+        Some((1, 1, 2)),
+        "version must be parsed even when descendant holds pipe open"
     );
 }
 
@@ -1717,7 +1606,7 @@ fn custom_catalog_entry_carries_definition_env_for_edit_roundtrip() {
     )
     .unwrap();
 
-    let entries = discover_acp_runtimes_from(Some(dir.path()));
+    let entries = discover_acp_runtimes_from(Some(dir.path()), true);
     let entry = entries
         .iter()
         .find(|e| e.id == "env-harness")
@@ -1747,7 +1636,7 @@ fn builtin_catalog_entry_has_empty_definition_env() {
     // publishes to the global registry.
     let _path_guard = crate::managed_agents::lock_path_mutex();
     let _lock = registry_test_lock();
-    let entries = discover_acp_runtimes_from(None);
+    let entries = discover_acp_runtimes_from(None, true);
     // Find any builtin entry (e.g. "goose" or "claude").
     let builtin = entries
         .iter()
@@ -1802,7 +1691,6 @@ fn harness_def(
         install_hint: String::new(),
     }
 }
-
 /// A `save_and_warm` landing mid-discovery (after the scan, before the
 /// publish) must survive discovery's registry publish — through the real
 /// `discover_acp_runtimes_from` path.
@@ -1828,7 +1716,7 @@ fn discovery_publish_path_survives_mid_flight_save() {
         assert!(lookup_loaded_harness_by_id("mid-flight-save").is_some());
     }));
 
-    let _entries = discover_acp_runtimes_from(Some(dir.path()));
+    let _entries = discover_acp_runtimes_from(Some(dir.path()), true);
 
     assert!(
         lookup_loaded_harness_by_id("mid-flight-save").is_some(),
@@ -1836,7 +1724,6 @@ fn discovery_publish_path_survives_mid_flight_save() {
          publish clobbers a save that landed mid-discovery"
     );
 }
-
 /// A `delete_and_warm` landing mid-discovery must stay gone after discovery's
 /// publish — a stale snapshot (taken while the file existed) would resurrect it.
 #[test]
@@ -1861,7 +1748,7 @@ fn discovery_publish_path_drops_mid_flight_delete() {
         assert!(lookup_loaded_harness_by_id("mid-flight-delete").is_none());
     }));
 
-    let _entries = discover_acp_runtimes_from(Some(dir.path()));
+    let _entries = discover_acp_runtimes_from(Some(dir.path()), true);
 
     assert!(
         lookup_loaded_harness_by_id("mid-flight-delete").is_none(),

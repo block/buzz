@@ -11,6 +11,7 @@ import '../../shared/auth/auth.dart';
 import '../../shared/crypto/ecdh.dart';
 import '../../shared/crypto/nip44.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/security/sensitive_action_authorizer.dart';
 import 'pairing_crypto.dart';
 import 'pairing_socket.dart';
 
@@ -36,12 +37,18 @@ class PairingState {
   final String? errorMessage;
   final String? sasCode;
   final bool userConfirmedSas;
+  final bool sendsIdentityToDesktop;
+  final bool protectSensitiveActions;
+  final bool authorizationInProgress;
 
   const PairingState({
     this.status = PairingStatus.idle,
     this.errorMessage,
     this.sasCode,
     this.userConfirmedSas = false,
+    this.sendsIdentityToDesktop = false,
+    this.protectSensitiveActions = true,
+    this.authorizationInProgress = false,
   });
 
   PairingState copyWith({
@@ -49,11 +56,21 @@ class PairingState {
     String? errorMessage,
     String? sasCode,
     bool? userConfirmedSas,
+    bool? sendsIdentityToDesktop,
+    bool? protectSensitiveActions,
+    bool? authorizationInProgress,
+    bool clearErrorMessage = false,
   }) => PairingState(
     status: status ?? this.status,
-    errorMessage: errorMessage ?? this.errorMessage,
+    errorMessage: clearErrorMessage ? null : errorMessage ?? this.errorMessage,
     sasCode: sasCode ?? this.sasCode,
     userConfirmedSas: userConfirmedSas ?? this.userConfirmedSas,
+    sendsIdentityToDesktop:
+        sendsIdentityToDesktop ?? this.sendsIdentityToDesktop,
+    protectSensitiveActions:
+        protectSensitiveActions ?? this.protectSensitiveActions,
+    authorizationInProgress:
+        authorizationInProgress ?? this.authorizationInProgress,
   );
 }
 
@@ -65,13 +82,32 @@ typedef PairingSocketFactory =
       required void Function(Object? error) onDisconnected,
     });
 
+typedef PairingCredentialValidator =
+    Future<void> Function({required String relayUrl, required String? nsec});
+
+const identityExportAuthorizationTtl = Duration(minutes: 2);
+
+final identityExportClockProvider = Provider<DateTime Function()>((ref) {
+  return DateTime.now;
+});
+
 class PairingNotifier extends Notifier<PairingState> {
   final PairingSocketFactory _socketFactory;
+  final PairingCredentialValidator? _credentialValidator;
+  final RelaySocketFactory _validationSocketFactory;
+  RelaySocket? _validationSocket;
   PairingSocket? _socket;
   Timer? _sessionTimeout;
+  Community? _identityExportCommunity;
+  bool _identityExportBiometricOnly = false;
 
-  PairingNotifier({PairingSocketFactory? socketFactory})
-    : _socketFactory = socketFactory ?? _createPairingSocket;
+  PairingNotifier({
+    PairingSocketFactory? socketFactory,
+    PairingCredentialValidator? credentialValidator,
+    RelaySocketFactory validationSocketFactory = RelaySocket.new,
+  }) : _socketFactory = socketFactory ?? _createPairingSocket,
+       _credentialValidator = credentialValidator,
+       _validationSocketFactory = validationSocketFactory;
 
   static PairingSocket _createPairingSocket({
     required String wsUrl,
@@ -86,7 +122,10 @@ class PairingNotifier extends Notifier<PairingState> {
   );
 
   @override
-  PairingState build() => const PairingState();
+  PairingState build() {
+    ref.onDispose(_cleanup);
+    return const PairingState();
+  }
 
   Future<void> pair(String rawInput) async {
     if (state.status == PairingStatus.connecting ||
@@ -103,27 +142,170 @@ class PairingNotifier extends Notifier<PairingState> {
     return _pairLegacy(trimmed);
   }
 
+  Future<bool> authorizeIdentityExport({required Community community}) async {
+    if (state.authorizationInProgress) return false;
+
+    final biometricOnly =
+        community.sensitiveActionPolicy == SensitiveActionPolicy.enabled;
+    final pairingGeneration = _pairingGeneration;
+    state = state.copyWith(
+      authorizationInProgress: true,
+      clearErrorMessage: true,
+    );
+    final result = await ref
+        .read(sensitiveActionAuthorizationSessionProvider)
+        .authorize(biometricOnly: biometricOnly);
+    if (pairingGeneration != _pairingGeneration) return false;
+    if (result != DeviceAuthResult.success) {
+      state = state.copyWith(
+        authorizationInProgress: false,
+        errorMessage: _authorizationError(result),
+      );
+      return false;
+    }
+
+    _identityExportCommunity = community;
+    _identityExportBiometricOnly = biometricOnly;
+    _identityExportAuthorizedAt = ref.read(identityExportClockProvider)();
+    state = state.copyWith(authorizationInProgress: false);
+    return true;
+  }
+
   /// Confirm that the SAS code matches. Called by the UI after user approval.
   void confirmSas() {
-    if (state.status != PairingStatus.confirmingSas) return;
+    if (state.status != PairingStatus.confirmingSas ||
+        state.authorizationInProgress) {
+      return;
+    }
+    _userConfirmedSas = true;
+    state = state.copyWith(userConfirmedSas: true);
+    if (_sasConfirmReceived) unawaited(_continueAfterSas());
+  }
 
-    // If the desktop's sas-confirm has already arrived and been verified,
-    // transition immediately and process any buffered payload.
-    if (_sasConfirmReceived) {
-      state = state.copyWith(status: PairingStatus.transferring);
+  void setProtectSensitiveActions(bool value) {
+    if (state.status != PairingStatus.confirmingSas ||
+        state.sendsIdentityToDesktop ||
+        state.authorizationInProgress) {
+      return;
+    }
+    state = state.copyWith(protectSensitiveActions: value);
+  }
+
+  Future<void> _continueAfterSas() async {
+    if (!_userConfirmedSas ||
+        !_sasConfirmReceived ||
+        state.status != PairingStatus.confirmingSas ||
+        state.authorizationInProgress) {
+      return;
+    }
+
+    if (_sendIdentityToSource && !_exportIdentityIsCurrent()) {
+      _userConfirmedSas = false;
+      state = state.copyWith(
+        userConfirmedSas: false,
+        errorMessage:
+            'The active community changed. Start identity export again.',
+      );
+      return;
+    }
+
+    final authorizedAt = _identityExportAuthorizedAt;
+    final elapsed = authorizedAt == null
+        ? null
+        : ref.read(identityExportClockProvider)().difference(authorizedAt);
+    final hasFreshExportAuthorization =
+        elapsed != null &&
+        !elapsed.isNegative &&
+        elapsed < identityExportAuthorizationTtl;
+    if (_sendIdentityToSource && !hasFreshExportAuthorization) {
+      final pairingGeneration = _pairingGeneration;
+      state = state.copyWith(authorizationInProgress: true);
+      final result = await ref
+          .read(sensitiveActionAuthorizationSessionProvider)
+          .authorize(biometricOnly: _identityExportBiometricOnly);
+      if (pairingGeneration != _pairingGeneration ||
+          !_userConfirmedSas ||
+          !_sasConfirmReceived ||
+          state.status != PairingStatus.confirmingSas ||
+          !state.authorizationInProgress) {
+        return;
+      }
+      if (result != DeviceAuthResult.success) {
+        _userConfirmedSas = false;
+        state = state.copyWith(
+          userConfirmedSas: false,
+          authorizationInProgress: false,
+          errorMessage: _authorizationError(result),
+        );
+        return;
+      }
+    } else if (!_sendIdentityToSource && state.protectSensitiveActions) {
+      final pairingGeneration = _pairingGeneration;
+      state = state.copyWith(authorizationInProgress: true);
+      final result = await ref
+          .read(sensitiveActionAuthorizerProvider)
+          .authorizeBiometricProtection();
+      if (pairingGeneration != _pairingGeneration ||
+          !_userConfirmedSas ||
+          !_sasConfirmReceived ||
+          state.status != PairingStatus.confirmingSas ||
+          !state.authorizationInProgress) {
+        return;
+      }
+      if (result != DeviceAuthResult.success) {
+        _userConfirmedSas = false;
+        state = state.copyWith(
+          userConfirmedSas: false,
+          authorizationInProgress: false,
+          errorMessage: _biometricProtectionError(result),
+        );
+        return;
+      }
+    }
+
+    _userConfirmedSas = false;
+    state = state.copyWith(
+      status: PairingStatus.transferring,
+      authorizationInProgress: false,
+    );
+    if (_sendIdentityToSource) {
+      _sendIdentityPayload();
+    } else {
       final pending = _pendingPayload;
       if (pending != null) {
         _pendingPayload = null;
         _handlePayload(pending);
       }
-      return;
     }
-
-    // Desktop hasn't confirmed yet — record intent and wait. The transition
-    // will happen in _handleSasConfirm() once the transcript hash is verified.
-    _userConfirmedSas = true;
-    state = state.copyWith(userConfirmedSas: true);
   }
+
+  static String _biometricProtectionError(
+    DeviceAuthResult result,
+  ) => switch (result) {
+    DeviceAuthResult.cancelled =>
+      'Biometric setup was cancelled. Nothing was transferred.',
+    DeviceAuthResult.unavailable =>
+      'Biometrics are unavailable. Enroll Face ID or biometrics and try again, or turn this option off.',
+    DeviceAuthResult.lockedOut =>
+      'Biometrics are locked. Unlock them in system settings and try again.',
+    DeviceAuthResult.failed =>
+      'Biometric confirmation failed. Nothing was transferred.',
+    DeviceAuthResult.success => '',
+  };
+
+  static String _authorizationError(
+    DeviceAuthResult result,
+  ) => switch (result) {
+    DeviceAuthResult.cancelled =>
+      'Identity confirmation was cancelled. Nothing was transferred.',
+    DeviceAuthResult.unavailable =>
+      'Device authentication is unavailable. Configure a device passcode or biometrics and try again.',
+    DeviceAuthResult.lockedOut =>
+      'Device authentication is locked. Unlock it in system settings and try again.',
+    DeviceAuthResult.failed =>
+      'Identity confirmation failed. Nothing was transferred.',
+    DeviceAuthResult.success => '',
+  };
 
   /// Deny the SAS code. Send abort and terminate.
   void denySas() {
@@ -141,6 +323,9 @@ class PairingNotifier extends Notifier<PairingState> {
   }
 
   void _cleanup() {
+    _pairingGeneration++;
+    _validationSocket?.dispose();
+    _validationSocket = null;
     _sessionTimeout?.cancel();
     _sessionTimeout = null;
     _socket?.dispose();
@@ -149,6 +334,10 @@ class PairingNotifier extends Notifier<PairingState> {
     _sasConfirmReceived = false;
     _userConfirmedSas = false;
     _pendingPayload = null;
+    _sendIdentityToSource = false;
+    _identityExportCommunity = null;
+    _identityExportBiometricOnly = false;
+    _identityExportAuthorizedAt = null;
   }
 
   // ── NIP-AB pairing flow ─────────────────────────────────────────────────
@@ -163,10 +352,14 @@ class PairingNotifier extends Notifier<PairingState> {
   Uint8List? _conversationKey;
   bool _sasConfirmReceived = false;
   bool _userConfirmedSas = false;
+  bool _sendIdentityToSource = false;
+  int _pairingGeneration = 0;
+  DateTime? _identityExportAuthorizedAt;
   Map<String, dynamic>? _pendingPayload; // buffered until user confirms SAS
   final Set<String> _processedEventIds = {}; // NIP-AB §Duplicate Event Handling
 
   Future<void> _pairNipAb(String uri) async {
+    final generation = _pairingGeneration;
     state = const PairingState(status: PairingStatus.connecting);
 
     try {
@@ -174,6 +367,8 @@ class PairingNotifier extends Notifier<PairingState> {
       final qr = parseNostrpairUri(uri);
       _sourcePubkey = qr.sourcePubkey;
       _sessionSecret = qr.sessionSecret;
+      _sendIdentityToSource =
+          Uri.parse(uri).queryParameters['mode'] == 'recover';
 
       final relayWsUrl = qr.relays.first;
 
@@ -198,11 +393,16 @@ class PairingNotifier extends Notifier<PairingState> {
       final socket = _socketFactory(
         wsUrl: relayWsUrl,
         ephemeralPrivkey: _ephemeralPrivkey!,
-        onMessage: _handleRelayMessage,
-        onDisconnected: _handleDisconnected,
+        onMessage: (message) {
+          if (generation == _pairingGeneration) _handleRelayMessage(message);
+        },
+        onDisconnected: (error) {
+          if (generation == _pairingGeneration) _handleDisconnected(error);
+        },
       );
       _socket = socket;
       await socket.connect();
+      if (generation != _pairingGeneration) return;
 
       if (!socket.isConnected) {
         throw StateError('Pairing socket did not reach the connected state');
@@ -214,6 +414,7 @@ class PairingNotifier extends Notifier<PairingState> {
       // 6. Wait briefly for EOSE, then send offer.
       // (In practice, we send the offer immediately — the relay will buffer it.)
       await Future.delayed(const Duration(milliseconds: 500));
+      if (generation != _pairingGeneration) return;
 
       // 7. Build and send the offer event.
       final offerContent = _encryptMessage({
@@ -234,6 +435,8 @@ class PairingNotifier extends Notifier<PairingState> {
       state = PairingState(
         status: PairingStatus.confirmingSas,
         sasCode: formatSas(sasCode),
+        sendsIdentityToDesktop: _sendIdentityToSource,
+        protectSensitiveActions: ref.read(relayConfigProvider).nsec == null,
       );
 
       // 9. Start 120s session timeout.
@@ -248,12 +451,14 @@ class PairingNotifier extends Notifier<PairingState> {
         }
       });
     } on FormatException catch (e) {
+      if (generation != _pairingGeneration) return;
       _cleanup();
       state = PairingState(
         status: PairingStatus.error,
         errorMessage: 'Invalid pairing code: ${e.message}',
       );
     } catch (e) {
+      if (generation != _pairingGeneration) return;
       debugPrint('Pairing connection error: $e');
       _cleanup();
       state = PairingState(
@@ -359,6 +564,9 @@ class PairingNotifier extends Notifier<PairingState> {
         case 'abort':
           _handleAbort(msg);
           _processedEventIds.add(eventId);
+        case 'complete':
+          _handleComplete(msg);
+          _processedEventIds.add(eventId);
       }
     } catch (e) {
       // Silently discard invalid events per NIP-AB §Event Validation.
@@ -398,15 +606,45 @@ class PairingNotifier extends Notifier<PairingState> {
     // If the user already tapped "Codes Match", complete the transition now
     // that the transcript hash is verified.
     if (_userConfirmedSas) {
-      _userConfirmedSas = false;
-      state = state.copyWith(status: PairingStatus.transferring);
-      final pending = _pendingPayload;
-      if (pending != null) {
-        _pendingPayload = null;
-        _handlePayload(pending);
-      }
+      unawaited(_continueAfterSas());
     }
     // Otherwise stay in confirmingSas — user must still confirm via confirmSas().
+  }
+
+  bool _exportIdentityIsCurrent() {
+    final authorizedCommunity = _identityExportCommunity;
+    final currentConfig = ref.read(relayConfigProvider);
+    return authorizedCommunity != null &&
+        authorizedCommunity.nsec != null &&
+        authorizedCommunity.nsec!.isNotEmpty &&
+        authorizedCommunity.nsec == currentConfig.nsec &&
+        authorizedCommunity.relayUrl == currentConfig.storedOrigin;
+  }
+
+  void _sendIdentityPayload() {
+    if (!_exportIdentityIsCurrent()) {
+      _sendAbort('identity_changed');
+      _cleanup();
+      state = const PairingState(
+        status: PairingStatus.error,
+        errorMessage:
+            'The active community changed. Start identity export again.',
+      );
+      return;
+    }
+    final nsec = _identityExportCommunity!.nsec!;
+    final content = _encryptMessage({
+      'type': 'payload',
+      'payload_type': 'nsec',
+      'payload': nsec,
+    });
+    _publishEvent(
+      kind: 24134,
+      content: content,
+      tags: [
+        ['p', _sourcePubkey!],
+      ],
+    );
   }
 
   void _handlePayload(Map<String, dynamic> msg) {
@@ -426,6 +664,7 @@ class PairingNotifier extends Notifier<PairingState> {
     final payloadType = msg['payload_type'] as String?;
     final payload = msg['payload'] as String?;
     if (payload == null) {
+      _cleanup();
       state = const PairingState(
         status: PairingStatus.error,
         errorMessage: 'Received empty payload from source.',
@@ -433,7 +672,32 @@ class PairingNotifier extends Notifier<PairingState> {
       return;
     }
 
-    _processPayload(payloadType, payload);
+    final pairingGeneration = _pairingGeneration;
+    final protectSensitiveActions = state.protectSensitiveActions;
+    unawaited(
+      _processPayload(
+        payloadType,
+        payload,
+        pairingGeneration: pairingGeneration,
+        protectSensitiveActions: protectSensitiveActions,
+      ),
+    );
+  }
+
+  void _handleComplete(Map<String, dynamic> msg) {
+    if (!_sendIdentityToSource || state.status != PairingStatus.transferring) {
+      return;
+    }
+    if (msg['success'] != true) {
+      _cleanup();
+      state = const PairingState(
+        status: PairingStatus.error,
+        errorMessage: 'Desktop could not store the identity.',
+      );
+      return;
+    }
+    _cleanup();
+    state = const PairingState(status: PairingStatus.success);
   }
 
   void _handleAbort(Map<String, dynamic> msg) {
@@ -445,7 +709,12 @@ class PairingNotifier extends Notifier<PairingState> {
     );
   }
 
-  Future<void> _processPayload(String? payloadType, String payload) async {
+  Future<void> _processPayload(
+    String? payloadType,
+    String payload, {
+    required int pairingGeneration,
+    required bool protectSensitiveActions,
+  }) async {
     try {
       // Parse the custom payload.
       final data = jsonDecode(payload) as Map<String, dynamic>;
@@ -461,7 +730,13 @@ class PairingNotifier extends Notifier<PairingState> {
       _validateRelayUrl(relayUrl);
 
       // Validate credentials against the relay via NIP-42 WS handshake.
-      await _validateCredentials(relayUrl: relayUrl, nsec: nsec);
+      final credentialValidator = _credentialValidator ?? _validateCredentials;
+      await credentialValidator(relayUrl: relayUrl, nsec: nsec);
+      if (pairingGeneration != _pairingGeneration ||
+          state.status != PairingStatus.storing ||
+          _sendIdentityToSource) {
+        return;
+      }
 
       // Send complete only after credentials are validated.
       _sendComplete(true);
@@ -472,14 +747,27 @@ class PairingNotifier extends Notifier<PairingState> {
         relayUrl: relayUrl,
         pubkey: pubkey,
         nsec: nsec,
+        sensitiveActionPolicy: protectSensitiveActions
+            ? SensitiveActionPolicy.enabled
+            : SensitiveActionPolicy.disabledByUser,
       );
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
+      if (pairingGeneration != _pairingGeneration ||
+          state.status != PairingStatus.storing ||
+          _sendIdentityToSource) {
+        return;
+      }
 
       _cleanup();
       state = const PairingState(status: PairingStatus.success);
     } catch (e) {
+      if (pairingGeneration != _pairingGeneration ||
+          state.status != PairingStatus.storing ||
+          _sendIdentityToSource) {
+        return;
+      }
       _sendComplete(false);
       _cleanup();
       state = PairingState(
@@ -561,26 +849,28 @@ class PairingNotifier extends Notifier<PairingState> {
   // ── Legacy buzz:// flow ───────────────────────────────────────────────
 
   Future<void> _pairLegacy(String rawInput) async {
+    final generation = _pairingGeneration;
     state = const PairingState(status: PairingStatus.connecting);
 
     try {
       final community = _parseLegacyInput(rawInput);
+      final validator = _credentialValidator ?? _validateCredentials;
+      await validator(relayUrl: community.relayUrl, nsec: community.nsec);
 
-      await _validateCredentials(
-        relayUrl: community.relayUrl,
-        nsec: community.nsec,
-      );
-
+      if (generation != _pairingGeneration) return;
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
+      if (generation != _pairingGeneration) return;
       state = const PairingState(status: PairingStatus.success);
     } on FormatException catch (e) {
+      if (generation != _pairingGeneration) return;
       state = PairingState(
         status: PairingStatus.error,
         errorMessage: 'Invalid pairing code: ${e.message}',
       );
     } on RelayException catch (e) {
+      if (generation != _pairingGeneration) return;
       state = PairingState(
         status: PairingStatus.error,
         errorMessage:
@@ -588,6 +878,7 @@ class PairingNotifier extends Notifier<PairingState> {
             'Check that the pairing code is valid.',
       );
     } catch (e) {
+      if (generation != _pairingGeneration) return;
       state = PairingState(
         status: PairingStatus.error,
         errorMessage:
@@ -608,16 +899,18 @@ class PairingNotifier extends Notifier<PairingState> {
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     final wsUrl = uri.replace(scheme: scheme).toString();
 
-    final socket = RelaySocket(
+    final socket = _validationSocketFactory(
       wsUrl: wsUrl,
       nsec: nsec,
       onMessage: (_) {},
       onConnected: () {},
       onDisconnected: (_) {},
     );
+    _validationSocket = socket;
     try {
       await socket.connect().timeout(const Duration(seconds: 8));
     } finally {
+      if (identical(_validationSocket, socket)) _validationSocket = null;
       await socket.disconnect();
     }
   }
@@ -648,6 +941,7 @@ class PairingNotifier extends Notifier<PairingState> {
       relayUrl: relayUrl,
       pubkey: decoded['pubkey'] as String?,
       nsec: decoded['nsec'] as String?,
+      sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
     );
   }
 

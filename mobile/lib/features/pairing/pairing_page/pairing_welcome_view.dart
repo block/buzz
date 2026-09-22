@@ -87,9 +87,10 @@ class _PairingWelcomeView extends StatelessWidget {
                               ? const SizedBox(
                                   width: 20,
                                   height: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
+                                  child: BuzzLoadingIndicator(
+                                    size: 20,
                                     color: _onboardingCtaLabel,
+                                    semanticLabel: 'Opening scanner',
                                   ),
                                 )
                               : const Text('Scan a QR code'),
@@ -173,12 +174,11 @@ class _PairingWelcomeView extends StatelessWidget {
                                             ? const SizedBox(
                                                 width: 20,
                                                 height: 20,
-                                                child:
-                                                    CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                      color:
-                                                          _onboardingCtaLabel,
-                                                    ),
+                                                child: BuzzLoadingIndicator(
+                                                  size: 20,
+                                                  color: _onboardingCtaLabel,
+                                                  semanticLabel: 'Connecting',
+                                                ),
                                               )
                                             : const Text('Connect'),
                                       ),

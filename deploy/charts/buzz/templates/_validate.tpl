@@ -75,10 +75,12 @@ surface at template time regardless of which manifest helm renders first.
   {{- fail "Postgres source missing: enable postgresql.enabled=true, set externalPostgresql.url, or provide secrets.existingSecret with key DATABASE_URL." -}}
 {{- end -}}
 
-{{/* S3 / object-storage source must exist somewhere (relay hard-fails its
-     startup conformance probe without a reachable bucket). */}}
+{{/* S3 / object-storage source must exist somewhere. With the default
+     BUZZ_GIT_CONFORMANCE_PROBE behavior, an unreachable bucket is detected
+     before the relay opens its listener; operators can explicitly disable that
+     startup gate. */}}
 {{- if not (or .Values.minio.enabled .Values.s3.endpoint .Values.secrets.existingSecret) -}}
-  {{- fail "S3/object-storage source missing: enable minio.enabled=true (quickstart in-cluster), set s3.endpoint + s3.bucket + credentials, or provide secrets.existingSecret with keys BUZZ_S3_ACCESS_KEY + BUZZ_S3_SECRET_KEY. The relay runs a startup S3 conformance probe and exits if storage is unreachable." -}}
+  {{- fail "S3/object-storage source missing: enable minio.enabled=true (quickstart in-cluster), set s3.endpoint + s3.bucket + credentials, or provide secrets.existingSecret with keys BUZZ_S3_ACCESS_KEY + BUZZ_S3_SECRET_KEY. By default the relay runs a startup S3 conformance probe and exits if storage is unreachable; disabling BUZZ_GIT_CONFORMANCE_PROBE also removes that startup storage check." -}}
 {{- end -}}
 
 {{- end -}}

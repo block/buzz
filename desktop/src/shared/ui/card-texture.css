@@ -7,6 +7,11 @@
  * fixed and repeats edge texture while the white center fills any card size.
  */
 .buzz-card-textured {
+  --buzz-card-textured-source: url("./assets/card-texture.png");
+  --buzz-card-textured-slice: 416;
+  --buzz-card-textured-width: 208px;
+  --buzz-card-textured-outset: 96px;
+  --buzz-card-textured-min-size: 224px;
   /*
    * The asset has three zones, from outside in:
    *   1. transparent powder bleed (outside the layout box, via outset)
@@ -31,11 +36,41 @@
    * into a smaller height with `--buzz-card-textured-min-height` when the
    * center seam is acceptable for that deliberately compressed surface.
    */
-  min-height: var(--buzz-card-textured-min-height, 224px);
-  min-width: 224px;
-  border-image-source: url("./assets/card-texture.png");
-  border-image-slice: 416 fill;
-  border-image-width: 208px;
-  border-image-outset: 96px;
+  min-height: var(
+    --buzz-card-textured-min-height,
+    var(--buzz-card-textured-min-size)
+  );
+  min-width: var(
+    --buzz-card-textured-min-width,
+    var(--buzz-card-textured-min-size)
+  );
+  border-image-source: var(--buzz-card-textured-source);
+  border-image-slice: var(--buzz-card-textured-slice) fill;
+  border-image-width: var(--buzz-card-textured-width);
+  border-image-outset: var(--buzz-card-textured-outset);
   border-image-repeat: repeat;
+}
+
+/* Dark backup surfaces use a separately baked fill so their content stays
+ * bright; applying `filter: brightness()` to the element would dim children. */
+.buzz-card-textured-dark {
+  --buzz-card-textured-source: url("./assets/card-texture-dark.png");
+}
+
+/*
+ * Popovers, confirmations, and compact callouts need the same powder edge
+ * without the full card's 96px bleed or 224px floor. This independently baked
+ * nine-slice keeps the edge legible at overlay scale.
+ */
+.buzz-card-textured-compact {
+  --buzz-card-textured-source: url("./assets/card-texture-compact.png");
+  --buzz-card-textured-slice: 136;
+  --buzz-card-textured-width: 68px;
+  --buzz-card-textured-outset: 24px;
+  --buzz-card-textured-safe-inset: 1.75rem;
+  --buzz-card-textured-min-size: 136px;
+}
+
+.buzz-card-textured-dark.buzz-card-textured-compact {
+  --buzz-card-textured-source: url("./assets/card-texture-dark-compact.png");
 }

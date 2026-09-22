@@ -20,12 +20,19 @@
 //! newest timestamp and collide on the bumped second. run.sh serialization is
 //! the guard against parallel adds (e.g. `xargs -P`).
 
+mod deletions;
+mod storage_snapshot_startup;
+
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
 use buzz_core::tenant::{relay_url_authority, TenantContext};
 use buzz_db::{Db, DbConfig};
+use buzz_media::{BucketSnapshot, MediaConfig, MediaStorage, S3AddressingStyle, SweepError};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -76,17 +83,33 @@ enum Command {
     GenerateKey,
     /// Run pending database migrations.
     Migrate,
+    /// Compute one complete S3 storage snapshot and persist it for relay readers.
+    StorageSnapshot {
+        /// Abort before folding a page that would exceed this object count.
+        #[arg(long, default_value_t = 10_000_000)]
+        max_objects: u64,
+    },
     /// Inspect deployment-wide Buzz product feedback.
     ProductFeedback {
         #[command(subcommand)]
         command: ProductFeedbackCommand,
     },
-    /// Emit kind:39000/39002 events for channels missing them.
+    /// Durable CLI-only whole-community deletion control plane.
+    Deletions {
+        #[command(subcommand)]
+        command: deletions::DeletionsCommand,
+    },
+    /// Emit missing kind:39000/39001/39002 channel discovery events, or
+    /// republish only a targeted channel's kind:39002 roster.
     ///
-    /// Channels created via direct SQL (seed scripts, pre-migration data) won't
-    /// have Nostr discovery events. This command creates them so pure-nostr
-    /// clients can see those channels. Idempotent — safe to run multiple times.
+    /// Without `--channel`, only channels missing discovery metadata are
+    /// reconciled. With `--channel`, only that channel's member snapshot is
+    /// replaced; canonical metadata and admin events remain untouched.
     ReconcileChannels {
+        /// Optional channel UUID to force-republish.
+        #[arg(long)]
+        channel: Option<String>,
+
         /// Relay private key (hex) for signing events. Falls back to
         /// BUZZ_RELAY_PRIVATE_KEY env var. If neither is set, generates
         /// an ephemeral key (events will be unverifiable after restart).
@@ -142,17 +165,153 @@ async fn run(cli: Cli) -> Result<i32> {
             println!("Database migrations complete.");
             Ok(0)
         }
+        Command::StorageSnapshot { max_objects } => cmd_storage_snapshot(max_objects).await,
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
         Command::ListMembers => cmd_list_members().await,
         Command::ProductFeedback {
             command: ProductFeedbackCommand::List { limit },
         } => cmd_list_product_feedback(limit).await,
-        Command::ReconcileChannels { relay_key } => {
-            reconcile_channels(relay_key).await?;
+        Command::Deletions { command } => deletions::run(command).await,
+        Command::ReconcileChannels { channel, relay_key } => {
+            reconcile_channels(channel, relay_key).await?;
             Ok(0)
         }
     }
+}
+
+async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
+    let max_objects_db = i64::try_from(max_objects)
+        .map_err(|_| anyhow::anyhow!("--max-objects must be at most {}", i64::MAX))?;
+    if max_objects == 0 {
+        return Err(anyhow::anyhow!("--max-objects must be greater than zero"));
+    }
+
+    let db = storage_snapshot_startup::connect_db().await?;
+    let mut leader = db.try_lock_storage_accounting().await?.ok_or_else(|| {
+        anyhow::anyhow!("another storage-snapshot worker already holds the lease")
+    })?;
+    let storage = Arc::new(MediaStorage::new(&storage_config_from_env()?)?);
+    let code_sha =
+        std::env::var("BUZZ_STORAGE_SNAPSHOT_CODE_SHA").unwrap_or_else(|_| "unknown".to_string());
+    if code_sha.is_empty() || code_sha.len() > 128 {
+        return Err(anyhow::anyhow!(
+            "BUZZ_STORAGE_SNAPSHOT_CODE_SHA must contain 1 to 128 bytes"
+        ));
+    }
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "storage_snapshot_started",
+            "max_objects": max_objects,
+            "code_sha": code_sha,
+        })
+    );
+    let run_started = Instant::now();
+    let listed_objects = Arc::new(AtomicU64::new(0));
+    let fold = buzz_media::fold_bucket_listing(max_objects, move |token| {
+        let storage = Arc::clone(&storage);
+        let listed_objects = Arc::clone(&listed_objects);
+        async move {
+            let page = storage.list_page(token, 1000).await?;
+            let page_objects = u64::try_from(page.objects.len()).unwrap_or(u64::MAX);
+            let before = listed_objects.fetch_add(page_objects, Ordering::Relaxed);
+            let after = before.saturating_add(page_objects);
+            if before / 100_000 != after / 100_000 {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "storage_snapshot_progress",
+                        "listed_objects": after,
+                        "max_objects": max_objects,
+                    })
+                );
+            }
+            Ok(page)
+        }
+    });
+    let snapshot_code_sha = code_sha.clone();
+    let persisted = persist_completed_fold(fold, move |encoded, duration_ms| async move {
+        leader
+            .save_snapshot(&encoded, duration_ms, max_objects_db, &snapshot_code_sha)
+            .await?;
+        Ok(())
+    })
+    .await;
+    let (snapshot, duration_ms) = match persisted {
+        Ok(completed) => completed,
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "storage_snapshot_failed",
+                    "duration_ms": i64::try_from(run_started.elapsed().as_millis()).unwrap_or(i64::MAX),
+                    "max_objects": max_objects,
+                    "code_sha": code_sha,
+                    "error": error.to_string(),
+                })
+            );
+            return Err(error);
+        }
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "storage_snapshot_completed",
+            "duration_ms": duration_ms,
+            "listed_objects": snapshot.physical_objects,
+            "listed_bytes": snapshot.physical_bytes,
+            "logical_objects": snapshot.logical_objects,
+            "logical_bytes": snapshot.logical_bytes,
+            "max_objects": max_objects,
+            "code_sha": code_sha,
+        })
+    );
+    Ok(0)
+}
+
+async fn persist_completed_fold<FoldFuture, Persist, PersistFuture>(
+    fold: FoldFuture,
+    persist: Persist,
+) -> Result<(BucketSnapshot, i64)>
+where
+    FoldFuture: Future<Output = std::result::Result<BucketSnapshot, SweepError>>,
+    Persist: FnOnce(serde_json::Value, i64) -> PersistFuture,
+    PersistFuture: Future<Output = Result<()>>,
+{
+    let started = Instant::now();
+    let snapshot = fold.await?;
+    let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    let encoded = serde_json::to_value(&snapshot)?;
+    persist(encoded, duration_ms).await?;
+    Ok((snapshot, duration_ms))
+}
+
+fn storage_config_from_env() -> Result<MediaConfig> {
+    let required = |name: &str| {
+        std::env::var(name).map_err(|_| anyhow::anyhow!("{name} must be set for storage-snapshot"))
+    };
+    let addressing_style = std::env::var("BUZZ_S3_ADDRESSING_STYLE")
+        .unwrap_or_else(|_| "path".to_string())
+        .parse::<S3AddressingStyle>()
+        .map_err(anyhow::Error::msg)?;
+    Ok(MediaConfig {
+        s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT").unwrap_or_default(),
+        s3_access_key: std::env::var("BUZZ_S3_ACCESS_KEY").unwrap_or_default(),
+        s3_secret_key: std::env::var("BUZZ_S3_SECRET_KEY").unwrap_or_default(),
+        s3_bucket: required("BUZZ_S3_BUCKET")?,
+        s3_region: std::env::var("BUZZ_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+        s3_addressing_style: addressing_style,
+        max_image_bytes: 1,
+        max_gif_bytes: 1,
+        max_video_bytes: 1,
+        max_file_bytes: 1,
+        public_base_url: "http://storage-snapshot.invalid/media".to_string(),
+        upload_records_enabled: false,
+        upload_ip_header: None,
+        upload_port_header: None,
+    })
 }
 
 async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
@@ -418,14 +577,17 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
 }
 
 async fn connect_db() -> Result<Db> {
+    Ok(Db::new(&db_config_from_env()).await?)
+}
+
+fn db_config_from_env() -> DbConfig {
     let db_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
-    let db = Db::new(&DbConfig {
+    DbConfig {
         database_url: db_url,
         ..DbConfig::default()
-    })
-    .await?;
-    Ok(db)
+    }
+    .with_session_timeouts_from_env()
 }
 
 /// Resolve the deployment's tenant from the configured `RELAY_URL` host.
@@ -458,14 +620,26 @@ async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
     Ok(TenantContext::resolved(record.id, record.host))
 }
 
-async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
+async fn reconcile_channels(
+    channel_arg: Option<String>,
+    relay_key_arg: Option<String>,
+) -> Result<()> {
     use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
     use buzz_db::event::EventQuery;
 
     let db = connect_db().await?;
 
-    // Resolve relay signing key: arg > env > ephemeral
-    let relay_keys = match relay_key_arg.or_else(|| std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok()) {
+    // Resolve relay signing key: arg > env > ephemeral. Force-republish must
+    // never use an ephemeral key because it replaces an existing authoritative
+    // snapshot.
+    let configured_relay_key =
+        relay_key_arg.or_else(|| std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok());
+    if channel_arg.is_some() && configured_relay_key.is_none() {
+        return Err(anyhow::anyhow!(
+            "--channel requires --relay-key or BUZZ_RELAY_PRIVATE_KEY"
+        ));
+    }
+    let relay_keys = match configured_relay_key {
         Some(key_hex) => {
             Keys::parse(&key_hex).map_err(|e| anyhow::anyhow!("invalid relay key: {e}"))?
         }
@@ -482,7 +656,21 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
     };
 
     let tenant = resolve_admin_tenant(&db).await?;
-    let channels = db.list_channels(tenant.community(), None).await?;
+    let target_channel = channel_arg
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid --channel UUID: {e}"))?;
+    let channels = if let Some(target) = target_channel {
+        vec![db
+            .get_channel(tenant.community(), target)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("channel {target} not found in community {}", tenant.host())
+            })?]
+    } else {
+        db.list_channels(tenant.community(), None).await?
+    };
     if channels.is_empty() {
         println!("No channels in database.");
         return Ok(());
@@ -505,57 +693,64 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
             .await
             .unwrap_or_default();
 
-        if !existing.is_empty() {
+        if !existing.is_empty() && target_channel.is_none() {
             skipped += 1;
             continue;
         }
 
         let members = db.get_members(tenant.community(), channel.id).await?;
 
-        // kind:39000 — channel metadata
-        {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            tags.push(Tag::parse(["name", &channel.name])?);
-            if let Some(ref desc) = channel.description {
-                if !desc.is_empty() {
-                    tags.push(Tag::parse(["about", desc])?);
-                }
-            }
-            if channel.visibility == "private" {
-                tags.push(Tag::parse(["private"])?);
-            } else {
-                tags.push(Tag::parse(["public"])?);
-            }
-            if channel.channel_type == "dm" {
-                tags.push(Tag::parse(["hidden"])?);
-            }
-            tags.push(Tag::parse(["closed"])?);
-            tags.push(Tag::parse(["t", &channel.channel_type])?);
-
-            let event = EventBuilder::new(Kind::Custom(39000), "")
-                .tags(tags)
-                .sign_with_keys(&relay_keys)
-                .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                .await?;
-        }
-
-        // kind:39001 — admins
-        {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            for m in members
-                .iter()
-                .filter(|m| m.role == "owner" || m.role == "admin")
+        // A targeted repair is deliberately roster-only. kind:39000 metadata
+        // is richer than this legacy backfill builder, and kind:39001 is not
+        // part of the stale-roster incident; replacing either can destroy
+        // canonical state. Full backfill still creates all three event kinds
+        // for channels with no discovery metadata.
+        if target_channel.is_none() {
+            // kind:39000 — channel metadata
             {
-                let pk = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pk, &m.role])?);
+                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
+                tags.push(Tag::parse(["name", &channel.name])?);
+                if let Some(ref desc) = channel.description {
+                    if !desc.is_empty() {
+                        tags.push(Tag::parse(["about", desc])?);
+                    }
+                }
+                if channel.visibility == "private" {
+                    tags.push(Tag::parse(["private"])?);
+                } else {
+                    tags.push(Tag::parse(["public"])?);
+                }
+                if channel.channel_type == "dm" {
+                    tags.push(Tag::parse(["hidden"])?);
+                }
+                tags.push(Tag::parse(["closed"])?);
+                tags.push(Tag::parse(["t", &channel.channel_type])?);
+
+                let event = EventBuilder::new(Kind::Custom(39000), "")
+                    .tags(tags)
+                    .sign_with_keys(&relay_keys)
+                    .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
+                db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
+                    .await?;
             }
-            let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
-                .tags(tags)
-                .sign_with_keys(&relay_keys)
-                .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                .await?;
+
+            // kind:39001 — admins
+            {
+                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
+                for m in members
+                    .iter()
+                    .filter(|m| m.role == "owner" || m.role == "admin")
+                {
+                    let pk = hex::encode(&m.pubkey);
+                    tags.push(Tag::parse(["p", &pk, &m.role])?);
+                }
+                let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
+                    .tags(tags)
+                    .sign_with_keys(&relay_keys)
+                    .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
+                db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
+                    .await?;
+            }
         }
 
         // kind:39002 — members
@@ -581,4 +776,28 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod storage_snapshot_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_fold_never_invokes_snapshot_persistence() {
+        let persist_calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&persist_calls);
+        let result = persist_completed_fold(
+            async { Err::<BucketSnapshot, _>(SweepError::MalformedPage) },
+            move |_, _| async move {
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(persist_calls.load(Ordering::SeqCst), 0);
+    }
 }

@@ -16,7 +16,8 @@ function entry(overrides) {
     modelEnvVar: null,
     providerEnvVar: null,
     thinkingEnvVar: null,
-    installHint: "Install the amp-acp npm adapter: npm install -g amp-acp.",
+    installHint:
+      "Buzz talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
     installInstructionsUrl: "https://example.com",
     canAutoInstall: false,
     requiresExternalCli: false,
@@ -43,7 +44,7 @@ test("not-installed warning includes the install hint", () => {
   const warning = runtimeAvailabilityWarning(entry({}));
   assert.equal(
     warning,
-    "Amp is not installed. Install the amp-acp npm adapter: npm install -g amp-acp.",
+    "Amp is not installed. Buzz talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
   );
 });
 
@@ -62,7 +63,7 @@ test("adapter-missing warning names the adapter and includes the hint", () => {
     warning ?? "",
     /CLI is installed but the ACP adapter is missing/,
   );
-  assert.match(warning ?? "", /npm install -g amp-acp/);
+  assert.match(warning ?? "", /amp-acp command is on your PATH/);
 });
 
 test("cli-missing external-CLI warning keeps the hint", () => {

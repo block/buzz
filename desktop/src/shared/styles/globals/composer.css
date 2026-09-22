@@ -1,12 +1,67 @@
+.composer-dock {
+  --composer-dock-active-rail: 2.125rem;
+  --composer-dock-activity-bottom: 0.5rem;
+  --composer-dock-quiet-inset: 1.25rem;
+  --composer-dock-release: calc(
+    var(--composer-dock-active-rail) -
+    var(--composer-dock-quiet-inset)
+  );
+
+  padding-bottom: var(--composer-dock-quiet-inset);
+  transition: padding-bottom 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.composer-dock--with-activity {
+  padding-bottom: var(--composer-dock-active-rail);
+}
+
+.composer-dock-quiet-spacer {
+  height: var(--composer-dock-release);
+  transition: height 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.composer-dock--with-activity .composer-dock-quiet-spacer {
+  height: 0;
+}
+
+.composer-dock-rail-mask {
+  height: var(--composer-dock-quiet-inset);
+  transition: height 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.composer-dock--with-activity .composer-dock-rail-mask {
+  height: var(--composer-dock-active-rail);
+}
+
+.composer-dock-activity {
+  bottom: var(--composer-dock-activity-bottom);
+}
+
 .composer-overlay-corner-masks::before,
 .composer-overlay-corner-masks::after {
   position: absolute;
-  bottom: 2.5rem;
+  bottom: var(--composer-dock-quiet-inset);
   z-index: 0;
   width: 1rem;
   height: 1rem;
   background: hsl(var(--background));
   content: "";
+  transition: bottom 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.composer-dock--with-activity.composer-overlay-corner-masks::before,
+.composer-dock--with-activity.composer-overlay-corner-masks::after {
+  bottom: var(--composer-dock-active-rail);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-dock,
+  .composer-dock-quiet-spacer,
+  .composer-dock-rail-mask,
+  .composer-overlay-corner-masks::before,
+  .composer-overlay-corner-masks::after {
+    transition: none;
+  }
 }
 
 .composer-overlay-corner-masks::before {
@@ -38,10 +93,10 @@
 }
 
 .rich-text-composer .tiptap {
+  @apply text-message font-normal tracking-normal;
   outline: none;
   min-height: 1lh;
-  font-size: var(--text-sm);
-  line-height: var(--text-sm--line-height);
+  padding-block: 0.0625rem;
 }
 
 .rich-text-composer .tiptap p {
@@ -200,4 +255,67 @@
 
 /* Inline chips — timeline markdown + composer share `.message-markdown` scope.
    Body copy is text-sm; inline code labels sit one step down (text-xs).
-   All chip variants share one box height so mono labels stay balanced. */
+   All chip variants share one box height so mono labels stay balanced.
+
+   Plain-text mention decorations stay inline because inline-flex pulls the
+   caret into their decorated range and swallows the trailing space after an
+   @mention. Their generated icon participates in the first line's inline
+   flow: absolute positioning anchors it to the union of every wrapped line,
+   and icon-sized left padding is cloned onto every continuation fragment.
+   Composer Buzz links are atom nodes with their own leading-fragment wrapper. */
+.rich-text-composer .tiptap .mention-chip {
+  overflow-wrap: anywhere;
+  white-space: normal;
+  display: inline;
+  min-height: 0;
+  line-height: calc(
+    1em +
+    var(--inline-chip-padding-block-start) +
+    var(--inline-chip-padding-block-end)
+  );
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.inline-chip-with-icon:not(.wrapping-inline-chip) {
+  padding-left: var(--inline-chip-padding-inline);
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.inline-chip-with-icon:not(.wrapping-inline-chip)::before {
+  position: static;
+  display: inline-block;
+  margin-right: var(--inline-chip-icon-gap);
+  transform: none;
+  vertical-align: -0.125em;
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.inline-chip-icon-human:not(.wrapping-inline-chip)::before {
+  transform: translateY(0.0625rem);
+}
+
+/* Full-key literal decorations can split at any character (including into multiple
+   spans where highlight patterns overlap). Paint the actual @/# prefix rather
+   than absolutely positioned icons, which overlap labels or wrapped key lines.
+   Cloned padding must not extend a wrapped key past the editable line box. */
+.rich-text-composer .tiptap
+  .mention-chip.mention-literal-key:not(.wrapping-inline-chip) {
+  padding-inline: 0;
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.mention-literal-key:not(.wrapping-inline-chip)::before {
+  display: none;
+}
+
+.rich-text-composer .tiptap .mention-prefix-hidden.mention-literal-key {
+  display: inline;
+  width: auto;
+  max-width: none;
+  overflow: visible;
+  opacity: 1;
+}

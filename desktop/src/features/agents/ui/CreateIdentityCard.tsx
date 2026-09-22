@@ -6,7 +6,7 @@ import { cn } from "@/shared/lib/cn";
 type CreateIdentityCardProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   ariaLabel: string;
   dataTestId: string;
-  label: string;
+  label?: string;
 };
 
 export const CreateIdentityCard = React.forwardRef<
@@ -30,7 +30,9 @@ export const CreateIdentityCard = React.forwardRef<
     >
       <span className="flex flex-col items-center justify-center gap-2 text-center">
         <Plus className="h-7 w-7 transition-colors" />
-        <span className="text-sm font-medium leading-5">{label}</span>
+        {label ? (
+          <span className="text-sm font-medium leading-5">{label}</span>
+        ) : null}
       </span>
     </button>
   );

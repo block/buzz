@@ -113,3 +113,18 @@ test("channel-presence fence applies before mute filter — unknown channel + mu
 
   assert.deepEqual(items, []);
 });
+
+test("top-level DM activity is included in Activity", () => {
+  const dmItem = threadActivityItem({
+    id: "agent-dm-reply",
+    tags: [["h", CHANNEL_ID]],
+  });
+  const channels = [{ id: CHANNEL_ID, name: "Agent DM", channelType: "dm" }];
+
+  assert.deepEqual(
+    buildThreadActivityFeedItems([dmItem], new Set(), channels).map(
+      (item) => item.id,
+    ),
+    ["agent-dm-reply"],
+  );
+});

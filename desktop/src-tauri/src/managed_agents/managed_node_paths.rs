@@ -4,7 +4,7 @@ pub(crate) fn buzz_managed_npm_prefix() -> Option<PathBuf> {
     dirs::data_dir().map(|dir| dir.join("Buzz").join("node-tools"))
 }
 
-const BUZZ_MANAGED_NODE_VERSION: &str = "v24.11.0";
+const BUZZ_MANAGED_NODE_VERSION: &str = "v24.18.0";
 
 pub(crate) fn buzz_managed_node_root() -> Option<PathBuf> {
     dirs::data_dir().map(|dir| dir.join("Buzz").join("runtimes").join("node"))

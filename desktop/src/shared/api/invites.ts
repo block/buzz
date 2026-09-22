@@ -1,5 +1,9 @@
 import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
-import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
+import {
+  getRelayHttpUrl,
+  invokeTauri,
+  signRelayEvent,
+} from "@/shared/api/tauri";
 
 // Relay invite data layer. Both endpoints are NIP-98-authed HTTP POSTs
 // (mirrors the read path in moderation.ts, plus the payload tag the relay
@@ -21,6 +25,8 @@ export type MintedInvite = {
   code: string;
   expiresAt: number;
   url: string;
+  maxUses: number | null;
+  usesRemaining: number | null;
 };
 
 export type JoinPolicy = {
@@ -124,26 +130,38 @@ export function isJoinPolicyDiscoveryCandidate(relayWsUrl: string): boolean {
 /** Fetch relay-hosted policy content for any join surface. */
 export async function getJoinPolicy(
   relayWsUrl: string,
+  transport: "native" | "webview",
 ): Promise<JoinPolicy | null> {
-  const base = relayHttpFromWs(relayWsUrl);
-  const response = await fetch(`${base.replace(/\/+$/, "")}/api/join-policy`);
-  // Relays predating join-policy support have no configured policy.
-  if (response.status === 404) return null;
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const raw = (await response.json()) as {
-    policy?: {
-      terms_markdown?: string;
-      privacy_markdown?: string;
-      age_attestation_required: boolean;
-      version: string;
-    };
+  type RawJoinPolicy = {
+    terms_markdown?: string;
+    privacy_markdown?: string;
+    age_attestation_required: boolean;
+    version: string;
   };
-  return raw.policy
+  let raw: RawJoinPolicy | null;
+  if (transport === "native") {
+    raw = await invokeTauri<RawJoinPolicy | null>("fetch_join_policy", {
+      relayUrl: relayWsUrl,
+    });
+  } else {
+    const base = relayHttpFromWs(relayWsUrl);
+    const response = await fetch(`${base.replace(/\/+$/, "")}/api/join-policy`);
+    // Relays predating join-policy support have no configured policy.
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    raw =
+      (
+        (await response.json()) as {
+          policy?: RawJoinPolicy;
+        }
+      ).policy ?? null;
+  }
+  return raw
     ? {
-        termsMarkdown: raw.policy.terms_markdown,
-        privacyMarkdown: raw.policy.privacy_markdown,
-        ageAttestationRequired: raw.policy.age_attestation_required,
-        version: raw.policy.version,
+        termsMarkdown: raw.terms_markdown,
+        privacyMarkdown: raw.privacy_markdown,
+        ageAttestationRequired: raw.age_attestation_required,
+        version: raw.version,
       }
     : null;
 }
@@ -173,15 +191,29 @@ export async function acceptJoinPolicy(
 }
 
 /** Mint an invite code on the active community's relay (owner/admin only). */
-export async function mintInvite(ttlSecs?: number): Promise<MintedInvite> {
+export async function mintInvite(options?: {
+  ttlSecs?: number;
+  maxUses?: number | null;
+}): Promise<MintedInvite> {
   const base = await getRelayHttpUrl();
-  const body = JSON.stringify(ttlSecs ? { ttl_secs: ttlSecs } : {});
+  const payload: Record<string, unknown> = {};
+  if (options?.ttlSecs != null) payload.ttl_secs = options.ttlSecs;
+  if (options?.maxUses != null) payload.max_uses = options.maxUses;
+  const body = JSON.stringify(payload);
   const raw = await invitePost<{
     code: string;
     expires_at: number;
     url: string;
+    max_uses: number | null;
+    uses_remaining: number | null;
   }>(base, "/api/invites", body);
-  return { code: raw.code, expiresAt: raw.expires_at, url: raw.url };
+  return {
+    code: raw.code,
+    expiresAt: raw.expires_at,
+    url: raw.url,
+    maxUses: raw.max_uses,
+    usesRemaining: raw.uses_remaining,
+  };
 }
 
 /**
