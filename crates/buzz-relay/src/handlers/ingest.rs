@@ -439,6 +439,14 @@ pub struct IngestResult {
 pub enum IngestError {
     /// Client error (bad event) — WS: OK false, HTTP: 400.
     Rejected(String),
+    /// Canvas CAS precondition failure — WS: OK false, HTTP: 409.
+    ///
+    /// Emitted when a canvas write's `expected-revision` tag no longer matches
+    /// the relay's canonical head: the revision is missing, has changed, or the
+    /// new event does not supersede the current one.  Kept separate from
+    /// [`IngestError::Rejected`] so the HTTP bridge can map it to
+    /// `409 CONFLICT` while generic client mistakes remain `400 BAD_REQUEST`.
+    CanvasConflict(String),
     /// Auth/scope error — WS: OK false, HTTP: 401/403.
     AuthFailed(String),
     /// Server error — WS: OK false, HTTP: 500.
@@ -3285,17 +3293,17 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
         match status {
             buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
-                return Err(IngestError::Rejected(
+                return Err(IngestError::CanvasConflict(
                     "conflict: canvas revision does not exist".into(),
                 ));
             }
             buzz_db::ChannelHeadWriteStatus::RevisionMismatch => {
-                return Err(IngestError::Rejected(
+                return Err(IngestError::CanvasConflict(
                     "conflict: canvas changed since it was loaded".into(),
                 ));
             }
             buzz_db::ChannelHeadWriteStatus::SupersedeFailed => {
-                return Err(IngestError::Rejected(
+                return Err(IngestError::CanvasConflict(
                     "conflict: canvas write does not supersede the current head".into(),
                 ));
             }
@@ -6242,8 +6250,8 @@ mod postgres_tests {
                 Err(e) => e,
             };
         assert!(
-            matches!(&err, IngestError::Rejected(msg) if msg.starts_with("conflict:")),
-            "stale write must return a conflict: rejection; got {:?}",
+            matches!(&err, IngestError::CanvasConflict(msg) if msg.starts_with("conflict:")),
+            "stale write must return a canvas conflict: rejection; got {:?}",
             err,
         );
 

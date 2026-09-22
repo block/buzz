@@ -1041,6 +1041,19 @@ async fn submit_event_authed(
                 response: api_error(StatusCode::BAD_REQUEST, &msg),
             }
         }
+        Err(IngestError::CanvasConflict(msg)) => {
+            // Canvas CAS precondition failures are a distinct HTTP 409 so the
+            // CLI's reconciliation branch (which gates on `status == 409`) is
+            // reachable against the live relay.  The message body is unchanged;
+            // the desktop TypeScript layer matches on message text, not status.
+            let reason = truncate_reason(&msg, REJECT_REASON_MAX_BYTES).to_owned();
+            crate::handlers::ingest::reject_with_transport("http", "invalid");
+            SubmitOutcome::Rejected {
+                kind: kind_u32,
+                reason,
+                response: api_error(StatusCode::CONFLICT, &msg),
+            }
+        }
         Err(IngestError::AuthFailed(msg)) => {
             crate::handlers::ingest::reject_with_transport("http", "auth");
             let e = api_error(StatusCode::FORBIDDEN, &msg);
@@ -4344,6 +4357,148 @@ mod postgres_tests {
             "rejection body must name the canvas guard (not the membership check). \
              Got: {body}; mutation oracle: delete the guard call site → body becomes \
              'not a channel member'",
+        );
+    }
+
+    /// Wire-pinning test: a canvas CAS conflict must reach the HTTP client as
+    /// **409 CONFLICT**, not 400.
+    ///
+    /// The relay's `IngestError::CanvasConflict` variant maps to `409` via the
+    /// `bridge.rs` HTTP handler.  The CLI reconciliation branch gates on
+    /// `status == 409`; if the bridge emits `400` instead the reconciliation
+    /// path is dead code against the live relay.
+    ///
+    /// Scenario:
+    /// 1. POST canvas event A (no `expected-revision` tag) → 200, head = A.
+    /// 2. POST canvas event B with `expected-revision: <A-id>` → 200, head = B.
+    /// 3. POST canvas event C with `expected-revision: <A-id>` (stale, A ≠ B)
+    ///    → 409 with a body containing `"canvas changed since it was loaded"`.
+    ///
+    /// Mutation oracle: mapping `IngestError::CanvasConflict` to
+    /// `StatusCode::BAD_REQUEST` (reverting the fix) makes step 3 return 400
+    /// and fails both assertions.
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn canvas_cas_conflict_yields_409_through_http_bridge() {
+        use buzz_core::kind::KIND_CANVAS;
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use uuid::Uuid;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+
+        let Some(state) = rt.block_on(bridge_handler_test_state()) else {
+            panic!("local Postgres not reachable — start Postgres on 127.0.0.1:5432 before running ignored bridge handler tests");
+        };
+
+        let (host, channel_id) = rt.block_on(async {
+            let h = format!("canvas-cas-409-wiring-{}.local", Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&h)
+                .await
+                .expect("ensure community");
+            let creator_keys = Keys::generate();
+            let (channel, _) = state
+                .db
+                .create_channel_with_id(
+                    community.id,
+                    Uuid::new_v4(),
+                    &format!("canvas-cas-409-{}", Uuid::new_v4().simple()),
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    creator_keys.public_key().to_bytes().as_slice(),
+                    None,
+                )
+                .await
+                .expect("create test channel");
+            (h, channel.id.to_string())
+        });
+
+        let author_keys = Keys::generate();
+        let pubkey_hex = author_keys.public_key().to_hex();
+
+        let relay_now = chrono::Utc::now().timestamp() as u64;
+
+        // Step 1: unconditional first write — establishes head A.
+        let event_a = EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# first canvas")
+            .tag(Tag::parse(["h", channel_id.as_str()]).expect("h tag"))
+            .custom_created_at(nostr::Timestamp::from(relay_now))
+            .sign_with_keys(&author_keys)
+            .expect("sign canvas event A");
+        let event_a_id = event_a.id.to_hex();
+        let body_a = serde_json::to_vec(&event_a).expect("serialize event A");
+
+        let (status_a, _) = rt.block_on(post_events_with_body(
+            state.clone(),
+            &host,
+            &pubkey_hex,
+            &body_a,
+        ));
+        assert_eq!(
+            status_a,
+            axum::http::StatusCode::OK,
+            "first canvas write must be accepted"
+        );
+
+        // Step 2: write B on top of A — advances head so A is no longer current.
+        let event_b = EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# second canvas (on A)")
+            .tag(Tag::parse(["h", channel_id.as_str()]).expect("h tag"))
+            .tag(
+                Tag::parse(["expected-revision", event_a_id.as_str()])
+                    .expect("expected-revision tag"),
+            )
+            .custom_created_at(nostr::Timestamp::from(relay_now + 1))
+            .sign_with_keys(&author_keys)
+            .expect("sign canvas event B");
+        let body_b = serde_json::to_vec(&event_b).expect("serialize event B");
+
+        let (status_b, _) = rt.block_on(post_events_with_body(
+            state.clone(),
+            &host,
+            &pubkey_hex,
+            &body_b,
+        ));
+        assert_eq!(
+            status_b,
+            axum::http::StatusCode::OK,
+            "second canvas write (B on A) must be accepted"
+        );
+
+        // Step 3: stale write C with the same `expected-revision: A` — A is no
+        // longer the head (B is), so this must be a CAS conflict → HTTP 409.
+        // Mutation oracle: reverting IngestError::CanvasConflict → BAD_REQUEST
+        // in bridge.rs makes this return 400 and both assertions below fail.
+        let event_c = EventBuilder::new(
+            Kind::Custom(KIND_CANVAS as u16),
+            "# stale write (still on A)",
+        )
+        .tag(Tag::parse(["h", channel_id.as_str()]).expect("h tag"))
+        .tag(Tag::parse(["expected-revision", event_a_id.as_str()]).expect("expected-revision tag"))
+        .custom_created_at(nostr::Timestamp::from(relay_now + 2))
+        .sign_with_keys(&author_keys)
+        .expect("sign canvas event C");
+        let body_c = serde_json::to_vec(&event_c).expect("serialize event C");
+
+        let (status_c, body_text) = rt.block_on(post_events_with_body(
+            state.clone(),
+            &host,
+            &pubkey_hex,
+            &body_c,
+        ));
+
+        assert_eq!(
+            status_c,
+            axum::http::StatusCode::CONFLICT,
+            "stale canvas CAS write must yield 409 CONFLICT (not 400); body: {body_text}"
+        );
+        assert!(
+            body_text.contains("canvas changed since it was loaded"),
+            "409 body must contain the canonical conflict message. \
+             Got: {body_text}; mutation oracle: revert CanvasConflict → BAD_REQUEST → status 400"
         );
     }
 
