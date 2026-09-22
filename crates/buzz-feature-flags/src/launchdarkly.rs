@@ -9,6 +9,7 @@ use crate::{BooleanFlag, EvaluationContext, FlagEvaluator, IntegerFlag};
 
 const COMMUNITY_CONTEXT_KIND: &str = "community";
 const PUBKEY_CONTEXT_KIND: &str = "pubkey";
+const JSON_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
 
 /// Runtime inputs required to initialize a LaunchDarkly-backed evaluator.
 #[derive(Clone)]
@@ -151,9 +152,30 @@ impl FlagEvaluator for LaunchDarklyEvaluator {
             Ok(context) => context,
             Err(_) => return flag.default(),
         };
-        self.client
-            .int_variation(&context, flag.key(), flag.default())
+
+        let detail =
+            self.client
+                .float_variation_detail(&context, flag.key(), flag.default() as f64);
+
+        let Some(value) = detail.value else {
+            return flag.default();
+        };
+
+        strict_f64_to_i64(value).unwrap_or_else(|| flag.default())
     }
+}
+
+fn strict_f64_to_i64(value: f64) -> Option<i64> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return None;
+    }
+
+    if value.abs() > JSON_SAFE_INTEGER_MAX as f64 {
+        return None;
+    }
+
+    let integer = value as i64;
+    (integer as f64 == value).then_some(integer)
 }
 
 fn launchdarkly_context(context: &EvaluationContext) -> Result<Context, String> {
@@ -427,6 +449,90 @@ mod tests {
         assert_eq!(
             evaluator.evaluate_int(IntegerFlag::new("relay.feature.int-bool", -5), &context),
             -5
+        );
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn fractional_integer_variation_falls_back_to_declared_default() {
+        let test_data = TestData::new();
+        test_data.update(
+            FlagBuilder::new("relay.feature.int-fractional-positive")
+                .value_for_all(FlagValue::from(17.75_f64)),
+        );
+        test_data.update(
+            FlagBuilder::new("relay.feature.int-fractional-negative")
+                .value_for_all(FlagValue::from(-17.75_f64)),
+        );
+        let evaluator = started_evaluator(&test_data).await;
+        let context = EvaluationContext::for_actor(
+            community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            actor(),
+        );
+
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("relay.feature.int-fractional-positive", 123),
+                &context,
+            ),
+            123
+        );
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("relay.feature.int-fractional-negative", -456),
+                &context,
+            ),
+            -456
+        );
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn integer_variation_honors_json_safe_integer_boundaries() {
+        let test_data = TestData::new();
+        test_data.update(
+            FlagBuilder::new("relay.feature.int-safe-max")
+                .value_for_all(FlagValue::from(9_007_199_254_740_991_f64)),
+        );
+        test_data.update(
+            FlagBuilder::new("relay.feature.int-safe-min")
+                .value_for_all(FlagValue::from(-9_007_199_254_740_991_f64)),
+        );
+        test_data.update(
+            FlagBuilder::new("relay.feature.int-out-of-range-positive")
+                .value_for_all(FlagValue::from(9_007_199_254_740_992_f64)),
+        );
+        test_data.update(
+            FlagBuilder::new("relay.feature.int-out-of-range-negative")
+                .value_for_all(FlagValue::from(-9_007_199_254_740_992_f64)),
+        );
+        let evaluator = started_evaluator(&test_data).await;
+        let context = EvaluationContext::for_actor(
+            community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            actor(),
+        );
+
+        assert_eq!(
+            evaluator.evaluate_int(IntegerFlag::new("relay.feature.int-safe-max", 0), &context),
+            9_007_199_254_740_991_i64
+        );
+        assert_eq!(
+            evaluator.evaluate_int(IntegerFlag::new("relay.feature.int-safe-min", 0), &context),
+            -9_007_199_254_740_991_i64
+        );
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("relay.feature.int-out-of-range-positive", 11),
+                &context,
+            ),
+            11
+        );
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("relay.feature.int-out-of-range-negative", -12),
+                &context,
+            ),
+            -12
         );
         evaluator.close();
     }
