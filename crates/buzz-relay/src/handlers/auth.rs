@@ -287,6 +287,12 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 .conn_manager
                 .set_authenticated_pubkey(conn_id, pubkey.to_bytes().to_vec());
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
+            // Fire-and-forget: never block AUTH OK on OpenClaw workspace MCP mint.
+            crate::openclaw_workspace_provision::maybe_provision_after_auth(
+                Arc::clone(&state),
+                Arc::clone(&conn),
+                pubkey,
+            );
         }
         Err(e) => {
             warn!(conn_id = %conn_id, error = %e, "NIP-42 auth failed");

@@ -109,6 +109,38 @@ impl std::fmt::Debug for KlipyConfig {
     }
 }
 
+/// Optional OpenClaw workspace MCP mint settings (post-AUTH auto-provision).
+///
+/// Both `mint_url` and `mint_key` must be configured together; partial env is
+/// treated as disabled with a startup warning. The mint key is redacted in
+/// [`Debug`] so dumping [`Config`] cannot disclose it.
+#[derive(Clone)]
+pub struct OpenClawWorkspaceMintConfig {
+    /// Base URL of the openclaw-workspace-gateway (no path suffix).
+    pub mint_url: String,
+    /// Shared mint key (`X-Mint-Key`); redacted in Debug.
+    pub(crate) mint_key: String,
+    /// Optional member-token TTL override in seconds (gateway default applies when unset).
+    pub ttl_secs: Option<u64>,
+}
+
+impl OpenClawWorkspaceMintConfig {
+    /// Shared key for `X-Mint-Key` on non-loopback mint calls.
+    pub(crate) fn mint_key(&self) -> &str {
+        &self.mint_key
+    }
+}
+
+impl std::fmt::Debug for OpenClawWorkspaceMintConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenClawWorkspaceMintConfig")
+            .field("mint_url", &self.mint_url)
+            .field("mint_key", &"[REDACTED]")
+            .field("ttl_secs", &self.ttl_secs)
+            .finish()
+    }
+}
+
 /// Maximum configured jitter, leaving ten seconds of the hard-drain budget for
 /// WebSocket close-frame delivery after the final delayed cancellation.
 pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
@@ -289,6 +321,10 @@ pub struct Config {
     /// Relay-owned KLIPY integration. Unset means GIF search is not advertised
     /// and its proxy routes return 404.
     pub klipy: Option<KlipyConfig>,
+
+    /// Optional OpenClaw workspace MCP auto-provision after NIP-42 AUTH.
+    /// Unset means no mint / no HULA capability push (zero behavior change).
+    pub openclaw_workspace_mint: Option<OpenClawWorkspaceMintConfig>,
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
@@ -713,6 +749,44 @@ impl Config {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(|api_key| KlipyConfig { api_key });
+
+        let openclaw_mint_url = std::env::var("BUZZ_OPENCLAW_WORKSPACE_MINT_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let openclaw_mint_key = std::env::var("BUZZ_OPENCLAW_WORKSPACE_MINT_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let openclaw_mint_ttl_secs = match std::env::var("BUZZ_OPENCLAW_WORKSPACE_MINT_TTL_SECS") {
+            Ok(raw) => {
+                let raw = raw.trim();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(raw.parse::<u64>().map_err(|_| {
+                        ConfigError::InvalidValue(format!(
+                            "BUZZ_OPENCLAW_WORKSPACE_MINT_TTL_SECS must be a u64, got {raw:?}"
+                        ))
+                    })?)
+                }
+            }
+            Err(_) => None,
+        };
+        let openclaw_workspace_mint = match (openclaw_mint_url, openclaw_mint_key) {
+            (Some(mint_url), Some(mint_key)) => Some(OpenClawWorkspaceMintConfig {
+                mint_url,
+                mint_key,
+                ttl_secs: openclaw_mint_ttl_secs,
+            }),
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                warn!(
+                    "BUZZ_OPENCLAW_WORKSPACE_MINT_URL and BUZZ_OPENCLAW_WORKSPACE_MINT_KEY must                      both be set to enable OpenClaw workspace MCP auto-provision; treating as disabled"
+                );
+                None
+            }
+        };
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
@@ -1234,6 +1308,7 @@ impl Config {
             relay_operator_pubkeys,
             allow_nip_oa_auth,
             klipy,
+            openclaw_workspace_mint,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
@@ -1276,10 +1351,70 @@ mod tests {
         assert!(!debug.contains("private-klipy-key"));
     }
 
+    #[test]
+    fn openclaw_workspace_mint_config_debug_redacts_the_mint_key() {
+        let config = OpenClawWorkspaceMintConfig {
+            mint_url: "http://127.0.0.1:8743".to_string(),
+            mint_key: "super-secret-mint-key".to_string(),
+            ttl_secs: Some(43200),
+        };
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("http://127.0.0.1:8743"));
+        assert!(!debug.contains("super-secret-mint-key"));
+    }
+
     // Mutex to serialize tests that mutate environment variables.
     // Parallel env-var mutation causes `defaults_are_valid` to see the invalid
     // value set by `invalid_bind_addr_returns_error`, causing a flaky failure.
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn openclaw_workspace_mint_unset_when_env_absent() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_URL");
+        std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_KEY");
+        std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_TTL_SECS");
+        let config = Config::from_env().expect("default config");
+        assert!(config.openclaw_workspace_mint.is_none());
+    }
+
+    #[test]
+    fn openclaw_workspace_mint_both_set_enables_config() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(
+            "BUZZ_OPENCLAW_WORKSPACE_MINT_URL",
+            "http://127.0.0.1:8743/",
+        );
+        std::env::set_var("BUZZ_OPENCLAW_WORKSPACE_MINT_KEY", "test-mint-key");
+        std::env::set_var("BUZZ_OPENCLAW_WORKSPACE_MINT_TTL_SECS", "3600");
+        let config = Config::from_env().expect("config with mint");
+        std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_URL");
+        std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_KEY");
+        std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_TTL_SECS");
+        let mint = config
+            .openclaw_workspace_mint
+            .expect("mint config should be Some");
+        assert_eq!(mint.mint_url, "http://127.0.0.1:8743/");
+        assert_eq!(mint.mint_key(), "test-mint-key");
+        assert_eq!(mint.ttl_secs, Some(3600));
+    }
+
+    #[test]
+    fn openclaw_workspace_mint_partial_env_disables() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(
+            "BUZZ_OPENCLAW_WORKSPACE_MINT_URL",
+            "http://127.0.0.1:8743",
+        );
+        std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_KEY");
+        std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_TTL_SECS");
+        let config = Config::from_env().expect("partial mint is soft-disabled");
+        std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_URL");
+        assert!(config.openclaw_workspace_mint.is_none());
+    }
+
 
     /// Look up against a fixed set, standing in for process env.
     fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {

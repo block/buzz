@@ -25,6 +25,9 @@ pub mod error;
 pub mod handlers;
 /// Stateless HMAC-signed relay invite tokens (mint/verify).
 pub mod invite_token;
+
+/// OpenClaw workspace MCP auto-provision after NIP-42 AUTH.
+pub mod openclaw_workspace_provision;
 /// Fixed-schema evidence for the relay's earliest startup steps.
 pub mod lifecycle;
 /// Inter-relay mesh startup wiring (`BUZZ_MESH` seam).

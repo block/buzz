@@ -230,6 +230,14 @@ impl RelayMessage {
         serde_json::json!(["NOTICE", message]).to_string()
     }
 
+    /// Format a Hula-only custom frame: `["HULA", <capability>]`.
+    ///
+    /// Upstream Buzz ignores unknown frame types; Hula Buzz Desktop parses the
+    /// capability object (see `openclaw.workspace_mcp`).
+    pub fn hula(capability: &serde_json::Value) -> String {
+        serde_json::json!(["HULA", capability]).to_string()
+    }
+
     /// Format an EOSE (End of Stored Events) message for a subscription.
     pub fn eose(sub_id: &str) -> String {
         serde_json::json!(["EOSE", sub_id]).to_string()
@@ -267,6 +275,21 @@ mod tests {
     // Type alias to avoid clippy::type_complexity warning on the test case table.
     // The tuple holds: raw JSON string + a boxed checker closure.
     type ParseCase<'a> = (&'a str, Box<dyn Fn(ClientMessage)>);
+
+    #[test]
+    fn hula_frame_formats_capability_object() {
+        let capability = serde_json::json!({
+            "v": 1,
+            "type": "hula.capability",
+            "name": "openclaw.workspace_mcp",
+            "hulaBuzzOnly": true
+        });
+        let frame = RelayMessage::hula(&capability);
+        let parsed: serde_json::Value = serde_json::from_str(&frame).expect("valid json");
+        assert_eq!(parsed[0], "HULA");
+        assert_eq!(parsed[1]["type"], "hula.capability");
+        assert_eq!(parsed[1]["name"], "openclaw.workspace_mcp");
+    }
 
     #[test]
     fn parse_valid_messages() {
