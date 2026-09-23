@@ -28,7 +28,8 @@ use crate::{
 /// Unity Catalog model-service FQN, and the wire/config value), `name` is the
 /// display label. Databricks catalog APIs do not provide a consistently useful
 /// picker label, so discovery derives `name` as exact record → unique alias →
-/// generated label grammar → raw id.
+/// generated label grammar (known `label_family_tokens` families only) → raw
+/// id. Adding a vendor means adding one `label_family_tokens` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
     pub id: String,

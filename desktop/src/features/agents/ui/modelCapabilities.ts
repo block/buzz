@@ -460,7 +460,9 @@ export function databricksRegistryLabel(
 // Generative display-label grammar — mirrors crates/buzz-agent/src/
 // databricks_label_grammar.rs. Reached only after an exact-record and a
 // unique-alias miss; returns a label built solely from the id's own tokens, or
-// null so callers show the raw id. Presentation-only: capabilities, routing,
+// null so callers show the raw id. Only families in the manifest's
+// label_family_tokens are named; adding a vendor means adding one entry there.
+// Presentation-only: capabilities, routing,
 // and the saved id never depend on it. Both interpreters replay
 // scripts/databricks-label-fixtures.json.
 // ---------------------------------------------------------------------------
@@ -499,6 +501,15 @@ export function generateDatabricksLabel(rawModelId: string): string | null {
   const familyMatch = /^([a-z]+)(\d{0,2})$/.exec(head);
   if (!familyMatch) return null;
   const [, family, digits] = familyMatch;
+  if (
+    !MANIFEST.label_family_tokens.some(
+      (token) => token.replace(/-$/, "") === family,
+    )
+  )
+    return null;
+  // Attached digits followed by a version (`qwen3-5`, `llama3-1`) cannot be
+  // read without guessing; checked before any reorder.
+  if (digits !== "" && isVersionToken(rest[0] ?? "")) return null;
   // In-name digits stay whole (`nova12` → `Nova12`). The one exception is
   // Qwen's own compact-decimal naming: `qwen35` → `Qwen3.5` when the second
   // digit is nonzero.

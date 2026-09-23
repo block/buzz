@@ -4,7 +4,9 @@
 //! reached only after an exact-record miss and a unique-alias miss. The result
 //! is either a label built solely from the id's own tokens or `None`, in which
 //! case callers show the raw id. It is presentation-only: capabilities, wire
-//! routing, and the saved model id never depend on it.
+//! routing, and the saved model id never depend on it. Ids from families not
+//! in the manifest's `label_family_tokens` stay raw; supporting a new vendor
+//! means adding one entry to that list, not a record per model.
 //!
 //! Mirrored by `desktop/src/features/agents/ui/modelCapabilities.ts`; both
 //! replay `scripts/databricks-label-fixtures.json`.
@@ -21,8 +23,12 @@ enum Part {
 }
 
 /// Parse a Databricks endpoint id into a display label, or `None` when any part
-/// of the id falls outside the grammar.
-pub(crate) fn generate_databricks_label(raw_model_id: &str) -> Option<String> {
+/// of the id falls outside the grammar. Only families listed in the manifest's
+/// `label_family_tokens` are named, so custom endpoints (`rag-agent-3`) stay raw.
+pub(crate) fn generate_databricks_label(
+    raw_model_id: &str,
+    family_tokens: &[String],
+) -> Option<String> {
     // Refuse non-ASCII before trimming or folding, so no Unicode case or
     // whitespace rule can turn an unsupported id into an ASCII-looking one.
     if !raw_model_id.is_ascii() {
@@ -49,7 +55,18 @@ pub(crate) fn generate_databricks_label(raw_model_id: &str) -> Option<String> {
 
     let mut tokens = body.split('-');
     let (family, stem) = split_family(tokens.next()?)?;
+    if !family_tokens
+        .iter()
+        .any(|t| t.strip_suffix('-').unwrap_or(t) == family)
+    {
+        return None;
+    }
     let mut rest: Vec<&str> = tokens.collect();
+    // Attached digits followed by a version (`qwen3-5`, `llama3-1`) cannot be
+    // read without guessing; checked before any reorder.
+    if stem.is_some() && rest.first().is_some_and(|t| is_version(t)) {
+        return None;
+    }
     if family == "claude" {
         // Goose's numeric-first Claude ids (`claude-4-7-opus`) name the tier
         // after the version. Reorder only that exact shape; any other token
@@ -187,12 +204,18 @@ fn capitalize(word: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::generate_databricks_label;
     use crate::model_capabilities::{databricks_curated_label, databricks_registry_label};
     use serde_json::Value;
 
     const FIXTURES_JSON: &str = include_str!("../../../scripts/databricks-label-fixtures.json");
     const MANIFEST_JSON: &str = include_str!("../../../scripts/model-capabilities.json");
+
+    fn generate(id: &str) -> Option<String> {
+        let family_tokens: Vec<String> =
+            serde_json::from_value(json(MANIFEST_JSON)["label_family_tokens"].clone())
+                .expect("label_family_tokens");
+        super::generate_databricks_label(id, &family_tokens)
+    }
 
     fn json(source: &str) -> Value {
         serde_json::from_str(source).expect("fixture JSON must parse")
@@ -228,7 +251,7 @@ mod tests {
                 "exact" | "alias" => assert_eq!(curated.as_deref(), label, "id={id:?}"),
                 "generated" => {
                     assert_eq!(curated, None, "generated fixture is masked: {id:?}");
-                    assert_eq!(generate_databricks_label(id).as_deref(), label, "id={id:?}");
+                    assert_eq!(generate(id).as_deref(), label, "id={id:?}");
                 }
                 "raw" => {
                     assert_eq!(label, None, "raw fixture has a label: {id:?}");
@@ -250,7 +273,7 @@ mod tests {
             .collect();
         let misses: Vec<String> = exact_records()
             .into_iter()
-            .filter(|(raw, label)| generate_databricks_label(raw).as_deref() != Some(label))
+            .filter(|(raw, label)| generate(raw).as_deref() != Some(label))
             .map(|(raw, _)| raw)
             .collect();
         assert_eq!(misses, curator_only);

@@ -476,7 +476,12 @@ fn registry_label_for_databricks_records(
 
     let generated = || {
         generate
-            .then(|| crate::databricks_label_grammar::generate_databricks_label(raw_model_id))
+            .then(|| {
+                crate::databricks_label_grammar::generate_databricks_label(
+                    raw_model_id,
+                    family_tokens,
+                )
+            })
             .flatten()
     };
     let query_lower = raw_model_id.to_ascii_lowercase();
