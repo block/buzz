@@ -38,15 +38,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_attest_root = fs::read(&c.app_attest_root_cert_path)?;
     let configured = &c.profile;
     let profile = {
+        let apple = AppAttestVerifier::with_environment(
+            configured.app_attest_app_id.clone(),
+            app_attest_root,
+            configured.app_attest_environment,
+        )?;
+        tracing::info!(environment = ?apple.environment(), "App Attest verifier configured");
         let transport = Arc::new(ApnsTransport::certificate(
             &fs::read(&configured.apns_cert_path)?,
             configured.apns_topic.clone(),
             configured.apns_environment,
         )?);
-        let apple = AppAttestVerifier::new(
-            configured.app_attest_app_id.clone(),
-            app_attest_root.clone(),
-        )?;
         buzz_push_gateway::http::ProfileRuntime {
             app_attest: Arc::new(apple),
             transport,

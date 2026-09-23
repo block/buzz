@@ -30,8 +30,13 @@ import {
   subscribeControlResults,
 } from "@/features/agents/observerRelayStore";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
+import { getAudioMediaLoadSchedulerSnapshot } from "@/features/messages/lib/audioMediaLoadScheduler";
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
 import { selectMockHistory } from "./e2eBridgeHistory.ts";
+import {
+  createMockSubscription,
+  hasMockSubscription,
+} from "./e2eBridgeSubscriptions.ts";
 export { mockSearchHitMatches };
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type {
@@ -1085,14 +1090,7 @@ type MockManagedAgentRuntimeRow = {
 type WsHandler = (message: unknown) => void;
 const GLOBAL_MOCK_SUBSCRIPTION = "*";
 
-type MockSubscription = {
-  channelIds: string[];
-  kinds: number[] | null;
-  /** `#p` values from the REQ filters, if any — lets specs assert an
-   *  owner-scoped live subscription (e.g. the observer-archive `24200`
-   *  reconciliation gate) independently of channel-scoped ones. */
-  ownerPubkeys: string[];
-};
+type MockSubscription = ReturnType<typeof createMockSubscription>;
 
 type MockFilter = {
   "#a"?: string[];
@@ -1275,6 +1273,7 @@ declare global {
     __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
       channelName: string;
       kind?: number;
+      exactChannel?: boolean;
     }) => boolean;
     __BUZZ_E2E_HAS_MOCK_OWNER_KIND_SUBSCRIPTION__?: (input: {
       ownerPubkey: string;
@@ -1609,6 +1608,8 @@ declare global {
     __BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__?: number;
     /** Hold renderer-owned media fetches until their cancellation command. */
     __BUZZ_E2E_HOLD_MEDIA_FETCHES__?: boolean;
+    /** Real scheduler ownership, including work not yet admitted to native fetch. */
+    __BUZZ_E2E_AUDIO_LOAD_STATE__?: typeof getAudioMediaLoadSchedulerSnapshot;
     /** Exact active/peak native media-fetch ownership for scheduler tests. */
     __BUZZ_E2E_MEDIA_FETCH_STATE__?: { active: number; peak: number };
     /** Object-URL lifecycle counters installed by the audio E2E regression. */
@@ -5040,22 +5041,19 @@ function emitMockGlobalEvent(event: RelayEvent) {
   }
 }
 
-function hasMockLiveSubscription(channelId: string, kind?: number) {
-  for (const socket of mockSockets.values()) {
-    for (const subscription of socket.subscriptions.values()) {
-      if (
-        (subscription.channelIds.includes(channelId) ||
-          subscription.channelIds.includes(GLOBAL_MOCK_SUBSCRIPTION)) &&
-        (kind === undefined ||
-          !subscription.kinds ||
-          subscription.kinds.includes(kind))
-      ) {
-        return true;
-      }
-    }
-  }
-
-  return false;
+function hasMockLiveSubscription(
+  channelId: string,
+  kind?: number,
+  exactChannel = false,
+) {
+  return [...mockSockets.values()].some((socket) =>
+    hasMockSubscription(
+      socket.subscriptions.values(),
+      channelId,
+      kind,
+      exactChannel,
+    ),
+  );
 }
 
 /**
@@ -10862,43 +10860,29 @@ function sendToMockSocket(args: {
     }
 
     if (subId.startsWith("live-")) {
-      // Collect channel IDs from all filters in the REQ
-      const channelIds = new Set<string>();
-      const kinds = new Set<number>();
-      const ownerPubkeys = new Set<string>();
-      for (const f of filters) {
-        for (const channelId of f["#h"] ?? []) channelIds.add(channelId);
-        for (const kind of f.kinds ?? []) {
-          kinds.add(kind);
-        }
-        for (const p of f["#p"] ?? []) {
-          ownerPubkeys.add(p);
-        }
-      }
+      const subscription = createMockSubscription(filters);
       const onlyChannelId =
-        channelIds.size === 1
-          ? (channelIds.values().next().value as string)
+        subscription.channelIds.length === 1 &&
+        subscription.channelIds[0] !== GLOBAL_MOCK_SUBSCRIPTION
+          ? subscription.channelIds[0]
           : undefined;
       if (
         getConfig()?.mock?.closeChannelLiveSubscriptionOnce &&
         !mockClosedChannelLiveSubscription &&
         onlyChannelId &&
-        kinds.has(KIND_CHANNEL_THREAD_SUMMARY)
+        subscription.kinds?.includes(KIND_CHANNEL_THREAD_SUMMARY)
       ) {
         mockClosedChannelLiveSubscription = true;
         sendWsText(socket.handler, ["CLOSED", subId, "rate-limited"]);
         return;
       }
-      socket.subscriptions.set(subId, {
-        channelIds:
-          channelIds.size > 0 ? [...channelIds] : [GLOBAL_MOCK_SUBSCRIPTION],
-        kinds: kinds.size > 0 ? [...kinds] : null,
-        ownerPubkeys: [...ownerPubkeys],
-      });
+      socket.subscriptions.set(subId, subscription);
       // Live requests still replay stored matches; pacing can admit them after
       // a publish. Ephemeral/global fixtures are not channel history.
       const history = new Map(
-        [...channelIds].map((id) => [id, getMockMessageStore(id)]),
+        subscription.channelIds
+          .filter((id) => id !== GLOBAL_MOCK_SUBSCRIPTION)
+          .map((id) => [id, getMockMessageStore(id)]),
       );
       for (const event of selectMockHistory(history, filters)) {
         sendWsText(socket.handler, ["EVENT", subId, event]);
@@ -11362,6 +11346,7 @@ export function maybeInstallE2eTauriMocks() {
   cancelledMediaFetchIds = new Set<string>();
   mockMediaFetchControllers = new Map<string, AbortController>();
   window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ = 0;
+  window.__BUZZ_E2E_AUDIO_LOAD_STATE__ = getAudioMediaLoadSchedulerSnapshot;
   window.__BUZZ_E2E_MEDIA_FETCH_STATE__ = { active: 0, peak: 0 };
   window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__ = () => {
     const queued = deferredLinkPreviewMetadataQueue.splice(0);
@@ -11618,7 +11603,11 @@ export function maybeInstallE2eTauriMocks() {
       createdAt,
     );
   };
-  window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({ channelName, kind }) => {
+  window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({
+    channelName,
+    kind,
+    exactChannel,
+  }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
     );
@@ -11626,7 +11615,7 @@ export function maybeInstallE2eTauriMocks() {
       throw new Error(`Mock channel ${channelName} not found.`);
     }
 
-    return hasMockLiveSubscription(channel.id, kind);
+    return hasMockLiveSubscription(channel.id, kind, exactChannel);
   };
   window.__BUZZ_E2E_HAS_MOCK_OWNER_KIND_SUBSCRIPTION__ = ({
     ownerPubkey,
