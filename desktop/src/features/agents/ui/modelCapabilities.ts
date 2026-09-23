@@ -302,7 +302,17 @@ export function isDatabricksModelServiceFqn(model: string): boolean {
   );
 }
 
-// Mirror fqn_requires_responses: routing is the only inferred FQN capability.
+// Mirror fqn_requires_anthropic_messages: only the service component may
+// select Anthropic Messages, and doing so does not infer effort support.
+function fqnRequiresAnthropicMessages(model: string): boolean {
+  const service = model.split(".").at(-1) ?? "";
+  const stripped = stripCatalogPrefix(
+    service.toLowerCase(),
+    MANIFEST.family_tokens,
+  );
+  return stripped.startsWith("claude-");
+}
+
 function fqnRequiresResponses(model: string): boolean {
   const service = model.split(".").at(-1) ?? "";
   const stripped = stripCatalogPrefix(
@@ -328,8 +338,9 @@ export function resolveModelCapabilities(
 ): CapabilityResult {
   const canon = canonicalizeProvider(provider);
   const blank = rawModelId.trim().length === 0;
-  // Uncurated FQNs keep neutral effort capabilities; verified exact records
-  // take precedence. Catalog/schema names never infer a protocol.
+  // Exact records are verified service contracts and take precedence. Among
+  // uncurated FQNs, Claude exposes no effort choices; other services retain
+  // neutral fallback effort. Routing inspects only the service component.
   const modelServiceFqn =
     canon === "databricks_v2" && isDatabricksModelServiceFqn(rawModelId);
 
@@ -383,10 +394,27 @@ export function resolveModelCapabilities(
   // 3. Provider fallback (blank vs. concrete-unknown); never carries a label.
   const pair = fallbackPair(canon);
   const state = blank ? pair.blank : pair.concrete_unknown;
-  const route =
-    modelServiceFqn && fqnRequiresResponses(rawModelId)
+  const fqnAnthropicMessages =
+    modelServiceFqn && fqnRequiresAnthropicMessages(rawModelId);
+  const route = fqnAnthropicMessages
+    ? "anthropic-messages"
+    : modelServiceFqn && fqnRequiresResponses(rawModelId)
       ? "openai-responses"
       : state.databricks_v2_wire_route;
+  if (fqnAnthropicMessages) {
+    // Route inference does not prove thinking support. Verified exact records
+    // returned above; uncurated Claude services advertise no effort controls.
+    return toResult(
+      {
+        ...state,
+        supported_efforts: [],
+        default_effort: null,
+        normalization_policy: "none",
+      },
+      route,
+      null,
+    );
+  }
   return toResult(state, route, null);
 }
 

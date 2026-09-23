@@ -355,3 +355,25 @@ See the [root TESTING.md](../../TESTING.md) for the full integration testing gui
 ## License
 
 Apache-2.0
+
+## Git in coding runtimes
+
+The harness configures agent authorship, Nostr commit/tag signing, and Git
+credentials for native runtime shells and declared MCP servers. Author names
+use `BUZZ_ACP_DISPLAY_NAME` (sanitized, with an npub fallback); email retains
+the public key and relay host. Inherited author/committer name and email
+overrides are cleared so native shells use the same agent attribution as MCP.
+Credential helpers are scoped to the selected
+relay's `/git` URLs. Existing `GIT_CONFIG_*` entries are preserved before the
+harness's overrides, and the complete block is forwarded in `mcpServers[].env`
+for agents that clear their MCP child environment.
+
+`buzz-acp` includes both Git helpers as multicall personalities, so standalone
+and remote launches need no separate signer installation. The harness creates
+private helper aliases and a 0600 keyfile, keeps them alive across adapter
+respawns, and removes them when it exits normally or completes graceful
+shutdown. As with other temporary files, SIGKILL or a machine crash cannot run
+cleanup. `BUZZ_PRIVATE_KEY` remains available to the Buzz CLI; adapters do not
+receive the redundant `NOSTR_PRIVATE_KEY` variable. No global Git config is
+modified. Standalone `buzz-dev-mcp` supplies utility aliases only; a non-Buzz
+ACP client must supply any desired Git environment itself.

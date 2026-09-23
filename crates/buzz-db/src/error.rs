@@ -68,6 +68,10 @@ pub enum DbError {
     #[error("read-state snapshot exceeds event or byte limit")]
     ReadStateSnapshotTooLarge,
 
+    /// A complete thread window exceeds its request-wide work allowance.
+    #[error("thread window exceeds {0} budget")]
+    ThreadWindowBudgetExceeded(&'static str),
+
     /// A stored timestamp value could not be interpreted.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
