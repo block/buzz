@@ -2397,7 +2397,7 @@
       "supported_efforts": [],
       "default_effort": null,
       "databricks_v2_wire_route": "anthropic-messages",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "none",
       "registry_label": null
     }
   },
@@ -2410,7 +2410,7 @@
       "supported_efforts": [],
       "default_effort": null,
       "databricks_v2_wire_route": "anthropic-messages",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "none",
       "registry_label": null
     }
   },
@@ -2423,7 +2423,7 @@
       "supported_efforts": [],
       "default_effort": null,
       "databricks_v2_wire_route": "anthropic-messages",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "none",
       "registry_label": null
     }
   },
@@ -2460,7 +2460,7 @@
       "supported_efforts": [],
       "default_effort": null,
       "databricks_v2_wire_route": "anthropic-messages",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "none",
       "registry_label": null
     }
   },
@@ -2473,7 +2473,7 @@
       "supported_efforts": [],
       "default_effort": null,
       "databricks_v2_wire_route": "anthropic-messages",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "none",
       "registry_label": null
     }
   },
@@ -2662,7 +2662,7 @@
     }
   },
   {
-    "id": "dbv2-fqn-responses-7",
+    "id": "dbv2-fqn-claude-precedes-gpt",
     "provider": "databricks_v2",
     "raw_model_id": "catalog.schema.claude-gpt-6",
     "expect": {
@@ -2670,7 +2670,7 @@
       "supported_efforts": [],
       "default_effort": null,
       "databricks_v2_wire_route": "anthropic-messages",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "none",
       "registry_label": null
     }
   },

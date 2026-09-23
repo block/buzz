@@ -442,7 +442,11 @@ pub fn resolve(provider: &str, raw_model_id: &str) -> CapabilityResult {
         } else {
             state.databricks_v2_wire_route
         },
-        normalization_policy: state.normalization_policy,
+        normalization_policy: if fqn_anthropic_messages {
+            NormalizationPolicy::None
+        } else {
+            state.normalization_policy
+        },
         registry_label: None,
     }
 }
@@ -791,7 +795,7 @@ mod tests {
     Q::Vector { id: "dbv2-fqn-responses-4", provider: "databricks_v2", raw_model_id: "catalog.schema.GOOSE-GPT-6-ASTRA", note: None },
     Q::Vector { id: "dbv2-fqn-responses-5", provider: "databricks_v2", raw_model_id: "gpt-6.schema.other", note: None },
     Q::Vector { id: "dbv2-fqn-responses-6", provider: "databricks_v2", raw_model_id: "catalog.gpt-5.other", note: None },
-    Q::Vector { id: "dbv2-fqn-responses-7", provider: "databricks_v2", raw_model_id: "catalog.schema.claude-gpt-6", note: None },
+    Q::Vector { id: "dbv2-fqn-claude-precedes-gpt", provider: "databricks_v2", raw_model_id: "catalog.schema.claude-gpt-6", note: None },
     Q::Vector { id: "dbv2-fqn-responses-8", provider: "databricks_v2", raw_model_id: "catalog.schema.my-gpt-6-astra", note: None },
     Q::Vector { id: "dbv2-fqn-responses-9", provider: "databricks_v2", raw_model_id: "catalog.schema.mygpt-6-astra", note: None },
     Q::Vector { id: "dbv2-fqn-responses-10", provider: "databricks_v2", raw_model_id: "catalog.schema.gpt-4", note: None },

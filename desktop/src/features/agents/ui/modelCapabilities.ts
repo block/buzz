@@ -403,7 +403,12 @@ export function resolveModelCapabilities(
     // Route inference does not prove thinking support. Verified exact records
     // returned above; uncurated Claude services advertise no effort controls.
     return toResult(
-      { ...state, supported_efforts: [], default_effort: null },
+      {
+        ...state,
+        supported_efforts: [],
+        default_effort: null,
+        normalization_policy: "none",
+      },
       route,
       null,
     );
