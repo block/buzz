@@ -22,9 +22,7 @@ import {
   uniqueAutocompleteLabels,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { isReservedCommunityAgentName } from "@/features/agents/lib/reservedAgentNames";
-import {
-  reservedCommunityBotRoutes as buildReservedCommunityBotRoutes,
-} from "@/features/agents/lib/reservedCommunityMentionRouting";
+import { reservedCommunityBotRoutes as buildReservedCommunityBotRoutes } from "@/features/agents/lib/reservedCommunityMentionRouting";
 import { useCommunityBotsQuery } from "@/features/community-bots/hooks";
 import {
   useInfiniteUserSearchQuery,
@@ -190,6 +188,42 @@ export function useMentions(
   const mentionChannelId = isAgentMentionChannelType(options?.channelType)
     ? channelId
     : null;
+  const reservedCommunityBotRoutes = React.useMemo(() => {
+    const catalogBots = (communityBotsQuery.data ?? []).map((bot) => ({
+      name: bot.name,
+      pubkey: bot.pubkey,
+    }));
+    const channelBots = (members ?? [])
+      .map((member) => {
+        const name =
+          profiles?.[normalizePubkey(member.pubkey)]?.displayName ??
+          member.displayName ??
+          "";
+        return {
+          name,
+          pubkey: member.pubkey,
+          include:
+            member.role === "bot" ||
+            member.isAgent === true ||
+            isReservedCommunityAgentName(name),
+        };
+      })
+      .filter((entry) => entry.include)
+      .map(({ name, pubkey }) => ({ name, pubkey }));
+    return buildReservedCommunityBotRoutes({ catalogBots, channelBots });
+  }, [communityBotsQuery.data, members, profiles]);
+  // Community / reserved bots stay addressable even when we hide other
+  // members' respondTo=anyone personal agents from autocomplete.
+  const communityBotMentionPubkeys = React.useMemo(() => {
+    const pubkeys = new Set<string>();
+    for (const bot of communityBotsQuery.data ?? []) {
+      pubkeys.add(normalizePubkey(bot.pubkey));
+    }
+    for (const pubkey of reservedCommunityBotRoutes.values()) {
+      pubkeys.add(normalizePubkey(pubkey));
+    }
+    return pubkeys;
+  }, [communityBotsQuery.data, reservedCommunityBotRoutes]);
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
@@ -203,8 +237,13 @@ export function useMentions(
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
+        // Do not enumerate every co-membered foreign agent with
+        // respondTo=anyone (e.g. every member's identically named agent).
+        includePublicAnyone: false,
+        extraMentionablePubkeys: communityBotMentionPubkeys,
       }),
     [
+      communityBotMentionPubkeys,
       currentPubkey,
       channelId,
       options?.channelType,
@@ -247,30 +286,6 @@ export function useMentions(
     () => getMentionMemberPubkeys(channelId, channelsQuery.data, members),
     [channelId, channelsQuery.data, members],
   );
-  const reservedCommunityBotRoutes = React.useMemo(() => {
-    const catalogBots = (communityBotsQuery.data ?? []).map((bot) => ({
-      name: bot.name,
-      pubkey: bot.pubkey,
-    }));
-    const channelBots = (members ?? [])
-      .map((member) => {
-        const name =
-          profiles?.[normalizePubkey(member.pubkey)]?.displayName ??
-          member.displayName ??
-          "";
-        return {
-          name,
-          pubkey: member.pubkey,
-          include:
-            member.role === "bot" ||
-            member.isAgent === true ||
-            isReservedCommunityAgentName(name),
-        };
-      })
-      .filter((entry) => entry.include)
-      .map(({ name, pubkey }) => ({ name, pubkey }));
-    return buildReservedCommunityBotRoutes({ catalogBots, channelBots });
-  }, [communityBotsQuery.data, members, profiles]);
   const agentIdentityPubkeys = React.useMemo(
     () =>
       getAgentIdentityPubkeys({

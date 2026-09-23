@@ -22,6 +22,17 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
   );
 }
 
+export type RelayAgentShareOptions = {
+  /**
+   * When false, `respondTo: "anyone"` no longer admits foreign agents merely
+   * because they share a channel with the viewer. Owners and allowlisted
+   * viewers still pass. Mention autocomplete uses false so other members'
+   * identically named personal agents do not flood `@` suggestions; callers
+   * that still want room-public agents (directory pickers) leave the default.
+   */
+  includePublicAnyone?: boolean;
+};
+
 export function relayAgentIsSharedWithUser(
   agent: Pick<
     RelayAgent,
@@ -29,6 +40,7 @@ export function relayAgentIsSharedWithUser(
   >,
   sharedChannelIds: ReadonlySet<string>,
   currentPubkey?: string | null,
+  options?: RelayAgentShareOptions,
 ) {
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
@@ -53,6 +65,10 @@ export function relayAgentIsSharedWithUser(
       .includes(normalizedCurrentPubkey);
   }
 
+  if (options?.includePublicAnyone === false) {
+    return false;
+  }
+
   return (
     agent.respondTo === "anyone" &&
     agent.channelIds.some((channelId) => sharedChannelIds.has(channelId))
@@ -66,10 +82,16 @@ export function relayAgentCanRespondInChannel(
   >,
   channelId: string,
   currentPubkey?: string | null,
+  options?: RelayAgentShareOptions,
 ) {
   return (
     agent.channelIds.includes(channelId) &&
-    relayAgentIsSharedWithUser(agent, new Set([channelId]), currentPubkey)
+    relayAgentIsSharedWithUser(
+      agent,
+      new Set([channelId]),
+      currentPubkey,
+      options,
+    )
   );
 }
 
@@ -86,6 +108,8 @@ export function getMentionableAgentPubkeys({
   relayAgents,
   sharedChannelIds,
   phase = "publish",
+  includePublicAnyone = true,
+  extraMentionablePubkeys,
 }: {
   currentPubkey?: string | null;
   eligibilityScope: AgentEligibilityScope;
@@ -93,7 +117,12 @@ export function getMentionableAgentPubkeys({
   managedAgentPubkeys: Iterable<string>;
   relayAgents: readonly RelayAgent[] | undefined;
   sharedChannelIds: ReadonlySet<string>;
+  /** Defaults true. Mention autocomplete sets false — see RelayAgentShareOptions. */
+  includePublicAnyone?: boolean;
+  /** Always-admitted identities (community bots, reserved catalog routes). */
+  extraMentionablePubkeys?: Iterable<string>;
 }) {
+  const shareOptions: RelayAgentShareOptions = { includePublicAnyone };
   const pubkeys = new Set(
     [...managedAgentPubkeys].map((pubkey) => normalizePubkey(pubkey)),
   );
@@ -112,13 +141,19 @@ export function getMentionableAgentPubkeys({
                   agent,
                   sharedChannelIds,
                   currentPubkey,
+                  shareOptions,
                 ) &&
                 (phase === "prepare" ||
                   (eligibilityScope.channelId !== null &&
                     agent.channelIds.includes(eligibilityScope.channelId))),
             )
           : eligibilityScope.type === "community"
-            ? relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)
+            ? relayAgentIsSharedWithUser(
+                agent,
+                sharedChannelIds,
+                currentPubkey,
+                shareOptions,
+              )
             : phase === "prepare" &&
                 currentPubkey &&
                 agent.ownerPubkey &&
@@ -128,15 +163,22 @@ export function getMentionableAgentPubkeys({
                   agent,
                   sharedChannelIds,
                   currentPubkey,
+                  shareOptions,
                 )
               : relayAgentCanRespondInChannel(
                   agent,
                   eligibilityScope.channelId,
                   currentPubkey,
+                  shareOptions,
                 );
     if (isAllowed) {
       pubkeys.add(normalizePubkey(agent.pubkey));
     }
+  }
+
+  for (const pubkey of extraMentionablePubkeys ?? []) {
+    const normalized = normalizePubkey(pubkey);
+    if (normalized) pubkeys.add(normalized);
   }
 
   return pubkeys;

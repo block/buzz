@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { getMentionableAgentPubkeys } from "@/features/agents/lib/agentAutocompleteEligibility.ts";
+import { rankMentionCandidates } from "./mentionRanking.ts";
 import { buildMentionCandidates } from "./buildMentionCandidates.ts";
 
 const MEMBER_PUBKEY = "a".repeat(64);
@@ -114,7 +116,9 @@ test("archived roster members and directory agents stay out even when still cach
           status: "online",
         },
       ],
-      managedAgentNamesByPubkey: new Map([[ARCHIVED_PUBKEY, "Archived Managed"]]),
+      managedAgentNamesByPubkey: new Map([
+        [ARCHIVED_PUBKEY, "Archived Managed"],
+      ]),
       relayAgentNamesByPubkey: new Map([
         [ARCHIVED_PUBKEY, "Archived Relay"],
         [AGENT_PUBKEY, "Scout"],
@@ -288,4 +292,197 @@ test("memberPubkeys re-asserts isMember when routed identity matches roster", ()
   );
   const hit = candidates.find((c) => c.displayName === "Mo");
   assert.equal(hit?.isMember, true);
+});
+
+test("foreign identically named agents are hidden unless owned, allowlisted, or community-admitted", () => {
+  const CURRENT = "e".repeat(64);
+  const OWNER_A = "f".repeat(64);
+  const OWNER_B = "0".repeat(64);
+  const OWN_SCOUT = "1".repeat(64);
+  const FOREIGN_SCOUT = "2".repeat(64);
+  const ALLOWLISTED_SCOUT = "3".repeat(64);
+  const FOREIGN_ORB = "4".repeat(64);
+  const OWN_ORB = "5".repeat(64);
+  const COMMUNITY_CAPTAIN = "6".repeat(64);
+  const ARCHIVED_SCOUT = "7".repeat(64);
+
+  const channelId = "general";
+  const relayAgents = [
+    {
+      pubkey: OWN_SCOUT,
+      name: "Scout",
+      ownerPubkey: CURRENT,
+      status: "online",
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [channelId],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+    {
+      pubkey: FOREIGN_SCOUT,
+      name: "Scout",
+      ownerPubkey: OWNER_A,
+      status: "online",
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [channelId],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+    {
+      pubkey: ALLOWLISTED_SCOUT,
+      name: "Scout",
+      ownerPubkey: OWNER_B,
+      status: "online",
+      respondTo: "allowlist",
+      respondToAllowlist: [CURRENT],
+      channelIds: [channelId],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+    {
+      pubkey: FOREIGN_ORB,
+      name: "Orb",
+      ownerPubkey: OWNER_A,
+      status: "online",
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [channelId],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+    {
+      pubkey: OWN_ORB,
+      name: "Orb",
+      ownerPubkey: CURRENT,
+      status: "online",
+      respondTo: "owner-only",
+      respondToAllowlist: [],
+      channelIds: [channelId],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+    {
+      pubkey: COMMUNITY_CAPTAIN,
+      name: "Captain",
+      ownerPubkey: OWNER_A,
+      status: "online",
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [channelId],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+    {
+      pubkey: ARCHIVED_SCOUT,
+      name: "Scout",
+      ownerPubkey: CURRENT,
+      status: "online",
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [channelId],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+  ];
+
+  // Mirrors useMentions: includePublicAnyone false + community extras.
+  const mentionableAgentPubkeys = getMentionableAgentPubkeys({
+    currentPubkey: CURRENT,
+    phase: "prepare",
+    eligibilityScope: { type: "channel", channelId },
+    managedAgentPubkeys: [],
+    relayAgents,
+    sharedChannelIds: new Set([channelId]),
+    includePublicAnyone: false,
+    extraMentionablePubkeys: [COMMUNITY_CAPTAIN],
+  });
+
+  const candidates = buildMentionCandidates(
+    input({
+      currentPubkey: CURRENT,
+      mentionChannelId: channelId,
+      memberPubkeys: new Set([
+        OWN_SCOUT,
+        FOREIGN_SCOUT,
+        ALLOWLISTED_SCOUT,
+        FOREIGN_ORB,
+        OWN_ORB,
+        COMMUNITY_CAPTAIN,
+        ARCHIVED_SCOUT,
+        MEMBER_PUBKEY,
+      ]),
+      members: [
+        { pubkey: MEMBER_PUBKEY, displayName: "Ada", isAgent: false },
+        {
+          pubkey: COMMUNITY_CAPTAIN,
+          displayName: "Captain",
+          isAgent: true,
+          role: "bot",
+        },
+      ],
+      mentionableAgentPubkeys,
+      relayAgents,
+      isArchived: (pubkey) => pubkey === ARCHIVED_SCOUT,
+      reservedCommunityBotRoutes: new Map([["captain", COMMUNITY_CAPTAIN]]),
+    }),
+  );
+
+  const byName = (name) =>
+    candidates.filter((candidate) => candidate.displayName === name);
+
+  // Same display name, multiple owners: only owned + allowlisted remain.
+  assert.deepEqual(
+    byName("Scout")
+      .map((candidate) => candidate.pubkey)
+      .sort(),
+    [ALLOWLISTED_SCOUT, OWN_SCOUT].sort(),
+  );
+  assert.equal(
+    byName("Scout").some((candidate) => candidate.pubkey === FOREIGN_SCOUT),
+    false,
+  );
+
+  // Unrelated second name proves the rule is global, not name-specific.
+  assert.deepEqual(
+    byName("Orb").map((candidate) => candidate.pubkey),
+    [OWN_ORB],
+  );
+  assert.equal(
+    byName("Orb").some((candidate) => candidate.pubkey === FOREIGN_ORB),
+    false,
+  );
+
+  // Community bot still appears even though foreign+anyone.
+  assert.equal(byName("Captain").length, 1);
+  assert.equal(byName("Captain")[0]?.pubkey, COMMUNITY_CAPTAIN);
+
+  // Human members still appear.
+  assert.equal(
+    candidates.some((candidate) => candidate.pubkey === MEMBER_PUBKEY),
+    true,
+  );
+
+  // Archived still excluded.
+  assert.equal(
+    candidates.some((candidate) => candidate.pubkey === ARCHIVED_SCOUT),
+    false,
+  );
+
+  // Alphabetical ranking among surviving identities still applies.
+  const ranked = rankMentionCandidates(candidates, "").map(
+    (entry) => entry.candidate.displayName,
+  );
+  const sorted = [...ranked].sort((left, right) =>
+    left.localeCompare(right, undefined, { sensitivity: "base" }),
+  );
+  assert.deepEqual(ranked, sorted);
 });

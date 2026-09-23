@@ -694,3 +694,110 @@ test("DM ownership is independent of local configuration and still requires memb
     new Set([PUB_A, PUB_B]),
   );
 });
+
+test("relayAgentIsSharedWithUser: includePublicAnyone false keeps owners and allowlists, drops foreign anyone", () => {
+  const sharedChannelIds = new Set(["general"]);
+  const foreignAnyone = {
+    ownerPubkey: OTHER_OWNER_PUBKEY,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      foreignAnyone,
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+      { includePublicAnyone: false },
+    ),
+    false,
+  );
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        ownerPubkey: CURRENT_PUBKEY,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+      { includePublicAnyone: false },
+    ),
+    true,
+  );
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        ownerPubkey: OTHER_OWNER_PUBKEY,
+        respondTo: "allowlist",
+        respondToAllowlist: [CURRENT_PUBKEY],
+        channelIds: ["general"],
+      },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+      { includePublicAnyone: false },
+    ),
+    true,
+  );
+});
+
+test("getMentionableAgentPubkeys: mention autocomplete hides foreign anyone agents unless extras admit them", () => {
+  const own = {
+    pubkey: PUB_A,
+    ownerPubkey: CURRENT_PUBKEY,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+  const foreignAnyone = {
+    pubkey: PUB_B,
+    ownerPubkey: OTHER_OWNER_PUBKEY,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+  const allowlisted = {
+    pubkey: PUB_C,
+    ownerPubkey: OTHER_OWNER_PUBKEY,
+    respondTo: "allowlist",
+    respondToAllowlist: [CURRENT_PUBKEY],
+    channelIds: ["general"],
+  };
+  const communityBot = {
+    pubkey: PUB_D,
+    ownerPubkey: OTHER_OWNER_PUBKEY,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+  const base = {
+    currentPubkey: CURRENT_PUBKEY,
+    eligibilityScope: { type: "channel", channelId: "general" },
+    phase: "prepare",
+    managedAgentPubkeys: [],
+    relayAgents: [own, foreignAnyone, allowlisted, communityBot],
+    sharedChannelIds: new Set(["general"]),
+  };
+
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      includePublicAnyone: false,
+    }),
+    new Set([PUB_A, PUB_C]),
+  );
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      includePublicAnyone: false,
+      extraMentionablePubkeys: [PUB_D],
+    }),
+    new Set([PUB_A, PUB_C, PUB_D]),
+  );
+  // Default remains permissive for directory pickers.
+  assert.deepEqual(
+    getMentionableAgentPubkeys(base),
+    new Set([PUB_A, PUB_B, PUB_C, PUB_D]),
+  );
+});
