@@ -75,51 +75,55 @@ commit-msg:
     signoff:
       run: 'git interpret-trailers --if-exists doNothing --trailer "Signed-off-by: $(git var GIT_COMMITTER_IDENT | sed ''s/ [0-9]* [+-][0-9]*$//'')" --in-place {1}'
 
+# Git exports repository-local variables (GIT_DIR, GIT_INDEX_FILE, ...) into
+# hook processes. Lanes below run test suites whose fixtures spawn git in temp
+# dirs, so every lane runs through scripts/without-git-env.sh, which strips
+# those variables and lets each subprocess rediscover the repo from its cwd.
 pre-push:
   parallel: true
   commands:
     branch-skew:
-      run: ./scripts/check-branch-skew.sh
+      run: ./scripts/without-git-env.sh ./scripts/check-branch-skew.sh
     push-head-scope:
       # Warn-only: the scoped lanes below validate the checked-out HEAD, so a
       # non-HEAD ref push (explicit refspec, --all) relies on CI for its
       # path-scoped checks. This lane reads the pushed refs from stdin and
       # warns when any pushed commit is not HEAD. It never fails the push.
       use_stdin: true
-      run: ./scripts/check-push-head-scope.sh
+      run: ./scripts/without-git-env.sh ./scripts/check-push-head-scope.sh
     file-size-check:
       # The ratchet computes its own merge-base diff, so path filtering here
       # would only duplicate policy and create another place for coverage drift.
-      run: just file-size-check
+      run: ./scripts/without-git-env.sh just file-size-check
     rust-tests:
       files: git diff --name-only origin/main...HEAD
       glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
-      run: just test-unit
+      run: ./scripts/without-git-env.sh just test-unit
     desktop-check:
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
-      run: just desktop-check
+      run: ./scripts/without-git-env.sh just desktop-check
     desktop-typecheck:
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
-      run: just desktop-typecheck
+      run: ./scripts/without-git-env.sh just desktop-typecheck
     desktop-test:
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
-      run: just desktop-test
+      run: ./scripts/without-git-env.sh just desktop-test
     desktop-tauri-checks:
       # Keep local lint parity with Desktop Core CI for every path that can
       # affect the Tauri crate or its path dependencies. Run clippy and tests
       # serially so parallel pre-push hooks do not contend for Cargo's lock.
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
-      run: just desktop-tauri-clippy && just desktop-tauri-test
+      run: ./scripts/without-git-env.sh sh -c 'just desktop-tauri-clippy && just desktop-tauri-test'
     mobile-checks:
       # Run analysis and tests serially so parallel pre-push hooks do not
       # contend for shared Flutter state (.dart_tool, shader bundle).
       files: git diff --name-only origin/main...HEAD
       glob: ["mobile/**"]
-      run: just mobile-check && just mobile-test
+      run: ./scripts/without-git-env.sh sh -c 'just mobile-check && just mobile-test'
