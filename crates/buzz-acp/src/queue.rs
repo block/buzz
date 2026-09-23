@@ -4142,9 +4142,14 @@ mod tests {
         assert!(complete_prompt
             .contains("<thread-context included=\"2\" total=\"2\" truncated=\"false\">"));
         assert!(complete_prompt.contains("Let's refactor auth"));
-        assert!(complete_prompt.contains(&format!(
-            "IMPORTANT: For ordinary replies in this turn, use `--reply-to {root}`"
-        )));
+        assert!(
+            complete_prompt.contains(&format!("threaded at {root}")),
+            "reply instruction should anchor ordinary replies at the thread root"
+        );
+        assert!(
+            complete_prompt.contains(&format!("--reply-to {root}")),
+            "CLI extras should still be guided to --reply-to the thread root"
+        );
 
         let prompt_with_prior_delivery = format_prompt(
             &batch,
