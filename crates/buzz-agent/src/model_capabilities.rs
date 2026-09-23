@@ -437,13 +437,32 @@ pub fn databricks_v2_known_models() -> &'static [String] {
 /// contract.
 pub fn databricks_registry_label(raw_model_id: &str) -> Option<String> {
     let m = manifest();
-    registry_label_for_databricks_records(raw_model_id, &m.exact_records, &m.label_family_tokens)
+    registry_label_for_databricks_records(
+        raw_model_id,
+        &m.exact_records,
+        &m.label_family_tokens,
+        true,
+    )
+}
+
+/// Exact-record and unique-alias tiers only, so tests can assert which tier
+/// produced a label.
+#[cfg(test)]
+pub(crate) fn databricks_curated_label(raw_model_id: &str) -> Option<String> {
+    let m = manifest();
+    registry_label_for_databricks_records(
+        raw_model_id,
+        &m.exact_records,
+        &m.label_family_tokens,
+        false,
+    )
 }
 
 fn registry_label_for_databricks_records(
     raw_model_id: &str,
     records: &[ExactRecord],
     family_tokens: &[String],
+    generate: bool,
 ) -> Option<String> {
     if raw_model_id.trim().is_empty() {
         return None;
@@ -455,7 +474,11 @@ fn registry_label_for_databricks_records(
         return Some(rec.registry_label.clone());
     }
 
-    let generated = || crate::databricks_label_grammar::generate_databricks_label(raw_model_id);
+    let generated = || {
+        generate
+            .then(|| crate::databricks_label_grammar::generate_databricks_label(raw_model_id))
+            .flatten()
+    };
     let query_lower = raw_model_id.to_ascii_lowercase();
     let stripped_query = strip_catalog_prefix(&query_lower, family_tokens);
     if stripped_query == query_lower {
@@ -1149,7 +1172,7 @@ mod tests {
         let family_tokens = vec!["gpt-".to_string()];
 
         assert_eq!(
-            registry_label_for_databricks_records("goose-gpt-5-6", &records, &family_tokens),
+            registry_label_for_databricks_records("goose-gpt-5-6", &records, &family_tokens, true),
             None
         );
     }

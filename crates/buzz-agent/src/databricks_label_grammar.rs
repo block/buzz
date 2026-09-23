@@ -6,7 +6,7 @@
 //! case callers show the raw id. It is presentation-only: capabilities, wire
 //! routing, and the saved model id never depend on it.
 //!
-//! Mirrored by `desktop/src/features/agents/ui/databricksLabelGrammar.ts`; both
+//! Mirrored by `desktop/src/features/agents/ui/modelCapabilities.ts`; both
 //! replay `scripts/databricks-label-fixtures.json`.
 
 use crate::model_capabilities::is_databricks_model_service_fqn;
@@ -23,6 +23,11 @@ enum Part {
 /// Parse a Databricks endpoint id into a display label, or `None` when any part
 /// of the id falls outside the grammar.
 pub(crate) fn generate_databricks_label(raw_model_id: &str) -> Option<String> {
+    // Refuse non-ASCII before trimming or folding, so no Unicode case or
+    // whitespace rule can turn an unsupported id into an ASCII-looking one.
+    if !raw_model_id.is_ascii() {
+        return None;
+    }
     let id = raw_model_id.trim().to_ascii_lowercase();
     let is_fqn = is_databricks_model_service_fqn(&id);
     let service = if is_fqn {
@@ -46,9 +51,15 @@ pub(crate) fn generate_databricks_label(raw_model_id: &str) -> Option<String> {
     let (family, stem) = split_family(tokens.next()?)?;
     let mut rest: Vec<&str> = tokens.collect();
     if family == "claude" {
-        // Numeric-first Claude ids (`claude-4-7-opus`) name the tier after the version.
+        // Goose's numeric-first Claude ids (`claude-4-7-opus`) name the tier
+        // after the version. Reorder only that exact shape; any other token
+        // after the version keeps its position.
         let digits = rest.iter().take_while(|t| is_version(t)).count();
-        if digits > 0 && digits < rest.len() {
+        if (1..=2).contains(&digits)
+            && rest
+                .get(digits)
+                .is_some_and(|t| matches!(*t, "opus" | "sonnet" | "haiku"))
+        {
             rest[..=digits].rotate_right(1);
         }
     }
@@ -64,9 +75,16 @@ pub(crate) fn generate_databricks_label(raw_model_id: &str) -> Option<String> {
         let part = if is_version(tok) {
             let minor = rest.next_if(|t| is_version(t));
             after_minor = minor.is_some();
+            if after_minor && rest.peek().is_some_and(|t| is_version(t)) {
+                // A third number (`3-7-1`) would read as a separate version.
+                return None;
+            }
             Part::Version(minor.map_or_else(|| tok.to_string(), |m| format!("{tok}.{m}")))
         } else if is_letter_version(tok) {
             let minor = rest.next_if(|t| is_version(t));
+            if minor.is_some() && rest.peek().is_some_and(|t| is_version(t)) {
+                return None;
+            }
             let major = capitalize(tok);
             Part::Word(minor.map_or_else(|| major.clone(), |m| format!("{major}.{m}")))
         } else if is_size(tok) {
@@ -110,7 +128,8 @@ pub(crate) fn generate_databricks_label(raw_model_id: &str) -> Option<String> {
 }
 
 /// Split the leading token into its family name and an optional in-name
-/// version (`qwen3` → `3`, `qwen35` → `3.5`).
+/// version, kept whole (`nova12` → `12`). The one exception is Qwen's own
+/// compact-decimal naming: `qwen35` → `3.5` when the second digit is nonzero.
 fn split_family(tok: &str) -> Option<(&str, Option<String>)> {
     let alpha = tok.bytes().take_while(u8::is_ascii_lowercase).count();
     let (family, digits) = tok.split_at(alpha);
@@ -119,7 +138,9 @@ fn split_family(tok: &str) -> Option<(&str, Option<String>)> {
     }
     let stem = match digits.as_bytes() {
         [] => None,
-        [major, minor] => Some(format!("{}.{}", *major as char, *minor as char)),
+        [major, minor] if family == "qwen" && *minor != b'0' => {
+            Some(format!("{}.{}", *major as char, *minor as char))
+        }
         _ => Some(digits.to_string()),
     };
     Some((family, stem))
@@ -167,7 +188,7 @@ fn capitalize(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::generate_databricks_label;
-    use crate::model_capabilities::databricks_registry_label;
+    use crate::model_capabilities::{databricks_curated_label, databricks_registry_label};
     use serde_json::Value;
 
     const FIXTURES_JSON: &str = include_str!("../../../scripts/databricks-label-fixtures.json");
@@ -200,13 +221,19 @@ mod tests {
             let label = row["label"].as_str();
             assert_eq!(databricks_registry_label(id).as_deref(), label, "id={id:?}");
             let has_exact = records.iter().any(|(raw, _)| raw.eq_ignore_ascii_case(id));
-            match row["tier"].as_str().expect("tier") {
-                "exact" => assert!(has_exact, "exact fixture lacks a record: {id}"),
+            let curated = databricks_curated_label(id);
+            let tier = row["tier"].as_str().expect("tier");
+            assert_eq!(has_exact, tier == "exact", "tier={tier} id={id:?}");
+            match tier {
+                "exact" | "alias" => assert_eq!(curated.as_deref(), label, "id={id:?}"),
                 "generated" => {
-                    assert!(!has_exact, "generated fixture is masked by a record: {id}");
-                    assert_eq!(generate_databricks_label(id).as_deref(), label, "id={id}");
+                    assert_eq!(curated, None, "generated fixture is masked: {id:?}");
+                    assert_eq!(generate_databricks_label(id).as_deref(), label, "id={id:?}");
                 }
-                "alias" | "raw" => assert!(!has_exact, "fixture has a record: {id}"),
+                "raw" => {
+                    assert_eq!(label, None, "raw fixture has a label: {id:?}");
+                    assert_eq!(curated, None, "raw fixture is curated: {id:?}");
+                }
                 tier => panic!("unknown tier {tier:?} for {id}"),
             }
         }

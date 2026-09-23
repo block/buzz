@@ -465,6 +465,7 @@ export function databricksRegistryLabel(
 // scripts/databricks-label-fixtures.json.
 // ---------------------------------------------------------------------------
 
+const CLAUDE_TIERS = new Set(["opus", "sonnet", "haiku"]);
 const LABEL_WRAPPERS = ["databricks-", "goose-", "kgoose-", "builderbot-"];
 
 type LabelPart = { readonly version: boolean; readonly text: string };
@@ -481,6 +482,9 @@ const capitalize = (word: string) =>
  * of the id falls outside the grammar.
  */
 export function generateDatabricksLabel(rawModelId: string): string | null {
+  // Refuse non-ASCII before trimming or folding, so no Unicode case or
+  // whitespace rule can turn an unsupported id into an ASCII-looking one.
+  if ([...rawModelId].some((ch) => ch.charCodeAt(0) > 0x7f)) return null;
   const id = rawModelId.trim().toLowerCase();
   const isFqn = isDatabricksModelServiceFqn(id);
   const service = isFqn ? id.slice(id.lastIndexOf(".") + 1) : id;
@@ -495,12 +499,20 @@ export function generateDatabricksLabel(rawModelId: string): string | null {
   const familyMatch = /^([a-z]+)(\d{0,2})$/.exec(head);
   if (!familyMatch) return null;
   const [, family, digits] = familyMatch;
-  const stem = digits.length === 2 ? `${digits[0]}.${digits[1]}` : digits;
+  // In-name digits stay whole (`nova12` → `Nova12`). The one exception is
+  // Qwen's own compact-decimal naming: `qwen35` → `Qwen3.5` when the second
+  // digit is nonzero.
+  const stem =
+    family === "qwen" && digits.length === 2 && digits[1] !== "0"
+      ? `${digits[0]}.${digits[1]}`
+      : digits;
   if (family === "claude") {
-    // Numeric-first Claude ids (`claude-4-7-opus`) name the tier after the version.
+    // Goose's numeric-first Claude ids (`claude-4-7-opus`) name the tier after
+    // the version. Reorder only that exact shape; any other token after the
+    // version keeps its position.
     let count = 0;
     while (count < rest.length && isVersionToken(rest[count])) count += 1;
-    if (count > 0 && count < rest.length) {
+    if (count >= 1 && count <= 2 && CLAUDE_TIERS.has(rest[count])) {
       rest.splice(0, count + 1, rest[count], ...rest.slice(0, count));
     }
   }
@@ -511,12 +523,14 @@ export function generateDatabricksLabel(rawModelId: string): string | null {
     const tok = rest[i];
     const next = rest[i + 1];
     if (isDateToken(tok) && next === undefined) break;
+    const hasMinor = next !== undefined && isVersionToken(next);
+    // A third number (`3-7-1`) would read as a separate version.
+    if (hasMinor && isVersionToken(rest[i + 2] ?? "")) return null;
     if (isVersionToken(tok)) {
-      afterMinor = next !== undefined && isVersionToken(next);
+      afterMinor = hasMinor;
       parts.push({ version: true, text: afterMinor ? `${tok}.${next}` : tok });
       if (afterMinor) i += 1;
     } else if (isLetterVersionToken(tok)) {
-      const hasMinor = next !== undefined && isVersionToken(next);
       const major = capitalize(tok);
       parts.push({
         version: false,

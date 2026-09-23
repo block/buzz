@@ -27,8 +27,8 @@ use crate::{
 /// A discovered model entry: `id` is the picker value (the raw endpoint id or
 /// Unity Catalog model-service FQN, and the wire/config value), `name` is the
 /// display label. Databricks catalog APIs do not provide a consistently useful
-/// picker label, so discovery curates names from the capability manifest when
-/// an exact known id exists and otherwise uses the raw id.
+/// picker label, so discovery derives `name` as exact record → unique alias →
+/// generated label grammar → raw id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
     pub id: String,

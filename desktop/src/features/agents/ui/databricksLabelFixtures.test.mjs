@@ -32,8 +32,16 @@ test("shared fixtures replay through the label helper", () => {
       `id=${JSON.stringify(id)}`,
     );
     assert.equal(hasExactRecord(id), tier === "exact", `tier=${tier} id=${id}`);
-    if (tier === "generated") {
+    const curated = databricksRegistryLabel(id, { generate: false });
+    if (tier === "exact" || tier === "alias") {
+      assert.equal(curated, label, `id=${id}`);
+    } else if (tier === "generated") {
+      assert.equal(curated, null, `generated fixture is masked: ${id}`);
       assert.equal(generateDatabricksLabel(id), label, `id=${id}`);
+    } else {
+      assert.equal(tier, "raw", `unknown tier ${tier} for ${id}`);
+      assert.equal(label, null, `raw fixture has a label: ${id}`);
+      assert.equal(curated, null, `raw fixture is curated: ${id}`);
     }
   }
 });

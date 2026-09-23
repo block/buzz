@@ -385,17 +385,29 @@ test.describe("global agent config screenshots", () => {
     await expect(model).toHaveText("GPT-6 Astra");
     await expect(model).toHaveAttribute("data-value", siblingId);
 
-    const persisted = await page.evaluate(async () =>
-      (
-        window as typeof window & {
-          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
-            command: string,
-            payload: unknown,
-          ) => Promise<unknown>;
-        }
-      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
-    );
-    expect(persisted).toMatchObject({ model: modelId });
+    await page
+      .getByRole("button", { name: "Save defaults" })
+      .filter({ visible: true })
+      .click();
+    const persisted = () =>
+      page.evaluate(async () =>
+        (
+          window as typeof window & {
+            __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+              command: string,
+              payload: unknown,
+            ) => Promise<unknown>;
+          }
+        ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+      );
+    await expect.poll(persisted).toMatchObject({ model: siblingId });
+
+    // Reopen without a reload: the closed trigger recomputes its label from
+    // the saved raw id.
+    await page.getByTestId("settings-nav-appearance").click();
+    await page.getByTestId("settings-nav-agents").click();
+    await expect(model).toHaveText("GPT-6 Astra");
+    await expect(model).toHaveAttribute("data-value", siblingId);
   });
 
   test("defaults honor credentials set in the harness config file", async ({
