@@ -58,7 +58,9 @@ test("desktop surface fills host without fixed frame chrome", async () => {
 test("responsive surface exposes W×H inputs and side drag handles", async () => {
   const screen = await renderSurface("responsive");
   assert.equal(
-    screen.getByTestId("link-side-panel-surface").getAttribute("data-viewport-mode"),
+    screen
+      .getByTestId("link-side-panel-surface")
+      .getAttribute("data-viewport-mode"),
     "responsive",
   );
   assert.ok(screen.getByTestId("link-side-panel-responsive-width"));
@@ -71,7 +73,9 @@ test("responsive surface exposes W×H inputs and side drag handles", async () =>
 test("mobile surface paints device museum + hardware bezel", async () => {
   const screen = await renderSurface("mobile");
   assert.equal(
-    screen.getByTestId("link-side-panel-surface").getAttribute("data-viewport-mode"),
+    screen
+      .getByTestId("link-side-panel-surface")
+      .getAttribute("data-viewport-mode"),
     "mobile",
   );
   assert.ok(screen.getByTestId("link-side-panel-device-select"));
@@ -86,14 +90,22 @@ test("mobile surface exposes orientation and scale controls on white backdrop", 
   const screen = await renderSurface("mobile");
   const { fireEvent } = await import("@testing-library/react");
   assert.ok(screen.getByTestId("link-side-panel-orientation"));
-  assert.equal(screen.getByTestId("link-side-panel-device-scale-value").textContent, "100%");
+  assert.equal(
+    screen.getByTestId("link-side-panel-device-scale-value").textContent,
+    "100%",
+  );
   await fireEvent.click(screen.getByTestId("link-side-panel-device-scale-up"));
-  assert.equal(screen.getByTestId("link-side-panel-device-scale-value").textContent, "125%");
+  assert.equal(
+    screen.getByTestId("link-side-panel-device-scale-value").textContent,
+    "125%",
+  );
   assert.equal(
     screen.getByTestId("playground-device-frame").getAttribute("data-scale"),
     "125",
   );
   assert.ok(
-    screen.getByTestId("link-side-panel-mobile-backdrop").className.includes("bg-white"),
+    screen
+      .getByTestId("link-side-panel-mobile-backdrop")
+      .className.includes("bg-white"),
   );
 });

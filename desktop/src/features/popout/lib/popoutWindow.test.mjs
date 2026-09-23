@@ -47,7 +47,6 @@ test("popoutErrorMessage prefers Error and string throws over the fallback", () 
   );
 });
 
-
 test("start-fullscreen is passed into the OS create payload", async () => {
   installLocalStorage();
   const { resetPopoutSettingsForTests, setStartFullscreen } = await import(
@@ -98,7 +97,10 @@ test("embed path does not call OS window create", async () => {
   assert.equal(invokes.length, 0);
   assert.equal(embedded.listEmbeddedWindows().length, 1);
   assert.equal(embedded.getActiveEmbeddedWindow()?.payload.kind, "thread");
-  assert.equal(embedded.getActiveEmbeddedWindow()?.payload.threadId, "thread-1");
+  assert.equal(
+    embedded.getActiveEmbeddedWindow()?.payload.threadId,
+    "thread-1",
+  );
 
   delete globalThis.__TAURI_INTERNALS__;
   settings.resetPopoutSettingsForTests();
@@ -188,7 +190,6 @@ test("OS split parks the main overlay playground", async () => {
   embedded.resetEmbeddedWindowsForTests();
   sessions.resetPlaygroundState();
 });
-
 
 test("isPopoutSplitLayout is true only for kind split", async () => {
   const { isPopoutSplitLayout, isPopoutThreadOnlyLayout } = await import(

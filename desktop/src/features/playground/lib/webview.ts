@@ -213,7 +213,9 @@ export async function inspectPlaygroundWebview(
 }
 
 /** Close the WebKit inspector for a playground (e.g. leaving fullscreen). */
-export async function closePlaygroundWebviewInspect(sid: string): Promise<void> {
+export async function closePlaygroundWebviewInspect(
+  sid: string,
+): Promise<void> {
   if (!isNativePlaygroundRuntime()) return;
   await invoke("playground_webview_close_inspect", withWindowLabel({ sid }));
 }

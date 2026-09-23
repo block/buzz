@@ -3,8 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Semver with optional prerelease (e.g. 0.5.23 or 0.5.23-hula.2). */
-export const VERSION_PATTERN =
-  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+export const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 /**
  * Patch every desktop version surface the UI / Tauri / Cargo read at build time.

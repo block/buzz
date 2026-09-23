@@ -97,4 +97,3 @@ test("parses the hula-port-hole custom-card payload (v:1, stack, expires)", () =
     HULA_PORT_HOLE,
   );
 });
-

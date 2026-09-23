@@ -267,9 +267,7 @@ export function FocusThreadDrawer({
   return (
     <div
       className={
-        coverAppChrome
-          ? "fixed inset-0 z-[110]"
-          : "absolute inset-0 z-41"
+        coverAppChrome ? "fixed inset-0 z-[110]" : "absolute inset-0 z-41"
       }
       data-cover-app-chrome={coverAppChrome ? "true" : undefined}
       data-testid="focus-thread-drawer-overlay"

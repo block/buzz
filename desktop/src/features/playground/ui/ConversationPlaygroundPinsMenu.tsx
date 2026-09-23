@@ -24,11 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/shared/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 function scopeKeyForConversation(input: {
   channelId: string;
@@ -116,7 +112,10 @@ export function ConversationPlaygroundPinsMenu({
         <DropdownMenuLabel>Playground pins</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {pins.length === 0 ? (
-          <DropdownMenuItem disabled data-testid="conversation-playground-pins-empty">
+          <DropdownMenuItem
+            disabled
+            data-testid="conversation-playground-pins-empty"
+          >
             Pin a playground from a card
           </DropdownMenuItem>
         ) : (
@@ -128,7 +127,7 @@ export function ConversationPlaygroundPinsMenu({
               onSelect={() => openPin(pin)}
             >
               <span className="min-w-0 flex-1 truncate">{pin.name}</span>
-              <span
+              <button
                 aria-label={`Unpin ${pin.name}`}
                 className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
                 data-testid={`conversation-playground-unpin-${pin.sid}`}
@@ -137,10 +136,10 @@ export function ConversationPlaygroundPinsMenu({
                   event.preventDefault();
                   event.stopPropagation();
                 }}
-                role="button"
+                type="button"
               >
                 <X className="h-3.5 w-3.5" />
-              </span>
+              </button>
             </DropdownMenuItem>
           ))
         )}
@@ -148,4 +147,3 @@ export function ConversationPlaygroundPinsMenu({
     </DropdownMenu>
   );
 }
-

@@ -13,11 +13,8 @@ afterEach(async () => {
 });
 
 test("openLinkSidePanel accepts http(s) and rejects other schemes", async () => {
-  const {
-    getLinkSidePanel,
-    isLinkSidePanelUrl,
-    openLinkSidePanel,
-  } = await import("./linkSidePanelStore.ts");
+  const { getLinkSidePanel, isLinkSidePanelUrl, openLinkSidePanel } =
+    await import("./linkSidePanelStore.ts");
 
   assert.equal(isLinkSidePanelUrl("https://example.com/path"), true);
   assert.equal(isLinkSidePanelUrl("http://localhost:3000"), true);

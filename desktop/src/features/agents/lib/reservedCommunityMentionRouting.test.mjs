@@ -49,7 +49,9 @@ test("routing drops orphan competitors for reserved exact labels", () => {
   assert.equal(filtered.find((c) => c.displayName === "Mo")?.pubkey, MO);
   assert.ok(filtered.some((c) => c.displayName === "Mo Local"));
   assert.ok(filtered.some((c) => c.displayName === "Ada"));
-  assert.ok(!filtered.some((c) => c.displayName === "Mo" && c.pubkey === ORPHAN));
+  assert.ok(
+    !filtered.some((c) => c.displayName === "Mo" && c.pubkey === ORPHAN),
+  );
 });
 
 test("selected mention rewrite forces reserved labels onto community bots", () => {

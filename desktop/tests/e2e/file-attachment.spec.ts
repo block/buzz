@@ -905,7 +905,9 @@ test("markdown and HTML attachments preview in-app without navigating", async ({
   await expect(frame.locator("#spin")).toBeVisible();
 
   await frame.getByRole("link", { name: "Go to section" }).click();
-  await expect(frame.getByRole("heading", { name: "Section target" })).toBeInViewport();
+  await expect(
+    frame.getByRole("heading", { name: "Section target" }),
+  ).toBeInViewport();
 
   const parentUrl = page.url();
   const popupPromise = page

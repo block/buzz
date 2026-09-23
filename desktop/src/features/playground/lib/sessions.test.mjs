@@ -165,7 +165,6 @@ test("parkPlaygroundHost parks overlay and embed-only split", async () => {
   assert.equal(embedded.getActiveEmbeddedWindow(), null);
 });
 
-
 test("dismissPlayground parks embed-only host like parkPlaygroundHost", async () => {
   const {
     configurePlaygroundScope,
@@ -186,7 +185,10 @@ test("dismissPlayground parks embed-only host like parkPlaygroundHost", async ()
       playground: card,
     },
   });
-  assert.equal(embedded.getActiveEmbeddedWindow()?.label, "popout-playground-bbb");
+  assert.equal(
+    embedded.getActiveEmbeddedWindow()?.label,
+    "popout-playground-bbb",
+  );
   assert.equal(getActivePlaygroundSid(), null);
 
   dismissPlayground();

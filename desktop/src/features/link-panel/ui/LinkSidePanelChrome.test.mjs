@@ -103,9 +103,15 @@ test("chrome keeps URL on row 1 and right-justifies tooling on the mode row", as
   assert.equal(modeRow.parentElement, chrome);
   assert.ok(url.compareDocumentPosition(modeRow) & 4);
 
-  assert.ok(modeRow.contains(screen.getByTestId("link-side-panel-mode-desktop")));
-  assert.ok(modeRow.contains(screen.getByTestId("link-side-panel-mode-responsive")));
-  assert.ok(modeRow.contains(screen.getByTestId("link-side-panel-mode-mobile")));
+  assert.ok(
+    modeRow.contains(screen.getByTestId("link-side-panel-mode-desktop")),
+  );
+  assert.ok(
+    modeRow.contains(screen.getByTestId("link-side-panel-mode-responsive")),
+  );
+  assert.ok(
+    modeRow.contains(screen.getByTestId("link-side-panel-mode-mobile")),
+  );
   assert.ok(modeRow.contains(tools));
   assert.match(tools.className, /ml-auto/);
   assert.match(tools.className, /shrink-0/);
@@ -124,7 +130,10 @@ test("chrome keeps URL on row 1 and right-justifies tooling on the mode row", as
   assert.equal(screen.queryByTestId("link-side-panel-expand"), null);
 
   assert.equal(url.contains(screen.getByTestId("link-side-panel-back")), false);
-  assert.equal(url.contains(screen.getByTestId("link-side-panel-detach")), false);
+  assert.equal(
+    url.contains(screen.getByTestId("link-side-panel-detach")),
+    false,
+  );
 });
 
 test("Inspect is visible only when detached; Detach is hidden", async () => {

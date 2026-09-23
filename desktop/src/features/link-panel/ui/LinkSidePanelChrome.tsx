@@ -60,7 +60,11 @@ function ChromeIconButton({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        {props.disabled ? <span className="inline-flex">{button}</span> : button}
+        {props.disabled ? (
+          <span className="inline-flex">{button}</span>
+        ) : (
+          button
+        )}
       </TooltipTrigger>
       <TooltipContent side="bottom">{tooltip}</TooltipContent>
     </Tooltip>

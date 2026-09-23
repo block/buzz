@@ -35,4 +35,3 @@ export function usePopoutThreadOnlyLayout(): boolean {
 export function usePopoutSplitLayout(): boolean {
   return isPopoutSplitLayout(usePopoutLayoutPayload());
 }
-

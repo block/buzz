@@ -551,7 +551,7 @@ test("context-menu activation shows pending, suppresses duplicates, then navigat
         release = () => resolve({ id: HIDDEN_DM_ID, channel_type: "dm" });
       });
     const trigger = inbox.container.querySelector(
-      '[data-testid="home-inbox-item-' + SOURCE_EVENT_ID + '"]',
+      `[data-testid="home-inbox-item-${SOURCE_EVENT_ID}"]`,
     );
     assert.ok(trigger, "the row context-menu trigger must render");
     await act(async () => {
@@ -748,11 +748,11 @@ test("a failed reopen from an unselected row exposes its own keyboard Retry that
 
     // The failed row itself surfaces a keyboard-operable Retry.
     const rowStatus = inbox.container.querySelector(
-      '[data-testid="home-inbox-reopen-status-' + SOURCE_EVENT_ID + '"]',
+      `[data-testid="home-inbox-reopen-status-${SOURCE_EVENT_ID}"]`,
     );
     assert.ok(rowStatus, "the failed row must show its own error status");
     const retry = inbox.container.querySelector(
-      '[data-testid="home-inbox-reopen-retry-' + SOURCE_EVENT_ID + '"]',
+      `[data-testid="home-inbox-reopen-retry-${SOURCE_EVENT_ID}"]`,
     );
     assert.ok(retry, "the failed row must expose its own Retry");
     assert.equal(retry.tagName, "BUTTON");

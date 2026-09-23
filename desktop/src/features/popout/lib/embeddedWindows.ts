@@ -68,7 +68,12 @@ function persist() {
 function isPayload(value: unknown): value is EmbeddedPayload {
   if (!value || typeof value !== "object") return false;
   const kind = (value as EmbeddedPayload).kind;
-  return kind === "thread" || kind === "playground" || kind === "split" || kind === "link";
+  return (
+    kind === "thread" ||
+    kind === "playground" ||
+    kind === "split" ||
+    kind === "link"
+  );
 }
 
 function load() {

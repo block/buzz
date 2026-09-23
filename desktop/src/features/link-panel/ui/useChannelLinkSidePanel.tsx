@@ -48,7 +48,9 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
 
   React.useEffect(() => {
     // Pathname change (or ChannelScreen unmount) tears down fullscreen /
-    // side web so Projects and other shells are not covered.
+    // side web so Projects and other shells are not covered. Reading
+    // pathname keeps the dep intentional for cleanup-on-navigate.
+    void location.pathname;
     return () => {
       closeLinkSidePanel();
     };

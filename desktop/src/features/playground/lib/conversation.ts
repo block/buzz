@@ -53,4 +53,3 @@ export function playgroundPinScopeKey(
     ? conversation.draftKey
     : `channel:${conversation.channelId}`;
 }
-

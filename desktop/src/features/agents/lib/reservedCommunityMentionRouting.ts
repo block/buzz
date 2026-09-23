@@ -61,7 +61,10 @@ export function reservedCommunityBotRoutes({
     for (const name of RESERVED_COMMUNITY_AGENT_NAMES) {
       const key = normalizeLabel(name);
       if (routes.has(key)) continue;
-      routes.set(key, normalizePubkey(HULA_RESERVED_COMMUNITY_BOT_PUBKEYS[name]));
+      routes.set(
+        key,
+        normalizePubkey(HULA_RESERVED_COMMUNITY_BOT_PUBKEYS[name]),
+      );
     }
   }
 

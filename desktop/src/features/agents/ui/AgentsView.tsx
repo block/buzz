@@ -50,7 +50,9 @@ export function AgentsView() {
   const fullAiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const compactActionsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [isAiDefaultsOpen, setIsAiDefaultsOpen] = React.useState(false);
-  const [agentToEdit, setAgentToEdit] = React.useState<ManagedAgent | null>(null);
+  const [agentToEdit, setAgentToEdit] = React.useState<ManagedAgent | null>(
+    null,
+  );
 
   const handleEditPersona = React.useCallback(
     (persona: AgentPersona) => {
@@ -68,7 +70,6 @@ export function AgentsView() {
     },
     [agents.managedAgents, personas],
   );
-
 
   function openAiDefaults(trigger: HTMLButtonElement | null) {
     aiDefaultsTriggerRef.current = trigger;
@@ -378,8 +379,9 @@ export function AgentsView() {
                 (agent) =>
                   agent.personaId ===
                     (
-                      personas.personaDialogState!
-                        .initialValues as { id: string }
+                      personas.personaDialogState?.initialValues as {
+                        id: string;
+                      }
                     ).id && agent.useOpenClawWorkspace === true,
               ),
           )}

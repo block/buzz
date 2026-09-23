@@ -533,6 +533,7 @@ export function ProfileSummaryView({
                 isDeleteAgentPending={isAgentActionPending}
                 managedAgent={managedAgent}
                 onEditAgent={handleEditAgent}
+                onEditInstructions={handleEditPersona ?? handleEditAgent}
                 onCreateCard={onCreateCard}
                 onDeleteAgent={onDeleteAgent}
                 onDuplicateAgent={onDuplicateAgent}

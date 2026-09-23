@@ -18,11 +18,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/shared/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 function pinAsCard(session: {
   sid: string;
@@ -44,7 +40,10 @@ function pinAsCard(session: {
   };
 }
 
-function playgroundPinsScopeKey(channelId: string, threadId?: string | null): string {
+function playgroundPinsScopeKey(
+  channelId: string,
+  threadId?: string | null,
+): string {
   const trimmedThread = threadId?.trim() ?? "";
   if (trimmedThread) return `thread:${trimmedThread}`;
   return `channel:${channelId}`;
@@ -71,9 +70,7 @@ export function ConversationPopoutMenu({
         ...(threadId ? { threadId } : {}),
       });
     } catch (error) {
-      toast.error(
-        popoutErrorMessage(error, "Could not open window."),
-      );
+      toast.error(popoutErrorMessage(error, "Could not open window."));
     }
   }
 
@@ -88,9 +85,7 @@ export function ConversationPopoutMenu({
         playground,
       });
     } catch (error) {
-      toast.error(
-        popoutErrorMessage(error, "Could not open split window."),
-      );
+      toast.error(popoutErrorMessage(error, "Could not open split window."));
     }
   }
 

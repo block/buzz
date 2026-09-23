@@ -1003,7 +1003,6 @@ test("locked dock fullscreen covers both panes and restores the split", async ()
   );
 });
 
-
 test("chrome keeps URL on row 1 and right-justifies tooling on the mode row", async () => {
   const screen = await renderOverlay();
   const chrome = screen.getByTestId("playground-chrome");

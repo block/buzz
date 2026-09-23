@@ -72,11 +72,9 @@ test("showPinWebview re-hides when hide-all wins while show is in flight", async
     return Promise.resolve(undefined);
   });
 
-  const {
-    getPinHideEpoch,
-    hideAllPinWebviews,
-    showPinWebview,
-  } = await import("./pinWebview.ts");
+  const { getPinHideEpoch, hideAllPinWebviews, showPinWebview } = await import(
+    "./pinWebview.ts"
+  );
 
   const epochBefore = getPinHideEpoch();
   const pending = showPinWebview({
@@ -143,8 +141,9 @@ test("stale show re-hide does not invalidate a remounted pin show", async () => 
   // stale show resolves — must NOT re-hide the remounted paint.
   resolveNew();
   await second;
-  const hidesAfterNew = calls.filter((row) => row.cmd === "pin_webview_hide")
-    .length;
+  const hidesAfterNew = calls.filter(
+    (row) => row.cmd === "pin_webview_hide",
+  ).length;
 
   resolveOld();
   await first;
@@ -218,14 +217,14 @@ test("first-open remount: late cancelled show does not blank the new show", asyn
     `stale show must not re-hide remounted first open; hides=${JSON.stringify(hides)} calls=${JSON.stringify(calls)}`,
   );
   assert.equal(getPinShowGeneration(pinId), 2);
-  assert.equal(
-    calls.filter((row) => row.cmd === "pin_webview_show").length,
-    2,
-  );
+  assert.equal(calls.filter((row) => row.cmd === "pin_webview_show").length, 2);
 });
 
 test("window-scoped labels stay pin-id on main and suffix elsewhere", () => {
-  assert.equal(pinWebviewLabelForWindow("hula-link-side-panel"), "pin-hula-link-side-panel");
+  assert.equal(
+    pinWebviewLabelForWindow("hula-link-side-panel"),
+    "pin-hula-link-side-panel",
+  );
   assert.equal(
     pinWebviewLabelForWindow("hula-link-side-panel", "main"),
     "pin-hula-link-side-panel",
@@ -264,8 +263,12 @@ test("show/hide/close pin invokes pass current windowLabel", async () => {
     return Promise.resolve(undefined);
   });
 
-  const { closePinWebview, hideAllPinWebviews, hidePinWebview, showPinWebview } =
-    await import("./pinWebview.ts");
+  const {
+    closePinWebview,
+    hideAllPinWebviews,
+    hidePinWebview,
+    showPinWebview,
+  } = await import("./pinWebview.ts");
 
   await showPinWebview({
     pinId: "hula-link-side-panel",
@@ -298,10 +301,9 @@ test("inspect and screenshot invoke pin-scoped commands with window label", asyn
     }
     return undefined;
   });
-  const {
-    inspectPinWebview,
-    screenshotPinWebview,
-  } = await import("./pinWebview.ts");
+  const { inspectPinWebview, screenshotPinWebview } = await import(
+    "./pinWebview.ts"
+  );
   await inspectPinWebview("demo");
   await screenshotPinWebview("demo");
   assert.equal(calls[0].cmd, "pin_webview_inspect");

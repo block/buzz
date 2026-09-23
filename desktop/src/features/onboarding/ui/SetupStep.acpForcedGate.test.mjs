@@ -420,7 +420,7 @@ describe("SetupStep cached-ready revalidation — P4 regression (mounted consume
       '[data-testid="onboarding-setup-next"]',
     );
     assert.ok(
-      button && button.disabled,
+      button?.disabled,
       "Next stays gated while readiness is unconfirmed",
     );
 
