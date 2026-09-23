@@ -283,10 +283,10 @@ Inaccessible and nonexistent channels return no events or bounds.
 ### Resource Limits and Recovery
 
 Buzz shares resource limits across all thread-window filters in one query,
-including replica retries: 64 auxiliary SQL scans, 8,192 raw auxiliary rows
-(including probes), 8 MiB of raw auxiliary content plus serialized tags, 8 MiB
-of serialized output, and an eight-second overall deadline. Auxiliary payloads
-are consumed incrementally and charged before reconstruction; tombstones and
+including replica retries: 64 auxiliary SQL scans, 8,192 raw reply and auxiliary
+rows (including probes), 8 MiB of their combined content plus serialized tags, 8 MiB
+of serialized output, and an eight-second overall deadline. Reply and auxiliary
+payloads are consumed incrementally and charged before reconstruction; tombstones and
 probes consume the raw allowance too. No partial page or bounds is returned
 when a budget is exceeded.
 

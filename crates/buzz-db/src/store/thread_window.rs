@@ -72,6 +72,7 @@ async fn select_window(
     conn: &mut PgConnection,
     community: CommunityId,
     request: &Request,
+    budget: &mut ScanBudget,
 ) -> Result<ThreadWindow> {
     if !(1..=MAX_LIMIT).contains(&request.limit)
         || !(1..=100).contains(&request.depth)
@@ -103,7 +104,8 @@ async fn select_window(
     // sort can otherwise execute one lateral lookup for every reply first.
     // OFFSET 0 keeps this boundary without limiting candidates prematurely.
     let mut q = QueryBuilder::new(
-        "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.received_at, e.channel_id \
+        "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.received_at, e.channel_id, \
+         octet_length(e.content) + octet_length(e.tags::text) AS payload_bytes \
          FROM (SELECT tm.community_id, tm.event_id, tm.event_created_at \
          FROM thread_metadata tm WHERE tm.community_id = ",
     );
@@ -146,20 +148,29 @@ async fn select_window(
     // plan can sort the entire root (and exceeded the SQL deadline in paging
     // tests). An unnamed statement keeps parameter-aware planning for this
     // bounded query without changing pooled session or legacy settings.
-    let mut raw = q.build().persistent(false).fetch_all(&mut *conn).await?;
-    let has_more = raw.len() > request.limit as usize;
-    raw.truncate(request.limit as usize);
-    let next_cursor = if has_more {
-        raw.last().map(scan_cursor).transpose()?
-    } else {
-        None
-    };
-    let mut rows = Vec::with_capacity(raw.len());
-    for row in raw {
+    // Charge every consumed payload before reconstruction, including damaged
+    // rows and the limit+1 probe. The caller owns this ledger across all
+    // windows, auxiliary scans and replica-to-writer retries.
+    let mut raw = q.build().persistent(false).fetch(&mut *conn);
+    let mut rows = Vec::new();
+    let mut retained = 0;
+    let mut last_cursor = None;
+    let mut has_more = false;
+    while let Some(row) = raw.try_next().await? {
+        budget.rows(1)?;
+        let payload_bytes: i32 = row.try_get("payload_bytes")?;
+        budget.bytes(payload_bytes as usize)?;
+        if retained == request.limit {
+            has_more = true;
+            break;
+        }
+        last_cursor = Some(scan_cursor(&row)?);
+        retained += 1;
         if let Some(event) = row_to_stored_event(row)? {
             rows.push(event);
         }
     }
+    let next_cursor = if has_more { last_cursor } else { None };
     Ok(ThreadWindow {
         rows,
         has_more,
@@ -172,6 +183,7 @@ async fn writer_window(
     pool: &PgPool,
     community: CommunityId,
     request: &Request,
+    budget: &mut ScanBudget,
 ) -> Result<ThreadWindow> {
     let conn = crate::observability::acquire_writer(
         pool,
@@ -180,7 +192,7 @@ async fn writer_window(
     .await?;
     let mut tx = sqlx::Transaction::begin(conn, None).await?;
     set_deadline(&mut tx).await?;
-    let window = select_window(&mut tx, community, request).await?;
+    let window = select_window(&mut tx, community, request, budget).await?;
     tx.rollback().await?;
     Ok(window)
 }
@@ -190,12 +202,14 @@ impl Db {
     /// cursors supply an upper bound, including terminal pages; no forward
     /// thread "last delivered row is newest" inference is used. Head routing
     /// inherits the existing default-off budget. Writer follow-ups are pooled,
-    /// not a snapshot spanning the response or subsequent history pages.
+    /// not a snapshot spanning the response or subsequent history pages. The
+    /// caller must share `budget` with every window and auxiliary scan in the request.
     #[datastore_span(name = "get_thread_window", system = "postgresql")]
     pub async fn get_thread_window_with_session(
         &self,
         community: CommunityId,
         request: &Request,
+        budget: &mut ScanBudget,
     ) -> Result<(ThreadWindow, ReadSession)> {
         let cursor = request.cursor.as_ref().map(cursor_key).transpose()?;
         let path = if cursor.is_some() {
@@ -213,7 +227,7 @@ impl Db {
         {
             let result = async {
                 set_deadline(&mut tx).await?;
-                select_window(&mut tx, community, request).await
+                select_window(&mut tx, community, request, budget).await
             }
             .await;
             match result {
@@ -243,7 +257,7 @@ impl Db {
                 }
             }
         }
-        let window = writer_window(&self.pool, community, request).await?;
+        let window = writer_window(&self.pool, community, request, budget).await?;
         Ok((
             window,
             ReadSession {
@@ -273,16 +287,17 @@ pub struct AuxQuery<'a> {
 /// Fixed raw auxiliary page budget (the probe is one extra row).
 pub const AUX_LIMIT: usize = 1000;
 
-/// Aggregate auxiliary work allowance for one HTTP query, not one window.
+/// Aggregate reply and auxiliary scan allowance for one query, not one window.
+/// Bytes include content and tags; the bridge separately bounds serialized output.
 /// Passed through replica retries so degradation cannot reset the allowance.
 #[derive(Default)]
-pub struct AuxBudget {
+pub struct ScanBudget {
     queries: usize,
     rows: usize,
     bytes: usize,
 }
 
-impl AuxBudget {
+impl ScanBudget {
     fn query(&mut self) -> Result<()> {
         self.queries += 1;
         if self.queries > 64 {
@@ -294,7 +309,7 @@ impl AuxBudget {
     fn bytes(&mut self, count: usize) -> Result<()> {
         self.bytes = self.bytes.saturating_add(count);
         if self.bytes > 8 * 1024 * 1024 {
-            return Err(DbError::ThreadWindowBudgetExceeded("auxiliary byte"));
+            return Err(DbError::ThreadWindowBudgetExceeded("payload byte"));
         }
         Ok(())
     }
@@ -321,7 +336,7 @@ pub struct AuxPage {
 async fn select_aux(
     conn: &mut PgConnection,
     query: &AuxQuery<'_>,
-    budget: &mut AuxBudget,
+    budget: &mut ScanBudget,
 ) -> Result<AuxPage> {
     if query.targets.is_empty() || query.targets.len() > 200 {
         return Err(invalid("invalid thread auxiliary target batch"));
@@ -404,7 +419,7 @@ async fn select_aux(
 async fn writer_aux(
     pool: &PgPool,
     query: &AuxQuery<'_>,
-    budget: &mut AuxBudget,
+    budget: &mut ScanBudget,
 ) -> Result<AuxPage> {
     let conn = crate::observability::acquire_writer(
         pool,
@@ -425,7 +440,7 @@ impl ReadSession {
     pub async fn thread_window_aux(
         &mut self,
         query: &AuxQuery<'_>,
-        budget: &mut AuxBudget,
+        budget: &mut ScanBudget,
     ) -> Result<AuxPage> {
         let writer = match &mut self.inner {
             ReadSessionInner::Replica { tx, writer } => match select_aux(tx, query, budget).await {

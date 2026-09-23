@@ -125,7 +125,10 @@ async fn replies(
 async fn assert_pages(db: &Db, cid: CommunityId, mut req: Request, expected: &[nostr::Event]) {
     let mut delivered = Vec::new();
     loop {
-        let (window, _) = db.get_thread_window_with_session(cid, &req).await.unwrap();
+        let (window, _) = db
+            .get_thread_window_with_session(cid, &req, &mut ScanBudget::default())
+            .await
+            .unwrap();
         assert_eq!(window.has_more, window.next_cursor.is_some());
         assert!(window.rows.len() <= req.limit as usize);
         delivered.extend(window.rows.iter().map(|row| row.event.id));
@@ -170,7 +173,11 @@ async fn cardinalities() {
         let expected = replies(&db, cid, ch, &keys, &root, count).await;
         assert_pages(&db, cid, request(ch, &root, 50), &expected).await;
         let (head, _) = db
-            .get_thread_window_with_session(cid, &request(ch, &root, 50))
+            .get_thread_window_with_session(
+                cid,
+                &request(ch, &root, 50),
+                &mut ScanBudget::default(),
+            )
             .await
             .unwrap();
         assert_eq!(head.has_more, count > 50);
@@ -211,7 +218,10 @@ async fn thread_window_predicates_corruption_and_legacy() {
         .await
         .unwrap();
     let req = request(ch, &root, 50);
-    let (page, _) = db.get_thread_window_with_session(cid, &req).await.unwrap();
+    let (page, _) = db
+        .get_thread_window_with_session(cid, &req, &mut ScanBudget::default())
+        .await
+        .unwrap();
     assert_eq!(page.rows.len(), 49);
     assert!(page.has_more);
     assert_eq!(page.next_cursor.as_ref().unwrap().id, broken.to_hex());
@@ -265,7 +275,10 @@ async fn thread_window_predicates_corruption_and_legacy() {
     let expected = &rows[600..];
     let mut req = request(ch, &root, 50);
     req.depth = 1;
-    let (page, _) = db.get_thread_window_with_session(cid, &req).await.unwrap();
+    let (page, _) = db
+        .get_thread_window_with_session(cid, &req, &mut ScanBudget::default())
+        .await
+        .unwrap();
     assert_eq!(page.rows.len(), 50);
     assert!(page.has_more);
     assert_eq!(page.next_cursor.unwrap().id, expected[49].id.to_hex());
@@ -277,7 +290,10 @@ async fn thread_window_predicates_corruption_and_legacy() {
         .await
         .unwrap();
     let expected = &expected[..50];
-    let (page, _) = db.get_thread_window_with_session(cid, &req).await.unwrap();
+    let (page, _) = db
+        .get_thread_window_with_session(cid, &req, &mut ScanBudget::default())
+        .await
+        .unwrap();
     assert_eq!(page.rows.len(), 50);
     assert!(!page.has_more && page.next_cursor.is_none());
     // Deleting the root does not hide the descendants.
@@ -289,7 +305,10 @@ async fn thread_window_predicates_corruption_and_legacy() {
         .unwrap();
     assert_pages(&db, cid, req.clone(), expected).await;
     req.channel = Uuid::new_v4();
-    let (page, _) = db.get_thread_window_with_session(cid, &req).await.unwrap();
+    let (page, _) = db
+        .get_thread_window_with_session(cid, &req, &mut ScanBudget::default())
+        .await
+        .unwrap();
     assert!(page.rows.is_empty() && !page.has_more && !page.root_in_channel);
     let legacy = db
         .get_thread_replies(cid, &root.id.to_bytes(), None, 100, None)
@@ -333,7 +352,7 @@ async fn thread_aux_tombstone_ids_and_raw_cursor_survive_damaged_payload() {
         .unwrap();
     // A deleted damaged payload still supplies its ID for delete-of-aux.
     let first = session
-        .thread_window_aux(&query, &mut AuxBudget::default())
+        .thread_window_aux(&query, &mut ScanBudget::default())
         .await
         .unwrap();
     assert_eq!(first.events.len(), 999);
@@ -342,7 +361,7 @@ async fn thread_aux_tombstone_ids_and_raw_cursor_survive_damaged_payload() {
     assert!(first.next_cursor.is_some());
     query.cursor = first.next_cursor;
     let tail = session
-        .thread_window_aux(&query, &mut AuxBudget::default())
+        .thread_window_aux(&query, &mut ScanBudget::default())
         .await
         .unwrap();
     assert_eq!(tail.events.len(), 1);
@@ -364,7 +383,7 @@ async fn thread_aux_query_budget_fails_on_65th_real_scan() {
     let mut session = ReadSession {
         inner: ReadSessionInner::Writer(db.pool.clone()),
     };
-    let mut budget = AuxBudget::default();
+    let mut budget = ScanBudget::default();
     for _ in 0..64 {
         assert!(session
             .thread_window_aux(&query, &mut budget)
@@ -412,11 +431,11 @@ async fn thread_aux_byte_budget_stops_consumption_and_survives_retry() {
     let mut session = ReadSession {
         inner: ReadSessionInner::Writer(db.pool.clone()),
     };
-    let mut budget = AuxBudget::default();
+    let mut budget = ScanBudget::default();
     let result = session.thread_window_aux(&query, &mut budget).await;
     assert!(matches!(
         result,
-        Err(DbError::ThreadWindowBudgetExceeded("auxiliary byte"))
+        Err(DbError::ThreadWindowBudgetExceeded("payload byte"))
     ));
     assert_eq!(
         budget.rows, 32,
@@ -426,10 +445,127 @@ async fn thread_aux_byte_budget_stops_consumption_and_survives_retry() {
     let result = session.thread_window_aux(&query, &mut budget).await;
     assert!(matches!(
         result,
-        Err(DbError::ThreadWindowBudgetExceeded("auxiliary byte"))
+        Err(DbError::ThreadWindowBudgetExceeded("payload byte"))
     ));
     assert_eq!(
         budget.rows, 33,
         "a retry cannot reset the request-wide allowance"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_reply_byte_budget_stops_before_collecting_page() {
+    let (db, community, channel, keys, root) = fixture().await;
+    // Real signed replies at the ingest content ceiling, not oversized DB rows.
+    for n in 0..201 {
+        let reply = make_event(
+            &keys,
+            channel,
+            9,
+            &"x".repeat(256 * 1024),
+            Some(&root),
+            root.created_at.as_secs() + n,
+        );
+        let ts = DateTime::from_timestamp(reply.created_at.as_secs() as i64, 0).unwrap();
+        let root_ts = DateTime::from_timestamp(root.created_at.as_secs() as i64, 0).unwrap();
+        db.insert_event_with_thread_metadata(
+            community,
+            &reply,
+            Some(channel),
+            Some(crate::event::ThreadMetadataParams {
+                event_id: &reply.id.to_bytes(),
+                event_created_at: ts,
+                channel_id: channel,
+                parent_event_id: Some(&root.id.to_bytes()),
+                parent_event_created_at: Some(root_ts),
+                root_event_id: Some(&root.id.to_bytes()),
+                root_event_created_at: Some(root_ts),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let mut req = request(channel, &root, 200);
+    req.include_aux = false;
+    let mut budget = ScanBudget::default();
+    let result = db
+        .get_thread_window_with_session(community, &req, &mut budget)
+        .await;
+    assert!(matches!(
+        result,
+        Err(DbError::ThreadWindowBudgetExceeded("payload byte"))
+    ));
+    assert_eq!(
+        budget.rows, 32,
+        "stop on first excess payload, not after collecting 201 replies"
+    );
+    assert!(budget.bytes > 8 * 1024 * 1024);
+    let result = db
+        .get_thread_window_with_session(community, &req, &mut budget)
+        .await;
+    assert!(matches!(
+        result,
+        Err(DbError::ThreadWindowBudgetExceeded("payload byte"))
+    ));
+    assert_eq!(budget.rows, 33, "retry must preserve consumed allowance");
+
+    // A smaller page succeeds. The probe is charged but never delivered, and
+    // the cursor is the last retained raw candidate rather than the probe.
+    req.limit = 20;
+    let mut budget = ScanBudget::default();
+    let (page, mut session) = db
+        .get_thread_window_with_session(community, &req, &mut budget)
+        .await
+        .unwrap();
+    assert_eq!(budget.rows, 21);
+    assert_eq!(page.rows.len(), 20);
+    assert!(page.has_more);
+    assert_eq!(
+        page.next_cursor.as_ref().unwrap().id,
+        page.rows[19].event.id.to_hex()
+    );
+    let first_bytes = budget.bytes;
+    // Even an empty auxiliary page shares the existing reply allowance.
+    let targets = [root.id.to_hex()];
+    session
+        .thread_window_aux(
+            &AuxQuery {
+                community,
+                targets: &targets,
+                kinds: &[7],
+                accessible: &[channel],
+                cursor: None,
+            },
+            &mut budget,
+        )
+        .await
+        .unwrap();
+    assert_eq!(budget.bytes, first_bytes);
+    drop(session);
+    let result = db
+        .get_thread_window_with_session(community, &req, &mut budget)
+        .await;
+    assert!(matches!(
+        result,
+        Err(DbError::ThreadWindowBudgetExceeded("payload byte"))
+    ));
+    assert_eq!(
+        budget.rows, 32,
+        "the next window cannot reset the batch allowance"
+    );
+
+    // The probe alone can cross the limit; do not silently omit its charge.
+    req.limit = 31;
+    let mut budget = ScanBudget::default();
+    let result = db
+        .get_thread_window_with_session(community, &req, &mut budget)
+        .await;
+    assert!(matches!(
+        result,
+        Err(DbError::ThreadWindowBudgetExceeded("payload byte"))
+    ));
+    assert_eq!(budget.rows, 32);
 }

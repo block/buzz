@@ -114,9 +114,49 @@ async fn thread_window_signed_large_aux_fails_with_recoverable_budget_error() {
     assert!(body["error"]
         .as_str()
         .unwrap()
-        .contains("auxiliary byte budget"));
+        .contains("payload byte budget"));
     let mut without_aux = filter;
     without_aux["include_aux"] = json!(false);
     let recovered = f.query(&without_aux).await;
     assert_eq!(f.bounds(&recovered, &without_aux)["has_more"], false);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_signed_large_replies_without_aux_are_bounded() {
+    let f = Fixture::new().await;
+    for n in 0..201 {
+        let reply = event(
+            &f.keys,
+            f.channel,
+            9,
+            &"x".repeat(256 * 1024),
+            Some(&f.root),
+            f.root.created_at.as_secs() + n,
+        );
+        ingest(&f, &reply).await;
+    }
+    let mut filter = f.filter();
+    filter["include_aux"] = json!(false);
+    filter["limit"] = json!(200);
+    let (status, body) = f.post(&f.keys, "/query", json!([filter])).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("payload byte budget"));
+    assert!(
+        body.as_array().is_none(),
+        "no partial rows or signed bounds on failure"
+    );
+    filter["limit"] = json!(20);
+    let page = f.query(&filter).await;
+    assert_eq!(ids(&page, Some(9)).len(), 20);
+    assert_eq!(f.bounds(&page, &filter)["has_more"], true);
+    let (status, body) = f.post(&f.keys, "/query", json!([filter, filter])).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("payload byte budget"));
 }

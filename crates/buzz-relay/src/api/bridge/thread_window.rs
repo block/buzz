@@ -4,7 +4,7 @@ use std::{collections::HashSet, time::Duration};
 
 use axum::{http::StatusCode, Json};
 use buzz_core::{thread_window::Request, TenantContext};
-use buzz_db::thread_window::{AuxBudget, AuxQuery};
+use buzz_db::thread_window::{AuxQuery, ScanBudget};
 use serde_json::{json, Value};
 
 use super::{event_in_accessible_channel, WINDOW_AUX_DELETE_KINDS, WINDOW_AUX_KINDS};
@@ -21,7 +21,7 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Default)]
 pub(super) struct Budget {
     bytes: usize,
-    aux: AuxBudget,
+    scan: ScanBudget,
 }
 
 /// Validate before search/presence/other extension dispatch can swallow the
@@ -128,7 +128,7 @@ async fn query(
 ) -> Result<Vec<Value>, Error> {
     let (window, mut session) = state
         .db
-        .get_thread_window_with_session(tenant.community(), request)
+        .get_thread_window_with_session(tenant.community(), request, &mut budget.scan)
         .await
         .map_err(|e| database_error("window", e))?;
     // An unsupported, missing or out-of-scope root is not a served window.
@@ -179,7 +179,7 @@ async fn query(
                     loop {
                         let was_replica = session.is_replica();
                         let page = session
-                            .thread_window_aux(&query, &mut budget.aux)
+                            .thread_window_aux(&query, &mut budget.scan)
                             .await
                             .map_err(|e| database_error("auxiliary closure", e))?;
                         if was_replica && !session.is_replica() {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::thread_window::{AuxBudget, AuxQuery};
+use crate::thread_window::{AuxQuery, ScanBudget};
 use buzz_core::thread_window::Request;
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
@@ -36,7 +36,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
     db.fence()
         .force_open_for_tests(chrono::DateTime::from_timestamp(base as i64 + 15, 0).unwrap());
     let (page, session) = db
-        .get_thread_window_with_session(community, &req)
+        .get_thread_window_with_session(community, &req, &mut ScanBudget::default())
         .await
         .unwrap();
     assert!(!session.is_replica());
@@ -49,7 +49,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
     // Counterfactual: over-claiming coverage demonstrably loses the middle row.
     db.fence().force_open_for_tests(chrono::Utc::now());
     let (page, session) = db
-        .get_thread_window_with_session(community, &req)
+        .get_thread_window_with_session(community, &req, &mut ScanBudget::default())
         .await
         .unwrap();
     assert!(session.is_replica());
@@ -60,7 +60,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
     // Default head route remains writer despite an open fence.
     req.cursor = None;
     let (head, session) = db
-        .get_thread_window_with_session(community, &req)
+        .get_thread_window_with_session(community, &req, &mut ScanBudget::default())
         .await
         .unwrap();
     assert!(!session.is_replica());
@@ -72,7 +72,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
     insert_thread_reply(&replica, cid, channel, &root, &middle).await;
     req = request(channel, &root, base + 30);
     let (_, mut session) = db
-        .get_thread_window_with_session(community, &req)
+        .get_thread_window_with_session(community, &req, &mut ScanBudget::default())
         .await
         .unwrap();
     assert!(session.is_replica());
@@ -102,7 +102,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
         accessible: &[channel],
         cursor: None,
     };
-    let mut budget = AuxBudget::default();
+    let mut budget = ScanBudget::default();
     let stale = session
         .thread_window_aux(&query, &mut budget)
         .await
@@ -112,7 +112,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
         "held snapshot must not advance after page proof"
     );
     let (_, mut fresh) = db
-        .get_thread_window_with_session(community, &req)
+        .get_thread_window_with_session(community, &req, &mut ScanBudget::default())
         .await
         .unwrap();
     assert_eq!(
@@ -142,7 +142,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
     // not reinterpret an unavailable reader as an empty terminal window.
     replica.close().await;
     let (page, session) = db
-        .get_thread_window_with_session(community, &req)
+        .get_thread_window_with_session(community, &req, &mut ScanBudget::default())
         .await
         .unwrap();
     assert!(!session.is_replica());
