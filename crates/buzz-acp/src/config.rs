@@ -45,6 +45,12 @@ pub enum ConfigError {
 
     #[error("config file error: {0}")]
     ConfigFile(String),
+
+    /// `--relay-input false` with no forward socket is a silent seat (§4).
+    #[error(
+        "RELAY_INPUT_OFF_WITHOUT_FORWARD_SOCKET: --relay-input false requires BUZZ_ACP_FORWARD_SOCKET"
+    )]
+    RelayInputOffWithoutForwardSocket,
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -525,6 +531,35 @@ pub struct CliArgs {
     /// ignored (the watermark stays at startup time).
     #[arg(long, env = "BUZZ_ACP_REPLAY_FLOOR")]
     pub replay_floor: Option<u64>,
+    /// Unix socket path for Hermes Buzz gateway forward frames. Unset = no listener.
+    #[arg(long, env = "BUZZ_ACP_FORWARD_SOCKET")]
+    pub forward_socket: Option<PathBuf>,
+
+    /// UID that may connect to the forward socket. Required when the socket is set.
+    #[arg(long, env = "BUZZ_ACP_FORWARD_PEER_UID")]
+    pub forward_peer_uid: Option<u32>,
+
+    /// Append-only jsonl of occupied forward dedupe keys.
+    #[arg(long, env = "BUZZ_ACP_FORWARD_STATE", requires = "forward_socket")]
+    pub forward_state: Option<PathBuf>,
+
+    /// Inbound relay subscription switch. Takes an explicit value
+    /// (`--relay-input false`) instead of being a bare flag: this pin is set
+    /// from a container env var, and a flag-style bool reads
+    /// `BUZZ_ACP_RELAY_INPUT=false` as "present, therefore true".
+    ///
+    /// Conventions §4 (single input path): when a forward sidecar is present
+    /// the seat listens on that path only. Default `true` keeps the existing
+    /// dual-path behaviour. `false` without `BUZZ_ACP_FORWARD_SOCKET` is a
+    /// silent seat and is rejected at startup.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_RELAY_INPUT",
+        action = clap::ArgAction::Set,
+        num_args = 1,
+        default_value_t = true
+    )]
+    pub relay_input: bool,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -629,6 +664,16 @@ pub struct Config {
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
+    /// Forward-input unix socket. `None` keeps the harness on relay-only intake.
+    pub forward_socket: Option<PathBuf>,
+    /// Peer UID allowlisted to write forward frames. Required with `forward_socket`.
+    pub forward_peer_uid: Option<u32>,
+    /// Durable occupancy file for forward `dedupe_key`s.
+    pub forward_state: Option<PathBuf>,
+    /// When false, the harness does not open inbound relay subscriptions.
+    /// Outbound publish (presence, occupancy, signed events) stays on.
+    /// Conventions §4: forward sidecar is then the only input path.
+    pub relay_input: bool,
 }
 
 /// Maximum length, in characters, of a session title sent to the adapter.
@@ -1150,6 +1195,27 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        if !args.relay_input && args.forward_socket.is_none() {
+            return Err(ConfigError::RelayInputOffWithoutForwardSocket);
+        }
+        if args.forward_socket.is_some() {
+            if !cfg!(unix) {
+                return Err(ConfigError::ConfigFile(
+                    "forward input requires Unix".into(),
+                ));
+            }
+            if args.forward_peer_uid.is_none() {
+                return Err(ConfigError::ConfigFile(
+                    "BUZZ_ACP_FORWARD_SOCKET requires BUZZ_ACP_FORWARD_PEER_UID".into(),
+                ));
+            }
+            if args.forward_state.is_none() {
+                return Err(ConfigError::ConfigFile(
+                    "BUZZ_ACP_FORWARD_SOCKET requires BUZZ_ACP_FORWARD_STATE".into(),
+                ));
+            }
+        }
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
@@ -1204,6 +1270,10 @@ impl Config {
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
+            forward_socket: args.forward_socket,
+            forward_peer_uid: args.forward_peer_uid,
+            forward_state: args.forward_state,
+            relay_input: args.relay_input,
         };
 
         Ok(config)
@@ -1251,6 +1321,20 @@ impl Config {
             allowed_respond_to_detail,
         )
     }
+}
+
+/// Startup log line for the two intake paths. Relay off still holds a
+/// membership REQ (`off(membership-only)`) so new rooms can be learned.
+pub(crate) fn input_paths_log_line(relay_input: bool, forward: bool) -> String {
+    format!(
+        "input_paths relay={} forward={}",
+        if relay_input {
+            "on"
+        } else {
+            "off(membership-only)"
+        },
+        if forward { "on" } else { "off" },
+    )
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1580,6 +1664,10 @@ mod tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            forward_socket: None,
+            forward_peer_uid: None,
+            forward_state: None,
+            relay_input: true,
         }
     }
 
@@ -2453,6 +2541,28 @@ channels = "ALL"
         assert_eq!(config.permission_mode, PermissionMode::BypassPermissions);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_forward_socket_without_peer_uid_is_config_error() {
+        let key = "0000000000000000000000000000000000000000000000000000000000000001";
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            key,
+            "--forward-socket",
+            "/tmp/bz-test.sock",
+        ])
+        .expect("cli parses");
+        assert!(args.forward_socket.is_some());
+        assert!(args.forward_peer_uid.is_none());
+        let err = Config::from_args(args).expect_err("socket without peer uid must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FORWARD_PEER_UID"),
+            "error should name the missing peer uid: {msg}"
+        );
+    }
+
     #[test]
     fn test_permission_mode_value_enum_kebab_case() {
         // clap::ValueEnum generates kebab-case by default from PascalCase variants.
@@ -3187,6 +3297,210 @@ channels = "ALL"
             violations.is_empty(),
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
+        );
+    }
+    // --- Relay inbound switch (§4 single input path) ----------------------------
+
+    #[test]
+    fn relay_input_takes_an_explicit_value_not_bare_presence() {
+        let bare = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-input",
+        ]);
+        assert!(bare.is_err(), "a bare flag must not be accepted");
+
+        let off = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-input",
+            "false",
+        ])
+        .expect("explicit false parses");
+        assert!(!off.relay_input);
+
+        let on = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-input",
+            "true",
+        ])
+        .expect("explicit true parses");
+        assert!(on.relay_input);
+    }
+
+    #[test]
+    fn relay_input_defaults_true() {
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY])
+            .expect("clap should parse args");
+        assert!(args.relay_input);
+        let config = Config::from_args(args).expect("default config is valid");
+        assert!(config.relay_input);
+    }
+
+    #[test]
+    fn relay_input_env_false_is_actually_false() {
+        use clap::{CommandFactory, FromArgMatches};
+        let cmd = CliArgs::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "relay_input")
+            .expect("relay_input arg exists");
+        assert_eq!(
+            arg.get_env()
+                .map(|v| v.to_string_lossy().into_owned())
+                .as_deref(),
+            Some("BUZZ_ACP_RELAY_INPUT")
+        );
+        assert!(
+            matches!(arg.get_action(), clap::ArgAction::Set),
+            "must take a value so env false is not 'present therefore true'"
+        );
+
+        // clap's bool value parser is what the env fallback uses. `false` must
+        // stay false — this is the Set vs SetTrue distinction the launcher pin
+        // depends on.
+        let matches = CliArgs::command()
+            .try_get_matches_from([
+                "buzz-acp",
+                "--private-key",
+                TEST_PRIVATE_KEY,
+                "--relay-input",
+                "false",
+            ])
+            .expect("explicit false matches");
+        let parsed = CliArgs::from_arg_matches(&matches).expect("from matches");
+        assert!(!parsed.relay_input);
+    }
+
+    #[test]
+    fn relay_input_off_without_forward_socket_is_config_error() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-input",
+            "false",
+        ])
+        .expect("cli parses");
+        let err = Config::from_args(args).expect_err("silent seat must fail");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, ConfigError::RelayInputOffWithoutForwardSocket),
+            "expected RelayInputOffWithoutForwardSocket, got {err:?}"
+        );
+        assert!(
+            msg.contains("RELAY_INPUT_OFF_WITHOUT_FORWARD_SOCKET"),
+            "error must name the reject code: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relay_input_off_with_forward_socket_is_ok() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-input",
+            "false",
+            "--forward-socket",
+            "/tmp/bz-fwd.sock",
+            "--forward-peer-uid",
+            "10001",
+            "--forward-state",
+            "/tmp/acp-forward-test.jsonl",
+        ])
+        .expect("cli parses");
+        let config = Config::from_args(args).expect("off + forward must start");
+        assert!(!config.relay_input);
+        assert!(config.forward_socket.is_some());
+    }
+
+    #[test]
+    fn relay_input_off_without_socket_beats_missing_peer_uid() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-input",
+            "false",
+        ])
+        .expect("cli parses");
+        let err = Config::from_args(args).expect_err("silent seat");
+        assert!(
+            matches!(err, ConfigError::RelayInputOffWithoutForwardSocket),
+            "got {err:?}"
+        );
+        assert!(err
+            .to_string()
+            .contains("RELAY_INPUT_OFF_WITHOUT_FORWARD_SOCKET"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relay_input_off_with_socket_missing_peer_uid_is_not_the_silent_seat_code() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-input",
+            "false",
+            "--forward-socket",
+            "/tmp/bz-fwd.sock",
+        ])
+        .expect("cli parses");
+        let err = Config::from_args(args).expect_err("peer uid required");
+        let msg = err.to_string();
+        assert!(
+            !matches!(err, ConfigError::RelayInputOffWithoutForwardSocket),
+            "socket present is not the silent-seat reject: {err:?}"
+        );
+        assert!(
+            !msg.contains("RELAY_INPUT_OFF_WITHOUT_FORWARD_SOCKET"),
+            "stderr identifier must not fire when a socket was given: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_ACP_FORWARD_PEER_UID"),
+            "peer-uid error: {msg}"
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn forward_socket_is_rejected_on_non_unix() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--forward-socket",
+            "forward.sock",
+            "--forward-peer-uid",
+            "10001",
+            "--forward-state",
+            "forward.jsonl",
+        ])
+        .expect("cli parses");
+        let err = Config::from_args(args).expect_err("forward input is Unix-only");
+        assert!(err.to_string().contains("forward input requires Unix"));
+    }
+
+    #[test]
+    fn input_paths_log_line_names_both_switches() {
+        assert_eq!(
+            input_paths_log_line(true, false),
+            "input_paths relay=on forward=off"
+        );
+        assert_eq!(
+            input_paths_log_line(false, true),
+            "input_paths relay=off(membership-only) forward=on"
+        );
+        assert_eq!(
+            input_paths_log_line(false, false),
+            "input_paths relay=off(membership-only) forward=off"
         );
     }
 }

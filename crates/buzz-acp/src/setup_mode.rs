@@ -43,6 +43,18 @@ use nostr::EventId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Setup-mode's only intake is the relay. A launcher pin of `relay_input=false`
+/// would wait forever on `next_event()`. Force inbound on; the single-input
+/// path applies to ready mode only.
+fn setup_mode_force_relay_inbound(relay_input: bool) -> bool {
+    if !relay_input {
+        tracing::warn!(
+            "setup-mode: relay input forced on — single input path applies to ready mode only"
+        );
+    }
+    true
+}
+
 // ── Availability mirror ────────────────────────────────────────────────────────
 
 /// Granular install/auth state for a CLI-backed ACP harness.
@@ -342,6 +354,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
             .await
             .map_err(|e| anyhow::anyhow!("setup-mode relay connect error: {e}"))?;
+    relay.set_inbound_subscribe(setup_mode_force_relay_inbound(config.relay_input));
 
     if let Err(e) = relay.set_startup_watermark(startup_watermark).await {
         tracing::warn!("setup-mode: failed to set startup watermark: {e}");
@@ -701,6 +714,12 @@ async fn publish_setup_nudge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_mode_forces_relay_inbound_on_when_pin_is_off() {
+        assert!(setup_mode_force_relay_inbound(false));
+        assert!(setup_mode_force_relay_inbound(true));
+    }
 
     #[test]
     fn setup_payload_from_raw_returns_none_when_absent() {

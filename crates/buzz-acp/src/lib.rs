@@ -8,6 +8,9 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+#[cfg(unix)]
+mod forward;
+mod intake;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -41,7 +44,12 @@ use config::{
     MultipleEventHandling, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
+#[cfg(unix)]
+use forward::{
+    accept_loop, bind_listener, persist_occupancy, relay_dedupe_key, DedupeStore, ForwardPolicy,
+};
 use futures_util::FutureExt;
+use intake::{EnqueueResult, ForwardWork};
 use nostr::{PublicKey, ToBech32};
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
@@ -478,11 +486,14 @@ mod inbound_author_gate {
             // Retry failed startup discovery on generation 0 as well as failed
             // reconnect refreshes. Only an authoritative result completes the
             // generation; transient failure retains the last verified key.
-            if refresh_needed(self.refreshed_generation, buzz_event.connection_generation) {
+            if buzz_event.connection_generation == u64::MAX
+                || refresh_needed(self.refreshed_generation, buzz_event.connection_generation)
+            {
                 let (relay_self, completed) =
                     refresh_relay_self(rest_client, self.relay_self.take(), "listener").await;
                 self.relay_self = relay_self;
-                if completed {
+                if completed && buzz_event.connection_generation != u64::MAX {
+                    // Forward input must not poison the relay generation cache.
                     self.refreshed_generation = Some(buzz_event.connection_generation);
                 }
             }
@@ -2573,6 +2584,10 @@ async fn run_harness(
         .extend(git_environment.env.iter().cloned());
 
     tracing::info!("buzz-acp starting: {}", config.summary());
+    tracing::info!(
+        "{}",
+        config::input_paths_log_line(config.relay_input, config.forward_socket.is_some())
+    );
 
     let observer = config
         .relay_observer
@@ -2636,6 +2651,7 @@ async fn run_harness(
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+    relay.set_inbound_subscribe(config.relay_input);
 
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
@@ -2773,12 +2789,17 @@ async fn run_harness(
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
-    let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
+    let subscribed_channel_ids = Arc::new(std::sync::Mutex::new(HashSet::with_capacity(
+        channel_filters.len(),
+    )));
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
             tracing::warn!("failed to subscribe to channel {channel_id}: {e}");
         } else {
-            subscribed_channel_ids.insert(*channel_id);
+            subscribed_channel_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(*channel_id);
             tracing::info!("subscribed to channel {channel_id}");
         }
     }
@@ -2800,6 +2821,39 @@ async fn run_harness(
     let dedup_mode = config.dedup_mode;
     let mut queue =
         EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+
+    #[cfg(unix)]
+    let forward_store = if config.forward_socket.is_some() {
+        let path = config
+            .forward_state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing forward state path"))?;
+        Some(Arc::new(std::sync::Mutex::new(DedupeStore::load(path)?)))
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let mut forward_rx = if let Some(path) = &config.forward_socket {
+        let uid = config
+            .forward_peer_uid
+            .ok_or_else(|| anyhow::anyhow!("missing forward peer UID"))?;
+        let store = forward_store
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("missing forward store"))?;
+        let (tx, rx) = mpsc::channel::<ForwardWork>(32);
+        let policy = ForwardPolicy {
+            peer_uid: uid,
+            subscribed: subscribed_channel_ids.clone(),
+            store,
+        };
+        let listener = bind_listener(path)?;
+        tokio::spawn(accept_loop(listener, policy, tx));
+        Some(rx)
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let mut forward_rx: Option<mpsc::Receiver<ForwardWork>> = None;
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -3262,11 +3316,29 @@ async fn run_harness(
                     None
                 }
                 // Remaining branches don't touch pool — evaluated when pool is idle.
-                buzz_event = relay.next_event() => {
+                incoming = async {
+                    tokio::select! {
+                        event = relay.next_event() => (event, None),
+                        work = async { match forward_rx.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }} => match work {
+                            Some(work) => (Some(work.event), Some(work.reply)),
+                            None => std::future::pending().await,
+                        }
+                    }
+                } => {
+                    let (buzz_event, forward_reply) = incoming;
                     let _ = result_rx; // end split borrow before relay handling
                     match buzz_event {
                         Some(buzz_event) => {
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
+                            if forward_reply.is_some() && !subscribed_channel_ids.lock().unwrap_or_else(|e| e.into_inner()).contains(&buzz_event.channel_id) {
+                                if let Some(reply) = forward_reply { let _ = reply.send(EnqueueResult::Ignored); }
+                                continue;
+                            }
+                            if forward_reply.is_none() && !config.relay_input && !matches!(kind_u32, KIND_MEMBER_ADDED_NOTIFICATION | KIND_MEMBER_REMOVED_NOTIFICATION) { continue; }
+
 
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
                                 || kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION
@@ -3325,20 +3397,20 @@ async fn run_harness(
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
 
-                                    if subscribed_channel_ids.contains(&ch) {
+                                    if subscribed_channel_ids.lock().unwrap_or_else(|e| e.into_inner()).contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
                                     } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
-                                            subscribed_channel_ids.insert(ch);
+                                            subscribed_channel_ids.lock().unwrap_or_else(|e| e.into_inner()).insert(ch);
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
                                     }
                                 } else {
-                                    subscribed_channel_ids.remove(&ch);
+                                    subscribed_channel_ids.lock().unwrap_or_else(|e| e.into_inner()).remove(&ch);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
@@ -3386,226 +3458,21 @@ async fn run_harness(
                                 continue;
                             }
 
-                            if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
-                                tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
-                                continue;
+                            #[cfg(unix)]
+                            let occupancy = if forward_reply.is_none() {
+                                forward_store.as_ref().map(|store| (store.clone(), relay_dedupe_key(&buzz_event.event, buzz_event.channel_id)))
+                            } else { None };
+                            #[cfg(unix)]
+                            if let Some((store, key)) = &occupancy {
+                                if !store.lock().unwrap_or_else(|e| e.into_inner()).reserve(key) { continue; }
                             }
-
-                            // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
-                            let is_shutdown = is_owner_control_command(
-                                &buzz_event.event,
-                                kind_u32,
-                                "!shutdown",
-                                &pubkey_hex,
-                            );
-                            if is_shutdown {
-                                let owner = owner_cache.get();
-                                if let Some(owner) = owner {
-                                    if buzz_event.event.pubkey.to_hex() == *owner {
-                                        tracing::info!(
-                                            channel_id = %buzz_event.channel_id,
-                                            sender = %buzz_event.event.pubkey.to_hex(),
-                                            "shutdown command from owner — exiting gracefully"
-                                        );
-                                        let _ = shutdown_tx.send(());
-                                        continue;
-                                    }
-                                }
-                                // Not from owner — fall through to normal prompt handling.
-                                // Don't drop it — it's a regular message that happens to
-                                // contain "!shutdown" from a non-owner.
-                            }
-
-                            // Mirrors !shutdown: kind:9, content "!cancel", from
-                            // owner, mentions THIS agent. Must be BEFORE
-                            // queue.push() — the event content is moved by push.
-                            //
-                            // Mode-independent: !cancel fires regardless of
-                            // --multiple-event-handling. It is explicit user
-                            // intent, not an automatic policy decision.
-                            let is_cancel = is_owner_control_command(
-                                &buzz_event.event,
-                                kind_u32,
-                                "!cancel",
-                                &pubkey_hex,
-                            );
-                            if is_cancel {
-                                let from_owner = owner_cache.get().is_some_and(|owner| {
-                                    buzz_event.event.pubkey.to_hex() == *owner
-                                });
-                                if from_owner {
-                                    // Scope-exact: an owner's !cancel in thread A
-                                    // must cancel thread A's turn, never a sibling
-                                    // thread running in the same channel. Under
-                                    // the default channel policy the scope is the
-                                    // channel's sole conversation, so this is
-                                    // byte-for-byte the prior behavior.
-                                    let scope = scope::SessionScope::derive(
-                                        config.session_policy,
-                                        buzz_event.channel_id,
-                                        is_dm_channel(buzz_event.channel_id, &ctx.channel_info)
-                                            .await,
-                                        &buzz_event.event,
-                                    );
-                                    let fired = signal_in_flight_task_for_scope(
-                                        &mut pool,
-                                        &scope,
-                                        ControlSignal::Cancel,
-                                    );
-                                    if !fired {
-                                        tracing::warn!(
-                                            channel_id = %buzz_event.channel_id,
-                                            scope = %scope.telemetry_label(),
-                                            "!cancel received but no in-flight task — no-op"
-                                        );
-                                    }
-                                    continue; // consume event — do NOT push to queue
-                                }
-                                // Not from owner — fall through to normal prompt handling.
-                            }
-
-                            // Mirrors !shutdown / !cancel: kind:9, content
-                            // "!rotate", from owner, mentions THIS agent.
-                            //
-                            // Rotation is explicit owner intent to start the
-                            // next turn in this channel with a fresh ACP
-                            // session. It is consumed by the harness and never
-                            // forwarded to the agent. If a turn is in-flight,
-                            // cancel it, drop its triggering batch, and
-                            // invalidate the channel session when the task
-                            // returns. If idle, invalidate the cached channel
-                            // session immediately. Queued future events remain
-                            // queued and will create a fresh session on dispatch.
-                            let is_rotate = is_owner_control_command(
-                                &buzz_event.event,
-                                kind_u32,
-                                "!rotate",
-                                &pubkey_hex,
-                            );
-                            if is_rotate {
-                                let from_owner = owner_cache.get().is_some_and(|owner| {
-                                    buzz_event.event.pubkey.to_hex() == *owner
-                                });
-                                if from_owner {
-                                    // Scope-exact: rotate only the thread the
-                                    // owner's !rotate belongs to. Under the
-                                    // default channel policy the scope is the
-                                    // channel's sole conversation, matching the
-                                    // prior channel-wide rotate.
-                                    let scope = scope::SessionScope::derive(
-                                        config.session_policy,
-                                        buzz_event.channel_id,
-                                        is_dm_channel(buzz_event.channel_id, &ctx.channel_info)
-                                            .await,
-                                        &buzz_event.event,
-                                    );
-                                    let fired = signal_in_flight_task_for_scope(
-                                        &mut pool,
-                                        &scope,
-                                        ControlSignal::Rotate,
-                                    );
-                                    if fired {
-                                        tracing::info!(
-                                            channel_id = %buzz_event.channel_id,
-                                            scope = %scope.telemetry_label(),
-                                            "!rotate received — cancelling in-flight turn and rotating session"
-                                        );
-                                    } else {
-                                        let invalidated =
-                                            pool.invalidate_scope_session(&scope);
-                                        tracing::info!(
-                                            channel_id = %buzz_event.channel_id,
-                                            scope = %scope.telemetry_label(),
-                                            invalidated,
-                                            "!rotate received — invalidated idle session for scope"
-                                        );
-                                    }
-                                    continue; // consume event — do NOT push to queue
-                                }
-                                // Not from owner — fall through to normal prompt handling.
-                            }
-
-                            // Coarse security policy: drop events from disallowed
-                            // authors before they reach subscription rules or the
-                            // agent. Must be AFTER !shutdown (owner can always
-                            // shut down regardless of gate mode).
-                            //
-                            // Both OwnerOnly and Allowlist accept events from
-                            // "siblings" — pubkeys whose agent_owner_pubkey
-                            // matches this agent's owner (e.g. other bots
-                            // launched by the same human). Allowlist adds the
-                            // explicit pubkey list on top, for external people;
-                            // it never revokes same-owner team bots.
-                            let Some(authorized_event) = authorize_normal_listener_event(
-                                &mut author_gate_ctx,
-                                buzz_event,
-                                &config.respond_to,
-                                &config.respond_to_allowlist,
-                                &owner_cache,
-                                &ctx.channel_info,
-                                &ctx.rest_client,
-                            )
-                            .await
-                            else {
-                                continue;
-                            };
-                            let Some(ingress) =
-                                AuthorizedNormalListenerEvent(authorized_event)
-                                    .match_subscription(&rules, &pubkey_hex)
-                                    .await
-                            else {
-                                tracing::debug!("authorized event matched no rule — dropping");
-                                continue;
-                            };
-                            // Derive the session scope once, at admission, from
-                            // the operator policy, DM status, and NIP-10 thread
-                            // tags. Under the default `channel` policy this is
-                            // always a conversation scope, preserving today's
-                            // channel-keyed routing. Telemetry only for now —
-                            // queue/pool partitioning by scope lands in a
-                            // follow-up (see ticket outline steps 2–4).
-                            let session_scope = scope::SessionScope::derive(
-                                config.session_policy,
-                                ingress.buzz_event.channel_id,
-                                is_dm_channel(
-                                    ingress.buzz_event.channel_id,
-                                    &ctx.channel_info,
-                                )
-                                .await,
-                                &ingress.buzz_event.event,
-                            );
-                            tracing::debug!(
-                                channel_id = %session_scope.channel_id(),
-                                scope = %session_scope.telemetry_label(),
-                                thread_scoped = session_scope.is_thread(),
-                                thread_root = session_scope.root_event_id().unwrap_or("-"),
-                                policy = %config.session_policy,
-                                "admitted event — resolved session scope"
-                            );
-                            let queued = ingress.push(&mut queue, session_scope);
-                            // 👀 — immediate "seen" reaction, only if the event
-                            // was actually queued (not dropped by DedupMode::Drop).
-                            // Fire-and-forget: on rare fast-failure paths the
-                            // guard's cleanup may race with this add, leaving a
-                            // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
-                            queued.mark_seen(&ctx.rest_client);
-                            // Event is already queued. The authorized ingress
-                            // retains its verified author, resolved scope, and
-                            // event data through the optional steer/interrupt
-                            // decision.
-                            queued.steer_or_interrupt(
-                                config.multiple_event_handling,
-                                owner_cache.get(),
-                                &mut pool,
-                                &mut queue,
-                                &steer_ack_tx,
-                            );
-                            if pool_ready {
-                                for (scope, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, observer.as_ref())
-                                {
-                                    typing_channels.insert(scope, thread_tags);
-                                }
+                            let outcome = admit_inbound(buzz_event, &config, &pubkey_hex, &owner_cache,
+                                &shutdown_tx, &mut author_gate_ctx, &mut pool, &mut queue, &ctx, &rules,
+                                &steer_ack_tx, pool_ready, &mut typing_channels, &mut last_activity, observer.as_ref()).await;
+                            if let Some(reply) = forward_reply { let _ = reply.send(outcome); }
+                            #[cfg(unix)]
+                            if let Some((store, key)) = occupancy {
+                                tokio::spawn(async move { let _ = persist_occupancy(&store, key).await; });
                             }
                         }
                         None => {
@@ -9230,6 +9097,10 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            forward_socket: None,
+            forward_peer_uid: None,
+            forward_state: None,
+            relay_input: true,
         }
     }
 
@@ -9494,6 +9365,10 @@ mod error_outcome_emission_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            forward_socket: None,
+            forward_peer_uid: None,
+            forward_state: None,
+            relay_input: true,
         }
     }
 
@@ -11609,5 +11484,381 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+/// Admit either transport through the same author, mention, scope and queue boundary.
+/// A terminal result means admission/intentional filtering, never completed execution.
+#[allow(clippy::too_many_arguments)]
+async fn admit_inbound(
+    buzz_event: relay::BuzzEvent,
+    config: &Config,
+    pubkey_hex: &str,
+    owner_cache: &OwnerCache,
+    shutdown_tx: &watch::Sender<()>,
+    author_gate_ctx: &mut InboundAuthorGate,
+    pool: &mut AgentPool,
+    queue: &mut EventQueue,
+    ctx: &Arc<PromptContext>,
+    rules: &[SubscriptionRule],
+    steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
+    pool_ready: bool,
+    typing_channels: &mut HashMap<scope::SessionScope, ThreadTags>,
+    last_activity: &mut tokio::time::Instant,
+    observer: Option<&observer::ObserverHandle>,
+) -> EnqueueResult {
+    let kind_u32 = buzz_event.event.kind.as_u16() as u32;
+    if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
+        tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
+        return EnqueueResult::Ignored;
+    }
+
+    // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
+    let is_shutdown =
+        is_owner_control_command(&buzz_event.event, kind_u32, "!shutdown", pubkey_hex);
+    if is_shutdown {
+        let owner = owner_cache.get();
+        if let Some(owner) = owner {
+            if buzz_event.event.pubkey.to_hex() == *owner {
+                tracing::info!(
+                    channel_id = %buzz_event.channel_id,
+                    sender = %buzz_event.event.pubkey.to_hex(),
+                    "shutdown command from owner — exiting gracefully"
+                );
+                let _ = shutdown_tx.send(());
+                return EnqueueResult::Ignored;
+            }
+        }
+        // Not from owner — fall through to normal prompt handling.
+        // Don't drop it — it's a regular message that happens to
+        // contain "!shutdown" from a non-owner.
+    }
+
+    // Mirrors !shutdown: kind:9, content "!cancel", from
+    // owner, mentions THIS agent. Must be BEFORE
+    // queue.push() — the event content is moved by push.
+    //
+    // Mode-independent: !cancel fires regardless of
+    // --multiple-event-handling. It is explicit user
+    // intent, not an automatic policy decision.
+    let is_cancel = is_owner_control_command(&buzz_event.event, kind_u32, "!cancel", pubkey_hex);
+    if is_cancel {
+        let from_owner = owner_cache
+            .get()
+            .is_some_and(|owner| buzz_event.event.pubkey.to_hex() == *owner);
+        if from_owner {
+            // Scope-exact: an owner's !cancel in thread A
+            // must cancel thread A's turn, never a sibling
+            // thread running in the same channel. Under
+            // the default channel policy the scope is the
+            // channel's sole conversation, so this is
+            // byte-for-byte the prior behavior.
+            let scope = scope::SessionScope::derive(
+                config.session_policy,
+                buzz_event.channel_id,
+                is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await,
+                &buzz_event.event,
+            );
+            let fired = signal_in_flight_task_for_scope(pool, &scope, ControlSignal::Cancel);
+            if !fired {
+                tracing::warn!(
+                    channel_id = %buzz_event.channel_id,
+                    scope = %scope.telemetry_label(),
+                    "!cancel received but no in-flight task — no-op"
+                );
+            }
+            return EnqueueResult::Ignored; // consume event — do NOT push to queue
+        }
+        // Not from owner — fall through to normal prompt handling.
+    }
+
+    // Mirrors !shutdown / !cancel: kind:9, content
+    // "!rotate", from owner, mentions THIS agent.
+    //
+    // Rotation is explicit owner intent to start the
+    // next turn in this channel with a fresh ACP
+    // session. It is consumed by the harness and never
+    // forwarded to the agent. If a turn is in-flight,
+    // cancel it, drop its triggering batch, and
+    // invalidate the channel session when the task
+    // returns. If idle, invalidate the cached channel
+    // session immediately. Queued future events remain
+    // queued and will create a fresh session on dispatch.
+    let is_rotate = is_owner_control_command(&buzz_event.event, kind_u32, "!rotate", pubkey_hex);
+    if is_rotate {
+        let from_owner = owner_cache
+            .get()
+            .is_some_and(|owner| buzz_event.event.pubkey.to_hex() == *owner);
+        if from_owner {
+            // Scope-exact: rotate only the thread the
+            // owner's !rotate belongs to. Under the
+            // default channel policy the scope is the
+            // channel's sole conversation, matching the
+            // prior channel-wide rotate.
+            let scope = scope::SessionScope::derive(
+                config.session_policy,
+                buzz_event.channel_id,
+                is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await,
+                &buzz_event.event,
+            );
+            let fired = signal_in_flight_task_for_scope(pool, &scope, ControlSignal::Rotate);
+            if fired {
+                tracing::info!(
+                    channel_id = %buzz_event.channel_id,
+                    scope = %scope.telemetry_label(),
+                    "!rotate received — cancelling in-flight turn and rotating session"
+                );
+            } else {
+                let invalidated = pool.invalidate_scope_session(&scope);
+                tracing::info!(
+                    channel_id = %buzz_event.channel_id,
+                    scope = %scope.telemetry_label(),
+                    invalidated,
+                    "!rotate received — invalidated idle session for scope"
+                );
+            }
+            return EnqueueResult::Ignored; // consume event — do NOT push to queue
+        }
+        // Not from owner — fall through to normal prompt handling.
+    }
+
+    // Coarse security policy: drop events from disallowed
+    // authors before they reach subscription rules or the
+    // agent. Must be AFTER !shutdown (owner can always
+    // shut down regardless of gate mode).
+    //
+    // Both OwnerOnly and Allowlist accept events from
+    // "siblings" — pubkeys whose agent_owner_pubkey
+    // matches this agent's owner (e.g. other bots
+    // launched by the same human). Allowlist adds the
+    // explicit pubkey list on top, for external people;
+    // it never revokes same-owner team bots.
+    let Some(authorized_event) = authorize_normal_listener_event(
+        author_gate_ctx,
+        buzz_event,
+        &config.respond_to,
+        &config.respond_to_allowlist,
+        owner_cache,
+        &ctx.channel_info,
+        &ctx.rest_client,
+    )
+    .await
+    else {
+        return EnqueueResult::Ignored;
+    };
+    let Some(ingress) = AuthorizedNormalListenerEvent(authorized_event)
+        .match_subscription(rules, pubkey_hex)
+        .await
+    else {
+        tracing::debug!("authorized event matched no rule — dropping");
+        return EnqueueResult::Ignored;
+    };
+    // Derive the session scope once, at admission, from
+    // the operator policy, DM status, and NIP-10 thread
+    // tags. Under the default `channel` policy this is
+    // always a conversation scope, preserving today's
+    // channel-keyed routing. Telemetry only for now —
+    // queue/pool partitioning by scope lands in a
+    // follow-up (see ticket outline steps 2–4).
+    let session_scope = scope::SessionScope::derive(
+        config.session_policy,
+        ingress.buzz_event.channel_id,
+        is_dm_channel(ingress.buzz_event.channel_id, &ctx.channel_info).await,
+        &ingress.buzz_event.event,
+    );
+    tracing::debug!(
+        channel_id = %session_scope.channel_id(),
+        scope = %session_scope.telemetry_label(),
+        thread_scoped = session_scope.is_thread(),
+        thread_root = session_scope.root_event_id().unwrap_or("-"),
+        policy = %config.session_policy,
+        "admitted event — resolved session scope"
+    );
+    let queued = ingress.push(queue, session_scope);
+    let outcome = if queued.accepted {
+        EnqueueResult::Queued
+    } else {
+        EnqueueResult::Drop
+    };
+    // 👀 — immediate "seen" reaction, only if the event
+    // was actually queued (not dropped by DedupMode::Drop).
+    // Fire-and-forget: on rare fast-failure paths the
+    // guard's cleanup may race with this add, leaving a
+    // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
+    queued.mark_seen(&ctx.rest_client);
+    // Event is already queued. The authorized ingress
+    // retains its verified author, resolved scope, and
+    // event data through the optional steer/interrupt
+    // decision.
+    queued.steer_or_interrupt(
+        config.multiple_event_handling,
+        owner_cache.get(),
+        pool,
+        queue,
+        steer_ack_tx,
+    );
+    if pool_ready {
+        for (scope, thread_tags) in dispatch_pending(pool, queue, ctx, last_activity, observer) {
+            typing_channels.insert(scope, thread_tags);
+        }
+    }
+    outcome
+}
+
+#[cfg(test)]
+mod forward_admission_tests {
+    use super::*;
+    use nostr::{EventBuilder, Kind, Tag};
+
+    async fn admit_case(
+        mentioned: bool,
+        respond_to: RespondTo,
+        self_echo: bool,
+        ignore_self: bool,
+    ) -> (EnqueueResult, usize) {
+        use clap::Parser;
+        let seat = nostr::Keys::generate();
+        let mut config = Config::from_args(
+            config::CliArgs::try_parse_from([
+                "buzz-acp",
+                "--private-key",
+                &seat.secret_key().to_secret_hex(),
+            ])
+            .expect("args"),
+        )
+        .expect("config");
+        config.ignore_self = ignore_self;
+        config.respond_to = respond_to;
+        let author = if self_echo {
+            seat.clone()
+        } else {
+            nostr::Keys::generate()
+        };
+        let channel = Uuid::new_v4();
+        let rest = relay::RestClient {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_millis(100))
+                .build()
+                .expect("http"),
+            base_url: "http://127.0.0.1:0".into(),
+            keys: seat.clone(),
+            auth_tag_json: None,
+        };
+        let info = pool::ChannelInfoResolver::new(
+            HashMap::from([(
+                channel,
+                relay::ChannelInfo {
+                    name: "test".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            rest.clone(),
+        );
+        let ctx = Arc::new(PromptContext {
+            mcp_servers: vec![],
+            initial_message: None,
+            idle_timeout: Duration::from_secs(1),
+            max_turn_duration: Duration::from_secs(1),
+            turn_liveness_interval: Duration::ZERO,
+            dedup_mode: DedupMode::Queue,
+            system_prompt: None,
+            session_title: None,
+            team_instructions: None,
+            heartbeat_prompt: None,
+            base_prompt: None,
+            cwd: ".".into(),
+            rest_client: rest.clone(),
+            channel_info: info,
+            context_message_limit: 0,
+            max_turns_per_session: 0,
+            permission_mode: config::PermissionMode::Default,
+            agent_keys: seat.clone(),
+            agent_owner_pubkey: None,
+            memory_enabled: false,
+            harness_name: "test".into(),
+            relay_url: "ws://127.0.0.1:0".into(),
+        });
+        let pk = seat.public_key().to_hex();
+        let mut gate = InboundAuthorGate::connect(&rest, &pk, "test").await;
+        let owner = OwnerCache::new(Some(pk.clone()));
+        owner.cache_sibling(author.public_key().to_hex(), false);
+        let rules = vec![SubscriptionRule {
+            name: "mentions".into(),
+            channels: filter::ChannelScope::All("all".into()),
+            kinds: vec![9],
+            require_mention: true,
+            filter: None,
+            compiled_filter: None,
+            consecutive_timeouts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            prompt_tag: None,
+        }];
+        let mut tags = vec![Tag::parse(["h", &channel.to_string()]).expect("tag")];
+        if mentioned {
+            tags.push(Tag::parse(["p", &pk]).expect("p tag"));
+        }
+        let event = EventBuilder::new(Kind::Custom(9), "hello")
+            .allow_self_tagging()
+            .tags(tags)
+            .sign_with_keys(&author)
+            .expect("sign");
+        let event = relay::BuzzEvent {
+            connection_generation: u64::MAX,
+            channel_id: channel,
+            event,
+        };
+        let (shutdown, _) = watch::channel(());
+        let (steer, _) = mpsc::unbounded_channel();
+        let mut pool = AgentPool::from_slots(vec![]);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let mut typing = HashMap::new();
+        let mut last_activity = tokio::time::Instant::now();
+        let outcome = admit_inbound(
+            event,
+            &config,
+            &pk,
+            &owner,
+            &shutdown,
+            &mut gate,
+            &mut pool,
+            &mut queue,
+            &ctx,
+            &rules,
+            &steer,
+            false,
+            &mut typing,
+            &mut last_activity,
+            None,
+        )
+        .await;
+        (outcome, queue.pending_channels())
+    }
+
+    #[tokio::test]
+    async fn socket_origin_cannot_bypass_mention_or_author_filter() {
+        assert_eq!(
+            admit_case(false, RespondTo::Anyone, false, true).await,
+            (EnqueueResult::Ignored, 0)
+        );
+        assert_eq!(
+            admit_case(true, RespondTo::OwnerOnly, false, true).await,
+            (EnqueueResult::Ignored, 0)
+        );
+        assert_eq!(
+            admit_case(true, RespondTo::Anyone, false, true).await,
+            (EnqueueResult::Queued, 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn socket_origin_honors_configured_self_filter() {
+        assert_eq!(
+            admit_case(true, RespondTo::Anyone, true, true).await,
+            (EnqueueResult::Ignored, 0)
+        );
+        assert_eq!(
+            admit_case(true, RespondTo::Anyone, true, false).await,
+            (EnqueueResult::Queued, 1)
+        );
     }
 }
