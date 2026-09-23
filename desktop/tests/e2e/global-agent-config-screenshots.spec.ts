@@ -370,19 +370,28 @@ test.describe("global agent config screenshots", () => {
     await openAiDefaultsSettings(page);
 
     const model = page.getByTestId("global-agent-model");
-    await expect(model).toHaveText("GPT-6 Astra");
+    await expect(model).toHaveText("GPT-6 Astra (data_workflow_tools.goose)");
     await expect(model).toHaveAttribute("data-value", modelId);
 
     await model.click();
     const option = (id: string) =>
       page.getByTestId(`global-agent-model-option-${id}`);
-    await expect(option(modelId)).toHaveText("GPT-6 Astra");
-    await expect(option(siblingId)).toHaveText("GPT-6 Astra");
+    // Colliding labels are told apart by their catalog.schema.
+    await expect(option(modelId)).toHaveText(
+      "GPT-6 Astra (data_workflow_tools.goose)",
+    );
+    await expect(option(siblingId)).toHaveText("GPT-6 Astra (system.ai)");
     await expect(option("builderbot-pr-reviews")).toHaveText(
       "builderbot-pr-reviews",
     );
+
+    // Search matches the raw id as well as the label.
+    await page.getByTestId("global-agent-model-search").fill("system.ai");
+    await expect(option(siblingId)).toBeVisible();
+    await expect(option("builderbot-pr-reviews")).toHaveCount(0);
+
     await option(siblingId).click();
-    await expect(model).toHaveText("GPT-6 Astra");
+    await expect(model).toHaveText("GPT-6 Astra (system.ai)");
     await expect(model).toHaveAttribute("data-value", siblingId);
 
     await page
@@ -406,7 +415,7 @@ test.describe("global agent config screenshots", () => {
     // the saved raw id.
     await page.getByTestId("settings-nav-appearance").click();
     await page.getByTestId("settings-nav-agents").click();
-    await expect(model).toHaveText("GPT-6 Astra");
+    await expect(model).toHaveText("GPT-6 Astra (system.ai)");
     await expect(model).toHaveAttribute("data-value", siblingId);
   });
 

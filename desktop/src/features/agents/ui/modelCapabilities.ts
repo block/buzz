@@ -289,7 +289,7 @@ function toResult(
   };
 }
 
-function isDatabricksModelServiceFqn(model: string): boolean {
+export function isDatabricksModelServiceFqn(model: string): boolean {
   const components = model.split(".");
   return (
     components.length === 3 &&

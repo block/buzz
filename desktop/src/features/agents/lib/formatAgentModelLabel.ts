@@ -1,6 +1,7 @@
 import {
   canonicalizeProvider,
   databricksRegistryLabel,
+  isDatabricksModelServiceFqn,
   resolveModelCapabilities,
 } from "../ui/modelCapabilities";
 
@@ -80,4 +81,55 @@ export function formatAgentModelLabel(
   const trimmed = model?.trim();
   if (!trimmed) return "Auto";
   return resolveModelLabel(trimmed, null, provider);
+}
+
+const DATABRICKS_WRAPPERS = ["databricks-", "goose-", "kgoose-", "builderbot-"];
+
+/** Where a Databricks id comes from: its UC `catalog.schema`, else its wrapper. */
+function databricksModelSource(id: string): string {
+  if (isDatabricksModelServiceFqn(id)) {
+    return id.split(".").slice(0, 2).join(".");
+  }
+  const lower = id.toLowerCase();
+  const wrapper = DATABRICKS_WRAPPERS.find((w) => lower.startsWith(w));
+  return wrapper ? wrapper.slice(0, -1) : id;
+}
+
+function collidingLabels(rows: ReadonlyArray<{ id: string; label: string }>) {
+  const counts = new Map<string, number>();
+  for (const { label } of rows) {
+    const key = label.toLowerCase();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return (label: string) => (counts.get(label.toLowerCase()) ?? 0) > 1;
+}
+
+/**
+ * Tells apart Databricks rows whose humanized labels collide (the same model
+ * served from several catalogs or wrappers) by suffixing the source:
+ * `GPT-6 Astra (system.ai)`, `GPT-5.5 (goose)`. Rows still colliding after
+ * that get the full id. Raw-id rows, unique labels, the default `""` row, and
+ * other providers are unchanged. Presentation only; ids are never touched.
+ */
+export function disambiguateModelLabels<
+  T extends { id: string; label: string },
+>(rows: ReadonlyArray<T>, provider: string | null | undefined): T[] {
+  if (canonicalizeProvider(provider ?? "") !== "databricks_v2") {
+    return [...rows];
+  }
+  const humanized = (row: T) => row.id !== "" && row.label !== row.id;
+  const collides = collidingLabels(rows.filter(humanized));
+  const suffixed = rows.map((row) =>
+    humanized(row) && collides(row.label)
+      ? { ...row, label: `${row.label} (${databricksModelSource(row.id)})` }
+      : row,
+  );
+  const stillCollides = collidingLabels(
+    suffixed.filter((row, i) => row !== rows[i]),
+  );
+  return suffixed.map((row, i) =>
+    row !== rows[i] && stillCollides(row.label)
+      ? { ...row, label: `${rows[i].label} (${row.id})` }
+      : row,
+  );
 }
