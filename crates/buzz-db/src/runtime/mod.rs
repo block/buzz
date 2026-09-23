@@ -121,6 +121,21 @@ pub(crate) async fn insert_mentions_in_transaction(
     Ok(())
 }
 
+/// Start a tenant-local event-write transaction and take the shared community
+/// deletion lock before any serving mutation.
+pub(crate) async fn begin_community_event_write_transaction(
+    pool: &PgPool,
+    community: CommunityId,
+    operation: observability::WriterOperation,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+    let connection = observability::acquire_writer_with_legacy_metrics(pool, operation).await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    deletion::DeletionStore::new(pool.clone())
+        .guard_transaction(&mut tx, community)
+        .await?;
+    Ok(tx)
+}
+
 /// Database handle. Clone is cheap (Arc-backed pool).
 #[derive(Clone, Debug)]
 pub struct Db {
@@ -1243,11 +1258,12 @@ impl Db {
         &self,
         community: CommunityId,
     ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-        let mut tx = self.begin_event_write_transaction().await?;
-        self.deletion_store()
-            .guard_transaction(&mut tx, community)
-            .await?;
-        Ok(tx)
+        begin_community_event_write_transaction(
+            &self.pool,
+            community,
+            observability::WriterOperation::EventWrite,
+        )
+        .await
     }
 
     /// Begin an event-write transaction that takes the shared replica-floor

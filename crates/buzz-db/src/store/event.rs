@@ -420,19 +420,15 @@ pub async fn insert_event(
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<(StoredEvent, bool)> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    if crate::operator_listener::is_listener_mention_kind(u32::from(event.kind.as_u16())) {
-        let mut tx = Transaction::begin(connection, None).await?;
-        let result = insert_event_in_transaction(&mut tx, community_id, event, channel_id).await?;
-        tx.commit().await?;
-        Ok(result)
-    } else {
-        insert_event_on(&mut connection, community_id, event, channel_id).await
-    }
+    let result = insert_event_in_transaction(&mut tx, community_id, event, channel_id).await?;
+    tx.commit().await?;
+    Ok(result)
 }
 
 /// Insert a Nostr event in a caller-owned PostgreSQL transaction.
@@ -1746,13 +1742,12 @@ pub async fn insert_event_with_thread_metadata(
 ) -> Result<(StoredEvent, bool)> {
     use crate::store::replaceable::event_replacement_lock_key;
 
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
-
     if event_kind_i32(event) == KIND_CANVAS as i32 {
         if let Some(ch) = channel_id {
             let lock_key = event_replacement_lock_key(

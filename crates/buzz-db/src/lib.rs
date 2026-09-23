@@ -58,8 +58,8 @@ pub const DB_CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionO
 /// Raw Prometheus series ceiling per pod for connection-step telemetry.
 pub const DB_CONNECTION_RAW_SERIES_PER_POD: usize = runtime::CONNECTION_RAW_SERIES_PER_POD;
 pub(crate) use runtime::{
-    insert_mentions_in_transaction, observability, route_proof, ReadSessionInner, RouteDecision,
-    RoutePredicate,
+    begin_community_event_write_transaction, insert_mentions_in_transaction, observability,
+    route_proof, ReadSessionInner, RouteDecision, RoutePredicate,
 };
 pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, artifact, channel,

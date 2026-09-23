@@ -242,11 +242,15 @@ pub async fn accept_lease_event(
     max_active_leases: i64,
 ) -> Result<AcceptLeaseOutcome> {
     let author = event.pubkey.as_bytes();
-    let (mut tx, transaction_timer) = crate::observability::begin_transaction(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
-        crate::observability::TransactionOperation::AcceptPushLeaseEvent,
+        community,
+        crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let transaction_timer = crate::observability::TransactionTimer::start(
+        crate::observability::TransactionOperation::AcceptPushLeaseEvent,
+    );
     transaction_timer
         .observe(async {
     let mut address_lock = Vec::with_capacity(16 + author.len() + installation_id.len());

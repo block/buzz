@@ -625,3 +625,93 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         }
     }
 }
+
+#[test]
+fn event_write_paths_use_tenant_local_chokepoint() {
+    let event = include_str!("../src/store/event.rs");
+    let insert_event = event
+        .split_once("pub async fn insert_event(\n")
+        .expect("event store must expose pool-level insert_event")
+        .1
+        .split_once("/// Insert a Nostr event in a caller-owned PostgreSQL transaction.")
+        .expect("pool insert must precede transaction-seam insert")
+        .0;
+    assert!(
+        insert_event.contains("begin_community_event_write_transaction"),
+        "pool-level event inserts must enter through the tenant-local event-write chokepoint"
+    );
+    let insert_with_thread_meta = event
+        .split_once("pub async fn insert_event_with_thread_metadata(\n")
+        .expect("event store must expose pool-level thread-metadata insert")
+        .1
+        .split_once("impl Db {")
+        .expect("pool thread-metadata insert must precede Db wrappers")
+        .0;
+    assert!(
+        insert_with_thread_meta.contains("begin_community_event_write_transaction"),
+        "thread-metadata event inserts must enter through the tenant-local chokepoint"
+    );
+
+    let replaceable = include_str!("../src/store/replaceable.rs");
+    let replace_addressable = replaceable
+        .split_once("pub async fn replace_addressable_event(\n")
+        .expect("replaceable store must expose replace_addressable_event")
+        .1
+        .split_once("/// Replace a NIP-33 event inside a caller-owned transaction.")
+        .expect("addressable replacement must precede parameterized transaction seam")
+        .0;
+    assert!(
+        replace_addressable.contains("begin_community_event_write_transaction"),
+        "addressable replacements must enter through the tenant-local chokepoint"
+    );
+    let replace_parameterized = replaceable
+        .split_once("pub async fn replace_parameterized_event(\n")
+        .expect("replaceable store must expose replace_parameterized_event")
+        .1
+        .split_once("}\n\n#[cfg(test)]")
+        .expect("parameterized replacement must precede tests")
+        .0;
+    assert!(
+        replace_parameterized.contains("begin_community_event_write_transaction"),
+        "parameterized replacements must enter through the tenant-local chokepoint"
+    );
+
+    let channel_members = include_str!("../src/store/channel_members.rs");
+    let snapshot_lock = channel_members
+        .split_once("pub async fn lock_member_snapshot(\n")
+        .expect("channel_members must expose lock_member_snapshot")
+        .1
+        .split_once("/// Add a member to a channel.")
+        .expect("snapshot lock path must precede member add path")
+        .0;
+    assert!(
+        snapshot_lock.contains("begin_community_event_write_transaction"),
+        "snapshot publication locks must enter through the tenant-local chokepoint"
+    );
+
+    let relay_members = include_str!("../src/store/relay_members.rs");
+    let publish_snapshot = relay_members
+        .split_once("pub async fn publish_nip43_membership_locked(\n")
+        .expect("relay_members must expose publish_nip43_membership_locked")
+        .1
+        .split_once("}\n\n#[cfg(test)]")
+        .expect("membership publish path must precede tests")
+        .0;
+    assert!(
+        publish_snapshot.contains("begin_community_event_write_transaction"),
+        "NIP-43 membership publication must enter through the tenant-local chokepoint"
+    );
+
+    let push = include_str!("../src/store/push.rs");
+    let accept_lease = push
+        .split_once("pub async fn accept_lease_event(\n")
+        .expect("push store must expose accept_lease_event")
+        .1
+        .split_once("fn constraint_acceptance_outcome")
+        .expect("accept_lease_event must precede constraint outcome mapping")
+        .0;
+    assert!(
+        accept_lease.contains("begin_community_event_write_transaction"),
+        "push lease source-event writes must enter through the tenant-local chokepoint"
+    );
+}
