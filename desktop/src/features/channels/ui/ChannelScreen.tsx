@@ -18,7 +18,11 @@ import {
 } from "@/features/channels/readState/readStateFormat";
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
-import { usePopoutThreadOnlyLayout } from "@/features/popout/lib/popoutLayout";
+import {
+  usePopoutSplitLayout,
+  usePopoutThreadOnlyLayout,
+} from "@/features/popout/lib/popoutLayout";
+import { isPopoutForcedSinglePanelView } from "@/features/popout/lib/popoutWindow";
 import { WelcomeAgentCreateDialog } from "@/features/channels/ui/WelcomeAgentCreateDialog";
 import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
@@ -712,8 +716,17 @@ export function ChannelScreen({
     channelContentWidthPx > 0 &&
     channelContentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
   const isPopoutThreadOnly = usePopoutThreadOnlyLayout();
+  const isPopoutPlaygroundSplit = usePopoutSplitLayout();
   const isSinglePanelView =
-    isPopoutThreadOnly ||
+    isPopoutForcedSinglePanelView({
+      hasNonThreadAuxiliary: Boolean(
+        openAgentSessionPubkey ||
+          profilePanelPubkey ||
+          channelManagementOpen,
+      ),
+      isPopoutPlaygroundSplit,
+      isPopoutThreadOnly,
+    }) ||
     (isNarrowPanelViewport &&
       activeChannel?.channelType !== "forum" &&
       hasAuxiliaryPanel);

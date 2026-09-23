@@ -14,19 +14,33 @@ import {
 import {
   currentPopoutPayload,
   type PopoutPayload,
+  shouldSeedPopoutChannelRoute,
 } from "@/features/popout/lib/popoutWindow";
 
 export function usePopoutBootstrap(): PopoutPayload | null {
   const payload = React.useMemo(() => currentPopoutPayload(), []);
   const { goChannel } = useAppNavigation();
+  // Seed once per companion lifetime. `goChannel` identity churns with
+  // `location.href` (commitNavigation closes over it); re-running bootstrap
+  // would replace search with only channel/thread and wipe panels such as
+  // `agentSession` — making View Activity a no-op in detached windows.
+  const didSeedRef = React.useRef(false);
 
   React.useEffect(() => {
-    if (!payload || payload.kind === "playground" || payload.kind === "link")
+    if (
+      !shouldSeedPopoutChannelRoute({
+        alreadySeeded: didSeedRef.current,
+        payload,
+      })
+    ) {
       return;
-    if (!payload.channelId) return;
-    void goChannel(payload.channelId, {
+    }
+    const channelId = payload?.channelId;
+    if (!channelId) return;
+    didSeedRef.current = true;
+    void goChannel(channelId, {
       replace: true,
-      ...(payload.threadId ? { thread: payload.threadId } : {}),
+      ...(payload?.threadId ? { thread: payload.threadId } : {}),
     });
   }, [goChannel, payload]);
 

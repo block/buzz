@@ -141,6 +141,38 @@ export function isPopoutSplitLayout(
   return payload?.kind === "split";
 }
 
+/**
+ * Whether a thread companion must stay single-panel (full-bleed thread/activity).
+ *
+ * Plain thread pop-outs default to single-panel. When a non-thread auxiliary
+ * opens (Activity, profile, channel management), lift into channel|auxiliary
+ * split so View Activity can land on the right with Back restoring the prior
+ * right pane. Playground `kind:"split"` stays single-panel inside the content
+ * surface — Activity replaces the thread on that already-split right half.
+ */
+export function isPopoutForcedSinglePanelView(options: {
+  hasNonThreadAuxiliary: boolean;
+  isPopoutPlaygroundSplit: boolean;
+  isPopoutThreadOnly: boolean;
+}): boolean {
+  if (!options.isPopoutThreadOnly) return false;
+  if (options.isPopoutPlaygroundSplit) return true;
+  return !options.hasNonThreadAuxiliary;
+}
+
+/** True when an OS companion should seed its channel/thread route once on open. */
+export function shouldSeedPopoutChannelRoute(options: {
+  alreadySeeded: boolean;
+  payload: PopoutPayload | null;
+}): boolean {
+  if (options.alreadySeeded) return false;
+  const payload = options.payload;
+  if (!payload || payload.kind === "playground" || payload.kind === "link") {
+    return false;
+  }
+  return Boolean(payload.channelId);
+}
+
 export function popoutPayloadFromInput(input: {
   kind: PopoutKind;
   title: string;

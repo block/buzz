@@ -280,3 +280,74 @@ test("isPopoutSplitLayout is true only for kind split", async () => {
   );
   assert.equal(isPopoutThreadOnlyLayout({ kind: "split" }), false);
 });
+
+test("isPopoutForcedSinglePanelView lifts plain thread pop-outs for Activity", async () => {
+  const { isPopoutForcedSinglePanelView } = await import("./popoutWindow.ts");
+
+  assert.equal(
+    isPopoutForcedSinglePanelView({
+      hasNonThreadAuxiliary: false,
+      isPopoutPlaygroundSplit: false,
+      isPopoutThreadOnly: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isPopoutForcedSinglePanelView({
+      hasNonThreadAuxiliary: true,
+      isPopoutPlaygroundSplit: false,
+      isPopoutThreadOnly: true,
+    }),
+    false,
+  );
+  // Playground split keeps single-panel content; Activity replaces the thread.
+  assert.equal(
+    isPopoutForcedSinglePanelView({
+      hasNonThreadAuxiliary: true,
+      isPopoutPlaygroundSplit: true,
+      isPopoutThreadOnly: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isPopoutForcedSinglePanelView({
+      hasNonThreadAuxiliary: true,
+      isPopoutPlaygroundSplit: false,
+      isPopoutThreadOnly: false,
+    }),
+    false,
+  );
+});
+
+test("shouldSeedPopoutChannelRoute only seeds once for channel/thread companions", async () => {
+  const { shouldSeedPopoutChannelRoute } = await import("./popoutWindow.ts");
+
+  assert.equal(
+    shouldSeedPopoutChannelRoute({
+      alreadySeeded: false,
+      payload: { kind: "thread", channelId: "c", threadId: "t" },
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSeedPopoutChannelRoute({
+      alreadySeeded: true,
+      payload: { kind: "thread", channelId: "c", threadId: "t" },
+    }),
+    false,
+  );
+  assert.equal(
+    shouldSeedPopoutChannelRoute({
+      alreadySeeded: false,
+      payload: { kind: "link", link: { url: "https://x", pinId: "p" } },
+    }),
+    false,
+  );
+  assert.equal(
+    shouldSeedPopoutChannelRoute({
+      alreadySeeded: false,
+      payload: { kind: "thread" },
+    }),
+    false,
+  );
+});
