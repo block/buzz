@@ -1123,6 +1123,7 @@ dependencies = [
  "buzz-core",
  "buzz-datastore-tracing",
  "chrono",
+ "futures-util",
  "hex",
  "metrics",
  "metrics-util",

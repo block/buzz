@@ -171,6 +171,50 @@ Exactly one per served window response. The **only** authority on exhaustion. Ta
 5. **Bounds integrity**: a window response missing its `kind:39006`, or carrying more than one, or carrying one whose `d`-tag binding does not echo the request cursor, whose content is not parseable JSON, or whose content violates `has_more = true ⇔ next_cursor ≠ null`, is not a usable page — the client MUST discard it (and MAY retry) rather than guess at exhaustion. Clients SHOULD additionally reject overlays that violate the exact tag cardinality of §Channel-mode Overlay Event Formats or whose content fields have the wrong runtime types (hardening against a malformed or hostile serializer). Cryptographic verification is governed by §Overlay Trust.
 6. **Overlays are metadata**: never render a `39005`/`39006` as a message, never feed one into cursor math, and key cached summaries by their `d` tag (latest wins).
 
+## Legacy Oldest-first Threads
+
+Buzz's authenticated `POST /query` also supports an older thread path, separate
+from both window modes. It is selected by a single `#e` root and `depth_limit`,
+with `thread_window` absent or false:
+
+```jsonc
+{
+  "#h": ["<channel UUID>"],
+  "#e": ["<root event id>"],
+  "kinds": [9, 40002],
+  "depth_limit": 100,
+  "limit": 100,
+  "include_aux": true,
+  "thread_cursor": 1751500000,
+  "thread_cursor_id": "<last loaded reply id>"
+}
+```
+
+- Omit both cursor fields to start at the oldest reply. The historical
+  `thread_cursor: -1` start sentinel remains accepted. `depth_limit` is an
+  explicit maximum depth; `2147483647` is the existing unbounded-depth sentinel.
+  The row limit defaults to 100 and is capped at 500.
+- Replies are ordered by `created_at ASC, id ASC`. To continue, derive
+  `thread_cursor` and `thread_cursor_id` from the **last loaded reply**, not
+  from an auxiliary event. The next page satisfies `created_at > cursor OR
+  (created_at = cursor AND id > cursor_id)`. The camel-case aliases
+  `threadCursor` and `threadCursorId` are also accepted.
+- Timestamp-only continuation remains accepted for compatibility but skips
+  other replies in the same second; clients SHOULD send the composite pair.
+- This path traverses stored thread metadata, not the newest-first mode's strict
+  row-kind filter. Clients SHOULD supply explicit `kinds` for query authorization
+  but MUST NOT assume this legacy thread path restricts its reply rows by them.
+- `include_aux` appends root/reply reactions, edits and deletions, followed by
+  deletions of auxiliary events. These do not count against the reply limit.
+- There is **no signed bounds event or server-issued continuation cursor**.
+  A full reply page can be the final page, so continuation may require one more
+  request. A short/empty reply page is the legacy stop heuristic, not a signed
+  exhaustion fact: access filtering can also shorten a response.
+
+A client explicitly falling back from thread windows MUST restart this path
+from the oldest reply with clean pagination state. `until`/`before_id` are not
+legacy thread continuation fields and MUST NOT be reused as such.
+
 ## Thread Mode
 
 `thread_window: true` requests a newest-first page of replies to one root. It is
@@ -209,7 +253,11 @@ filters.
 
 For an authorized request the relay MUST:
 
-1. Verify that the root is a conversation event in the requested channel.
+1. Verify that the root is a supported conversation event (`9`, `40002`,
+   `45001`, or `45003`) in the requested community and channel. Retained root
+   tombstones are eligible. A missing, out-of-scope, or unsupported root
+   (including a `40008` diff) returns no events or bounds; it MUST NOT receive
+   a signed exhausted page even if ingest has threaded replies beneath it.
 2. Select non-deleted replies in that channel at depths 1 through
    `depth_limit`, restricted by `kinds`, ordered by `created_at DESC, id ASC`.
    A continuation retains rows where `created_at < until OR (created_at = until
@@ -221,14 +269,35 @@ For an authorized request the relay MUST:
    (`kind:5`/`9005`), and edits (`kind:40003`) targeting the root or returned
    replies, followed by deletions targeting those auxiliary events. Preserve
    original signatures, deduplicate by event ID, and apply access control to
-   every event.
-5. Refresh access before signing. If access changed while the page was built,
-   return an empty access-scoped result for loss of the requested channel or a
-   retryable error for any other change. Append one bounds event to every served
-   page, including empty and exhausted pages.
+   every event. A target reference requires an `e` tag with the target ID
+   in its second position; containing both strings elsewhere is insufficient.
+5. Append one bounds event to each served page, including empty and exhausted
+   pages. Refresh access for the **entire query batch** before releasing any
+   events or bounds. If the reader's accessible-channel set changed while any
+   window was built, discard all accumulated output and return a retryable
+   error (Buzz: HTTP `503`). This includes cross-channel auxiliary access.
 
 Rows alone count against `limit`. Auxiliary events and bounds do not.
 Inaccessible and nonexistent channels return no events or bounds.
+
+### Resource Limits and Recovery
+
+Buzz shares resource limits across all thread-window filters in one query,
+including replica retries: 64 auxiliary SQL scans, 8,192 raw auxiliary rows
+(including probes), 8 MiB of raw auxiliary content plus serialized tags, 8 MiB
+of serialized output, and an eight-second overall deadline. Auxiliary payloads
+are consumed incrementally and charged before reconstruction; tombstones and
+probes consume the raw allowance too. No partial page or bounds is returned
+when a budget is exceeded.
+
+Resource exhaustion and database timeouts return HTTP `503`; malformed stored
+auxiliary data remains a separate HTTP `500`. Clients MUST discard the entire
+failed batch without advancing any cursor. For work/byte exhaustion, reduce
+`limit`, split the batch, or explicitly request `include_aux: false` and fetch
+needed auxiliary data separately. A root's auxiliary history can exceed the
+allowance even at `limit: 1`; blind retries of the same query will not help.
+For timeouts or changed access, retry with bounded backoff and fresh access.
+These errors MUST NOT trigger legacy compatibility fallback.
 
 ### Thread Bounds: `kind:39007`
 

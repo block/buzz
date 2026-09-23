@@ -374,9 +374,62 @@ async fn thread_aux_query_budget_fails_on_65th_real_scan() {
             .is_empty());
     }
     let result = session.thread_window_aux(&query, &mut budget).await;
-    assert!(
-        matches!(result, Err(DbError::InvalidData(ref message)) if message.contains("query budget"))
-    );
+    assert!(matches!(
+        result,
+        Err(DbError::ThreadWindowBudgetExceeded("query"))
+    ));
     assert_eq!(budget.queries, 65);
     assert_eq!(budget.rows, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_aux_byte_budget_stops_consumption_and_survives_retry() {
+    let (db, community, channel, keys, root) = fixture().await;
+    // Each edit is signed and within ingest's 256 KiB content limit. The
+    // router regression exercises the same size through signed POST /events.
+    for n in 0..40 {
+        let edit = make_event(
+            &keys,
+            channel,
+            40003,
+            &"x".repeat(256 * 1024),
+            Some(&root),
+            root.created_at.as_secs() + n,
+        );
+        db.insert_event(community, &edit, Some(channel))
+            .await
+            .unwrap();
+    }
+    let targets = [root.id.to_hex()];
+    let query = AuxQuery {
+        community,
+        targets: &targets,
+        kinds: &[40003],
+        accessible: &[channel],
+        cursor: None,
+    };
+    let mut session = ReadSession {
+        inner: ReadSessionInner::Writer(db.pool.clone()),
+    };
+    let mut budget = AuxBudget::default();
+    let result = session.thread_window_aux(&query, &mut budget).await;
+    assert!(matches!(
+        result,
+        Err(DbError::ThreadWindowBudgetExceeded("auxiliary byte"))
+    ));
+    assert_eq!(
+        budget.rows, 32,
+        "stop consuming at the first over-budget payload, not the full page"
+    );
+    assert!(budget.bytes > 8 * 1024 * 1024);
+    let result = session.thread_window_aux(&query, &mut budget).await;
+    assert!(matches!(
+        result,
+        Err(DbError::ThreadWindowBudgetExceeded("auxiliary byte"))
+    ));
+    assert_eq!(
+        budget.rows, 33,
+        "a retry cannot reset the request-wide allowance"
+    );
 }

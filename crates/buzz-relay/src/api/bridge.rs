@@ -1230,23 +1230,18 @@ async fn query_events_authed(
                 "thread_window cannot mix with other query modes",
             ));
         }
-        return tokio::time::timeout(thread_window::DEADLINE, async {
-            let mut budget = thread_window::Budget::default();
-            let mut events = Vec::new();
-            for request in thread_windows.iter().flatten() {
-                events.extend(
-                    thread_window::query(state, tenant, &pubkey, request, &mut budget).await?,
-                );
-            }
-            Ok(Json(Value::Array(events)))
-        })
+        return tokio::time::timeout(
+            thread_window::DEADLINE,
+            thread_window::query_batch(state, tenant, &pubkey, thread_windows.iter().flatten()),
+        )
         .await
         .map_err(|_| {
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "thread window deadline exceeded",
             )
-        })?;
+        })?
+        .map(|events| Json(Value::Array(events)));
     }
     if read_state_snapshot::requested(&raw_filters) {
         return read_state_snapshot::query(state, tenant, &pubkey, &raw_filters).await;

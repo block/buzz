@@ -53,6 +53,9 @@ fn unavailable(message: &str) -> Error {
 }
 
 fn database_error(context: &str, error: buzz_db::DbError) -> Error {
+    if let buzz_db::DbError::ThreadWindowBudgetExceeded(_) = &error {
+        return unavailable(&format!("{error}; reduce window work before retrying"));
+    }
     // Pool acquisition and PostgreSQL's statement/lock budgets may expire
     // before the outer HTTP deadline. They are retryable, not internal faults.
     let timed_out = match &error {
@@ -81,39 +84,67 @@ fn append(events: &mut Vec<Value>, budget: &mut Budget, event: &nostr::Event) ->
     Ok(())
 }
 
-pub(super) async fn query(
+/// Authorize the entire batch against one writer access set, then refresh it
+/// once before releasing any output. A later window must never suppress only
+/// its own rows while releasing an earlier window built before revocation.
+pub(super) async fn query_batch<'a>(
     state: &AppState,
     tenant: &TenantContext,
     reader: &nostr::PublicKey,
-    request: &Request,
-    budget: &mut Budget,
+    requests: impl IntoIterator<Item = &'a Request>,
 ) -> Result<Vec<Value>, Error> {
-    // Never use the membership cache to authorize authoritative window bounds.
     let accessible = state
         .db
         .get_accessible_channel_ids(tenant.community(), &reader.to_bytes())
         .await
         .map_err(|e| database_error("access", e))?;
-    if !accessible.contains(&request.channel) {
-        return Ok(vec![]);
+    let mut budget = Budget::default();
+    let mut events = Vec::new();
+    for request in requests {
+        if accessible.contains(&request.channel) {
+            events.extend(query(state, tenant, reader, request, &accessible, &mut budget).await?);
+        }
     }
+    let current = state
+        .db
+        .get_accessible_channel_ids(tenant.community(), &reader.to_bytes())
+        .await
+        .map_err(|e| database_error("final access", e))?;
+    // Grants can expose auxiliary events omitted from the original closure;
+    // revocations can invalidate earlier windows or their cross-channel aux.
+    if accessible.iter().collect::<HashSet<_>>() != current.iter().collect::<HashSet<_>>() {
+        return Err(unavailable("thread authorization changed; retry query"));
+    }
+    Ok(events)
+}
+
+async fn query(
+    state: &AppState,
+    tenant: &TenantContext,
+    reader: &nostr::PublicKey,
+    request: &Request,
+    accessible: &[uuid::Uuid],
+    budget: &mut Budget,
+) -> Result<Vec<Value>, Error> {
     let (window, mut session) = state
         .db
         .get_thread_window_with_session(tenant.community(), request)
         .await
         .map_err(|e| database_error("window", e))?;
+    // An unsupported, missing or out-of-scope root is not a served window.
+    // In particular, never sign false exhaustion for an unsupported root kind.
+    if !window.root_in_channel {
+        return Ok(vec![]);
+    }
     let reader_bytes = reader.to_bytes();
     let visible = |se: &buzz_core::StoredEvent| {
-        event_in_accessible_channel(se, &accessible)
+        event_in_accessible_channel(se, accessible)
             && crate::handlers::req::event_visible_to_reader(&se.event, &reader_bytes)
     };
     let mut events = Vec::new();
     let page_start_bytes = budget.bytes;
     budget.bytes += 2;
-    let mut targets = Vec::new();
-    if window.root_in_channel {
-        targets.push(request.root.clone());
-    }
+    let mut targets = vec![request.root.clone()];
     for row in &window.rows {
         if !visible(row) {
             // This would contradict the SQL's channel and row-kind predicates.
@@ -142,7 +173,7 @@ pub(super) async fn query(
                         community: tenant.community(),
                         targets: batch,
                         kinds,
-                        accessible: &accessible,
+                        accessible,
                         cursor: None,
                     };
                     loop {
@@ -181,24 +212,6 @@ pub(super) async fn query(
             }
             break;
         }
-    }
-    // Reauthorize before issuing bounds; a revoked page is not an empty served
-    // window. Check every returned aux channel again too (aux can be cross-channel).
-    let current = state
-        .db
-        .get_accessible_channel_ids(tenant.community(), &reader_bytes)
-        .await
-        .map_err(|e| database_error("final access", e))?;
-    if !current.contains(&request.channel) {
-        return Ok(vec![]);
-    }
-    // Grants can expose auxiliary events omitted from the original closure;
-    // revocations can invalidate included events. Compare complete sets, not
-    // just removed channels (nor query-order-dependent vectors).
-    if accessible.iter().collect::<HashSet<_>>() != current.iter().collect::<HashSet<_>>() {
-        return Err(unavailable(
-            "thread auxiliary authorization changed; retry window",
-        ));
     }
     let tags = [
         [

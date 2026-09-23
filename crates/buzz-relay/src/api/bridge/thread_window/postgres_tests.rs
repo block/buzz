@@ -365,10 +365,10 @@ async fn thread_window_real_query_denial_revocation_and_colliding_tenants() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(other_page.as_array().unwrap().len(), 1);
     assert_eq!(
-        f.bounds_on_host(&other_page, &filter, &other_host)["has_more"],
-        false
+        other_page,
+        json!([]),
+        "absent root must not sign exhaustion"
     );
     f.query(&filter).await;
     // Prime the usual cached access, then revoke directly on the writer without
@@ -485,11 +485,10 @@ async fn thread_window_scope_roots_and_aggregate_budgets() {
         hidden_filter["#e"] = json!([root.id.to_hex()]);
         let body = f.query(&hidden_filter).await;
         assert_eq!(
-            body.as_array().unwrap().len(),
-            1,
-            "hidden-root aux must not leak"
+            body,
+            json!([]),
+            "hidden roots return neither aux nor bounds"
         );
-        assert_eq!(f.bounds(&body, &hidden_filter)["has_more"], false);
     }
 
     // Real bounded payloads: one 4.8 MiB page passes, two in the same request
@@ -512,8 +511,8 @@ async fn thread_window_router_aux_row_cap_and_corrupt_page() {
     }
     f.copy_aux(&aux, 8200, "fixture").await;
     let (status, body) = f.post(&f.keys, "/query", json!([f.filter()])).await;
-    assert!(status.is_server_error(), "{status}: {body}");
-    assert_eq!(body, json!({"error":"internal server error"}));
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("raw row budget"));
     // Keep 1,001 rows and corrupt one guaranteed to lie on the first raw page.
     sqlx::query("DELETE FROM events WHERE community_id=$1 AND kind=40003 AND id NOT IN \
         (SELECT id FROM events WHERE community_id=$1 AND kind=40003 ORDER BY created_at DESC,id ASC LIMIT 1001)")
@@ -531,3 +530,5 @@ async fn thread_window_router_aux_row_cap_and_corrupt_page() {
 }
 
 mod failure_postgres_tests;
+
+mod review_postgres_tests;

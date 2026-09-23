@@ -211,7 +211,7 @@ async fn assert_aux_access_change(grant: bool) {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{interrupted}");
     assert_eq!(
         interrupted,
-        json!({"error":"thread auxiliary authorization changed; retry window"})
+        json!({"error":"thread authorization changed; retry query"})
     );
 
     let after = f.query(&filter).await;
@@ -292,4 +292,56 @@ async fn thread_window_database_timeout_classification_uses_sqlstate() {
         body.0,
         json!({"error":"thread database timeout; retry window"})
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_batch_discards_earlier_windows_after_revocation() {
+    // Cover both repeated-root batches and revoking an earlier window's channel
+    // while the later window remains authorized. All output must fail closed.
+    for same_channel in [true, false] {
+        let f = Fixture::new().await;
+        f.reply(0).await;
+        let mut first = f.filter();
+        first["include_aux"] = json!(false);
+        let mut later = f.filter();
+        if !same_channel {
+            let channel = Uuid::new_v4();
+            private_channel(&f.state.db, f.community, channel, &f.keys).await;
+            let root = event(
+                &f.keys,
+                channel,
+                9,
+                "other root",
+                None,
+                f.root.created_at.as_secs(),
+            );
+            f.state
+                .db
+                .insert_event(f.community, &root, Some(channel))
+                .await
+                .unwrap();
+            f.aux(7, &root, Some(channel)).await;
+            later["#h"] = json!([channel]);
+            later["#e"] = json!([root.id.to_hex()]);
+        } else {
+            f.aux(7, &f.root, Some(f.channel)).await;
+        }
+        let batch = json!([first, later]);
+        let (status, before) = f.post(&f.keys, "/query", batch.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{before}");
+        assert_eq!(ids(&before, Some(39007)).len(), 2);
+        let request = pause_after_aux_page(f.post(&f.keys, "/query", batch.clone())).await;
+        set_access(&f, f.channel, false).await;
+        let (status, body) = request.await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(
+            body,
+            json!({"error":"thread authorization changed; retry query"})
+        );
+        let (status, after) = f.post(&f.keys, "/query", batch).await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert_eq!(ids(&after, Some(9)).len(), 0);
+        assert_eq!(ids(&after, Some(39007)).len(), usize::from(!same_channel));
+    }
 }

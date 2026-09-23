@@ -6,6 +6,7 @@ use buzz_core::{
     CommunityId, StoredEvent,
 };
 use chrono::{DateTime, Utc};
+use futures_util::TryStreamExt;
 use sqlx::{PgConnection, PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
@@ -25,8 +26,8 @@ pub struct ThreadWindow {
     pub has_more: bool,
     /// Last retained raw candidate, or None iff exhausted.
     pub next_cursor: Option<Cursor>,
-    /// Root exists in this channel, possibly as a tombstone. Only then may
-    /// the bridge expand root auxiliary events.
+    /// A supported conversation root exists in this channel, possibly as a
+    /// tombstone. Only then may the bridge serve rows, auxiliary events or bounds.
     pub root_in_channel: bool,
 }
 
@@ -233,7 +234,9 @@ impl Db {
                         },
                     ));
                 }
-                Err(error @ DbError::InvalidData(_)) => return Err(error),
+                Err(error @ (DbError::InvalidData(_) | DbError::ThreadWindowBudgetExceeded(_))) => {
+                    return Err(error);
+                }
                 Err(error) => {
                     tracing::warn!(%error, path, "replica thread window failed; re-running on writer");
                     Self::record_route(path, "writer", "replica_error");
@@ -276,13 +279,22 @@ pub const AUX_LIMIT: usize = 1000;
 pub struct AuxBudget {
     queries: usize,
     rows: usize,
+    bytes: usize,
 }
 
 impl AuxBudget {
     fn query(&mut self) -> Result<()> {
         self.queries += 1;
         if self.queries > 64 {
-            return Err(invalid("thread auxiliary closure exceeds query budget"));
+            return Err(DbError::ThreadWindowBudgetExceeded("query"));
+        }
+        Ok(())
+    }
+
+    fn bytes(&mut self, count: usize) -> Result<()> {
+        self.bytes = self.bytes.saturating_add(count);
+        if self.bytes > 8 * 1024 * 1024 {
+            return Err(DbError::ThreadWindowBudgetExceeded("auxiliary byte"));
         }
         Ok(())
     }
@@ -290,7 +302,7 @@ impl AuxBudget {
     fn rows(&mut self, count: usize) -> Result<()> {
         self.rows = self.rows.saturating_add(count);
         if self.rows > 8192 {
-            return Err(invalid("thread auxiliary closure exceeds raw row budget"));
+            return Err(DbError::ThreadWindowBudgetExceeded("raw row"));
         }
         Ok(())
     }
@@ -316,7 +328,8 @@ async fn select_aux(
     }
     budget.query()?;
     let mut q = QueryBuilder::new(
-        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, deleted_at \
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, deleted_at, \
+         octet_length(content) + octet_length(tags::text) AS payload_bytes \
          FROM events WHERE community_id = ");
     q.push_bind(query.community.as_uuid())
         .push(" AND ((channel_id IS NULL AND kind IN (5, 9005)) OR channel_id = ANY(")
@@ -332,7 +345,13 @@ async fn select_aux(
         q.push("tags @> ")
             .push_bind(serde_json::json!([["e", target]]));
     }
-    q.push(")");
+    // JSONB containment is an indexable prefilter, not a positional tag match.
+    q.push(
+        ") AND EXISTS (SELECT 1 FROM jsonb_array_elements(tags) tag \
+        WHERE tag->>0 = 'e' AND tag->>1 = ANY(",
+    )
+    .push_bind(query.targets)
+    .push("))");
     if let Some(cursor) = &query.cursor {
         let (ts, id) = cursor_key(cursor)?;
         q.push(" AND (created_at < ")
@@ -345,20 +364,26 @@ async fn select_aux(
     }
     q.push(" ORDER BY created_at DESC, id ASC LIMIT ")
         .push_bind(AUX_LIMIT as i64 + 1);
-    let mut raw = q.build().fetch_all(&mut *conn).await?;
-    budget.rows(raw.len())?;
-    let has_more = raw.len() > AUX_LIMIT;
-    raw.truncate(AUX_LIMIT);
-    let next_cursor = if has_more {
-        raw.last().map(scan_cursor).transpose()?
-    } else {
-        None
-    };
-    let mut events = Vec::with_capacity(raw.len());
-    let mut target_ids = Vec::with_capacity(raw.len());
-    for row in raw {
+    // Never collect a full raw page: 1,001 ingest-valid edits can contain
+    // 250 MiB. Charge each row (including tombstones and the probe) before
+    // reconstruction, and preserve this request-wide ledger across retries.
+    let mut raw = q.build().fetch(&mut *conn);
+    let mut events = Vec::new();
+    let mut target_ids = Vec::new();
+    let mut last_cursor = None;
+    let mut next_cursor = None;
+    while let Some(row) = raw.try_next().await? {
+        budget.rows(1)?;
+        let payload_bytes: i32 = row.try_get("payload_bytes")?;
+        budget.bytes(payload_bytes as usize)?;
+        if target_ids.len() == AUX_LIMIT {
+            next_cursor = last_cursor;
+            break;
+        }
         // Validate IDs even for deleted payloads: no ambiguous continuation.
-        target_ids.push(scan_cursor(&row)?.id);
+        let cursor = scan_cursor(&row)?;
+        target_ids.push(cursor.id.clone());
+        last_cursor = Some(cursor);
         if row
             .try_get::<Option<DateTime<Utc>>, _>("deleted_at")?
             .is_none()
@@ -405,7 +430,9 @@ impl ReadSession {
         let writer = match &mut self.inner {
             ReadSessionInner::Replica { tx, writer } => match select_aux(tx, query, budget).await {
                 Ok(page) => return Ok(page),
-                Err(error @ DbError::InvalidData(_)) => return Err(error),
+                Err(error @ (DbError::InvalidData(_) | DbError::ThreadWindowBudgetExceeded(_))) => {
+                    return Err(error);
+                }
                 Err(error) => {
                     tracing::warn!(%error, "thread auxiliary read failed; degrading to writer");
                     metrics::counter!("buzz_db_read_session_degraded").increment(1);
