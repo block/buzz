@@ -37,8 +37,9 @@ use uuid::Uuid;
 use buzz_core::kind::{
     KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_GIT_ISSUE, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_JOB_ACCEPTED, KIND_JOB_ERROR, KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT,
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::{CommunityId, StoredEvent};
 
@@ -272,7 +273,8 @@ fn build_activity_query(
     qb.push(" AND deleted_at IS NULL");
     qb.push(format!(
         " AND kind IN ({KIND_STREAM_MESSAGE}, {KIND_STREAM_MESSAGE_V2}, {KIND_FORUM_POST}, \
-         {KIND_JOB_REQUEST}, {KIND_JOB_PROGRESS}, {KIND_JOB_RESULT})"
+         {KIND_JOB_REQUEST}, {KIND_JOB_ACCEPTED}, {KIND_JOB_PROGRESS}, {KIND_JOB_RESULT}, \
+         {KIND_JOB_ERROR})"
     ));
     push_visible_channel_filter(&mut qb, "channel_id", accessible_channel_ids);
     if let Some(s) = since {
@@ -284,7 +286,8 @@ fn build_activity_query(
 
 /// Find recent activity across accessible channels (for watched topics / agent activity).
 ///
-/// Returns stream messages, forum posts, and agent job events.
+/// Returns stream messages, forum posts, and the full agent job lifecycle
+/// (request, accepted, progress, result, error).
 /// Workflow execution kinds (46001-46012) are intentionally excluded to avoid noise.
 /// **Performance**: uses indexed `kind` + `channel_id` columns -- no JSON scan.
 /// `limit` is capped at [`FEED_MAX_LIMIT`] regardless of the value passed by the caller.
@@ -802,6 +805,91 @@ mod postgres_tests {
                 .iter()
                 .all(|row| row.event.id != b_global.id && row.event.id != b_channel.id),
             "community B activity must not appear in community A feed"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn query_activity_includes_full_job_lifecycle_and_excludes_workflow_kinds() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+
+        let requested = store_feed_event(
+            &pool,
+            community,
+            KIND_JOB_REQUEST,
+            "job requested",
+            Some(channel),
+            vec![],
+        )
+        .await;
+        let accepted = store_feed_event(
+            &pool,
+            community,
+            KIND_JOB_ACCEPTED,
+            "job accepted",
+            Some(channel),
+            vec![],
+        )
+        .await;
+        let progress = store_feed_event(
+            &pool,
+            community,
+            KIND_JOB_PROGRESS,
+            "job progress",
+            Some(channel),
+            vec![],
+        )
+        .await;
+        let result = store_feed_event(
+            &pool,
+            community,
+            KIND_JOB_RESULT,
+            "job result",
+            Some(channel),
+            vec![],
+        )
+        .await;
+        let error = store_feed_event(
+            &pool,
+            community,
+            KIND_JOB_ERROR,
+            "job error",
+            Some(channel),
+            vec![],
+        )
+        .await;
+        let workflow = store_feed_event(
+            &pool,
+            community,
+            KIND_WORKFLOW_APPROVAL_REQUESTED,
+            "workflow noise",
+            Some(channel),
+            vec![],
+        )
+        .await;
+
+        let rows = query_activity(&pool, community, &[channel], None, 50)
+            .await
+            .expect("query activity");
+
+        // Dropping any job kind from `build_activity_query`'s allowlist fails this test.
+        for (label, event) in [
+            ("request", &requested),
+            ("accepted", &accepted),
+            ("progress", &progress),
+            ("result", &result),
+            ("error", &error),
+        ] {
+            assert!(
+                rows.iter().any(|row| row.event.id == event.id),
+                "agent job {label} event must appear in the activity feed"
+            );
+        }
+        assert!(
+            rows.iter().all(|row| row.event.id != workflow.id),
+            "workflow execution kinds are intentionally excluded from the activity feed"
         );
     }
 
