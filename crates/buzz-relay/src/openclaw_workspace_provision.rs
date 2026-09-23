@@ -189,33 +189,35 @@ mod tests {
 
         let app = Router::new().route(
             "/internal/mint-member-token",
-            post(move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
-                let seen_h = seen_h.clone();
-                async move {
-                    let key = headers
-                        .get("X-Mint-Key")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("")
-                        .to_string();
-                    *seen_h.lock().await = Some((key, body));
-                    Json(serde_json::json!({
-                        "token": "should-not-be-logged",
-                        "expiresAt": "2026-09-22T12:00:00.000Z",
-                        "capability": {
-                            "v": 1,
-                            "type": "hula.capability",
-                            "name": "openclaw.workspace_mcp",
-                            "mcp": {
-                                "url": "https://workspace.example/mcp",
-                                "transport": "http",
-                                "authorization": "Bearer should-not-be-logged",
-                                "expiresAt": "2026-09-22T12:00:00.000Z"
-                            },
-                            "hulaBuzzOnly": true
-                        }
-                    }))
-                }
-            }),
+            post(
+                move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
+                    let seen_h = seen_h.clone();
+                    async move {
+                        let key = headers
+                            .get("X-Mint-Key")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        *seen_h.lock().await = Some((key, body));
+                        Json(serde_json::json!({
+                            "token": "should-not-be-logged",
+                            "expiresAt": "2026-09-22T12:00:00.000Z",
+                            "capability": {
+                                "v": 1,
+                                "type": "hula.capability",
+                                "name": "openclaw.workspace_mcp",
+                                "mcp": {
+                                    "url": "https://workspace.example/mcp",
+                                    "transport": "http",
+                                    "authorization": "Bearer should-not-be-logged",
+                                    "expiresAt": "2026-09-22T12:00:00.000Z"
+                                },
+                                "hulaBuzzOnly": true
+                            }
+                        }))
+                    }
+                },
+            ),
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

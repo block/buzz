@@ -2812,6 +2812,7 @@ async fn tokio_main() -> Result<()> {
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
+        gateway_agent_id: config.gateway_agent_id.clone(),
         team_instructions: config.team_instructions.clone(),
         base_prompt,
         heartbeat_prompt: config.heartbeat_prompt.clone(),
@@ -5744,7 +5745,9 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // so shutdown() runs on all paths (success, error, timeout).
     let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
         let init = client.initialize().await?;
-        let session = client.session_new_full(&cwd, vec![], None, None).await?;
+        let session = client
+            .session_new_full(&cwd, vec![], None, None, None)
+            .await?;
         Ok::<_, acp::AcpError>((init, session))
     })
     .await;
@@ -9100,6 +9103,7 @@ mod build_mcp_servers_tests {
             model: None,
             effort_level: None,
             session_title: None,
+            gateway_agent_id: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
@@ -9326,6 +9330,7 @@ mod error_outcome_emission_tests {
             model: None,
             effort_level: None,
             session_title: None,
+            gateway_agent_id: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),

@@ -646,10 +646,12 @@ impl AcpClient {
     /// - `Some(SystemPromptTransport::ClaudeMeta(text))` — `_meta.systemPrompt`
     ///   as `{"append": text}`, keeping claude-agent-acp's native preset intact.
     ///
-    /// `session_title` rides in `_meta.sessionTitle` when `Some`; `_meta` is
-    /// omitted entirely otherwise, since adapters may distinguish an absent
-    /// member from a null one. When both `ClaudeMeta` and `session_title` are
-    /// present the two `_meta` members are merged into a single object.
+    /// `session_title` rides in `_meta.sessionTitle` when `Some`.
+    /// `session_key` rides in `_meta.sessionKey` when `Some` (OpenClaw Gateway
+    /// routing; overrides CLI `--session` on that `session/new`).
+    /// `_meta` is omitted entirely when neither is set (and no ClaudeMeta
+    /// prompt), since adapters may distinguish an absent member from a null
+    /// one. When ClaudeMeta / title / key coexist they merge into one `_meta`.
     ///
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
@@ -659,6 +661,7 @@ impl AcpClient {
         mcp_servers: Vec<McpServer>,
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
+        session_key: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
         let mut params = serde_json::json!({
             "cwd": cwd,
@@ -669,7 +672,7 @@ impl AcpClient {
                 params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
             }
             Some(SystemPromptTransport::ClaudeMeta(sp)) => {
-                // Merge into _meta so sessionTitle (set below) is not clobbered.
+                // Merge into _meta so sessionTitle/sessionKey (set below) are not clobbered.
                 params["_meta"]["systemPrompt"] = serde_json::json!({ "append": sp });
             }
             None => {}
@@ -677,6 +680,9 @@ impl AcpClient {
         if let Some(title) = session_title {
             // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
+        }
+        if let Some(key) = session_key {
+            params["_meta"]["sessionKey"] = serde_json::Value::String(key.to_owned());
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -700,9 +706,10 @@ impl AcpClient {
         mcp_servers: Vec<McpServer>,
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
+        session_key: Option<&str>,
     ) -> Result<String, AcpError> {
         Ok(self
-            .session_new_full(cwd, mcp_servers, system_prompt, session_title)
+            .session_new_full(cwd, mcp_servers, system_prompt, session_title, session_key)
             .await?
             .session_id)
     }
@@ -3492,6 +3499,7 @@ mod tests {
                 vec![],
                 Some(SystemPromptTransport::Field("Custom system prompt")),
                 None,
+                None,
             )
             .await
             .expect("session_new_full should succeed");
@@ -3577,7 +3585,7 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], None, None)
+            .session_new_full("/tmp", vec![], None, None, None)
             .await
             .expect("session_new_full should succeed");
 
@@ -3605,7 +3613,7 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], None, Some("Fizz · #buzz-dev"))
+            .session_new_full("/tmp", vec![], None, Some("Fizz · #buzz-dev"), None)
             .await
             .expect("session_new_full should succeed");
 
@@ -3633,7 +3641,7 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], None, None)
+            .session_new_full("/tmp", vec![], None, None, None)
             .await
             .expect("session_new_full should succeed");
 
@@ -3668,6 +3676,7 @@ mod tests {
                 "/tmp",
                 vec![],
                 Some(SystemPromptTransport::ClaudeMeta("Be concise")),
+                None,
                 None,
             )
             .await
@@ -3708,6 +3717,7 @@ mod tests {
                 vec![],
                 Some(SystemPromptTransport::ClaudeMeta("Be concise")),
                 Some("Fizz · #buzz-dev"),
+                Some("agent:fizz:buzz:ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
             )
             .await
             .expect("session_new_full should succeed");
@@ -3722,6 +3732,44 @@ mod tests {
             received["params"]["_meta"]["sessionTitle"].as_str(),
             Some("Fizz · #buzz-dev"),
             "_meta.sessionTitle must be present alongside systemPrompt"
+        );
+        assert_eq!(
+            received["params"]["_meta"]["sessionKey"].as_str(),
+            Some("agent:fizz:buzz:ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            "_meta.sessionKey must be present alongside systemPrompt/sessionTitle"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_sends_session_key_in_meta_when_some() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_key","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let key = "agent:mo:buzz:ch:11111111-2222-3333-4444-555555555555";
+        let resp = client
+            .session_new_full("/tmp", vec![], None, None, Some(key))
+            .await
+            .expect("session_new_full should succeed");
+
+        let received = &resp.raw["_receivedRequest"];
+        assert_eq!(
+            received["params"]["_meta"]["sessionKey"].as_str(),
+            Some(key),
+            "sessionKey should ride in _meta.sessionKey"
+        );
+        assert!(
+            received["params"]["_meta"].get("sessionTitle").is_none(),
+            "sessionTitle must be absent when not provided"
         );
     }
 

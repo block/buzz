@@ -3,8 +3,7 @@
 //! stays allowed while "mo" / "MO" are blocked.
 
 /// Exact display names reserved for Hula community bots.
-pub(crate) const RESERVED_AGENT_NAMES: &[&str] =
-    &["Captain", "Mo", "Stitch", "Quasar", "Korg"];
+pub(crate) const RESERVED_AGENT_NAMES: &[&str] = &["Captain", "Mo", "Stitch", "Quasar", "Korg"];
 
 /// Returns `true` when `name` (after trim) exactly matches a reserved
 /// community-bot name, ignoring ASCII case.

@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::app_state::keyring_service;
+use crate::app_state::AppState;
 use crate::managed_agents::config_bridge::claude::{
     remove_mcp_server, upsert_http_mcp_server, OPENCLAW_WORKSPACE_MCP_NAME,
 };
-use crate::app_state::AppState;
 use crate::managed_agents::{
     current_instance_id, load_managed_agents, save_managed_agents, stop_managed_agent_process,
     sync_managed_agent_processes, BackendKind, ManagedAgentRecord,

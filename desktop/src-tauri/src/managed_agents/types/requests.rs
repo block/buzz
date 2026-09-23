@@ -198,7 +198,11 @@ pub struct CreateManagedAgentRequest {
     /// Opt the new instance into OpenClaw workspace MCP (Hula). Default false.
     /// Wire key is `useOpenclawWorkspace` (serde camelCase of use_openclaw_workspace).
     /// Alias keeps older capital-C payloads working.
-    #[serde(default, rename = "useOpenclawWorkspace", alias = "useOpenClawWorkspace")]
+    #[serde(
+        default,
+        rename = "useOpenclawWorkspace",
+        alias = "useOpenClawWorkspace"
+    )]
     pub use_openclaw_workspace: bool,
 }
 

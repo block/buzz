@@ -154,6 +154,46 @@ impl SessionScope {
             }
         }
     }
+
+    /// OpenClaw Gateway session-key suffix for this scope.
+    ///
+    /// - Conversation (channel): `ch:<channelUuid>`
+    /// - Conversation (DM): `dm:<channelUuid>` when `channel_type == "dm"`
+    /// - Thread: `ch:<channelUuid>:t:<root8>`
+    ///
+    /// Combined with an OpenClaw agent id as
+    /// `agent:<id>:buzz:<suffix>` for `_meta.sessionKey` on `session/new`.
+    pub fn openclaw_session_key_suffix(&self, channel_type: Option<&str>) -> String {
+        match self {
+            Self::Conversation { channel_id } => {
+                let kind = if channel_type == Some("dm") {
+                    "dm"
+                } else {
+                    "ch"
+                };
+                format!("{kind}:{channel_id}")
+            }
+            Self::Thread {
+                channel_id,
+                root_event_id,
+            } => {
+                let short: String = root_event_id.chars().take(8).collect();
+                format!("ch:{channel_id}:t:{short}")
+            }
+        }
+    }
+
+    /// Full OpenClaw Gateway session key: `agent:<id>:buzz:<suffix>`.
+    pub fn openclaw_gateway_session_key(
+        &self,
+        agent_id: &str,
+        channel_type: Option<&str>,
+    ) -> String {
+        format!(
+            "agent:{agent_id}:buzz:{}",
+            self.openclaw_session_key_suffix(channel_type)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -384,6 +424,48 @@ mod tests {
         assert_eq!(thread.root_event_id(), Some(root.as_str()));
         assert!(thread.is_thread());
         assert_eq!(thread.telemetry_label(), "thread:abcdef01");
+    }
+
+    #[test]
+    fn openclaw_gateway_session_key_formats_channel_dm_and_thread() {
+        let ch = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        let conv = SessionScope::Conversation { channel_id: ch };
+        assert_eq!(
+            conv.openclaw_session_key_suffix(None),
+            "ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        );
+        assert_eq!(
+            conv.openclaw_session_key_suffix(Some("stream")),
+            "ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        );
+        assert_eq!(
+            conv.openclaw_session_key_suffix(Some("dm")),
+            "dm:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        );
+        assert_eq!(
+            conv.openclaw_gateway_session_key("captain", Some("dm")),
+            "agent:captain:buzz:dm:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        );
+
+        let root = "abcdef0123456789".repeat(4);
+        let thread = SessionScope::Thread {
+            channel_id: ch,
+            root_event_id: root,
+        };
+        assert_eq!(
+            thread.openclaw_session_key_suffix(None),
+            "ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:t:abcdef01"
+        );
+        assert_eq!(
+            thread.openclaw_gateway_session_key("mo", None),
+            "agent:mo:buzz:ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:t:abcdef01"
+        );
+        // Thread keys stay channel-prefixed even when channel_type is dm
+        // (DMs are conversation-scoped under derive(), so this is defensive).
+        assert_eq!(
+            thread.openclaw_session_key_suffix(Some("dm")),
+            "ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:t:abcdef01"
+        );
     }
 
     #[test]
