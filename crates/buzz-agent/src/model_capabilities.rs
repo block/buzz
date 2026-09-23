@@ -293,8 +293,10 @@ fn prefix_matches(token: &str, s: &str) -> bool {
 /// Databricks Unity Catalog model-service names are catalog data, not model
 /// family hints. Both capability interpreters use this shape check before
 /// family matching so services cannot inherit endpoint capabilities accidentally.
-/// Verified exact records may supply capabilities; other GPT-5+ services have
-/// a route-only Responses exception.
+/// Verified exact records may supply capabilities. Among uncurated services,
+/// Claude routes through Anthropic Messages with no advertised effort choices,
+/// GPT-5+ routes through OpenAI Responses with neutral fallback effort, and all
+/// others retain the provider fallback route.
 pub(crate) fn is_databricks_model_service_fqn(model: &str) -> bool {
     let mut components = model.split('.');
     let (Some(catalog), Some(schema), Some(service)) =
@@ -345,9 +347,10 @@ pub fn resolve(provider: &str, raw_model_id: &str) -> CapabilityResult {
     let canon = canonical_provider(provider);
     let blank = raw_model_id.trim().is_empty();
 
-    // Uncurated FQNs keep neutral effort capabilities. Exact records are verified
-    // service contracts, not family-name inference. Route-only fallbacks inspect
-    // just the service component, never catalog/schema names.
+    // Exact records are verified service contracts, not family-name inference.
+    // Among uncurated FQNs, Claude exposes no effort choices; other services
+    // retain neutral fallback effort. Route fallbacks inspect only the service
+    // component, never catalog/schema names.
     let model_service_fqn =
         canon == "databricks_v2" && is_databricks_model_service_fqn(raw_model_id);
 
@@ -782,7 +785,7 @@ mod tests {
     Q::Vector { id: "dbv2-opus-uc-service", provider: "databricks_v2", raw_model_id: "data_workflow_tools.goose.goose-claude-opus-5-5-preview", note: None },
     Q::Vector { id: "dbv2-opus-uc-system", provider: "databricks_v2", raw_model_id: "system.ai.claude-opus-5-5", note: None },
     Q::Vector { id: "dbv2-opus-uc-provider", provider: "openai", raw_model_id: "data_workflow_tools.goose.goose-claude-opus-5-5", note: None },
-    Q::Section { group: "Uncurated Databricks Claude FQN routing", note: Some("Only the service component selects Anthropic Messages; effort capabilities remain neutral.") },
+    Q::Section { group: "Uncurated Databricks Claude FQN routing", note: Some("Only the service component selects Anthropic Messages; unverified Claude FQNs expose no effort choices.") },
     Q::Vector { id: "dbv2-fqn-claude-anthropic", provider: "databricks_v2", raw_model_id: "catalog.schema.claude-sonnet-custom", note: None },
     Q::Vector { id: "dbv2-fqn-claude-case", provider: "databricks_v2", raw_model_id: "catalog.schema.GOOSE-CLAUDE-SONNET-CUSTOM", note: None },
     Q::Vector { id: "dbv2-fqn-claude-catalog-inert", provider: "databricks_v2", raw_model_id: "claude-catalog.schema.service", note: None },
@@ -1006,7 +1009,9 @@ mod tests {
 
     #[test]
     fn test_every_resolve_yields_a_complete_result() {
-        // Complete-result invariant: supported_efforts is never empty on any path.
+        // Complete-result invariant: ordinary resolution paths advertise at
+        // least one effort; uncurated Claude FQNs intentionally opt out and are
+        // covered by dedicated fallback tests.
         let inputs = [
             ("anthropic", "claude-opus-4-7"),
             ("anthropic", ""),

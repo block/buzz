@@ -2449,7 +2449,7 @@
   },
   {
     "_group": "Uncurated Databricks Claude FQN routing",
-    "_note": "Only the service component selects Anthropic Messages; effort capabilities remain neutral."
+    "_note": "Only the service component selects Anthropic Messages; unverified Claude FQNs expose no effort choices."
   },
   {
     "id": "dbv2-fqn-claude-anthropic",

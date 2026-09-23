@@ -302,7 +302,8 @@ function isDatabricksModelServiceFqn(model: string): boolean {
   );
 }
 
-// Mirror fqn_requires_responses: routing is the only inferred FQN capability.
+// Mirror fqn_requires_anthropic_messages: only the service component may
+// select Anthropic Messages, and doing so does not infer effort support.
 function fqnRequiresAnthropicMessages(model: string): boolean {
   const service = model.split(".").at(-1) ?? "";
   const stripped = stripCatalogPrefix(
@@ -337,8 +338,9 @@ export function resolveModelCapabilities(
 ): CapabilityResult {
   const canon = canonicalizeProvider(provider);
   const blank = rawModelId.trim().length === 0;
-  // Uncurated FQNs keep neutral effort capabilities; verified exact records
-  // take precedence. Route fallbacks inspect only the service component.
+  // Exact records are verified service contracts and take precedence. Among
+  // uncurated FQNs, Claude exposes no effort choices; other services retain
+  // neutral fallback effort. Routing inspects only the service component.
   const modelServiceFqn =
     canon === "databricks_v2" && isDatabricksModelServiceFqn(rawModelId);
 
