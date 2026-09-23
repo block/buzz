@@ -38,14 +38,13 @@ jobs:
           # PR files come from GitHub's PR diff. A tokenless comparison uses the
           # checked-out merge commit and can include newer, unrelated base changes.
           token: ${{ github.token }}
-          # Ordinary Markdown is documentation; explicitly retain Markdown that
-          # is embedded in runtime binaries as prompts or agent skills.
+          # Root and docs/ Markdown do not select runtime suites. Markdown under
+          # runtime directories remains covered by the directory filters below.
           filters: |
             rust:
-              - 'crates/**/!(*.md)'
-              - 'crates/buzz-acp/src/{base_prompt,session_model_channel,session_model_thread}.md'
-              - 'migrations/**/!(*.md)'
-              - 'schema/**/!(*.md)'
+              - 'crates/**'
+              - 'migrations/**'
+              - 'schema/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -69,17 +68,15 @@ jobs:
             desktop:
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
-              - 'desktop/**/!(*.md)'
-              - 'desktop/src-tauri/src/managed_agents/{nest_agents,nest_skill,screenshot_skill}.md'
+              - 'desktop/**'
               - 'pnpm-lock.yaml'
             desktop-rust:
-              - 'desktop/src-tauri/**/!(*.md)'
-              - 'desktop/src-tauri/src/managed_agents/{nest_agents,nest_skill,screenshot_skill}.md'
+              - 'desktop/src-tauri/**'
             web:
-              - 'web/**/!(*.md)'
+              - 'web/**'
               - 'pnpm-lock.yaml'
             mobile:
-              - 'mobile/**/!(*.md)'
+              - 'mobile/**'
               - 'scripts/mobile-release.sh'
               - 'scripts/mobile-worktree-overrides.sh'
               - 'scripts/mobile-worktree-clean.sh'
