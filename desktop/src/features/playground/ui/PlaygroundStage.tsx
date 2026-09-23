@@ -3,7 +3,12 @@ import * as React from "react";
 import { cn } from "@/shared/lib/cn";
 import { isNativeWebviewModalParked } from "@/shared/lib/nativeWebviewModalPark";
 
-import { readPlaygroundStageBounds } from "../lib/deviceBezel";
+import {
+  afterPlaygroundLayout,
+  playgroundStageBoundsSyncTargets,
+  playgroundStageChromeElement,
+  readPlaygroundStageBounds,
+} from "../lib/deviceBezel";
 import {
   PLAYGROUND_DEVICES,
   PLAYGROUND_DEVICE_SCALE_DEFAULT,
@@ -340,30 +345,26 @@ function NativeStageHost({
     let cancelled = false;
     let opened = false;
     let layoutRetry = 0;
+    let cancelScheduled: (() => void) | null = null;
+    let settleTimer = 0;
     // layoutKey is the position-change signal: ResizeObserver ignores
     // moves that keep the same size (fullscreen toggle, inspect restore).
     void layoutKey;
 
-    // Chrome is shrink-0 above the stage. Observe it so WKWebView bounds
-    // follow both chrome rows, not just host size (ResizeObserver ignores
-    // a host that only *moves* when the mode row appears). Look it up
-    // before the first sync so the native rect never covers the mode row.
-    const overlay = host.closest('[data-testid="playground-overlay"]');
-    const chrome = overlay?.querySelector('[data-testid="playground-chrome"]');
-    // Mobile museum host size is fixed CSS viewport; window resize only
-    // re-centers it. Observe scroll/backdrop parents so position-only moves
-    // still re-sync native bounds (bezel vs WKWebView alignment).
-    const mobileBackdrop = host.closest(
-      '[data-testid="playground-mobile-backdrop"]',
-    );
-    const mobileStage = host.closest('[data-testid="playground-mobile-stage"]');
+    // Chrome is shrink-0 above the stage. Look it up before the first sync so
+    // the native rect never covers the mode row. Mobile museum host size is a
+    // fixed CSS viewport — window resize only re-centers the bezel via flex.
+    // Observe backdrop/frame/stage/overlay (+ scroll) and defer measurement
+    // until after layout so the border stays aligned with the preview.
+    const chrome = playgroundStageChromeElement(host);
+    const syncTargets = playgroundStageBoundsSyncTargets(host);
 
     const hostHasLayout = (el: HTMLElement) => {
       const rect = el.getBoundingClientRect();
       return rect.width >= 1 && rect.height >= 1;
     };
 
-    const sync = () => {
+    const syncNow = () => {
       if (cancelled || !hostRef.current) return;
       // Blocking Buzz modals park native children — do not re-show under them.
       if (isNativeWebviewModalParked()) return;
@@ -403,52 +404,69 @@ function NativeStageHost({
       });
     };
 
-    sync();
-    const observer = new ResizeObserver(sync);
-    observer.observe(host);
-    if (chrome) {
-      observer.observe(chrome);
+    const scheduleSync = (settle = false) => {
+      cancelScheduled?.();
+      cancelScheduled = afterPlaygroundLayout(() => {
+        cancelScheduled = null;
+        syncNow();
+      });
+      if (!settle || typeof window.setTimeout !== "function") return;
+      window.clearTimeout(settleTimer);
+      settleTimer = window.setTimeout(() => {
+        syncNow();
+      }, 80);
+    };
+
+    syncNow();
+    const observer = new ResizeObserver(() => scheduleSync(true));
+    for (const el of syncTargets.observe) {
+      observer.observe(el);
     }
-    if (mobileStage instanceof Element) {
-      observer.observe(mobileStage);
+    const onWindowResize = () => scheduleSync(true);
+    window.addEventListener("resize", onWindowResize);
+    for (const el of syncTargets.scroll) {
+      el.addEventListener("scroll", onWindowResize, { passive: true });
     }
-    if (overlay instanceof Element) {
-      observer.observe(overlay);
-    }
-    window.addEventListener("resize", sync);
-    mobileBackdrop?.addEventListener("scroll", sync, { passive: true });
     // Modal park (and pin restore) hides playground children without
     // unmounting this host — re-open so the stage is visible again.
     const restore = () => {
       opened = false;
-      sync();
+      scheduleSync(true);
     };
     window.addEventListener(PLAYGROUND_WEBVIEW_RESTORE_EVENT, restore);
     const visualViewport = window.visualViewport;
-    visualViewport?.addEventListener("resize", sync);
-    visualViewport?.addEventListener("scroll", sync);
+    visualViewport?.addEventListener("resize", onWindowResize);
+    visualViewport?.addEventListener("scroll", onWindowResize);
     // Retry briefly while the pop-out flex tree settles — RO may not fire if
     // the host jumps from 0×0 to sized in the same commit path WebKit skips.
+    // Keep a few frames after first open so justify-center can finish moving
+    // the bezel before we freeze native bounds.
+    let layoutRaf = 0;
     const retryLayout = () => {
-      if (cancelled || opened || layoutRetry >= 45) return;
+      if (cancelled || layoutRetry >= 45) return;
       layoutRetry += 1;
-      sync();
-      if (!opened) {
+      syncNow();
+      if (!opened || layoutRetry < 12) {
         layoutRaf = window.requestAnimationFrame(retryLayout);
       }
     };
-    let layoutRaf =
-      typeof window.requestAnimationFrame === "function"
-        ? window.requestAnimationFrame(retryLayout)
-        : 0;
+    if (typeof window.requestAnimationFrame === "function") {
+      layoutRaf = window.requestAnimationFrame(retryLayout);
+    }
     return () => {
       cancelled = true;
+      cancelScheduled?.();
+      if (typeof window.clearTimeout === "function") {
+        window.clearTimeout(settleTimer);
+      }
       observer.disconnect();
-      window.removeEventListener("resize", sync);
-      mobileBackdrop?.removeEventListener("scroll", sync);
+      window.removeEventListener("resize", onWindowResize);
+      for (const el of syncTargets.scroll) {
+        el.removeEventListener("scroll", onWindowResize);
+      }
       window.removeEventListener(PLAYGROUND_WEBVIEW_RESTORE_EVENT, restore);
-      visualViewport?.removeEventListener("resize", sync);
-      visualViewport?.removeEventListener("scroll", sync);
+      visualViewport?.removeEventListener("resize", onWindowResize);
+      visualViewport?.removeEventListener("scroll", onWindowResize);
       if (typeof window.cancelAnimationFrame === "function") {
         window.cancelAnimationFrame(layoutRaf);
       }

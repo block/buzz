@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  afterPlaygroundLayout,
   playgroundDeviceBezel,
   playgroundDeviceBezelOuterSize,
   playgroundDeviceFrameSize,
   playgroundDeviceNubGutter,
+  playgroundStageBoundsSyncTargets,
+  playgroundStageChromeElement,
   readPlaygroundStageBounds,
   rotateBezelEdge,
   scalePlaygroundDeviceBezel,
@@ -142,4 +145,65 @@ test("scalePlaygroundDeviceBezel multiplies linear chrome for museum scale", () 
   assert.equal(scaled.outerRadius, Math.round(portrait.outerRadius * 0.5));
   assert.equal(scaled.island?.width, Math.round(portrait.island.width * 0.5));
   assert.equal(scalePlaygroundDeviceBezel(portrait, 1), portrait);
+});
+
+test("stage sync targets include museum backdrop and device frame", () => {
+  const overlay = { id: "overlay" };
+  const chrome = { id: "chrome" };
+  const stage = { id: "stage" };
+  const backdrop = { id: "backdrop" };
+  const frame = { id: "frame" };
+  const screen = { id: "screen" };
+  const host = {
+    id: "host",
+    closest(selector) {
+      if (selector.includes("playground-overlay")) return overlay;
+      if (selector.includes("playground-mobile-backdrop")) return backdrop;
+      if (selector.includes("playground-mobile-stage")) return stage;
+      if (selector.includes("playground-device-frame")) return frame;
+      if (selector.includes("playground-device-screen")) return screen;
+      return null;
+    },
+  };
+  overlay.querySelector = (selector) =>
+    selector.includes("playground-chrome") ? chrome : null;
+
+  const targets = playgroundStageBoundsSyncTargets(host);
+  assert.deepEqual(
+    targets.observe.map((el) => el.id),
+    ["host", "chrome", "backdrop", "stage", "frame", "screen", "overlay"],
+  );
+  assert.deepEqual(
+    targets.scroll.map((el) => el.id),
+    ["backdrop"],
+  );
+  assert.equal(playgroundStageChromeElement(host), chrome);
+});
+
+test("afterPlaygroundLayout waits for nested animation frames", () => {
+  const calls = [];
+  const originalRaf = globalThis.requestAnimationFrame;
+  const originalCancel = globalThis.cancelAnimationFrame;
+  const queue = [];
+  globalThis.requestAnimationFrame = (cb) => {
+    queue.push(cb);
+    return queue.length;
+  };
+  globalThis.cancelAnimationFrame = (id) => {
+    queue[id - 1] = null;
+  };
+  try {
+    const cancel = afterPlaygroundLayout(() => calls.push("run"));
+    assert.deepEqual(calls, []);
+    assert.equal(queue.length, 1);
+    queue[0](0);
+    assert.deepEqual(calls, []);
+    assert.equal(queue.length, 2);
+    queue[1](0);
+    assert.deepEqual(calls, ["run"]);
+    cancel();
+  } finally {
+    globalThis.requestAnimationFrame = originalRaf;
+    globalThis.cancelAnimationFrame = originalCancel;
+  }
 });

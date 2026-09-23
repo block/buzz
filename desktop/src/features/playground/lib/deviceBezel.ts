@@ -342,3 +342,83 @@ export function readPlaygroundStageBounds(
     height,
   };
 }
+
+/** Closest playground chrome above the stage (for native y clamp). */
+export function playgroundStageChromeElement(
+  host: Element,
+): Element | null | undefined {
+  return host
+    .closest?.('[data-testid="playground-overlay"]')
+    ?.querySelector('[data-testid="playground-chrome"]');
+}
+
+/**
+ * DOM nodes whose size or scroll can move the museum screen hole without
+ * changing the host box itself (flex `justify-center` on window resize,
+ * chrome growth, backdrop scroll). Observe these so native WKWebView bounds
+ * re-measure from the preview host instead of staying at a stale rect.
+ */
+export function playgroundStageBoundsSyncTargets(host: Element): {
+  observe: Element[];
+  scroll: Element[];
+} {
+  const overlay = host.closest('[data-testid="playground-overlay"]');
+  const chrome = overlay?.querySelector('[data-testid="playground-chrome"]');
+  const mobileBackdrop = host.closest(
+    '[data-testid="playground-mobile-backdrop"]',
+  );
+  const mobileStage = host.closest('[data-testid="playground-mobile-stage"]');
+  const deviceFrame = host.closest('[data-testid="playground-device-frame"]');
+  const deviceScreen = host.closest('[data-testid="playground-device-screen"]');
+
+  const observe: Element[] = [host];
+  for (const el of [
+    chrome,
+    mobileBackdrop,
+    mobileStage,
+    deviceFrame,
+    deviceScreen,
+    overlay,
+  ]) {
+    if (el != null && !observe.includes(el)) {
+      observe.push(el);
+    }
+  }
+
+  const scroll: Element[] = [];
+  if (mobileBackdrop != null) {
+    scroll.push(mobileBackdrop);
+  }
+  return { observe, scroll };
+}
+
+/**
+ * Run `fn` after the current and next layout passes.
+ * `window` resize often fires before flex recenters the device bezel; measuring
+ * in that same turn leaves the native child (and its border alignment) stuck
+ * while the CSS preview moves.
+ */
+export function afterPlaygroundLayout(fn: () => void): () => void {
+  let cancelled = false;
+  let outer = 0;
+  let inner = 0;
+  const run = () => {
+    if (!cancelled) fn();
+  };
+  if (typeof requestAnimationFrame !== "function") {
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }
+  outer = requestAnimationFrame(() => {
+    inner = requestAnimationFrame(run);
+  });
+  return () => {
+    cancelled = true;
+    if (typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    }
+  };
+}
