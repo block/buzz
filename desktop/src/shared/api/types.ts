@@ -301,6 +301,10 @@ export type ManagedAgentBackend =
 export type AcpSessionPolicy = "channel" | "thread";
 
 import type { RestartDiffEntry } from "./restartDiff";
+import type {
+  PermissionPolicy,
+  PermissionPolicySource,
+} from "./permissionPolicy";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
   pubkey: string;
@@ -372,15 +376,22 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
+  /** Effective permission policy at the last spawn. */
+  permissionPolicy: PermissionPolicy;
+  /** Source of `permissionPolicy`: agent, definition, global_default, or built_in. */
+  permissionPolicySource: PermissionPolicySource;
+  /** Policy active on the remote worker; non-null only after a successful deploy. */
+  appliedPermissionPolicy: PermissionPolicy | null;
 };
 
 /** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
 
-export type BackendProviderCandidate = {
-  id: string;
-  binaryPath: string;
-};
+export type {
+  PermissionPolicy,
+  PermissionPolicySource,
+  BackendProviderCandidate,
+} from "./permissionPolicy";
 
 export type BackendProviderProbeResult = {
   ok: boolean;
@@ -431,6 +442,8 @@ export type CreateManagedAgentInput = {
    */
   respondToAllowlist?: string[];
   relayMesh?: RelayMeshConfig;
+  /** Per-agent permission policy override. Omitted = inherit from global or built-in default. */
+  permissionPolicy?: PermissionPolicy;
 };
 
 export type CreateManagedAgentResponse = {
@@ -445,25 +458,11 @@ export type ManagedAgentLog = {
   logPath: string;
 };
 
-/** Outcome of a live `switch_model` control frame; `failure` lands late. */
-export type SwitchManagedAgentModelStatus =
-  | "sent"
-  | "turn_ending"
-  | "ambiguous_target"
-  | "switched"
-  | "unsupported_model"
-  | "no_active_turn"
-  | "failure";
-
-export type ControlResultFrame = {
-  type: "cancel_turn" | "switch_model";
-  status: string;
-  modelId?: string;
-  /** Opaque per-pick id echoed from the request; correlates late frames. */
-  requestId?: string;
-  /** Buzz channel UUID from the observer envelope; disambiguates channels. */
-  channelId?: string | null;
-};
+export type {
+  CancelManagedAgentTurnResult,
+  SwitchManagedAgentModelStatus,
+  ControlResultFrame,
+} from "./permissionPolicy";
 
 export type GitBashPrerequisite = {
   available: boolean;
@@ -706,6 +705,8 @@ export type UpdateManagedAgentInput = {
   respondTo?: RespondToMode;
   /** Absent = keep. Present = replace the allowlist (server-validated). */
   respondToAllowlist?: string[];
+  /** Absent = don't touch. `null` = clear to inherit. Remote: read-only. */
+  permissionPolicy?: PermissionPolicy | null;
   /** Tri-state: absent = don't touch; `null` = clear; `string` = set. Persisted in the locked update so access-change restarts snapshot the new effort. Send only when `effortTouched`. */
   effortLevel?: string | null;
 };
@@ -859,8 +860,8 @@ export type ForumThreadResponse = {
  *
  * The event-id tiebreak is load-bearing: thread replies routinely share a
  * `createdAt` second (bursty threads), so a timestamp-only cursor would skip
- * every tied reply past the page limit. The pair `(createdAt, eventId)` orders
- * replies unambiguously and lets paging resume strictly after the last event.
+ * every tied reply past the page limit. `(createdAt, eventId)` orders replies
+ * unambiguously and lets paging resume strictly after the last event.
  */
 export type ThreadCursor = {
   createdAt: number;
@@ -881,8 +882,7 @@ export type ThreadRepliesResponse = {
  * The event-id tiebreak is load-bearing for the dense-second case: the relay
  * orders `created_at DESC, id ASC` and advances past a second denser than one
  * page with `id > eventId`. A bare `createdAt` (`until`) cursor cannot escape
- * such a second — it re-returns the same slice forever, leaving older history
- * unreachable. `(createdAt, eventId)` moves strictly older every page.
+ * such a second. `(createdAt, eventId)` moves strictly older every page.
  */
 export type ChannelPageCursor = {
   createdAt: number;
@@ -902,9 +902,7 @@ export type ChannelMessagesPageResponse = {
  * Global agent configuration defaults applied to ALL agents.
  *
  * Lowest user-settable layer — per-agent and persona values win on any key
- * collision. Mirrors the Rust `GlobalAgentConfig` struct.
- *
- * Precedence: baked floor < global < persona < per-agent.
+ * collision. Precedence: baked floor < global < persona < per-agent.
  */
 export type GlobalAgentConfig = {
   /** Global env vars injected into all agents unconditionally. */
@@ -915,6 +913,8 @@ export type GlobalAgentConfig = {
   model: string | null;
   /** Preferred ACP runtime for agents without a persona-specific runtime. */
   preferred_runtime: string | null;
+  /** Fleet-wide policy fallback. `null` = no fleet default; `ask` applies. */
+  permission_policy: PermissionPolicy | null;
 };
 
 /**

@@ -302,6 +302,11 @@ pub async fn update_managed_agent(
             record.respond_to_allowlist = prospective_allowlist;
         }
 
+        crate::managed_agents::permission_policy::apply_permission_policy_update(
+            record,
+            input.permission_policy,
+        )?;
+
         // Effort + env_vars: applied together inside `apply_record_field_updates` to
         // enforce the ordering invariant (env_vars before effort column write) and
         // provide a directly-testable production seam. Effort persists inside the

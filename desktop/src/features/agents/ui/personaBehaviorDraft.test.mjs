@@ -122,11 +122,101 @@ test("draftFromBehavior round-trips a full quad and copies the list", () => {
     respondTo: "allowlist",
     respondToAllowlist: [HEX],
     parallelism: "3",
+    permissionPolicy: null,
     sessionPolicy: "thread",
   });
   draft.respondToAllowlist.push("mutated");
   assert.deepEqual(behavior.respondToAllowlist, [HEX], "list must be copied");
   assert.deepEqual(draftFromBehavior(undefined), emptyPersonaBehaviorDraft);
+});
+
+// ── Permission policy (definition default, resolver tier 2) ──────────────────
+
+test("a policy-only draft submits just the policy on create", () => {
+  const group = behaviorForSubmit(
+    { ...emptyPersonaBehaviorDraft, permissionPolicy: "reject" },
+    emptyPersonaBehaviorDraft,
+    false,
+  );
+  assert.deepEqual(group, {
+    respondTo: undefined,
+    respondToAllowlist: undefined,
+    parallelism: undefined,
+    permissionPolicy: "reject",
+  });
+});
+
+test("changing only the policy on edit submits the full group", () => {
+  const seed = { ...emptyPersonaBehaviorDraft, permissionPolicy: "ask" };
+  const group = behaviorForSubmit(
+    { ...seed, permissionPolicy: "allow" },
+    seed,
+    true,
+  );
+  assert.equal(group.permissionPolicy, "allow");
+});
+
+test("clearing the policy on edit submits an explicit clear, not nothing", () => {
+  // A definition whose only behavioral field is a policy, cleared to inherit,
+  // must submit `{}` — "submit nothing" would silently no-op the clear and the
+  // stored default would resurrect on reopen (same contract as respondTo).
+  const seed = { ...emptyPersonaBehaviorDraft, permissionPolicy: "allow" };
+  const group = behaviorForSubmit(emptyPersonaBehaviorDraft, seed, true);
+  assert.deepEqual(group, {}, "full clear must submit a replace-with-empty");
+});
+
+test("draftFromBehavior round-trips a policy-only behavior group", () => {
+  const draft = draftFromBehavior({ permissionPolicy: "reject" });
+  assert.equal(draft.permissionPolicy, "reject");
+  assert.equal(draft.respondTo, null);
+});
+
+// ── Session-policy clear regressions ─────────────────────────────────────────
+
+test("clearing thread scope to channel default submits 'channel', not 'thread'", () => {
+  // Regression: behaviorForSubmit previously returned seed.sessionPolicy in
+  // the full-clear branch, so editing "Each thread → Entire channel" with no
+  // other fields set resubmitted "thread" instead of clearing to "channel".
+  const seed = { ...emptyPersonaBehaviorDraft, sessionPolicy: "thread" };
+  const group = behaviorForSubmit(emptyPersonaBehaviorDraft, seed, true);
+  assert.deepEqual(group, {
+    respondTo: undefined,
+    respondToAllowlist: undefined,
+    parallelism: undefined,
+    sessionPolicy: "channel",
+  });
+});
+
+test("clearing both permission and thread scope submits 'channel' (not 'thread')", () => {
+  // Regression: same root as the thread-only case above. A seed with both
+  // permissionPolicy and a non-channel sessionPolicy cleared to empty must
+  // submit the draft's channel default — not the seed's old "thread" value.
+  const seed = {
+    ...emptyPersonaBehaviorDraft,
+    permissionPolicy: "allow",
+    sessionPolicy: "thread",
+  };
+  const group = behaviorForSubmit(emptyPersonaBehaviorDraft, seed, true);
+  assert.deepEqual(group, {
+    respondTo: undefined,
+    respondToAllowlist: undefined,
+    parallelism: undefined,
+    sessionPolicy: "channel",
+  });
+});
+
+test("clearing only permission while keeping thread scope submits 'thread'", () => {
+  // Keeps the existing contract: when the session scope is still set after
+  // clearing the permission policy, the submitted group must carry it.
+  const seed = {
+    ...emptyPersonaBehaviorDraft,
+    permissionPolicy: "allow",
+    sessionPolicy: "thread",
+  };
+  const draft = { ...seed, permissionPolicy: null };
+  const group = behaviorForSubmit(draft, seed, true);
+  assert.equal(group?.sessionPolicy, "thread");
+  assert.equal(group?.permissionPolicy, undefined);
 });
 
 test("edit full-clear submits an explicit empty group, not nothing", () => {

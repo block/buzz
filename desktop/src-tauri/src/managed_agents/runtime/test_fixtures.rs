@@ -36,6 +36,7 @@ pub(super) fn fixture(
     auth_tag: Option<String>,
 ) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        definition_permission_policy: None,
         session_policy: Default::default(),
         description: None,
         pubkey: "p".into(),
@@ -93,6 +94,8 @@ pub(super) fn fixture(
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         effort_level: None,
     }
 }

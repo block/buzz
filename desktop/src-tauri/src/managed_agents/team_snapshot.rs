@@ -254,6 +254,7 @@ mod tests {
     /// Build a minimal `ManagedAgentRecord` for use as a team member.
     fn agent_record(name: &str) -> ManagedAgentRecord {
         ManagedAgentRecord {
+            definition_permission_policy: None,
             session_policy: Default::default(),
             description: None,
             pubkey: format!("{name}-pubkey"),
@@ -315,6 +316,8 @@ mod tests {
             definition_respond_to_allowlist: vec![],
             definition_parallelism: None,
             relay_mesh: None,
+            permission_policy: None,
+            applied_permission_policy: None,
             effort_level: None,
         }
     }

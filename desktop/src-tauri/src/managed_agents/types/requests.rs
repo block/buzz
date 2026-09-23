@@ -27,6 +27,13 @@ pub struct PersonaBehaviorRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub parallelism: Option<u32>,
+    /// Definition-level default permission policy (resolver tier 2). Within a
+    /// present behavior group this replaces the stored value as a unit like
+    /// the fields above: `None` = no definition default (defer to the global /
+    /// built-in tier), `Some(policy)` = advertise that default. Unlike the
+    /// others it is never published or mint-copied — a local authority grant.
+    #[serde(default)]
+    pub permission_policy: Option<super::super::permission_policy::PermissionPolicy>,
     /// Absent inside a present behavior group selects the channel default.
     #[serde(default)]
     pub session_policy: Option<AcpSessionPolicy>,
@@ -72,6 +79,9 @@ pub fn apply_persona_behavior(
         Vec::new()
     };
     record.parallelism = behavior.parallelism;
+    // Definition-scoped default: replace as part of the behavior group. `None`
+    // clears any stored default so the resolver falls through to global/built-in.
+    record.permission_policy = behavior.permission_policy;
     record.session_policy = behavior.session_policy.unwrap_or_default();
     Ok(())
 }
@@ -265,6 +275,12 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+    /// Absent = don't touch. `null` = clear per-agent override (revert to
+    /// global/built-in). Present string = set per-agent override.
+    /// Remote deployed agents: rejected server-side (displayed read-only in UI).
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub permission_policy:
+        Option<Option<crate::managed_agents::permission_policy::PermissionPolicy>>,
     /// Absent = don't touch. `null` = clear the canonical effort column
     /// (revert to inherited default). `"value"` = set the column.
     ///
@@ -286,11 +302,14 @@ mod tests {
         record.respond_to = Some("allowlist".to_string());
         record.respond_to_allowlist = vec!["a".repeat(64)];
         record.parallelism = Some(4);
+        record.permission_policy =
+            Some(crate::managed_agents::permission_policy::PermissionPolicy::Reject);
         record
     }
 
     fn record_without_quad() -> AgentDefinition {
         AgentDefinition {
+            permission_policy: None,
             session_policy: Default::default(),
             description: None,
             id: "p-1".to_string(),
@@ -327,6 +346,10 @@ mod tests {
         assert_eq!(record.respond_to.as_deref(), Some("allowlist"));
         assert_eq!(record.respond_to_allowlist, vec!["a".repeat(64)]);
         assert_eq!(record.parallelism, Some(4));
+        assert_eq!(
+            record.permission_policy,
+            Some(crate::managed_agents::permission_policy::PermissionPolicy::Reject)
+        );
     }
 
     #[test]
@@ -339,6 +362,10 @@ mod tests {
                 respond_to: Some(RespondTo::Anyone),
                 respond_to_allowlist: Vec::new(),
                 parallelism: None,
+                // Omitting the policy from a present group clears the stored
+                // definition default — same replace-as-a-unit contract as the
+                // other fields, so an edit can revert to global/built-in.
+                permission_policy: None,
                 session_policy: None,
             }),
         )
@@ -346,6 +373,7 @@ mod tests {
         assert_eq!(record.respond_to.as_deref(), Some("anyone"));
         assert!(record.respond_to_allowlist.is_empty());
         assert_eq!(record.parallelism, None);
+        assert_eq!(record.permission_policy, None);
         assert_eq!(record.session_policy, AcpSessionPolicy::Channel);
     }
 
@@ -419,6 +447,8 @@ mod tests {
     /// Pinky's loop row: an applied behavior group must flow through
     /// `persona_event_content` so the republished 30175 carries the edited
     /// behavior group — the write path and the publish path cannot drift apart.
+    /// The permission policy is the deliberate exception: it is set on the
+    /// record but MUST NOT reach the published content (local authority grant).
     #[test]
     fn applied_behavior_flows_into_persona_event_content() {
         let mut record = record_without_quad();
@@ -428,14 +458,29 @@ mod tests {
                 respond_to: Some(RespondTo::Allowlist),
                 respond_to_allowlist: vec!["c".repeat(64)],
                 parallelism: Some(3),
+                permission_policy: Some(
+                    crate::managed_agents::permission_policy::PermissionPolicy::Allow,
+                ),
                 session_policy: Some(AcpSessionPolicy::Thread),
             }),
         )
         .unwrap();
+        // Stored on the record for the resolver's tier 2.
+        assert_eq!(
+            record.permission_policy,
+            Some(crate::managed_agents::permission_policy::PermissionPolicy::Allow)
+        );
         let content = crate::managed_agents::persona_events::persona_event_content(&record);
         assert_eq!(content.respond_to.as_deref(), Some("allowlist"));
         assert_eq!(content.respond_to_allowlist, vec!["c".repeat(64)]);
         assert_eq!(content.parallelism, Some(3));
+        // Local-only: PersonaEventContent has no policy field, so the edited
+        // default never leaves the desktop even as respond_to/parallelism do.
+        let json = serde_json::to_value(&content).unwrap();
+        assert!(
+            json.get("permissionPolicy").is_none() && json.get("permission_policy").is_none(),
+            "definition permission policy must never be published: {json}"
+        );
         assert_eq!(content.session_policy, AcpSessionPolicy::Thread);
     }
 

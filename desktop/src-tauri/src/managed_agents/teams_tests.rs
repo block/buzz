@@ -167,6 +167,7 @@ fn validate_team_deletion_rejects_built_ins() {
 
 fn managed_agent(name: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        definition_permission_policy: None,
         session_policy: Default::default(),
         description: None,
         pubkey: name.to_string(),
@@ -221,6 +222,8 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         catalog_source: None,
         team_catalog_source: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         effort_level: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
@@ -455,6 +458,7 @@ const D_TAG: &str = "my-team";
 
 fn catalog_copy(id: &str, owner: &str, d_tag: &str) -> AgentDefinition {
     AgentDefinition {
+        permission_policy: None,
         session_policy: Default::default(),
         id: id.to_string(),
         display_name: id.to_string(),
@@ -696,6 +700,7 @@ fn test_ref_check_preserves_copy_used_by_a_standalone_managed_agent() {
 
 fn catalog_persona(id: &str, owner: &str, d_tag: &str) -> AgentDefinition {
     AgentDefinition {
+        permission_policy: None,
         session_policy: Default::default(),
         id: id.to_string(),
         display_name: id.to_string(),

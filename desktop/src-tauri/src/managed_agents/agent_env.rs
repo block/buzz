@@ -116,6 +116,42 @@ pub(crate) fn build_buzz_agent_provider_defaults(cmd: &mut std::process::Command
     }
 }
 
+/// Wire the git-credential-nostr helper onto `cmd` for Buzz relay git (NIP-98).
+///
+/// Sets ephemeral `GIT_CONFIG_*` vars scoped to the relay HTTP URL and mirrors
+/// the agent key into `NOSTR_PRIVATE_KEY`. When the helper binary is absent,
+/// the agent simply lacks automatic Buzz git auth — a warning, not a failure.
+pub(super) fn configure_git_credential_helper(
+    cmd: &mut std::process::Command,
+    relay_url: &str,
+    private_key_nsec: &str,
+    agent_name: &str,
+) {
+    let Some(cred_helper) = super::resolve_command("git-credential-nostr") else {
+        eprintln!(
+            "buzz-desktop: git-credential-nostr not found — agent {agent_name} will not have automatic Buzz git auth",
+        );
+        return;
+    };
+    let relay_http_url = crate::relay::relay_http_base_url(relay_url);
+    cmd.env("NOSTR_PRIVATE_KEY", private_key_nsec);
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_CONFIG_COUNT", "2");
+    cmd.env(
+        "GIT_CONFIG_KEY_0",
+        format!("credential.{relay_http_url}/git.helper"),
+    );
+    cmd.env(
+        "GIT_CONFIG_VALUE_0",
+        cred_helper.to_string_lossy().replace('\\', "/"),
+    );
+    cmd.env(
+        "GIT_CONFIG_KEY_1",
+        format!("credential.{relay_http_url}/git.useHttpPath"),
+    );
+    cmd.env("GIT_CONFIG_VALUE_1", "true");
+}
+
 /// Parse newline-delimited `KEY=VALUE` lines from a baked env blob.
 /// Blank lines are skipped. Each non-blank line must contain `=`; the key
 /// is everything before the first `=`, the value is everything after (values

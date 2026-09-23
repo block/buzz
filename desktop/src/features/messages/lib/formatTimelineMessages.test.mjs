@@ -773,3 +773,204 @@ test("verified agent owner may publish a suppression edit", () => {
     true,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Sentinel edit-gate regression: only agent-signed edits may overlay a
+// permission-request sentinel. Owner/attacker edits must leave the original
+// pending body intact. Drives formatTimelineMessages → computePermissionRequest.
+//
+// PUBKEY_A = agent signer, PUBKEY_B = owner, ATTACKER = third party.
+// ---------------------------------------------------------------------------
+
+import { computePermissionRequest } from "@/shared/lib/computePermissionRequest.ts";
+
+const ATTACKER_PUBKEY =
+  "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+// Minimal valid pending sentinel — bare JSON as the harness emits.
+const PENDING_SENTINEL = JSON.stringify({
+  v: 1,
+  state: "pending",
+  requestNonce: "sentinel-gate-test-nonce",
+  sessionId: null,
+  turnId: null,
+  expiresAt: 9_999_999_999,
+  optionIds: ["opt-allow", "opt-deny"],
+  labels: { "opt-allow": "Allow", "opt-deny": "Deny" },
+});
+
+const RESOLVED_SENTINEL = JSON.stringify({
+  v: 1,
+  state: "resolved",
+  requestNonce: "sentinel-gate-test-nonce",
+  originalEventId: HEX64_A,
+  sessionId: null,
+  turnId: null,
+  expiresAt: 9_999_999_999,
+  optionIds: ["opt-allow", "opt-deny"],
+  labels: { "opt-allow": "Allow", "opt-deny": "Deny" },
+  outcome: "applied",
+  chosenOptionId: "opt-allow",
+});
+
+// Agent-signed pending sentinel message.
+function sentinelMessage(overrides = {}) {
+  return {
+    id: HEX64_A,
+    pubkey: PUBKEY_A,
+    kind: 9,
+    created_at: 1_700_000_000,
+    content: PENDING_SENTINEL,
+    tags: [["h", CHANNEL_ID]],
+    sig: "sig",
+    ...overrides,
+  };
+}
+
+// Edit event targeting the sentinel.
+function sentinelEdit(content, signerPubkey, overrides = {}) {
+  return {
+    id: HEX64_B,
+    pubkey: signerPubkey,
+    kind: 40003,
+    created_at: 1_700_000_001,
+    content,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", HEX64_A],
+    ],
+    sig: "sig",
+    ...overrides,
+  };
+}
+
+// Profiles: PUBKEY_A agent whose owner is PUBKEY_B.
+const SENTINEL_PROFILES = {
+  [PUBKEY_A]: { ownerPubkey: PUBKEY_B, isAgent: true },
+};
+
+test("sentinel_owner_edit_rejected_pending_body_preserved_and_card_actionable", () => {
+  // Case 1: agent-signed pending kind-9 + owner-signed resolved edit.
+  // The owner edit is authorized for normal messages but must be dropped for
+  // sentinels — pending body must survive, card must remain actionable.
+  const ownerEdit = sentinelEdit(RESOLVED_SENTINEL, PUBKEY_B);
+  const [row] = formatTimelineMessages(
+    [sentinelMessage(), ownerEdit],
+    null,
+    undefined,
+    null,
+    SENTINEL_PROFILES,
+  );
+
+  // Body must be the original pending sentinel, not the resolved override.
+  assert.equal(row.body, PENDING_SENTINEL, "pending body preserved");
+  assert.equal(
+    row.editSignerPubkey,
+    undefined,
+    "no editSignerPubkey when edit is rejected",
+  );
+
+  // computePermissionRequest with no edit: must yield a pending payload.
+  const payload = computePermissionRequest(
+    row.body,
+    true,
+    PUBKEY_A,
+    row.signerPubkey,
+    row.editSignerPubkey,
+  );
+  assert.ok(payload !== null, "card must be active");
+  assert.equal(payload.state, "pending", "card remains pending");
+});
+
+test("sentinel_edit_before_original_owner_edit_still_rejected", () => {
+  // Case 2: same as case 1 but edit arrives before the original in the array.
+  const ownerEdit = sentinelEdit(RESOLVED_SENTINEL, PUBKEY_B, {
+    created_at: 1_699_999_999,
+  });
+  const [row] = formatTimelineMessages(
+    [ownerEdit, sentinelMessage()],
+    null,
+    undefined,
+    null,
+    SENTINEL_PROFILES,
+  );
+
+  assert.equal(
+    row.body,
+    PENDING_SENTINEL,
+    "pending body preserved regardless of arrival order",
+  );
+  assert.equal(row.editSignerPubkey, undefined, "no editSignerPubkey");
+
+  const payload = computePermissionRequest(
+    row.body,
+    true,
+    PUBKEY_A,
+    row.signerPubkey,
+    row.editSignerPubkey,
+  );
+  assert.ok(payload !== null, "card must be active");
+  assert.equal(payload.state, "pending", "card remains pending");
+});
+
+test("sentinel_attacker_edit_rejected_pending_body_preserved", () => {
+  // Case 3: attacker-signed edit targeting a sentinel — neither authorized
+  // by isAuthorizedMessageEdit nor by the sentinel gate.
+  const attackerEdit = sentinelEdit(RESOLVED_SENTINEL, ATTACKER_PUBKEY);
+  const [row] = formatTimelineMessages(
+    [sentinelMessage(), attackerEdit],
+    null,
+    undefined,
+    null,
+    SENTINEL_PROFILES,
+  );
+
+  assert.equal(
+    row.body,
+    PENDING_SENTINEL,
+    "pending body preserved against attacker edit",
+  );
+  assert.equal(row.editSignerPubkey, undefined);
+
+  const payload = computePermissionRequest(
+    row.body,
+    true,
+    PUBKEY_A,
+    row.signerPubkey,
+    row.editSignerPubkey,
+  );
+  assert.ok(payload !== null, "card active");
+  assert.equal(payload.state, "pending");
+});
+
+test("sentinel_agent_edit_accepted_card_retires_to_resolved", () => {
+  // Case 4: agent-signed resolved edit — the one valid resolution path.
+  // pending card must retire to non-actionable resolved state.
+  const agentEdit = sentinelEdit(RESOLVED_SENTINEL, PUBKEY_A);
+  const [row] = formatTimelineMessages(
+    [sentinelMessage(), agentEdit],
+    null,
+    undefined,
+    null,
+    SENTINEL_PROFILES,
+  );
+
+  assert.equal(row.body, RESOLVED_SENTINEL, "resolved sentinel body applied");
+  assert.equal(
+    row.editSignerPubkey,
+    PUBKEY_A.toLowerCase(),
+    "editSignerPubkey is the agent",
+  );
+
+  const payload = computePermissionRequest(
+    row.body,
+    true,
+    PUBKEY_A,
+    row.signerPubkey,
+    row.editSignerPubkey,
+    row.id,
+    row.preEditBody,
+  );
+  assert.ok(payload !== null, "card present");
+  assert.equal(payload.state, "resolved", "card retired to resolved");
+});

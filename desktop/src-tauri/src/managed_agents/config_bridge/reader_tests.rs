@@ -68,6 +68,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
 
 fn test_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        definition_permission_policy: None,
         session_policy: Default::default(),
         description: None,
         pubkey: "test".to_string(),
@@ -122,6 +123,8 @@ fn test_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         effort_level: None,
         agent_command_override: None,
         persona_source_version: None,

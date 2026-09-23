@@ -25,6 +25,7 @@
         "BUZZ_ACP_DISPLAY_NAME": "worker",
         "BUZZ_ACP_LAZY_POOL": "true",
         "BUZZ_ACP_MODEL": "gpt-5",
+        "BUZZ_ACP_PERMISSION_POLICY": "ask",
         "BUZZ_ACP_RELAY_OBSERVER": "true",
         "BUZZ_ACP_SESSION_POLICY": "channel",
         "BUZZ_ACP_SESSION_TITLE": "worker",

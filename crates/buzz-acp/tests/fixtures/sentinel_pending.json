@@ -1,0 +1,1 @@
+{"description":"read a file","expiresAt":1700000300,"labels":{"opt-allow":"Allow once","opt-reject":"Reject"},"optionIds":["opt-allow","opt-reject"],"requestNonce":"test-nonce-fixture-abc123","sessionId":"sess-fixture-001","state":"pending","turnId":"turn-fixture-xyz","v":1}

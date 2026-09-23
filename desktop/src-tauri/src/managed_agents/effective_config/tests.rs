@@ -8,6 +8,7 @@ fn definition(
     prompt: &str,
 ) -> AgentDefinition {
     AgentDefinition {
+        permission_policy: None,
         session_policy: Default::default(),
         description: None,
         id: id.to_string(),
@@ -42,6 +43,7 @@ fn record(
 ) -> ManagedAgentRecord {
     use crate::managed_agents::{BackendKind, RespondTo};
     ManagedAgentRecord {
+        definition_permission_policy: None,
         session_policy: Default::default(),
         description: None,
         pubkey: "agent-pk".to_string(),
@@ -95,6 +97,8 @@ fn record(
         catalog_source: None,
         team_catalog_source: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         effort_level: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,

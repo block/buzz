@@ -367,6 +367,7 @@ mod tests {
     /// pubkey/nsec pair matters here.
     fn record_with_keys(pubkey: String, private_key_nsec: String) -> ManagedAgentRecord {
         ManagedAgentRecord {
+            definition_permission_policy: None,
             session_policy: Default::default(),
             description: None,
             pubkey,
@@ -420,6 +421,8 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            permission_policy: None,
+            applied_permission_policy: None,
             effort_level: None,
             agent_command_override: None,
             persona_source_version: None,

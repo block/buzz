@@ -86,6 +86,9 @@ pub(super) fn record() -> ManagedAgentRecord {
         agent_command_override: None,
         persona_source_version: None,
         provider: None,
+        permission_policy: None,
+        definition_permission_policy: None,
+        applied_permission_policy: None,
     }
 }
 
@@ -121,6 +124,7 @@ fn persona(id: &str, env_vars: BTreeMap<String, String>) -> AgentDefinition {
         parallelism: None,
         created_at: String::new(),
         updated_at: String::new(),
+        permission_policy: None,
     }
 }
 

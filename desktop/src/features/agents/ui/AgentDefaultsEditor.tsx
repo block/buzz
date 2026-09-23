@@ -17,7 +17,7 @@ import {
   getGlobalAgentConfig,
   setGlobalAgentConfig,
 } from "@/shared/api/tauriGlobalAgentConfig";
-import type { GlobalAgentConfig } from "@/shared/api/types";
+import type { GlobalAgentConfig, PermissionPolicy } from "@/shared/api/types";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import { globalAgentConfigQueryKey } from "@/features/agents/useGlobalAgentConfig";
 import {
@@ -302,6 +302,36 @@ export function AgentDefaultsEditor({
               testId="global-agent-default-harness"
               value={selectedRuntime?.id ?? ""}
             />
+          </div>
+          {/* Fleet-wide permission policy default */}
+          <div className="space-y-1.5">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="global-agent-default-permission-policy"
+            >
+              Default permission policy
+            </label>
+            <select
+              className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+              data-testid="global-agent-default-permission-policy"
+              id="global-agent-default-permission-policy"
+              value={config.permission_policy ?? ""}
+              onChange={(e) => {
+                const val = e.target.value;
+                handleConfigChange({
+                  ...config,
+                  permission_policy:
+                    val === "" ? null : (val as PermissionPolicy),
+                });
+              }}
+            >
+              <option value="">Inherit built-in (ask)</option>
+              <option value="ask">Ask — show Allow/Deny card</option>
+              <option value="allow">
+                Allow — auto-approve (explicit opt-in)
+              </option>
+              <option value="reject">Reject — auto-deny</option>
+            </select>
           </div>
           {flatLayout ? (
             <AnimatePresence initial={false}>

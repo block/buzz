@@ -110,6 +110,12 @@ pub(crate) async fn deploy_to_provider(
         .map_or_else(|| resolve_provider_binary(&provider_id), Ok)?;
 
     let deployed_agent_json = agent_json.clone();
+    // Enforce the deploy-receipt invariant BEFORE invoking the provider: the
+    // applied policy is the byte-identical value build_deploy_payload wrote into
+    // the REBUILT payload, and a missing/unparseable one is a broken JSON-boundary
+    // invariant that must fail the deploy rather than silently stamp None and
+    // suppress the drift row.
+    let applied_policy = super::extract_applied_permission_policy(&agent_json)?;
     let config_clone = config.clone();
     let deploy_result =
         tokio::task::spawn_blocking(move || provider_deploy(&bin_path, &agent_json, &config_clone))
@@ -127,7 +133,7 @@ pub(crate) async fn deploy_to_provider(
         .find(|r| r.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
 
-    let result = apply_deploy_result(rec, deploy_result, &deployed_agent_json);
+    let result = apply_deploy_result(rec, deploy_result, &deployed_agent_json, applied_policy);
     save_managed_agents(app, &records)?;
     result
 }
@@ -238,6 +244,7 @@ fn apply_deploy_result(
     record: &mut crate::managed_agents::ManagedAgentRecord,
     deploy_result: Result<String, String>,
     deployed_agent_json: &serde_json::Value,
+    applied_policy: crate::managed_agents::permission_policy::PermissionPolicy,
 ) -> Result<(), String> {
     match deploy_result {
         Ok(backend_agent_id) => {
@@ -248,9 +255,16 @@ fn apply_deploy_result(
             record.last_started_at = Some(now_iso());
             record.updated_at = now_iso();
             record.last_error = None;
+            // Confirmed receipt: the exact policy sent in this deploy, so a
+            // later global-default flip is detectable as drift against the
+            // live worker.
+            record.applied_permission_policy = Some(applied_policy);
             Ok(())
         }
         Err(error) => {
+            // Retain the last confirmed `applied_permission_policy`: the old
+            // worker may still be running it, and `last_error` records the
+            // failed new attempt. Clearing it would destroy known truth.
             record.last_error = Some(error.clone());
             record.updated_at = now_iso();
             Err(error)
@@ -427,12 +441,44 @@ mod tests {
             &mut record,
             Ok("provider-agent".into()),
             &policy_payload("owner-only"),
+            crate::managed_agents::permission_policy::PermissionPolicy::Allow,
         )
         .unwrap();
 
         assert!(!record.provider_policy_pending);
         assert_eq!(record.backend_agent_id.as_deref(), Some("provider-agent"));
         assert_eq!(record.last_error, None);
+        assert_eq!(
+            record.applied_permission_policy,
+            Some(crate::managed_agents::permission_policy::PermissionPolicy::Allow),
+            "successful deploy stamps the exact policy sent as the confirmed receipt"
+        );
+    }
+
+    #[test]
+    fn successful_redeploy_updates_the_applied_receipt() {
+        let mut record = record();
+
+        apply_deploy_result(
+            &mut record,
+            Ok("provider-agent".into()),
+            &policy_payload("owner-only"),
+            crate::managed_agents::permission_policy::PermissionPolicy::Allow,
+        )
+        .unwrap();
+        apply_deploy_result(
+            &mut record,
+            Ok("provider-agent".into()),
+            &policy_payload("owner-only"),
+            crate::managed_agents::permission_policy::PermissionPolicy::Reject,
+        )
+        .unwrap();
+
+        assert_eq!(
+            record.applied_permission_policy,
+            Some(crate::managed_agents::permission_policy::PermissionPolicy::Reject),
+            "redeploy must update the applied receipt to the new sent value"
+        );
     }
 
     #[test]
@@ -444,6 +490,7 @@ mod tests {
             &mut record,
             Ok("provider-agent".into()),
             &policy_payload("owner-only"),
+            crate::managed_agents::permission_policy::PermissionPolicy::Allow,
         )
         .unwrap();
 
@@ -453,16 +500,34 @@ mod tests {
     #[test]
     fn failed_deploy_preserves_pending_policy() {
         let mut record = record();
+        // Stamp a confirmed `applied_permission_policy` via a stale (mismatched)
+        // deploy so `provider_policy_pending` stays true going into the failure:
+        // the payload's `owner-only` audience differs from this record's `anyone`.
+        record.respond_to = crate::managed_agents::RespondTo::Anyone;
+
+        apply_deploy_result(
+            &mut record,
+            Ok("provider-agent".into()),
+            &policy_payload("owner-only"),
+            crate::managed_agents::permission_policy::PermissionPolicy::Allow,
+        )
+        .unwrap();
 
         let error = apply_deploy_result(
             &mut record,
             Err("provider unavailable".into()),
             &policy_payload("owner-only"),
+            crate::managed_agents::permission_policy::PermissionPolicy::Reject,
         )
         .expect_err("deployment should fail");
 
         assert_eq!(error, "provider unavailable");
         assert!(record.provider_policy_pending);
         assert_eq!(record.last_error.as_deref(), Some("provider unavailable"));
+        assert_eq!(
+            record.applied_permission_policy,
+            Some(crate::managed_agents::permission_policy::PermissionPolicy::Allow),
+            "failed redeploy must retain the last confirmed applied policy"
+        );
     }
 }

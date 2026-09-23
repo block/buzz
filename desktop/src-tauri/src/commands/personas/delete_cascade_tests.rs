@@ -17,6 +17,7 @@ fn make_agent(
     runtime_pid: Option<u32>,
 ) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        definition_permission_policy: None,
         session_policy: Default::default(),
         description: None,
         pubkey: pubkey.to_string(),
@@ -70,6 +71,8 @@ fn make_agent(
         catalog_source: None,
         team_catalog_source: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         effort_level: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,

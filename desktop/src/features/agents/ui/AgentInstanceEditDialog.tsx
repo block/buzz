@@ -15,11 +15,9 @@ import {
 } from "@/features/agents/hooks";
 import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
-import type {
-  ManagedAgent,
-  RespondToMode,
-  UpdateManagedAgentInput,
-} from "@/shared/api/types";
+import { AgentPermissionPolicyField } from "./AgentPermissionPolicyField";
+import { useRespondToField } from "./OwnerOnlyAccessField";
+import type { ManagedAgent, UpdateManagedAgentInput } from "@/shared/api/types";
 import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -38,6 +36,7 @@ import {
   getDefaultLlmModelLabel,
   getDefaultPersonaRuntime,
   getPersonaProviderOptions,
+  getProviderApiKeyEnvVar,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -81,7 +80,6 @@ import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -168,12 +166,7 @@ export function AgentInstanceEditDialog({
     [agent.personaId, personasQuery.data],
   );
   const inheritedEnvVars = linkedPersona?.envVars ?? {};
-  const [respondTo, setRespondTo] = React.useState<RespondToMode>(
-    agent.respondTo,
-  );
-  const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
-    agent.respondToAllowlist,
-  );
+  const rto = useRespondToField(agent);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -181,11 +174,9 @@ export function AgentInstanceEditDialog({
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
 
-  // Runtime selector: defaults to "custom" until the dialog opens and the
-  // catalog loads. The open-effect re-derives the correct id from the catalog.
+  // Runtime selector: defaults to "custom"; open-effect re-derives from catalog.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
 
-  // Tracks whether the user has made an in-dialog runtime selection.
   const runtimeTouched = React.useRef(false);
 
   // Reset form state only when the dialog opens or when switching to a different agent.
@@ -208,11 +199,10 @@ export function AgentInstanceEditDialog({
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
+      rto.reset();
       setEffortLevel(null);
       effortTouched.current = false;
       setSetterError(null);
-      setRespondTo(agent.respondTo);
-      setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
@@ -625,8 +615,8 @@ export function AgentInstanceEditDialog({
       parallelism,
       agentAcpCommand: agent.acpCommand,
       acpCommand,
-      respondTo,
-      respondToAllowlistLength: respondToAllowlist.length,
+      respondTo: rto.respondTo,
+      respondToAllowlistLength: rto.respondToAllowlist.length,
       selectedRuntimeId,
       inheritHarness,
       agentCommand,
@@ -733,7 +723,8 @@ export function AgentInstanceEditDialog({
         envVars: envVarsEqual(submitEnvVars, agent.envVars)
           ? undefined
           : submitEnvVars,
-        respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
+        respondTo:
+          rto.respondTo !== agent.respondTo ? rto.respondTo : undefined,
         // The allowlist is preserved across mode toggles in local UI state
         // (so a user can flip away from allowlist and back without losing
         // their entries), but we only send it on the wire when (a) it
@@ -741,10 +732,14 @@ export function AgentInstanceEditDialog({
         // an allowlist while switching to a non-allowlist mode would be
         // harmless server-side, but it's noise in the persisted record.
         respondToAllowlist:
-          respondTo === "allowlist" &&
-          respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
-            ? respondToAllowlist
+          rto.respondTo === "allowlist" &&
+          rto.respondToAllowlist.join(",") !==
+            agent.respondToAllowlist.join(",")
+            ? rto.respondToAllowlist
             : undefined,
+        // Permission policy is set on the agent definition, not here — the
+        // instance surface is display-only (effective value + drift row), so
+        // this update never touches the stored per-instance override.
       };
 
       // Resolve effort before the update so access-change restarts can
@@ -1002,12 +997,13 @@ export function AgentInstanceEditDialog({
             </div>
             <OwnerOnlyAccessField
               accessLocked={agentAccessOwnerOnly === true}
-              allowlist={respondToAllowlist}
+              allowlist={rto.respondToAllowlist}
               disabled={isSaving}
-              mode={respondTo}
-              onAllowlistChange={setRespondToAllowlist}
-              onModeChange={setRespondTo}
+              mode={rto.respondTo}
+              onAllowlistChange={rto.setRespondToAllowlist}
+              onModeChange={rto.setRespondTo}
             />
+            <AgentPermissionPolicyField agent={agent} />
             <RunOnSummarySection backend={agent.backend} />
 
             {/* Provider (runtime) */}
