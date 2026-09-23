@@ -226,30 +226,32 @@ impl WorkflowEngine {
                 let trace_json = serde_json::Value::Array(full_trace);
                 let step_count = result.step_index as i32;
 
-                if result.approval_token.is_some() {
-                    // Approval gates are not yet implemented (WF-08).
-                    // Fail explicitly rather than creating unreachable WaitingApproval rows.
-                    tracing::warn!(
-                        run_id = %run_id,
-                        step_index = result.step_index,
-                        "Workflow hit approval gate — not yet implemented, marking as failed"
-                    );
+                if let Some(token) = result.approval_token.as_deref() {
                     if let Err(e) = self
-                        .db
-                        .update_workflow_run(
+                        .suspend_for_approval(
                             community_id,
                             run_id,
-                            RunStatus::Failed,
-                            step_count,
+                            result.step_index,
+                            token,
                             &trace_json,
-                            Some("approval gates not yet implemented — see WF-08"),
                         )
                         .await
                     {
-                        tracing::error!(
-                            run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
-                        );
+                        tracing::error!(run_id = %run_id, "Approval request failed: {e}");
+                        if let Err(db_err) = self
+                            .db
+                            .update_workflow_run(
+                                community_id,
+                                run_id,
+                                RunStatus::Failed,
+                                step_count,
+                                &trace_json,
+                                Some(&e.to_string()),
+                            )
+                            .await
+                        {
+                            tracing::error!(run_id = %run_id, "Failed to mark approval run failed: {db_err}");
+                        }
                     }
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");
@@ -296,6 +298,118 @@ impl WorkflowEngine {
                 }
             }
         }
+    }
+
+    async fn suspend_for_approval(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        step_index: usize,
+        token: &str,
+        trace: &serde_json::Value,
+    ) -> Result<(), WorkflowError> {
+        let run = self.db.get_workflow_run(community_id, run_id).await?;
+        let workflow = self.db.get_workflow(community_id, run.workflow_id).await?;
+        let def: WorkflowDef = serde_json::from_value(workflow.definition)
+            .map_err(|e| WorkflowError::InvalidDefinition(e.to_string()))?;
+        let step = def.steps.get(step_index).ok_or_else(|| {
+            WorkflowError::InvalidDefinition("approval step no longer exists".into())
+        })?;
+        let ActionDef::RequestApproval {
+            from,
+            message,
+            timeout,
+        } = &step.action
+        else {
+            return Err(WorkflowError::InvalidDefinition(
+                "suspended step is not an approval".into(),
+            ));
+        };
+        let trigger: executor::TriggerContext =
+            serde_json::from_value(run.trigger_context.ok_or_else(|| {
+                WorkflowError::InvalidDefinition("approval run is missing trigger context".into())
+            })?)
+            .map_err(|e| WorkflowError::InvalidDefinition(e.to_string()))?;
+        let outputs: HashMap<String, serde_json::Value> = trace
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                Some((
+                    entry.get("step_id")?.as_str()?.to_owned(),
+                    entry.get("output")?.clone(),
+                ))
+            })
+            .collect();
+        let approver = executor::resolve_template(from, &trigger, &outputs)?;
+        if !schema::valid_approval_approver(&approver) {
+            return Err(WorkflowError::InvalidDefinition(
+                "approval 'from' must be 'any' or a 64-character pubkey".into(),
+            ));
+        }
+        let message = executor::resolve_template(message, &trigger, &outputs)?;
+        let duration = match timeout {
+            Some(value) => executor::resolve_template(value, &trigger, &outputs)?,
+            None => "24h".into(),
+        };
+        let secs = executor::parse_duration_secs(&duration)?;
+        if secs == 0 || secs > 30 * 24 * 3600 {
+            return Err(WorkflowError::InvalidDefinition(
+                "approval timeout must be between 1 second and 30 days".into(),
+            ));
+        }
+        let expires_at = Utc::now() + chrono::Duration::seconds(secs as i64);
+        let channel_id = workflow.channel_id.ok_or_else(|| {
+            WorkflowError::InvalidDefinition("approval workflow has no channel".into())
+        })?;
+        self.check_owner_authority(community_id, channel_id, &workflow.owner_pubkey, &def)
+            .await?;
+        self.db
+            .suspend_workflow_run_for_approval(
+                buzz_db::workflow::CreateApprovalParams {
+                    community_id,
+                    token,
+                    workflow_id: run.workflow_id,
+                    run_id,
+                    step_id: &step.id,
+                    step_index: step_index as i32,
+                    approver_spec: &approver,
+                    expires_at,
+                },
+                trace,
+            )
+            .await?;
+        if let Err(e) = self
+            .action_sink()?
+            .request_approval(
+                community_id,
+                channel_id,
+                run.workflow_id,
+                run_id,
+                token,
+                &approver,
+                &message,
+                expires_at,
+            )
+            .await
+        {
+            // A request that cannot be delivered must not remain actionable.
+            if let Err(db_err) = self
+                .db
+                .update_approval(
+                    community_id,
+                    token,
+                    buzz_db::workflow::ApprovalStatus::Expired,
+                    None,
+                    None,
+                )
+                .await
+            {
+                tracing::error!(run_id = %run_id, "Failed to invalidate undelivered approval: {db_err}");
+            }
+            return Err(e.into());
+        }
+        Ok(())
     }
 
     /// Called from the event handler post-store hook for every stored event.
@@ -487,6 +601,9 @@ impl WorkflowEngine {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
             let now = Utc::now();
+            if let Err(e) = self.db.expire_workflow_approvals().await {
+                tracing::error!("Cron tick: failed to expire workflow approvals: {e}");
+            }
 
             let workflows = match self.db.list_all_enabled_workflows().await {
                 Ok(wf) => wf,

@@ -203,6 +203,23 @@ impl WorkflowDef {
                     step.id
                 )));
             }
+            if let ActionDef::RequestApproval { from, timeout, .. } = &step.action {
+                if !from.contains("{{") && !valid_approval_approver(from) {
+                    return Err(WorkflowError::InvalidDefinition(
+                        "approval 'from' must be 'any' or a 64-character pubkey".into(),
+                    ));
+                }
+                if let Some(duration) = timeout {
+                    if !duration.contains("{{") {
+                        let secs = crate::executor::parse_duration_secs(duration)?;
+                        if secs == 0 || secs > 30 * 24 * 3600 {
+                            return Err(WorkflowError::InvalidDefinition(
+                                "approval timeout must be between 1 second and 30 days".into(),
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         if let TriggerDef::Schedule { cron, interval } = &self.trigger {
@@ -240,6 +257,11 @@ impl WorkflowDef {
 
         Ok(())
     }
+}
+
+/// Whether an approval approver is supported by the signed-decision handler.
+pub fn valid_approval_approver(spec: &str) -> bool {
+    spec == "any" || (spec.len() == 64 && spec.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Validate a cron expression using the `cron` crate.
@@ -357,7 +379,7 @@ mod tests {
             "  - id: topic\n    action: set_channel_topic\n    topic: Status active\n",
             "  - id: react\n    action: add_reaction\n    emoji: white_check_mark\n",
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
-            "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
+            "  - id: approve\n    action: request_approval\n    from: any\n    message: Approve?\n    timeout: 4h\n",
             "  - id: wait\n    action: delay\n    duration: 5m\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
@@ -393,15 +415,25 @@ mod tests {
             "name: Deploy Approval\n",
             "trigger:\n  on: webhook\n",
             "steps:\n",
-            "  - id: request\n    action: request_approval\n    from: '@engineering-lead'\n",
+            "  - id: request\n    action: request_approval\n    from: any\n",
             "    message: Approve deploy?\n    timeout: 4h\n",
             "  - id: notify_approved\n    if: 'steps_request_output_approved == true'\n",
             "    action: send_message\n    text: Deploy approved\n",
-            "  - id: notify_denied\n    if: 'steps_request_output_approved == false'\n",
-            "    action: send_message\n    text: Deploy denied\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
-        assert_eq!(def.steps.len(), 3);
+        assert_eq!(def.steps.len(), 2);
+    }
+
+    #[test]
+    fn approval_requires_supported_approver_and_bounded_timeout() {
+        let template = "name: Gate\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 1h\n";
+        assert!(parse_yaml(template).is_err());
+        let supported = template.replace("'@manager'", "any");
+        assert!(parse_yaml(&supported).is_ok());
+        assert!(parse_yaml(&supported.replace("1h", "0s")).is_err());
+        assert!(parse_yaml(&supported.replace("1h", "744h")).is_err());
+        assert!(valid_approval_approver(&"ab".repeat(32)));
+        assert!(!valid_approval_approver("@manager"));
     }
 
     #[test]

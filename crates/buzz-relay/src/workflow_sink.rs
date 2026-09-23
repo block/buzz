@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED};
 use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
 use chrono::Utc;
@@ -360,6 +360,85 @@ impl ActionSink for RelayActionSink {
             }
 
             Ok(event_id_hex)
+        })
+    }
+
+    fn request_approval(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        workflow_id: Uuid,
+        run_id: Uuid,
+        token: &str,
+        approver: &str,
+        message: &str,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionSinkError>> + Send + '_>> {
+        let token = token.to_owned();
+        let approver = approver.to_owned();
+        let message = message.to_owned();
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database("workflow community has no host".into())
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let mut tags = vec![
+                Tag::parse(["h", &channel_id.to_string()])
+                    .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
+                Tag::parse(["d", &workflow_id.to_string()])
+                    .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
+            ];
+            if approver.len() == 64 && approver.bytes().all(|b| b.is_ascii_hexdigit()) {
+                tags.push(
+                    Tag::parse(["p", &approver])
+                        .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
+                );
+            }
+            let content = serde_json::json!({
+                "run_id": run_id,
+                "workflow_id": workflow_id,
+                "token": token,
+                "from": approver,
+                "message": message,
+                "expires_at": expires_at,
+            })
+            .to_string();
+            let event =
+                EventBuilder::new(Kind::from(KIND_WORKFLOW_APPROVAL_REQUESTED as u16), content)
+                    .tags(tags)
+                    .sign_with_keys(&state.relay_keypair)
+                    .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?;
+            let (stored, inserted) = state
+                .db
+                .insert_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    Some(channel_id),
+                    None,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored,
+                    KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    &state.relay_keypair.public_key().to_hex(),
+                    None,
+                )
+                .await;
+            }
+            Ok(())
         })
     }
 }

@@ -189,6 +189,45 @@ pub async fn cmd_trigger_workflow(
     Ok(())
 }
 
+/// List channel-scoped approval request events for a workflow.
+///
+/// Requests are immutable events; a listed request may already be decided or expired.
+pub async fn cmd_get_approvals(
+    client: &BuzzClient,
+    workflow_id: &str,
+    limit: Option<u32>,
+) -> Result<(), CliError> {
+    validate_uuid(workflow_id)?;
+    let filter = serde_json::json!({
+        "kinds": [46010],
+        "#d": [workflow_id],
+        "limit": limit.unwrap_or(20).min(100),
+    });
+    let resp = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp)
+        .map_err(|e| CliError::Other(format!("invalid approval query response: {e}")))?;
+    let requests: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|event| {
+            let content: serde_json::Value =
+                serde_json::from_str(event.get("content")?.as_str()?).ok()?;
+            let token = content.get("token")?.as_str()?;
+            let run_id = content.get("run_id")?.as_str()?;
+            Some(serde_json::json!({
+                "event_id": event.get("id"),
+                "workflow_id": workflow_id,
+                "run_id": run_id,
+                "token": token,
+                "from": content.get("from"),
+                "message": content.get("message"),
+                "expires_at": content.get("expires_at"),
+            }))
+        })
+        .collect();
+    println!("{}", serde_json::Value::Array(requests));
+    Ok(())
+}
+
 /// Approve or deny a workflow step — sign and submit a kind:46030 (grant) or 46031 (deny) event.
 pub async fn cmd_approve_step(
     client: &BuzzClient,
@@ -230,6 +269,9 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
         }
         WorkflowsCmd::Runs { workflow, limit } => {
             cmd_get_workflow_runs(client, &workflow, limit).await
+        }
+        WorkflowsCmd::Approvals { workflow, limit } => {
+            cmd_get_approvals(client, &workflow, limit).await
         }
         WorkflowsCmd::Approve {
             token,

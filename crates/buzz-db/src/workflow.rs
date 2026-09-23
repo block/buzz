@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -919,6 +919,53 @@ pub async fn update_workflow_run(
     Ok(())
 }
 
+/// Atomically create an approval and suspend its running workflow run.
+///
+/// The request cannot become actionable without a corresponding waiting run.
+pub async fn suspend_workflow_run_for_approval(
+    pool: &PgPool,
+    params: CreateApprovalParams<'_>,
+    trace: &serde_json::Value,
+) -> Result<()> {
+    let token_hash = hash_approval_token(params.token);
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query(
+        "UPDATE workflow_runs SET status = 'waiting_approval', current_step = $1, execution_trace = $2 \
+         WHERE community_id = $3 AND id = $4 AND workflow_id = $5 AND status = 'running'",
+    )
+    .bind(params.step_index)
+    .bind(trace)
+    .bind(params.community_id.as_uuid())
+    .bind(params.run_id)
+    .bind(params.workflow_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if updated != 1 {
+        return Err(DbError::NotFound(format!(
+            "running workflow_run {}",
+            params.run_id
+        )));
+    }
+    sqlx::query(
+        "INSERT INTO workflow_approvals \
+         (community_id, token, workflow_id, run_id, step_id, step_index, approver_spec, status, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)",
+    )
+    .bind(params.community_id.as_uuid())
+    .bind(token_hash)
+    .bind(params.workflow_id)
+    .bind(params.run_id)
+    .bind(params.step_id)
+    .bind(params.step_index)
+    .bind(params.approver_spec)
+    .bind(params.expires_at)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 // -- Approval CRUD ------------------------------------------------------------
 
 /// Parameters for creating a new approval request.
@@ -1094,6 +1141,47 @@ pub async fn update_approval_by_stored_hash(
     approver_pubkey: Option<&[u8]>,
     note: Option<&str>,
 ) -> Result<bool> {
+    let mut connection = pool.acquire().await?;
+    update_approval_on_connection(
+        &mut connection,
+        community_id,
+        token_hash,
+        status,
+        approver_pubkey,
+        note,
+    )
+    .await
+}
+
+/// Update an approval inside an existing command-event transaction.
+/// A rejected decision rolls back both the event and the status change.
+pub async fn update_approval_by_stored_hash_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    status: ApprovalStatus,
+    approver_pubkey: Option<&[u8]>,
+    note: Option<&str>,
+) -> Result<bool> {
+    update_approval_on_connection(
+        &mut *tx,
+        community_id,
+        token_hash,
+        status,
+        approver_pubkey,
+        note,
+    )
+    .await
+}
+
+async fn update_approval_on_connection(
+    connection: &mut PgConnection,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    status: ApprovalStatus,
+    approver_pubkey: Option<&[u8]>,
+    note: Option<&str>,
+) -> Result<bool> {
     let status_str = status.to_string();
     let affected = sqlx::query(
         r#"
@@ -1104,6 +1192,7 @@ pub async fn update_approval_by_stored_hash(
             granted_at      = CASE WHEN $4 = 'granted' THEN NOW() ELSE granted_at END,
             denied_at       = CASE WHEN $5 = 'denied'  THEN NOW() ELSE denied_at  END
         WHERE community_id = $6 AND token = $7 AND status = 'pending'
+          AND ($1 = 'expired' OR expires_at > NOW())
         "#,
     )
     .bind(&status_str)
@@ -1113,11 +1202,36 @@ pub async fn update_approval_by_stored_hash(
     .bind(&status_str) // for denied_at CASE
     .bind(community_id.as_uuid())
     .bind(token_hash)
-    .execute(pool)
+    .execute(connection)
     .await?
     .rows_affected();
 
     Ok(affected > 0)
+}
+
+/// Expire pending approvals and fail their suspended runs in one database statement.
+/// Safe to invoke from every relay pod; the pending predicate claims each row once.
+pub async fn expire_workflow_approvals(pool: &PgPool) -> Result<u64> {
+    let row: (i64,) = sqlx::query_as(
+        r#"
+        WITH expired AS (
+            UPDATE workflow_approvals SET status = 'expired'
+            WHERE status = 'pending' AND expires_at <= NOW()
+            RETURNING community_id, run_id
+        ), failed AS (
+            UPDATE workflow_runs AS r
+            SET status = 'failed', completed_at = NOW(), error_message = 'approval timed out'
+            FROM expired AS e
+            WHERE r.community_id = e.community_id AND r.id = e.run_id
+              AND r.status = 'waiting_approval'
+            RETURNING r.id
+        )
+        SELECT COUNT(*) FROM failed
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0 as u64)
 }
 
 // -- Row mappers --------------------------------------------------------------

@@ -91,12 +91,11 @@ enum PersistResult {
 /// If the event is a duplicate (ON CONFLICT DO NOTHING), the transaction is
 /// rolled back and `PersistResult::Duplicate` is returned — no mutations needed.
 ///
-/// NOTE: Domain mutations (open_dm, upsert_workflow, etc.) execute on the
-/// connection pool, NOT inside this transaction. The pattern is idempotent but
-/// not strictly atomic: if a mutation succeeds but commit fails, the mutation
-/// persists without the event record. On retry, the event INSERT succeeds
-/// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+/// NOTE: Most domain mutations (open_dm, upsert_workflow, etc.) execute on the
+/// connection pool rather than inside this transaction. Those operations are
+/// idempotent but not strictly atomic with event insertion. Approval decisions
+/// are the exception: their status update uses this open transaction, so a
+/// failed commit cannot consume an approval without its signed command event.
 async fn persist_command_event(
     state: &Arc<AppState>,
     tenant: &TenantContext,
@@ -1026,6 +1025,70 @@ fn check_approver_spec(approver_spec: &str, requester_hex: &str) -> Result<(), I
     )))
 }
 
+async fn check_waiting_approval(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    approval: &buzz_db::workflow::ApprovalRecord,
+    requester_pubkey: &[u8],
+) -> Result<(), IngestError> {
+    let community = tenant.community();
+    let run = state
+        .db
+        .get_workflow_run(community, approval.run_id)
+        .await
+        .map_err(|_| IngestError::Rejected("invalid: workflow run not found".into()))?;
+    if run.status != RunStatus::WaitingApproval
+        || run.workflow_id != approval.workflow_id
+        || run.current_step != approval.step_index
+    {
+        return Err(IngestError::Rejected(
+            "invalid: workflow is not waiting at this approval".into(),
+        ));
+    }
+    let workflow = state
+        .db
+        .get_workflow(community, approval.workflow_id)
+        .await
+        .map_err(|_| IngestError::Rejected("invalid: workflow not found".into()))?;
+    let channel_id = workflow
+        .channel_id
+        .ok_or_else(|| IngestError::Rejected("invalid: workflow has no channel".into()))?;
+    if state
+        .db
+        .get_member_role(community, channel_id, requester_pubkey)
+        .await
+        .map_err(|_| {
+            IngestError::Rejected("forbidden: approver membership could not be verified".into())
+        })?
+        .is_none()
+    {
+        return Err(IngestError::Rejected(
+            "forbidden: approver is not a channel member".into(),
+        ));
+    }
+    let def: buzz_workflow::WorkflowDef = serde_json::from_value(workflow.definition)
+        .map_err(|_| IngestError::Rejected("invalid: workflow definition".into()))?;
+    let step = def
+        .steps
+        .get(approval.step_index as usize)
+        .ok_or_else(|| IngestError::Rejected("invalid: approval step no longer exists".into()))?;
+    if step.id != approval.step_id
+        || !matches!(
+            step.action,
+            buzz_workflow::ActionDef::RequestApproval { .. }
+        )
+    {
+        return Err(IngestError::Rejected(
+            "invalid: approval step has changed".into(),
+        ));
+    }
+    state
+        .workflow_engine
+        .check_owner_authority(community, channel_id, &workflow.owner_pubkey, &def)
+        .await
+        .map_err(|_| IngestError::Rejected("forbidden: workflow owner no longer authorized".into()))
+}
+
 async fn handle_approval_grant(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -1068,9 +1131,10 @@ async fn handle_approval_grant(
 
     // 4. Validate caller is authorized approver
     check_approver_spec(&approval.approver_spec, &self_hex)?;
+    check_waiting_approval(tenant, state, &approval, &self_bytes).await?;
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let mut tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1090,7 +1154,8 @@ async fn handle_approval_grant(
 
     let updated = state
         .db
-        .update_approval_by_stored_hash(
+        .update_approval_by_stored_hash_in_tx(
+            &mut tx,
             tenant.community(),
             &token_hash,
             ApprovalStatus::Granted,
@@ -1179,9 +1244,10 @@ async fn handle_approval_deny(
 
     // 4. Validate caller is authorized approver
     check_approver_spec(&approval.approver_spec, &self_hex)?;
+    check_waiting_approval(tenant, state, &approval, &self_bytes).await?;
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let mut tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1201,7 +1267,8 @@ async fn handle_approval_deny(
 
     let updated = state
         .db
-        .update_approval_by_stored_hash(
+        .update_approval_by_stored_hash_in_tx(
+            &mut tx,
             tenant.community(),
             &token_hash,
             ApprovalStatus::Denied,
@@ -1351,9 +1418,25 @@ async fn resume_workflow_after_approval(
         .as_ref()
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    let Some(approval_step) = def.steps.get(resume_index.saturating_sub(1)) else {
+        tracing::error!("resume_workflow: approval step missing from definition");
+        return;
+    };
+    if !matches!(
+        approval_step.action,
+        buzz_workflow::ActionDef::RequestApproval { .. }
+    ) {
+        tracing::error!("resume_workflow: approval step changed in definition");
+        return;
+    }
+    let approval_output = serde_json::json!({ "approved": true });
+    initial_outputs.insert(approval_step.id.clone(), approval_output.clone());
 
     // Execute remaining steps
-    let existing_trace = run.execution_trace.as_array().cloned();
+    let mut existing_trace = run.execution_trace.as_array().cloned().unwrap_or_default();
+    existing_trace.push(serde_json::json!({
+        "step_id": approval_step.id, "status": "completed", "output": approval_output,
+    }));
     let result = buzz_workflow::executor::execute_from_step(
         &engine,
         community_id,
@@ -1365,6 +1448,6 @@ async fn resume_workflow_after_approval(
     )
     .await;
     engine
-        .finalize_run(community_id, run_id, result, existing_trace)
+        .finalize_run(community_id, run_id, result, Some(existing_trace))
         .await;
 }

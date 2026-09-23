@@ -931,9 +931,18 @@ pub enum WorkflowsCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// List approval request events for a workflow (may include decided or expired requests)
+    Approvals {
+        /// Workflow UUID
+        #[arg(long)]
+        workflow: String,
+        /// Maximum number of requests
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Approve or deny a workflow step
     #[command(
-        after_help = "Examples:\n  buzz workflows approve --token <UUID>\n  buzz workflows approve --token <UUID> --approved false --note \"needs revision\""
+        after_help = "Examples:\n  buzz workflows approvals --workflow <UUID>\n  buzz workflows approve --token <TOKEN_FROM_REQUEST>\n  buzz workflows approve --token <TOKEN_FROM_REQUEST> --approved false --note \"needs revision\""
     )]
     Approve {
         /// The approval token UUID (from the approval request)
@@ -2263,7 +2272,17 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "workflows"),
-            vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
+            vec![
+                "approvals",
+                "approve",
+                "create",
+                "delete",
+                "get",
+                "list",
+                "runs",
+                "trigger",
+                "update"
+            ]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
@@ -2360,7 +2379,7 @@ mod tests {
             ("social", 7),
             ("upload", 1),
             ("users", 5),
-            ("workflows", 8),
+            ("workflows", 9),
         ];
 
         let cmd = Cli::command();

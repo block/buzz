@@ -66,4 +66,18 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Publish a channel-scoped approval request after its waiting state is durable.
+    /// The token must be available to the designated approver to submit a signed decision.
+    fn request_approval(
+        &self,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        workflow_id: uuid::Uuid,
+        run_id: uuid::Uuid,
+        token: &str,
+        approver: &str,
+        message: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionSinkError>> + Send + '_>>;
 }

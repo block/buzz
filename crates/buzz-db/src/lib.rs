@@ -3820,6 +3820,15 @@ impl Db {
         .await
     }
 
+    /// Atomically persist an approval request and suspend its running workflow.
+    pub async fn suspend_workflow_run_for_approval(
+        &self,
+        params: workflow::CreateApprovalParams<'_>,
+        trace: &serde_json::Value,
+    ) -> Result<()> {
+        workflow::suspend_workflow_run_for_approval(&self.pool, params, trace).await
+    }
+
     /// Create an approval request.
     pub async fn create_approval(&self, params: workflow::CreateApprovalParams<'_>) -> Result<()> {
         workflow::create_approval(&self.pool, params).await
@@ -3891,6 +3900,32 @@ impl Db {
             note,
         )
         .await
+    }
+
+    /// Update an approval in the same transaction as its signed command event.
+    pub async fn update_approval_by_stored_hash_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        token_hash: &[u8],
+        status: workflow::ApprovalStatus,
+        approver_pubkey: Option<&[u8]>,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        workflow::update_approval_by_stored_hash_in_tx(
+            tx,
+            community_id,
+            token_hash,
+            status,
+            approver_pubkey,
+            note,
+        )
+        .await
+    }
+
+    /// Expire overdue approvals and fail their waiting runs across communities.
+    pub async fn expire_workflow_approvals(&self) -> Result<u64> {
+        workflow::expire_workflow_approvals(&self.pool).await
     }
 
     /// Ensures monthly partitions exist for the next N months.
