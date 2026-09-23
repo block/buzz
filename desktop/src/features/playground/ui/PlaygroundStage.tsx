@@ -339,6 +339,7 @@ function NativeStageHost({
     if (!host) return;
     let cancelled = false;
     let opened = false;
+    let layoutRetry = 0;
     // layoutKey is the position-change signal: ResizeObserver ignores
     // moves that keep the same size (fullscreen toggle, inspect restore).
     void layoutKey;
@@ -347,14 +348,29 @@ function NativeStageHost({
     // follow both chrome rows, not just host size (ResizeObserver ignores
     // a host that only *moves* when the mode row appears). Look it up
     // before the first sync so the native rect never covers the mode row.
-    const chrome = host
-      .closest('[data-testid="playground-overlay"]')
-      ?.querySelector('[data-testid="playground-chrome"]');
+    const overlay = host.closest('[data-testid="playground-overlay"]');
+    const chrome = overlay?.querySelector('[data-testid="playground-chrome"]');
+    // Mobile museum host size is fixed CSS viewport; window resize only
+    // re-centers it. Observe scroll/backdrop parents so position-only moves
+    // still re-sync native bounds (bezel vs WKWebView alignment).
+    const mobileBackdrop = host.closest(
+      '[data-testid="playground-mobile-backdrop"]',
+    );
+    const mobileStage = host.closest('[data-testid="playground-mobile-stage"]');
+
+    const hostHasLayout = (el: HTMLElement) => {
+      const rect = el.getBoundingClientRect();
+      return rect.width >= 1 && rect.height >= 1;
+    };
 
     const sync = () => {
       if (cancelled || !hostRef.current) return;
       // Blocking Buzz modals park native children — do not re-show under them.
       if (isNativeWebviewModalParked()) return;
+      // Detached/windowed opens often mount at 0×0 before flex lays out.
+      // Viewport fallback used to make bounds "usable" at stale x/y=0, which
+      // painted a blank hole until resize or desktop↔mobile remount.
+      if (!hostHasLayout(hostRef.current)) return;
       const bounds = readPlaygroundStageBounds(
         hostRef.current,
         viewportWidth != null && viewportHeight != null
@@ -393,7 +409,14 @@ function NativeStageHost({
     if (chrome) {
       observer.observe(chrome);
     }
+    if (mobileStage instanceof Element) {
+      observer.observe(mobileStage);
+    }
+    if (overlay instanceof Element) {
+      observer.observe(overlay);
+    }
     window.addEventListener("resize", sync);
+    mobileBackdrop?.addEventListener("scroll", sync, { passive: true });
     // Modal park (and pin restore) hides playground children without
     // unmounting this host — re-open so the stage is visible again.
     const restore = () => {
@@ -404,21 +427,30 @@ function NativeStageHost({
     const visualViewport = window.visualViewport;
     visualViewport?.addEventListener("resize", sync);
     visualViewport?.addEventListener("scroll", sync);
-    const raf =
+    // Retry briefly while the pop-out flex tree settles — RO may not fire if
+    // the host jumps from 0×0 to sized in the same commit path WebKit skips.
+    const retryLayout = () => {
+      if (cancelled || opened || layoutRetry >= 45) return;
+      layoutRetry += 1;
+      sync();
+      if (!opened) {
+        layoutRaf = window.requestAnimationFrame(retryLayout);
+      }
+    };
+    let layoutRaf =
       typeof window.requestAnimationFrame === "function"
-        ? window.requestAnimationFrame(() => {
-            if (!cancelled) sync();
-          })
+        ? window.requestAnimationFrame(retryLayout)
         : 0;
     return () => {
       cancelled = true;
       observer.disconnect();
       window.removeEventListener("resize", sync);
+      mobileBackdrop?.removeEventListener("scroll", sync);
       window.removeEventListener(PLAYGROUND_WEBVIEW_RESTORE_EVENT, restore);
       visualViewport?.removeEventListener("resize", sync);
       visualViewport?.removeEventListener("scroll", sync);
       if (typeof window.cancelAnimationFrame === "function") {
-        window.cancelAnimationFrame(raf);
+        window.cancelAnimationFrame(layoutRaf);
       }
     };
   }, [

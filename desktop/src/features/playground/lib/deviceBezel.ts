@@ -319,14 +319,26 @@ export function readPlaygroundStageBounds(
       .closest?.('[data-testid="playground-overlay"]')
       ?.querySelector('[data-testid="playground-chrome"]');
   const chromeBottom = chromeEl?.getBoundingClientRect().bottom;
+  const rawY = rect.y;
   const y =
-    typeof chromeBottom === "number" ? Math.max(rect.y, chromeBottom) : rect.y;
+    typeof chromeBottom === "number" ? Math.max(rawY, chromeBottom) : rawY;
   const bottom =
     typeof rect.bottom === "number" ? rect.bottom : rect.y + rect.height;
+  const hostHeight = Math.max(0, bottom - y);
+  const width = viewport?.width ?? rect.width;
+  // Published CSS viewport sizes the WKWebView when the screen hole has not
+  // finished layout. If chrome raised `y`, shrink height so the native child
+  // cannot spill past the host bottom (bezel/window resize misalignment).
+  const height =
+    viewport != null
+      ? y > rawY
+        ? Math.min(viewport.height, hostHeight || viewport.height)
+        : viewport.height
+      : hostHeight;
   return {
     x: rect.x,
     y,
-    width: viewport?.width ?? rect.width,
-    height: viewport?.height ?? Math.max(0, bottom - y),
+    width,
+    height,
   };
 }

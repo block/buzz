@@ -21,6 +21,7 @@ import {
   rememberSelectedAgentPubkeys,
   uniqueAutocompleteLabels,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
+import { isReservedCommunityAgentName } from "@/features/agents/lib/reservedAgentNames";
 import {
   reservedCommunityBotRoutes as buildReservedCommunityBotRoutes,
 } from "@/features/agents/lib/reservedCommunityMentionRouting";
@@ -252,14 +253,22 @@ export function useMentions(
       pubkey: bot.pubkey,
     }));
     const channelBots = (members ?? [])
-      .filter((member) => member.role === "bot")
-      .map((member) => ({
-        name:
+      .map((member) => {
+        const name =
           profiles?.[normalizePubkey(member.pubkey)]?.displayName ??
           member.displayName ??
-          "",
-        pubkey: member.pubkey,
-      }));
+          "";
+        return {
+          name,
+          pubkey: member.pubkey,
+          include:
+            member.role === "bot" ||
+            member.isAgent === true ||
+            isReservedCommunityAgentName(name),
+        };
+      })
+      .filter((entry) => entry.include)
+      .map(({ name, pubkey }) => ({ name, pubkey }));
     return buildReservedCommunityBotRoutes({ catalogBots, channelBots });
   }, [communityBotsQuery.data, members, profiles]);
   const agentIdentityPubkeys = React.useMemo(

@@ -11,14 +11,14 @@ import {
 const ORPHAN = "c".repeat(64);
 const MO = HULA_RESERVED_COMMUNITY_BOT_PUBKEYS.Mo.toLowerCase();
 
-test("routes prefer catalog over channel over Hula fallback", () => {
+test("routes prefer channel over catalog over Hula fallback", () => {
   const catalogMo = "a".repeat(64);
   const channelMo = "b".repeat(64);
   const routes = reservedCommunityBotRoutes({
     catalogBots: [{ name: "Mo", pubkey: catalogMo }],
     channelBots: [{ name: "Mo", pubkey: channelMo }],
   });
-  assert.equal(routes.get("mo"), catalogMo);
+  assert.equal(routes.get("mo"), channelMo);
 
   const channelOnly = reservedCommunityBotRoutes({
     channelBots: [{ name: "Mo", pubkey: channelMo }],

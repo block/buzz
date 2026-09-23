@@ -124,7 +124,7 @@ test("native stage bounds never overlap playground chrome", () => {
   });
   assert.deepEqual(
     readPlaygroundStageBounds(host, { width: 393, height: 852 }, overlapping),
-    { x: 0, y: 72, width: 393, height: 852 },
+    { x: 0, y: 72, width: 393, height: 328 },
   );
   const flush = { getBoundingClientRect: () => ({ bottom: 40 }) };
   assert.deepEqual(readPlaygroundStageBounds(host, undefined, flush), {

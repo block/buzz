@@ -321,6 +321,12 @@ export function uniqueAutocompleteLabels(
   return [...unique.values()];
 }
 
+/**
+ * Keep stale autocomplete rows only while they still exist in the live
+ * candidate set. That drops relay-archived identities (already filtered from
+ * `buildMentionCandidates`) even if a prior suggestion snapshot still lists
+ * them during a global-search refetch.
+ */
 export function filterCachedAgentSuggestions<
   T extends {
     isAgent?: boolean;
@@ -330,19 +336,18 @@ export function filterCachedAgentSuggestions<
   suggestions: readonly T[],
   currentCandidates: readonly AgentAutocompleteCandidate[],
 ) {
-  const admittedAgentPubkeys = new Set(
+  const livePubkeys = new Set(
     currentCandidates.flatMap((candidate) =>
-      candidate.isAgent && candidate.pubkey
-        ? [normalizePubkey(candidate.pubkey)]
-        : [],
+      candidate.pubkey ? [normalizePubkey(candidate.pubkey)] : [],
     ),
   );
-  return suggestions.filter(
-    (suggestion) =>
-      !suggestion.isAgent ||
-      !suggestion.pubkey ||
-      admittedAgentPubkeys.has(normalizePubkey(suggestion.pubkey)),
-  );
+  return suggestions.filter((suggestion) => {
+    if (!suggestion.pubkey) {
+      // Persona/team rows without a pubkey stay until the live set rebuilds.
+      return true;
+    }
+    return livePubkeys.has(normalizePubkey(suggestion.pubkey));
+  });
 }
 
 type AgentAutocompleteCandidate = {

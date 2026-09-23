@@ -14,28 +14,10 @@ export type MentionCandidateForRanking = {
 
 export type RankedMentionCandidate<T extends MentionCandidateForRanking> = {
   candidate: T;
-  groupRank: number;
   label: string;
   order: number;
   score: number;
 };
-
-function getMentionCandidateGroupRank(
-  candidate: MentionCandidateForRanking,
-  activePersonaIds: ReadonlySet<string>,
-) {
-  if (candidate.isMember) return 0;
-
-  const isRunnablePersona =
-    candidate.kind === "team" ||
-    candidate.kind === "persona" ||
-    (candidate.personaId ? activePersonaIds.has(candidate.personaId) : false);
-  if (isRunnablePersona) return 1;
-
-  if (!candidate.isAgent) return 2;
-
-  return 3;
-}
 
 function scoreMentionCandidateLabel(
   label: string,
@@ -50,6 +32,10 @@ function scoreMentionCandidateLabel(
   if (words.some((word) => word.startsWith(lowerQuery))) return 3;
 
   return null;
+}
+
+function compareDisplayLabels(left: string, right: string) {
+  return left.localeCompare(right, undefined, { sensitivity: "base" });
 }
 
 export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
@@ -93,10 +79,9 @@ export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
               activePersonaIds.has(left.personaId ?? ""),
           );
         if (runnableDiff !== 0) return runnableDiff;
-        const labelDiff = (left.displayName ?? "").localeCompare(
+        const labelDiff = compareDisplayLabels(
+          left.displayName ?? "",
           right.displayName ?? "",
-          undefined,
-          { sensitivity: "base" },
         );
         if (labelDiff !== 0) return labelDiff;
         return (left.pubkey ?? "").localeCompare(right.pubkey ?? "");
@@ -104,10 +89,18 @@ export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
   );
 }
 
+/**
+ * Rank @mention autocomplete suggestions for the typed query.
+ *
+ * Order is typing relevance first (exact / prefix / word matches), then
+ * case-insensitive alphabetical display name. Membership, local-agent, and
+ * runnable-persona status are intentionally not hard tiers — community bots
+ * compete fairly with channel members and local agents on the same query.
+ */
 export function rankMentionCandidates<T extends MentionCandidateForRanking>(
   candidates: readonly T[],
   query: string,
-  activePersonaIds: ReadonlySet<string> = new Set(),
+  _activePersonaIds: ReadonlySet<string> = new Set(),
 ): RankedMentionCandidate<T>[] {
   const lowerQuery = query.toLowerCase();
 
@@ -119,10 +112,6 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
       const label =
         candidate.displayName ??
         (candidate.pubkey ? truncatePubkey(candidate.pubkey) : "agent");
-      const groupRank = getMentionCandidateGroupRank(
-        candidate,
-        activePersonaIds,
-      );
 
       const labelScores = [
         candidate.displayName,
@@ -146,11 +135,14 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
         : null;
       const score = labelScore !== null ? labelScore : pubkeyScore;
 
-      return { candidate, groupRank, label, order, score };
+      return { candidate, label, order, score };
     })
     .filter((item): item is RankedMentionCandidate<T> => item.score !== null)
     .sort(
       (a, b) =>
-        a.groupRank - b.groupRank || a.score - b.score || a.order - b.order,
+        a.score - b.score ||
+        compareDisplayLabels(a.label, b.label) ||
+        (a.candidate.pubkey ?? "").localeCompare(b.candidate.pubkey ?? "") ||
+        a.order - b.order,
     );
 }

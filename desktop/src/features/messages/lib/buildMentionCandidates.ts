@@ -52,8 +52,10 @@ export type BuildMentionCandidatesInput = {
 /**
  * Merge the channel roster, agent directories, global people search, and
  * standalone personas into the deduplicated candidate list the mention
- * autocomplete ranks. Archived identities and agents the viewer may not
- * mention are dropped; identities appearing in several sources are coalesced
+ * autocomplete ranks. NIP-IA archived identities (`isArchived`, from the
+ * relay `kind:13535` snapshot) are dropped at add time even when they still
+ * appear in a roster or directory cache. Agents the viewer may not mention
+ * are also dropped; identities appearing in several sources are coalesced
  * into a single entry that keeps the richest field from each.
  */
 export function buildMentionCandidates({
@@ -251,7 +253,22 @@ export function buildMentionCandidates({
       preferredPubkeys: memberPubkeys,
     },
   );
-  return reservedCommunityBotRoutes && reservedCommunityBotRoutes.size > 0
-    ? applyReservedCommunityMentionRouting(coalesced, reservedCommunityBotRoutes)
-    : coalesced;
+  const routed =
+    reservedCommunityBotRoutes && reservedCommunityBotRoutes.size > 0
+      ? applyReservedCommunityMentionRouting(
+          coalesced,
+          reservedCommunityBotRoutes,
+        )
+      : coalesced;
+  // Routing can keep a catalog/fallback pubkey that also appears on the
+  // roster under a richer non-member source. Re-assert membership from the
+  // merged channel set so in-channel community bots never show
+  // "not in channel".
+  return routed.map((candidate) => {
+    if (!candidate.pubkey || candidate.isMember) return candidate;
+    if (!memberPubkeys.has(normalizePubkey(candidate.pubkey))) {
+      return candidate;
+    }
+    return { ...candidate, isMember: true };
+  });
 }

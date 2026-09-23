@@ -78,6 +78,60 @@ test("archived identities never become candidates", () => {
   );
 });
 
+test("archived roster members and directory agents stay out even when still cached", () => {
+  const candidates = buildMentionCandidates(
+    input({
+      isArchived: (pubkey) => pubkey === ARCHIVED_PUBKEY,
+      memberPubkeys: new Set([ARCHIVED_PUBKEY, MEMBER_PUBKEY]),
+      members: [
+        {
+          pubkey: ARCHIVED_PUBKEY,
+          displayName: "Archived Bot",
+          isAgent: true,
+          role: "bot",
+        },
+        { pubkey: MEMBER_PUBKEY, displayName: "Ada", isAgent: false },
+      ],
+      mentionableAgentPubkeys: new Set([ARCHIVED_PUBKEY, AGENT_PUBKEY]),
+      managedAgents: [
+        {
+          pubkey: ARCHIVED_PUBKEY,
+          name: "Archived Managed",
+          status: "stopped",
+        },
+      ],
+      relayAgents: [
+        {
+          pubkey: ARCHIVED_PUBKEY,
+          name: "Archived Relay",
+          ownerPubkey: null,
+          status: "online",
+        },
+        {
+          pubkey: AGENT_PUBKEY,
+          name: "Scout",
+          ownerPubkey: null,
+          status: "online",
+        },
+      ],
+      managedAgentNamesByPubkey: new Map([[ARCHIVED_PUBKEY, "Archived Managed"]]),
+      relayAgentNamesByPubkey: new Map([
+        [ARCHIVED_PUBKEY, "Archived Relay"],
+        [AGENT_PUBKEY, "Scout"],
+      ]),
+    }),
+  );
+
+  assert.deepEqual(
+    candidates.map((candidate) => candidate.pubkey).sort(),
+    [AGENT_PUBKEY, MEMBER_PUBKEY].sort(),
+  );
+  assert.equal(
+    candidates.some((candidate) => candidate.pubkey === ARCHIVED_PUBKEY),
+    false,
+  );
+});
+
 test("an agent outside the mentionable set is hidden once its directory is ready", () => {
   const relayAgents = [
     { pubkey: AGENT_PUBKEY, name: "Scout", ownerPubkey: null, status: "away" },
@@ -168,3 +222,70 @@ for (const locallyManaged of [true, false]) {
     assert.equal(Boolean(candidate.isManagedAgent), locallyManaged);
   });
 }
+
+test("in-channel reserved community bot stays isMember after catalog route", () => {
+  const channelMo = "b".repeat(64);
+  const catalogMo = "a".repeat(64);
+  const candidates = buildMentionCandidates(
+    input({
+      memberPubkeys: new Set([channelMo]),
+      members: [
+        {
+          pubkey: channelMo,
+          displayName: "Mo",
+          role: "bot",
+          isAgent: true,
+        },
+      ],
+      mentionableAgentPubkeys: new Set([channelMo, catalogMo]),
+      relayAgents: [
+        {
+          pubkey: catalogMo,
+          name: "Mo",
+          ownerPubkey: null,
+          agentType: "openclaw",
+          channels: [],
+          channelIds: [],
+          capabilities: [],
+          status: "online",
+          respondTo: null,
+          respondToAllowlist: [],
+        },
+      ],
+      // Channel-preferred route (see reservedCommunityBotRoutes).
+      reservedCommunityBotRoutes: new Map([["mo", channelMo]]),
+    }),
+  );
+  const mo = candidates.filter((c) => c.displayName === "Mo");
+  assert.equal(mo.length, 1);
+  assert.equal(mo[0]?.pubkey, channelMo);
+  assert.equal(mo[0]?.isMember, true);
+});
+
+test("memberPubkeys re-asserts isMember when routed identity matches roster", () => {
+  const mo = "b".repeat(64);
+  const candidates = buildMentionCandidates(
+    input({
+      memberPubkeys: new Set([mo]),
+      members: [],
+      mentionableAgentPubkeys: new Set([mo]),
+      relayAgents: [
+        {
+          pubkey: mo,
+          name: "Mo",
+          ownerPubkey: null,
+          agentType: "openclaw",
+          channels: [],
+          channelIds: [],
+          capabilities: [],
+          status: "online",
+          respondTo: null,
+          respondToAllowlist: [],
+        },
+      ],
+      reservedCommunityBotRoutes: new Map([["mo", mo]]),
+    }),
+  );
+  const hit = candidates.find((c) => c.displayName === "Mo");
+  assert.equal(hit?.isMember, true);
+});

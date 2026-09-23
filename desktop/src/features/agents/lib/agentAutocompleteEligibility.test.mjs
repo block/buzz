@@ -250,13 +250,17 @@ test("autocomplete helper extraction preserves safe filtering and labels", () =>
   const person = { pubkey: PUB_A, isAgent: false };
   const admittedAgent = { pubkey: PUB_B.toUpperCase(), isAgent: true };
   const removedAgent = { pubkey: PUB_C, isAgent: true };
+  const archivedPerson = { pubkey: PUB_D, isAgent: false };
   const persona = { isAgent: true };
   assert.deepEqual(
     filterCachedAgentSuggestions(
-      [person, admittedAgent, removedAgent, persona],
-      [{ pubkey: PUB_B, isAgent: true }],
+      [person, admittedAgent, removedAgent, archivedPerson, persona],
+      [
+        { pubkey: PUB_B, isAgent: true },
+        // Live set omits PUB_A / PUB_C / PUB_D (e.g. archived or no longer eligible).
+      ],
     ),
-    [person, admittedAgent, persona],
+    [admittedAgent, persona],
   );
 });
 

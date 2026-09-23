@@ -107,6 +107,16 @@ export function PlaygroundOverlay({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [fullscreen, setOverlayFullscreen]);
 
+  // Detached OS / windowed playgrounds often paint before the flex stage has
+  // a non-zero box. One post-mount layout bump forces NativeStageHost to sync.
+  React.useEffect(() => {
+    if (lockPlacement !== "window") return;
+    const id = window.setTimeout(() => {
+      setLayoutEpoch((value) => value + 1);
+    }, 50);
+    return () => window.clearTimeout(id);
+  }, [lockPlacement, session.sid]);
+
   const placement = playgroundOverlayPlacement(fullscreen, docked);
   const dockVisible = placement === "dock";
   const chromeLayout = playgroundChromeLayoutFlags(lockPlacement, {

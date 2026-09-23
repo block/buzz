@@ -26,8 +26,11 @@ export type ReservedBotRouteSource = {
 
 /**
  * Map reserved community names → pubkey.
- * Precedence: installed community-bots catalog, then channel bot members,
- * then the hard-coded Hula #hula pubkeys.
+ * Precedence: channel bot members (live roster wins for "in channel"),
+ * then installed community-bots catalog, then the hard-coded Hula #hula
+ * pubkeys. Catalog-first routing dropped in-channel bots whose pubkey
+ * differed from the catalog row and left autocomplete stuck on
+ * "not in channel".
  */
 export function reservedCommunityBotRoutes({
   catalogBots = [],
@@ -51,8 +54,8 @@ export function reservedCommunityBotRoutes({
     }
   };
 
-  take(catalogBots);
   take(channelBots);
+  take(catalogBots);
 
   if (useHulaFallback) {
     for (const name of RESERVED_COMMUNITY_AGENT_NAMES) {
