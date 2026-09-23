@@ -164,7 +164,225 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::Archived => cmd_archived(client).await,
+
+        AgentsCmd::SetDirectory {
+            name,
+            channel_ids,
+            channels_from_membership,
+            no_channels,
+            respond_to,
+            respond_to_allowlist,
+            status,
+        } => {
+            cmd_set_directory(
+                client,
+                SetDirectoryArgs {
+                    name,
+                    channel_ids,
+                    channels_from_membership,
+                    no_channels,
+                    respond_to,
+                    respond_to_allowlist,
+                    status,
+                },
+            )
+            .await
+        }
     }
+}
+
+/// Merge the new directory fields over the existing kind:10100 content so
+/// unrelated fields (notably `channel_add_policy`) survive the replaceable
+/// overwrite.
+fn merge_directory_content(
+    mut base: serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    channel_ids: &[String],
+    channel_names: &[String],
+    respond_to: &str,
+    respond_to_allowlist: &[String],
+    status: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    base.insert("name".into(), json!(name));
+    base.entry("agent_type".to_string())
+        .or_insert_with(|| json!("agent"));
+    base.insert("channel_ids".into(), json!(channel_ids));
+    base.insert("channels".into(), json!(channel_names));
+    base.insert("respond_to".into(), json!(respond_to));
+    base.insert("respond_to_allowlist".into(), json!(respond_to_allowlist));
+    base.insert("status".into(), json!(status));
+    base
+}
+
+fn content_object(event: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    event
+        .get("content")
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+struct SetDirectoryArgs {
+    name: Option<String>,
+    channel_ids: Vec<String>,
+    channels_from_membership: bool,
+    no_channels: bool,
+    respond_to: crate::DirectoryRespondToArg,
+    respond_to_allowlist: Vec<String>,
+    status: String,
+}
+
+async fn cmd_set_directory(client: &BuzzClient, args: SetDirectoryArgs) -> Result<(), CliError> {
+    use crate::client::extract_d_tag;
+    use crate::validate::parse_uuid;
+
+    let SetDirectoryArgs {
+        name,
+        channel_ids,
+        channels_from_membership,
+        no_channels,
+        respond_to,
+        respond_to_allowlist,
+        status,
+    } = args;
+
+    let respond_to = respond_to.to_wire();
+    match respond_to {
+        "allowlist" if respond_to_allowlist.is_empty() => {
+            return Err(CliError::Usage(
+                "--respond-to allowlist requires at least one --allow <PUBKEY>".into(),
+            ));
+        }
+        "allowlist" => {
+            for pk in &respond_to_allowlist {
+                validate_hex64(pk)?;
+            }
+        }
+        _ if !respond_to_allowlist.is_empty() => {
+            return Err(CliError::Usage(
+                "--allow is only valid with --respond-to allowlist".into(),
+            ));
+        }
+        _ => {}
+    }
+    let respond_to_allowlist: Vec<String> = respond_to_allowlist
+        .iter()
+        .map(|pk| pk.to_ascii_lowercase())
+        .collect();
+
+    let my_pk = client.keys().public_key().to_hex();
+
+    // Existing directory record — the merge base.
+    let existing_filter =
+        json!({"kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE], "authors": [my_pk], "limit": 1});
+    let existing_raw = client.query(&existing_filter).await?;
+    let existing: Vec<serde_json::Value> = serde_json::from_str(&existing_raw).unwrap_or_default();
+    let base = existing.first().map(content_object).unwrap_or_default();
+
+    // Resolve channel ids: explicit flags, or this identity's memberships.
+    let channel_ids: Vec<String> = if no_channels {
+        Vec::new()
+    } else if channels_from_membership {
+        let member_filter = json!({"kinds": [39002], "#p": [my_pk]});
+        let member_events = client.query_paginated(member_filter, 500).await?;
+        let mut ids: Vec<String> = member_events
+            .iter()
+            .map(extract_d_tag)
+            .filter(|id| !id.is_empty())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            return Err(CliError::Usage(
+                "no channel memberships found for this identity; pass --channel-id explicitly"
+                    .into(),
+            ));
+        }
+        ids
+    } else if channel_ids.is_empty() {
+        return Err(CliError::Usage(
+            "pass --channel-id <UUID> (repeatable), --channels-from-membership, or --no-channels"
+                .into(),
+        ));
+    } else {
+        for id in &channel_ids {
+            parse_uuid(id)?;
+        }
+        channel_ids
+    };
+
+    // Channel display names for the record's legacy `channels` field.
+    let meta_events = if channel_ids.is_empty() {
+        Vec::new()
+    } else {
+        let meta_filter = json!({"kinds": [39000], "#d": channel_ids});
+        client.query_paginated(meta_filter, 500).await?
+    };
+    let channel_names: Vec<String> = meta_events
+        .iter()
+        .filter_map(|e| {
+            e.get("tags")?.as_array()?.iter().find_map(|t| {
+                let t = t.as_array()?;
+                (t.first()?.as_str()? == "name").then(|| t.get(1)?.as_str().map(str::to_string))?
+            })
+        })
+        .collect();
+
+    // Resolve the display name: flag, else this identity's kind:0 profile.
+    let name = match name {
+        Some(n) if !n.trim().is_empty() => n,
+        _ => {
+            let profile_filter = json!({"kinds": [0], "authors": [my_pk], "limit": 1});
+            let profile_raw = client.query(&profile_filter).await?;
+            let profiles: Vec<serde_json::Value> =
+                serde_json::from_str(&profile_raw).unwrap_or_default();
+            profiles
+                .first()
+                .map(content_object)
+                .and_then(|c| {
+                    ["display_name", "name"].iter().find_map(|k| {
+                        c.get(*k)
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.trim().is_empty())
+                            .map(str::to_string)
+                    })
+                })
+                .ok_or_else(|| {
+                    CliError::Usage(
+                        "no --name given and this identity has no kind:0 profile name".into(),
+                    )
+                })?
+        }
+    };
+
+    let merged = merge_directory_content(
+        base,
+        &name,
+        &channel_ids,
+        &channel_names,
+        respond_to,
+        &respond_to_allowlist,
+        &status,
+    );
+    let content = serde_json::Value::Object(merged).to_string();
+
+    use nostr::{EventBuilder, Kind};
+    let builder = EventBuilder::new(
+        Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
+        &content,
+    )
+    .tags([]);
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    let mut output: serde_json::Value = serde_json::from_str(&resp).unwrap_or(json!({}));
+    if let Some(obj) = output.as_object_mut() {
+        obj.insert("name".into(), json!(name));
+        obj.insert("channel_ids".into(), json!(channel_ids));
+        obj.insert("respond_to".into(), json!(respond_to));
+    }
+    println!("{output}");
+    Ok(())
 }
 
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by
@@ -1273,5 +1491,67 @@ mod tests {
             .expect("sign");
         let result = verify_archived_event(&event, &self_hex).expect("should pass");
         assert!(result.is_empty());
+    }
+
+    // ── merge_directory_content ───────────────────────────────────────────
+
+    #[test]
+    fn merge_preserves_unrelated_fields() {
+        let base = serde_json::from_str::<serde_json::Value>(
+            r#"{"channel_add_policy":"owner_only","custom":"kept"}"#,
+        )
+        .unwrap()
+        .as_object()
+        .cloned()
+        .unwrap();
+        let merged = merge_directory_content(
+            base,
+            "QC Lead",
+            &["11111111-2222-4333-8444-555555555555".into()],
+            &["Quality control".into()],
+            "anyone",
+            &[],
+            "online",
+        );
+        assert_eq!(merged["channel_add_policy"], "owner_only");
+        assert_eq!(merged["custom"], "kept");
+        assert_eq!(merged["name"], "QC Lead");
+        assert_eq!(merged["agent_type"], "agent");
+        assert_eq!(
+            merged["channel_ids"],
+            serde_json::json!(["11111111-2222-4333-8444-555555555555"])
+        );
+        assert_eq!(merged["channels"], serde_json::json!(["Quality control"]));
+        assert_eq!(merged["respond_to"], "anyone");
+        assert_eq!(merged["respond_to_allowlist"], serde_json::json!([]));
+        assert_eq!(merged["status"], "online");
+    }
+
+    #[test]
+    fn merge_overwrites_stale_directory_fields_but_not_agent_type() {
+        let base = serde_json::from_str::<serde_json::Value>(
+            r#"{"name":"old","agent_type":"specialist","channel_ids":["stale"],"respond_to":"owner-only"}"#,
+        )
+        .unwrap()
+        .as_object()
+        .cloned()
+        .unwrap();
+        let merged = merge_directory_content(
+            base,
+            "new",
+            &[],
+            &[],
+            "allowlist",
+            &["a".repeat(64)],
+            "offline",
+        );
+        assert_eq!(merged["name"], "new");
+        assert_eq!(merged["agent_type"], "specialist");
+        assert_eq!(merged["channel_ids"], serde_json::json!([]));
+        assert_eq!(merged["respond_to"], "allowlist");
+        assert_eq!(
+            merged["respond_to_allowlist"],
+            serde_json::json!(["a".repeat(64)])
+        );
     }
 }
