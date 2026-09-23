@@ -78,7 +78,7 @@ exec sleep 60
         .env("GIT_CONFIG_VALUE_2", "true")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env("GIT_CONFIG_PARAMETERS", "'user.name=Inherited Human'")
         .env_remove("BUZZ_ACP_SETUP_PAYLOAD")
         .env_remove("BUZZ_AUTH_TAG")
         .stdin(Stdio::null())

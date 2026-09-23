@@ -19,6 +19,43 @@ mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 pub(crate) use path::{compose_path_entries, should_skip_claude_executable, should_use_inherited};
 
+/// Custom ACP harnesses do not run buzz-acp's Git bootstrap. Preserve the
+/// Desktop-provided relay credential helper for those commands.
+fn apply_custom_acp_git_credentials(
+    command: &mut std::process::Command,
+    acp_command: &str,
+    private_key: &str,
+    relay_url: &str,
+    credential_helper: Option<&std::path::Path>,
+) {
+    if acp_command == super::DEFAULT_ACP_COMMAND {
+        return;
+    }
+    let Some(helper) = credential_helper else {
+        eprintln!(
+            "buzz-desktop: git-credential-nostr not found — custom ACP command will not have automatic Buzz git auth"
+        );
+        return;
+    };
+    let relay_http_url = crate::relay::relay_http_base_url(relay_url);
+    command.env("NOSTR_PRIVATE_KEY", private_key);
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_CONFIG_COUNT", "2");
+    command.env(
+        "GIT_CONFIG_KEY_0",
+        format!("credential.{relay_http_url}/git.helper"),
+    );
+    command.env(
+        "GIT_CONFIG_VALUE_0",
+        helper.to_string_lossy().replace('\\', "/"),
+    );
+    command.env(
+        "GIT_CONFIG_KEY_1",
+        format!("credential.{relay_http_url}/git.useHttpPath"),
+    );
+    command.env("GIT_CONFIG_VALUE_1", "true");
+}
+
 pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondToEnv};
 
 mod metadata;
@@ -725,6 +762,17 @@ pub fn spawn_agent_child(
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 
     // buzz-acp owns Git identity, scoped credentials, signing and key cleanup.
+    // An advanced custom ACP command bypasses that harness, so retain the
+    // earlier Desktop credential setup for that supported override.
+    if record.acp_command != super::DEFAULT_ACP_COMMAND {
+        apply_custom_acp_git_credentials(
+            &mut command,
+            &record.acp_command,
+            &record.private_key_nsec,
+            &effective_relay_url,
+            resolve_command("git-credential-nostr").as_deref(),
+        );
+    }
 
     // User env (descriptor.env): fully-layered floor→runtime→definition→global→persona→agent,
     // reserved-key filtered. Written last so user-explicit values win over Buzz-set env.

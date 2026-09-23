@@ -536,6 +536,10 @@ impl AcpClient {
         {
             cmd.env(name, value);
         }
+        // Git applies this older injection channel after GIT_CONFIG_COUNT.
+        // Keeping it would let an ambient user.name or signing setting win
+        // over the harness-owned agent identity in native shells.
+        cmd.env_remove("GIT_CONFIG_PARAMETERS");
         cmd.env_remove("NOSTR_PRIVATE_KEY");
         if extra_env.iter().any(|(name, _)| name == "GIT_CONFIG_COUNT") {
             // Native shells inherit these overrides, while buzz-agent clears
