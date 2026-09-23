@@ -88,6 +88,12 @@ function load() {
     store.windows = [];
     for (const row of saved.windows ?? []) {
       if (row?.label && row.title != null && isPayload(row.payload)) {
+        // Channel/thread (and link) embeds are OS-only now and are hidden from
+        // the Windows section (#107). Drop leftovers so a prior embed takeover
+        // cannot soft-lock the main chat with no dismiss row.
+        if (row.payload.kind === "thread" || row.payload.kind === "link") {
+          continue;
+        }
         store.windows.push({
           label: row.label,
           title: row.title,
@@ -100,6 +106,7 @@ function load() {
       store.windows.some((row) => row.label === saved.activeLabel)
         ? saved.activeLabel
         : null;
+    persist();
   } catch {
     store.windows = [];
     store.activeLabel = null;

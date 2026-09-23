@@ -181,16 +181,21 @@ export async function openPopoutWindow(input: {
   playground?: PlaygroundCard;
   link?: PopoutLinkTarget;
   /**
-   * Always open a real OS window. Link Detach uses this (and `kind: "link"`)
-   * so "Embed in main" cannot turn Detach into an in-app main-area takeover.
+   * Always open a real OS window. Link Detach and channel/thread "Open in a
+   * new window" use this so "Embed in main" (leftover after Appearance →
+   * Windows was removed) cannot turn those into an in-app main-area takeover
+   * with no Windows-section dismiss row (#107).
    */
   forceOsWindow?: boolean;
 }): Promise<void> {
   const label = popoutLabel(input.kind, input.seed);
   const payload = popoutPayloadFromInput(input);
-  // Link browsers are Detach-to-OS-window only. Embed-in-main still applies to
-  // thread/playground/split pop-outs.
-  const forceOs = input.forceOsWindow === true || input.kind === "link";
+  // Channel/thread and link browsers are OS-window only. Embed-in-main may
+  // still apply to playground/split pop-outs (those keep Windows rows).
+  const forceOs =
+    input.forceOsWindow === true ||
+    input.kind === "link" ||
+    input.kind === "thread";
   if (isEmbedInMainEnabled() && !forceOs) {
     openEmbeddedWindow({ label, payload });
     return;

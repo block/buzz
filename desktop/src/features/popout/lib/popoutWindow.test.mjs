@@ -5,6 +5,29 @@ import { installLocalStorage } from "../../playground/lib/testStorage.mjs";
 
 import { popoutErrorMessage, popoutLabel } from "./popoutWindow.ts";
 
+function installTauriInvoke() {
+  const invokes = [];
+  const internals = {
+    invoke(cmd, args) {
+      invokes.push({ cmd, args });
+      return Promise.resolve();
+    },
+  };
+  globalThis.isTauri = true;
+  globalThis.__TAURI_INTERNALS__ = internals;
+  globalThis.window = globalThis.window ?? globalThis;
+  globalThis.window.__TAURI_INTERNALS__ = internals;
+  return invokes;
+}
+
+function uninstallTauriInvoke() {
+  delete globalThis.__TAURI_INTERNALS__;
+  delete globalThis.isTauri;
+  if (globalThis.window) {
+    delete globalThis.window.__TAURI_INTERNALS__;
+  }
+}
+
 test("split labels stay unique when sid+channel prefixes collide at 48 chars", () => {
   const sid = `pg-${"s".repeat(40)}`;
   const channelId = `chan-${"c".repeat(40)}`;
@@ -67,7 +90,7 @@ test("start-fullscreen is passed into the OS create payload", async () => {
   resetPopoutSettingsForTests();
 });
 
-test("embed path does not call OS window create", async () => {
+test("embed path does not call OS window create for playground", async () => {
   installLocalStorage();
   const settings = await import("./popoutSettings.ts");
   const embedded = await import("./embeddedWindows.ts");
@@ -87,6 +110,44 @@ test("embed path does not call OS window create", async () => {
   globalThis.__TAURI_INTERNALS__ = internals;
 
   await openPopoutWindow({
+    kind: "playground",
+    title: "Demo",
+    seed: "demo-1",
+    playground: {
+      hula: "playground",
+      v: 1,
+      name: "Demo",
+      url: "https://app.example.com",
+      sid: "demo-1",
+    },
+  });
+
+  assert.equal(invokes.length, 0);
+  assert.equal(embedded.listEmbeddedWindows().length, 1);
+  assert.equal(embedded.getActiveEmbeddedWindow()?.payload.kind, "playground");
+  assert.equal(
+    embedded.getActiveEmbeddedWindow()?.payload.playground?.sid,
+    "demo-1",
+  );
+
+  delete globalThis.__TAURI_INTERNALS__;
+  settings.resetPopoutSettingsForTests();
+  embedded.resetEmbeddedWindowsForTests();
+});
+
+test("channel/thread opens OS window even when embed-in-main is on", async () => {
+  installLocalStorage();
+  const settings = await import("./popoutSettings.ts");
+  const embedded = await import("./embeddedWindows.ts");
+  const { openPopoutWindow } = await import("./popoutWindow.ts");
+  settings.resetPopoutSettingsForTests();
+  embedded.resetEmbeddedWindowsForTests();
+  settings.setShowWindowsSection(true);
+  settings.setEmbedInMain(true);
+
+  const invokes = installTauriInvoke();
+
+  await openPopoutWindow({
     kind: "thread",
     title: "Design review",
     seed: "chan-thread-1",
@@ -94,15 +155,12 @@ test("embed path does not call OS window create", async () => {
     threadId: "thread-1",
   });
 
-  assert.equal(invokes.length, 0);
-  assert.equal(embedded.listEmbeddedWindows().length, 1);
-  assert.equal(embedded.getActiveEmbeddedWindow()?.payload.kind, "thread");
-  assert.equal(
-    embedded.getActiveEmbeddedWindow()?.payload.threadId,
-    "thread-1",
-  );
+  assert.equal(embedded.listEmbeddedWindows().length, 0);
+  assert.equal(invokes.length, 1);
+  assert.equal(invokes[0].cmd, "open_popout_window");
+  assert.match(invokes[0].args.label, /^popout-thread-/);
 
-  delete globalThis.__TAURI_INTERNALS__;
+  uninstallTauriInvoke();
   settings.resetPopoutSettingsForTests();
   embedded.resetEmbeddedWindowsForTests();
 });
@@ -117,13 +175,7 @@ test("link Detach opens OS window even when embed-in-main is on", async () => {
   settings.setShowWindowsSection(true);
   settings.setEmbedInMain(true);
 
-  const invokes = [];
-  globalThis.__TAURI_INTERNALS__ = {
-    invoke(cmd, args) {
-      invokes.push({ cmd, args });
-      return Promise.resolve();
-    },
-  };
+  const invokes = installTauriInvoke();
 
   await openPopoutWindow({
     kind: "link",
@@ -143,7 +195,7 @@ test("link Detach opens OS window even when embed-in-main is on", async () => {
   assert.equal(invokes[0].cmd, "open_popout_window");
   assert.match(invokes[0].args.label, /^popout-link-/);
 
-  delete globalThis.__TAURI_INTERNALS__;
+  uninstallTauriInvoke();
   settings.resetPopoutSettingsForTests();
   embedded.resetEmbeddedWindowsForTests();
 });
