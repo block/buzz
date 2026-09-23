@@ -228,7 +228,10 @@ export function useMentions(
     () =>
       getMentionableAgentPubkeys({
         currentPubkey,
-        phase: "prepare",
+        // Autocomplete must match send-time authorization: owned agents only
+        // appear when they can respond in *this* channel. phase "prepare" was
+        // admitting every owned Fizz/Honey clone from other rooms/machines.
+        phase: "publish",
         eligibilityScope: mentionChannelId
           ? { type: "channel", channelId: mentionChannelId }
           : options?.channelType === "dm"

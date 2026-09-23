@@ -742,6 +742,61 @@ test("relayAgentIsSharedWithUser: includePublicAnyone false keeps owners and all
   );
 });
 
+test("getMentionableAgentPubkeys: channel publish hides owned clones outside this channel", () => {
+  const inChannel = {
+    pubkey: PUB_A,
+    ownerPubkey: CURRENT_PUBKEY,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+  const otherChannelClone = {
+    pubkey: PUB_B,
+    ownerPubkey: CURRENT_PUBKEY,
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+    channelIds: ["elsewhere"],
+  };
+  const unjoinedClone = {
+    pubkey: PUB_C,
+    ownerPubkey: CURRENT_PUBKEY,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: [],
+  };
+  const foreignInChannel = {
+    pubkey: PUB_D,
+    ownerPubkey: OTHER_OWNER_PUBKEY,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+  const base = {
+    currentPubkey: CURRENT_PUBKEY,
+    eligibilityScope: { type: "channel", channelId: "general" },
+    managedAgentPubkeys: [],
+    relayAgents: [
+      inChannel,
+      otherChannelClone,
+      unjoinedClone,
+      foreignInChannel,
+    ],
+    sharedChannelIds: new Set(["general", "elsewhere"]),
+    includePublicAnyone: false,
+  };
+
+  // prepare admitted every owned clone (the @Fizz flood).
+  assert.deepEqual(
+    getMentionableAgentPubkeys({ ...base, phase: "prepare" }),
+    new Set([PUB_A, PUB_B, PUB_C]),
+  );
+  // publish matches send-time: only the in-channel owned agent.
+  assert.deepEqual(
+    getMentionableAgentPubkeys({ ...base, phase: "publish" }),
+    new Set([PUB_A]),
+  );
+});
+
 test("getMentionableAgentPubkeys: mention autocomplete hides foreign anyone agents unless extras admit them", () => {
   const own = {
     pubkey: PUB_A,

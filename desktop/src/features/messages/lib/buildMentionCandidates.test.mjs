@@ -397,7 +397,7 @@ test("foreign identically named agents are hidden unless owned, allowlisted, or 
   // Mirrors useMentions: includePublicAnyone false + community extras.
   const mentionableAgentPubkeys = getMentionableAgentPubkeys({
     currentPubkey: CURRENT,
-    phase: "prepare",
+    phase: "publish",
     eligibilityScope: { type: "channel", channelId },
     managedAgentPubkeys: [],
     relayAgents,
@@ -485,4 +485,107 @@ test("foreign identically named agents are hidden unless owned, allowlisted, or 
     left.localeCompare(right, undefined, { sensitivity: "base" }),
   );
   assert.deepEqual(ranked, sorted);
+});
+
+test("owned same-named clones outside the channel stay hidden (Fizz flood)", () => {
+  const CURRENT = "e".repeat(64);
+  const OTHER_OWNER = "f".repeat(64);
+  const LOCAL_FIZZ = "1".repeat(64);
+  const OTHER_ROOM_FIZZ = "2".repeat(64);
+  const UNJOINED_FIZZ = "3".repeat(64);
+  const FOREIGN_FIZZ = "4".repeat(64);
+  const ARCHIVED_FIZZ = "5".repeat(64);
+  const channelId = "general";
+
+  const relayAgents = [
+    {
+      pubkey: LOCAL_FIZZ,
+      name: "Fizz",
+      ownerPubkey: CURRENT,
+      status: "online",
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [channelId],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+    {
+      pubkey: OTHER_ROOM_FIZZ,
+      name: "Fizz",
+      ownerPubkey: CURRENT,
+      status: "online",
+      respondTo: "owner-only",
+      respondToAllowlist: [],
+      channelIds: ["elsewhere"],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+    {
+      pubkey: UNJOINED_FIZZ,
+      name: "Fizz",
+      ownerPubkey: CURRENT,
+      status: "unknown",
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+    {
+      pubkey: FOREIGN_FIZZ,
+      name: "Fizz",
+      ownerPubkey: OTHER_OWNER,
+      status: "online",
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [channelId],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+    {
+      pubkey: ARCHIVED_FIZZ,
+      name: "Fizz",
+      ownerPubkey: CURRENT,
+      status: "online",
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [channelId],
+      agentType: "openclaw",
+      channels: [],
+      capabilities: [],
+    },
+  ];
+
+  const mentionableAgentPubkeys = getMentionableAgentPubkeys({
+    currentPubkey: CURRENT,
+    phase: "publish",
+    eligibilityScope: { type: "channel", channelId },
+    managedAgentPubkeys: [],
+    relayAgents,
+    sharedChannelIds: new Set([channelId, "elsewhere"]),
+    includePublicAnyone: false,
+  });
+
+  const candidates = buildMentionCandidates(
+    input({
+      currentPubkey: CURRENT,
+      mentionChannelId: channelId,
+      memberPubkeys: new Set([LOCAL_FIZZ, FOREIGN_FIZZ, ARCHIVED_FIZZ]),
+      mentionableAgentPubkeys,
+      relayAgents,
+      isArchived: (pubkey) => pubkey === ARCHIVED_FIZZ,
+    }),
+  );
+
+  const fizz = candidates.filter(
+    (candidate) => candidate.displayName === "Fizz",
+  );
+  assert.deepEqual(
+    fizz.map((candidate) => candidate.pubkey),
+    [LOCAL_FIZZ],
+  );
 });
