@@ -178,6 +178,7 @@ test("no backend intent is byte-identical to the pre-intent mapping", async () =
     spawnAfterCreate: true,
     startOnAppLaunch: true,
     backend: { type: "local" },
+    useOpenClawWorkspace: false,
   });
 });
 

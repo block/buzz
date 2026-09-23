@@ -16,6 +16,7 @@ import {
 } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
+import { ConversationInfoButton } from "@/features/channels/ui/ConversationInfoButton";
 import { ConversationPopoutMenu } from "@/features/popout/ui/ConversationPopoutMenu";
 import { ConversationPlaygroundPinsMenu } from "@/features/playground/ui/ConversationPlaygroundPinsMenu";
 import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
@@ -134,6 +135,10 @@ export function ChannelScreenHeader({
       <div className="flex items-center gap-1">
         {activeChannel ? (
           <>
+            <ConversationInfoButton
+              channelId={activeChannel.id}
+              title={activeChannelTitle}
+            />
             <ConversationPlaygroundPinsMenu channelId={activeChannel.id} />
             <ConversationPopoutMenu channelId={activeChannel.id} />
           </>
