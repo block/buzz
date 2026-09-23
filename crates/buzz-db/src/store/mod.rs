@@ -51,6 +51,8 @@ pub mod replaceable;
 /// Durable completed snapshots from the isolated media-storage worker.
 pub mod storage_accounting;
 /// Thread metadata persistence.
+/// Task and task-event persistence.
+pub mod task;
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.
 pub mod usage;

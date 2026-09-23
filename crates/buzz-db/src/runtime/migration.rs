@@ -703,7 +703,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 48);
+        assert_eq!(migrations.len(), 49);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1828,6 +1828,11 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        // `tasks`/`task_events` are created by 0049 and fenced there, so they
+        // are present in the desired-state schema but not in 0029's own
+        // attachment list — same shape as the two removals above.
+        expected_fences.insert("tasks".to_string());
+        expected_fences.insert("task_events".to_string());
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"

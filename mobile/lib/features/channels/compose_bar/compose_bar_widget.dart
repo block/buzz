@@ -1022,6 +1022,7 @@ class ComposeBar extends HookConsumerWidget {
                   focusNode.requestFocus();
                 });
               },
+              onCreateTask: () => _openComposerTaskSheet(context, ref, this),
               onOpenFormatting: () {
                 attachmentSurface.value = _AttachmentSurface.closed;
                 showFormatting.value = true;
