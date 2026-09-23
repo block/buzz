@@ -197,6 +197,26 @@ function installDOMShim() {
 
 installDOMShim();
 
+// Playground screenshot listener attaches to `window`. Our shim aliases window
+// to globalThis; give it EventTarget methods so the production effect works.
+(() => {
+  const listeners = Object.create(null);
+  if (typeof globalThis.addEventListener !== "function") {
+    globalThis.addEventListener = (type, fn) => {
+      if (!listeners[type]) listeners[type] = [];
+      listeners[type].push(fn);
+    };
+    globalThis.removeEventListener = (type, fn) => {
+      if (!listeners[type]) return;
+      listeners[type] = listeners[type].filter((f) => f !== fn);
+    };
+    globalThis.dispatchEvent = (e) => {
+      for (const fn of listeners[e.type] ?? []) fn(e);
+      return true;
+    };
+  }
+})();
+
 // ── localStorage shim ─────────────────────────────────────────────────────────
 
 function makeLocalStorage() {
@@ -243,9 +263,11 @@ import {
   persistDraftEntry,
 } from "../lib/useDrafts.ts";
 import {
+  resetBackgroundMediaUploads,
   saveQueuedAttachmentsForDraft,
   takeQueuedAttachmentsForDraft,
 } from "../lib/backgroundMediaUploadStore.ts";
+import { PLAYGROUND_DRAFT_ATTACHMENT_EVENT } from "@/features/playground/lib/screenshot.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -880,4 +902,132 @@ test("discarding_a_draft_drops_its_retained_local_files", () => {
   deleteDraftEntry("chan-deleted");
 
   assert.deepEqual(takeQueuedAttachmentsForDraft("chan-deleted"), []);
+});
+
+test("playground_screenshot_event_merges_into_mounted_composer_queue", async () => {
+  setupStore("pubkey-playground-shot");
+  resetBackgroundMediaUploads();
+  const draftKey = "chan-shot";
+  let editorContent = "";
+  let queuedAttachments = [];
+  const spoileredRef = { current: new Set() };
+  const shot = {
+    file: new File(["png"], "playground-demo.png", { type: "image/png" }),
+    id: 99,
+    spoilered: false,
+  };
+
+  function HarnessComposer() {
+    useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      getQueuedAttachments: () => queuedAttachments,
+      saveQueuedAttachmentsForDraft,
+      clearQueuedAttachments: () => {
+        queuedAttachments = [];
+      },
+      restoreQueuedAttachments: (attachments) => {
+        queuedAttachments = attachments;
+      },
+      takeQueuedAttachmentsForDraft,
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    });
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  assert.deepEqual(queuedAttachments, []);
+
+  saveQueuedAttachmentsForDraft(draftKey, [shot]);
+  await act(async () => {
+    window.dispatchEvent(
+      new CustomEvent(PLAYGROUND_DRAFT_ATTACHMENT_EVENT, {
+        detail: { draftKey },
+      }),
+    );
+  });
+
+  assert.equal(queuedAttachments.length, 1);
+  assert.equal(queuedAttachments[0]?.file.name, "playground-demo.png");
+  assert.deepEqual(
+    takeQueuedAttachmentsForDraft(draftKey),
+    [],
+    "listener must take the parked attachment out of the store",
+  );
+
+  await handle.unmount();
+});
+
+test("playground_screenshot_event_ignores_other_draft_keys", async () => {
+  setupStore("pubkey-playground-shot-other");
+  resetBackgroundMediaUploads();
+  const draftKey = "chan-shot-ignore";
+  let editorContent = "";
+  let queuedAttachments = [];
+  const spoileredRef = { current: new Set() };
+  const shot = {
+    file: new File(["png"], "other.png", { type: "image/png" }),
+    id: 100,
+    spoilered: false,
+  };
+
+  function HarnessComposer() {
+    useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      getQueuedAttachments: () => queuedAttachments,
+      saveQueuedAttachmentsForDraft,
+      clearQueuedAttachments: () => {
+        queuedAttachments = [];
+      },
+      restoreQueuedAttachments: (attachments) => {
+        queuedAttachments = attachments;
+      },
+      takeQueuedAttachmentsForDraft,
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    });
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  saveQueuedAttachmentsForDraft("thread:root-1", [shot]);
+  await act(async () => {
+    window.dispatchEvent(
+      new CustomEvent(PLAYGROUND_DRAFT_ATTACHMENT_EVENT, {
+        detail: { draftKey: "thread:root-1" },
+      }),
+    );
+  });
+  assert.deepEqual(queuedAttachments, []);
+  assert.equal(takeQueuedAttachmentsForDraft("thread:root-1").length, 1);
+
+  await handle.unmount();
 });

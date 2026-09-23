@@ -69,3 +69,22 @@ test("playgroundPinScopeKey distinguishes channel vs thread", async () => {
     "thread:root-1",
   );
 });
+
+test("playgroundConversationFromPopout mirrors channel vs thread draft keys", async () => {
+  const { playgroundConversationFromPopout } = await import(
+    "./conversation.ts"
+  );
+  assert.equal(playgroundConversationFromPopout({}), null);
+  assert.equal(playgroundConversationFromPopout({ channelId: "  " }), null);
+  assert.deepEqual(playgroundConversationFromPopout({ channelId: "chan-a" }), {
+    channelId: "chan-a",
+    draftKey: "chan-a",
+  });
+  assert.deepEqual(
+    playgroundConversationFromPopout({
+      channelId: "chan-a",
+      threadId: "root-1",
+    }),
+    { channelId: "chan-a", draftKey: "thread:root-1" },
+  );
+});

@@ -4,7 +4,10 @@ import { useLocation } from "@tanstack/react-router";
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 
 import { usePlaygroundSessions } from "../hooks";
-import { playgroundConversationFromRoute } from "../lib/conversation";
+import {
+  playgroundConversationFromPopout,
+  playgroundConversationFromRoute,
+} from "../lib/conversation";
 import { usePlaygroundRuntime } from "../lib/runtime";
 import { usePopoutLayoutPayload } from "@/features/popout/lib/popoutLayout";
 import { PlaygroundOverlay } from "./PlaygroundOverlay";
@@ -13,6 +16,7 @@ export function PlaygroundHost() {
   const { sessions, overlaySid } = usePlaygroundSessions();
   usePlaygroundRuntime();
   const location = useLocation();
+  const popout = usePopoutLayoutPayload();
   const conversation = React.useMemo(() => {
     const route = deriveShellRoute(location.pathname);
     const search = location.search as {
@@ -20,13 +24,19 @@ export function PlaygroundHost() {
       threadRootId?: unknown;
     };
     const thread = search.threadRootId ?? search.thread;
-    return playgroundConversationFromRoute({
+    const fromRoute = playgroundConversationFromRoute({
       selectedView: route.selectedView,
       selectedChannelId: route.selectedChannelId,
       threadId: typeof thread === "string" ? thread : null,
     });
-  }, [location.pathname, location.search]);
-  const popout = usePopoutLayoutPayload();
+    if (fromRoute) return fromRoute;
+    // Detached playground (and similar) may lack a channel route; use the
+    // channel/thread that opened the window so Screenshot stages correctly.
+    return playgroundConversationFromPopout({
+      channelId: popout?.channelId,
+      threadId: popout?.threadId,
+    });
+  }, [location.pathname, location.search, popout?.channelId, popout?.threadId]);
   const popoutSession = popout?.playground
     ? {
         sid: popout.playground.sid,

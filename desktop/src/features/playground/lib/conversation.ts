@@ -53,3 +53,21 @@ export function playgroundPinScopeKey(
     ? conversation.draftKey
     : `channel:${conversation.channelId}`;
 }
+
+/**
+ * Detached playground OS windows often have no channel route (kind:"playground"
+ * does not seed goChannel). Fall back to channel/thread ids carried on the
+ * popout payload so Screenshot still targets the conversation that opened it.
+ */
+export function playgroundConversationFromPopout(input: {
+  channelId?: string | null;
+  threadId?: string | null;
+}): PlaygroundConversation | null {
+  const channelId = input.channelId?.trim() ?? "";
+  if (!channelId) return null;
+  return playgroundConversationFromRoute({
+    selectedView: "channel",
+    selectedChannelId: channelId,
+    threadId: input.threadId,
+  });
+}

@@ -125,10 +125,17 @@ export function PlaygroundOverlay({
 
   async function handleDetach() {
     try {
+      const threadId = conversation?.draftKey.startsWith("thread:")
+        ? conversation.draftKey.slice("thread:".length)
+        : undefined;
       await openPopoutWindow({
         kind: "playground",
         title: session.name,
         seed: session.sid,
+        ...(conversation?.channelId
+          ? { channelId: conversation.channelId }
+          : {}),
+        ...(threadId ? { threadId } : {}),
         playground: {
           hula: PLAYGROUND_HULA,
           v: PLAYGROUND_VERSION,
