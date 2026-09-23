@@ -1872,6 +1872,10 @@ pub struct FormatPromptArgs<'a> {
     /// Defaults to `false` so a caller that never sets it behaves as if this
     /// were the session's first message.
     pub standing_context_sent: bool,
+    /// Computed ACP session title (same value as `_meta.sessionTitle`).
+    /// When `Some`, [`format_prompt`] appends an OpenClaw sidebar-label rename
+    /// instruction. `None` when `BUZZ_ACP_SESSION_TITLE` is unset.
+    pub session_title: Option<&'a str>,
 }
 
 /// The prompt sections that do not change for the life of a session: base
@@ -1965,6 +1969,7 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// 1. `<context>` — scope, channel name, and contextual hints for the agent
 /// 2. `<thread-context>` or `<conversation-context>` — if fetched
 /// 3. `<buzz-event>` / `<buzz-events>` — the triggering event(s)
+/// 4. `<openclaw-session-label>` — when [`FormatPromptArgs::session_title`] is set
 ///
 /// Each section is returned as its own block rather than one joined string so
 /// the observer frame's size trimmer (`fit_observer_event_to_budget`) elides
@@ -2135,6 +2140,13 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // 4c. Closing note for cancel + re-prompt.
     if has_cancelled {
         sections.push(framing.closing_note.to_string());
+    }
+
+    // 5. OpenClaw session-label workaround — OpenClaw ignores `_meta.sessionTitle`,
+    //    so ask the agent to rename its sidebar label to the computed title.
+    //    Included on every prompt (idempotent wording) when title mode is on.
+    if let Some(title) = args.session_title.map(str::trim).filter(|t| !t.is_empty()) {
+        sections.push(crate::prompt_framing::openclaw_session_label_section(title));
     }
 
     sections
@@ -2612,6 +2624,81 @@ mod tests {
         assert!(prompt.contains("Event ID:"));
         // Should NOT contain "--- Event 1 ---" (that's the multi-event format).
         assert!(!prompt.contains("--- Event 1 ---"));
+    }
+
+    #[test]
+    fn test_format_prompt_appends_openclaw_session_label_when_title_set() {
+        let ch = Uuid::new_v4();
+        let event = make_event("Hello @agent");
+        let batch = FlushBatch {
+            channel_id: ch,
+            scope: conv(ch),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let title = "buzz #hula:abcdef01";
+        let sections = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                session_title: Some(title),
+                ..Default::default()
+            },
+        );
+        let prompt = sections.join("\n\n");
+        let expected = crate::prompt_framing::openclaw_session_label_section(title);
+        assert_eq!(sections.last().unwrap(), &expected);
+        assert!(prompt.contains("exactly `buzz #hula:abcdef01`"));
+        assert!(prompt.contains("If it is not already named that, rename it now"));
+    }
+
+    #[test]
+    fn test_format_prompt_omits_openclaw_session_label_when_title_absent() {
+        let ch = Uuid::new_v4();
+        let event = make_event("Hello @agent");
+        let batch = FlushBatch {
+            channel_id: ch,
+            scope: conv(ch),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(!prompt.contains("<openclaw-session-label>"));
+    }
+
+    #[test]
+    fn test_format_prompt_omits_openclaw_session_label_when_title_blank() {
+        let ch = Uuid::new_v4();
+        let event = make_event("Hello @agent");
+        let batch = FlushBatch {
+            channel_id: ch,
+            scope: conv(ch),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                session_title: Some("   "),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(!prompt.contains("<openclaw-session-label>"));
     }
 
     /// Helper: build a merged (cancel + re-prompt) batch with one cancelled

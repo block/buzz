@@ -642,6 +642,7 @@ impl QueuedNormalListenerEvent {
         pool: &mut AgentPool,
         queue: &mut EventQueue,
         steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
+        session_title: Option<&str>,
     ) {
         if !self.accepted || !queue.is_scope_in_flight(&self.scope) {
             return;
@@ -657,6 +658,7 @@ impl QueuedNormalListenerEvent {
                 self.event_for_steer,
                 self.prompt_tag_for_steer,
                 steer_ack_tx,
+                session_title,
             );
         if !native_attempted {
             signal_in_flight_task_for_scope(pool, &self.scope, signal);
@@ -3583,12 +3585,20 @@ async fn tokio_main() -> Result<()> {
                             // retains its verified author, resolved scope, and
                             // event data through the optional steer/interrupt
                             // decision.
+                            let cached_channel =
+                                ctx.channel_info.cached_channel(queued.scope.channel_id());
+                            let steer_session_title = pool::computed_prompt_session_title(
+                                ctx.session_title.as_deref(),
+                                cached_channel.as_ref(),
+                                Some(&queued.scope),
+                            );
                             queued.steer_or_interrupt(
                                 config.multiple_event_handling,
                                 owner_cache.get(),
                                 &mut pool,
                                 &mut queue,
                                 &steer_ack_tx,
+                                steer_session_title.as_deref(),
                             );
                             if pool_ready {
                                 for (scope, thread_tags) in
@@ -4318,6 +4328,7 @@ fn try_native_steer(
     event: nostr::Event,
     prompt_tag: String,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
+    session_title: Option<&str>,
 ) -> bool {
     let channel_id = scope.channel_id();
     // Build the steer body: framing strings come from
@@ -4347,7 +4358,13 @@ fn try_native_steer(
         &[("type", prompt_tag.as_str())],
         &event_block,
     );
-    let body = format!("{new_message}\n\n{event_section}\n\n{closing}");
+    let mut body = format!("{new_message}\n\n{event_section}\n\n{closing}");
+    // Every ACP prompt — including native steers — carries the OpenClaw
+    // sidebar-label rename instruction when session titles are configured.
+    if let Some(title) = session_title.map(str::trim).filter(|t| !t.is_empty()) {
+        body.push_str("\n\n");
+        body.push_str(&prompt_framing::openclaw_session_label_section(title));
+    }
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
