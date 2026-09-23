@@ -251,7 +251,7 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
     // overlap barrier, not a race against a fast catalog-only migration.
     let mut migration_tx = pool.begin().await.unwrap();
     let result = sqlx::raw_sql(include_str!(
-        "../../../../../migrations/0048_thread_window_index.sql"
+        "../../../../../migrations/0049_thread_window_index.sql"
     ))
     .execute(&mut *migration_tx)
     .await;
