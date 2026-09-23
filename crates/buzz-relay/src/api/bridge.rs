@@ -3,6 +3,8 @@
 //! These endpoints provide HTTP access to the relay's Nostr protocol,
 //! authenticated via NIP-98 signed events.
 
+mod read_state_snapshot;
+
 use std::sync::Arc;
 
 use axum::{
@@ -20,6 +22,8 @@ use crate::handlers::ingest::{IngestAuth, IngestError};
 use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
+
+mod thread_roots;
 
 pub(crate) async fn enforce_http_admission(
     state: &AppState,
@@ -39,14 +43,14 @@ pub(crate) async fn enforce_http_admission(
     {
         Ok(()) => Ok(()),
         Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "quota").increment(1);
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "quota", "bucket" => "api_calls").increment(1);
             Err(api_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
             ))
         }
         Err(crate::admission::AdmissionError::Unavailable) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "unavailable").increment(1);
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "unavailable", "bucket" => "api_calls").increment(1);
             Err(api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "rate-limited: shared admission unavailable",
@@ -1143,6 +1147,10 @@ async fn query_events_authed(
         ));
     }
 
+    if read_state_snapshot::requested(&raw_filters) {
+        return read_state_snapshot::query(state, tenant, &pubkey, &raw_filters).await;
+    }
+
     // Get channels this user can access — same enforcement as WS REQ handler.
     let mut accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
@@ -1185,10 +1193,30 @@ async fn query_events_authed(
     let mut events: Vec<Value> = Vec::new();
     let mut handled: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
+    let ownership_targets: usize = raw_filters
+        .iter()
+        .zip(&filters)
+        .filter(|(raw, _)| extension_flag(raw, "resolve_thread_roots"))
+        .map(|(_, filter)| filter.ids.as_ref().map_or(0, |ids| ids.len()))
+        .sum();
+    if ownership_targets > 100 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "resolve_thread_roots permits at most 100 targets per request",
+        ));
+    }
+    // Resolve reply owners from retained thread metadata, including tombstones.
+    for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+        if extension_flag(raw, "resolve_thread_roots") {
+            events.extend(thread_roots::query(state, tenant, filter, &accessible_channels).await?);
+            handled.insert(idx);
+        }
+    }
+
     // Channel-window filters (`top_level: true`) — the GUI read-model surface.
     // Dispatched first: a window filter is never a feed/thread/catchall query.
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
-        if !extension_flag(raw, "top_level") {
+        if handled.contains(&idx) || !extension_flag(raw, "top_level") {
             continue;
         }
         handle_channel_window_filter(
@@ -3839,7 +3867,7 @@ mod postgres_tests {
     /// - Redis pool points at the local dev instance for the admission check.
     ///
     /// Returns `None` when local Postgres is not reachable.
-    async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+    pub(super) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.

@@ -703,7 +703,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 47);
+        assert_eq!(migrations.len(), 49);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1828,7 +1828,7 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
-        // `tasks`/`task_events` are created by 0047 and fenced there, so they
+        // `tasks`/`task_events` are created by 0049 and fenced there, so they
         // are present in the desired-state schema but not in 0029's own
         // attachment list — same shape as the two removals above.
         expected_fences.insert("tasks".to_string());
@@ -2264,9 +2264,9 @@ mod postgres_tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(39, &migrated)
+            .run_to(47, &migrated)
             .await
-            .expect("apply migrations 1-39");
+            .expect("apply migrations 1-47");
 
         for table in [
             "relay_admin_actions",
