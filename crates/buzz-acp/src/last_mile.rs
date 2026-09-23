@@ -230,8 +230,10 @@ mod tests {
     }
 
     fn batch_with(event: nostr::Event) -> FlushBatch {
+        let channel_id = Uuid::new_v4();
         FlushBatch {
-            channel_id: Uuid::new_v4(),
+            channel_id,
+            scope: crate::scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
                 event,
                 prompt_tag: "@mention".into(),

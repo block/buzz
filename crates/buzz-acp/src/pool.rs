@@ -776,6 +776,10 @@ pub struct PromptContext {
     /// Channel sessions add the channel name; thread sessions also add the root
     /// ID prefix. Never part of the prompt.
     pub session_title: Option<String>,
+    /// OpenClaw Gateway agent id for `_meta.sessionKey` on session/new.
+    /// When set with a channel scope, buzz-acp sends
+    /// `agent:<id>:buzz:ch:<channelUuid>` (or thread/DM variants).
+    pub gateway_agent_id: Option<String>,
     pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
     /// Base instructions with the configured policy's Session Model appended,
@@ -1383,6 +1387,16 @@ async fn create_session_and_apply_model(
             channel.scope.and_then(SessionScope::root_event_id),
         )
     });
+    // OpenClaw: per-scope Gateway keys so channels/threads do not collapse onto
+    // the CLI fallback `--session agent:<id>:buzz`. Omitted when agent id or
+    // scope is unavailable (heartbeats / non-OpenClaw agents).
+    let session_key = match (ctx.gateway_agent_id.as_deref(), channel.scope) {
+        (Some(agent_id), Some(scope)) => Some(scope.openclaw_gateway_session_key(
+            agent_id,
+            channel.channel_type,
+        )),
+        _ => None,
+    };
     let mcp_servers = mcp_servers_with_git_origin(
         &ctx.mcp_servers,
         channel.scope.map(SessionScope::channel_id),
@@ -1402,6 +1416,7 @@ async fn create_session_and_apply_model(
                 combined_system_prompt.as_deref(),
             ),
             session_title.as_deref(),
+            session_key.as_deref(),
         )
         .await?;
 
@@ -8976,6 +8991,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
             session_title: None,
+            gateway_agent_id: None,
             team_instructions: None,
             heartbeat_prompt: None,
             base_prompt: None,
@@ -10388,6 +10404,7 @@ done"#
                 agent.acp.set_observer(Some(observer.clone()), 0);
                 let mut ctx = make_prompt_context_no_owner();
                 ctx.session_title = Some("Fizz".into());
+                ctx.gateway_agent_id = Some("fizz".into());
                 ctx.base_prompt =
                     include_base.then(|| policy.append_session_model("Custom base instructions."));
                 create_session_and_apply_model(
@@ -10413,6 +10430,22 @@ done"#
                     .unwrap()
                     .payload;
                 assert_eq!(request["params"]["_meta"]["sessionTitle"], title);
+                if let Some(scope) = scope {
+                    let expected_key = scope.openclaw_gateway_session_key("fizz", channel_type);
+                    assert_eq!(
+                        request["params"]["_meta"]["sessionKey"].as_str(),
+                        Some(expected_key.as_str()),
+                        "sessionKey must encode agent id + SessionScope"
+                    );
+                } else {
+                    assert!(
+                        request["params"]
+                            .get("_meta")
+                            .and_then(|m| m.get("sessionKey"))
+                            .is_none(),
+                        "sessionKey omitted without a channel scope"
+                    );
+                }
                 let base = ctx
                     .base_prompt
                     .as_deref()

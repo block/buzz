@@ -456,6 +456,15 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_SESSION_TITLE")]
     pub session_title: Option<String>,
 
+    /// OpenClaw Gateway agent id used to build `_meta.sessionKey` on
+    /// `session/new` (`agent:<id>:buzz:ch:<channelUuid>` …).
+    ///
+    /// When unset, buzz-acp derives it from `--agent-args` /
+    /// `BUZZ_ACP_AGENT_ARGS` looking for `--session agent:<id>:buzz`.
+    /// Community last-miles already pass that flag; set this only to override.
+    #[arg(long, env = "BUZZ_ACP_GATEWAY_AGENT_ID")]
+    pub gateway_agent_id: Option<String>,
+
     /// Permission mode for agents that support `session/set_config_option`
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
@@ -590,6 +599,9 @@ pub struct Config {
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
+    /// OpenClaw Gateway agent id for `_meta.sessionKey` composition.
+    /// `None` for non-OpenClaw agents (sessionKey omitted; CLI `--session` wins).
+    pub gateway_agent_id: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Inbound author gate mode.
@@ -701,6 +713,52 @@ pub(crate) fn compose_scoped_session_title(
         "{}{suffix}",
         compose_session_title_with_limit(agent.trim_end(), channel_name, budget)
     )
+}
+
+/// Extract an OpenClaw agent id from a Gateway session key / CLI `--session` value.
+///
+/// Accepts `agent:<id>:buzz` and longer keys that keep that prefix
+/// (`agent:<id>:buzz:ch:<uuid>`). Returns `None` for unrelated keys.
+pub(crate) fn parse_openclaw_gateway_agent_id(session: &str) -> Option<String> {
+    let session = session.trim();
+    let rest = session.strip_prefix("agent:")?;
+    let (id, after) = rest.split_once(':')?;
+    if id.is_empty() {
+        return None;
+    }
+    if after == "buzz" || after.starts_with("buzz:") {
+        Some(id.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+/// Resolve the OpenClaw Gateway agent id from an explicit override or agent args.
+///
+/// Looks for `--session agent:<id>:buzz` or `--session=agent:<id>:buzz` in
+/// `agent_args` (the shape community last-miles already pass).
+pub(crate) fn resolve_gateway_agent_id(
+    explicit: Option<&str>,
+    agent_args: &[String],
+) -> Option<String> {
+    if let Some(raw) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(raw.to_ascii_lowercase());
+    }
+    let mut i = 0;
+    while i < agent_args.len() {
+        let arg = agent_args[i].as_str();
+        if let Some(val) = arg.strip_prefix("--session=") {
+            return parse_openclaw_gateway_agent_id(val);
+        }
+        if arg == "--session" {
+            if let Some(val) = agent_args.get(i + 1) {
+                return parse_openclaw_gateway_agent_id(val);
+            }
+            return None;
+        }
+        i += 1;
+    }
+    None
 }
 
 fn compose_session_title_with_limit(
@@ -1153,6 +1211,11 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        let gateway_agent_id = resolve_gateway_agent_id(
+            args.gateway_agent_id.as_deref(),
+            &agent_args,
+        );
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
@@ -1193,6 +1256,7 @@ impl Config {
                 .session_title
                 .as_deref()
                 .and_then(sanitize_session_title),
+            gateway_agent_id,
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
@@ -1610,6 +1674,7 @@ mod tests {
             model: None,
             effort_level: None,
             session_title: None,
+            gateway_agent_id: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
@@ -3217,6 +3282,48 @@ channels = "ALL"
         let raw = format!("{} tail", "a".repeat(SESSION_TITLE_MAX_CHARS - 1));
         let title = sanitize_session_title(&raw).expect("title survives sanitizing");
         assert_eq!(title, "a".repeat(SESSION_TITLE_MAX_CHARS - 1));
+    }
+
+    #[test]
+    fn parse_openclaw_gateway_agent_id_accepts_base_and_composite_keys() {
+        assert_eq!(
+            parse_openclaw_gateway_agent_id("agent:mo:buzz"),
+            Some("mo".into())
+        );
+        assert_eq!(
+            parse_openclaw_gateway_agent_id("agent:Captain:buzz:ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            Some("captain".into())
+        );
+        assert_eq!(parse_openclaw_gateway_agent_id("agent:mo:main"), None);
+        assert_eq!(parse_openclaw_gateway_agent_id("not-a-key"), None);
+    }
+
+    #[test]
+    fn resolve_gateway_agent_id_prefers_explicit_then_agent_args() {
+        assert_eq!(
+            resolve_gateway_agent_id(Some("Mo"), &[]),
+            Some("mo".into())
+        );
+        let args = vec![
+            "/path/openclaw/dist/index.js".into(),
+            "acp".into(),
+            "--session".into(),
+            "agent:captain:buzz".into(),
+        ];
+        assert_eq!(
+            resolve_gateway_agent_id(None, &args),
+            Some("captain".into())
+        );
+        assert_eq!(
+            resolve_gateway_agent_id(Some("korg"), &args),
+            Some("korg".into())
+        );
+        let eq_args = vec!["acp".into(), "--session=agent:quasar:buzz".into()];
+        assert_eq!(
+            resolve_gateway_agent_id(None, &eq_args),
+            Some("quasar".into())
+        );
+        assert_eq!(resolve_gateway_agent_id(None, &["acp".into()]), None);
     }
 
     #[test]
