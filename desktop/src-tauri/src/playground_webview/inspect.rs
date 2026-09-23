@@ -5,8 +5,8 @@
 //! Linux CI cannot compile AppKit; keep presentation policy tests host-free.
 
 use super::{
-    APP_WEBVIEW_LABEL, PlaygroundBounds, PlaygroundWebviewManager, apply_bounds,
-    playground_webview_label,
+    apply_bounds, playground_webview_label, PlaygroundBounds, PlaygroundWebviewManager,
+    APP_WEBVIEW_LABEL,
 };
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Webview};
@@ -483,8 +483,8 @@ pub fn redetach_inspector_for_webview(webview: &Webview) {
 
 #[cfg(target_os = "macos")]
 fn macos_inspector_is_visible(webview: &Webview) -> bool {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     // with_webview requires FnOnce + Send + 'static. Cell<bool> is not Sync
     // (`&Cell<bool>` is not Send). A stack AtomicBool is Send but not 'static.
@@ -524,8 +524,8 @@ mod tests {
 
     #[test]
     fn inspector_visibility_flag_is_send_static() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
 
         fn take_send_static<F: FnOnce() + Send + 'static>(f: F) {
             f();

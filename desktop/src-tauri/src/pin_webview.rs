@@ -16,8 +16,8 @@ use tauri::{
 use uuid::Uuid;
 
 use policy::{
-    PinLoadVerdict, bounds_are_usable, classify_pin_load, is_unusable_document_url,
-    should_navigate_existing,
+    bounds_are_usable, classify_pin_load, is_unusable_document_url, should_navigate_existing,
+    PinLoadVerdict,
 };
 
 const PIN_LABEL_PREFIX: &str = "pin-";
