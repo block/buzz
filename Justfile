@@ -171,7 +171,7 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
-    SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+    SIDECARS=(buzz-acp buzz-agent goose buzz-dev-mcp git-credential-nostr buzz)
     if [[ "$TARGET" != *windows* ]]; then
         SIDECARS+=(buzz-backend-kubernetes)
     fi
@@ -284,6 +284,7 @@ desktop-release-build target="aarch64-apple-darwin":
     mkdir -p desktop/src-tauri/binaries
     touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
+    touch "desktop/src-tauri/binaries/goose-$TARGET"
     if [[ "$TARGET" != *windows* ]]; then
         touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
     fi

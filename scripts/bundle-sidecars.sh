@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+SIDECARS=(buzz-acp buzz-agent goose buzz-dev-mcp git-credential-nostr buzz)
 HOST=$(rustc -vV | sed -n 's|host: ||p')
 TARGET=${1:-$HOST}
 if [[ "$TARGET" != *windows* ]]; then
@@ -11,6 +11,10 @@ else
     BUILD_HINT="cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli"
 fi
 BINARIES_DIR="desktop/src-tauri/binaries"
+
+# Build Goose's lean ACP binary from a pinned upstream revision before staging
+# desktop sidecars. Keep buzz-agent bundled during the migration.
+./scripts/build-goose.sh "$TARGET"
 
 # When --target is passed explicitly to cargo (even if it matches the host),
 # binaries land in target/<triple>/release/. Without --target, they land in

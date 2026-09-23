@@ -2,6 +2,7 @@
   "bundle": {
     "externalBin": [
       "binaries/buzz-acp",
+      "binaries/goose",
       "binaries/buzz-agent",
       "binaries/buzz-dev-mcp",
       "binaries/git-credential-nostr",
