@@ -11,6 +11,10 @@ const OTHER_BRAIN_PUBKEY = "2".repeat(64);
 const CAPTAIN_PUBKEY = "c".repeat(64);
 const CARL_PUBKEY = "d".repeat(64);
 const LOCAL_CHUCK_PUBKEY = "e".repeat(64);
+// Hex pubkey includes "c" (and an npub-style secondary label) but the display
+// name does not — must not match @c after name-only ranking.
+const HONEY_PUBKEY =
+  "abcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 function candidate(overrides = {}) {
   return {
@@ -124,7 +128,7 @@ test("rankMentionCandidates: exact and prefix quality still outrank weaker match
   ]);
 });
 
-test("rankMentionCandidates: matching secondary labels participate in ranking", () => {
+test("rankMentionCandidates: secondary labels and hex pubkeys do not participate", () => {
   const byHandle = candidate({
     displayName: "Acme Bot",
     secondaryLabel: "brain@example.com",
@@ -135,11 +139,55 @@ test("rankMentionCandidates: matching secondary labels participate in ranking", 
     displayName: "Brain",
     pubkey: OTHER_BRAIN_PUBKEY,
   });
+  const honey = candidate({
+    displayName: "Honey",
+    isAgent: true,
+    secondaryLabel: "npub1carxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    pubkey: HONEY_PUBKEY,
+  });
 
-  // Exact display-name match outranks secondary-label prefix, regardless of membership.
-  assert.deepEqual(rankedPubkeys([byHandle, byName]), [
-    OTHER_BRAIN_PUBKEY,
-    CHANNEL_BRAIN_PUBKEY,
+  assert.deepEqual(rankedPubkeys([byHandle, byName]), [OTHER_BRAIN_PUBKEY]);
+  assert.deepEqual(rankedLabels([honey], "c"), []);
+  assert.deepEqual(rankedLabels([honey], "brain"), []);
+  assert.deepEqual(rankedLabels([honey], HONEY_PUBKEY.slice(0, 8)), []);
+});
+
+test("rankMentionCandidates: display/persona names match including bracket tokens like [CC]", () => {
+  const captain = candidate({
+    displayName: "Captain",
+    isAgent: true,
+    pubkey: CAPTAIN_PUBKEY,
+  });
+  const opus = candidate({
+    displayName: "JM - Opus 5 [CC]",
+    isAgent: true,
+    pubkey: "a".repeat(64),
+  });
+  const grok = candidate({
+    displayName: "JM - Grok 4.5 [GB]",
+    isAgent: true,
+    personaName: "Grok",
+    pubkey: "b".repeat(64),
+  });
+  const honey = candidate({
+    displayName: "Honey",
+    isAgent: true,
+    secondaryLabel: "npub1carxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    pubkey: HONEY_PUBKEY,
+  });
+
+  assert.deepEqual(rankedLabels([honey, opus, captain, grok], "c"), [
+    "Captain",
+    "JM - Opus 5 [CC]",
+  ]);
+  assert.deepEqual(rankedLabels([honey, opus, captain, grok], "cc"), [
+    "JM - Opus 5 [CC]",
+  ]);
+  assert.deepEqual(rankedLabels([honey, opus, grok], "g"), [
+    "JM - Grok 4.5 [GB]",
+  ]);
+  assert.deepEqual(rankedLabels([honey, opus, grok], "grok"), [
+    "JM - Grok 4.5 [GB]",
   ]);
 });
 
@@ -166,7 +214,7 @@ test("rankMentionCandidates: equal match quality sorts alphabetically, not by ac
   );
 });
 
-test("rankMentionCandidates: catalog and truncated-pubkey labels are searchable", () => {
+test("rankMentionCandidates: empty query lists everyone; non-empty ignores truncated pubkeys", () => {
   const catalogBot = candidate({
     displayName: "mo",
     isAgent: true,
@@ -183,7 +231,7 @@ test("rankMentionCandidates: catalog and truncated-pubkey labels are searchable"
   assert.deepEqual(rankedPubkeys([unnamedMember], ""), [OTHER_BRAIN_PUBKEY]);
   assert.deepEqual(
     rankedPubkeys([unnamedMember], OTHER_BRAIN_PUBKEY.slice(0, 8)),
-    [OTHER_BRAIN_PUBKEY],
+    [],
   );
 });
 

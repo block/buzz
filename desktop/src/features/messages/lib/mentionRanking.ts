@@ -19,6 +19,10 @@ export type RankedMentionCandidate<T extends MentionCandidateForRanking> = {
   score: number;
 };
 
+function normalizeMentionWord(word: string) {
+  return word.replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, "");
+}
+
 function scoreMentionCandidateLabel(
   label: string,
   lowerQuery: string,
@@ -27,7 +31,10 @@ function scoreMentionCandidateLabel(
   if (lower === lowerQuery) return 0;
   if (lower.startsWith(lowerQuery)) return 1;
 
-  const words = lower.split(/[\s\-_]+/).filter(Boolean);
+  const words = lower
+    .split(/[\s\-_]+/)
+    .map(normalizeMentionWord)
+    .filter(Boolean);
   if (words.some((word) => word === lowerQuery)) return 2;
   if (words.some((word) => word.startsWith(lowerQuery))) return 3;
 
@@ -92,6 +99,10 @@ export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
 /**
  * Rank @mention autocomplete suggestions for the typed query.
  *
+ * Non-empty queries match display name and persona name only — never hex
+ * pubkey substrings, truncated pubkey labels, secondaryLabel, or npub bech32.
+ * Empty query keeps the existing “list everyone” open-@ behavior.
+ *
  * Order is typing relevance first (exact / prefix / word matches), then
  * case-insensitive alphabetical display name. Membership, local-agent, and
  * runnable-persona status are intentionally not hard tiers — community bots
@@ -106,34 +117,21 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
 
   return candidates
     .map((candidate, order) => {
-      const pubkeyLower = candidate.pubkey
-        ? normalizePubkey(candidate.pubkey)
-        : "";
       const label =
         candidate.displayName ??
         (candidate.pubkey ? truncatePubkey(candidate.pubkey) : "agent");
 
-      const labelScores = [
-        candidate.displayName,
-        candidate.personaName,
-        candidate.secondaryLabel,
-        label,
-      ]
+      // Empty query: preserve open-@ listing of every candidate.
+      if (!lowerQuery) {
+        return { candidate, label, order, score: 0 };
+      }
+
+      const labelScores = [candidate.displayName, candidate.personaName]
         .map((value) =>
           value?.trim() ? scoreMentionCandidateLabel(value, lowerQuery) : null,
         )
         .filter((score): score is number => score !== null);
-      const labelScore =
-        labelScores.length > 0 ? Math.min(...labelScores) : null;
-
-      const pubkeyScore = candidate.pubkey
-        ? pubkeyLower.startsWith(lowerQuery)
-          ? 4
-          : pubkeyLower.includes(lowerQuery)
-            ? 5
-            : null
-        : null;
-      const score = labelScore !== null ? labelScore : pubkeyScore;
+      const score = labelScores.length > 0 ? Math.min(...labelScores) : null;
 
       return { candidate, label, order, score };
     })
