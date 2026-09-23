@@ -395,8 +395,8 @@ is the open-source home for all application code — the relay, desktop app,
 mobile app, CLI, and agent harness. Internal repositories handle
 enterprise-signed builds and infrastructure deployment.
 
-See [AGENTS.md § Ecosystem](AGENTS.md#ecosystem) for the full repo table and
-dependency diagram.
+See [AGENTS.md § Ecosystem](AGENTS.md#ecosystem) for the compact repository
+table (this repo plus the four internal build and deploy repos).
 
 **External contributors:** Fork `kingkillery/pkzz`, open a PR, and CI runs
 automatically. No special access is required.

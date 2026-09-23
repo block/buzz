@@ -8,27 +8,16 @@ code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Ecosystem
 
-Pkzz spans five repos. This one (`kingkillery/pkzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
+This repo (`kingkillery/pkzz`) is the OSS source for the relay, desktop, mobile, and CLI. The other four repos are internal build and deploy — not part of this tree:
 
 | Repo | Purpose |
 |------|---------|
-| [kingkillery/pkzz](https://github.com/kingkillery/pkzz) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
-| [squareup/buzz-releases](https://github.com/squareup/buzz-releases) | Buildkite pipelines producing Block-signed macOS + iOS builds with `-block` desktop version suffix |
-| [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
-| [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
-| [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
+| [squareup/buzz-releases](https://github.com/squareup/buzz-releases) | Block-signed macOS + iOS builds (`-block` desktop suffix) → Artifactory, GitHub, Mobile Releases |
+| [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | Relay Docker image → internal ECR |
+| [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Helm chart from that image → ArgoCD → staging cluster |
+| [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Blox compute provider for desktop agent launch |
 
-```
-kingkillery/pkzz (source)
-  ├─► buzz-releases      (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
-  ├─► sprout-oss         (relay Docker image → ECR)
-  │     └─► block-coder-tf-stacks  (Helm chart → ArgoCD → staging cluster)
-  └─── sprout-backend-blox         (Blox compute provider for Desktop agent launch)
-```
-
-See [RELEASING.md](RELEASING.md) for the desktop release flow and
-[CONTRIBUTING.md § Ecosystem](CONTRIBUTING.md#ecosystem) for contributor
-access information.
+Access: [CONTRIBUTING.md § Ecosystem](CONTRIBUTING.md#ecosystem). Release flow: [RELEASING.md](RELEASING.md).
 
 ---
 
@@ -57,7 +46,7 @@ crates/
   git-sign-nostr      # Sign git objects with a Nostr key
   git-credential-nostr # Git credential helper for Nostr-authed push/fetch
   # Tooling + shared
-  buzz-cli            # Agent-first CLI
+  buzz-cli            # Agent client surface — JSON in, JSON out
   buzz-sdk            # Typed Nostr event builders
   buzz-admin          # Operator CLI for relay administration
   buzz-ws-client      # Shared NIP-42 WebSocket client (connect, auth, publish)
@@ -90,25 +79,13 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 
 ## Quality Gates
 
-Run `just ci` before every PR — it runs `fmt` + `clippy` + desktop lint +
-unit tests + builds. Clippy passing does not mean fmt passes; run both.
+Run `just ci` before every PR — fmt, clippy, desktop lint, unit tests, and builds. Clippy passing does not mean fmt passes; run both. Run `just test` if you touched `buzz-relay`, `buzz-db`, or `buzz-auth` (needs Postgres and Redis).
 
-Run `just test` for integration tests if you touched `buzz-relay`,
-`buzz-db`, or `buzz-auth` — these require a running Postgres and Redis.
+Hook inventory is [lefthook.yml](lefthook.yml) (`just setup` installs it; `just hooks` reinstalls after env changes). Pre-commit auto-fixes formatting and re-stages it; unfixable lint blocks the commit. Pre-push runs clippy and fast unit tests only — no overlap with pre-commit. Builds are CI-only. `just fix-all` is the one-shot formatter.
 
-**Pre-commit hooks** are installed automatically by `just setup` and auto-fix
-formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
-fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
-Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
-commit. **Pre-push hooks** run clippy (workspace + Tauri) and fast unit tests
-in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter) — no overlap with
-pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix all formatting
-in one shot. Run `just ci` for the full local gate. Run `just hooks` to
-re-install hooks after env changes. Before agents run Git or hooks, activate the
-repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
-commands to compensate for an unconfigured shell `PATH`.
+Before Git or hooks, activate Hermit (`. ./bin/activate-hermit`). Do not rewrite hook commands to compensate for an unconfigured `PATH`.
 
-**Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
+**Commit with `git commit -s`.** The DCO check rejects a missing `Signed-off-by`. The `commit-msg` hook covers local `git commit` / `git merge` only — `git rebase` needs `--signoff`, `git cherry-pick` needs `-s`, and any commit command you build programmatically must include `-s`. Repair unsigned history with `git rebase --signoff main`, then force-push. Details: [CONTRIBUTING.md § Sign Your Commits](CONTRIBUTING.md#sign-your-commits).
 
 Additional rules:
 - No `unsafe` code
@@ -150,7 +127,7 @@ channel carry its id in their `d` tag instead: kind:39000 (metadata),
 kind:39001, kind:39002 (membership). `get_channels` resolves a user's channels
 from the `d` tag of their kind:39002 events, not from `h`.
 
-**Agent-facing operations go in `buzz-cli`**: New agent-facing features belong in `buzz-cli` — add a subcommand there first, then wire the REST/WebSocket call in `client.rs`. `buzz-dev-mcp` (shell + file tools for `buzz-agent`) is separate.
+**CLI is the client surface**: New agent-facing operations belong in `buzz-cli` — a client of the relay, not a new HTTP endpoint and not `buzz-dev-mcp` (shell + file tools for `buzz-agent`). Add a subcommand there first, then wire the call in `client.rs`. See [CLI client surface](#cli-client-surface-buzz-cli).
 
 **Workflow conditions**: `buzz-workflow` uses
 [evalexpr](https://docs.rs/evalexpr) for condition evaluation. Keep expressions
@@ -160,88 +137,28 @@ simple and testable.
 thread root events. Any code that inserts replies must update these counters —
 check existing reply handlers for the pattern.
 
-### Engagement discernment workbook
+### Engagement discernment
 
-`docs/engagement-discernment-workbook.md` is the field workbook for deciding
-when agents should speak, stay quiet, or escalate to a human. It is an
-evidence-gathering instrument, not a speculative design document.
+[`docs/engagement-discernment-workbook.md`](docs/engagement-discernment-workbook.md) is the field workbook for when agents should speak, stay quiet, or escalate. It is an evidence instrument, not a design doc — use its setup ladder and §3–§5 templates, not this guide, for how to fill it in.
 
-**Before collecting data:**
+Hard constraints:
 
-- Use a dedicated lab channel with `engagement = "thread"`; keep other
-  channels on deterministic `mentions` behavior.
-- Put at least two agents in the lab and complete the workbook's four-step
-  smoke ladder: mention, plain thread reply, unrelated-thread silence, then
-  rapid-fire replies that exercise cooldown suppression.
-- Confirm evidence is observable in the session panel's **Raw ACP activity**
-  view or the **Harness Log** panel before relying on the study.
-
-**When and how to fill it in:**
-
-- Add a row immediately after **real dogfood friction**, while the event is
-  still traceable. Never invent entries from unit tests, hypothetical
-  scenarios, or reconstructed memory.
-- Use §3A for false silence, §3B for false speech, §3C for chain-cap/cooldown
-  verdicts, §3D for human-escalation boundaries, and §3E for agent-to-agent
-  bounce sessions.
-- Record the date, channel/thread or event reference, what actually happened,
-  what should have happened, and the rule/telemetry reason if known. Use
-  severity `1 = shrug`, `2 = annoying`, `3 = broke the flow of work`. Reference
-  events instead of copying secrets or sensitive conversation content.
-- Change only one engagement knob at a time. Log every change in §4, link it
-  to the motivating §3 rows, and observe it for several days before recording
-  a verdict.
-- Name repeated failure shapes and candidate signals in §5 only after the
-  field log shows a pattern. Do not convert a single anecdote into scheduler
-  logic.
-
-**Do not resume implementation of `open` scheduling or the escalation kind
-until every §6 gate is checked:** at least two weeks with two agents in the
-lab, at least 15 false-silence/false-speech entries across §3A–B, at least five
-escalation entries in §3D, named §5 failure shapes, and at least one completed
-§4 knob-tuning cycle. At pickup, derive the first heuristic scheduler only
-from §5 evidence and preserve the invariant: deterministic by default,
-experiments opt-in per channel, and every new behavior emits a decision frame.
+- Log a row only after real dogfood friction, while it is still traceable. Never invent entries from tests, hypotheticals, or memory. Reference events; do not copy secrets or sensitive conversation content.
+- Lab channel only: `engagement = "thread"`. Leave every other channel on deterministic `mentions`. Change one knob at a time.
+- **Do not implement `open` scheduling or the escalation kind until every §6 gate is checked** (≥2 weeks with ≥2 lab agents, ≥15 §3A–B entries, ≥5 §3D entries, named §5 failure shapes, one completed §4 knob cycle). At pickup, derive the first heuristic scheduler only from §5. Invariant: deterministic by default, experiments opt-in per channel, every new behavior emits a decision frame.
 
 ---
 
-## Agent CLI (`buzz-cli`)
+## CLI client surface (`buzz-cli`)
 
-`buzz` is the agent-first CLI. Auth env vars
-(`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`) are auto-injected
-by the ACP harness into managed agent subprocesses. In development, set
-`BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` in your environment manually.
+`buzz` is the agent **client** surface for the relay (JSON in, JSON out) — not a server API and not `buzz-dev-mcp`. New agent-facing client operations get a subcommand here first, then the relay call in `client.rs`. Command list: [`crates/buzz-cli/README.md`](crates/buzz-cli/README.md). Live runbook: [`crates/buzz-cli/TESTING.md`](crates/buzz-cli/TESTING.md).
 
-### Building the CLI
+Hard constraints:
 
-```bash
-cargo build --release -p buzz-cli
-```
-
-Binary location: `./target/release/buzz`. Add `./target/release` to `PATH`
-or invoke with the full path.
-
-### Deep Links
-
-`buzz://message?channel=<uuid>&id=<hex>` links reference a specific message
-thread. To read the linked thread:
-
-```bash
-buzz messages thread --channel <uuid> --event <hex> --format compact
-```
-
-Extract `channel` and `id` from the URL query parameters. The optional
-`thread` parameter (root event ID) can be ignored — `messages thread` resolves
-the full thread from the event ID alone.
-
-All reads return sig-stripped JSON arrays; all writes return
-`{event_id, accepted, message}`; creates add the entity ID. Exit codes:
-0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
-
-`--format compact` is a **global** flag — it goes before the subcommand:
-`buzz --format compact channels list`, NOT `buzz channels list --format compact`.
-
-See `crates/buzz-cli/TESTING.md` for the full live-testing runbook.
+- The ACP harness injects `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, and `BUZZ_AUTH_TAG` into managed subprocesses. In development, set `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` yourself. Release binary: `cargo build --release -p buzz-cli` → `./target/release/buzz`.
+- `--format compact` is a **global** flag and goes before the subcommand: `buzz --format compact channels list`, not `buzz channels list --format compact`.
+- Reads return sig-stripped JSON arrays; writes return `{event_id, accepted, message}`; creates add the entity ID. Exit codes: 0 ok, 1 input error, 2 network/relay, 3 auth, 4 other, 5 write conflict (NIP-33 LWW).
+- `buzz://message?channel=<uuid>&id=<hex>` names a thread. Read it with `buzz --format compact messages thread --channel <uuid> --event <hex>`. Use `channel` and `id` from the query string. Ignore the optional `thread` parameter — `messages thread` resolves the thread from the event id alone.
 
 ---
 
@@ -253,6 +170,7 @@ just test         # full integration suite (requires Postgres + Redis)
 ```
 
 E2E tests live in `crates/buzz-test-client/tests/`:
+
 - `e2e_relay.rs` — WebSocket relay protocol
 - `e2e_media.rs` — media upload/download (Blossom)
 - `e2e_media_extended.rs` — extended media scenarios
@@ -260,208 +178,7 @@ E2E tests live in `crates/buzz-test-client/tests/`:
 
 Desktop E2E: `cd desktop && pnpm exec playwright test`
 
-See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
-
-### PR Screenshots
-
-> **Do NOT use `buzz upload`, the relay media endpoint, or any third-party
-> image host for PR screenshots.** Relay media URLs fail through GitHub's camo
-> proxy. Always use `scripts/post-screenshots.sh` for PNGs before linking them
-> from a PR body/comment. If you hand-edit PR markdown, run
-> `scripts/check-pr-image-urls.sh <markdown-file>` first to catch relay URLs.
-
-For mobile simulator screenshots, save the PNGs in a local directory and run
-`./scripts/post-screenshots.sh <PR-number> <png-dir>` or use the third argument
-with a markdown template containing `{{filename}}` placeholders.
-
-The desktop app requires the E2E mock bridge to render — it cannot run in a plain
-browser. Use `just desktop-screenshot` to capture screenshots (builds frontend,
-starts preview server, runs Playwright automatically):
-
-```bash
-just desktop-screenshot --name home
-just desktop-screenshot --name channel --route /channels/general
-just desktop-screenshot --name search --click open-search
-just desktop-screenshot --name settings --click open-settings
-```
-
-Options: `--name` (filename), `--route` (client route), `--active-channel`
-(channel to view), `--click` (left-click data-testid or CSS selector),
-`--right-click` (right-click for context menus), `--hover` (hover before
-capture), `--clip` (crop region as `x,y,w,h` — e.g. `0,0,256,720` for sidebar
-only), `--wait` (ms, default 2000), `--viewport` (WxH, default 1280x720),
-`--outdir` (default `test-results/screenshots`), `--messages` (JSON file path).
-Output is a PNG path on stdout.
-
-Use `--messages` to inject content into a channel before capture. The JSON file
-is an array of objects — `channelName` and `content` are required, all other
-fields are optional and passed through to `__BUZZ_E2E_EMIT_MOCK_MESSAGE__`:
-
-```json
-[
-  {
-    "channelName": "random",
-    "content": "Hey @tyler check this out",
-    "pubkey": "953d...",
-    "kind": 40002,
-    "mentionPubkeys": ["deadbeef..."],
-    "extraTags": [["broadcast", "1"], ["e", "some-root-id"]],
-    "parentEventId": "abc123"
-  }
-]
-```
-
-Without `--active-channel`, all messages must target the same channel and the
-helper navigates to that channel (useful for showing message content). With
-`--active-channel`, messages can target multiple channels while the "camera"
-stays on the specified channel (useful for unread indicators, badges, etc.).
-
-```bash
-# Messages in the channel you're viewing (code blocks, formatting, etc.)
-just desktop-screenshot --name code-blocks --messages /tmp/msgs.json
-
-# Messages in OTHER channels to trigger unread state
-just desktop-screenshot --name unread-dot \
-  --active-channel general --messages /tmp/badge-msgs.json
-
-# Cropped to sidebar only (256px wide)
-just desktop-screenshot --name sidebar-unread \
-  --active-channel general --messages /tmp/badge-msgs.json \
-  --clip 0,0,256,720
-
-# Context menu on an unread channel (wider crop to include popup)
-just desktop-screenshot --name ctx-mark-read \
-  --active-channel general --messages /tmp/badge-msgs.json \
-  --right-click channel-random --clip 0,200,320,300
-
-# Hover state (e.g. copy button reveal)
-just desktop-screenshot --name copy-hover \
-  --messages /tmp/code-msgs.json --hover "[data-testid='copy-code']"
-```
-
-Available mock channels: `general`, `random`, `design`, `sales`, `engineering`,
-`agents`, `watercooler`, `announcements`, `alice-tyler`, `bob-tyler`.
-
-`scripts/post-screenshots.sh` hosts PNGs on a per-developer branch
-(`agent-screenshots/<github-username>`) and posts a PR comment with
-commit-SHA-based image URLs (immutable — safe from later overwrites):
-
-```bash
-./scripts/post-screenshots.sh 803 test-results/screenshots
-./scripts/post-screenshots.sh 803 test-results/screenshots body.md  # custom body prepended
-```
-
-The body file supports `{{filename}}` placeholders (without `.png`) to inline
-images at specific positions. Images not referenced by any placeholder are
-appended at the end. Without placeholders, all images are appended (backward
-compatible).
-
-```markdown
-### Unread dot
-A message arrives in `#random`.
-
-{{01-unread-dot}}
-
-### Context menu
-Right-click shows "Mark as read".
-
-{{02-context-menu}}
-```
-
-Re-runs overwrite the image blobs on the `agent-screenshots/<username>`
-branch, but the script **appends a new PR comment** — it does not edit or
-delete the previous one. After reposting, delete the superseded comment so
-only the current set remains, otherwise reviewers still see the stale images:
-
-```bash
-# List screenshot comments to find the stale one's id
-gh pr view <pr> --repo kingkillery/pkzz --json comments \
-  --jq '.comments[] | select(.body | test("pr-<pr>--")) | {id, url}'
-gh api -X DELETE repos/kingkillery/pkzz/issues/comments/<stale-comment-id>
-```
-
-Branch cleanup when fully done: `git push origin --delete agent-screenshots/<username>`.
-
-### Writing E2E Screenshot Specs
-
-When screenshots need seeded state, live messages, or UI interaction before
-capture, write a Playwright spec instead of using `just desktop-screenshot`.
-Add specs to `desktop/tests/e2e/` and register them in `playwright.config.ts`
-(`smoke` project `testMatch`). Every test calls `installMockBridge(page)` for
-mock Tauri IPC. Mock pubkey, channel names, and UUIDs live in `e2eBridge.ts`.
-
-**Always build with `pnpm build:e2e`, never `pnpm run build`.** The mock Tauri
-bridge is compiled in only for `--mode e2e` (see `installE2eBridgeIfConfigured`
-in `desktop/src/main.tsx`). A plain `pnpm run build` strips it, so
-`window.__TAURI_INTERNALS__` is never defined and **every** mock-mode spec fails
-with `Cannot read properties of undefined (reading 'invoke')` — the app renders
-"Community connection failed" instead of the UI under test. That looks exactly
-like a product bug rather than a build mistake, so it burns real time.
-`pnpm test:e2e:smoke` and `pnpm test:e2e:integration` run the right build for
-you; prefer them over a manual build plus `playwright test`.
-
-**Stale server:** `reuseExistingServer: true` means a previous build's server
-serves old code. Kill port 4173 and re-run `pnpm build:e2e` before re-running
-tests after code changes.
-
-**`addInitScript` before bridge:** `page.addInitScript` (localStorage seeding)
-must run BEFORE `installMockBridge(page)` — React reads state on mount, the
-bridge triggers mount.
-
-**Live messages:** Call `waitForMockLiveSubscription(page, channelName)` before
-`__BUZZ_E2E_EMIT_MOCK_MESSAGE__` — messages are silently dropped without a
-subscription. Navigate to the channel first (triggers subscription), then away
-(so unread indicators appear), then inject.
-
-**Animation timing:** Radix components animate in via CSS. `toBeVisible()`
-resolves mid-animation — wait for completion before screenshotting. Use the
-shared helper (mandatory before any `page.screenshot()` or
-`locator.screenshot()` in specs):
-
-```ts
-import { waitForAnimations } from "../helpers/animations";
-
-// ... after the element is visible but before capturing:
-await waitForAnimations(page);
-await page.screenshot({ path: "...", clip: { ... } });
-```
-
-The `just desktop-screenshot` path (`screenshot.mjs`) calls
-`waitForAnimations` automatically — no manual step needed there.
-
-For per-element waits (rare — prefer the page-level helper above):
-
-```ts
-await menuItem.evaluate((el) =>
-  Promise.all(
-    el.closest("[data-state]")?.getAnimations().map((a) => a.finished) ?? [],
-  ),
-);
-```
-
-**Cropping:** Use `clip` — full-window (1280x720) screenshots are unreadable
-for sidebar features. Sidebar = 256px; context menus ~450px.
-
-**Distinct states — verify before posting:** when one view renders many
-elements at once (e.g. all team cards in a single grid), an unscoped
-full-page `page.screenshot()` captures the *same* pixels for every shot, so
-multiple PNGs come out byte-identical. Scope each shot to its subject with
-`locator.screenshot()` (full-page `clip` only when an overlay like an open
-dropdown must be included). Then gate on hash distinctness before posting:
-
-```bash
-shasum -a 256 test-results/<dir>/*.png   # every hash must be unique
-```
-
-Identical hashes mean two shots captured the same state — fix the spec, do
-not post. This catches the most common screenshot regression.
-
-**`general` has pre-seeded messages** making `hasUnread` always true. Use
-`engineering` for "muted + no unread" visual states.
-
-**PR comments:** Use a body template (3rd arg to `post-screenshots.sh`) with
-`{{filename}}` placeholders. Each screenshot gets a `###` heading + one-line
-description. See [PR #803](https://github.com/kingkillery/pkzz/pull/803).
+Live relay and ACP harness: [TESTING.md](TESTING.md). PR screenshots: [TESTING.md § PR Screenshots](TESTING.md#pr-screenshots). Do not use `buzz upload`, the relay media endpoint, or any third-party image host for PR screenshots — relay URLs fail through GitHub's camo proxy. Post PNGs with `scripts/post-screenshots.sh`.
 
 ---
 
@@ -470,7 +187,7 @@ description. See [PR #803](https://github.com/kingkillery/pkzz/pull/803).
 1. **Kind `39000` for channel metadata, not `41`** — kind 41 is NIP-01 (unused). All kinds defined in `buzz-core/src/kind.rs`.
 2. **Relay queries must specify `kinds`** — omitting `kinds` triggers the p-gate (403). Always include explicit kind filters.
 3. **`messages search` must include `--kinds`** — an open-ended search (no kinds) hits the relay p-gate and returns 403. Pass at least `--kinds 9,45001,45003` to scope the query.
-4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
+4. **Worktrees: pin the directory on the command** — do not assume a previous working directory still applies. Run the command from the worktree you mean (`cd /path/to/worktree && cargo build`) or pass an explicit `--manifest-path` / working directory.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
 6. **Desktop Tauri fmt fails in worktrees and blocks commits** — the pre-commit hook runs `just desktop-tauri-fmt`, which fails in git worktrees because `cargo fmt` resolves workspace paths relative to the worktree root. Run `just desktop-tauri-fmt` from the main checkout to apply the fix, then re-stage and commit. CI is unaffected.
 7. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
@@ -636,7 +353,7 @@ usage.
 ## See Also
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / HTTP endpoints
-- [TESTING.md](TESTING.md) — multi-agent E2E test guide
+- [TESTING.md](TESTING.md) — live relay, ACP harness, and PR screenshot runbooks
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start

@@ -73,8 +73,18 @@ for "no unread" visual states.
 ```
 
 The script pushes images to `agent-screenshots/<github-username>` and posts a
-PR comment with `## Screenshots` and all images. Re-runs overwrite that PR's
-images only.
+**new** PR comment with `## Screenshots` and all images. Re-runs overwrite that
+PR's image blobs only — they do not edit or replace the previous comment. After
+reposting, delete the superseded comment so reviewers do not keep the stale
+set:
+
+```bash
+gh pr view <pr> --repo kingkillery/pkzz --json comments \
+  --jq '.comments[] | select(.body | test("pr-<pr>--")) | {id, url}'
+gh api -X DELETE repos/kingkillery/pkzz/issues/comments/<stale-comment-id>
+```
+
+Full runbook: [TESTING.md § PR Screenshots](../../../../TESTING.md#pr-screenshots).
 
 ### Body Templates
 
@@ -95,8 +105,13 @@ Right-click shows "Star channel".
 
 ## Gotchas
 
-1. **Stale server** — `reuseExistingServer: true` means a prior build serves old
-   code. Kill port 4173 and rebuild (`cd desktop && pnpm run build`) after code changes.
+1. **Stale preview** — `just desktop-screenshot` already builds with
+   `pnpm build:e2e`, but if something is already listening on port 4173 it
+   reuses that server and the new `dist` is not served. Kill port 4173 and
+   run `just desktop-screenshot` again. Manual Playwright specs are different:
+   a plain `pnpm run build` strips the mock bridge. Kill port 4173 and rebuild
+   with `pnpm build:e2e` (or `pnpm test:e2e:smoke`, which builds in e2e mode)
+   from `desktop/`. Details: [TESTING.md § PR Screenshots](../../../../TESTING.md#pr-screenshots).
 2. **Clip for readability** — full 1280x720 screenshots are hard to read for sidebar
    features. Sidebar = 256px wide; context menus ~450px.
 3. **`post-screenshots.sh` requires `gh` auth** — the script uses `gh api` and
