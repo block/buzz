@@ -899,7 +899,9 @@ export function AppShell() {
                           }}
                           onSelectAgents={() => void goAgents()}
                           onSelectBots={() => void goBots()}
-                          onSelectPinnedSite={(pinId) => void goPinnedSite(pinId)}
+                          onSelectPinnedSite={(pinId) =>
+                            void goPinnedSite(pinId)
+                          }
                           onSelectChannel={handleSidebarChannelSelect}
                           onOpenSearchResult={handleOpenSearchResult}
                           searchChannels={channels}

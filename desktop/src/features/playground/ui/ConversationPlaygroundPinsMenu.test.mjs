@@ -75,7 +75,10 @@ async function renderMenu(props = { channelId: "chan-1" }) {
 test("pin icon hides the count badge when the scoped list is empty", async () => {
   const screen = await renderMenu({ channelId: "chan-1" });
   assert.ok(screen.getByTestId("conversation-playground-pins-menu"));
-  assert.equal(screen.queryByTestId("conversation-playground-pins-badge"), null);
+  assert.equal(
+    screen.queryByTestId("conversation-playground-pins-badge"),
+    null,
+  );
 });
 
 test("pin icon shows a count badge for scoped pins", async () => {

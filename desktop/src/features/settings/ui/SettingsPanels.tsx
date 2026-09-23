@@ -810,7 +810,6 @@ function ThemeSettingsCard() {
           <ConversationDisplaySettings />
           <LinkPreviewStyleSetting />
         </SettingsOptionGroup>
-
       </SettingsOptionGroupList>
     </section>
   );

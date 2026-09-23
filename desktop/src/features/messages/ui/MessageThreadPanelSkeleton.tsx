@@ -225,16 +225,16 @@ export function MessageThreadPanelSkeleton({
       footer={<ThreadComposerSkeleton columnMaxWidthPx={columnMaxWidthPx} />}
       header={
         isPopoutThreadOnly ? undefined : (
-        <MessageThreadPanelHeader
-          headerLeading={headerLeading}
-          headerTitle={headerTitle}
-          headerTitleAriaLabel={headerTitleAriaLabel}
-          isFocusMode={isFocusMode}
-          isSinglePanelView={isSinglePanelView}
-          onClose={onClose}
-          onHeaderTitleClick={onHeaderTitleClick}
-          showBackButton={showBackButton}
-        />
+          <MessageThreadPanelHeader
+            headerLeading={headerLeading}
+            headerTitle={headerTitle}
+            headerTitleAriaLabel={headerTitleAriaLabel}
+            isFocusMode={isFocusMode}
+            isSinglePanelView={isSinglePanelView}
+            onClose={onClose}
+            onHeaderTitleClick={onHeaderTitleClick}
+            showBackButton={showBackButton}
+          />
         )
       }
       isSinglePanelView={isSinglePanelView}

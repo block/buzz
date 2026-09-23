@@ -15,9 +15,7 @@ export function LinkPopoutHost() {
   const popout = usePopoutLayoutPayload() ?? currentPopoutPayload();
   const link = popout?.kind === "link" ? popout.link : null;
   const [viewportMode, setViewportMode] =
-    React.useState<LinkSidePanelViewportMode>(
-      link?.viewportMode ?? "desktop",
-    );
+    React.useState<LinkSidePanelViewportMode>(link?.viewportMode ?? "desktop");
 
   React.useEffect(() => {
     if (link?.viewportMode) setViewportMode(link.viewportMode);

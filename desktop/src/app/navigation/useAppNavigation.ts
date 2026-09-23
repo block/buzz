@@ -132,7 +132,6 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
-
   const goPulse = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(

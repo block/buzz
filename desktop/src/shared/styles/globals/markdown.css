@@ -156,7 +156,9 @@
 
 .message-markdown.inbox-preview-markdown .mention-chip,
 .message-markdown.inbox-preview-markdown .inline-code-chip,
-.message-markdown.inbox-preview-markdown :not(pre) > code:not(.code-block-lines) {
+.message-markdown.inbox-preview-markdown
+  :not(pre)
+  > code:not(.code-block-lines) {
   display: inline;
   line-height: 1;
   overflow: visible;

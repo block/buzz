@@ -61,14 +61,10 @@ export function LinkSidePanelSurface({
   viewportMode?: LinkSidePanelViewportMode;
 }) {
   if (viewportMode === "mobile") {
-    return (
-      <MobileStage keepAlive={keepAlive} pinId={pinId} url={url} />
-    );
+    return <MobileStage keepAlive={keepAlive} pinId={pinId} url={url} />;
   }
   if (viewportMode === "responsive") {
-    return (
-      <ResponsiveStage keepAlive={keepAlive} pinId={pinId} url={url} />
-    );
+    return <ResponsiveStage keepAlive={keepAlive} pinId={pinId} url={url} />;
   }
   return <DesktopStage keepAlive={keepAlive} pinId={pinId} url={url} />;
 }
@@ -418,15 +414,7 @@ function PinStageHost({
         void closePinWebview(pinId);
       }
     };
-  }, [
-    keepAlive,
-    hostRef,
-    native,
-    pinId,
-    url,
-    viewportWidth,
-    viewportHeight,
-  ]);
+  }, [keepAlive, hostRef, native, pinId, url, viewportWidth, viewportHeight]);
 
   return (
     <div
@@ -471,4 +459,3 @@ function PinStageHost({
     </div>
   );
 }
-

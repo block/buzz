@@ -115,7 +115,7 @@ export function PlaygroundOverlay({
       setLayoutEpoch((value) => value + 1);
     }, 50);
     return () => window.clearTimeout(id);
-  }, [lockPlacement, session.sid]);
+  }, [lockPlacement]);
 
   const placement = playgroundOverlayPlacement(fullscreen, docked);
   const dockVisible = placement === "dock";

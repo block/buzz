@@ -12,7 +12,9 @@ const card = {
 };
 
 afterEach(async () => {
-  const { resetConversationPlaygroundPins } = await import("./conversationPins.ts");
+  const { resetConversationPlaygroundPins } = await import(
+    "./conversationPins.ts"
+  );
   resetConversationPlaygroundPins();
 });
 
@@ -31,9 +33,15 @@ test("pins are scoped to channel vs thread and stay in memory only", async () =>
   });
 
   assert.equal(listConversationPlaygroundPins("channel:chan-a").length, 1);
-  assert.equal(listConversationPlaygroundPins("channel:chan-a")[0]?.sid, "demo-1");
+  assert.equal(
+    listConversationPlaygroundPins("channel:chan-a")[0]?.sid,
+    "demo-1",
+  );
   assert.equal(listConversationPlaygroundPins("thread:root-1").length, 1);
-  assert.equal(listConversationPlaygroundPins("thread:root-1")[0]?.name, "Thread Demo");
+  assert.equal(
+    listConversationPlaygroundPins("thread:root-1")[0]?.name,
+    "Thread Demo",
+  );
   assert.equal(hasConversationPlaygroundPin("channel:chan-a", "demo-2"), false);
   assert.equal(listConversationPlaygroundPins("channel:chan-b").length, 0);
 });
@@ -48,7 +56,10 @@ test("unpin removes the pin; pin is idempotent for the same sid", async () => {
   pinPlaygroundToConversation("channel:chan-a", card);
   pinPlaygroundToConversation("channel:chan-a", { ...card, name: "Renamed" });
   assert.equal(listConversationPlaygroundPins("channel:chan-a").length, 1);
-  assert.equal(listConversationPlaygroundPins("channel:chan-a")[0]?.name, "Renamed");
+  assert.equal(
+    listConversationPlaygroundPins("channel:chan-a")[0]?.name,
+    "Renamed",
+  );
 
   unpinPlaygroundFromConversation("channel:chan-a", "demo-1");
   assert.equal(listConversationPlaygroundPins("channel:chan-a").length, 0);
@@ -73,10 +84,8 @@ test("listConversationPlaygroundPins returns stable refs across alternating scop
   // Regression: channel header + thread panel both mount ConversationPlaygroundPinsMenu.
   // A single global snapshot cache thrashing between scopes made useSyncExternalStore
   // see a new array every getSnapshot → Maximum update depth exceeded.
-  const {
-    listConversationPlaygroundPins,
-    pinPlaygroundToConversation,
-  } = await import("./conversationPins.ts");
+  const { listConversationPlaygroundPins, pinPlaygroundToConversation } =
+    await import("./conversationPins.ts");
 
   pinPlaygroundToConversation("channel:chan-a", card);
 
@@ -94,7 +103,9 @@ test("listConversationPlaygroundPins returns stable refs across alternating scop
 });
 
 test("conversationPlaygroundPinWebviewId is sanitize_pin_id-safe (no colon)", async () => {
-  const { conversationPlaygroundPinWebviewId } = await import("./conversationPins.ts");
+  const { conversationPlaygroundPinWebviewId } = await import(
+    "./conversationPins.ts"
+  );
   const id = conversationPlaygroundPinWebviewId("demo-1");
   assert.equal(id, "playground-pin-demo-1");
   assert.match(id, /^[A-Za-z0-9_-]+$/);

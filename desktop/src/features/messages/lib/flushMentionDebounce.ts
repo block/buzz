@@ -102,7 +102,9 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   const exactMatch = routedExact
     ? routedExact
     : opts.requireExact
-      ? ranked.find(({ label }) => label.trim().toLowerCase() === normalizedQuery)
+      ? ranked.find(
+          ({ label }) => label.trim().toLowerCase() === normalizedQuery,
+        )
       : ranked[0];
   const couldBeLongerName = opts.searchableNamesLowerRef.current.some((name) =>
     name.trim().toLowerCase().startsWith(`${normalizedQuery} `),

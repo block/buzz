@@ -90,16 +90,10 @@ describe("combineObserverIngestionAgents", () => {
   });
 
   it("adds catalog community bots as deployed", () => {
-    const result = combineObserverIngestionAgents(
-      [],
-      [],
-      new Map(),
-      ME,
-      [AGENT_COMMUNITY],
-    );
-    assert.deepEqual(result, [
-      { pubkey: AGENT_COMMUNITY, status: "deployed" },
+    const result = combineObserverIngestionAgents([], [], new Map(), ME, [
+      AGENT_COMMUNITY,
     ]);
+    assert.deepEqual(result, [{ pubkey: AGENT_COMMUNITY, status: "deployed" }]);
   });
 
   it("does not duplicate a community bot that is already managed", () => {
@@ -110,9 +104,7 @@ describe("combineObserverIngestionAgents", () => {
       ME,
       [AGENT_COMMUNITY],
     );
-    assert.deepEqual(result, [
-      { pubkey: AGENT_COMMUNITY, status: "stopped" },
-    ]);
+    assert.deepEqual(result, [{ pubkey: AGENT_COMMUNITY, status: "stopped" }]);
   });
 
   it("does not duplicate a community bot that is already declared-owned", () => {
@@ -123,9 +115,7 @@ describe("combineObserverIngestionAgents", () => {
       ME,
       [AGENT_COMMUNITY.toUpperCase()],
     );
-    assert.deepEqual(result, [
-      { pubkey: AGENT_COMMUNITY, status: "deployed" },
-    ]);
+    assert.deepEqual(result, [{ pubkey: AGENT_COMMUNITY, status: "deployed" }]);
   });
 
   it("folds community bots alongside managed and owned agents", () => {

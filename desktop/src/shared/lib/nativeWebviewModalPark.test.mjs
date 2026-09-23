@@ -92,7 +92,11 @@ test("last release restores pins and playground", async () => {
   acquireNativeWebviewModalPark();
   acquireNativeWebviewModalPark();
   releaseNativeWebviewModalPark();
-  assert.equal(pinRestores, 0, "must not restore while another overlay is open");
+  assert.equal(
+    pinRestores,
+    0,
+    "must not restore while another overlay is open",
+  );
   assert.equal(playgroundRestores, 0);
 
   releaseNativeWebviewModalPark();

@@ -266,14 +266,20 @@ test("mobile stage exposes orientation and 50–200% scale controls", async () =
   const screen = await renderStage("mobile");
   const { fireEvent } = await import("@testing-library/react");
   assert.ok(screen.getByTestId("playground-orientation"));
-  assert.equal(screen.getByTestId("playground-device-scale-value").textContent, "100%");
+  assert.equal(
+    screen.getByTestId("playground-device-scale-value").textContent,
+    "100%",
+  );
   assert.equal(
     screen.getByTestId("playground-device-frame").getAttribute("data-scale"),
     "100",
   );
 
   await fireEvent.click(screen.getByTestId("playground-device-scale-up"));
-  assert.equal(screen.getByTestId("playground-device-scale-value").textContent, "125%");
+  assert.equal(
+    screen.getByTestId("playground-device-scale-value").textContent,
+    "125%",
+  );
   assert.equal(
     screen.getByTestId("playground-device-frame").getAttribute("data-scale"),
     "125",
@@ -283,20 +289,36 @@ test("mobile stage exposes orientation and 50–200% scale controls", async () =
   assert.equal(inner.style.height, `${Math.round(852 * 1.25)}px`);
 
   await fireEvent.click(screen.getByTestId("playground-device-scale-down"));
-  assert.equal(screen.getByTestId("playground-device-scale-value").textContent, "100%");
+  assert.equal(
+    screen.getByTestId("playground-device-scale-value").textContent,
+    "100%",
+  );
 
   // Floor at 50%
   for (let i = 0; i < 10; i++) {
     await fireEvent.click(screen.getByTestId("playground-device-scale-down"));
   }
-  assert.equal(screen.getByTestId("playground-device-scale-value").textContent, "50%");
-  assert.equal(screen.getByTestId("playground-device-scale-down").disabled, true);
+  assert.equal(
+    screen.getByTestId("playground-device-scale-value").textContent,
+    "50%",
+  );
+  assert.equal(
+    screen.getByTestId("playground-device-scale-down").disabled,
+    true,
+  );
 
   // Ceiling at 200%
   for (let i = 0; i < 20; i++) {
     await fireEvent.click(screen.getByTestId("playground-device-scale-up"));
   }
-  assert.equal(screen.getByTestId("playground-device-scale-value").textContent, "200%");
+  assert.equal(
+    screen.getByTestId("playground-device-scale-value").textContent,
+    "200%",
+  );
   assert.equal(screen.getByTestId("playground-device-scale-up").disabled, true);
-  assert.ok(screen.getByTestId("playground-mobile-backdrop").className.includes("bg-white"));
+  assert.ok(
+    screen
+      .getByTestId("playground-mobile-backdrop")
+      .className.includes("bg-white"),
+  );
 });

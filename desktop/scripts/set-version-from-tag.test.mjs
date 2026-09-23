@@ -10,10 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import {
-  VERSION_PATTERN,
-  setVersionFromTag,
-} from "./set-version-from-tag.mjs";
+import { VERSION_PATTERN, setVersionFromTag } from "./set-version-from-tag.mjs";
 
 function fixtureDesktop(root) {
   mkdirSync(join(root, "src-tauri"), { recursive: true });

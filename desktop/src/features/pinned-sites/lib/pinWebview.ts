@@ -19,7 +19,6 @@ export type PinWebviewPollResult = {
   changed: boolean;
 };
 
-
 export type PinWebviewInspectResult = {
   webviewId: string;
 };
@@ -236,7 +235,6 @@ export async function closePinWebview(pinId: string): Promise<void> {
   if (!isNativePinRuntime()) return;
   await invoke("pin_webview_close", withWindowLabel({ pinId }));
 }
-
 
 export async function inspectPinWebview(
   pinId: string,

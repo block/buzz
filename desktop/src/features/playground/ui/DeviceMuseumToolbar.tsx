@@ -1,4 +1,3 @@
-
 import {
   PLAYGROUND_DEVICES,
   PLAYGROUND_DEVICE_SCALE_DEFAULT,
@@ -71,7 +70,9 @@ export function DeviceMuseumToolbar({
           className="rounded-md border border-border px-2 py-1 text-xs disabled:opacity-40"
           data-testid={`${testIdPrefix}-device-scale-down`}
           disabled={scale <= PLAYGROUND_DEVICE_SCALE_MIN}
-          onClick={() => onScalePercentChange(stepPlaygroundDeviceScale(scale, -1))}
+          onClick={() =>
+            onScalePercentChange(stepPlaygroundDeviceScale(scale, -1))
+          }
           type="button"
         >
           −
@@ -87,7 +88,9 @@ export function DeviceMuseumToolbar({
           className="rounded-md border border-border px-2 py-1 text-xs disabled:opacity-40"
           data-testid={`${testIdPrefix}-device-scale-up`}
           disabled={scale >= PLAYGROUND_DEVICE_SCALE_MAX}
-          onClick={() => onScalePercentChange(stepPlaygroundDeviceScale(scale, 1))}
+          onClick={() =>
+            onScalePercentChange(stepPlaygroundDeviceScale(scale, 1))
+          }
           type="button"
         >
           +

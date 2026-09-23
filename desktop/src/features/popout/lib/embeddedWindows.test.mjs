@@ -29,11 +29,21 @@ test("opening the same label focuses the existing embedded window", async () => 
   setEmbedInMain(true);
   const first = openEmbeddedWindow({
     label: "popout-thread-aaa",
-    payload: { kind: "thread", title: "Design", channelId: "c1", threadId: "t1" },
+    payload: {
+      kind: "thread",
+      title: "Design",
+      channelId: "c1",
+      threadId: "t1",
+    },
   });
   const second = openEmbeddedWindow({
     label: "popout-thread-aaa",
-    payload: { kind: "thread", title: "Design", channelId: "c1", threadId: "t1" },
+    payload: {
+      kind: "thread",
+      title: "Design",
+      channelId: "c1",
+      threadId: "t1",
+    },
   });
   assert.equal(listEmbeddedWindows().length, 1);
   assert.equal(first.label, second.label);
@@ -124,7 +134,6 @@ test("dismissing and closing an embed split parks the playground host", async ()
   assert.equal(getActiveEmbeddedWindow(), null);
   closeEmbeddedWindow("popout-split-aaa");
 });
-
 
 test("closeEmbeddedWindow removes inactive rows and parks active sid", async () => {
   const settings = await import("./popoutSettings.ts");

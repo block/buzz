@@ -474,8 +474,9 @@ export const ChannelPane = React.memo(function ChannelPane({
     idleAuxiliaryExpanded,
     THREAD_FOCUS_SLIVER_WIDTH_PX,
   );
-  const idleAuxiliaryEscapeEnabled =
-    shouldEnableIdleFocusDrawerEscape(idleAuxiliaryExpanded);
+  const idleAuxiliaryEscapeEnabled = shouldEnableIdleFocusDrawerEscape(
+    idleAuxiliaryExpanded,
+  );
   const { channelIsCovered, markExitComplete } = useFocusDrawerPresence(
     useFocusThreadDrawer || useFocusIdleDrawer,
     priorityIdleAuxiliary
@@ -488,13 +489,14 @@ export const ChannelPane = React.memo(function ChannelPane({
     showIdleAuxiliaryOverThread,
     markExitComplete,
   );
-  const { layoutScrollTargetId, resolveScrollTarget } =
-    useThreadViewModeSwitch({
+  const { layoutScrollTargetId, resolveScrollTarget } = useThreadViewModeSwitch(
+    {
       activeThreadHeadId: threadHeadMessage?.id ?? null,
       externalScrollTargetId: threadScrollTargetId,
       onExternalTargetResolved: onThreadScrollTargetResolved,
       onModeChange: markExitComplete,
-    });
+    },
+  );
   const {
     handleEditLastOwnMainMessage,
     handleEditLastOwnThreadMessage,

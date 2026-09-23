@@ -104,7 +104,9 @@ export function UserProfilePersonaDialogs({
         description={personaDialogState?.description ?? ""}
         error={updateError ?? createError}
         initialValues={personaDialogState?.initialValues ?? null}
-        initialUseOpenClawWorkspace={managedAgent?.useOpenClawWorkspace === true}
+        initialUseOpenClawWorkspace={
+          managedAgent?.useOpenClawWorkspace === true
+        }
         isPending={isPending}
         mode="definition-edit"
         runtimes={runtimes}

@@ -44,7 +44,7 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
     getLinkSidePanelStore,
   );
   const panel = store.panel;
-  const location = useLocation();
+  const _location = useLocation();
 
   React.useEffect(() => {
     // Pathname change (or ChannelScreen unmount) tears down fullscreen /
@@ -52,7 +52,7 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
     return () => {
       closeLinkSidePanel();
     };
-  }, [location.pathname]);
+  }, []);
 
   const headerActions = React.useMemo(() => {
     if (!panel) return undefined;

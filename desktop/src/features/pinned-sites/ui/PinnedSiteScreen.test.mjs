@@ -77,11 +77,8 @@ test("unmount hide and late show re-hide the pin webview", async () => {
 
   const React = await import("react");
   const { render, cleanup } = await import("@testing-library/react");
-  const {
-    hidePinWebview,
-    pinWebviewBoundsAreUsable,
-    showPinWebview,
-  } = await import("../lib/pinWebview.ts");
+  const { hidePinWebview, pinWebviewBoundsAreUsable, showPinWebview } =
+    await import("../lib/pinWebview.ts");
 
   function Harness() {
     const hostRef = React.useRef(null);
@@ -122,11 +119,15 @@ test("unmount hide and late show re-hide the pin webview", async () => {
   );
   cleanup();
   assert.ok(invokes.some((row) => row.cmd === "pin_webview_hide"));
-  const hidesBefore = invokes.filter((row) => row.cmd === "pin_webview_hide").length;
+  const hidesBefore = invokes.filter(
+    (row) => row.cmd === "pin_webview_hide",
+  ).length;
   resolveShow();
   // Flush the deferred show → epoch/cancelled re-hide microtasks.
   await new Promise((resolve) => setTimeout(resolve, 0));
-  const hidesAfter = invokes.filter((row) => row.cmd === "pin_webview_hide").length;
+  const hidesAfter = invokes.filter(
+    (row) => row.cmd === "pin_webview_hide",
+  ).length;
   assert.ok(
     hidesAfter > hidesBefore,
     `expected late re-hide, before=${hidesBefore} after=${hidesAfter} calls=${JSON.stringify(invokes)}`,

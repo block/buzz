@@ -68,8 +68,7 @@ export function listConversationPlaygroundPins(
   const cached = pinsSnapshotByScope.get(scopeKey);
   if (cached) return cached;
   const scope = pinsByScope.get(scopeKey);
-  const snapshot =
-    scope && scope.size > 0 ? [...scope.values()] : EMPTY_PINS;
+  const snapshot = scope && scope.size > 0 ? [...scope.values()] : EMPTY_PINS;
   pinsSnapshotByScope.set(scopeKey, snapshot);
   return snapshot;
 }

@@ -183,7 +183,10 @@ test("Pin on a new sid probes and adds a conversation-scoped header pin", async 
   await waitFor(() =>
     assert.equal(listConversationPlaygroundPins("channel:chan-1").length, 1),
   );
-  assert.equal(listConversationPlaygroundPins("channel:chan-1")[0]?.name, "Demo");
+  assert.equal(
+    listConversationPlaygroundPins("channel:chan-1")[0]?.name,
+    "Demo",
+  );
   // Pin must not open the overlay / left-rail session list.
   assert.equal(listPlaygroundSessions().length, 0);
   assert.equal(getActivePlaygroundSid(), null);
@@ -247,7 +250,6 @@ test("URL opens the Projects link slide-out and does not add a session", async (
   assert.equal(getLinkSidePanel()?.url, "https://app.example.com");
 });
 
-
 test("Open probes then opens the Projects link slide-out", async () => {
   const { fireEvent, waitFor } = await import("@testing-library/react");
   const { listPlaygroundSessions } = await import("../lib/sessions.ts");
@@ -302,7 +304,6 @@ test("PIN is hidden when omitted and Open still works", async () => {
   assert.equal(screen.queryByTestId("playground-card-copy-pin"), null);
   assert.equal(screen.getByTestId("playground-card-open").textContent, "Open");
 });
-
 
 test("split pop-out disables Open, Pin, Open as Split, and URL clicks", async () => {
   const { fireEvent } = await import("@testing-library/react");
@@ -405,13 +406,18 @@ test("main window with open thread keeps Open as Split enabled", async () => {
     path: "/channels/chan-1?thread=thread-1",
   });
   assert.equal(
-    screen.getByTestId("playground-card").getAttribute(
-      "data-playground-card-actions",
-    ),
+    screen
+      .getByTestId("playground-card")
+      .getAttribute("data-playground-card-actions"),
     "enabled",
   );
   assert.equal(screen.getByTestId("playground-card-open").disabled, false);
-  assert.equal(screen.getByTestId("playground-card-pin-action").disabled, false);
-  assert.equal(screen.getByTestId("playground-card-open-split").disabled, false);
+  assert.equal(
+    screen.getByTestId("playground-card-pin-action").disabled,
+    false,
+  );
+  assert.equal(
+    screen.getByTestId("playground-card-open-split").disabled,
+    false,
+  );
 });
-

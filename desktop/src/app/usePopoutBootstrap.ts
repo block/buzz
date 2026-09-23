@@ -21,7 +21,8 @@ export function usePopoutBootstrap(): PopoutPayload | null {
   const { goChannel } = useAppNavigation();
 
   React.useEffect(() => {
-    if (!payload || payload.kind === "playground" || payload.kind === "link") return;
+    if (!payload || payload.kind === "playground" || payload.kind === "link")
+      return;
     if (!payload.channelId) return;
     void goChannel(payload.channelId, {
       replace: true,
@@ -50,7 +51,11 @@ function useEmbeddedWindowBootstrap() {
   const lastLabel = React.useRef<string | null>(null);
 
   React.useEffect(() => {
-    if (!embed || embed.payload.kind === "playground" || embed.payload.kind === "link") {
+    if (
+      !embed ||
+      embed.payload.kind === "playground" ||
+      embed.payload.kind === "link"
+    ) {
       lastLabel.current = embed?.label ?? null;
       return;
     }

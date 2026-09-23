@@ -77,7 +77,7 @@ async function addProjectToSidebar(
   await expect(page.getByTestId(`sidebar-project-${dtag}`)).toBeVisible();
 }
 
-async function openProjectRepository(
+async function _openProjectRepository(
   page: import("@playwright/test").Page,
   repositoryId: string,
 ) {
