@@ -75,22 +75,23 @@ commit-msg:
     signoff:
       run: 'git interpret-trailers --if-exists doNothing --trailer "Signed-off-by: $(git var GIT_COMMITTER_IDENT | sed ''s/ [0-9]* [+-][0-9]*$//'')" --in-place {1}'
 
-# Git exports repository-local variables (GIT_DIR, GIT_INDEX_FILE, ...) into
-# hook processes. Lanes below run test suites whose fixtures spawn git in temp
-# dirs, so every lane runs through scripts/without-git-env.sh, which strips
-# those variables and lets each subprocess rediscover the repo from its cwd.
+# Lanes below that run test suites or builds go through
+# scripts/without-git-env.sh, which strips git's repository-local variables
+# (per `git rev-parse --local-env-vars`) while preserving transport/credential
+# settings. The branch-skew and push-head-scope guards run no test fixtures
+# and need the caller's transport env, so they run unwrapped.
 pre-push:
   parallel: true
   commands:
     branch-skew:
-      run: ./scripts/without-git-env.sh ./scripts/check-branch-skew.sh
+      run: ./scripts/check-branch-skew.sh
     push-head-scope:
       # Warn-only: the scoped lanes below validate the checked-out HEAD, so a
       # non-HEAD ref push (explicit refspec, --all) relies on CI for its
       # path-scoped checks. This lane reads the pushed refs from stdin and
       # warns when any pushed commit is not HEAD. It never fails the push.
       use_stdin: true
-      run: ./scripts/without-git-env.sh ./scripts/check-push-head-scope.sh
+      run: ./scripts/check-push-head-scope.sh
     file-size-check:
       # The ratchet computes its own merge-base diff, so path filtering here
       # would only duplicate policy and create another place for coverage drift.
