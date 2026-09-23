@@ -1,34 +1,53 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasMockSubscription } from "./e2eBridgeSubscriptions.ts";
+import {
+  createMockSubscription,
+  hasMockSubscription,
+} from "./e2eBridgeSubscriptions.ts";
+
+const ready = (filters, channel = "channel", kind = 9, exact = true) =>
+  hasMockSubscription([createMockSubscription(filters)], channel, kind, exact);
 
 test("channel readiness rejects global-only, wrong-channel and wrong-kind REQs", () => {
-  const subscription = (channelIds, kinds) => ({ channelIds, kinds });
-  for (const candidate of [
-    subscription(["*"], [9]),
-    subscription(["other"], [9]),
-    subscription(["channel"], [30078]),
-  ]) {
-    assert.equal(hasMockSubscription([candidate], "channel", 9, true), false);
-  }
+  for (const filter of [
+    { kinds: [9] },
+    { "#h": [], kinds: [9] },
+    { "#h": ["other"], kinds: [9] },
+    { "#h": ["channel"], kinds: [30078] },
+  ])
+    assert.equal(ready([filter]), false);
   assert.equal(hasMockSubscription([], "channel", 9, true), false);
-  for (const kinds of [[9], [7, 9], null]) {
-    assert.equal(
-      hasMockSubscription(
-        [subscription(["channel"], kinds)],
-        "channel",
-        9,
-        true,
-      ),
-      true,
-    );
+  for (const kinds of [[9], [7, 9], [], undefined]) {
+    assert.equal(ready([{ "#h": ["channel"], kinds }]), true);
+  }
+});
+
+test("REQ storage preserves channel/kind correlation across OR filters", () => {
+  for (const unrelated of [{ kinds: [9] }, { "#h": ["other"], kinds: [9] }]) {
+    const filters = [{ "#h": ["channel"], kinds: [30078] }, unrelated];
+    const stored = createMockSubscription(filters);
+    assert.deepEqual(stored.filters, filters);
+    assert.equal(hasMockSubscription([stored], "channel", 9, true), false);
+    assert.equal(hasMockSubscription([stored], "channel", 30078, true), true);
+    assert.equal(ready([...filters, { "#h": ["channel"], kinds: [9] }]), true);
   }
 });
 
 test("legacy readiness and explicit global queries retain their semantics", () => {
-  const global = [{ channelIds: ["*"], kinds: [30078] }];
+  const global = [createMockSubscription([{ kinds: [30078] }])];
   assert.equal(hasMockSubscription(global, "channel"), true);
   assert.equal(hasMockSubscription(global, "channel", 9), false);
+  assert.equal(hasMockSubscription(global, "channel", 30078), true);
   assert.equal(hasMockSubscription(global, "*", 30078), true);
   assert.equal(hasMockSubscription(global, "*", 9), false);
+  assert.equal(hasMockSubscription(global, "channel", 30078, true), false);
+  assert.equal(
+    ready(
+      [{ "#h": ["channel"], kinds: [30078] }, { kinds: [9] }],
+      "channel",
+      9,
+      false,
+    ),
+    true,
+  );
 });

@@ -33,7 +33,10 @@ import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { getAudioMediaLoadSchedulerSnapshot } from "@/features/messages/lib/audioMediaLoadScheduler";
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
 import { selectMockHistory } from "./e2eBridgeHistory.ts";
-import { hasMockSubscription } from "./e2eBridgeSubscriptions.ts";
+import {
+  createMockSubscription,
+  hasMockSubscription,
+} from "./e2eBridgeSubscriptions.ts";
 export { mockSearchHitMatches };
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type {
@@ -1087,14 +1090,7 @@ type MockManagedAgentRuntimeRow = {
 type WsHandler = (message: unknown) => void;
 const GLOBAL_MOCK_SUBSCRIPTION = "*";
 
-type MockSubscription = {
-  channelIds: string[];
-  kinds: number[] | null;
-  /** `#p` values from the REQ filters, if any — lets specs assert an
-   *  owner-scoped live subscription (e.g. the observer-archive `24200`
-   *  reconciliation gate) independently of channel-scoped ones. */
-  ownerPubkeys: string[];
-};
+type MockSubscription = ReturnType<typeof createMockSubscription>;
 
 type MockFilter = {
   "#a"?: string[];
@@ -10864,43 +10860,29 @@ function sendToMockSocket(args: {
     }
 
     if (subId.startsWith("live-")) {
-      // Collect channel IDs from all filters in the REQ
-      const channelIds = new Set<string>();
-      const kinds = new Set<number>();
-      const ownerPubkeys = new Set<string>();
-      for (const f of filters) {
-        for (const channelId of f["#h"] ?? []) channelIds.add(channelId);
-        for (const kind of f.kinds ?? []) {
-          kinds.add(kind);
-        }
-        for (const p of f["#p"] ?? []) {
-          ownerPubkeys.add(p);
-        }
-      }
+      const subscription = createMockSubscription(filters);
       const onlyChannelId =
-        channelIds.size === 1
-          ? (channelIds.values().next().value as string)
+        subscription.channelIds.length === 1 &&
+        subscription.channelIds[0] !== GLOBAL_MOCK_SUBSCRIPTION
+          ? subscription.channelIds[0]
           : undefined;
       if (
         getConfig()?.mock?.closeChannelLiveSubscriptionOnce &&
         !mockClosedChannelLiveSubscription &&
         onlyChannelId &&
-        kinds.has(KIND_CHANNEL_THREAD_SUMMARY)
+        subscription.kinds?.includes(KIND_CHANNEL_THREAD_SUMMARY)
       ) {
         mockClosedChannelLiveSubscription = true;
         sendWsText(socket.handler, ["CLOSED", subId, "rate-limited"]);
         return;
       }
-      socket.subscriptions.set(subId, {
-        channelIds:
-          channelIds.size > 0 ? [...channelIds] : [GLOBAL_MOCK_SUBSCRIPTION],
-        kinds: kinds.size > 0 ? [...kinds] : null,
-        ownerPubkeys: [...ownerPubkeys],
-      });
+      socket.subscriptions.set(subId, subscription);
       // Live requests still replay stored matches; pacing can admit them after
       // a publish. Ephemeral/global fixtures are not channel history.
       const history = new Map(
-        [...channelIds].map((id) => [id, getMockMessageStore(id)]),
+        subscription.channelIds
+          .filter((id) => id !== GLOBAL_MOCK_SUBSCRIPTION)
+          .map((id) => [id, getMockMessageStore(id)]),
       );
       for (const event of selectMockHistory(history, filters)) {
         sendWsText(socket.handler, ["EVENT", subId, event]);
