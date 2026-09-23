@@ -24,6 +24,7 @@ import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { RestartDiffBadge } from "./RestartDiffBadge";
+import { OpenClawWorkspaceBadge } from "./OpenClawWorkspaceBadge";
 
 export function ManagedAgentRow({
   agent,
@@ -232,11 +233,16 @@ function AgentSummary({
         ) : (
           <span className="mt-0.5 h-4 w-4 shrink-0" />
         )}
-        {presenceStatus ? (
-          <PresenceDot className="mt-1 shrink-0" status={presenceStatus} />
-        ) : (
-          <span className="mt-1 h-2 w-2 shrink-0" />
-        )}
+        <span className="mt-1 flex shrink-0 items-center gap-1">
+          {presenceStatus ? (
+            <PresenceDot status={presenceStatus} />
+          ) : (
+            <span className="h-2.5 w-2.5" />
+          )}
+          {agent.useOpenClawWorkspace ? (
+            <OpenClawWorkspaceBadge size={20} />
+          ) : null}
+        </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <p className="truncate font-medium text-foreground">{agent.name}</p>

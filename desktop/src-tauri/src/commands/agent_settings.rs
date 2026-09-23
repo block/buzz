@@ -115,6 +115,8 @@ pub async fn set_managed_agent_auto_restart(
 #[tauri::command]
 pub async fn set_managed_agent_use_openclaw_workspace(
     pubkey: String,
+    // Tauri camelCases this to `useOpenclawWorkspace` (openclaw is one word).
+    // Frontend invoke payloads must use that exact key.
     use_openclaw_workspace: bool,
     app: AppHandle,
 ) -> Result<ManagedAgentSummary, String> {

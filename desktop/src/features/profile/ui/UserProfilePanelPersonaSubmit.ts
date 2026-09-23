@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 
 import { personaManagedAgentUpdate } from "@/features/profile/ui/UserProfilePanelUtils";
+import { setManagedAgentUseOpenClawWorkspace } from "@/shared/api/tauriManagedAgents";
 import type {
   AcpRuntimeCatalogEntry,
   AgentPersona,
@@ -25,6 +26,7 @@ type SubmitProfilePersonaDialogOptions = {
     input: UpdateManagedAgentInput,
   ) => Promise<{ agent: ManagedAgent; profileSyncError: string | null }>;
   updatePersona: (input: UpdatePersonaInput) => Promise<AgentPersona>;
+  useOpenClawWorkspace?: boolean;
 };
 
 type ValidateLinkedAgentRuntimeEditOptions = {
@@ -73,6 +75,7 @@ export async function submitProfilePersonaDialog({
   runtimes,
   updateManagedAgent,
   updatePersona,
+  useOpenClawWorkspace,
 }: SubmitProfilePersonaDialogOptions) {
   try {
     if ("id" in input) {
@@ -98,6 +101,16 @@ export async function submitProfilePersonaDialog({
       if (result?.profileSyncError) {
         toast.warning(
           `${result.agent.name} was updated, but profile sync failed: ${result.profileSyncError}`,
+        );
+      }
+      if (
+        managedAgent &&
+        typeof useOpenClawWorkspace === "boolean" &&
+        useOpenClawWorkspace !== managedAgent.useOpenClawWorkspace
+      ) {
+        await setManagedAgentUseOpenClawWorkspace(
+          managedAgent.pubkey,
+          useOpenClawWorkspace,
         );
       }
       toast.success(`Updated ${input.displayName}.`);

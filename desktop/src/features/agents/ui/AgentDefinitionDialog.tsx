@@ -12,6 +12,7 @@ import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import { AgentIdentityFields } from "./AgentDescriptionField";
+import { OpenClawWorkspaceToggleField } from "./OpenClawWorkspaceToggleField";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
@@ -114,10 +115,14 @@ type AgentDefinitionDialogProps = {
   createRunSection?: React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
+  /** Seed for OpenClaw workspace opt-in (definition-edit with linked instances). */
+  initialUseOpenClawWorkspace?: boolean;
 };
 
 export type AgentDefinitionSubmitOptions = {
   publishCatalogUpdates: boolean;
+  /** Opt managed instance(s) into OpenClaw workspace MCP (create + definition-edit). */
+  useOpenClawWorkspace?: boolean;
 };
 
 export function AgentDefinitionDialog({
@@ -137,6 +142,7 @@ export function AgentDefinitionDialog({
   publishCatalogUpdatesOnSave = false,
   createRunSection,
   createSubmitBlocked = false,
+  initialUseOpenClawWorkspace = false,
 }: AgentDefinitionDialogProps) {
   const runtimesLoading = runtimeCatalogStatus === "loading";
   const [displayName, setDisplayName] = React.useState("");
@@ -158,6 +164,7 @@ export function AgentDefinitionDialog({
   const [behaviorDraft, setBehaviorDraft] = React.useState(
     emptyPersonaBehaviorDraft,
   );
+  const [useOpenClawWorkspace, setUseOpenClawWorkspace] = React.useState(false);
   // The seed the draft is diffed against at submit: an untouched quad
   // submits no behavior group, keeping unrelated edits hash-quiet.
   const behaviorSeedRef = React.useRef(emptyPersonaBehaviorDraft);
@@ -234,11 +241,12 @@ export function AgentDefinitionDialog({
     setEnvVars(nextEnvVars);
     // Advanced always starts collapsed and only changes from its toggle.
     setShowAdvancedFields(false);
+    setUseOpenClawWorkspace(initialUseOpenClawWorkspace === true);
     setIsAvatarUploadPending(false);
     setHasUserChanges(false);
     isRuntimeAutoSeededRef.current = false;
     hasSeededForOpenRef.current = false;
-  }, [initialValues, open]);
+  }, [initialUseOpenClawWorkspace, initialValues, open]);
 
   React.useEffect(() => {
     if (
@@ -321,6 +329,7 @@ export function AgentDefinitionDialog({
       setBehaviorDraft(emptyPersonaBehaviorDraft);
       behaviorSeedRef.current = emptyPersonaBehaviorDraft;
       setShowAdvancedFields(false);
+      setUseOpenClawWorkspace(false);
       setIsAvatarUploadPending(false);
       setHasUserChanges(false);
       setIsAddHarnessOpen(false);
@@ -384,12 +393,16 @@ export function AgentDefinitionDialog({
         },
         {
           publishCatalogUpdates: publishCatalogUpdatesOnSave && hasUserChanges,
+          useOpenClawWorkspace,
         },
       );
       return;
     }
 
-    await onSubmit(baseInput, { publishCatalogUpdates: false });
+    await onSubmit(baseInput, {
+      publishCatalogUpdates: false,
+      useOpenClawWorkspace,
+    });
   }
 
   function handleSubmitForm(event: React.FormEvent<HTMLFormElement>) {
@@ -770,6 +783,21 @@ export function AgentDefinitionDialog({
           displayName={displayName}
           onDescriptionChange={setDescriptionDraft}
           onDisplayNameChange={setDisplayName}
+        />
+
+        <OpenClawWorkspaceToggleField
+          checked={useOpenClawWorkspace}
+          disabled={isPending}
+          id={
+            isCreateMode
+              ? "create-agent-openclaw-workspace"
+              : "edit-definition-openclaw-workspace"
+          }
+          onCheckedChange={(value) => {
+            setHasUserChanges(true);
+            setUseOpenClawWorkspace(value);
+          }}
+          requireConnected={isCreateMode}
         />
 
         <div className="space-y-1.5">

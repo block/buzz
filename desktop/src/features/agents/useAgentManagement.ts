@@ -30,8 +30,10 @@ import type { AgentCreateIntent } from "./ui/agentCreateIntent";
 import { editPersonaDialogState } from "./ui/personaDialogState";
 import type {
   CreatePersonaInput,
+  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import { setManagedAgentUseOpenClawWorkspace } from "@/shared/api/tauriManagedAgents";
 
 function updateInputFromRequest(
   request: Extract<AgentManagementRequest, { action: "update" }>,
@@ -179,6 +181,7 @@ export function useAgentManagement() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
+    options?: { useOpenClawWorkspace?: boolean },
   ): Promise<boolean> {
     if (request?.action !== "create" || "id" in input) {
       return false;
@@ -211,6 +214,9 @@ export function useAgentManagement() {
             runtime,
             undefined,
             backendIntent ?? undefined,
+            {
+              useOpenClawWorkspace: options?.useOpenClawWorkspace === true,
+            },
           ),
         );
         if (created.spawnError) throw new Error(created.spawnError);
@@ -237,7 +243,10 @@ export function useAgentManagement() {
     }
   }
 
-  async function submitUpdate(input: CreatePersonaInput | UpdatePersonaInput) {
+  async function submitUpdate(
+    input: CreatePersonaInput | UpdatePersonaInput,
+    options?: { useOpenClawWorkspace?: boolean },
+  ) {
     if (request?.action !== "update" || !("id" in input)) {
       return false;
     }
@@ -245,6 +254,20 @@ export function useAgentManagement() {
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
       await updatePersonaMutation.mutateAsync(input);
+      if (typeof options?.useOpenClawWorkspace === "boolean") {
+        const linked = (
+          queryClient.getQueryData<ManagedAgent[]>(managedAgentsQueryKey) ?? []
+        ).filter((agent) => agent.personaId === input.id);
+        for (const agent of linked) {
+          if (agent.useOpenClawWorkspace === options.useOpenClawWorkspace) {
+            continue;
+          }
+          await setManagedAgentUseOpenClawWorkspace(
+            agent.pubkey,
+            options.useOpenClawWorkspace,
+          );
+        }
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),

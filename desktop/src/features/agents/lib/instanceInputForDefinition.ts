@@ -112,6 +112,7 @@ export async function buildInstanceInputForDefinition(
   runtime: AcpRuntime,
   upload?: UploadMediaBytes,
   backendIntent?: BackendIntent,
+  options?: { useOpenClawWorkspace?: boolean },
 ): Promise<CreateManagedAgentInput> {
   const avatarUrl = await resolveManagedAgentAvatarUrl(
     persona.avatarUrl,
@@ -136,6 +137,7 @@ export async function buildInstanceInputForDefinition(
         id: backendIntent.id,
         config: backendIntent.config,
       },
+      useOpenClawWorkspace: options?.useOpenClawWorkspace === true,
     };
   }
 
@@ -157,5 +159,6 @@ export async function buildInstanceInputForDefinition(
     spawnAfterCreate: true,
     startOnAppLaunch: true,
     backend: { type: "local" },
+    useOpenClawWorkspace: options?.useOpenClawWorkspace === true,
   };
 }

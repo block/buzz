@@ -9520,6 +9520,9 @@ async function handleCreateManagedAgent(
         | { type: "provider"; id: string; config: Record<string, unknown> };
       respondTo?: "owner-only" | "allowlist" | "anyone";
       respondToAllowlist?: string[];
+      /** Serde camelCase of use_openclaw_workspace */
+      useOpenclawWorkspace?: boolean;
+      useOpenClawWorkspace?: boolean;
     };
   },
   config: E2eConfig | undefined,
@@ -9603,7 +9606,10 @@ async function handleCreateManagedAgent(
     log_path: `/tmp/mock-agent-${pubkey}.log`,
     start_on_app_launch: args.input.startOnAppLaunch ?? true,
     auto_restart_on_config_change: true,
-    use_openclaw_workspace: false,
+    use_openclaw_workspace:
+      args.input.useOpenclawWorkspace ??
+      args.input.useOpenClawWorkspace ??
+      false,
     backend: args.input.backend ?? { type: "local" as const },
     backend_agent_id: null,
     respond_to: mintRespondTo,
@@ -9863,10 +9869,14 @@ async function handleSetManagedAgentAutoRestart(args: {
 
 async function handleSetManagedAgentUseOpenClawWorkspace(args: {
   pubkey: string;
-  useOpenClawWorkspace: boolean;
+  /** Serde/Tauri camelCase of use_openclaw_workspace */
+  useOpenclawWorkspace?: boolean;
+  /** Legacy misspelling — still accept briefly */
+  useOpenClawWorkspace?: boolean;
 }): Promise<RawManagedAgent> {
   const agent = getMockManagedAgent(args.pubkey);
-  agent.use_openclaw_workspace = args.useOpenClawWorkspace;
+  agent.use_openclaw_workspace =
+    args.useOpenclawWorkspace ?? args.useOpenClawWorkspace ?? false;
   agent.updated_at = new Date().toISOString();
   return cloneManagedAgent(agent);
 }

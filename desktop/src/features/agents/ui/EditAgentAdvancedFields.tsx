@@ -23,7 +23,6 @@ import {
   EDIT_AGENT_PARALLELISM_HELP,
   parallelismCapHint,
 } from "../lib/agentParallelism";
-import { useFeatureEnabled } from "@/shared/features";
 import {
   deriveNumericDescriptors,
   structuredEnvKeys,
@@ -34,7 +33,6 @@ export function EditAgentAdvancedFields({
   acpCommand,
   agentArgs,
   autoRestartOnConfigChange,
-  useOpenClawWorkspace,
   disabled,
   envVars,
   fileSatisfiedEnvKeys,
@@ -57,14 +55,11 @@ export function EditAgentAdvancedFields({
   onInheritHarnessChange,
   onParallelismChange,
   onAutoRestartChange,
-  onUseOpenClawWorkspaceChange,
   onSystemPromptChange,
 }: {
   acpCommand: string;
   agentArgs: string;
   autoRestartOnConfigChange: boolean;
-  /** Hula OpenClaw per-agent mode; only shown when feature enabled. */
-  useOpenClawWorkspace?: boolean;
   disabled: boolean;
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys: readonly string[];
@@ -111,15 +106,8 @@ export function EditAgentAdvancedFields({
   onInheritHarnessChange: (value: boolean) => void;
   onParallelismChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
-  onUseOpenClawWorkspaceChange?: (value: boolean) => void;
   onSystemPromptChange: (value: string) => void;
 }) {
-  const openClawFeature = useFeatureEnabled("openclaw-workspace-mcp");
-  const showOpenClawToggle =
-    openClawFeature &&
-    useOpenClawWorkspace !== undefined &&
-    onUseOpenClawWorkspaceChange !== undefined;
-
   // Numeric tuning descriptors — gate on catalog status so that loading/error
   // never collapses to "no controls": keys stay visible as generic rows.
   const numericDescriptors = React.useMemo(
@@ -208,38 +196,6 @@ export function EditAgentAdvancedFields({
             : "Configuration changes only show the restart badge; restart manually to apply them."}
         </p>
       </div>
-
-      {showOpenClawToggle ? (
-        <div className="space-y-1.5" data-testid="edit-agent-openclaw-workspace">
-          <label
-            className="flex items-center gap-2 text-sm font-medium"
-            htmlFor="edit-agent-openclaw-workspace"
-          >
-            <input
-              checked={useOpenClawWorkspace === true}
-              disabled={disabled || !onUseOpenClawWorkspaceChange}
-              id="edit-agent-openclaw-workspace"
-              onChange={(event) =>
-                onUseOpenClawWorkspaceChange?.(event.target.checked)
-              }
-              type="checkbox"
-            />
-            Use OpenClaw workspace (MCP)
-          </label>
-          <p className="text-xs text-muted-foreground">
-            {useOpenClawWorkspace
-              ? "Project files and skills come from OpenClaw via MCP (skills_list / skills_get). Local Mac checkout is not the workspace."
-              : "Local agent: normal Mac filesystem and local skills. OpenClaw MCP is not attached."}
-          </p>
-          {useOpenClawWorkspace ? (
-            <p className="text-xs text-amber-600 dark:text-amber-400">
-              Requires a connected OpenClaw workspace grant (Settings → Agents →
-              OpenClaw workspace). Without a grant, start will fail with a clear
-              error instead of falling back to local disk.
-            </p>
-          ) : null}
-        </div>
-      ) : null}
 
       {/* Agent runtime args */}
       <div className="space-y-1.5">

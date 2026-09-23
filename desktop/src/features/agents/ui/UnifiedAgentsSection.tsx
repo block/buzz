@@ -312,6 +312,7 @@ function AgentPersonaCard({
             isStarting={startingAgentPubkey === agent.pubkey}
             label={title}
             requiresRestart={agent.needsRestart}
+            useOpenClawWorkspace={agent.useOpenClawWorkspace === true}
             startTestId={`agent-runtime-start-${agent.pubkey}`}
             onOpenError={() => {
               onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
@@ -416,6 +417,7 @@ function StandaloneAgentCard({
           isStarting={startingAgentPubkey === agent.pubkey}
           label={title}
           requiresRestart={agent.needsRestart}
+          useOpenClawWorkspace={agent.useOpenClawWorkspace === true}
           startTestId={`agent-runtime-start-${agent.pubkey}`}
           onOpenError={() => {
             onOpenAgentProfile(agent.pubkey, { tab: "runtime" });

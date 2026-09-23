@@ -12,8 +12,13 @@ use crate::app_state::keyring_service;
 use crate::managed_agents::config_bridge::claude::{
     remove_mcp_server, upsert_http_mcp_server, OPENCLAW_WORKSPACE_MCP_NAME,
 };
-use crate::managed_agents::{load_managed_agents, BackendKind, ManagedAgentRecord};
+use crate::app_state::AppState;
+use crate::managed_agents::{
+    current_instance_id, load_managed_agents, save_managed_agents, stop_managed_agent_process,
+    sync_managed_agent_processes, BackendKind, ManagedAgentRecord,
+};
 use crate::secret_store::SecretStore;
+use tauri::Manager;
 
 const GRANT_KEY: &str = "openclaw-workspace-mcp-grant";
 
@@ -214,7 +219,77 @@ pub fn apply_grant(
     })
 }
 
+/// Stop every running managed agent that has `use_openclaw_workspace` enabled.
+/// Does **not** clear the per-agent flag — reconnect + start again is enough.
+fn stop_running_openclaw_agents(app: &tauri::AppHandle) -> usize {
+    let state = app.state::<AppState>();
+    let Ok(_store_guard) = state.managed_agents_store_lock.lock() else {
+        return 0;
+    };
+    let Ok(mut records) = load_managed_agents(app) else {
+        return 0;
+    };
+    let Ok(mut runtimes) = state.managed_agent_processes.lock() else {
+        return 0;
+    };
+
+    let (sync_changed, exited_pubkeys) =
+        sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(app));
+    for pubkey in &exited_pubkeys {
+        state.clear_agent_session_caches(pubkey);
+    }
+
+    let targets: Vec<String> = records
+        .iter()
+        .filter(|record| {
+            record.use_openclaw_workspace
+                && record.backend == BackendKind::Local
+                && (record.runtime_pid.is_some()
+                    || runtimes
+                        .keys()
+                        .any(|key| key.pubkey.eq_ignore_ascii_case(&record.pubkey)))
+        })
+        .map(|record| record.pubkey.clone())
+        .collect();
+
+    let mut stopped = 0usize;
+    for pubkey in targets {
+        let Some(record) = records
+            .iter_mut()
+            .find(|record| record.pubkey.eq_ignore_ascii_case(&pubkey))
+        else {
+            continue;
+        };
+        match stop_managed_agent_process(app, record, &mut runtimes) {
+            Ok(()) => {
+                stopped += 1;
+                state.clear_agent_session_caches(&pubkey);
+            }
+            Err(error) => {
+                eprintln!(
+                    "buzz-desktop: openclaw disconnect: failed to stop agent {pubkey}: {error}"
+                );
+            }
+        }
+    }
+
+    if sync_changed || stopped > 0 {
+        let _ = save_managed_agents(app, &records);
+    }
+    stopped
+}
+
+fn grant_is_expired(expires_at: &str) -> bool {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+        // Unparseable expiry — treat as still valid; disconnect is explicit.
+        return false;
+    };
+    parsed < chrono::Utc::now()
+}
+
+/// Clear grant, strip MCP, and stop opted-in running agents.
 pub fn disconnect(app: &tauri::AppHandle) -> Result<OpenClawWorkspaceStatus, String> {
+    let stopped = stop_running_openclaw_agents(app);
     let _ = clear_grant();
     let _ = remove_mcp_server(None, OPENCLAW_WORKSPACE_MCP_NAME);
     // Remove from all Claude managed agents (opted-in or not) so a stale MCP
@@ -233,12 +308,118 @@ pub fn disconnect(app: &tauri::AppHandle) -> Result<OpenClawWorkspaceStatus, Str
         expires_at: None,
         url: None,
         connected_via_relay: false,
-        agents_updated: 0,
+        agents_updated: stopped,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenClawWorkspaceTestResult {
+    pub ok: bool,
+    pub message: String,
+    pub http_status: Option<u16>,
+}
+
+/// Re-apply the stored grant to Claude `mcpServers` (opted-in agents + home config).
+/// Does **not** mint a new JWT — that arrives on the next relay AUTH / HULA frame.
+/// Clears nothing; if no grant is stored, returns an actionable error.
+pub fn refresh(app: &tauri::AppHandle) -> Result<OpenClawWorkspaceStatus, String> {
+    let grant = load_grant()?.ok_or_else(|| {
+        "No OpenClaw workspace grant is stored. Join a Hula relay (or wait for the next AUTH) so a capability can be provisioned, then try again.".to_string()
+    })?;
+    apply_grant(app, grant)
+}
+
+/// Authenticated MCP ping: POST JSON-RPC `initialize` to the grant URL with the
+/// stored Authorization (+ optional CF Access headers). Does not log secrets.
+pub async fn test_connection() -> Result<OpenClawWorkspaceTestResult, String> {
+    let grant = load_grant()?
+        .ok_or_else(|| "Not connected — no OpenClaw workspace grant is stored.".to_string())?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+
+    let mut req = client
+        .post(&grant.url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
+        .header(reqwest::header::AUTHORIZATION, grant.authorization.as_str());
+
+    if let Some(headers) = &grant.headers {
+        for (key, value) in headers {
+            if key.eq_ignore_ascii_case("authorization") {
+                continue;
+            }
+            req = req.header(key.as_str(), value.as_str());
+        }
+    }
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "hula-buzz", "version": "0" }
+        }
+    });
+
+    let response = req
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("MCP request failed: {e}"))?;
+
+    let status = response.status();
+    let http_status = Some(status.as_u16());
+
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return Ok(OpenClawWorkspaceTestResult {
+            ok: false,
+            message: "MCP rejected credentials. Try Refresh after the next relay AUTH, or Disconnect and reconnect.".into(),
+            http_status,
+        });
+    }
+
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        let snippet: String = text.chars().take(160).collect();
+        let detail = if snippet.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {snippet}")
+        };
+        return Ok(OpenClawWorkspaceTestResult {
+            ok: false,
+            message: format!("MCP returned HTTP {}{detail}", status.as_u16()),
+            http_status,
+        });
+    }
+
+    // Body may be JSON or SSE; a 2xx after auth is enough to call the grant healthy.
+    let _ = response.bytes().await;
+    Ok(OpenClawWorkspaceTestResult {
+        ok: true,
+        message: "MCP accepted initialize — connection looks healthy.".into(),
+        http_status,
     })
 }
 
 pub fn status() -> Result<OpenClawWorkspaceStatus, String> {
     match load_grant()? {
+        Some(grant) if grant_is_expired(&grant.expires_at) => Ok(OpenClawWorkspaceStatus {
+            connected: false,
+            expires_at: Some(grant.expires_at),
+            url: Some(grant.url),
+            connected_via_relay: grant.connected_via_relay,
+            agents_updated: 0,
+        }),
         Some(grant) => Ok(OpenClawWorkspaceStatus {
             connected: true,
             expires_at: Some(grant.expires_at),
@@ -254,6 +435,19 @@ pub fn status() -> Result<OpenClawWorkspaceStatus, String> {
             agents_updated: 0,
         }),
     }
+}
+
+/// If the stored grant is expired (or missing), treat the workspace as down:
+/// stop opted-in running agents and clear the grant. Returns the post-check status.
+pub fn reconcile_expired_grant(app: &tauri::AppHandle) -> Result<OpenClawWorkspaceStatus, String> {
+    let Some(grant) = load_grant()? else {
+        return status();
+    };
+    if !grant_is_expired(&grant.expires_at) {
+        return status();
+    }
+    // Expired grant is "down" — same stop behavior as an explicit Disconnect.
+    disconnect(app)
 }
 
 #[cfg(test)]

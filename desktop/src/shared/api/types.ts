@@ -405,6 +405,8 @@ export type RelayMeshConfig = {
 export type CreateManagedAgentInput = {
   name: string;
   personaId?: string;
+  /** Opt the new instance into OpenClaw workspace MCP (Hula). Default false. */
+  useOpenClawWorkspace?: boolean;
   /** Team this instance was deployed from; controls runtime team instructions. */
   teamId?: string;
   relayUrl?: string;

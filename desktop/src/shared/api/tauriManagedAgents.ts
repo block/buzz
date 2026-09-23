@@ -74,11 +74,13 @@ export async function setManagedAgentUseOpenClawWorkspace(
   pubkey: string,
   useOpenClawWorkspace: boolean,
 ): Promise<ManagedAgent> {
+  // Tauri camelCases `use_openclaw_workspace` → `useOpenclawWorkspace`
+  // (openclaw is one serde word). Do not send `useOpenClawWorkspace`.
   const response = await invokeTauri<RawManagedAgent>(
     "set_managed_agent_use_openclaw_workspace",
     {
       pubkey,
-      useOpenClawWorkspace,
+      useOpenclawWorkspace: useOpenClawWorkspace,
     },
   );
   return fromRawManagedAgent(response);

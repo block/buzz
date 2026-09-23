@@ -811,6 +811,8 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
         relayMesh: input.relayMesh,
+        // IPC key must match serde camelCase of use_openclaw_workspace
+        useOpenclawWorkspace: input.useOpenClawWorkspace ?? false,
       },
     },
   );

@@ -42,6 +42,7 @@ type AgentDialogCreateProps = {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
+    options?: { useOpenClawWorkspace?: boolean },
   ) => Promise<boolean>;
 };
 
@@ -78,6 +79,7 @@ type AgentDialogDefinitionEditProps = {
     options: AgentDefinitionSubmitOptions,
   ) => Promise<unknown>;
   publishCatalogUpdatesOnSave?: boolean;
+  initialUseOpenClawWorkspace?: boolean;
 };
 
 type AgentDialogProps =
@@ -165,11 +167,14 @@ function AgentCreateDialogRouter({
         isPending={isDefinitionPending}
         onDirtyChange={onDirtyChange}
         onOpenChange={onOpenChange}
-        onSubmit={async (input) => {
+        onSubmit={async (input, options) => {
           const submitted = await onSubmitDefinition(
             input,
             "definition_start",
             resolveBackendIntent(runDraft),
+            {
+              useOpenClawWorkspace: options.useOpenClawWorkspace === true,
+            },
           );
           if (submitted) {
             onDirtyChange?.(false);

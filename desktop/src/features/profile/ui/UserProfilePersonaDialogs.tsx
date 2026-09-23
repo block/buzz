@@ -50,6 +50,7 @@ export function UserProfilePersonaDialogs({
   instanceCount,
   isPending,
   linkedAgentPubkey,
+  managedAgent,
   personaDialogState,
   personaToDelete,
   personaToExportSnapshot,
@@ -72,6 +73,7 @@ export function UserProfilePersonaDialogs({
   instanceCount: number;
   isPending: boolean;
   linkedAgentPubkey: string | null;
+  managedAgent?: ManagedAgent | undefined;
   personaDialogState: PersonaDialogState | null;
   personaToDelete: AgentPersona | null;
   personaToExportSnapshot: AgentPersona | null;
@@ -86,7 +88,10 @@ export function UserProfilePersonaDialogs({
   onCloseExportSnapshot: () => void;
   onConfirmDelete: (persona: AgentPersona) => void;
   onExportSnapshot: (persona: AgentPersona) => void;
-  onSubmit: (input: CreatePersonaInput | UpdatePersonaInput) => Promise<void>;
+  onSubmit: (
+    input: CreatePersonaInput | UpdatePersonaInput,
+    options?: { useOpenClawWorkspace?: boolean },
+  ) => Promise<void>;
 }) {
   const runtimeCatalogStatus = runtimesLoading
     ? "loading"
@@ -99,6 +104,7 @@ export function UserProfilePersonaDialogs({
         description={personaDialogState?.description ?? ""}
         error={updateError ?? createError}
         initialValues={personaDialogState?.initialValues ?? null}
+        initialUseOpenClawWorkspace={managedAgent?.useOpenClawWorkspace === true}
         isPending={isPending}
         mode="definition-edit"
         runtimes={runtimes}

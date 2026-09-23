@@ -26,7 +26,10 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
-import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
+import {
+  setManagedAgentAutoRestart,
+  setManagedAgentUseOpenClawWorkspace,
+} from "@/shared/api/tauriManagedAgents";
 import { EffortPickerField } from "./EffortPickerField";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
@@ -68,6 +71,7 @@ import {
 } from "./runtimeModelProviderSelection";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import { OwnerOnlyAccessField } from "./OwnerOnlyAccessField";
+import { OpenClawWorkspaceToggleField } from "./OpenClawWorkspaceToggleField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { RunOnSummarySection } from "./RunOnSummarySection";
@@ -156,6 +160,9 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
+  const [useOpenClawWorkspace, setUseOpenClawWorkspace] = React.useState(
+    agent.useOpenClawWorkspace === true,
+  );
   // Effort picker is Save-gated: hold the pending selection in dialog state and
   // embed it in the locked update payload on Save alone (see
   // resolveEffortSubmission / handleSubmit — PR #4625), never on selection.
@@ -212,6 +219,7 @@ export function AgentInstanceEditDialog({
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
+      setUseOpenClawWorkspace(agent.useOpenClawWorkspace === true);
       setEffortLevel(null);
       effortTouched.current = false;
       setSetterError(null);
@@ -784,6 +792,12 @@ export function AgentInstanceEditDialog({
             autoRestartOnConfigChange,
           );
         }
+        if (useOpenClawWorkspace !== agent.useOpenClawWorkspace) {
+          await setManagedAgentUseOpenClawWorkspace(
+            agent.pubkey,
+            useOpenClawWorkspace,
+          );
+        }
         // Effort disk write happened inside the locked update. Only need to
         // invalidate the cache here (when effortTouched && effortSubmission.persist).
         // If effort was not included (!effortSubmission.persist), nothing to do.
@@ -1008,6 +1022,13 @@ export function AgentInstanceEditDialog({
                 />
               </div>
             </div>
+            <OpenClawWorkspaceToggleField
+              checked={useOpenClawWorkspace}
+              disabled={isSaving}
+              id="edit-agent-openclaw-workspace"
+              onCheckedChange={setUseOpenClawWorkspace}
+            />
+
             <OwnerOnlyAccessField
               accessLocked={agentAccessOwnerOnly === true}
               allowlist={respondToAllowlist}

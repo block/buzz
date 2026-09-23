@@ -16,6 +16,7 @@ import { cn } from "@/shared/lib/cn";
 import { Spinner } from "@/shared/ui/spinner";
 import { agentPresenceStartBlockReason } from "../lib/useAgentAvailability";
 import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
+import { OpenClawWorkspaceBadge } from "./OpenClawWorkspaceBadge";
 
 type AgentRuntimeAvatarControlProps = {
   activeTestId: string;
@@ -30,6 +31,8 @@ type AgentRuntimeAvatarControlProps = {
   label: string;
   requiresRestart?: boolean;
   startTestId: string;
+  /** Per-agent OpenClaw workspace MCP opt-in (show crab badge when true). */
+  useOpenClawWorkspace?: boolean;
   onOpenError?: () => void;
   onStart: () => void;
 };
@@ -145,6 +148,7 @@ export function AgentRuntimeAvatarControl({
   label,
   requiresRestart = false,
   startTestId,
+  useOpenClawWorkspace = false,
   onOpenError,
   onStart,
 }: AgentRuntimeAvatarControlProps) {
@@ -186,92 +190,100 @@ export function AgentRuntimeAvatarControl({
     showStatusDot || hasError ? undefined : actionBadge.cutoutWidth;
 
   return (
-    <MaskedAvatarBadgeFrame
-      badge={
-        <span className="grid h-full w-full place-items-center">
-          {showStatusDot ? (
-            <span
-              aria-label={`${label}: ${availabilityLabel}`}
-              className="h-full w-full rounded-full"
-              data-testid={activeTestId}
-              role="img"
-              title={startBlockReason ?? `${label}: ${availabilityLabel}`}
-            />
-          ) : (
-            <button
-              aria-label={hasError ? errorActionLabel : actionLabel}
-              className={cn(
-                "pointer-events-auto flex h-full w-full items-center justify-center rounded-full px-2.5 text-xs font-semibold leading-none transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90",
-                hasError
-                  ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                  : isRestartAction
-                    ? "bg-transparent text-amber-800 hover:bg-amber-500/10 dark:text-amber-400"
-                    : "bg-primary text-primary-foreground hover:bg-primary/90",
-              )}
-              data-testid={hasError ? errorTestId : startTestId}
-              disabled={isPending}
-              onClick={(event) => {
-                event.stopPropagation();
-                if (hasError) {
-                  onOpenError?.();
-                  return;
-                }
-                onStart();
-              }}
-              title={hasError ? errorLabel || errorActionLabel : actionLabel}
-              type="button"
-            >
-              {isPending ? (
-                <Spinner
-                  aria-label={actionLabel}
-                  className="h-4 w-4 border-2"
-                />
-              ) : hasError ? (
-                <CircleAlert className="h-4 w-4" />
-              ) : (
-                actionText
-              )}
-            </button>
-          )}
-        </span>
-      }
-      badgeBox={badge.shell}
-      badgeClassName={cn(
-        "transition-colors ease-in-out",
-        shouldReduceMotion ? "duration-0" : "duration-300",
-        showStatusDot
-          ? availability
-            ? getPresenceDotClassName(availability)
-            : "bg-muted-foreground/35"
-          : hasError
-            ? "bg-destructive"
-            : isRestartAction
-              ? "bg-amber-500/15"
-              : "bg-primary",
-      )}
-      className="h-24 w-24"
-      cornerRadius={AGENT_AVATAR_SIZE * 0.3}
-      curve={showStatusDot ? STATUS_DOT_MASK_CURVE : ACTION_MASK_CURVE}
-      cutout={badge.cutout}
-      cutoutWidth={actionCutoutWidth}
-      maskTransition={transition}
-      size={AGENT_AVATAR_SIZE}
-    >
-      {trimmedAvatarUrl ? (
-        <ProfileAvatar
-          avatarUrl={trimmedAvatarUrl}
-          className="h-full w-full bg-muted shadow-none"
-          iconClassName="h-8 w-8"
-          label={label}
-          shape="squircle"
+    <div className="relative h-24 w-24">
+      {useOpenClawWorkspace ? (
+        <OpenClawWorkspaceBadge
+          className="pointer-events-none absolute bottom-0 left-0 z-10"
+          size={ACTIVE_DOT_SIZE * 2}
         />
-      ) : (
-        <IdentityInitialsAvatar
-          className="border-0 shadow-none"
-          label={label}
-          size={AGENT_AVATAR_SIZE}
-        />
-      )}
-    </MaskedAvatarBadgeFrame>
+      ) : null}
+      <MaskedAvatarBadgeFrame
+        badge={
+          <span className="grid h-full w-full place-items-center">
+            {showStatusDot ? (
+              <span
+                aria-label={`${label}: ${availabilityLabel}`}
+                className="h-full w-full rounded-full"
+                data-testid={activeTestId}
+                role="img"
+                title={startBlockReason ?? `${label}: ${availabilityLabel}`}
+              />
+            ) : (
+              <button
+                aria-label={hasError ? errorActionLabel : actionLabel}
+                className={cn(
+                  "pointer-events-auto flex h-full w-full items-center justify-center rounded-full px-2.5 text-xs font-semibold leading-none transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90",
+                  hasError
+                    ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    : isRestartAction
+                      ? "bg-transparent text-amber-800 hover:bg-amber-500/10 dark:text-amber-400"
+                      : "bg-primary text-primary-foreground hover:bg-primary/90",
+                )}
+                data-testid={hasError ? errorTestId : startTestId}
+                disabled={isPending}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (hasError) {
+                    onOpenError?.();
+                    return;
+                  }
+                  onStart();
+                }}
+                title={hasError ? errorLabel || errorActionLabel : actionLabel}
+                type="button"
+              >
+                {isPending ? (
+                  <Spinner
+                    aria-label={actionLabel}
+                    className="h-4 w-4 border-2"
+                  />
+                ) : hasError ? (
+                  <CircleAlert className="h-4 w-4" />
+                ) : (
+                  actionText
+                )}
+              </button>
+            )}
+          </span>
+        }
+        badgeBox={badge.shell}
+        badgeClassName={cn(
+          "transition-colors ease-in-out",
+          shouldReduceMotion ? "duration-0" : "duration-300",
+          showStatusDot
+            ? availability
+              ? getPresenceDotClassName(availability)
+              : "bg-muted-foreground/35"
+            : hasError
+              ? "bg-destructive"
+              : isRestartAction
+                ? "bg-amber-500/15"
+                : "bg-primary",
+        )}
+        className="h-24 w-24"
+        cornerRadius={AGENT_AVATAR_SIZE * 0.3}
+        curve={showStatusDot ? STATUS_DOT_MASK_CURVE : ACTION_MASK_CURVE}
+        cutout={badge.cutout}
+        cutoutWidth={actionCutoutWidth}
+        maskTransition={transition}
+        size={AGENT_AVATAR_SIZE}
+      >
+        {trimmedAvatarUrl ? (
+          <ProfileAvatar
+            avatarUrl={trimmedAvatarUrl}
+            className="h-full w-full bg-muted shadow-none"
+            iconClassName="h-8 w-8"
+            label={label}
+            shape="squircle"
+          />
+        ) : (
+          <IdentityInitialsAvatar
+            className="border-0 shadow-none"
+            label={label}
+            size={AGENT_AVATAR_SIZE}
+          />
+        )}
+      </MaskedAvatarBadgeFrame>
+    </div>
   );
 }

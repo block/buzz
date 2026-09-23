@@ -404,9 +404,15 @@ export function UserProfilePanel({
     return true;
   }, [managedAgent, resolvedPersona]);
   const handleEditAgent = React.useCallback(() => {
-    if (openResolvedPersonaEditor()) return;
-    setEditAgentOpen(true);
-  }, [openResolvedPersonaEditor, setEditAgentOpen]);
+    // Prefer instance-edit when a managed agent exists so per-instance
+    // settings (including OpenClaw workspace) appear on the main surface.
+    // Fall back to the persona/definition editor only when there is no instance.
+    if (managedAgent) {
+      setEditAgentOpen(true);
+      return;
+    }
+    void openResolvedPersonaEditor();
+  }, [managedAgent, openResolvedPersonaEditor, setEditAgentOpen]);
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({
       channels: channelsQuery.data,
@@ -518,7 +524,10 @@ export function UserProfilePanel({
   }, [deleteManagedAgentRecord, managedAgent, onClose]);
 
   const handleSubmitPersona = React.useCallback(
-    async (input: CreatePersonaInput | UpdatePersonaInput) => {
+    async (
+      input: CreatePersonaInput | UpdatePersonaInput,
+      options?: { useOpenClawWorkspace?: boolean },
+    ) => {
       await submitProfilePersonaDialog({
         createManagedAgentForPersona,
         createPersona: createPersonaMutation.mutateAsync,
@@ -532,6 +541,7 @@ export function UserProfilePanel({
         runtimes: acpRuntimesQuery.data ?? [],
         updateManagedAgent: updateManagedAgentMutation.mutateAsync,
         updatePersona: updatePersonaMutation.mutateAsync,
+        useOpenClawWorkspace: options?.useOpenClawWorkspace,
       });
     },
     [
@@ -948,6 +958,7 @@ export function UserProfilePanel({
           createAgentMutation.isPending
         }
         linkedAgentPubkey={managedAgent?.pubkey ?? null}
+        managedAgent={managedAgent}
         personaDialogState={personaDialogState}
         personaToDelete={personaToDelete}
         personaToExportSnapshot={personaToExportSnapshot}

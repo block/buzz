@@ -195,6 +195,11 @@ pub struct CreateManagedAgentRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// Opt the new instance into OpenClaw workspace MCP (Hula). Default false.
+    /// Wire key is `useOpenclawWorkspace` (serde camelCase of use_openclaw_workspace).
+    /// Alias keeps older capital-C payloads working.
+    #[serde(default, rename = "useOpenclawWorkspace", alias = "useOpenClawWorkspace")]
+    pub use_openclaw_workspace: bool,
 }
 
 /// Patch request for updating a managed agent's mutable fields.
