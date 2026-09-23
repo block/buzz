@@ -302,6 +302,15 @@ pub fn anthropic_thinking_config(
         }
         ThinkingMode::None | ThinkingMode::OmitFields => {
             // Non-thinking model, or unknown/unverified Anthropic name: omit rather than guess.
+            // A persisted explicit setting can outlive a model switch, so make the
+            // discarded choice observable even though fresh clients advertise only `none`.
+            if effort != ThinkingEffort::None {
+                tracing::warn!(
+                    model = effective_model,
+                    requested = effort.openai_effort_str(),
+                    "BUZZ_AGENT_THINKING_EFFORT is unsupported for this unverified Anthropic model; omitting thinking fields"
+                );
+            }
             (None, None)
         }
     }

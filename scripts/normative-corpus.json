@@ -2394,16 +2394,9 @@
     "raw_model_id": "other.goose.goose-claude-opus-5-5",
     "expect": {
       "thinking_mode": "none",
-      "supported_efforts": [
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
-      "default_effort": "medium",
-      "databricks_v2_wire_route": "mlflow-chat",
+      "supported_efforts": [],
+      "default_effort": null,
+      "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "openai-clamp-max-to-xhigh",
       "registry_label": null
     }
@@ -2414,16 +2407,9 @@
     "raw_model_id": "data_workflow_tools.goose.goose-claude-opus-5-5-preview",
     "expect": {
       "thinking_mode": "none",
-      "supported_efforts": [
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
-      "default_effort": "medium",
-      "databricks_v2_wire_route": "mlflow-chat",
+      "supported_efforts": [],
+      "default_effort": null,
+      "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "openai-clamp-max-to-xhigh",
       "registry_label": null
     }
@@ -2434,16 +2420,9 @@
     "raw_model_id": "system.ai.claude-opus-5-5",
     "expect": {
       "thinking_mode": "none",
-      "supported_efforts": [
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
-      "default_effort": "medium",
-      "databricks_v2_wire_route": "mlflow-chat",
+      "supported_efforts": [],
+      "default_effort": null,
+      "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "openai-clamp-max-to-xhigh",
       "registry_label": null
     }
@@ -2464,6 +2443,76 @@
       ],
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "_group": "Uncurated Databricks Claude FQN routing",
+    "_note": "Only the service component selects Anthropic Messages; effort capabilities remain neutral."
+  },
+  {
+    "id": "dbv2-fqn-claude-anthropic",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.claude-sonnet-custom",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [],
+      "default_effort": null,
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-claude-case",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.GOOSE-CLAUDE-SONNET-CUSTOM",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [],
+      "default_effort": null,
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-claude-catalog-inert",
+    "provider": "databricks_v2",
+    "raw_model_id": "claude-catalog.schema.service",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-claude-schema-inert",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.claude-schema.service",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
       "normalization_policy": "openai-clamp-max-to-xhigh",
       "registry_label": null
     }
@@ -2618,16 +2667,9 @@
     "raw_model_id": "catalog.schema.claude-gpt-6",
     "expect": {
       "thinking_mode": "none",
-      "supported_efforts": [
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
-      "default_effort": "medium",
-      "databricks_v2_wire_route": "mlflow-chat",
+      "supported_efforts": [],
+      "default_effort": null,
+      "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "openai-clamp-max-to-xhigh",
       "registry_label": null
     }

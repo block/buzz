@@ -309,6 +309,16 @@ pub(crate) fn is_databricks_model_service_fqn(model: &str) -> bool {
     }) && components.next().is_none()
 }
 
+/// Route uncurated Claude UC services through Anthropic Messages without
+/// borrowing effort capabilities from the service name.
+fn fqn_requires_anthropic_messages(model: &str) -> bool {
+    let Some(service) = model.rsplit('.').next() else {
+        return false;
+    };
+    let lower = service.to_ascii_lowercase();
+    strip_catalog_prefix(&lower, &manifest().family_tokens).starts_with("claude-")
+}
+
 /// Route GPT-5+ UC services to Responses without borrowing endpoint effort facts.
 /// Match the first family token in the service only, preserving the existing
 /// boundary semantics (e.g. `claude-gpt-5` is not a GPT service).
@@ -336,8 +346,8 @@ pub fn resolve(provider: &str, raw_model_id: &str) -> CapabilityResult {
     let blank = raw_model_id.trim().is_empty();
 
     // Uncurated FQNs keep neutral effort capabilities. Exact records are verified
-    // service contracts, not family-name inference. The GPT-5+ route-only fallback
-    // inspects just the service component, never catalog/schema names.
+    // service contracts, not family-name inference. Route-only fallbacks inspect
+    // just the service component, never catalog/schema names.
     let model_service_fqn =
         canon == "databricks_v2" && is_databricks_model_service_fqn(raw_model_id);
 
@@ -410,11 +420,24 @@ pub fn resolve(provider: &str, raw_model_id: &str) -> CapabilityResult {
     } else {
         &pair.concrete_unknown
     };
+    let fqn_anthropic_messages = model_service_fqn && fqn_requires_anthropic_messages(raw_model_id);
     CapabilityResult {
+        // Route inference does not prove thinking support. Expose no choices for
+        // an unverified Claude FQN; verified exact records returned above.
         thinking_mode: state.thinking_mode,
-        supported_efforts: &state.supported_efforts,
-        default_effort: state.default_effort,
-        databricks_v2_wire_route: if model_service_fqn && fqn_requires_responses(raw_model_id) {
+        supported_efforts: if fqn_anthropic_messages {
+            &[]
+        } else {
+            &state.supported_efforts
+        },
+        default_effort: if fqn_anthropic_messages {
+            None
+        } else {
+            state.default_effort
+        },
+        databricks_v2_wire_route: if fqn_anthropic_messages {
+            DatabricksV2Route::AnthropicMessages
+        } else if model_service_fqn && fqn_requires_responses(raw_model_id) {
             DatabricksV2Route::OpenaiResponses
         } else {
             state.databricks_v2_wire_route
@@ -755,6 +778,11 @@ mod tests {
     Q::Vector { id: "dbv2-opus-uc-service", provider: "databricks_v2", raw_model_id: "data_workflow_tools.goose.goose-claude-opus-5-5-preview", note: None },
     Q::Vector { id: "dbv2-opus-uc-system", provider: "databricks_v2", raw_model_id: "system.ai.claude-opus-5-5", note: None },
     Q::Vector { id: "dbv2-opus-uc-provider", provider: "openai", raw_model_id: "data_workflow_tools.goose.goose-claude-opus-5-5", note: None },
+    Q::Section { group: "Uncurated Databricks Claude FQN routing", note: Some("Only the service component selects Anthropic Messages; effort capabilities remain neutral.") },
+    Q::Vector { id: "dbv2-fqn-claude-anthropic", provider: "databricks_v2", raw_model_id: "catalog.schema.claude-sonnet-custom", note: None },
+    Q::Vector { id: "dbv2-fqn-claude-case", provider: "databricks_v2", raw_model_id: "catalog.schema.GOOSE-CLAUDE-SONNET-CUSTOM", note: None },
+    Q::Vector { id: "dbv2-fqn-claude-catalog-inert", provider: "databricks_v2", raw_model_id: "claude-catalog.schema.service", note: None },
+    Q::Vector { id: "dbv2-fqn-claude-schema-inert", provider: "databricks_v2", raw_model_id: "catalog.claude-schema.service", note: None },
     Q::Section { group: "Databricks FQN GPT-5+ Responses routing", note: Some("Only the service component selects Responses; effort capabilities remain neutral.") },
     Q::Vector { id: "dbv2-fqn-responses-0", provider: "databricks_v2", raw_model_id: "catalog.schema.goose-gpt-6-astra", note: None },
     Q::Vector { id: "dbv2-fqn-responses-1", provider: "databricks_v2", raw_model_id: "catalog.schema.goose-gpt-5", note: None },
@@ -894,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn corpus_has_exactly_164_executable_vectors() {
+    fn corpus_has_exactly_168_executable_vectors() {
         // Locks the vector count so a silent INPUTS edit can't quietly drop
         // coverage; must equal the gate in the TS harness
         // (modelCapabilitiesCorpus.test.mjs).
@@ -903,7 +931,7 @@ mod tests {
             .filter(|q| matches!(q, Q::Vector { .. }))
             .count();
         assert_eq!(
-            vectors, 164,
+            vectors, 168,
             "corpus executable-vector count changed; update this gate deliberately"
         );
     }
