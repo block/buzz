@@ -3328,10 +3328,7 @@ channels = "ALL"
 
     #[test]
     fn compose_session_title_qualifies_the_agent_name_with_the_channel() {
-        assert_eq!(
-            compose_session_title("buzz", Some("hula")),
-            "buzz #hula"
-        );
+        assert_eq!(compose_session_title("buzz", Some("hula")), "buzz #hula");
         assert_eq!(
             compose_session_title("Fizz", Some("buzz-dev")),
             "Fizz #buzz-dev"
