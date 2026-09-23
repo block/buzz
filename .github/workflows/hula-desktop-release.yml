@@ -38,6 +38,10 @@ on:
       - 'hula-desktop-v[0-9]*'
 
 env:
+  # Hula ships the protected/OpenClaw UI. Without this, Vite resolves
+  # @protected-features to the OSS stubs and release looks nothing like
+  # `just desktop-standalone` (which loads desktop/.env.local).
+  VITE_BUZZ_BESTIE: "1"
   HULA_UPDATER_ENDPOINT: https://github.com/jmfcamp/buzz/releases/download/hula-desktop-latest/latest.json
   HULA_REPO: jmfcamp/buzz
 
@@ -219,6 +223,18 @@ jobs:
           fi
           echo "Updater compile-time env OK (endpoint=${BUZZ_UPDATER_ENDPOINT})"
 
+
+      - name: Guard Hula protected UI env
+        # OpenClaw workspace Settings / badges / relay grant UI live behind
+        # VITE_BUZZ_BESTIE=1. Missing it ships an OSS frontend (hula.7 lesson).
+        run: |
+          set -euo pipefail
+          if [[ "${VITE_BUZZ_BESTIE:-}" != "1" ]]; then
+            echo "::error::VITE_BUZZ_BESTIE must be 1 for Hula desktop releases (got '${VITE_BUZZ_BESTIE:-}')"
+            exit 1
+          fi
+          echo "Hula protected UI env OK (VITE_BUZZ_BESTIE=1)"
+
       - name: Build unsigned Tauri app (updater-signed)
         # --no-sign skips Apple codesign AND Tauri updater .sig generation.
         # createUpdaterArtifacts still emits .app.tar.gz; we sign it next.
@@ -230,6 +246,7 @@ jobs:
           # Restate explicitly so this step cannot silently regress.
           # Pubkey comes from Generate release config via GITHUB_ENV;
           # endpoint is the workflow-level HULA_UPDATER_ENDPOINT.
+          VITE_BUZZ_BESTIE: "1"
           BUZZ_UPDATER_PUBLIC_KEY: ${{ env.BUZZ_UPDATER_PUBLIC_KEY }}
           BUZZ_UPDATER_ENDPOINT: ${{ env.HULA_UPDATER_ENDPOINT }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

@@ -299,7 +299,8 @@ desktop-release-build target="aarch64-apple-darwin": (_ensure-sidecar-stubs targ
         ./scripts/bundle-sidecars.sh "$TARGET"
     fi
     pnpm install
-    cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
+    # Hula: protected/OpenClaw UI (matches CI; debug uses desktop/.env.local)
+    cd {{desktop_dir}} && VITE_BUZZ_BESTIE=1 pnpm tauri build --features mesh-llm --target {{target}}
 
 # Build an unsigned named macOS demo DMG with isolated app and runtime identities.
 desktop-demo-build demo_name target="aarch64-apple-darwin":
@@ -322,7 +323,7 @@ desktop-demo-build demo_name target="aarch64-apple-darwin":
     ./scripts/bundle-sidecars.sh "$TARGET"
     pnpm install
     cd {{desktop_dir}}
-    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" pnpm tauri build --features mesh-llm --target "$TARGET" --bundles app --config "$CONFIG_PATH"
+    VITE_BUZZ_BESTIE=1 BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" pnpm tauri build --features mesh-llm --target "$TARGET" --bundles app --config "$CONFIG_PATH"
     cd ..
     VERSION="$(node -p "require('./desktop/package.json').version")"
     DMG_ARCH="${TARGET%%-*}"; [[ "$DMG_ARCH" == "x86_64" ]] && DMG_ARCH=x64
