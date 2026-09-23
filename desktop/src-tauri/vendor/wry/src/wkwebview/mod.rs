@@ -1346,8 +1346,19 @@ r#"Object.defineProperty(window, 'ipc', {
 }
 
 pub fn url_from_webview(webview: &WKWebView) -> Result<String> {
-  let url_obj = unsafe { webview.URL().unwrap() };
-  let absolute_url = unsafe { url_obj.absoluteString().unwrap() };
+  // WKWebView.URL() / NSURL.absoluteString() are nullable ObjC APIs. Unwrap
+  // panics here abort the whole desktop process (panic=abort). Return Io Err
+  // instead; callers such as pin/playground already use `.url().ok()`.
+  let Some(url_obj) = (unsafe { webview.URL() }) else {
+    return Err(Error::Io(std::io::Error::other(
+      "WKWebView.URL returned nil",
+    )));
+  };
+  let Some(absolute_url) = (unsafe { url_obj.absoluteString() }) else {
+    return Err(Error::Io(std::io::Error::other(
+      "NSURL.absoluteString returned nil",
+    )));
+  };
 
   let bytes = {
     let bytes: *const c_char = absolute_url.UTF8String();

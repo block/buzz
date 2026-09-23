@@ -162,8 +162,10 @@ buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }
 
 # wry 0.55.1 / rfd 0.16.0 still panic when +[NSOpenPanel openPanel] returns
 # nil (macOS 26, ad-hoc local builds). Upstream wry#1716 is unmerged and
-# wry 0.56.1 still calls the typed binding. Patch in-tree; drop when a
-# crates.io release retains nil and cancels instead of aborting.
+# wry 0.56.1 still calls the typed binding. Also patch wry url_from_webview
+# so nil WKWebView.URL / absoluteString returns Err(Io) instead of unwrap
+# panic (desktop ships panic=abort). Drop when a crates.io release retains
+# nil panels and handles nil webview URLs without aborting.
 [patch.crates-io]
 wry = { path = "vendor/wry" }
 rfd = { path = "vendor/rfd" }
