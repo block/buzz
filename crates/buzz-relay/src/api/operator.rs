@@ -182,7 +182,11 @@ pub async fn provision_community(
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
-        Err(msg) if msg == "community already exists" || msg.starts_with("limit_reached:") => {
+        Err(msg)
+            if msg == "community already exists"
+                || msg.starts_with("limit_reached:")
+                || msg.starts_with("owner_conflict:") =>
+        {
             Err(api_error(StatusCode::CONFLICT, &msg))
         }
         Err(msg)
@@ -542,6 +546,12 @@ pub async fn transfer_community(
             return Err(api_error(
                 StatusCode::CONFLICT,
                 "owner_conflict: the current owner no longer matches expected_owner_pubkey",
+            ));
+        }
+        buzz_db::relay_members::TransferResult::LifecycleConflict => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "community must be active to transfer ownership",
             ));
         }
         buzz_db::relay_members::TransferResult::DeletionPending => {
@@ -1344,6 +1354,68 @@ mod postgres_tests {
         assert_eq!(member.role, "owner");
 
         assert_snapshot_roles(&state, community.id, &[(&owner_hex, "owner")]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn archived_legacy_owner_convergence_returns_conflict_without_membership_change() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let replacement = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(state.clone(), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup community")
+            .expect("community exists");
+        archive_for_owner_deletion(&state, &host, &owner).await;
+
+        let body = serde_json::json!({
+            "host": host,
+            "initial_owner_pubkey": replacement.public_key().to_hex(),
+            "create_only": false,
+        })
+        .to_string();
+        let response = signed_operator_request(
+            state.clone(),
+            &operator,
+            "POST",
+            "/operator/communities",
+            Some(body),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            read_json(response).await["error"],
+            "owner_conflict: community must be active to rotate ownership"
+        );
+        assert_eq!(
+            state
+                .db
+                .get_relay_member(community.id, &owner.public_key().to_hex())
+                .await
+                .expect("get owner")
+                .expect("owner exists")
+                .role,
+            "owner"
+        );
+        assert!(state
+            .db
+            .get_relay_member(community.id, &replacement.public_key().to_hex())
+            .await
+            .expect("get replacement")
+            .is_none());
     }
 
     #[tokio::test]

@@ -26,6 +26,12 @@ management lists suppress the archived row. Replaying the same UUID converges
 to its current stage; a different UUID conflicts with the existing one-active-
 request invariant until that request is aborted.
 
+Ownership is mutable only while a community is active. Archiving freezes the
+current owner. Normal transfer and deployment-root legacy convergence take the
+same community-row lock as owner-deletion admission, then reject archived,
+quiescing, deleted, or deletion-pending rotation without changing membership.
+Initial owner bootstrap for a newly created community remains supported.
+
 Buzz is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 
 ---

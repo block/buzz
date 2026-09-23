@@ -3597,9 +3597,11 @@ mod tests {
 mod postgres_tests {
     use super::*;
     use crate::{
-        relay_members::TransferResult, CreateCommunityWithOwnerResult, Db, DbConfig,
-        UnarchiveCommunityResult,
+        relay_members::{ProvisionOwnerResult, TransferResult},
+        CreateCommunityWithOwnerResult, Db, DbConfig, UnarchiveCommunityResult,
     };
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::str::FromStr;
 
     async fn store() -> (Db, DeletionStore) {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -3685,6 +3687,188 @@ mod postgres_tests {
         (host, owner, created.id)
     }
 
+    struct AdmissionInsertGate {
+        connection: sqlx::pool::PoolConnection<Postgres>,
+        trigger_name: String,
+        function_name: String,
+        first_key: i32,
+        second_key: i32,
+    }
+
+    async fn install_admission_insert_gate(db: &Db, request_id: Uuid) -> AdmissionInsertGate {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let trigger_name = format!("owner_admission_gate_{suffix}");
+        let function_name = format!("owner_admission_gate_fn_{suffix}");
+        let first_key = (request_id.as_u128() as u32 & 0x7fff_ffff) as i32;
+        let second_key = ((request_id.as_u128() >> 32) as u32 & 0x7fff_ffff) as i32;
+        let mut connection = db.pool.acquire().await.expect("acquire gate connection");
+        sqlx::query("SELECT pg_advisory_lock(712345, 193847)")
+            .execute(&mut *connection)
+            .await
+            .expect("serialize admission gate fixtures");
+        sqlx::query("SELECT pg_advisory_lock($1, $2)")
+            .bind(first_key)
+            .bind(second_key)
+            .execute(&mut *connection)
+            .await
+            .expect("hold admission gate");
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE FUNCTION {function_name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               IF NEW.id = '{request_id}'::uuid THEN \
+                 PERFORM pg_advisory_xact_lock({first_key}, {second_key}); \
+               END IF; \
+               RETURN NEW; \
+             END $$"
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("install admission gate function");
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE TRIGGER {trigger_name} BEFORE INSERT ON community_deletion_requests \
+             FOR EACH ROW EXECUTE FUNCTION {function_name}()"
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("install admission gate trigger");
+        AdmissionInsertGate {
+            connection,
+            trigger_name,
+            function_name,
+            first_key,
+            second_key,
+        }
+    }
+
+    async fn wait_for_admission_gate(db: &Db, gate: &AdmissionInsertGate) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND classid = $1::oid AND objid = $2::oid \
+                       AND objsubid = 2 AND NOT granted)",
+                )
+                .bind(gate.first_key)
+                .bind(gate.second_key)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect admission gate");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner admission reached gated insert");
+    }
+
+    async fn release_admission_insert_gate(gate: &mut AdmissionInsertGate) {
+        sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+            .bind(gate.first_key)
+            .bind(gate.second_key)
+            .execute(&mut *gate.connection)
+            .await
+            .expect("release admission gate");
+    }
+
+    async fn remove_admission_insert_gate(db: &Db, mut gate: AdmissionInsertGate) {
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP TRIGGER {} ON community_deletion_requests",
+            gate.trigger_name
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("remove admission gate trigger");
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP FUNCTION {}()",
+            gate.function_name
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("remove admission gate function");
+        sqlx::query("SELECT pg_advisory_unlock(712345, 193847)")
+            .execute(&mut *gate.connection)
+            .await
+            .expect("release admission fixture serialization");
+    }
+
+    async fn contender_db(application_name: &str) -> Db {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+        let options = PgConnectOptions::from_str(&database_url)
+            .expect("parse test database URL")
+            .application_name(application_name);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect contender DB");
+        Db::from_pool(pool)
+    }
+
+    async fn wait_for_contender_lock(db: &Db, application_name: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE datname = current_database() AND application_name = $1 \
+                       AND wait_event_type = 'Lock')",
+                )
+                .bind(application_name)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect contender lock");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("contender reached community row lock");
+    }
+
+    async fn membership_roles(db: &Db, community: CommunityId) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT pubkey, role FROM relay_members WHERE community_id = $1 ORDER BY pubkey",
+        )
+        .bind(community.as_uuid())
+        .fetch_all(&db.pool)
+        .await
+        .expect("read membership roles")
+    }
+
+    async fn assert_owner_admission_is_only_committed_mutation(
+        db: &Db,
+        community: CommunityId,
+        request_id: Uuid,
+    ) {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM community_deletion_requests \
+                 WHERE id = $1 AND community_id = $2 AND stage = 'submitted'",
+            )
+            .bind(request_id)
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .expect("count admitted request"),
+            1
+        );
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT archived_at IS NOT NULL FROM communities WHERE id = $1",
+            )
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .expect("read archive state"),
+            "the losing mutation must not clear archive state"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn owner_admission_requires_current_owner_and_archived_active_target() {
@@ -3754,19 +3938,196 @@ mod postgres_tests {
                 .expect("non-owner admission result"),
             OwnerDeletionAdmission::NotFoundOrNotOwner
         );
-        assert!(matches!(
+        assert_eq!(
             db.transfer_ownership(created.id, &replacement, &owner)
                 .await
-                .expect("rotate owner"),
-            TransferResult::Transferred { .. }
-        ));
-        assert_eq!(
+                .expect("reject archived owner rotation"),
+            TransferResult::LifecycleConflict
+        );
+        assert!(matches!(
             store
                 .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
                 .await
-                .expect("stale-owner admission result"),
-            OwnerDeletionAdmission::NotFoundOrNotOwner
+                .expect("current-owner admission result"),
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn accepted_owner_deletion_blocks_legacy_owner_convergence_without_membership_change() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let replacement = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let before = membership_roles(&db, community).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert!(matches!(
+            store
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+                .await
+                .expect("admit owner request"),
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+
+        assert_eq!(
+            db.provision_owner(community, &replacement)
+                .await
+                .expect("legacy convergence result"),
+            ProvisionOwnerResult::DeletionPending
         );
+        assert_eq!(membership_roles(&db, community).await, before);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_owner_admission_serializes_before_normal_transfer() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let replacement = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let before = membership_roles(&db, community).await;
+        let request_id = Uuid::new_v4();
+        let mut gate = install_admission_insert_gate(&db, request_id).await;
+        let admission = tokio::spawn({
+            let store = store.clone();
+            let host = host.clone();
+            let owner = owner.clone();
+            async move {
+                store
+                    .admit_owner_request(
+                        &host,
+                        &owner,
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        1,
+                        request_id,
+                    )
+                    .await
+            }
+        });
+        wait_for_admission_gate(&db, &gate).await;
+
+        let application_name = format!("owner-transfer-{}", Uuid::new_v4().simple());
+        let contender = contender_db(&application_name).await;
+        let transfer = tokio::spawn({
+            let owner = owner.clone();
+            let replacement = replacement.clone();
+            async move {
+                contender
+                    .transfer_ownership(community, &replacement, &owner)
+                    .await
+            }
+        });
+        wait_for_contender_lock(&db, &application_name).await;
+        release_admission_insert_gate(&mut gate).await;
+
+        let admission_result = admission.await.expect("join admission").expect("admission");
+        let transfer_result = transfer.await.expect("join transfer").expect("transfer");
+        remove_admission_insert_gate(&db, gate).await;
+        assert!(matches!(
+            admission_result,
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+        assert_eq!(transfer_result, TransferResult::DeletionPending);
+        assert_eq!(membership_roles(&db, community).await, before);
+        assert_owner_admission_is_only_committed_mutation(&db, community, request_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_owner_admission_serializes_before_unarchive() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let before = membership_roles(&db, community).await;
+        let request_id = Uuid::new_v4();
+        let mut gate = install_admission_insert_gate(&db, request_id).await;
+        let admission = tokio::spawn({
+            let store = store.clone();
+            let host = host.clone();
+            let owner = owner.clone();
+            async move {
+                store
+                    .admit_owner_request(
+                        &host,
+                        &owner,
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        1,
+                        request_id,
+                    )
+                    .await
+            }
+        });
+        wait_for_admission_gate(&db, &gate).await;
+
+        let application_name = format!("owner-unarchive-{}", Uuid::new_v4().simple());
+        let contender = contender_db(&application_name).await;
+        let unarchive = tokio::spawn({
+            let host = host.clone();
+            let owner = owner.clone();
+            async move { contender.unarchive_community_owned_by(&host, &owner).await }
+        });
+        wait_for_contender_lock(&db, &application_name).await;
+        release_admission_insert_gate(&mut gate).await;
+
+        let admission_result = admission.await.expect("join admission").expect("admission");
+        let unarchive_result = unarchive.await.expect("join unarchive").expect("unarchive");
+        remove_admission_insert_gate(&db, gate).await;
+        assert!(matches!(
+            admission_result,
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+        assert_eq!(unarchive_result, UnarchiveCommunityResult::DeletionPending);
+        assert_eq!(membership_roles(&db, community).await, before);
+        assert_owner_admission_is_only_committed_mutation(&db, community, request_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_owner_admission_serializes_before_legacy_owner_rotation() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let replacement = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let before = membership_roles(&db, community).await;
+        let request_id = Uuid::new_v4();
+        let mut gate = install_admission_insert_gate(&db, request_id).await;
+        let admission = tokio::spawn({
+            let store = store.clone();
+            let host = host.clone();
+            let owner = owner.clone();
+            async move {
+                store
+                    .admit_owner_request(
+                        &host,
+                        &owner,
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        1,
+                        request_id,
+                    )
+                    .await
+            }
+        });
+        wait_for_admission_gate(&db, &gate).await;
+
+        let application_name = format!("owner-legacy-{}", Uuid::new_v4().simple());
+        let contender = contender_db(&application_name).await;
+        let provision = tokio::spawn({
+            let replacement = replacement.clone();
+            async move { contender.provision_owner(community, &replacement).await }
+        });
+        wait_for_contender_lock(&db, &application_name).await;
+        release_admission_insert_gate(&mut gate).await;
+
+        let admission_result = admission.await.expect("join admission").expect("admission");
+        let provision_result = provision
+            .await
+            .expect("join legacy convergence")
+            .expect("legacy convergence");
+        remove_admission_insert_gate(&db, gate).await;
+        assert!(matches!(
+            admission_result,
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+        assert_eq!(provision_result, ProvisionOwnerResult::DeletionPending);
+        assert_eq!(membership_roles(&db, community).await, before);
+        assert_owner_admission_is_only_committed_mutation(&db, community, request_id).await;
     }
 
     #[tokio::test]
