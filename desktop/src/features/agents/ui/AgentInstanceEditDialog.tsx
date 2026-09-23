@@ -12,6 +12,7 @@ import {
   usePersonasQuery,
   useStartManagedAgentMutation,
   useUpdateManagedAgentMutation,
+  useUpdatePersonaMutation,
 } from "@/features/agents/hooks";
 import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
@@ -32,6 +33,14 @@ import {
 } from "@/shared/api/tauriManagedAgents";
 import { EffortPickerField } from "./EffortPickerField";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
+import { EditAgentAvatarColumn } from "./EditAgentAvatarColumn";
+import { EditAgentIdentityFields } from "./EditAgentIdentityFields";
+import {
+  isPersonaIdentityEditable,
+  persistPersonaIdentityUpdate,
+  resolveInstanceSystemPromptUpdate,
+} from "./editAgentPersonaIdentity";
+import { useEditAgentIdentitySeed } from "./useEditAgentIdentitySeed";
 import {
   ADVANCED_FIELDS_MOTION_TRANSITION,
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -69,7 +78,6 @@ import {
   selectionOnRuntimeChange,
   type RuntimeModelProviderSelection,
 } from "./runtimeModelProviderSelection";
-import { AgentCreationPreview } from "./AgentCreationPreview";
 import { OwnerOnlyAccessField } from "./OwnerOnlyAccessField";
 import { OpenClawWorkspaceToggleField } from "./OpenClawWorkspaceToggleField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
@@ -122,6 +130,7 @@ export function AgentInstanceEditDialog({
   onUpdated?: (agent: ManagedAgent) => void;
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
+  const updatePersonaMutation = useUpdatePersonaMutation();
   const startMutation = useStartManagedAgentMutation();
   const queryClient = useQueryClient();
   // Spans the COMPLETE Save sequence (locked update + standalone setters).
@@ -152,6 +161,7 @@ export function AgentInstanceEditDialog({
   const [systemPrompt, setSystemPrompt] = React.useState(
     agent.systemPrompt ?? "",
   );
+  const [descriptionDraft, setDescriptionDraft] = React.useState("");
   const [model, setModel] = React.useState(agent.model ?? "");
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [provider, setProvider] = React.useState(agent.provider ?? "");
@@ -178,6 +188,15 @@ export function AgentInstanceEditDialog({
         : null,
     [agent.personaId, personasQuery.data],
   );
+  const personaIdentityEditable = isPersonaIdentityEditable(linkedPersona);
+  const { resetIdentitySeed } = useEditAgentIdentitySeed({
+    agentPersonaId: agent.personaId,
+    agentSystemPrompt: agent.systemPrompt,
+    linkedPersona,
+    open,
+    setDescriptionDraft,
+    setSystemPrompt,
+  });
   const inheritedEnvVars = linkedPersona?.envVars ?? {};
   const [respondTo, setRespondTo] = React.useState<RespondToMode>(
     agent.respondTo,
@@ -198,11 +217,11 @@ export function AgentInstanceEditDialog({
 
   // Tracks whether the user has made an in-dialog runtime selection.
   const runtimeTouched = React.useRef(false);
-
   // Reset form state only when the dialog opens or when switching to a different agent.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — including agent fields would re-fire on every 5s poll and wipe edits
   React.useEffect(() => {
     if (open) {
+      resetIdentitySeed();
       setName(agent.name);
       setAcpCommand(agent.acpCommand);
       setAgentCommand(agent.agentCommand);
@@ -694,6 +713,18 @@ export function AgentInstanceEditDialog({
       if (nextName !== agent.name && isReservedCommunityAgentName(nextName)) {
         throw new Error(reservedCommunityAgentNameError(nextName));
       }
+
+      const syncedSystemPrompt =
+        personaIdentityEditable && linkedPersona
+          ? await persistPersonaIdentityUpdate({
+              descriptionDraft,
+              persona: linkedPersona,
+              systemPromptDraft: systemPrompt,
+              updatePersona: (input) =>
+                updatePersonaMutation.mutateAsync(input),
+            })
+          : undefined;
+
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: nextName !== agent.name ? nextName : undefined,
@@ -718,13 +749,12 @@ export function AgentInstanceEditDialog({
           parsedParallelism > 0 && parsedParallelism !== agent.parallelism
             ? parsedParallelism
             : undefined,
-        // Linked instances defer model/provider/systemPrompt to the definition.
-        systemPrompt:
-          linkedPersona != null
-            ? undefined
-            : (systemPrompt.trim() || null) !== agent.systemPrompt
-              ? systemPrompt.trim() || null
-              : undefined,
+        systemPrompt: resolveInstanceSystemPromptUpdate({
+          agentSystemPrompt: agent.systemPrompt,
+          linkedPersona,
+          syncedSystemPrompt,
+          systemPromptDraft: systemPrompt,
+        }),
         model:
           linkedPersona != null
             ? undefined
@@ -963,66 +993,29 @@ export function AgentInstanceEditDialog({
         }
       >
         <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
-          {/* Avatar is definition-level identity. hideEditControl suppresses
-              the internal pencil badge; the CTA below is the only edit path. */}
-          <div className="flex flex-col items-center gap-2">
-            <AgentCreationPreview
-              avatarUrl={previewAvatarUrl}
-              hideEditControl
-              label={previewLabel}
-              onClearAvatar={() => setAvatarUrl("")}
-              onUploadPendingChange={setIsAvatarUploadPending}
-              onSelectAvatar={setAvatarUrl}
-              showOpenClawWorkspaceBadge={useOpenClawWorkspace}
-            />
-            {onEditLinkedPersona ? (
-              <Button
-                className="w-full"
-                disabled={isSaving}
-                onClick={() => {
-                  handleOpenChange(false);
-                  onEditLinkedPersona();
-                }}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                Edit avatar
-              </Button>
-            ) : (
-              <p className="text-center text-xs text-muted-foreground">
-                Avatar is shared identity
-              </p>
-            )}
-          </div>
+          <EditAgentAvatarColumn
+            isSaving={isSaving}
+            onEditLinkedPersona={onEditLinkedPersona}
+            onOpenChange={handleOpenChange}
+            previewAvatarUrl={previewAvatarUrl}
+            previewLabel={previewLabel}
+            setAvatarUrl={setAvatarUrl}
+            setIsAvatarUploadPending={setIsAvatarUploadPending}
+            useOpenClawWorkspace={useOpenClawWorkspace}
+          />
           <div className="space-y-5">
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-name"
-              >
-                Agent name
-              </label>
-              <div
-                className={cn(
-                  "flex min-h-11 items-center px-3",
-                  PERSONA_FIELD_SHELL_CLASS,
-                )}
-              >
-                <Input
-                  autoCorrect="off"
-                  className={cn(
-                    "h-8 px-0 py-0 leading-6",
-                    PERSONA_FIELD_CONTROL_CLASS,
-                  )}
-                  disabled={isSaving}
-                  id="edit-agent-name"
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Agent name"
-                  value={name}
-                />
-              </div>
-            </div>
+            <EditAgentIdentityFields
+              descriptionDraft={descriptionDraft}
+              disabled={isSaving}
+              linkedPersonaPresent={linkedPersona != null}
+              name={name}
+              onDescriptionChange={setDescriptionDraft}
+              onNameChange={setName}
+              onSystemPromptChange={setSystemPrompt}
+              personaIdentityEditable={personaIdentityEditable}
+              systemPrompt={systemPrompt}
+            />
+
             <OpenClawWorkspaceToggleField
               checked={useOpenClawWorkspace}
               disabled={isSaving}
@@ -1227,14 +1220,12 @@ export function AgentInstanceEditDialog({
                       requiredEnvKeys={advancedRequiredEnvKeys}
                       catalogStatus={runtimeCatalogStatus}
                       selectedRuntime={prospectiveRuntime}
-                      systemPrompt={systemPrompt}
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}
                       onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onParallelismChange={setParallelism}
-                      onSystemPromptChange={setSystemPrompt}
                     />
                   </motion.div>
                 ) : null}

@@ -1,7 +1,6 @@
 import * as React from "react";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
-import { Textarea } from "@/shared/ui/textarea";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import {
   CARD_MINT_KEY_ANNOTATIONS,
@@ -48,14 +47,12 @@ export function EditAgentAdvancedFields({
   requiredEnvKeys,
   catalogStatus = "ready",
   selectedRuntime,
-  systemPrompt,
   onAcpCommandChange,
   onAgentArgsChange,
   onEnvVarsChange,
   onInheritHarnessChange,
   onParallelismChange,
   onAutoRestartChange,
-  onSystemPromptChange,
 }: {
   acpCommand: string;
   agentArgs: string;
@@ -99,14 +96,12 @@ export function EditAgentAdvancedFields({
    * When undefined after the catalog has settled, no numeric controls render.
    */
   selectedRuntime?: AcpRuntimeCatalogEntry;
-  systemPrompt: string;
   onAcpCommandChange: (value: string) => void;
   onAgentArgsChange: (value: string) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
   onParallelismChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
-  onSystemPromptChange: (value: string) => void;
 }) {
   // Numeric tuning descriptors — gate on catalog status so that loading/error
   // never collapses to "no controls": keys stay visible as generic rows.
@@ -298,33 +293,6 @@ export function EditAgentAdvancedFields({
           />
         </div>
       </div>
-
-      {/* System prompt override — hidden for linked instances; the persona
-          definition is authoritative and the backend will reject any override. */}
-      {linkedPersona == null && (
-        <div className="space-y-1.5">
-          <label
-            className="text-sm font-medium text-foreground"
-            htmlFor="edit-agent-system-prompt"
-          >
-            System prompt override
-            <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-          </label>
-          <div className={PERSONA_FIELD_SHELL_CLASS}>
-            <Textarea
-              className={cn(
-                "min-h-24 resize-y px-3 py-3 leading-5",
-                PERSONA_FIELD_CONTROL_CLASS,
-              )}
-              disabled={disabled}
-              id="edit-agent-system-prompt"
-              onChange={(event) => onSystemPromptChange(event.target.value)}
-              placeholder="Leave blank to send no ACP system prompt"
-              value={systemPrompt}
-            />
-          </div>
-        </div>
-      )}
 
       {/* Env vars */}
       <EnvVarsEditor
