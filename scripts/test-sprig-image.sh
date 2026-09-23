@@ -22,11 +22,6 @@ assert_run '
   test "$(pwd)" = /home/agent
 '
 
-assert_run '
-  grep -Eq "^[[:space:]]*exec buzz-acp" /usr/local/bin/sprig-entrypoint
-  ! grep -Eq "^[[:space:]]*(buzz-acp|bash -c .*buzz-acp)" /usr/local/bin/sprig-entrypoint
-'
-
 docker run --rm --entrypoint /bin/bash \
   -e BUZZ_RELAY_URL=wss://relay.example.test/ "$IMAGE" -ceu '
     /usr/local/bin/sprig-entrypoint --help >/dev/null
@@ -34,7 +29,8 @@ docker run --rm --entrypoint /bin/bash \
     ! git config --global --get-all credential.helper
   '
 
-# Exercise the actual Sprig -> ACP helper dispatch, without a live relay.
+# Exercise the image entrypoint, ACP harness, and both Git helper personalities
+# without contacting a relay.
 docker run --rm -i --entrypoint /bin/bash "$IMAGE" -seuo pipefail <<'SCRIPT'
 probe_dir=$(mktemp -d)
 trap 'rm -rf "$probe_dir"' EXIT
@@ -52,7 +48,11 @@ git verify-tag probe
 test "$(git show -s --format=%an HEAD)" = "$(git config user.name)"
 test "$(git show -s --format=%cn HEAD)" = "$(git config user.name)"
 git config nostr.keyfile > ../keyfile
+test "$(git config --get-urlmatch credential.helper https://relay.invalid/git/repo)" = nostr
 ! git config --get-urlmatch credential.helper https://unrelated.invalid/git/repo
+printf 'capability[]=authtype\nprotocol=https\nhost=relay.invalid\npath=git/repo\nwwwauth[]=Nostr method="GET"\n\n' |
+    git credential fill > ../credential-result
+grep -q '^authtype=Nostr$' ../credential-result
 printf done > ../done
 exec sleep 30
 ADAPTER
@@ -63,13 +63,18 @@ GIT_COMMITTER_NAME='Inherited Human' GIT_COMMITTER_EMAIL=human@example.invalid \
 BUZZ_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000001 \
 BUZZ_RELAY_URL=wss://relay.invalid \
 BUZZ_ACP_AGENT_COMMAND="$probe_dir/adapter" BUZZ_ACP_AGENT_ARGS= \
-    buzz-acp > "$probe_dir/log" 2>&1 &
+    /usr/local/bin/sprig-entrypoint > "$probe_dir/log" 2>&1 &
 pid=$!
 for _ in {1..100}; do
     [[ -f "$probe_dir/done" ]] && break
     sleep 0.1
 done
-kill -TERM "$pid"
+if ! kill -TERM "$pid" 2>/dev/null; then
+    wait "$pid" || true
+    cat "$probe_dir/log"
+    echo "harness exited before SIGTERM" >&2
+    exit 1
+fi
 for _ in {1..50}; do
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
@@ -80,7 +85,10 @@ if kill -0 "$pid" 2>/dev/null; then
     cat "$probe_dir/log"
     exit 1
 fi
-wait "$pid"
+if ! wait "$pid"; then
+    cat "$probe_dir/log"
+    exit 1
+fi
 if [[ ! -f "$probe_dir/done" ]]; then
     cat "$probe_dir/log"
     exit 1
