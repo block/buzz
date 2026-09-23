@@ -390,7 +390,7 @@ test.describe("global agent config screenshots", () => {
     await expect(option(siblingId)).toBeVisible();
     await expect(option("builderbot-pr-reviews")).toHaveCount(0);
 
-    await option(siblingId).click();
+    await page.getByRole("option", { name: "GPT-6 Astra (system.ai)" }).click();
     await expect(model).toHaveText("GPT-6 Astra (system.ai)");
     await expect(model).toHaveAttribute("data-value", siblingId);
 
