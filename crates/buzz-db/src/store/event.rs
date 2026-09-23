@@ -1938,15 +1938,19 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
+        let mut tx = crate::begin_community_event_write_transaction(
+            &self.pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
         let result =
-            crate::event::insert_event(&self.pool, community_id, event, channel_id).await?;
+            crate::event::insert_event_in_transaction(&mut tx, community_id, event, channel_id)
+                .await?;
         if result.1 {
-            if let Err(e) =
-                crate::insert_mentions(&self.pool, community_id, event, channel_id).await
-            {
-                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
-            }
+            crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
         }
+        tx.commit().await?;
         Ok(result)
     }
 
@@ -2461,8 +2465,14 @@ impl Db {
         channel_id: Option<Uuid>,
         thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
     ) -> Result<(StoredEvent, bool)> {
-        let result = crate::event::insert_event_with_thread_metadata(
+        let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        let result = crate::event::insert_event_with_thread_metadata_tx(
+            &mut tx,
             community_id,
             event,
             channel_id,
@@ -2470,12 +2480,9 @@ impl Db {
         )
         .await?;
         if result.1 {
-            if let Err(e) =
-                crate::insert_mentions(&self.pool, community_id, event, channel_id).await
-            {
-                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
-            }
+            crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
         }
+        tx.commit().await?;
         Ok(result)
     }
 
@@ -4610,6 +4617,251 @@ mod postgres_tests {
         assert!(
             is_deleted,
             "canvas event must have deleted_at set after soft-delete"
+        );
+    }
+
+    async fn admin_url() -> String {
+        crate::test_support::database_url()
+    }
+
+    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
+        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(admin)
+            .await
+            .expect("create scratch db");
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        let scratch_url = format!("{}/{}", &base[..idx], name);
+        let pool = PgPool::connect(&scratch_url)
+            .await
+            .expect("connect scratch db");
+        crate::migration::run_migrations(&pool)
+            .await
+            .expect("migrate scratch db");
+        (pool, name)
+    }
+
+    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
+        pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+        )))
+        .execute(admin)
+        .await;
+    }
+
+    fn make_mentioning_event(mentioned_hex: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), "mentions someone")
+            .tags(vec![Tag::parse(["p", mentioned_hex]).expect("p tag")])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign mentioning event")
+    }
+
+    async fn install_mention_failure_injection(pool: &PgPool) {
+        sqlx::query(
+            "CREATE FUNCTION reject_test_mention() RETURNS trigger AS $$ \
+             BEGIN RAISE EXCEPTION 'injected mention failure'; END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(pool)
+        .await
+        .expect("create failure function");
+        sqlx::query(
+            "CREATE TRIGGER reject_test_mention BEFORE INSERT ON event_mentions \
+             FOR EACH ROW EXECUTE FUNCTION reject_test_mention()",
+        )
+        .execute(pool)
+        .await
+        .expect("install failure injection");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_event_mention_failure_rolls_back_the_event_insert() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin database");
+        let (scratch_pool, name) = create_scratch_db(&admin, "event_mention_rollback").await;
+        install_mention_failure_injection(&scratch_pool).await;
+
+        let db = Db::from_pool(scratch_pool.clone());
+        let community = CommunityId::from_uuid(make_test_community(&scratch_pool).await);
+        let mentioned = Keys::generate();
+        let event = make_mentioning_event(&mentioned.public_key().to_hex());
+
+        let error = db
+            .insert_event(community, &event, None)
+            .await
+            .expect_err("mention-indexing failure must fail the whole event insert");
+        assert!(
+            error.to_string().contains("injected mention failure"),
+            "unexpected error: {error}"
+        );
+
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(event.id.as_bytes().as_slice())
+                .fetch_one(&scratch_pool)
+                .await
+                .expect("count event rows");
+        assert_eq!(
+            persisted, 0,
+            "event must not persist when mention indexing fails atomically"
+        );
+
+        drop_scratch_db(&admin, scratch_pool, &name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_event_mention_success_commits_atomically_with_event() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let mentioned = Keys::generate();
+        let event = make_mentioning_event(&mentioned.public_key().to_hex());
+
+        let (stored, was_inserted) = db
+            .insert_event(community, &event, None)
+            .await
+            .expect("insert event with mention");
+        assert!(was_inserted);
+        assert_eq!(stored.event.id, event.id);
+
+        let mention_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count mention rows");
+        assert_eq!(
+            mention_count, 1,
+            "mention row must be committed atomically alongside the event"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_event_with_thread_metadata_mention_failure_rolls_back_the_event_insert() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin database");
+        let (scratch_pool, name) = create_scratch_db(&admin, "event_thread_mention_rollback").await;
+        install_mention_failure_injection(&scratch_pool).await;
+
+        let db = Db::from_pool(scratch_pool.clone());
+        let community_uuid = make_test_community(&scratch_pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&scratch_pool, community_uuid, None).await;
+
+        let mentioned = Keys::generate();
+        let event = make_mentioning_event(&mentioned.public_key().to_hex());
+        let event_ts = DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+            .expect("valid timestamp");
+
+        let error = db
+            .insert_event_with_thread_metadata(
+                community,
+                &event,
+                Some(channel),
+                Some(ThreadMetadataParams {
+                    event_id: event.id.as_bytes(),
+                    event_created_at: event_ts,
+                    channel_id: channel,
+                    parent_event_id: None,
+                    parent_event_created_at: None,
+                    root_event_id: None,
+                    root_event_created_at: None,
+                    depth: 0,
+                    broadcast: true,
+                }),
+            )
+            .await
+            .expect_err("mention-indexing failure must fail the whole event insert");
+        assert!(
+            error.to_string().contains("injected mention failure"),
+            "unexpected error: {error}"
+        );
+
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(event.id.as_bytes().as_slice())
+                .fetch_one(&scratch_pool)
+                .await
+                .expect("count event rows");
+        assert_eq!(
+            persisted, 0,
+            "event must not persist when mention indexing fails atomically"
+        );
+
+        let thread_meta_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM thread_metadata WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_one(&scratch_pool)
+        .await
+        .expect("count thread metadata rows");
+        assert_eq!(
+            thread_meta_count, 0,
+            "thread metadata must not persist when mention indexing fails atomically"
+        );
+
+        drop_scratch_db(&admin, scratch_pool, &name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_event_with_thread_metadata_mention_success_commits_atomically() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        let mentioned = Keys::generate();
+        let event = make_mentioning_event(&mentioned.public_key().to_hex());
+        let event_ts = DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+            .expect("valid timestamp");
+
+        let (stored, was_inserted) = db
+            .insert_event_with_thread_metadata(
+                community,
+                &event,
+                Some(channel),
+                Some(ThreadMetadataParams {
+                    event_id: event.id.as_bytes(),
+                    event_created_at: event_ts,
+                    channel_id: channel,
+                    parent_event_id: None,
+                    parent_event_created_at: None,
+                    root_event_id: None,
+                    root_event_created_at: None,
+                    depth: 0,
+                    broadcast: true,
+                }),
+            )
+            .await
+            .expect("insert thread event with mention");
+        assert!(was_inserted);
+        assert_eq!(stored.event.id, event.id);
+
+        let mention_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count mention rows");
+        assert_eq!(
+            mention_count, 1,
+            "mention row must be committed atomically alongside the thread event"
         );
     }
 }

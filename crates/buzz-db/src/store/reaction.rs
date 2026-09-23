@@ -178,12 +178,12 @@ pub async fn insert_reaction_event_with_thread_metadata(
     actor_pubkey: &[u8],
     emoji: &str,
 ) -> Result<ReactionEventInsertOutcome> {
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     let target_row = sqlx::query(
         "SELECT created_at FROM events \
@@ -1185,5 +1185,186 @@ mod postgres_tests {
             groups_a_after.is_empty(),
             "A's reaction must be gone after A removes it"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_insert_fails_closed_and_rolls_back_when_community_is_fenced() {
+        use crate::deletion::DeletionStore;
+
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+
+        let target = make_text_event("fenced reaction target");
+        insert_event(&pool, community, &target, None)
+            .await
+            .expect("insert target before fencing");
+
+        let store = DeletionStore::new(pool.clone());
+        let host: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
+            .bind(community_uuid)
+            .fetch_one(&pool)
+            .await
+            .expect("load community host");
+        let submitted = store
+            .submit(&host, "test-operator", Some("reaction fence regression"))
+            .await
+            .expect("submit deletion request");
+        let empty_digest = crate::deletion::KeyStreamDigest::new().finish().0;
+        let empty_storage = crate::deletion::StorageManifest {
+            version: 4,
+            prefixes: vec![
+                crate::deletion::PrefixManifest {
+                    prefix: format!("_meta/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest.clone(),
+                },
+                crate::deletion::PrefixManifest {
+                    prefix: format!("_uploads/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest.clone(),
+                },
+                crate::deletion::PrefixManifest {
+                    prefix: format!("repos/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest,
+                },
+            ],
+        };
+        let inventory = crate::deletion::FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("inventory schema"),
+            storage: empty_storage,
+        };
+        let request = store
+            .freeze_inventory(submitted.id, &inventory)
+            .await
+            .expect("freeze inventory");
+        store
+            .approve(request.id, "test-approver", Some("approved"))
+            .await
+            .expect("approve request");
+        let claim = store
+            .claim_specific(
+                request.id,
+                "test-executor",
+                crate::deletion::DEFAULT_LEASE_DURATION,
+            )
+            .await
+            .expect("claim request")
+            .expect("claim winner");
+        store
+            .begin_quiescing(&claim.lease)
+            .await
+            .expect("begin quiescing");
+        store.fence(&claim.lease).await.expect("fence community");
+
+        let actor = Keys::generate();
+        let actor_pubkey = actor.public_key().to_bytes();
+        let emoji = "👍";
+        let reaction = make_reaction_event(&actor, &target.id.to_hex(), emoji);
+
+        let error = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &reaction,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor_pubkey,
+            emoji,
+        )
+        .await
+        .expect_err("fenced community must reject reaction inserts");
+        assert!(
+            matches!(&error, DbError::AccessDenied(message) if message.contains("write-fenced")),
+            "expected write-fenced access denial, got: {error:#}"
+        );
+
+        let reaction_row_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM reactions WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(target.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count reaction rows");
+        assert_eq!(
+            reaction_row_count, 0,
+            "fenced rejection must not leave a partially committed reaction row"
+        );
+
+        let event_row_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(reaction.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count reaction event rows");
+        assert_eq!(
+            event_row_count, 0,
+            "fenced rejection must not leave a partially committed kind:7 event row"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_chokepoint_transaction_holds_shared_community_deletion_lock() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+
+        let writer = crate::begin_community_event_write_transaction(
+            &pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("open reaction chokepoint transaction");
+
+        let mut contender = pool.begin().await.expect("begin exclusive contender");
+        let exclusive_taken: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
+                .bind(community_uuid)
+                .fetch_one(&mut *contender)
+                .await
+                .expect("probe exclusive community-deletion lock");
+        assert!(
+            !exclusive_taken,
+            "reaction chokepoint transaction must hold the shared community-deletion lock \
+             for its full lifetime"
+        );
+        contender
+            .rollback()
+            .await
+            .expect("rollback exclusive contender");
+
+        writer
+            .rollback()
+            .await
+            .expect("rollback chokepoint transaction");
+
+        let mut released = pool.begin().await.expect("begin post-release contender");
+        let exclusive_after_release: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
+                .bind(community_uuid)
+                .fetch_one(&mut *released)
+                .await
+                .expect("probe exclusive lock after release");
+        assert!(
+            exclusive_after_release,
+            "exclusive community-deletion lock must become available once the reaction \
+             chokepoint transaction releases the shared lock"
+        );
+        released
+            .rollback()
+            .await
+            .expect("rollback post-release contender");
     }
 }

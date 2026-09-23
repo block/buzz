@@ -714,4 +714,98 @@ fn event_write_paths_use_tenant_local_chokepoint() {
         accept_lease.contains("begin_community_event_write_transaction"),
         "push lease source-event writes must enter through the tenant-local chokepoint"
     );
+
+    let reaction = include_str!("../src/store/reaction.rs");
+    let insert_reaction = reaction
+        .split_once("pub async fn insert_reaction_event_with_thread_metadata(\n")
+        .expect("reaction store must expose insert_reaction_event_with_thread_metadata")
+        .1
+        .split_once("/// Soft-delete a reaction by setting")
+        .expect("reaction insert must precede reaction soft-delete")
+        .0;
+    assert!(
+        insert_reaction.contains("begin_community_event_write_transaction"),
+        "live kind:7 reaction inserts must enter through the tenant-local chokepoint"
+    );
+}
+
+/// The tests above enumerate specific known chokepoint entry points by function name — useful for
+/// pinpointing exactly which path regressed, but only as strong as the list, and reaction.rs was
+/// missing from it for a full release cycle. This test is the structural backstop: it scans every
+/// production `.rs` file under `src/` for a write to a community-fenced table and requires the
+/// chokepoint marker to appear somewhere in that file, so a newly added (or newly reverted) writer
+/// fails by default instead of silently passing until someone remembers to enumerate it.
+#[test]
+fn serving_table_writes_enter_the_tenant_local_chokepoint() {
+    use std::path::{Path, PathBuf};
+
+    const CHOKEPOINT: &str = "begin_community_event_write_transaction";
+    const GUARDED_TABLE_MARKERS: [&str; 3] = [
+        "INSERT INTO events",
+        "INSERT INTO reactions",
+        "INSERT INTO event_mentions",
+    ];
+    // Bootstrap/verification probes that legitimately write a community-fenced table without the
+    // application-level chokepoint. Each entry must justify why it is not a serving mutation on real
+    // tenant data (self-contained scratch state, transaction unconditionally rolled back).
+    const EXCEPTIONS: [&str; 1] = [
+        // `verify_floor_guard_behavior`: creates its own scratch community and always rolls back
+        // the whole transaction; it verifies a trigger's config, it never persists tenant data.
+        "runtime/replica_fence.rs",
+    ];
+
+    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read source directory") {
+            let entry = entry.expect("read directory entry");
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                // Whole files loaded only via `#[cfg(test)] #[path = "..."] mod ...;` (e.g.
+                // `runtime/tests.rs`) are entirely test code but carry no internal
+                // `#[cfg(test)]` marker of their own to slice against.
+                && path.file_name().is_some_and(|name| name != "tests.rs")
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src_root, &mut files);
+    assert!(
+        !files.is_empty(),
+        "guarded-table scan must see production source files"
+    );
+
+    let mut checked_guarded_files = 0usize;
+    for path in files {
+        let relative = path
+            .strip_prefix(&src_root)
+            .expect("file is under src root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if EXCEPTIONS.contains(&relative.as_str()) {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read source file");
+        let production = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
+        if GUARDED_TABLE_MARKERS
+            .iter()
+            .any(|marker| production.contains(marker))
+        {
+            checked_guarded_files += 1;
+            assert!(
+                production.contains(CHOKEPOINT),
+                "{relative} writes to a community-fenced table but its production source never \
+                 calls {CHOKEPOINT}; route the write through the chokepoint or add a narrowly \
+                 justified exception to serving_table_writes_enter_the_tenant_local_chokepoint"
+            );
+        }
+    }
+    assert!(
+        checked_guarded_files > 0,
+        "guarded-table scan must exercise at least one file that writes a fenced table"
+    );
 }
