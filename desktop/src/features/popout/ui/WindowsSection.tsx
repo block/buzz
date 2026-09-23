@@ -37,6 +37,15 @@ function PopoutRowIcon({ kind }: { kind: string | null }) {
   return <AppWindow className={className} />;
 }
 
+/**
+ * Channel/thread OS (and embed) pop-outs stay usable, but they no longer get a
+ * left-sidebar Windows row. Playground, split, and link detach still list so
+ * users can focus those companion windows.
+ */
+export function isListedInWindowsSection(kind: string | null): boolean {
+  return kind != null && kind !== "thread";
+}
+
 export function activateWindowsSectionRow(
   host: "embed" | "os",
   label: string,
@@ -68,21 +77,23 @@ export function WindowsSection() {
   if (!settings.showWindowsSection) return null;
 
   const embedOn = isEmbedInMainEnabled();
-  const rows = embedOn
-    ? embedded.windows.map((row) => ({
-        host: "embed" as const,
-        label: row.label,
-        title: row.title,
-        kind: row.payload.kind,
-        active: embedded.activeLabel === row.label,
-      }))
-    : osRows.map((row) => ({
-        host: "os" as const,
-        label: row.label,
-        title: row.title,
-        kind: popoutKindFromLabel(row.label),
-        active: false,
-      }));
+  const rows = (
+    embedOn
+      ? embedded.windows.map((row) => ({
+          host: "embed" as const,
+          label: row.label,
+          title: row.title,
+          kind: row.payload.kind,
+          active: embedded.activeLabel === row.label,
+        }))
+      : osRows.map((row) => ({
+          host: "os" as const,
+          label: row.label,
+          title: row.title,
+          kind: popoutKindFromLabel(row.label),
+          active: false,
+        }))
+  ).filter((row) => isListedInWindowsSection(row.kind));
   if (rows.length === 0) return null;
 
   return (

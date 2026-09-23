@@ -83,6 +83,15 @@ function installTauriInvoke() {
   return invokes;
 }
 
+test("isListedInWindowsSection excludes thread only", async () => {
+  const { isListedInWindowsSection } = await import("./WindowsSection.tsx");
+  assert.equal(isListedInWindowsSection("thread"), false);
+  assert.equal(isListedInWindowsSection("playground"), true);
+  assert.equal(isListedInWindowsSection("split"), true);
+  assert.equal(isListedInWindowsSection("link"), true);
+  assert.equal(isListedInWindowsSection(null), false);
+});
+
 test("Windows section is hidden when empty and visible with a pop-out", async () => {
   const screen = await renderSection();
   assert.equal(screen.queryByTestId("windows-section"), null);
@@ -92,7 +101,7 @@ test("Windows section is hidden when empty and visible with a pop-out", async ()
   await act(() => {
     setPopoutWindowsForTests([
       { label: "main", title: "Buzz" },
-      { label: "popout-thread-aaa", title: "Thread" },
+      { label: "popout-playground-aaa", title: "Demo" },
     ]);
   });
   assert.ok(screen.getByTestId("windows-section"));
@@ -100,8 +109,42 @@ test("Windows section is hidden when empty and visible with a pop-out", async ()
     screen.getByTestId("windows-section-label").textContent,
     "Windows",
   );
-  assert.ok(screen.getByTestId("open-window-popout-thread-aaa"));
+  assert.ok(screen.getByTestId("open-window-popout-playground-aaa"));
   assert.equal(screen.queryByTestId("open-window-main"), null);
+});
+
+test("channel/thread pop-outs do not appear in the Windows section", async () => {
+  const { act } = await import("@testing-library/react");
+  const { setPopoutWindowsForTests } = await import("../lib/popoutWindows.ts");
+  const screen = await renderSection();
+  await act(() => {
+    setPopoutWindowsForTests([
+      { label: "popout-thread-aaa", title: "Thread" },
+      { label: "popout-thread-bbb", title: "Channel" },
+      { label: "popout-playground-ccc", title: "Demo" },
+      { label: "popout-split-ddd", title: "Split" },
+      { label: "popout-link-eee", title: "Link" },
+    ]);
+  });
+  assert.ok(screen.getByTestId("windows-section"));
+  assert.equal(screen.queryByTestId("open-window-popout-thread-aaa"), null);
+  assert.equal(screen.queryByTestId("open-window-popout-thread-bbb"), null);
+  assert.ok(screen.getByTestId("open-window-popout-playground-ccc"));
+  assert.ok(screen.getByTestId("open-window-popout-split-ddd"));
+  assert.ok(screen.getByTestId("open-window-popout-link-eee"));
+});
+
+test("only channel/thread pop-outs leaves the Windows section hidden", async () => {
+  const { act } = await import("@testing-library/react");
+  const { setPopoutWindowsForTests } = await import("../lib/popoutWindows.ts");
+  const screen = await renderSection();
+  await act(() => {
+    setPopoutWindowsForTests([
+      { label: "popout-thread-aaa", title: "Thread" },
+      { label: "popout-thread-bbb", title: "Channel" },
+    ]);
+  });
+  assert.equal(screen.queryByTestId("windows-section"), null);
 });
 
 test("Clearing the last pop-out hides the Windows section", async () => {
@@ -119,7 +162,7 @@ test("Clearing the last pop-out hides the Windows section", async () => {
 test("Show Windows off hides the section even when pop-outs exist", async () => {
   const { setPopoutWindowsForTests } = await import("../lib/popoutWindows.ts");
   const { setShowWindowsSection } = await import("../lib/popoutSettings.ts");
-  setPopoutWindowsForTests([{ label: "popout-thread-aaa", title: "Thread" }]);
+  setPopoutWindowsForTests([{ label: "popout-playground-aaa", title: "Demo" }]);
   setShowWindowsSection(false);
   const screen = await renderSection();
   assert.equal(screen.queryByTestId("windows-section"), null);
@@ -139,12 +182,17 @@ test("embed mode lists embedded windows and can close them", async () => {
     label: "popout-thread-aaa",
     payload: { kind: "thread", title: "Design review", threadId: "t1" },
   });
+  openEmbeddedWindow({
+    label: "popout-playground-bbb",
+    payload: { kind: "playground", title: "Demo" },
+  });
   const screen = await renderSection();
   assert.ok(screen.getByTestId("windows-section"));
-  assert.ok(screen.getByTestId("open-window-popout-thread-aaa"));
-  assert.ok(screen.getByTestId("close-window-popout-thread-aaa"));
+  assert.equal(screen.queryByTestId("open-window-popout-thread-aaa"), null);
+  assert.ok(screen.getByTestId("open-window-popout-playground-bbb"));
+  assert.ok(screen.getByTestId("close-window-popout-playground-bbb"));
   await act(() => {
-    closeEmbeddedWindow("popout-thread-aaa");
+    closeEmbeddedWindow("popout-playground-bbb");
   });
   assert.equal(screen.queryByTestId("windows-section"), null);
 });
@@ -161,22 +209,22 @@ test("clicking an OS window row focuses the native pop-out, not embed", async ()
   setShowWindowsSection(true);
   setEmbedInMain(false);
   openEmbeddedWindow({
-    label: "popout-thread-aaa",
-    payload: { kind: "thread", title: "Design review", threadId: "t1" },
+    label: "popout-playground-aaa",
+    payload: { kind: "playground", title: "Demo" },
   });
-  setPopoutWindowsForTests([{ label: "popout-thread-aaa", title: "Thread" }]);
+  setPopoutWindowsForTests([{ label: "popout-playground-aaa", title: "Demo" }]);
   const screen = await renderSection();
   const invokes = installTauriInvoke();
 
   await act(async () => {
-    fireEvent.click(screen.getByTestId("open-window-popout-thread-aaa"));
+    fireEvent.click(screen.getByTestId("open-window-popout-playground-aaa"));
   });
 
   const focusCalls = invokes.filter(
     (call) => call.cmd === "focus_popout_window",
   );
   assert.equal(focusCalls.length, 1);
-  assert.deepEqual(focusCalls[0].args, { label: "popout-thread-aaa" });
+  assert.deepEqual(focusCalls[0].args, { label: "popout-playground-aaa" });
   assert.equal(
     invokes.some((call) => call.cmd === "open_popout_window"),
     false,
@@ -195,8 +243,8 @@ test("clicking an embedded window row activates embed, not native focus", async 
   setShowWindowsSection(true);
   setEmbedInMain(true);
   openEmbeddedWindow({
-    label: "popout-thread-aaa",
-    payload: { kind: "thread", title: "Design review", threadId: "t1" },
+    label: "popout-playground-aaa",
+    payload: { kind: "playground", title: "Alpha" },
   });
   openEmbeddedWindow({
     label: "popout-playground-bbb",
@@ -207,10 +255,10 @@ test("clicking an embedded window row activates embed, not native focus", async 
   assert.equal(getActiveEmbeddedWindow()?.label, "popout-playground-bbb");
 
   await act(async () => {
-    fireEvent.click(screen.getByTestId("open-window-popout-thread-aaa"));
+    fireEvent.click(screen.getByTestId("open-window-popout-playground-aaa"));
   });
 
-  assert.equal(getActiveEmbeddedWindow()?.label, "popout-thread-aaa");
+  assert.equal(getActiveEmbeddedWindow()?.label, "popout-playground-aaa");
   assert.equal(
     invokes.some((call) => call.cmd === "focus_popout_window"),
     false,
