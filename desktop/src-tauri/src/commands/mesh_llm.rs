@@ -176,7 +176,7 @@ fn advance_mesh_status_cursor(
     Ok(cursor)
 }
 
-async fn query_mesh_discovery_events_at(
+pub(super) async fn query_mesh_discovery_events_at(
     state: &AppState,
     relay_url: &str,
 ) -> Result<Vec<nostr::Event>, String> {
@@ -338,6 +338,7 @@ async fn resolve_buzz_mesh_startup_at(
 }
 
 pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> CmdResult<()> {
+    let generation = state.mesh_recovery.generation();
     let Some(mut config) = load_mesh_sharing_config(app)? else {
         return Ok(());
     };
@@ -354,7 +355,7 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
         .unwrap_or_else(|| relay::relay_ws_url_with_override(state));
     let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup_at(state, &relay_url).await;
     let mut runtime = state.mesh_llm_runtime.lock().await;
-    if runtime.is_some() {
+    if runtime.is_some() || state.mesh_recovery.generation() != generation {
         return Ok(());
     }
     if config.start_on_next_launch {
@@ -408,6 +409,7 @@ pub async fn mesh_start_node(
     state: State<'_, AppState>,
     mut request: mesh_llm::StartMeshNodeRequest,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    let generation = state.mesh_recovery.generation();
     let relay_url = relay::relay_ws_url_with_override(&state);
     request.relay_url = Some(relay_url.clone());
     if let Some(model_id) = request.model_id.as_mut() {
@@ -426,14 +428,20 @@ pub async fn mesh_start_node(
     // process restart, the only boundary that proves both ports are clean.
     {
         let runtime = state.mesh_llm_runtime.lock().await;
+        ensure_current_mesh_start(generation, state.mesh_recovery.generation())?;
         if let Some(existing) = runtime.as_ref() {
+            if existing.cleanup_requested() {
+                return Err(
+                    "Mesh cleanup is incomplete; restart Buzz before starting Share Compute"
+                        .to_string(),
+                );
+            }
             let plan = mesh_start_plan(request.mode, Some(existing.mode()));
             match plan {
                 MeshStartPlan::RestartToReplaceClient => {
                     let config = sharing_config
                         .as_ref()
                         .ok_or_else(|| "serving configuration is unavailable".to_string())?;
-                    drop(runtime);
                     return restart_to_share(&app, config);
                 }
                 MeshStartPlan::RejectOccupied => {
@@ -457,6 +465,7 @@ pub async fn mesh_start_node(
     request.mesh_name = Some(buzz_mesh_name_for_relay(&relay_url));
     let mut runtime = state.mesh_llm_runtime.lock().await;
 
+    ensure_current_mesh_start(generation, state.mesh_recovery.generation())?;
     let plan = match runtime.as_ref() {
         Some(existing) => mesh_start_plan(request.mode, Some(existing.mode())),
         None => mesh_start_plan(request.mode, None),
@@ -465,7 +474,6 @@ pub async fn mesh_start_node(
         let config = sharing_config
             .as_ref()
             .ok_or_else(|| "serving configuration is unavailable".to_string())?;
-        drop(runtime);
         return restart_to_share(&app, config);
     }
     if plan == MeshStartPlan::RejectOccupied {
@@ -484,7 +492,7 @@ pub async fn mesh_start_node(
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
         .map_err(|error| format!("{error:#}"))?;
-    let status = match started.status().await {
+    let mut status = match started.status().await {
         Ok(status) => status,
         Err(error) => {
             let cleanup = started.stop().await;
@@ -510,8 +518,8 @@ pub async fn mesh_start_node(
     // ingress HTTP (this probe included) behind any in-flight turn — a cold
     // start can take minutes. The old code stopped the node and restarted the
     // app on that timeout, turning startup latency into a restart loop.
+    let started_id = started.id();
     *runtime = Some(started);
-    drop(runtime);
     if let Some(config) = sharing_config.as_ref() {
         // Installed + tracked == Share Compute is on, so persist the enabled
         // config now (mirroring restore), not gated on the probe. Gating it
@@ -520,14 +528,41 @@ pub async fn mesh_start_node(
         // (leaves a warming node alone) can loop a slow-but-alive node, and an
         // unstartable config fails earlier in `start()`. Probe is informational.
         save_mesh_sharing_config(&app, config)?;
-        if let Err(error) = wait_for_mesh_inference(&config.model_id).await {
-            eprintln!(
-                "buzz-mesh: node started but inference is not ready yet ({error}); \
-                 leaving it to warm up (Share Compute stays armed for next launch)"
-            );
+    }
+    drop(runtime);
+    if let Some(config) = sharing_config.as_ref() {
+        match wait_for_mesh_inference(&config.model_id).await {
+            Ok(()) => {
+                // The status captured immediately after runtime installation can
+                // still say `starting`. Re-read after the readiness probe so the
+                // command response reflects the successful boot the user waited
+                // for instead of pinning the UI's transition indicator.
+                let runtime = state.mesh_llm_runtime.lock().await;
+                ensure_current_mesh_start(generation, state.mesh_recovery.generation())?;
+                if let Some(running) = runtime
+                    .as_ref()
+                    .filter(|running| running.id() == started_id && !running.cleanup_requested())
+                {
+                    status = running.status().await.map_err(|error| error.to_string())?;
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "buzz-mesh: node started but inference is not ready yet ({error}); \
+                     leaving it to warm up (Share Compute stays armed for next launch)"
+                );
+            }
         }
     }
     mesh_llm::publish_current_status_once(&app, "start").await;
+    let runtime = state.mesh_llm_runtime.lock().await;
+    ensure_current_mesh_start(generation, state.mesh_recovery.generation())?;
+    if !runtime
+        .as_ref()
+        .is_some_and(|running| running.id() == started_id && !running.cleanup_requested())
+    {
+        return Err("mesh start was superseded by a newer lifecycle operation".to_string());
+    }
     Ok(status)
 }
 
@@ -715,7 +750,7 @@ pub(crate) async fn ensure_relay_mesh_for_record(
             }
             mesh_llm::MeshRuntimeRecovery::ReleasePending => {
                 return Err(
-                    "Buzz shared compute is still shutting down its previous local ingress. Try again shortly."
+                    "Buzz shared compute cleanup is incomplete. Restart Buzz to release the previous native listeners before retrying."
                         .to_string(),
                 );
             }
@@ -770,39 +805,59 @@ pub async fn mesh_stop_node(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
-    // The single runtime slot is shared by serve (this machine SHARING
-    // compute) and client (this machine CONSUMING a peer's compute) roles.
-    // Stopping "Share compute" must NEVER tear down a client node: inspect the
-    // role under the lock and, when it's a consume session, leave it running
-    // and return its live status unchanged. The frontend also guards this, but
-    // status can be stale between polls, so the backend is authoritative.
-    let (taken, bound_relay_url) = {
-        let mut guard = state.mesh_llm_runtime.lock().await;
-        if let Some(runtime) = guard.as_ref() {
-            if !share_stop_should_teardown(runtime.mode()) {
-                return runtime.status().await.map_err(|error| error.to_string());
-            }
-        }
-        let bound_relay_url = guard
-            .as_ref()
-            .and_then(|runtime| runtime.start_request().relay_url.clone());
-        (guard.take(), bound_relay_url)
-    };
-    if let Some(runtime) = taken {
-        runtime.stop().await.map_err(|error| error.to_string())?;
+    let (status, bound_relay_url) = stop_sharing_runtime(&state, || {
+        save_mesh_sharing_config(
+            &app,
+            &MeshSharingConfig {
+                enabled: false,
+                start_on_next_launch: false,
+                model_id: String::new(),
+                max_vram_gb: None,
+                relay_url: None,
+            },
+        )
+    })
+    .await?;
+    if status.mode != Some(mesh_llm::MeshNodeMode::Client) {
+        mesh_llm::publish_stopped_status_once_at(&app, bound_relay_url.as_deref(), "stop").await;
     }
-    save_mesh_sharing_config(
-        &app,
-        &MeshSharingConfig {
-            enabled: false,
-            start_on_next_launch: false,
-            model_id: String::new(),
-            max_vram_gb: None,
-            relay_url: None,
-        },
-    )?;
-    mesh_llm::publish_stopped_status_once_at(&app, bound_relay_url.as_deref(), "stop").await;
-    Ok(mesh_llm::stopped_status())
+    Ok(status)
+}
+
+fn ensure_current_mesh_start(expected: u64, current: u64) -> CmdResult<()> {
+    if expected != current {
+        return Err("mesh start was cancelled by Stop sharing".to_string());
+    }
+    Ok(())
+}
+
+/// Production seam: the same mutex protects intent, cleanup and slot removal.
+/// Persist OFF before touching native state; failures retain the runtime/tombstone
+/// and cannot silently re-arm sharing or allow watchdog replacement.
+async fn stop_sharing_runtime(
+    state: &AppState,
+    persist_off: impl FnOnce() -> CmdResult<()>,
+) -> CmdResult<(mesh_llm::MeshNodeStatus, Option<String>)> {
+    let mut guard = state.mesh_llm_runtime.lock().await;
+    if let Some(runtime) = guard.as_ref() {
+        if !share_stop_should_teardown(runtime.mode()) {
+            return runtime
+                .status()
+                .await
+                .map(|status| (status, None))
+                .map_err(|error| error.to_string());
+        }
+    }
+    persist_off()?;
+    state.mesh_recovery.cancel_pending_start();
+    let bound_relay_url = guard
+        .as_ref()
+        .and_then(|runtime| runtime.start_request().relay_url.clone());
+    if let Some(runtime) = guard.as_ref() {
+        runtime.stop().await.map_err(|error| format!("Share Compute is disabled for next launch, but cleanup is incomplete: {error:#}; restart Buzz to finish stopping"))?;
+    }
+    *guard = None;
+    Ok((mesh_llm::stopped_status(), bound_relay_url))
 }
 
 #[tauri::command]

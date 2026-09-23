@@ -13,6 +13,9 @@ pub(crate) use discovery::{
 };
 use discovery::{device_name_from_status, endpoint_id_from_status, enrich_status_payload_identity};
 
+mod snapshot;
+pub use snapshot::{snapshot_from_events, MeshSnapshot};
+
 mod catalog;
 pub(crate) use catalog::canonical_curated_model_id;
 pub use catalog::{model_catalog, MeshModelCatalog};
@@ -273,6 +276,7 @@ enum DesktopMeshHandle {
 
 pub struct DesktopMeshRuntime {
     id: u64,
+    cleanup_requested: std::sync::atomic::AtomicBool,
     handle: tokio::sync::Mutex<DesktopMeshHandle>,
     mode: MeshNodeMode,
     api_base_url: String,
@@ -337,8 +341,17 @@ async fn ensure_model_downloaded(model: &str) -> anyhow::Result<()> {
 }
 
 impl DesktopMeshRuntime {
-    pub async fn start(mut request: StartMeshNodeRequest) -> anyhow::Result<Self> {
+    pub async fn start(request: StartMeshNodeRequest) -> anyhow::Result<Self> {
+        Self::start_on_ports(request, mesh_api_port()?, mesh_console_port()?).await
+    }
+
+    async fn start_on_ports(
+        mut request: StartMeshNodeRequest,
+        api_port: u16,
+        console_port: u16,
+    ) -> anyhow::Result<Self> {
         sanitize_no_leak_request(&mut request)?;
+        preflight_mesh_ports(api_port, console_port)?;
         initialize_mesh_native_runtime().await?;
         let model_id = request
             .model_id
@@ -353,8 +366,8 @@ impl DesktopMeshRuntime {
                 ensure_model_downloaded(model).await?;
             }
         }
-        let api_port = mesh_api_port()?;
-        let console_port = mesh_console_port()?;
+        // Downloads may take minutes; recheck immediately before SDK startup.
+        preflight_mesh_ports(api_port, console_port)?;
         let handle = match request.mode {
             MeshNodeMode::Serve => {
                 let model = model_id
@@ -440,6 +453,7 @@ impl DesktopMeshRuntime {
 
         Ok(Self {
             id: MESH_RUNTIME_ID_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            cleanup_requested: std::sync::atomic::AtomicBool::new(false),
             handle: tokio::sync::Mutex::new(handle),
             mode: request.mode,
             api_base_url: format!("http://127.0.0.1:{api_port}/v1"),
@@ -713,15 +727,32 @@ impl DesktopMeshRuntime {
         }
     }
 
-    pub async fn stop(self) -> anyhow::Result<()> {
-        match self.handle.into_inner() {
+    /// Whether shutdown has begun and this runtime must not be reused or replaced.
+    pub fn cleanup_requested(&self) -> bool {
+        self.cleanup_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Retain a tombstone in the app slot even if cleanup fails or is cancelled.
+    /// SDK shutdown consumes its handle and cannot safely be retried in-process.
+    pub async fn stop(&self) -> anyhow::Result<()> {
+        self.cleanup_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut handle = self.handle.lock().await;
+        let previous = std::mem::replace(
+            &mut *handle,
+            DesktopMeshHandle::Failed(
+                "Mesh cleanup requested; restart Buzz to release native listeners".to_string(),
+            ),
+        );
+        let result = match previous {
             DesktopMeshHandle::Ready(ready) => {
                 match tokio::time::timeout(MESH_STOP_TIMEOUT, ready.stop()).await {
                     Ok(result) => result,
-                    Err(_) => anyhow::bail!(
+                    Err(_) => Err(anyhow::anyhow!(
                         "timed out after {}s waiting for embedded mesh runtime to stop",
                         MESH_STOP_TIMEOUT.as_secs()
-                    ),
+                    )),
                 }
             }
             DesktopMeshHandle::Starting { task, .. } => {
@@ -731,11 +762,58 @@ impl DesktopMeshRuntime {
                 // the process-owned embedded thread. Recovery requests that
                 // controlled restart instead of racing a second runtime.
                 task.abort();
-                Ok(())
+                Err(anyhow::anyhow!(
+                    "Mesh startup has not provided a shutdown handle; restart Buzz to terminate the pending native runtime"
+                ))
             }
-            DesktopMeshHandle::Failed(_) => Ok(()),
+            DesktopMeshHandle::Failed(error) => Err(anyhow::anyhow!(error)),
+        };
+        if let Err(error) = &result {
+            *handle = DesktopMeshHandle::Failed(format!(
+                "Mesh cleanup failed: {error:#}; restart Buzz to release native listeners"
+            ));
         }
+        result?;
+        let api_port = url::Url::parse(&self.api_base_url)?
+            .port_or_known_default()
+            .ok_or_else(|| anyhow::anyhow!("mesh API URL has no port"))?;
+        let console_port = url::Url::parse(&self.console_url)?
+            .port_or_known_default()
+            .ok_or_else(|| anyhow::anyhow!("mesh console URL has no port"))?;
+        let release = preflight_mesh_ports(api_port, console_port).map_err(|error| anyhow::anyhow!(
+            "Mesh shutdown completed but listeners remain: {error:#}; restart Buzz to finish stopping Share Compute"
+        ));
+        if let Err(error) = &release {
+            *handle = DesktopMeshHandle::Failed(format!("{error:#}"));
+        }
+        release
     }
+}
+
+/// The SDK readiness probe trusts the console port, not process identity. Never
+/// let a pre-existing Buzz/mesh instance satisfy readiness for our new runtime.
+/// This is a preflight, not an atomic reservation: the SDK cannot inherit sockets.
+fn preflight_mesh_ports(api_port: u16, console_port: u16) -> anyhow::Result<()> {
+    let mut reservations = Vec::new();
+    for (name, port) in [("API", api_port), ("console", console_port)] {
+        let reserve = || -> std::io::Result<tokio::net::TcpListener> {
+            let socket = tokio::net::TcpSocket::new_v4()?;
+            // Match the SDK's Tokio listener: allow restart after accepted
+            // connections enter TIME_WAIT, but never share a live listener
+            // (SO_REUSEPORT is deliberately not enabled).
+            #[cfg(unix)]
+            socket.set_reuseaddr(true)?;
+            socket.bind(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                port,
+            )))?;
+            socket.listen(1)
+        };
+        reservations.push(reserve().map_err(|error| anyhow::anyhow!(
+            "Mesh {name} port {port} is unavailable: {error}; stop sharing in the other Buzz/mesh instance or quit that instance, then retry"
+        ))?);
+    }
+    Ok(())
 }
 
 fn mesh_api_port() -> anyhow::Result<u16> {
@@ -948,3 +1026,20 @@ pub(super) fn dedupe_models(models: Vec<MeshModelOption>) -> Vec<MeshModelOption
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod mod_tests;
+
+#[cfg(test)]
+pub(crate) fn lifecycle_test_runtime(mode: MeshNodeMode, failed: bool) -> DesktopMeshRuntime {
+    let task = tokio::spawn(std::future::pending());
+    let mut runtime = mod_tests::pending_client_runtime(task);
+    runtime.mode = mode;
+    if failed {
+        let previous = std::mem::replace(
+            runtime.handle.get_mut(),
+            DesktopMeshHandle::Failed("injected cleanup failure".into()),
+        );
+        if let DesktopMeshHandle::Starting { task, .. } = previous {
+            task.abort();
+        }
+    }
+    runtime
+}

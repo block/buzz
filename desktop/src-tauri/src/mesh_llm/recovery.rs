@@ -20,6 +20,7 @@ pub(crate) const MESH_REARM_ERROR_SENTINEL: &str = "[buzz-mesh-rearm] ";
 /// to one specific handle, while `rearm_lock` prevents overlapping watchdog
 /// passes from starting competing replacements.
 pub struct MeshRecoveryState {
+    lifecycle_generation: AtomicU64,
     probe_runtime_id: AtomicU64,
     dead_probes: AtomicU32,
     rearm_lock: tokio::sync::Mutex<()>,
@@ -28,6 +29,7 @@ pub struct MeshRecoveryState {
 impl Default for MeshRecoveryState {
     fn default() -> Self {
         Self {
+            lifecycle_generation: AtomicU64::new(0),
             probe_runtime_id: AtomicU64::new(0),
             dead_probes: AtomicU32::new(0),
             rearm_lock: tokio::sync::Mutex::new(()),
@@ -36,6 +38,14 @@ impl Default for MeshRecoveryState {
 }
 
 impl MeshRecoveryState {
+    pub(crate) fn generation(&self) -> u64 {
+        self.lifecycle_generation.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn cancel_pending_start(&self) {
+        self.lifecycle_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
     fn reset_probe_streak(&self) {
         self.probe_runtime_id.store(0, Ordering::Relaxed);
         self.dead_probes.store(0, Ordering::Relaxed);
@@ -188,6 +198,9 @@ pub(crate) async fn recover_stale_mesh_runtime(
 ) -> MeshRuntimeRecovery {
     let (candidate_id, startup_in_progress, candidate_mode) =
         match state.mesh_llm_runtime.lock().await.as_ref() {
+            Some(runtime) if runtime.cleanup_requested() => {
+                return MeshRuntimeRecovery::ReleasePending;
+            }
             Some(runtime) => (runtime.id(), runtime.is_starting().await, runtime.mode()),
             None => {
                 state.mesh_recovery.reset_probe_streak();
@@ -228,39 +241,31 @@ pub(crate) async fn recover_stale_mesh_runtime(
     // Pending client startups have the same ownership problem because the SDK
     // has not yielded a shutdown handle yet. In both cases, process restart is
     // the only boundary that preserves the configured role safely.
+    let mut guard = state.mesh_llm_runtime.lock().await;
+    if guard.as_ref().map(|runtime| runtime.id()) != Some(candidate_id) {
+        state.mesh_recovery.reset_probe_streak();
+        return MeshRuntimeRecovery::Replaced;
+    }
+    let Some(stale) = guard.as_ref() else {
+        return MeshRuntimeRecovery::Replaced;
+    };
+    if stale.cleanup_requested() {
+        return MeshRuntimeRecovery::ReleasePending;
+    }
     if requires_process_restart(candidate_mode, startup_in_progress) {
         state.mesh_recovery.reset_probe_streak();
         return MeshRuntimeRecovery::RestartRequired;
     }
-
-    let stale = {
-        let mut guard = state.mesh_llm_runtime.lock().await;
-        if guard.as_ref().map(|runtime| runtime.id()) != Some(candidate_id) {
-            state.mesh_recovery.reset_probe_streak();
-            return MeshRuntimeRecovery::Replaced;
-        }
-        guard.take()
-    };
-    let Some(stale) = stale else {
-        return MeshRuntimeRecovery::Replaced;
-    };
     state.mesh_recovery.reset_probe_streak();
-
     match tokio::time::timeout(STALE_STOP_TIMEOUT, stale.stop()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => eprintln!("buzz-mesh: stale runtime stop failed: {error:#}"),
-        Err(_) => eprintln!(
-            "buzz-mesh: stale runtime stop exceeded {}s; waiting for port release",
-            STALE_STOP_TIMEOUT.as_secs()
-        ),
-    }
-    if wait_for_ingress_release().await {
-        MeshRuntimeRecovery::Evicted
-    } else {
-        eprintln!(
-            "buzz-mesh: old runtime still owns the local ingress; deferring replacement to avoid a port-conflict loop"
-        );
-        MeshRuntimeRecovery::ReleasePending
+        Ok(Ok(())) if wait_for_ingress_release().await => {
+            *guard = None;
+            MeshRuntimeRecovery::Evicted
+        }
+        outcome => {
+            eprintln!("buzz-mesh: cleanup incomplete ({outcome:?}); restart Buzz before replacing this runtime");
+            MeshRuntimeRecovery::ReleasePending
+        }
     }
 }
 
@@ -311,7 +316,7 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
         }
         MeshRuntimeRecovery::ReleasePending => {
             return Err(format!(
-                "{MESH_REARM_ERROR_SENTINEL}old local mesh ingress is still shutting down"
+                "{MESH_REARM_ERROR_SENTINEL}local mesh cleanup is incomplete; restart Buzz to release native listeners"
             ));
         }
         MeshRuntimeRecovery::Absent => {

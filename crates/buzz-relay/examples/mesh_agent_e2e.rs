@@ -5,10 +5,9 @@
 //!
 //! Permutations:
 //!   P1 explicit-model chat  — agent pinned to the served model id replies.
-//!   P2 auto-model chat      — agent sends `model: "auto"`; mesh router picks.
-//!   P3 context-fit regression — an oversized output budget (150k tokens)
-//!      must FAIL with the router's context error (proves the router's fit
-//!      gate — the failure mode the 1024 preset cap protects against).
+//!   P2 virtual-mesh chat   — one served model exercises single-model fallback.
+//!   P3 generous output ceiling succeeds (Mesh #1350); oversized input still
+//!      fails context admission via the real HTTP router, before inference.
 //!   P4 agentic tool use     — agent + buzz-dev-mcp writes a file on disk.
 //!
 //! The serve node is the same `mesh_llm_sdk::serve` path Share-compute uses
@@ -136,13 +135,11 @@ async fn run() -> anyhow::Result<()> {
         ),
     }
 
-    // P3: regression — an output budget no served model's context can hold
-    // must be rejected by the router with the context-fit error (the failure
-    // mode that broke relay-mesh agents when buzz-agent's default 32768
-    // budget met a 32k-context model). 150k output: passes buzz-agent's own
-    // config validation (must stay under its 200k max_context_tokens) but
-    // with the router's +25% margin overflows even 128k-context models like
-    // GLM-4.7-Flash.
+    // Mesh v0.76.0-rc9 (9f192c9), routing_rank.rs:43-58 reserves
+    // min(completion ceiling, 512) decode headroom, NOT the entire ceiling
+    // (#1350). buzz-agent llm.rs sends max_completion_tokens on the chat API.
+    // Keep the 150k ceiling as a positive regression, plus a negative input
+    // fit probe below. Do not accept generic service failures as context errors.
     let r = agent_chat(
         &base,
         "mesh",
@@ -152,18 +149,13 @@ async fn run() -> anyhow::Result<()> {
     )
     .await;
     match r {
-        Ok(text) => record(
-            "P3 oversized-budget must fail",
-            false,
-            format!("unexpectedly succeeded: {text}"),
-        ),
-        Err(e) => {
-            let msg = e.to_string();
-            let is_context_503 = msg.contains("503")
-                || msg.contains("service_unavailable")
-                || msg.contains("context-compatible");
-            record("P3 oversized-budget must fail", is_context_503, msg);
-        }
+        Ok(text) => record("P3a generous output ceiling", text.trim() == "PONG", text),
+        Err(e) => record("P3a generous output ceiling", false, e.to_string()),
+    }
+    let r = oversized_input_probe(&http, &base, &served_id).await;
+    match r {
+        Ok(detail) => record("P3b oversized input rejected", true, detail),
+        Err(e) => record("P3b oversized input rejected", false, e.to_string()),
     }
 
     // P4: agentic tool use via buzz-dev-mcp — write a real file inside the
@@ -171,13 +163,13 @@ async fn run() -> anyhow::Result<()> {
     // nonexistent absolute paths outside that root.
     let marker_name = format!("mesh-e2e-{}.txt", std::process::id());
     let prompt = format!(
-        "Use your developer tools to create {marker_name} in the current working directory containing exactly the text BUZZ_OK (no quotes, no newline commentary). Then confirm."
+        "Call dev__shell exactly once with command `{}` and no workdir override. This is the only authorized operation. Then confirm in text; do not run any other tools.", marker_command(&marker_name)
     );
     let mcp = vec![("dev".to_string(), repo_bin("buzz-dev-mcp")?)];
     let (r, marker) =
         agent_chat_with_marker(&base, "mesh", None, &prompt, &mcp, &marker_name).await;
     let file_ok = std::fs::read_to_string(&marker)
-        .map(|c| c.contains("BUZZ_OK"))
+        .map(|c| c == "BUZZ_OK")
         .unwrap_or(false);
     match r {
         Ok(text) => record(
@@ -189,7 +181,7 @@ async fn run() -> anyhow::Result<()> {
                 format!("no file at {}; agent said: {text}", marker.display())
             },
         ),
-        Err(e) => record("P4 agentic tool use", file_ok, format!("agent error: {e}")),
+        Err(e) => record("P4 agentic tool use", false, format!("agent error: {e}")),
     }
     let _ = std::fs::remove_file(&marker);
 
@@ -237,7 +229,8 @@ async fn agent_chat(
     mcp_servers: &[(String, String)],
 ) -> anyhow::Result<String> {
     let (result, _) =
-        agent_chat_in_isolated_home(base, model, max_output_tokens, prompt, mcp_servers).await;
+        agent_chat_in_isolated_home(base, model, max_output_tokens, prompt, mcp_servers, None)
+            .await;
     result
 }
 
@@ -249,8 +242,15 @@ async fn agent_chat_with_marker(
     mcp_servers: &[(String, String)],
     marker_name: &str,
 ) -> (anyhow::Result<String>, std::path::PathBuf) {
-    let (result, home) =
-        agent_chat_in_isolated_home(base, model, max_output_tokens, prompt, mcp_servers).await;
+    let (result, home) = agent_chat_in_isolated_home(
+        base,
+        model,
+        max_output_tokens,
+        prompt,
+        mcp_servers,
+        Some(marker_name),
+    )
+    .await;
     (result, home.join(marker_name))
 }
 
@@ -260,19 +260,25 @@ async fn agent_chat_in_isolated_home(
     max_output_tokens: Option<&str>,
     prompt: &str,
     mcp_servers: &[(String, String)],
+    marker_name: Option<&str>,
 ) -> (anyhow::Result<String>, std::path::PathBuf) {
     let agent = match repo_bin("buzz-agent") {
         Ok(agent) => agent,
         Err(error) => return (Err(error), std::path::PathBuf::new()),
     };
     // Isolated HOME: no skills, no AGENTS.md chain, no keychain, tiny prompt.
-    let home = std::env::temp_dir().join(format!("mesh-e2e-home-{}", std::process::id()));
-    if let Err(error) = std::fs::create_dir_all(&home) {
-        return (Err(error.into()), home);
-    }
+    // Fresh per leg: stale markers and prior agent state can never pass P4.
+    // Retain the directory for diagnostics (also when P4 fails).
+    let home = match tempfile::Builder::new().prefix("mesh-e2e-home-").tempdir() {
+        Ok(dir) => dir.keep(),
+        Err(error) => return (Err(error.into()), std::path::PathBuf::new()),
+    };
+    eprintln!("[e2e] isolated home: {}", home.display());
 
     let mut command = Command::new(&agent);
     command
+        .current_dir(&home)
+        .kill_on_drop(true)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &home)
@@ -291,10 +297,8 @@ async fn agent_chat_in_isolated_home(
         // Pinning a value here would test a config the product does not ship.
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    // P3 deliberately overrides the production default to exercise the
-    // router's context-fit rejection. Normal and tool turns leave it unset,
-    // matching the desktop provider path.
+        .stderr(Stdio::inherit());
+    // P3a exercises a generous ceiling, not an admission reservation.
     if let Some(value) = max_output_tokens {
         command.env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", value);
     }
@@ -303,7 +307,7 @@ async fn agent_chat_in_isolated_home(
         Err(error) => return (Err(error.into()), home),
     };
 
-    let result = drive_acp(&mut child, prompt, mcp_servers, &home).await;
+    let result = drive_acp(&mut child, prompt, mcp_servers, &home, marker_name).await;
     let _ = child.kill().await;
     (result, home)
 }
@@ -313,6 +317,7 @@ async fn drive_acp(
     prompt: &str,
     mcp_servers: &[(String, String)],
     cwd: &std::path::Path,
+    marker_name: Option<&str>,
 ) -> anyhow::Result<String> {
     let mut stdin = child
         .stdin
@@ -341,7 +346,68 @@ async fn drive_acp(
             .as_bytes(),
         )
         .await?;
-    stdin
+    let mut session_id: Option<String> = None;
+    let mut agent_text = String::new();
+    let mut marker_approved = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+
+    loop {
+        let line = tokio::time::timeout_at(deadline, lines.next_line())
+            .await
+            .map_err(|_| anyhow::anyhow!("agent timed out; text so far: {agent_text}"))??
+            .ok_or_else(|| anyhow::anyhow!("agent closed stdout; text so far: {agent_text}"))?;
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        // Requests have their own id namespace; handle before response ids.
+        if msg["method"] == "session/request_permission" {
+            let response = permission_response(
+                &msg,
+                session_id.as_deref(),
+                marker_name,
+                &mut marker_approved,
+            );
+            eprintln!(
+                "[e2e] permission: {} -> {}",
+                msg["params"]["toolCall"], response["result"]
+            );
+            stdin.write_all(send(response).as_bytes()).await?;
+            continue;
+        }
+        if msg.get("method").is_some() && msg.get("id").is_some() {
+            stdin
+                .write_all(
+                    send(serde_json::json!({
+                        "jsonrpc": "2.0", "id": msg["id"],
+                        "error": {"code": -32601, "message": "Unsupported harness method"}
+                    }))
+                    .as_bytes(),
+                )
+                .await?;
+            continue;
+        }
+        // Collect any streamed agent text from session/update notifications.
+        if msg.get("method").and_then(|m| m.as_str()) == Some("session/update") {
+            if msg["params"]["sessionId"].as_str() == session_id.as_deref() {
+                let update = &msg["params"]["update"];
+                if matches!(
+                    update["sessionUpdate"].as_str(),
+                    Some("tool_call" | "tool_call_update")
+                ) {
+                    eprintln!("[e2e] tool update: {update}");
+                }
+                collect_text(update, &mut agent_text);
+            }
+            continue;
+        }
+        match msg.get("id").and_then(|i| i.as_i64()) {
+            Some(1) => {
+                anyhow::ensure!(msg.get("error").is_none(), "initialize failed: {msg}");
+                anyhow::ensure!(
+                    msg["result"]["protocolVersion"] == 1,
+                    "expected ACP v1: {msg}"
+                );
+                stdin
         .write_all(
             send(serde_json::json!({
                 "jsonrpc": "2.0", "id": 2, "method": "session/new",
@@ -354,25 +420,7 @@ async fn drive_acp(
             .as_bytes(),
         )
         .await?;
-
-    let mut session_id: Option<String> = None;
-    let mut agent_text = String::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
-
-    loop {
-        let line = tokio::time::timeout_at(deadline, lines.next_line())
-            .await
-            .map_err(|_| anyhow::anyhow!("agent timed out; text so far: {agent_text}"))??
-            .ok_or_else(|| anyhow::anyhow!("agent closed stdout; text so far: {agent_text}"))?;
-        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        // Collect any streamed agent text from session/update notifications.
-        if msg.get("method").and_then(|m| m.as_str()) == Some("session/update") {
-            collect_text(&msg["params"]["update"], &mut agent_text);
-            continue;
-        }
-        match msg.get("id").and_then(|i| i.as_i64()) {
+            }
             Some(2) => {
                 if let Some(err) = msg.get("error") {
                     anyhow::bail!("session/new failed: {err}");
@@ -400,6 +448,14 @@ async fn drive_acp(
                 if let Some(err) = msg.get("error") {
                     anyhow::bail!("session/prompt failed: {err}");
                 }
+                anyhow::ensure!(
+                    msg["result"]["stopReason"] == "end_turn",
+                    "unexpected prompt stop: {msg}; text: {agent_text}"
+                );
+                anyhow::ensure!(
+                    marker_name.is_none() || marker_approved,
+                    "marker permission was never approved; text: {agent_text}"
+                );
                 return Ok(agent_text.trim().to_string());
             }
             _ => {}
@@ -407,25 +463,116 @@ async fn drive_acp(
     }
 }
 
-/// Recursively harvest "text" string fields out of a session/update payload.
+/// Only user-visible assistant chunks count, never reasoning or tool content.
 fn collect_text(value: &serde_json::Value, out: &mut String) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                if k == "text" {
-                    if let Some(s) = v.as_str() {
-                        out.push_str(s);
-                    }
-                } else {
-                    collect_text(v, out);
-                }
-            }
+    if value["sessionUpdate"] == "agent_message_chunk" && value["content"]["type"] == "text" {
+        if let Some(text) = value["content"]["text"].as_str() {
+            out.push_str(text);
         }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_text(item, out);
-            }
-        }
-        _ => {}
     }
 }
+
+fn marker_command(name: &str) -> String {
+    format!("printf %s BUZZ_OK > {name}")
+}
+
+/// Test-client-only grant: one exact shell invocation, in a fresh cwd.
+/// No command parsing, prefix matches, persistent grants, or alternate tools.
+fn permission_response(
+    request: &serde_json::Value,
+    session: Option<&str>,
+    marker: Option<&str>,
+    approved: &mut bool,
+) -> serde_json::Value {
+    let p = &request["params"];
+    let tool = &p["toolCall"]; // We negotiate v1 only; fail closed on other shapes.
+    let input = &tool["rawInput"];
+    let safe_marker = marker.filter(|name| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+    });
+    let exact_input = safe_marker.is_some_and(|name| {
+        input.as_object().is_some_and(|o| {
+            o.keys()
+                .all(|k| k == "command" || k == "timeout_ms" || k == "workdir")
+                // MCP treats absent/null workdir as its default cwd; no overrides.
+                && (input.get("workdir").is_none() || input["workdir"].is_null())
+                && input["command"] == marker_command(name)
+                && (input.get("timeout_ms").is_none()
+                    || input["timeout_ms"]
+                        .as_u64()
+                        .is_some_and(|n| n > 0 && n <= 120_000))
+        })
+    });
+    let allow = !*approved
+        && session.is_some()
+        && p["sessionId"].as_str() == session
+        && tool["title"] == "dev__shell"
+        && exact_input;
+    let option = p["options"]
+        .as_array()
+        .and_then(|options| options.iter().find(|o| o["kind"] == "allow_once"))
+        .and_then(|o| o["optionId"].as_str());
+    let outcome = if let Some(id) = option.filter(|_| allow) {
+        *approved = true;
+        serde_json::json!({"outcome": "selected", "optionId": id})
+    } else {
+        serde_json::json!({"outcome": "cancelled"})
+    };
+    serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "result": {"outcome": outcome}})
+}
+
+async fn oversized_input_probe(
+    http: &reqwest::Client,
+    base: &str,
+    model: &str,
+) -> anyhow::Result<String> {
+    // Use advertised runtime capacity, not native model capacity. Explicit
+    // model routing avoids conflating MoA selection failure with context fit.
+    let models: serde_json::Value = http
+        .get(format!("{base}/models"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let entry = models["data"]
+        .as_array()
+        .and_then(|a| a.iter().find(|m| m["id"] == model))
+        .ok_or_else(|| anyhow::anyhow!("served model absent: {models}"))?;
+    let metadata = &entry["metadata"];
+    let context = metadata["max_context_length"]
+        .as_u64()
+        .or_else(|| metadata["context_length"].as_u64())
+        .ok_or_else(|| anyhow::anyhow!("no advertised runtime context: {entry}"))?;
+    // Bound allocation/request size; fail rather than guess for huge models.
+    anyhow::ensure!(
+        context > 0 && context <= 262_144,
+        "unsupported smoke context: {context}"
+    );
+    // rc9 estimates serialized input bytes / 4, retains ALL prompt tokens.
+    let body = serde_json::json!({"model": model, "stream": false,
+        "max_completion_tokens": 1,
+        "messages": [{"role": "user", "content": "x".repeat((context as usize + 1024) * 4)}]});
+    let response = http
+        .post(format!("{base}/chat/completions"))
+        .timeout(Duration::from_secs(30))
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    let text = response.text().await?;
+    anyhow::ensure!(
+        status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+            && text.contains("no context-compatible target"),
+        "expected context-fit 503 for runtime context {context}, got {status}: {}",
+        text.chars().take(2048).collect::<String>()
+    );
+    Ok(format!("runtime context {context}; {status}: {text}"))
+}
+
+#[cfg(test)]
+#[path = "mesh_agent_e2e/tests.rs"]
+mod tests;
