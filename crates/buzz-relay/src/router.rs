@@ -286,6 +286,18 @@ where
 /// Pure Nostr protocol: WebSocket (NIP-01), HTTP bridge (NIP-98), media (Blossom),
 /// git (smart HTTP), NIP-05, and health probes.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    build_router_with_api_body_budgets(state, API_BODY_IDLE_TIMEOUT, API_BODY_RECEPTION_CEILING)
+}
+
+/// [`build_router`] with the API router's body-reception budgets injected, so
+/// tests can drive the production route table and guard attachment with
+/// millisecond deadlines instead of sleeping for the production constants.
+/// Every other layer, route and limit is identical to [`build_router`].
+fn build_router_with_api_body_budgets(
+    state: Arc<AppState>,
+    api_body_idle_timeout: Duration,
+    api_body_reception_ceiling: Duration,
+) -> Router {
     let media_body_limit = state
         .config
         .media
@@ -407,13 +419,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(audio::handler::ws_audio_handler),
         );
     // Reject request bodies larger than 1 MB to prevent resource exhaustion,
-    // and bound the request future so a withheld body cannot park a task
-    // (WebSocket routes: handshake bounded, established session unaffected).
+    // and bound body *reception* so a withheld body cannot park a task. Only
+    // reception is bounded: once the body is buffered, the handler (and a
+    // WebSocket upgrade or established session) runs with no deadline.
     let api_router = with_body_reception_guard(
         api_router,
         1024 * 1024,
-        API_BODY_IDLE_TIMEOUT,
-        API_BODY_RECEPTION_CEILING,
+        api_body_idle_timeout,
+        api_body_reception_ceiling,
     )
     .with_state(state.clone());
 
@@ -982,10 +995,21 @@ mod tests {
     }
 
     async fn readiness_state(evaluator: Arc<dyn readiness::ReadinessEvaluator>) -> Arc<AppState> {
+        let mut state = offline_state(|_| {}).await;
+        state.set_readiness_evaluator(evaluator);
+        Arc::new(state)
+    }
+
+    /// Relay state whose Postgres and Redis point at closed loopback ports and
+    /// are only ever connected lazily, so routes that never touch them (health,
+    /// readiness with a scripted evaluator, requests refused before a handler)
+    /// run with no infrastructure. `configure` adjusts the default config.
+    async fn offline_state(configure: impl FnOnce(&mut crate::config::Config)) -> AppState {
         let mut config = crate::config::Config::from_env().expect("default config loads");
         config.require_relay_membership = false;
         config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
         config.redis_url = "redis://127.0.0.1:1".to_string();
+        configure(&mut config);
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
@@ -1004,7 +1028,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (mut state, _audit_shutdown) = AppState::new(
+        let (state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -1016,8 +1040,7 @@ mod tests {
             nostr::Keys::generate(),
             media_storage,
         );
-        state.set_readiness_evaluator(evaluator);
-        Arc::new(state)
+        state
     }
 
     async fn readiness_request(router: Router) -> (StatusCode, serde_json::Value) {
@@ -2050,6 +2073,94 @@ mod tests {
             assert!(
                 !completed.load(Ordering::SeqCst),
                 "the handler must not run for a body that never arrived"
+            );
+        }
+
+        /// The production path the wiring tests below drive: the real
+        /// `POST /api/invites/accept-policy` mount from `build_router`.
+        const PRODUCTION_ACCEPT_POLICY_PATH: &str = "/api/invites/accept-policy";
+
+        /// The production router ([`build_router_with_api_body_budgets`], so the
+        /// real route table and the real guard attachment) over infra-free state
+        /// with a join policy configured, so `accept_policy` answers a complete
+        /// body from config alone. Only the API body budgets are injected.
+        async fn production_router(idle_timeout: Duration, ceiling: Duration) -> Router {
+            let state = offline_state(|config| {
+                config.join_policy = Some(crate::config::JoinPolicyConfig {
+                    terms_markdown: Some("terms".to_string()),
+                    privacy_markdown: None,
+                    age_attestation_required: false,
+                    version: "policy-v1".to_string(),
+                });
+            })
+            .await;
+            build_router_with_api_body_budgets(Arc::new(state), idle_timeout, ceiling)
+        }
+
+        fn accept_policy_request(body: Body) -> Request<Body> {
+            Request::post(PRODUCTION_ACCEPT_POLICY_PATH)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn production_accept_policy_mount_answers_a_withheld_body_with_408() {
+            // Wiring, not the helper: the same withheld body as above, sent to
+            // the real accept-policy route through `build_router`'s own guard
+            // attachment. `accept_policy` extracts `Bytes`, so without that
+            // attachment the extractor awaits the body forever and the outer
+            // deadline fails this test.
+            let router =
+                production_router(Duration::from_millis(50), Duration::from_secs(60)).await;
+
+            let response =
+                within_five_seconds(router.oneshot(accept_policy_request(stalled_body())))
+                    .await
+                    .unwrap();
+
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        }
+
+        #[tokio::test]
+        async fn production_accept_policy_mount_answers_a_trickled_body_with_408() {
+            // The ceiling half of the production attachment: every gap inside the
+            // idle bound, the whole body past the ceiling.
+            let router =
+                production_router(Duration::from_millis(200), Duration::from_millis(100)).await;
+
+            let response = within_five_seconds(router.oneshot(accept_policy_request(paced_body(
+                50,
+                1,
+                Duration::from_millis(20),
+            ))))
+            .await
+            .unwrap();
+
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        }
+
+        #[tokio::test]
+        async fn production_accept_policy_mount_serves_a_complete_body_under_the_same_budgets() {
+            // Control for the two rows above: under the same millisecond budgets
+            // a complete body reaches the real handler and gets a receipt, so the
+            // 408s come from the guard refusing reception, not from a dead route.
+            let router =
+                production_router(Duration::from_millis(50), Duration::from_millis(100)).await;
+
+            let body = Body::from(r#"{"code":"invite-code","policy_version":"policy-v1"}"#);
+            let response = within_five_seconds(router.oneshot(accept_policy_request(body)))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                payload["receipt"].as_str().is_some_and(|r| !r.is_empty()),
+                "accept_policy must mint a receipt: {payload}"
             );
         }
 
