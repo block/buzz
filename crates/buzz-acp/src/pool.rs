@@ -1391,10 +1391,9 @@ async fn create_session_and_apply_model(
     // the CLI fallback `--session agent:<id>:buzz`. Omitted when agent id or
     // scope is unavailable (heartbeats / non-OpenClaw agents).
     let session_key = match (ctx.gateway_agent_id.as_deref(), channel.scope) {
-        (Some(agent_id), Some(scope)) => Some(scope.openclaw_gateway_session_key(
-            agent_id,
-            channel.channel_type,
-        )),
+        (Some(agent_id), Some(scope)) => {
+            Some(scope.openclaw_gateway_session_key(agent_id, channel.channel_type))
+        }
         _ => None,
     };
     let mcp_servers = mcp_servers_with_git_origin(

@@ -166,7 +166,11 @@ impl SessionScope {
     pub fn openclaw_session_key_suffix(&self, channel_type: Option<&str>) -> String {
         match self {
             Self::Conversation { channel_id } => {
-                let kind = if channel_type == Some("dm") { "dm" } else { "ch" };
+                let kind = if channel_type == Some("dm") {
+                    "dm"
+                } else {
+                    "ch"
+                };
                 format!("{kind}:{channel_id}")
             }
             Self::Thread {

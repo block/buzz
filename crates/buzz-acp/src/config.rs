@@ -1211,10 +1211,8 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
-        let gateway_agent_id = resolve_gateway_agent_id(
-            args.gateway_agent_id.as_deref(),
-            &agent_args,
-        );
+        let gateway_agent_id =
+            resolve_gateway_agent_id(args.gateway_agent_id.as_deref(), &agent_args);
 
         let config = Config {
             keys,
@@ -3291,7 +3289,9 @@ channels = "ALL"
             Some("mo".into())
         );
         assert_eq!(
-            parse_openclaw_gateway_agent_id("agent:Captain:buzz:ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            parse_openclaw_gateway_agent_id(
+                "agent:Captain:buzz:ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            ),
             Some("captain".into())
         );
         assert_eq!(parse_openclaw_gateway_agent_id("agent:mo:main"), None);
@@ -3300,10 +3300,7 @@ channels = "ALL"
 
     #[test]
     fn resolve_gateway_agent_id_prefers_explicit_then_agent_args() {
-        assert_eq!(
-            resolve_gateway_agent_id(Some("Mo"), &[]),
-            Some("mo".into())
-        );
+        assert_eq!(resolve_gateway_agent_id(Some("Mo"), &[]), Some("mo".into()));
         let args = vec![
             "/path/openclaw/dist/index.js".into(),
             "acp".into(),

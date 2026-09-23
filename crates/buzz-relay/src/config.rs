@@ -1383,10 +1383,7 @@ mod tests {
     #[test]
     fn openclaw_workspace_mint_both_set_enables_config() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var(
-            "BUZZ_OPENCLAW_WORKSPACE_MINT_URL",
-            "http://127.0.0.1:8743/",
-        );
+        std::env::set_var("BUZZ_OPENCLAW_WORKSPACE_MINT_URL", "http://127.0.0.1:8743/");
         std::env::set_var("BUZZ_OPENCLAW_WORKSPACE_MINT_KEY", "test-mint-key");
         std::env::set_var("BUZZ_OPENCLAW_WORKSPACE_MINT_TTL_SECS", "3600");
         let config = Config::from_env().expect("config with mint");
@@ -1404,17 +1401,13 @@ mod tests {
     #[test]
     fn openclaw_workspace_mint_partial_env_disables() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var(
-            "BUZZ_OPENCLAW_WORKSPACE_MINT_URL",
-            "http://127.0.0.1:8743",
-        );
+        std::env::set_var("BUZZ_OPENCLAW_WORKSPACE_MINT_URL", "http://127.0.0.1:8743");
         std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_KEY");
         std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_TTL_SECS");
         let config = Config::from_env().expect("partial mint is soft-disabled");
         std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_URL");
         assert!(config.openclaw_workspace_mint.is_none());
     }
-
 
     /// Look up against a fixed set, standing in for process env.
     fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
