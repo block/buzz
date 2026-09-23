@@ -386,8 +386,11 @@ test.describe("global agent config screenshots", () => {
     );
 
     // Search matches the raw id as well as the label.
-    await page.getByTestId("global-agent-model-search").fill("system.ai");
+    await page
+      .getByTestId("global-agent-model-search")
+      .fill("system.ai.gpt-6-astra");
     await expect(option(siblingId)).toBeVisible();
+    await expect(option(modelId)).toHaveCount(0);
     await expect(option("builderbot-pr-reviews")).toHaveCount(0);
 
     await page.getByRole("option", { name: "GPT-6 Astra (system.ai)" }).click();

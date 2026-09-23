@@ -100,11 +100,13 @@ export function ModelPicker({
       ),
     [modelsData, agent.provider],
   );
+  const rowLabel = (id: string) =>
+    modelRows.find((row) => row.id === id)?.label ??
+    resolveModelLabel(id, null, agent.provider);
   const displayLabel = agent.model
-    ? (modelRows.find((row) => row.id === agent.model)?.label ??
-      resolveModelLabel(agent.model, null, agent.provider))
+    ? rowLabel(agent.model)
     : modelsData?.agentDefaultModel
-      ? `${resolveModelLabel(modelsData.agentDefaultModel, null, agent.provider)} (default)`
+      ? `${rowLabel(modelsData.agentDefaultModel)} (default)`
       : hasRequestedModels && loading
         ? "Loading..."
         : "Auto";
