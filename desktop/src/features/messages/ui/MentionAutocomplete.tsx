@@ -313,6 +313,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     <UserAvatar
                       avatarUrl={suggestion.avatarUrl ?? null}
                       displayName={suggestion.displayName}
+                      pubkey={suggestion.pubkey}
                       shape={
                         suggestion.isAgent || suggestion.kind === "persona"
                           ? "squircle"

@@ -467,6 +467,7 @@ export const MessageRow = React.memo(
           avatarUrl={message.avatarUrl ?? null}
           className="shrink-0"
           displayName={message.author}
+          pubkey={message.pubkey}
           shape={isAuthorAgent ? "squircle" : "circle"}
           testId="message-avatar"
         />

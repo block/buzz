@@ -210,6 +210,7 @@ export function InboxMessageRow({
                   avatarUrl={message.avatarUrl}
                   className="h-9 w-9 shrink-0"
                   displayName={message.authorLabel}
+                  pubkey={message.authorPubkey}
                   shape={isAuthorAgent ? "squircle" : "circle"}
                   size="md"
                 />

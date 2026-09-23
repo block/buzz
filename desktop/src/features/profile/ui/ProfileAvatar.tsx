@@ -7,6 +7,11 @@ import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
+import {
+  OpenClawWorkspaceBadge,
+  openClawWorkspaceBadgeSizeForAvatar,
+} from "@/shared/ui/OpenClawWorkspaceBadge";
+import { useOpenClawWorkspaceAvatarEnabled } from "@/shared/ui/openClawWorkspaceAvatarContext";
 import { Spinner } from "@/shared/ui/spinner";
 
 /**
@@ -40,6 +45,12 @@ type ProfileAvatarProps = {
    * blocked.
    */
   untrusted?: boolean;
+  /** Local agent pubkey for OpenClaw crab badge lookup. */
+  pubkey?: string | null;
+  /** Explicit OpenClaw badge override when the managed-agent flag is known. */
+  showOpenClawWorkspaceBadge?: boolean;
+  /** Pixel size of the avatar for badge scaling (defaults to 32). */
+  openClawBadgeAvatarPx?: number;
 };
 
 export function ProfileAvatar({
@@ -53,8 +64,16 @@ export function ProfileAvatar({
   shape = "circle",
   testId,
   untrusted = false,
+  pubkey,
+  showOpenClawWorkspaceBadge,
+  openClawBadgeAvatarPx = 32,
 }: ProfileAvatarProps) {
   const initials = getInitials(label);
+  const fromContext = useOpenClawWorkspaceAvatarEnabled(pubkey);
+  const showOpenClawBadge = showOpenClawWorkspaceBadge ?? fromContext;
+  const openClawBadgeSize = openClawWorkspaceBadgeSizeForAvatar(
+    openClawBadgeAvatarPx,
+  );
   const presentation = useAvatarPresentation(avatarUrl);
   const presentedAvatarUrl = presentation?.displayUrl ?? avatarUrl;
 
@@ -93,66 +112,74 @@ export function ProfileAvatar({
   const shouldShowFallback = src === undefined || (!animated && liveFailed);
 
   return (
-    <Avatar
-      className={cn(
-        "shrink-0 text-primary shadow-xs",
-        shape === "squircle" && "rounded-[30%]",
-        // Animated avatars carry their own backdrop disc and transparent
-        // surroundings — any container fill would flatten the pop-out.
-        plain || animated ? "bg-transparent shadow-none" : "bg-primary/20",
-        className,
-      )}
-      data-testid={testId}
-      onMouseEnter={animated ? () => setIsHovered(true) : undefined}
-      onMouseLeave={animated ? () => setIsHovered(false) : undefined}
-    >
-      {src !== undefined ? (
-        <AvatarImage
-          alt={`${label} avatar`}
-          className={cn(
-            "object-cover",
-            presentation?.state === "pending" && "brightness-75",
-            imageClassName,
-          )}
-          data-testid={testId ? `${testId}-image` : undefined}
-          onLoadingStatusChange={(status) => {
-            if (status === "error") setFailedSrc(liveSrc);
-            if (status === "loaded" && src === liveSrc) {
-              setFailedSrc(null);
-            }
-          }}
-          referrerPolicy="no-referrer"
-          src={src}
+    <span className="relative inline-flex shrink-0">
+      <Avatar
+        className={cn(
+          "shrink-0 text-primary shadow-xs",
+          shape === "squircle" && "rounded-[30%]",
+          // Animated avatars carry their own backdrop disc and transparent
+          // surroundings — any container fill would flatten the pop-out.
+          plain || animated ? "bg-transparent shadow-none" : "bg-primary/20",
+          className,
+        )}
+        data-testid={testId}
+        onMouseEnter={animated ? () => setIsHovered(true) : undefined}
+        onMouseLeave={animated ? () => setIsHovered(false) : undefined}
+      >
+        {src !== undefined ? (
+          <AvatarImage
+            alt={`${label} avatar`}
+            className={cn(
+              "object-cover",
+              presentation?.state === "pending" && "brightness-75",
+              imageClassName,
+            )}
+            data-testid={testId ? `${testId}-image` : undefined}
+            onLoadingStatusChange={(status) => {
+              if (status === "error") setFailedSrc(liveSrc);
+              if (status === "loaded" && src === liveSrc) {
+                setFailedSrc(null);
+              }
+            }}
+            referrerPolicy="no-referrer"
+            src={src}
+          />
+        ) : null}
+        {shouldShowFallback ? (
+          <AvatarFallback
+            className={cn(
+              "font-semibold text-primary",
+              plain || animated ? "bg-transparent" : "bg-primary/20",
+            )}
+            data-testid={testId ? `${testId}-fallback` : undefined}
+            delayMs={src === undefined ? undefined : 200}
+          >
+            {initials.length > 0 ? (
+              initials
+            ) : (
+              <UserRound className={iconClassName} />
+            )}
+          </AvatarFallback>
+        ) : null}
+        {presentation?.state === "pending" ? (
+          <span
+            aria-label="Avatar upload pending"
+            className="pointer-events-none absolute inset-0 flex items-center justify-center text-white drop-shadow-sm"
+            data-testid={testId ? `${testId}-upload-pending` : undefined}
+            role="status"
+          >
+            <span className="flex size-7 items-center justify-center rounded-full bg-black/35">
+              <Spinner aria-hidden="true" className="border-2" size={16} />
+            </span>
+          </span>
+        ) : null}
+      </Avatar>
+      {showOpenClawBadge ? (
+        <OpenClawWorkspaceBadge
+          className="pointer-events-none absolute bottom-0 left-0 z-10"
+          size={openClawBadgeSize}
         />
       ) : null}
-      {shouldShowFallback ? (
-        <AvatarFallback
-          className={cn(
-            "font-semibold text-primary",
-            plain || animated ? "bg-transparent" : "bg-primary/20",
-          )}
-          data-testid={testId ? `${testId}-fallback` : undefined}
-          delayMs={src === undefined ? undefined : 200}
-        >
-          {initials.length > 0 ? (
-            initials
-          ) : (
-            <UserRound className={iconClassName} />
-          )}
-        </AvatarFallback>
-      ) : null}
-      {presentation?.state === "pending" ? (
-        <span
-          aria-label="Avatar upload pending"
-          className="pointer-events-none absolute inset-0 flex items-center justify-center text-white drop-shadow-sm"
-          data-testid={testId ? `${testId}-upload-pending` : undefined}
-          role="status"
-        >
-          <span className="flex size-7 items-center justify-center rounded-full bg-black/35">
-            <Spinner aria-hidden="true" className="border-2" size={16} />
-          </span>
-        </span>
-      ) : null}
-    </Avatar>
+    </span>
   );
 }

@@ -46,6 +46,7 @@ function ParticipantAvatar({
           index < participantCount - 1 && "ring-2 ring-background",
         )}
         displayName={participant.author}
+        pubkey={participant.id}
         shape={participant.isAgent ? "squircle" : "circle"}
         size="sm"
       />

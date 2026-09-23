@@ -56,6 +56,7 @@ export function ChannelMemberAvatarStack({
               className="!h-8 !w-8 border-2 border-background text-2xs"
               displayName={label}
               fallbackDelayMs={0}
+              pubkey={member.pubkey}
               shape={profile?.isAgent ? "squircle" : "circle"}
             />
           </span>

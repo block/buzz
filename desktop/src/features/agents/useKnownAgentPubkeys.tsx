@@ -6,6 +6,7 @@ import {
 } from "@/features/agents/hooks";
 import { mergeKnownAgentPubkeys } from "@/features/agents/knownAgentPubkeys";
 import { useStableMap, useStableSet } from "@/shared/hooks/useStableReference";
+import { OpenClawWorkspaceAvatarProvider } from "@/shared/ui/openClawWorkspaceAvatarContext";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { isAgentDirectoryReady } from "./lib/agentAutocompleteEligibility";
@@ -64,6 +65,13 @@ export function KnownAgentPubkeysProvider({
       (managedAgents ?? []).map((agent) => normalizePubkey(agent.pubkey)),
     ),
   );
+  const openClawWorkspacePubkeys = useStableSet(
+    new Set(
+      (managedAgents ?? [])
+        .filter((agent) => agent.useOpenClawWorkspace === true)
+        .map((agent) => normalizePubkey(agent.pubkey)),
+    ),
+  );
   const relayOwners = useStableMap(
     new Map(
       isAgentDirectoryReady(relayQuery)
@@ -94,7 +102,9 @@ export function KnownAgentPubkeysProvider({
   return (
     <KnownAgentPubkeysContext.Provider value={stable}>
       <AgentManagementContext.Provider value={management}>
-        {children}
+        <OpenClawWorkspaceAvatarProvider pubkeys={openClawWorkspacePubkeys}>
+          {children}
+        </OpenClawWorkspaceAvatarProvider>
       </AgentManagementContext.Provider>
     </KnownAgentPubkeysContext.Provider>
   );

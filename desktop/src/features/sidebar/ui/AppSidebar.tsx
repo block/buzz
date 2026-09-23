@@ -435,6 +435,7 @@ export function AppSidebar({
             channelId,
             isAgent: participant.isAgent,
             label: dmChannelLabels[channelId] ?? participant.label,
+            pubkey: participant.pubkey,
           },
         ];
       }),

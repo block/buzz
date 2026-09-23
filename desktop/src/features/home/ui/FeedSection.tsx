@@ -207,6 +207,7 @@ export function FeedSection({
                         profiles,
                         preferResolvedSelfLabel: true,
                       })}
+                      pubkey={item.pubkey}
                       shape={
                         profiles?.[item.pubkey.toLowerCase()]?.isAgent === true
                           ? "squircle"

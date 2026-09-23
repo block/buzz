@@ -97,6 +97,7 @@ export function ForumPostCard({
                 accent={authorIsAgent}
                 avatarUrl={avatarUrl}
                 displayName={authorLabel}
+                pubkey={post.pubkey}
                 shape={authorIsAgent ? "squircle" : "circle"}
                 size="sm"
               />

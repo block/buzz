@@ -728,6 +728,7 @@ export function TopbarSearch({
               pubkey: result.hit.pubkey,
               preferResolvedSelfLabel: true,
             })}
+            pubkey={result.hit.pubkey}
             shape={
               resultProfiles?.[result.hit.pubkey.toLowerCase()]?.isAgent ===
               true
@@ -741,6 +742,7 @@ export function TopbarSearch({
             avatarUrl={result.user.avatarUrl}
             className="h-7 w-7"
             displayName={userDisplayName ?? result.user.pubkey}
+            pubkey={result.user.pubkey}
             shape={result.user.isAgent ? "squircle" : "circle"}
             size="sm"
           />

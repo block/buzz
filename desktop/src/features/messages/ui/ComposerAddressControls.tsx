@@ -70,6 +70,7 @@ function AddressedAgentAvatar({
         avatarUrl={agent.avatarUrl}
         className="h-4.5 w-4.5"
         displayName={agent.displayName}
+        pubkey={agent.pubkey}
         shape="squircle"
         size="xs"
         testId="composer-address-lock-avatar"

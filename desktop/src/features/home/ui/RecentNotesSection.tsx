@@ -65,6 +65,7 @@ export function RecentNotesSection({
                 <UserAvatar
                   avatarUrl={profile?.avatarUrl ?? null}
                   displayName={displayName}
+                  pubkey={note.pubkey}
                   shape={isAgent ? "squircle" : "circle"}
                   size="sm"
                 />

@@ -973,6 +973,7 @@ export function AgentInstanceEditDialog({
               onClearAvatar={() => setAvatarUrl("")}
               onUploadPendingChange={setIsAvatarUploadPending}
               onSelectAvatar={setAvatarUrl}
+              showOpenClawWorkspaceBadge={useOpenClawWorkspace}
             />
             {onEditLinkedPersona ? (
               <Button

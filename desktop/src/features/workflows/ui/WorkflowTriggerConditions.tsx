@@ -79,11 +79,13 @@ function AuthorConditionSummary({
   excluded,
   isAgent,
   label,
+  pubkey,
 }: {
   avatarUrl: string | null;
   excluded: boolean;
   isAgent?: boolean;
   label: string;
+  pubkey?: string | null;
 }) {
   return (
     <span className="flex shrink-0 items-center">
@@ -93,6 +95,7 @@ function AuthorConditionSummary({
           className="h-6 w-6"
           displayName={label}
           fallbackDelayMs={0}
+          pubkey={pubkey}
           shape={isAgent ? "squircle" : "circle"}
           size="xs"
         />
@@ -331,6 +334,7 @@ export function WorkflowTriggerConditions({
                       excluded={condition.operator === "not_equals"}
                       isAgent={triggerPresentation.isAgent}
                       label={authorSummary}
+                      pubkey={triggerPresentation.pubkey}
                     />
                   ) : messageSummary ? (
                     <span

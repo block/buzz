@@ -104,6 +104,7 @@ function ReplyRow({
               accent={replyAuthorIsAgent}
               avatarUrl={replyAvatarUrl}
               displayName={replyAuthorLabel}
+              pubkey={reply.pubkey}
               shape={replyAuthorIsAgent ? "squircle" : "circle"}
               size="sm"
             />
@@ -264,6 +265,7 @@ export function ForumThreadPanel({
                   accent={postAuthorIsAgent}
                   avatarUrl={postAvatarUrl}
                   displayName={postAuthorLabel}
+                  pubkey={post.pubkey}
                   shape={postAuthorIsAgent ? "squircle" : "circle"}
                 />
                 <span className="text-sm font-semibold text-foreground hover:underline">

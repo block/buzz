@@ -119,6 +119,7 @@ export function CompactMessageSummary({
               avatarUrl={avatarUrl}
               className="size-full text-xs"
               displayName={displayName}
+              pubkey={pubkey}
               shape="squircle"
               size="sm"
               testId="transcript-agent-sent-avatar"
@@ -132,6 +133,7 @@ export function CompactMessageSummary({
               isCompactPreview ? "text-3xs" : "text-xs",
             )}
             displayName={displayName}
+            pubkey={pubkey}
             shape="squircle"
             size="sm"
             testId="transcript-agent-sent-avatar"

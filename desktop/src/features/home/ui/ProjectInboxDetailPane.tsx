@@ -100,6 +100,7 @@ export function ProjectInboxDetailPane({
                 avatarUrl={authorAvatarUrl}
                 className="shrink-0"
                 displayName={authorLabel}
+                pubkey={authorPubkey}
                 shape={authorIsAgent ? "squircle" : "circle"}
                 size="sm"
                 testId="project-inbox-author-avatar"

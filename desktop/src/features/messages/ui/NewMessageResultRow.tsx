@@ -114,6 +114,8 @@ export function NewMessageResultRow({
           className="h-8 w-8 text-xs shadow-none"
           iconClassName="h-4 w-4"
           label={name}
+          openClawBadgeAvatarPx={32}
+          pubkey={user.pubkey}
           shape={user.isAgent ? "squircle" : "circle"}
         />
         <div className="min-w-0 flex-1">

@@ -635,6 +635,7 @@ export const WorkflowFormBuilder = React.forwardRef<
       isAgent={triggerPresentation.isAgent}
       label={triggerPresentation.label}
       loading={triggerPresentation.loading}
+      pubkey={triggerPresentation.pubkey}
     />
   );
   const TriggerIcon = {

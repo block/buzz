@@ -415,6 +415,7 @@ function ActivityCard({
                   accent={profile?.isAgent === true}
                   avatarUrl={profile?.avatarUrl ?? null}
                   displayName={actorLabel}
+                  pubkey={item.actorPubkey}
                   shape={profile?.isAgent ? "squircle" : "circle"}
                   size={compact ? "xs" : "md"}
                 />
@@ -426,6 +427,7 @@ function ActivityCard({
               avatarUrl={profile?.avatarUrl ?? null}
               className="relative z-10 shrink-0"
               displayName={actorLabel}
+              pubkey={item.actorPubkey}
               shape={profile?.isAgent ? "squircle" : "circle"}
               size={compact ? "xs" : "md"}
             />

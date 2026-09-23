@@ -91,6 +91,7 @@ function ReplyParentContext({
                 avatarUrl={parentAvatarUrl}
                 className="!h-4 !w-4 shrink-0"
                 displayName={parentDisplayName ?? "Parent note author"}
+                pubkey={parentNote.pubkey}
                 shape={parentIsAgent ? "squircle" : "circle"}
               />
             </button>
@@ -176,6 +177,7 @@ export function NoteCard({
             avatarUrl={avatarUrl}
             className="!h-9 !w-9 shrink-0"
             displayName={displayName}
+            pubkey={note.pubkey}
             shape={isAgent ? "squircle" : "circle"}
           />
           {isAgent ? (

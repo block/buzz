@@ -9,12 +9,14 @@ export function WorkflowRichTriggerDescription({
   isAgent,
   label,
   loading,
+  pubkey,
 }: {
   avatarUrl?: string | null;
   description: string;
   isAgent?: boolean;
   label?: string | null;
   loading?: boolean;
+  pubkey?: string | null;
 }) {
   if (loading) {
     return (
@@ -43,6 +45,7 @@ export function WorkflowRichTriggerDescription({
         className="h-4 w-4"
         displayName={label}
         fallbackDelayMs={0}
+        pubkey={pubkey}
         shape={isAgent ? "squircle" : "circle"}
         size="xs"
         testId="workflow-trigger-author-avatar"

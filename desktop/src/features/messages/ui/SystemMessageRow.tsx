@@ -333,6 +333,7 @@ function MemberNamesInlineList({
                         currentPubkey,
                         profiles,
                       )}
+                      pubkey={pubkey}
                       shape={
                         isKnownAgentPubkey(
                           pubkey,

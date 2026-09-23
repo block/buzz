@@ -5,6 +5,11 @@ import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
+import {
+  OpenClawWorkspaceBadge,
+  openClawWorkspaceBadgeSizeForAvatar,
+} from "@/shared/ui/OpenClawWorkspaceBadge";
+import { useOpenClawWorkspaceAvatarEnabled } from "@/shared/ui/openClawWorkspaceAvatarContext";
 
 type UserAvatarSize = "xs" | "sm" | "md";
 
@@ -12,6 +17,12 @@ const sizeClasses: Record<UserAvatarSize, string> = {
   xs: "h-5 w-5 text-3xs",
   sm: "h-6 w-6 text-2xs",
   md: "h-9 w-9 text-xs",
+};
+
+const sizePixels: Record<UserAvatarSize, number> = {
+  xs: 20,
+  sm: 24,
+  md: 36,
 };
 
 const fallbackColorClasses = [
@@ -42,6 +53,16 @@ type UserAvatarProps = {
   fallbackDelayMs?: number;
   imageDraggable?: boolean;
   testId?: string;
+  /**
+   * Local agent pubkey — when set, overlays the OpenClaw crab badge if that
+   * agent has `useOpenClawWorkspace` enabled (looked up from app context).
+   */
+  pubkey?: string | null;
+  /**
+   * Explicit override for the OpenClaw badge. Prefer this when the caller
+   * already has the managed-agent flag; otherwise pass `pubkey`.
+   */
+  showOpenClawWorkspaceBadge?: boolean;
 };
 
 export function UserAvatar({
@@ -54,6 +75,8 @@ export function UserAvatar({
   fallbackDelayMs = 200,
   imageDraggable,
   testId,
+  pubkey,
+  showOpenClawWorkspaceBadge,
 }: UserAvatarProps) {
   const initials = getInitials(displayName);
   // Animated avatars show their static poster frame until hovered, then play
@@ -68,43 +91,55 @@ export function UserAvatar({
   const resolvedShape = shape ?? "circle";
   const radiusClass =
     resolvedShape === "squircle" ? "rounded-[30%]" : "rounded-full";
+  const fromContext = useOpenClawWorkspaceAvatarEnabled(pubkey);
+  const showBadge = showOpenClawWorkspaceBadge ?? fromContext;
+  const badgeSize = openClawWorkspaceBadgeSizeForAvatar(sizePixels[size]);
 
   return (
-    <Avatar
-      // Animated avatars carry their own backdrop disc and transparent
-      // surroundings — any container fill would flatten the pop-out.
+    <span
       className={cn(
+        "relative inline-flex shrink-0",
         sizeClasses[size],
-        radiusClass,
-        !animated && "shadow-xs",
         className,
       )}
-      data-testid={testId}
-      onMouseEnter={animated ? () => setIsHovered(true) : undefined}
-      onMouseLeave={animated ? () => setIsHovered(false) : undefined}
     >
-      {src ? (
-        <AvatarImage
-          alt={`${displayName} avatar`}
-          className={cn("object-cover", !animated && "bg-secondary")}
-          data-testid={testId ? `${testId}-image` : undefined}
-          draggable={imageDraggable}
-          referrerPolicy="no-referrer"
-          src={src}
+      <Avatar
+        // Animated avatars carry their own backdrop disc and transparent
+        // surroundings — any container fill would flatten the pop-out.
+        className={cn("h-full w-full", radiusClass, !animated && "shadow-xs")}
+        data-testid={testId}
+        onMouseEnter={animated ? () => setIsHovered(true) : undefined}
+        onMouseLeave={animated ? () => setIsHovered(false) : undefined}
+      >
+        {src ? (
+          <AvatarImage
+            alt={`${displayName} avatar`}
+            className={cn("object-cover", !animated && "bg-secondary")}
+            data-testid={testId ? `${testId}-image` : undefined}
+            draggable={imageDraggable}
+            referrerPolicy="no-referrer"
+            src={src}
+          />
+        ) : null}
+        <AvatarFallback
+          className={cn(
+            "font-semibold",
+            accent
+              ? "bg-primary text-primary-foreground"
+              : fallbackColorClass(displayName),
+          )}
+          data-testid={testId ? `${testId}-fallback` : undefined}
+          delayMs={fallbackDelayMs}
+        >
+          {initials}
+        </AvatarFallback>
+      </Avatar>
+      {showBadge ? (
+        <OpenClawWorkspaceBadge
+          className="pointer-events-none absolute bottom-0 left-0 z-10"
+          size={badgeSize}
         />
       ) : null}
-      <AvatarFallback
-        className={cn(
-          "font-semibold",
-          accent
-            ? "bg-primary text-primary-foreground"
-            : fallbackColorClass(displayName),
-        )}
-        data-testid={testId ? `${testId}-fallback` : undefined}
-        delayMs={fallbackDelayMs}
-      >
-        {initials}
-      </AvatarFallback>
-    </Avatar>
+    </span>
   );
 }

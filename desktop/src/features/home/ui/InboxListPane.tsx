@@ -396,6 +396,7 @@ export function InboxListPane({
                     avatarUrl={item.avatarUrl}
                     className="h-9 w-9"
                     displayName={item.senderLabel}
+                    pubkey={item.item.pubkey}
                     shape={isSenderAgent ? "squircle" : "circle"}
                     size="md"
                   />

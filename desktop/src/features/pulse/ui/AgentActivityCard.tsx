@@ -75,6 +75,7 @@ export function AgentActivityCard({
             <UserAvatar
               avatarUrl={avatarUrl}
               displayName={displayName}
+              pubkey={group.pubkey}
               shape="squircle"
             />
             <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />

@@ -207,6 +207,7 @@ export function ChannelMemberInviteCard({
                   <UserAvatar
                     avatarUrl={invitee.avatarUrl ?? null}
                     displayName={formatSearchUserName(invitee)}
+                    pubkey={invitee.pubkey}
                     shape={invitee.isAgent ? "squircle" : "circle"}
                     size="xs"
                   />
@@ -272,6 +273,7 @@ export function ChannelMemberInviteCard({
                         <UserAvatar
                           avatarUrl={null}
                           displayName={truncatePubkey(directInvitee.pubkey)}
+                          pubkey={directInvitee.pubkey}
                           size="xs"
                         />
                         <p className="truncate text-sm font-medium leading-5">
@@ -299,6 +301,7 @@ export function ChannelMemberInviteCard({
                         <UserAvatar
                           avatarUrl={result.avatarUrl}
                           displayName={formatSearchUserName(result)}
+                          pubkey={result.pubkey}
                           shape={result.isAgent ? "squircle" : "circle"}
                           size="xs"
                         />

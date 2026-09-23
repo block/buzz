@@ -110,7 +110,6 @@ export function TypingIndicatorRow({
                 >
                   <ProfileAvatar
                     avatarUrl={profile?.avatarUrl ?? null}
-                    label={label}
                     className={cn(
                       isActivityVariant
                         ? "h-4 w-4 text-3xs"
@@ -119,6 +118,9 @@ export function TypingIndicatorRow({
                     iconClassName={
                       isActivityVariant ? "h-2.5 w-2.5" : "h-4 w-4"
                     }
+                    label={label}
+                    openClawBadgeAvatarPx={isActivityVariant ? 16 : 20}
+                    pubkey={pubkey}
                     shape={profile?.isAgent ? "squircle" : "circle"}
                   />
                 </div>

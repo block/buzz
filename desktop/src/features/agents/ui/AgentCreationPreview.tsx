@@ -6,6 +6,10 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
+  OpenClawWorkspaceBadge,
+  openClawWorkspaceBadgeSizeForAvatar,
+} from "@/shared/ui/OpenClawWorkspaceBadge";
+import {
   AVATAR_COLORS,
   AVATAR_COLOR_SWATCHES,
   CUSTOM_AVATAR_COLOR_SWATCH,
@@ -55,6 +59,7 @@ export function AgentCreationPreview({
   onSelectAvatar,
   processImage,
   shape = "circle",
+  showOpenClawWorkspaceBadge = false,
   testIdPrefix = "agent-avatar",
   variant = "default",
 }: {
@@ -72,6 +77,8 @@ export function AgentCreationPreview({
   onSelectAvatar: (avatarUrl: string) => void;
   processImage?: (file: File) => Promise<string>;
   shape?: "circle" | "rounded-square";
+  /** Preview the OpenClaw crab badge while the create/edit toggle is on. */
+  showOpenClawWorkspaceBadge?: boolean;
   testIdPrefix?: string;
   variant?: "compact" | "default";
 }) {
@@ -107,6 +114,12 @@ export function AgentCreationPreview({
     assetLabel.charAt(0).toUpperCase() + assetLabel.slice(1);
   const isRoundedSquare = shape === "rounded-square";
   const isCompact = variant === "compact";
+  const openClawPreviewBadge = showOpenClawWorkspaceBadge ? (
+    <OpenClawWorkspaceBadge
+      className="pointer-events-none absolute bottom-0 left-0 z-10"
+      size={openClawWorkspaceBadgeSizeForAvatar(isCompact ? 64 : 144)}
+    />
+  ) : null;
   const emojiShape = isRoundedSquare ? "rounded-square" : "circle";
   const {
     inputRef: avatarUploadInputRef,
@@ -756,8 +769,10 @@ export function AgentCreationPreview({
                   isCompact ? "text-base" : "text-4xl",
                 )}
                 label={label}
+                showOpenClawWorkspaceBadge={false}
               />
             )}
+            {openClawPreviewBadge}
           </div>
         </div>
       </div>
@@ -1008,6 +1023,7 @@ export function AgentCreationPreview({
                   </button>
                 </PopoverTrigger>
               )}
+              {openClawPreviewBadge}
             </div>
           </PopoverAnchor>
           {avatarMenuContent}

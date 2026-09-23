@@ -47,6 +47,7 @@ export function AddMemberSearchResultRow({
         avatarUrl={user.avatarUrl}
         className="pointer-events-none relative z-10 h-8 w-8 text-xs shadow-none"
         displayName={formatAddCandidateName(user)}
+        pubkey={user.pubkey}
         shape={user.isAgent ? "squircle" : "circle"}
         size="sm"
       />

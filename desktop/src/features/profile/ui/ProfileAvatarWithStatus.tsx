@@ -3,6 +3,11 @@ import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import type { PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import {
+  OpenClawWorkspaceBadge,
+  openClawWorkspaceBadgeSizeForAvatar,
+} from "@/shared/ui/OpenClawWorkspaceBadge";
+import { useOpenClawWorkspaceAvatarEnabled } from "@/shared/ui/openClawWorkspaceAvatarContext";
+import {
   MaskedAvatarBadgeFrame,
   STATUS_DOT_MASK_CURVE,
 } from "./MaskedAvatarBadgeFrame";
@@ -27,6 +32,8 @@ type ProfileAvatarWithStatusProps = {
   status?: PresenceStatus;
   statusTestId?: string;
   testId?: string;
+  pubkey?: string | null;
+  showOpenClawWorkspaceBadge?: boolean;
 };
 
 export const DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY = {
@@ -62,8 +69,13 @@ export function ProfileAvatarWithStatus({
   status,
   statusTestId,
   testId,
+  pubkey,
+  showOpenClawWorkspaceBadge,
 }: ProfileAvatarWithStatusProps) {
   const statusLabel = status ? getPresenceLabel(status) : null;
+  const fromContext = useOpenClawWorkspaceAvatarEnabled(pubkey);
+  const showOpenClawBadge = showOpenClawWorkspaceBadge ?? fromContext;
+  const openClawBadgeSize = openClawWorkspaceBadgeSizeForAvatar(size);
   const cutout = status
     ? {
         cx: geometry.centerX,
@@ -81,37 +93,47 @@ export function ProfileAvatarWithStatus({
     : undefined;
 
   return (
-    <MaskedAvatarBadgeFrame
-      badge={
-        status ? (
-          <span
-            aria-label={statusLabel ?? undefined}
-            className="flex h-full w-full items-center justify-center rounded-full"
-            data-testid={statusTestId}
-            role="img"
-          >
-            <PresenceDot className="h-full w-full" status={status} />
-            {statusLabel ? (
-              <span className="sr-only">{statusLabel}</span>
-            ) : null}
-          </span>
-        ) : undefined
-      }
-      badgeBox={badgeBox}
-      className={cn("inline-flex", className)}
-      cornerRadius={shape === "squircle" ? size * 0.3 : undefined}
-      curve={STATUS_DOT_MASK_CURVE}
-      cutout={cutout}
-      size={size}
-    >
-      <ProfileAvatar
-        avatarUrl={avatarUrl}
-        className={cn("h-full w-full", avatarClassName)}
-        iconClassName={iconClassName}
-        label={label}
-        shape={shape}
-        testId={testId}
-      />
-    </MaskedAvatarBadgeFrame>
+    <span className={cn("relative inline-flex", className)}>
+      <MaskedAvatarBadgeFrame
+        badge={
+          status ? (
+            <span
+              aria-label={statusLabel ?? undefined}
+              className="flex h-full w-full items-center justify-center rounded-full"
+              data-testid={statusTestId}
+              role="img"
+            >
+              <PresenceDot className="h-full w-full" status={status} />
+              {statusLabel ? (
+                <span className="sr-only">{statusLabel}</span>
+              ) : null}
+            </span>
+          ) : undefined
+        }
+        badgeBox={badgeBox}
+        className="inline-flex"
+        cornerRadius={shape === "squircle" ? size * 0.3 : undefined}
+        curve={STATUS_DOT_MASK_CURVE}
+        cutout={cutout}
+        size={size}
+      >
+        <ProfileAvatar
+          avatarUrl={avatarUrl}
+          className={cn("h-full w-full", avatarClassName)}
+          iconClassName={iconClassName}
+          label={label}
+          openClawBadgeAvatarPx={size}
+          shape={shape}
+          showOpenClawWorkspaceBadge={false}
+          testId={testId}
+        />
+      </MaskedAvatarBadgeFrame>
+      {showOpenClawBadge ? (
+        <OpenClawWorkspaceBadge
+          className="pointer-events-none absolute bottom-0 left-0 z-10"
+          size={openClawBadgeSize}
+        />
+      ) : null}
+    </span>
   );
 }

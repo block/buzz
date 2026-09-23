@@ -118,6 +118,7 @@ export function UserMessageBubble({
             avatarUrl={authorProfile?.avatarUrl ?? null}
             className="size-full text-xs"
             displayName={authorLabel}
+            pubkey={item.authorPubkey}
             shape={authorProfile?.isAgent ? "squircle" : "circle"}
             size="sm"
           />
@@ -127,6 +128,7 @@ export function UserMessageBubble({
           avatarUrl={authorProfile?.avatarUrl ?? null}
           className="order-last ml-2 mt-1 size-7 shrink-0 text-xs"
           displayName={authorLabel}
+          pubkey={item.authorPubkey}
           shape={authorProfile?.isAgent ? "squircle" : "circle"}
           size="sm"
         />

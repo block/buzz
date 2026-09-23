@@ -34,6 +34,7 @@ const UNKNOWN_CHANNEL_LABEL = "Unknown channel";
 /** Author identity + source channel resolved for a reminder's target. */
 export type ReminderSource = {
   authorLabel: string;
+  authorPubkey: string;
   avatarUrl: string | null;
   channel: Channel | null;
   channelLabel: string;
@@ -75,6 +76,7 @@ export function useReminderSources(reminders: readonly Reminder[]) {
           profiles,
           pubkey: target.authorPubkey,
         }),
+        authorPubkey: target.authorPubkey,
         avatarUrl:
           profiles?.[normalizePubkey(target.authorPubkey)]?.avatarUrl ?? null,
         channel: channel ?? null,
@@ -198,6 +200,7 @@ function ReminderRow({
               avatarUrl={source.avatarUrl}
               className="h-4 w-4 shrink-0"
               displayName={source.authorLabel}
+              pubkey={source.authorPubkey}
               shape={source.isAgent ? "squircle" : "circle"}
               size="xs"
             />
@@ -449,6 +452,7 @@ export function ReminderDetailPane({
                 avatarUrl={source.avatarUrl}
                 className="h-6 w-6"
                 displayName={source.authorLabel}
+                pubkey={source.authorPubkey}
                 shape={source.isAgent ? "squircle" : "circle"}
                 size="sm"
               />

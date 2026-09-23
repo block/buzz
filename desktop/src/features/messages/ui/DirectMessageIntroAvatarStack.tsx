@@ -45,6 +45,7 @@ export function DirectMessageIntroAvatarStack({
                   : "h-[60px] w-[60px] text-base"
               }
               displayName={participant.displayName}
+              pubkey={participant.pubkey}
               shape={participant.isAgent ? "squircle" : "circle"}
               size="md"
             />

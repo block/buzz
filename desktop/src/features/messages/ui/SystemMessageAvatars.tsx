@@ -72,6 +72,7 @@ export function SystemMessageAvatar({
         avatarUrl={resolveAvatarUrl(singlePubkey, profiles)}
         className="!h-9 !w-9 shrink-0 text-2xs"
         displayName={actorLabel}
+        pubkey={singlePubkey}
         shape={isSingleAgent ? "squircle" : "circle"}
         testId="system-message-avatar"
       />
@@ -127,6 +128,7 @@ export function SystemMessageAvatar({
         avatarUrl={resolveAvatarUrl(actorPubkey, profiles)}
         className="!h-7 !w-7 border-2 border-background text-2xs"
         displayName={actorLabel}
+        pubkey={actorPubkey}
         shape={isActorAgent ? "squircle" : "circle"}
       />
       <UserAvatar
@@ -134,6 +136,7 @@ export function SystemMessageAvatar({
         avatarUrl={resolveAvatarUrl(targetPubkey, profiles)}
         className="!absolute !bottom-0 !right-0 !h-7 !w-7 border-2 border-background text-2xs"
         displayName={targetLabel}
+        pubkey={targetPubkey}
         shape={isTargetAgent ? "squircle" : "circle"}
       />
     </div>
@@ -208,6 +211,7 @@ export function MembershipAvatarStack({
                   index < visiblePubkeys.length - 1 && "ring-2 ring-background",
                 )}
                 displayName={label}
+                pubkey={pubkey}
                 shape={isAgent ? "squircle" : "circle"}
                 size="sm"
               />

@@ -342,6 +342,7 @@ function AuthorOption({
       <UserAvatar
         avatarUrl={candidate.avatarUrl}
         displayName={label}
+        pubkey={candidate.pubkey}
         shape={candidate.isAgent ? "squircle" : "circle"}
         size="md"
       />

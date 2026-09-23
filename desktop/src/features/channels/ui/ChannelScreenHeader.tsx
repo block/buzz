@@ -174,6 +174,7 @@ export function ChannelScreenHeader({
                 geometry={DM_HEADER_AVATAR_STATUS_GEOMETRY}
                 iconClassName="h-4 w-4"
                 label={activeChannelTitle}
+                pubkey={activeDmParticipant.pubkey}
                 shape={activeDmParticipant.isAgent ? "squircle" : "circle"}
                 size={DM_HEADER_AVATAR_SIZE}
                 status={activeDmPresenceStatus ?? "offline"}
@@ -268,6 +269,7 @@ function DmHeaderParticipantStack({
                   : "h-8 w-8 text-xs"
               }
               displayName={participant.displayName}
+              pubkey={participant.pubkey}
               shape={participant.isAgent ? "squircle" : "circle"}
               size="sm"
             />

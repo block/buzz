@@ -38,6 +38,11 @@ import {
 } from "@/features/profile/ui/UserProfilePanelFocusedViews";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
+  OpenClawWorkspaceBadge,
+  openClawWorkspaceBadgeSizeForAvatar,
+} from "@/shared/ui/OpenClawWorkspaceBadge";
+import { useOpenClawWorkspaceAvatarEnabled } from "@/shared/ui/openClawWorkspaceAvatarContext";
+import {
   ProfilePersonaPrimaryActions,
   ProfilePrimaryActions,
 } from "@/features/profile/ui/UserProfilePrimaryActions";
@@ -406,6 +411,12 @@ export function ProfileSummaryView({
           onEditAgent={canEditAgent ? handleEditAgent : undefined}
           presenceStatus={presenceStatus}
           profile={profile}
+          pubkey={pubkey}
+          showOpenClawWorkspaceBadge={
+            managedAgent
+              ? managedAgent.useOpenClawWorkspace === true
+              : undefined
+          }
           userStatus={userStatus}
         />
       </div>
@@ -610,6 +621,8 @@ function ProfileHero({
   onEditAgent,
   presenceStatus,
   profile,
+  pubkey,
+  showOpenClawWorkspaceBadge,
   userStatus,
 }: {
   displayName: string;
@@ -618,8 +631,12 @@ function ProfileHero({
   onEditAgent?: () => void;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ProfileSummaryViewProps["profile"];
+  pubkey?: string | null;
+  showOpenClawWorkspaceBadge?: boolean;
   userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
+  const fromContext = useOpenClawWorkspaceAvatarEnabled(pubkey);
+  const showOpenClawBadge = showOpenClawWorkspaceBadge ?? fromContext;
   const presenceDotClassName = isBot ? "h-4.5 w-4.5" : "h-3.5 w-3.5";
   const botIndicator = isBot ? (
     <BotIdenticon
@@ -632,39 +649,49 @@ function ProfileHero({
 
   return (
     <div className="flex flex-col items-center gap-3 text-center">
-      <MaskedAvatarBadgeFrame
-        badge={
-          presenceStatus ? (
-            <span
-              aria-label={getPresenceLabel(presenceStatus)}
-              className="flex h-6 w-6 items-center justify-center rounded-full"
-              data-testid="user-profile-presence-badge"
-              role="img"
-            >
-              <PresenceDot
-                className={presenceDotClassName}
-                status={presenceStatus}
-              />
-            </span>
-          ) : null
-        }
-        badgeBox={PROFILE_HERO_PRESENCE_BADGE.shell}
-        className="h-20 w-20"
-        cornerRadius={isBot ? 24 : undefined}
-        curve={STATUS_DOT_MASK_CURVE}
-        cutout={PROFILE_HERO_PRESENCE_BADGE.cutout}
-        size={80}
-      >
-        <ProfileAvatar
-          avatarUrl={profile?.avatarUrl ?? null}
-          className="h-full w-full text-xl"
-          iconClassName="h-8 w-8"
-          label={displayName}
-          plain
-          shape={isBot ? "squircle" : "circle"}
-          testId="user-profile-avatar"
-        />
-      </MaskedAvatarBadgeFrame>
+      <span className="relative inline-flex h-20 w-20">
+        <MaskedAvatarBadgeFrame
+          badge={
+            presenceStatus ? (
+              <span
+                aria-label={getPresenceLabel(presenceStatus)}
+                className="flex h-6 w-6 items-center justify-center rounded-full"
+                data-testid="user-profile-presence-badge"
+                role="img"
+              >
+                <PresenceDot
+                  className={presenceDotClassName}
+                  status={presenceStatus}
+                />
+              </span>
+            ) : null
+          }
+          badgeBox={PROFILE_HERO_PRESENCE_BADGE.shell}
+          className="h-20 w-20"
+          cornerRadius={isBot ? 24 : undefined}
+          curve={STATUS_DOT_MASK_CURVE}
+          cutout={PROFILE_HERO_PRESENCE_BADGE.cutout}
+          size={80}
+        >
+          <ProfileAvatar
+            avatarUrl={profile?.avatarUrl ?? null}
+            className="h-full w-full text-xl"
+            iconClassName="h-8 w-8"
+            label={displayName}
+            plain
+            pubkey={pubkey}
+            shape={isBot ? "squircle" : "circle"}
+            showOpenClawWorkspaceBadge={false}
+            testId="user-profile-avatar"
+          />
+        </MaskedAvatarBadgeFrame>
+        {showOpenClawBadge ? (
+          <OpenClawWorkspaceBadge
+            className="pointer-events-none absolute bottom-0 left-0 z-10"
+            size={openClawWorkspaceBadgeSizeForAvatar(80)}
+          />
+        ) : null}
+      </span>
 
       <div className="flex flex-col items-center gap-1">
         {onEditAgent ? (

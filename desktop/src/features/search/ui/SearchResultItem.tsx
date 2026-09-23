@@ -247,6 +247,7 @@ export function MessageResultBody({
           <UserAvatar
             avatarUrl={avatarUrl}
             displayName={authorLabel}
+            pubkey={hit.pubkey}
             shape={authorIsAgent ? "squircle" : "circle"}
             size="xs"
           />

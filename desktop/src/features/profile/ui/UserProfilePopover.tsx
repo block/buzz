@@ -387,6 +387,7 @@ function UserProfilePopoverBody({
         className="h-10 w-10"
         iconClassName="h-5 w-5"
         label={displayName}
+        pubkey={pubkey}
         shape={isBotProfile ? "squircle" : "circle"}
         size={40}
         status={presenceStatus}
