@@ -17,9 +17,24 @@ test("channel readiness rejects global-only, wrong-channel and wrong-kind REQs",
   ])
     assert.equal(ready([filter]), false);
   assert.equal(hasMockSubscription([], "channel", 9, true), false);
-  for (const kinds of [[9], [7, 9], [], undefined]) {
+  for (const kinds of [[9], [7, 9], undefined]) {
     assert.equal(ready([{ "#h": ["channel"], kinds }]), true);
   }
+  const emptyKinds = [
+    createMockSubscription([{ "#h": ["channel"], kinds: [] }]),
+  ];
+  assert.equal(hasMockSubscription(emptyKinds, "channel", 9, true), false);
+  assert.equal(
+    hasMockSubscription(emptyKinds, "channel", undefined, true),
+    false,
+  );
+  assert.equal(
+    ready([
+      { "#h": ["channel"], kinds: [] },
+      { "#h": ["channel"], kinds: [9] },
+    ]),
+    true,
+  );
 });
 
 test("REQ storage preserves channel/kind correlation across OR filters", () => {

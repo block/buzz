@@ -31,9 +31,9 @@ export function hasMockSubscription(
         subscription.filters.some(
           (filter) =>
             filter["#h"]?.includes(channelId) &&
-            (kind === undefined ||
-              !filter.kinds?.length ||
-              filter.kinds.includes(kind)),
+            (filter.kinds === undefined ||
+              (filter.kinds.length > 0 &&
+                (kind === undefined || filter.kinds.includes(kind)))),
         )
       )
         return true;
