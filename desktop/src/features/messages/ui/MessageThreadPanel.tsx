@@ -2,6 +2,7 @@ import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
 import { usePopoutThreadOnlyLayout } from "@/features/popout/lib/popoutLayout";
+import { ConversationInfoButton } from "@/features/channels/ui/ConversationInfoButton";
 import { ConversationPopoutMenu } from "@/features/popout/ui/ConversationPopoutMenu";
 import { ConversationPlaygroundPinsMenu } from "@/features/playground/ui/ConversationPlaygroundPinsMenu";
 
@@ -921,6 +922,12 @@ export function MessageThreadPanel({
               headerTrailing={
                 channelId ? (
                   <>
+                    <ConversationInfoButton
+                      channelId={channelId}
+                      testId="thread-info-button"
+                      threadRootId={threadHeadId}
+                      title={headerTitle ?? channelName}
+                    />
                     <ConversationPlaygroundPinsMenu
                       channelId={channelId}
                       threadId={threadHeadId}
