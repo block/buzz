@@ -1315,7 +1315,7 @@ const UNKNOWN_CHANNEL_NAME: &str = "unknown";
 /// session: an unresolved channel, a DM (no meaningful name), or the literal
 /// `"unknown"` that [`fetch_channel_info`] substitutes for a metadata event
 /// with no `name` tag. Composing that sentinel would title every unnamed
-/// channel identically (`Agent · #unknown`) — reintroducing the collision the
+/// channel identically (`Agent #unknown`) — reintroducing the collision the
 /// suffix exists to remove, while naming a channel something it isn't. The
 /// startup cache already refuses `channel_type == "unknown"` for the same
 /// reason.
@@ -9973,7 +9973,7 @@ done"#
 
     /// The `"unknown"` placeholder `fetch_channel_info` substitutes for a
     /// metadata event with no `name` tag is not a channel name: qualifying with
-    /// it would title every unnamed channel `Agent · #unknown`.
+    /// it would title every unnamed channel `Agent #unknown`.
     #[tokio::test]
     async fn test_new_session_channel_context_treats_the_unknown_name_as_absent() {
         let id = Uuid::new_v4();
@@ -10369,30 +10369,30 @@ done"#
                 Some(&conversation),
                 Some("engineering"),
                 Some("stream"),
-                "Fizz · #engineering",
+                "Fizz #engineering".to_string(),
             ),
             (
                 SessionPolicy::Thread,
                 Some(&thread_a),
                 Some("engineering"),
                 Some("stream"),
-                "Fizz · #engineering · abcdef01",
+                format!("Fizz #engineering:{}", "abcdef01".repeat(8)),
             ),
             (
                 SessionPolicy::Thread,
                 Some(&thread_b),
                 Some("engineering"),
                 Some("stream"),
-                "Fizz · #engineering · 12345678",
+                format!("Fizz #engineering:{}", "12345678".repeat(8)),
             ),
             (
                 SessionPolicy::Thread,
                 Some(&conversation),
                 None,
                 Some("dm"),
-                "Fizz",
+                "Fizz".to_string(),
             ),
-            (SessionPolicy::Thread, None, None, None, "Fizz"),
+            (SessionPolicy::Thread, None, None, None, "Fizz".to_string()),
         ] {
             for (version, include_base) in [(1, true), (2, true), (1, false), (2, false)] {
                 let acp = spawn_switch_acp("[]", r#""result":{}"#).await;
