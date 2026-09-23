@@ -335,6 +335,69 @@ test.describe("global agent config screenshots", () => {
     expect(persisted).toMatchObject({ model: modelId });
   });
 
+  test("defaults humanize uncurated Databricks ids without changing persisted ids", async ({
+    page,
+  }) => {
+    // Neither id has a curated record; both labels come from the generative
+    // grammar, and two distinct ids sharing a label must both stay selectable.
+    const modelId = "data_workflow_tools.goose.goose-gpt-6-astra";
+    const siblingId = "system.ai.gpt-6-astra";
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        preferred_runtime: "goose",
+        provider: "databricks_v2",
+        model: modelId,
+        env_vars: {},
+      },
+      discoverAgentModels: {
+        models: [
+          { id: modelId, name: modelId },
+          { id: siblingId, name: siblingId },
+          { id: "builderbot-pr-reviews", name: "builderbot-pr-reviews" },
+        ],
+        supportsSwitching: true,
+        selectedModel: modelId,
+      },
+      runtimeFileConfigs: {
+        goose: {
+          provider: "databricks_v2",
+          model: modelId,
+          satisfiedEnvKeys: ["DATABRICKS_HOST"],
+        },
+      },
+    });
+
+    await openAiDefaultsSettings(page);
+
+    const model = page.getByTestId("global-agent-model");
+    await expect(model).toHaveText("GPT-6 Astra");
+    await expect(model).toHaveAttribute("data-value", modelId);
+
+    await model.click();
+    const option = (id: string) =>
+      page.getByTestId(`global-agent-model-option-${id}`);
+    await expect(option(modelId)).toHaveText("GPT-6 Astra");
+    await expect(option(siblingId)).toHaveText("GPT-6 Astra");
+    await expect(option("builderbot-pr-reviews")).toHaveText(
+      "builderbot-pr-reviews",
+    );
+    await option(siblingId).click();
+    await expect(model).toHaveText("GPT-6 Astra");
+    await expect(model).toHaveAttribute("data-value", siblingId);
+
+    const persisted = await page.evaluate(async () =>
+      (
+        window as typeof window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload: unknown,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+    );
+    expect(persisted).toMatchObject({ model: modelId });
+  });
+
   test("defaults honor credentials set in the harness config file", async ({
     page,
   }) => {

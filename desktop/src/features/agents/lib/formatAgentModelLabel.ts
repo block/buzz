@@ -19,13 +19,15 @@ export { canonicalizeProvider };
  *      discovery contract (`{id, name: id}`) and any harness/version skew that
  *      echoes the id as the name.
  *   2. Registry lookup by id:
- *      - `provider` supplied → Databricks v2 uses alias-aware exact records;
- *        every other provider uses provider-qualified exact records. On a miss
+ *      - `provider` supplied → Databricks v2 uses alias-aware exact records,
+ *        then the generative Databricks label grammar; every other provider
+ *        uses provider-qualified exact records. On a miss
  *        the raw id is returned; the providerless registry tier is NOT
  *        consulted, so a Databricks endpoint id never leaks a curated label
  *        through an anthropic/openai provider context (the P3-B contract).
  *      - `provider` absent → alias-aware lookup over `databricks_v2` exact
- *        records, for legacy/inherited ids with no provider on hand.
+ *        records only (no generated labels), for legacy/inherited ids with no
+ *        provider on hand.
  *   3. Raw id unchanged.
  *
  * Returns the empty string when both id and discoveredName are blank; use
@@ -56,8 +58,9 @@ export function resolveModelLabel(
         : resolveModelCapabilities(provider, trimmedId).registryLabel;
     return registryLabel ?? trimmedId;
   }
-  // Providerless path: alias-aware lookup for legacy/inherited ids.
-  return databricksRegistryLabel(trimmedId) ?? trimmedId;
+  // Providerless path: curated alias-aware lookup for legacy/inherited ids.
+  // Generated labels need an explicit databricks_v2 provider.
+  return databricksRegistryLabel(trimmedId, { generate: false }) ?? trimmedId;
 }
 
 /**
@@ -65,8 +68,9 @@ export function resolveModelLabel(
  * "Auto" when no model is set (empty or whitespace-only).
  *
  * For known Databricks managed endpoints the registry-curated name is returned
- * (e.g. "databricks-gpt-5-5" → "GPT-5.5"). Unknown or custom endpoint ids are
- * returned unchanged — no heuristic string mangling. Pass `provider` when the
+ * (e.g. "databricks-gpt-5-5" → "GPT-5.5"); with a `databricks_v2` provider, an
+ * uncurated endpoint id gets a label parsed strictly from its own tokens.
+ * Anything else is returned unchanged. Pass `provider` when the
  * inference provider is known to get a provider-qualified registry label.
  */
 export function formatAgentModelLabel(

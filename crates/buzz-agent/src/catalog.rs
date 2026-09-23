@@ -80,12 +80,10 @@ const UNITY_CATALOG_DESCRIPTOR: CatalogDescriptor<ModelEntry> = CatalogDescripto
     parse_page: parse_uc_model_services_page,
 };
 
-/// Curated display label for a discovered Databricks endpoint or model-service
-/// id. Unknown ids deliberately pass through unchanged.
+/// Display label for a discovered Databricks endpoint or model-service id. Ids
+/// the label grammar cannot fully parse deliberately pass through unchanged.
 fn curated_model_name(id: &str) -> String {
-    crate::model_capabilities::databricks_registry_label(id)
-        .unwrap_or(id)
-        .to_string()
+    crate::model_capabilities::databricks_registry_label(id).unwrap_or_else(|| id.to_string())
 }
 
 /// Fallback catalog used only when both authenticated Databricks v2 catalogs
@@ -1903,7 +1901,7 @@ mod tests {
         // `name` is the curated label + provenance suffix, not the raw id.
         assert!(models.iter().all(|model| {
             let label = crate::model_capabilities::databricks_registry_label(&model.id)
-                .unwrap_or(model.id.as_str());
+                .unwrap_or_else(|| model.id.clone());
             model.name == format!("{label}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}")
         }));
     }

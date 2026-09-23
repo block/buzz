@@ -400,11 +400,19 @@ export type RegistryLabelRecord = {
   readonly registry_label: string;
 };
 
+/**
+ * Display label for a Databricks endpoint id: exact record → unique alias →
+ * generative grammar (only when `generate` and no record matched) → `null`
+ * (show the raw id). An ambiguous alias match stays `null`.
+ */
 export function databricksRegistryLabelForRecords(
   rawModelId: string,
   records: ReadonlyArray<RegistryLabelRecord>,
   familyTokens: ReadonlyArray<string>,
+  generate = true,
 ): string | null {
+  const unmatched = () =>
+    generate ? generateDatabricksLabel(rawModelId) : null;
   if (!rawModelId.trim()) return null;
 
   const idLower = rawModelId.toLowerCase();
@@ -416,7 +424,7 @@ export function databricksRegistryLabelForRecords(
   if (exact) return exact.registry_label;
 
   const strippedQuery = stripCatalogPrefix(idLower, familyTokens);
-  if (strippedQuery === idLower) return null;
+  if (strippedQuery === idLower) return unmatched();
   let matchingRecord: RegistryLabelRecord | null = null;
   for (const rec of records) {
     if (rec.provider !== "databricks_v2") continue;
@@ -429,13 +437,125 @@ export function databricksRegistryLabelForRecords(
       matchingRecord = rec;
     }
   }
-  return matchingRecord?.registry_label ?? null;
+  return matchingRecord?.registry_label ?? unmatched();
 }
 
-export function databricksRegistryLabel(rawModelId: string): string | null {
+/**
+ * `generate: false` limits the lookup to curated records — for ids whose
+ * provider is unknown, which must not be humanized by Databricks grammar.
+ */
+export function databricksRegistryLabel(
+  rawModelId: string,
+  { generate = true }: { generate?: boolean } = {},
+): string | null {
   return databricksRegistryLabelForRecords(
     rawModelId,
     MANIFEST.exact_records,
     MANIFEST.label_family_tokens,
+    generate,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Generative display-label grammar — mirrors crates/buzz-agent/src/
+// databricks_label_grammar.rs. Reached only after an exact-record and a
+// unique-alias miss; returns a label built solely from the id's own tokens, or
+// null so callers show the raw id. Presentation-only: capabilities, routing,
+// and the saved id never depend on it. Both interpreters replay
+// scripts/databricks-label-fixtures.json.
+// ---------------------------------------------------------------------------
+
+const LABEL_WRAPPERS = ["databricks-", "goose-", "kgoose-", "builderbot-"];
+
+type LabelPart = { readonly version: boolean; readonly text: string };
+
+const isVersionToken = (tok: string) => /^(?:\d|[1-9]\d)$/.test(tok);
+const isDateToken = (tok: string) => /^(?:\d{4}|\d{8})$/.test(tok);
+const isLetterVersionToken = (tok: string) => /^[a-z]\d+$/.test(tok);
+const isSizeToken = (tok: string) => /^[a-z]?\d+b$/.test(tok);
+const capitalize = (word: string) =>
+  word.charAt(0).toUpperCase() + word.slice(1);
+
+/**
+ * Parse a Databricks endpoint id into a display label, or `null` when any part
+ * of the id falls outside the grammar.
+ */
+export function generateDatabricksLabel(rawModelId: string): string | null {
+  const id = rawModelId.trim().toLowerCase();
+  const isFqn = isDatabricksModelServiceFqn(id);
+  const service = isFqn ? id.slice(id.lastIndexOf(".") + 1) : id;
+  // Only a UC FQN or a wrapped endpoint name is attributable to Databricks; a
+  // bare id such as `gpt-5` stays raw.
+  const wrapper = LABEL_WRAPPERS.find((w) => service.startsWith(w));
+  if (!wrapper && !isFqn) return null;
+  let body = wrapper ? service.slice(wrapper.length) : service;
+  if (body.startsWith("meta-llama-")) body = body.slice("meta-".length);
+
+  const [head, ...rest] = body.split("-");
+  const familyMatch = /^([a-z]+)(\d{0,2})$/.exec(head);
+  if (!familyMatch) return null;
+  const [, family, digits] = familyMatch;
+  const stem = digits.length === 2 ? `${digits[0]}.${digits[1]}` : digits;
+  if (family === "claude") {
+    // Numeric-first Claude ids (`claude-4-7-opus`) name the tier after the version.
+    let count = 0;
+    while (count < rest.length && isVersionToken(rest[count])) count += 1;
+    if (count > 0 && count < rest.length) {
+      rest.splice(0, count + 1, rest[count], ...rest.slice(0, count));
+    }
+  }
+
+  const parts: LabelPart[] = [];
+  let afterMinor = false;
+  for (let i = 0; i < rest.length; i += 1) {
+    const tok = rest[i];
+    const next = rest[i + 1];
+    if (isDateToken(tok) && next === undefined) break;
+    if (isVersionToken(tok)) {
+      afterMinor = next !== undefined && isVersionToken(next);
+      parts.push({ version: true, text: afterMinor ? `${tok}.${next}` : tok });
+      if (afterMinor) i += 1;
+    } else if (isLetterVersionToken(tok)) {
+      const hasMinor = next !== undefined && isVersionToken(next);
+      const major = capitalize(tok);
+      parts.push({
+        version: false,
+        text: hasMinor ? `${major}.${next}` : major,
+      });
+      if (hasMinor) i += 1;
+    } else if (isSizeToken(tok)) {
+      parts.push({ version: false, text: tok.toUpperCase() });
+    } else if (/^[a-z]+$/.test(tok)) {
+      const text =
+        tok === "oss"
+          ? "OSS"
+          : family === "gpt" && afterMinor && (tok === "mini" || tok === "nano")
+            ? tok
+            : capitalize(tok);
+      parts.push({ version: false, text });
+    } else {
+      return null;
+    }
+  }
+  // A versionless id (`builderbot-pr-reviews`) is a named endpoint, not a model.
+  const hasNumber =
+    stem !== "" || parts.some((part) => part.version || /\d/.test(part.text));
+  if (!hasNumber) return null;
+
+  const brand =
+    family === "gpt"
+      ? "GPT"
+      : family === "glm"
+        ? "GLM"
+        : family === "deepseek"
+          ? "DeepSeek"
+          : capitalize(family);
+  const hyphenated = family === "gpt" || family === "glm";
+  return parts.reduce(
+    (label, part, index) =>
+      label +
+      (part.version && index === 0 && hyphenated ? "-" : " ") +
+      part.text,
+    brand + stem,
   );
 }
