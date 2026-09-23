@@ -45,12 +45,24 @@ fn returns_none_for_unknown_commands() {
 }
 
 #[test]
-fn default_agent_command_resolves_bundled_buzz_agent() {
-    // The default must be bundled buzz-agent, never bare `goose` on a stock Windows install.
-    assert_eq!(default_agent_command(), "buzz-agent");
+fn default_agent_command_resolves_bundled_goose_acp() {
+    // Goose's lean `goose-acp` binary speaks ACP directly and takes no `acp` arg.
+    assert_eq!(default_agent_command(), "goose-acp");
+    let goose_runtime = super::known_acp_runtime_exact("goose").unwrap();
+    assert!(goose_runtime.commands.contains(&"goose-acp"));
+    assert_eq!(goose_runtime.underlying_cli, None);
+    assert_eq!(goose_runtime.mcp_command, Some("buzz-dev-mcp"));
+    assert!(goose_runtime.default_env.contains(&("GOOSE_MODE", "auto")));
     assert_eq!(
         normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
         Vec::<String>::new()
+    );
+    assert!(
+        super::known_acp_runtime_exact("goose")
+            .unwrap()
+            .commands
+            .contains(&default_agent_command().as_str()),
+        "the bundled default must be a discoverable Goose catalog command"
     );
 }
 
@@ -302,7 +314,7 @@ fn record_agent_command_bare_record_defaults() {
 }
 
 /// When the record carries a dangling (unknown) runtime id, `try_record_agent_command`
-/// must return `Err` containing "DANGLING_HARNESS_ID" — NEVER the buzz-agent default.
+/// must return `Err` containing "DANGLING_HARNESS_ID" — NEVER the bundled Goose default.
 /// This test would fail if the function silently fell back to `default_agent_command()`.
 #[test]
 fn try_record_agent_command_dangling_runtime_id_returns_err() {
@@ -449,7 +461,7 @@ fn divergent_override_none_for_empty_or_absent_pick() {
 fn create_time_override_none_when_persona_runtime_not_installed() {
     // CRITICAL-3 (Case 3): a `claude`-persona agent created on a machine
     // where the claude adapter isn't installed. `resolvePersonaRuntime`
-    // falls back to the default (`buzz-agent`) and sends THAT command with
+    // falls back to the default (`goose-acp`) and sends THAT command with
     // `harness_override` false (the user did not pick it). At create this
     // is a fallback, not a deliberate pin — it must store `None` so the
     // agent inherits the persona's runtime once it's installed and the
@@ -1309,7 +1321,7 @@ fn test_install_shell_from_some_returns_path() {
 // transactional refresh, or try_record_agent_command were reverted.
 
 /// After warm_harness_registry_from_dir, a record with a matching custom runtime
-/// id resolves to the custom command — NOT the buzz-agent default.
+/// id resolves to the custom command — NOT the Goose default.
 ///
 /// This test would fail if warm_harness_registry_from_dir is not called before
 /// try_record_agent_command, or if try_record_agent_command ignores the registry.

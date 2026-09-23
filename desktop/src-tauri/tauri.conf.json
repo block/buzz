@@ -54,7 +54,7 @@
     "targets": "all",
     "externalBin": [
       "binaries/buzz-acp",
-      "binaries/goose",
+      "binaries/goose-acp",
       "binaries/buzz-agent",
       "binaries/buzz-backend-kubernetes",
       "binaries/buzz-dev-mcp",

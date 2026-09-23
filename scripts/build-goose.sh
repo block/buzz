@@ -5,6 +5,10 @@ set -euo pipefail
 GOOSE_REV="e678c3b64a1dfd3c262a6a2019f158d33d5dcab0"
 TARGET="${1:-}"
 ROOT=$(pwd)
+if [[ ! -f "$ROOT/Cargo.toml" || ! -d "$ROOT/crates/buzz-acp" ]]; then
+    echo "Run scripts/build-goose.sh from the Buzz repository root" >&2
+    exit 2
+fi
 WORK_DIR="${ROOT}/target/goose-src"
 
 if [[ ! -d "$WORK_DIR/.git" ]]; then
