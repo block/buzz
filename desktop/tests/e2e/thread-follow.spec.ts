@@ -248,6 +248,7 @@ test("following a broadcast reply persists its thread root", async ({
     page.getByRole("menuitem", { name: /^(Unfollow|Follow) thread$/ }),
   ).toHaveCount(0);
   await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
 
   const root = await emitMessage(page, { content: "Broadcast thread root" });
   const broadcastReply = await emitMessage(page, {
