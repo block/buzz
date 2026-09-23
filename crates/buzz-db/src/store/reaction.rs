@@ -111,8 +111,9 @@ pub async fn add_reaction(
     emoji: &str,
     reaction_event_id: Option<&[u8]>,
 ) -> Result<bool> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
@@ -123,8 +124,10 @@ pub async fn add_reaction(
         .bind(pubkey)
         .bind(emoji)
         .bind(reaction_event_id)
-        .execute(&mut *connection)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     // Three cases:
     // (a) New reaction (no existing row): INSERT succeeds → rows_affected = 1 → true.
@@ -251,8 +254,9 @@ pub async fn remove_reaction(
     pubkey: &[u8],
     emoji: &str,
 ) -> Result<bool> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
@@ -273,8 +277,10 @@ pub async fn remove_reaction(
     .bind(event_id)
     .bind(pubkey)
     .bind(emoji)
-    .execute(&mut *connection)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -287,8 +293,9 @@ pub async fn remove_reaction_by_source_event_id(
     community: CommunityId,
     reaction_event_id: &[u8],
 ) -> Result<bool> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
@@ -303,8 +310,10 @@ pub async fn remove_reaction_by_source_event_id(
     )
     .bind(community.as_uuid())
     .bind(reaction_event_id)
-    .execute(&mut *connection)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -365,8 +374,9 @@ pub async fn set_reaction_event_id(
     emoji: &str,
     reaction_event_id: &[u8],
 ) -> Result<bool> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
@@ -388,8 +398,10 @@ pub async fn set_reaction_event_id(
     .bind(event_id)
     .bind(pubkey)
     .bind(emoji)
-    .execute(&mut *connection)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }

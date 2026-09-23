@@ -173,7 +173,8 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .expect("discovery deletion must end the production Db implementation")
         .0;
     assert!(soft_delete_discovery.contains("WriterOperation::EventWrite"));
-    assert!(soft_delete_discovery.contains("execute(&mut *connection)"));
+    assert!(soft_delete_discovery.contains("begin_community_event_write_transaction("));
+    assert!(soft_delete_discovery.contains("execute(&mut *tx)"));
 
     let side_effects = include_str!("../../buzz-relay/src/handlers/side_effects.rs");
     assert!(side_effects.contains("query_events_for_event_write"));
@@ -729,30 +730,236 @@ fn event_write_paths_use_tenant_local_chokepoint() {
     );
 }
 
-/// The tests above enumerate specific known chokepoint entry points by function name — useful for
-/// pinpointing exactly which path regressed, but only as strong as the list, and reaction.rs was
-/// missing from it for a full release cycle. This test is the structural backstop: it scans every
-/// production `.rs` file under `src/` for a write to a community-fenced table and requires the
-/// chokepoint marker to appear somewhere in that file, so a newly added (or newly reverted) writer
-/// fails by default instead of silently passing until someone remembers to enumerate it.
+/// Function-level tenant-lock policy backstop.
+///
+/// A file can contain both a legitimate chokepoint writer and a bypass writer.
+/// This check enforces each guarded-table mutation seam independently: every
+/// writing function must either enter through the tenant-local community
+/// chokepoint itself, accept a caller-owned guarded transaction/connection, or
+/// use reviewed adapter-owned transaction state whose constructor is pinned to
+/// the same chokepoint.
+const GUARDED_TABLE_WRITE_MARKERS: [&str; 9] = [
+    "INSERT INTO events",
+    "UPDATE events",
+    "DELETE FROM events",
+    "INSERT INTO reactions",
+    "UPDATE reactions",
+    "DELETE FROM reactions",
+    "INSERT INTO event_mentions",
+    "UPDATE event_mentions",
+    "DELETE FROM event_mentions",
+];
+
+const COMMUNITY_CHOKEPOINT_MARKER: &str = "begin_community_event_write_transaction(";
+
+const GUARDED_TX_SIGNATURE_MARKERS: [&str; 4] = [
+    "&mut sqlx::Transaction<",
+    "&mut Transaction<",
+    "&mut PgConnection",
+    "&mut sqlx::PgConnection",
+];
+
+// Narrow reviewed exceptions for non-serving verification probes only.
+const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 3] = [
+    "pub async fn verify_floor_guard_behavior(",
+    "pub async fn verify_channel_roster_fence_behavior(",
+    "pub async fn backfill_d_tags(&self) -> Result<u64> {",
+];
+
+const GUARDED_TX_ADAPTER_METHOD_PINS: [(&str, &str); 1] = [(
+    "pub async fn replace_member_event(",
+    "pub async fn lock_member_snapshot(",
+)];
+
+fn production_contains_guarded_write(production_source: &str) -> bool {
+    GUARDED_TABLE_WRITE_MARKERS
+        .iter()
+        .any(|marker| production_source.contains(marker))
+}
+
+fn fn_signature_starts_here(trimmed_line: &str) -> bool {
+    [
+        "fn ",
+        "async fn ",
+        "pub fn ",
+        "pub async fn ",
+        "pub(crate) fn ",
+        "pub(crate) async fn ",
+        "pub(super) fn ",
+        "pub(super) async fn ",
+    ]
+    .iter()
+    .any(|prefix| trimmed_line.starts_with(prefix))
+}
+
+fn function_slices(production_source: &str) -> Vec<&str> {
+    let mut starts = Vec::new();
+    let mut offset = 0usize;
+    for line in production_source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if fn_signature_starts_here(trimmed) {
+            starts.push(offset + (line.len() - trimmed.len()));
+        }
+        offset += line.len();
+    }
+
+    let mut functions = Vec::new();
+    for (index, start) in starts.iter().enumerate() {
+        let end = starts
+            .get(index + 1)
+            .copied()
+            .unwrap_or(production_source.len());
+        functions.push(&production_source[*start..end]);
+    }
+    functions
+}
+
+fn function_header(function_source: &str) -> &str {
+    function_source
+        .lines()
+        .next()
+        .unwrap_or("<unknown function>")
+        .trim()
+}
+
+fn function_is_guarded_write_exception(function_header: &str) -> bool {
+    GUARDED_WRITE_FUNCTION_EXCEPTIONS
+        .iter()
+        .any(|exception| function_header.starts_with(exception))
+}
+
+fn function_accepts_guarded_transaction_or_connection(function_source: &str) -> bool {
+    let signature = function_source.split('{').next().unwrap_or(function_source);
+    GUARDED_TX_SIGNATURE_MARKERS
+        .iter()
+        .any(|marker| signature.contains(marker))
+}
+
+fn function_uses_guarded_tx_adapter_state(function_source: &str) -> bool {
+    function_source.contains("&mut *self.tx") || function_source.contains("&mut self.tx")
+}
+
+fn adapter_constructor_is_chokepoint_pinned(production_source: &str, method_header: &str) -> bool {
+    for (adapter_method, adapter_constructor) in GUARDED_TX_ADAPTER_METHOD_PINS {
+        if method_header.starts_with(adapter_method) {
+            return function_slices(production_source)
+                .into_iter()
+                .find(|function_source| {
+                    function_header(function_source).starts_with(adapter_constructor)
+                })
+                .is_some_and(|constructor_source| {
+                    constructor_source.contains(COMMUNITY_CHOKEPOINT_MARKER)
+                });
+        }
+    }
+
+    false
+}
+
+fn function_has_guarded_write_seam(function_source: &str, production_source: &str) -> bool {
+    let header = function_header(function_source);
+
+    function_source.contains(COMMUNITY_CHOKEPOINT_MARKER)
+        || function_accepts_guarded_transaction_or_connection(function_source)
+        || (function_uses_guarded_tx_adapter_state(function_source)
+            && adapter_constructor_is_chokepoint_pinned(production_source, header))
+}
+
+fn guarded_write_policy_violations(production_source: &str) -> Vec<String> {
+    function_slices(production_source)
+        .into_iter()
+        .filter(|function_source| {
+            let header = function_header(function_source);
+            production_contains_guarded_write(function_source)
+                && !function_is_guarded_write_exception(header)
+                && !function_has_guarded_write_seam(function_source, production_source)
+        })
+        .map(|function_source| function_header(function_source).to_owned())
+        .collect()
+}
+
+#[test]
+fn serving_table_policy_rejects_same_file_mixed_guarded_writers() {
+    let mixed_source = r#"
+pub async fn guarded_writer(pool: &sqlx::PgPool) {
+    let mut tx = begin_community_event_write_transaction(pool, community, WriterOperation::EventWrite)
+        .await
+        .expect("tx");
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut *tx)
+        .await
+        .expect("write");
+}
+pub async fn unguarded_writer(pool: &sqlx::PgPool) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(pool)
+        .await
+        .expect("unguarded");
+}
+"#;
+
+    let violations = guarded_write_policy_violations(mixed_source);
+    assert!(
+        violations
+            .iter()
+            .any(|name| name.starts_with("pub async fn unguarded_writer(")),
+        "whole-file co-occurrence policy is too weak: one guarded writer in a file must not bless \
+         a sibling unguarded writer; violations: {violations:?}"
+    );
+    assert!(
+        !violations
+            .iter()
+            .any(|name| name.starts_with("pub async fn guarded_writer(")),
+        "guarded writer must remain allowed; violations: {violations:?}"
+    );
+}
+
+#[test]
+fn serving_table_policy_rejects_writer_connection_only_bypasses() {
+    let acquire_writer_bypass = r#"
+pub async fn bypass_with_writer_connection(pool: &sqlx::PgPool) {
+    let mut connection = crate::observability::acquire_writer(pool, WriterOperation::EventWrite)
+        .await
+        .expect("connection");
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut *connection)
+        .await
+        .expect("write");
+}
+"#;
+
+    let pool_begin_bypass = r#"
+pub async fn bypass_with_pool_begin(pool: &sqlx::PgPool) {
+    let mut tx = pool.begin().await.expect("tx");
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut *tx)
+        .await
+        .expect("write");
+}
+"#;
+
+    let acquire_writer_violations = guarded_write_policy_violations(acquire_writer_bypass);
+    assert!(
+        acquire_writer_violations
+            .iter()
+            .any(|name| name.starts_with("pub async fn bypass_with_writer_connection(")),
+        "acquire_writer + raw guarded-table write must be rejected; violations: \
+         {acquire_writer_violations:?}"
+    );
+
+    let pool_begin_violations = guarded_write_policy_violations(pool_begin_bypass);
+    assert!(
+        pool_begin_violations
+            .iter()
+            .any(|name| name.starts_with("pub async fn bypass_with_pool_begin(")),
+        "pool.begin + raw guarded-table write must be rejected; violations: \
+         {pool_begin_violations:?}"
+    );
+}
+
 #[test]
 fn serving_table_writes_enter_the_tenant_local_chokepoint() {
     use std::path::{Path, PathBuf};
-
-    const CHOKEPOINT: &str = "begin_community_event_write_transaction";
-    const GUARDED_TABLE_MARKERS: [&str; 3] = [
-        "INSERT INTO events",
-        "INSERT INTO reactions",
-        "INSERT INTO event_mentions",
-    ];
-    // Bootstrap/verification probes that legitimately write a community-fenced table without the
-    // application-level chokepoint. Each entry must justify why it is not a serving mutation on real
-    // tenant data (self-contained scratch state, transaction unconditionally rolled back).
-    const EXCEPTIONS: [&str; 1] = [
-        // `verify_floor_guard_behavior`: creates its own scratch community and always rolls back
-        // the whole transaction; it verifies a trigger's config, it never persists tenant data.
-        "runtime/replica_fence.rs",
-    ];
 
     fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("read source directory") {
@@ -786,21 +993,18 @@ fn serving_table_writes_enter_the_tenant_local_chokepoint() {
             .expect("file is under src root")
             .to_string_lossy()
             .replace('\\', "/");
-        if EXCEPTIONS.contains(&relative.as_str()) {
-            continue;
-        }
         let source = std::fs::read_to_string(&path).expect("read source file");
         let production = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
-        if GUARDED_TABLE_MARKERS
-            .iter()
-            .any(|marker| production.contains(marker))
-        {
+        if production_contains_guarded_write(production) {
             checked_guarded_files += 1;
+            let violations = guarded_write_policy_violations(production);
             assert!(
-                production.contains(CHOKEPOINT),
-                "{relative} writes to a community-fenced table but its production source never \
-                 calls {CHOKEPOINT}; route the write through the chokepoint or add a narrowly \
-                 justified exception to serving_table_writes_enter_the_tenant_local_chokepoint"
+                violations.is_empty(),
+                "{relative} has guarded-table INSERT/UPDATE/DELETE seams without an in-function \
+                 guard (tenant-local chokepoint entry or caller-owned guarded \
+                 transaction/connection): {violations:?}; route the write through the chokepoint, \
+                 receive a guarded transaction/connection, or add a narrowly justified exception to \
+                 serving_table_writes_enter_the_tenant_local_chokepoint"
             );
         }
     }
