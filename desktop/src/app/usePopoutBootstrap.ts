@@ -11,8 +11,10 @@ import {
   isEmbedInMainEnabled,
   subscribePopoutSettings,
 } from "@/features/popout/lib/popoutSettings";
+import { seedConversationPlaygroundPins } from "@/features/playground/lib/conversationPins";
 import {
   currentPopoutPayload,
+  popoutPlaygroundPinsScopeKey,
   type PopoutPayload,
   shouldSeedPopoutChannelRoute,
 } from "@/features/popout/lib/popoutWindow";
@@ -25,6 +27,20 @@ export function usePopoutBootstrap(): PopoutPayload | null {
   // would replace search with only channel/thread and wipe panels such as
   // `agentSession` — making View Activity a no-op in detached windows.
   const didSeedRef = React.useRef(false);
+  const didSeedPinsRef = React.useRef(false);
+
+  React.useEffect(() => {
+    if (didSeedPinsRef.current) return;
+    const pins = payload?.playgroundPins;
+    if (!pins || pins.length === 0) return;
+    const scope = popoutPlaygroundPinsScopeKey(
+      payload?.channelId,
+      payload?.threadId,
+    );
+    if (!scope) return;
+    didSeedPinsRef.current = true;
+    seedConversationPlaygroundPins(scope, pins);
+  }, [payload]);
 
   React.useEffect(() => {
     if (

@@ -2,6 +2,10 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import type { PlaygroundCard } from "@/features/playground/lib/types";
+import {
+  listConversationPlaygroundPins,
+  type ConversationPlaygroundPin,
+} from "@/features/playground/lib/conversationPins";
 
 import { hidePlaygroundWebview } from "@/features/playground/lib/webview";
 import { dismissPlayground } from "@/features/playground/lib/sessions";
@@ -32,6 +36,12 @@ export type PopoutPayload = {
   playground?: PlaygroundCard;
   /** Link/pin browser surface hosted in its own OS/embedded window. */
   link?: PopoutLinkTarget;
+  /**
+   * Thread/channel playground pins snapshot for OS companions. Pins live in
+   * per-window memory; without this seed the companion shows the pin chrome
+   * with an empty list.
+   */
+  playgroundPins?: ConversationPlaygroundPin[];
 };
 
 function sanitizeLabelPart(value: string): string {
@@ -173,6 +183,28 @@ export function shouldSeedPopoutChannelRoute(options: {
   return Boolean(payload.channelId);
 }
 
+/** Scope key for pins carried into a channel/thread companion. */
+export function popoutPlaygroundPinsScopeKey(
+  channelId?: string | null,
+  threadId?: string | null,
+): string | null {
+  const channel = channelId?.trim() ?? "";
+  if (!channel) return null;
+  const thread = threadId?.trim() ?? "";
+  return thread ? `thread:${thread}` : `channel:${channel}`;
+}
+
+/** Snapshot in-memory pins for the conversation this pop-out will host. */
+export function playgroundPinsForPopoutPayload(input: {
+  channelId?: string;
+  threadId?: string;
+}): ConversationPlaygroundPin[] | undefined {
+  const scope = popoutPlaygroundPinsScopeKey(input.channelId, input.threadId);
+  if (!scope) return undefined;
+  const pins = listConversationPlaygroundPins(scope);
+  return pins.length > 0 ? pins : undefined;
+}
+
 export function popoutPayloadFromInput(input: {
   kind: PopoutKind;
   title: string;
@@ -180,7 +212,13 @@ export function popoutPayloadFromInput(input: {
   threadId?: string;
   playground?: PlaygroundCard;
   link?: PopoutLinkTarget;
+  playgroundPins?: ConversationPlaygroundPin[];
 }): PopoutPayload {
+  const playgroundPins =
+    input.playgroundPins ??
+    (input.kind === "thread" || input.kind === "split"
+      ? playgroundPinsForPopoutPayload(input)
+      : undefined);
   return {
     kind: input.kind,
     title: input.title,
@@ -188,6 +226,7 @@ export function popoutPayloadFromInput(input: {
     ...(input.threadId ? { threadId: input.threadId } : {}),
     ...(input.playground ? { playground: input.playground } : {}),
     ...(input.link ? { link: input.link } : {}),
+    ...(playgroundPins && playgroundPins.length > 0 ? { playgroundPins } : {}),
   };
 }
 

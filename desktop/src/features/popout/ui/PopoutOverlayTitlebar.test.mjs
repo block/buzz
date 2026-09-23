@@ -141,3 +141,29 @@ test("playground-only pop-out keeps an empty drag gap", async () => {
   assert.equal(screen.queryByTestId("popout-overlay-titlebar"), null);
   assert.equal(screen.queryByTestId("conversation-playground-pins-menu"), null);
 });
+
+test("seeded playground pins appear in thread pop-out titlebar", async () => {
+  const { listConversationPlaygroundPins, seedConversationPlaygroundPins } =
+    await import("../../playground/lib/conversationPins.ts");
+  assert.equal(listConversationPlaygroundPins("thread:thread-seed").length, 0);
+
+  seedConversationPlaygroundPins("thread:thread-seed", [
+    {
+      sid: "demo-seed",
+      name: "Seeded",
+      url: "https://app.example.com",
+    },
+  ]);
+
+  const screen = await renderTitlebar({
+    kind: "thread",
+    channelId: "chan-1",
+    threadId: "thread-seed",
+  });
+
+  assert.ok(screen.getByTestId("conversation-playground-pins-badge"));
+  assert.equal(
+    screen.getByTestId("conversation-playground-pins-badge").textContent,
+    "1",
+  );
+});

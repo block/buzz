@@ -84,6 +84,38 @@ export function hasConversationPlaygroundPin(
  * Add (or refresh) a named playground pin under a channel/thread scope.
  * Client-lifetime only — never persisted. Does not open a slide-out or overlay.
  */
+/**
+ * Hydrate pins into a companion window (or tests). Idempotent per sid.
+ * Does not clear existing pins outside the provided list.
+ */
+export function seedConversationPlaygroundPins(
+  scopeKey: string,
+  pins: readonly ConversationPlaygroundPin[],
+): void {
+  const trimmed = scopeKey.trim();
+  if (!trimmed || pins.length === 0) return;
+  let scope = pinsByScope.get(trimmed);
+  if (!scope) {
+    scope = new Map();
+    pinsByScope.set(trimmed, scope);
+  }
+  let changed = false;
+  for (const pin of pins) {
+    const sid = pin?.sid?.trim() ?? "";
+    if (!sid) continue;
+    scope.set(sid, {
+      sid,
+      name: pin.name,
+      url: pin.url,
+      ...(pin.pin ? { pin: pin.pin } : {}),
+      ...(pin.stack ? { stack: pin.stack } : {}),
+      ...(pin.expires != null ? { expires: String(pin.expires) } : {}),
+    });
+    changed = true;
+  }
+  if (changed) emitPins();
+}
+
 export function pinPlaygroundToConversation(
   scopeKey: string,
   card: PlaygroundCard,

@@ -111,3 +111,43 @@ test("conversationPlaygroundPinWebviewId is sanitize_pin_id-safe (no colon)", as
   assert.match(id, /^[A-Za-z0-9_-]+$/);
   assert.ok(!id.includes(":"));
 });
+
+test("seedConversationPlaygroundPins hydrates a companion scope", async () => {
+  const { listConversationPlaygroundPins, seedConversationPlaygroundPins } =
+    await import("./conversationPins.ts");
+
+  seedConversationPlaygroundPins("thread:root-1", [
+    {
+      sid: "demo-1",
+      name: "Demo",
+      url: "https://app.example.com",
+      pin: "4455",
+      stack: "hula-app",
+    },
+  ]);
+  assert.equal(listConversationPlaygroundPins("thread:root-1").length, 1);
+  assert.equal(
+    listConversationPlaygroundPins("thread:root-1")[0]?.name,
+    "Demo",
+  );
+  // Idempotent refresh
+  seedConversationPlaygroundPins("thread:root-1", [
+    {
+      sid: "demo-1",
+      name: "Renamed",
+      url: "https://app.example.com",
+    },
+    {
+      sid: "demo-2",
+      name: "Second",
+      url: "https://other.example.com",
+    },
+  ]);
+  assert.equal(listConversationPlaygroundPins("thread:root-1").length, 2);
+  assert.equal(
+    listConversationPlaygroundPins("thread:root-1").find(
+      (p) => p.sid === "demo-1",
+    )?.name,
+    "Renamed",
+  );
+});

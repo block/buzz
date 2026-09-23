@@ -20,6 +20,8 @@ before(() => {
     },
     self: dom.window,
     window: dom.window,
+    // Radix Presence reads global getComputedStyle when the menu opens.
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   });
   installLocalStorage(dom.window.localStorage);
   dom.window.matchMedia = () => ({
@@ -165,4 +167,73 @@ test("header pin open path uses keepAlive and sanitize-safe pinId", async () => 
   assert.equal(panel.keepAlive, true);
   assert.equal(panel.pinId, "playground-pin-alpha");
   assert.match(panel.pinId, /^[A-Za-z0-9_-]+$/);
+});
+
+test("menu unpin path removes the pin and destroys any open keep-alive panel", async () => {
+  // Mirrors ConversationPlaygroundPinsMenu.unpin — store contract the X button
+  // must honor (no openLinkSidePanel). UI open of Radix menus is flaky in jsdom.
+  const {
+    conversationPlaygroundPinWebviewId,
+    listConversationPlaygroundPins,
+    pinPlaygroundToConversation,
+    unpinPlaygroundFromConversation,
+  } = await import("../lib/conversationPins.ts");
+  const { destroyLinkSidePanelIfPin, getLinkSidePanel, openLinkSidePanel } =
+    await import("@/features/link-panel/lib/linkSidePanelStore.ts");
+
+  pinPlaygroundToConversation(
+    "channel:chan-1",
+    sampleCard({
+      name: "Hula Home",
+      sid: "hula-home",
+      url: "https://hulapreview.example.com",
+    }),
+  );
+  assert.equal(
+    openLinkSidePanel("https://hulapreview.example.com", {
+      title: "Hula Home",
+      pinId: conversationPlaygroundPinWebviewId("hula-home"),
+      keepAlive: true,
+    }),
+    true,
+  );
+  assert.ok(getLinkSidePanel());
+
+  const scopeKey = "channel:chan-1";
+  const sid = "hula-home";
+  unpinPlaygroundFromConversation(scopeKey, sid);
+  destroyLinkSidePanelIfPin(conversationPlaygroundPinWebviewId(sid));
+
+  assert.equal(listConversationPlaygroundPins(scopeKey).length, 0);
+  assert.equal(getLinkSidePanel(), null);
+});
+
+test("opening a named pin uses keepAlive chrome path (not a bare webview)", async () => {
+  // Mirrors ConversationPlaygroundPinsMenu.openPin — row click must open the
+  // IdleAuxiliaryPanel-backed link side panel with title/close chrome.
+  const { conversationPlaygroundPinWebviewId } = await import(
+    "../lib/conversationPins.ts"
+  );
+  const { getLinkSidePanel, openLinkSidePanel } = await import(
+    "@/features/link-panel/lib/linkSidePanelStore.ts"
+  );
+
+  const pin = {
+    sid: "hula-home",
+    name: "Hula Home",
+    url: "https://hulapreview.example.com",
+  };
+  assert.equal(
+    openLinkSidePanel(pin.url, {
+      title: pin.name,
+      pinId: conversationPlaygroundPinWebviewId(pin.sid),
+      keepAlive: true,
+    }),
+    true,
+  );
+  const panel = getLinkSidePanel();
+  assert.ok(panel);
+  assert.equal(panel.title, "Hula Home");
+  assert.equal(panel.keepAlive, true);
+  assert.equal(panel.pinId, "playground-pin-hula-home");
 });

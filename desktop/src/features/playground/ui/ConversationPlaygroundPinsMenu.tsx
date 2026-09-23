@@ -54,6 +54,10 @@ export function ConversationPlaygroundPinsMenu({
     getConversationPlaygroundPinsMenuOpenRequest,
   );
   const [open, setOpen] = React.useState(false);
+  // Radix MenuItem selects on pointerup even when a nested control stopped
+  // pointerdown. Mark unpin gestures so onSelect does not open the pin as a
+  // chrome-less right-pane webview (Cloudflare Access soft-stuck UI).
+  const suppressOpenFromUnpinRef = React.useRef(false);
 
   React.useEffect(() => {
     if (!menuRequest) return;
@@ -70,11 +74,31 @@ export function ConversationPlaygroundPinsMenu({
     setOpen(false);
   }
 
-  function unpin(pin: ConversationPlaygroundPin, event: React.MouseEvent) {
+  function handlePinSelect(pin: ConversationPlaygroundPin, event: Event) {
+    if (suppressOpenFromUnpinRef.current) {
+      suppressOpenFromUnpinRef.current = false;
+      // Keep the menu open so the user can unpin more pins.
+      event.preventDefault();
+      return;
+    }
+    openPin(pin);
+  }
+
+  function unpin(pin: ConversationPlaygroundPin, event: React.SyntheticEvent) {
     event.preventDefault();
     event.stopPropagation();
+    suppressOpenFromUnpinRef.current = true;
     unpinPlaygroundFromConversation(scopeKey, pin.sid);
+    // Always tear down any open keep-alive surface for this pin so unpin
+    // cannot leave a half-open native webview covering the channel.
     destroyLinkSidePanelIfPin(conversationPlaygroundPinWebviewId(pin.sid));
+  }
+
+  function suppressItemSelect(event: React.SyntheticEvent) {
+    // pointerdown/up on X must not reach MenuItem — Radix selects on up.
+    event.preventDefault();
+    event.stopPropagation();
+    suppressOpenFromUnpinRef.current = true;
   }
 
   return (
@@ -124,7 +148,7 @@ export function ConversationPlaygroundPinsMenu({
               className="flex items-center gap-2"
               data-testid={`conversation-playground-pin-${pin.sid}`}
               key={pin.sid}
-              onSelect={() => openPin(pin)}
+              onSelect={(event) => handlePinSelect(pin, event)}
             >
               <span className="min-w-0 flex-1 truncate">{pin.name}</span>
               <button
@@ -132,10 +156,8 @@ export function ConversationPlaygroundPinsMenu({
                 className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
                 data-testid={`conversation-playground-unpin-${pin.sid}`}
                 onClick={(event) => unpin(pin, event)}
-                onPointerDown={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                }}
+                onPointerDown={suppressItemSelect}
+                onPointerUp={suppressItemSelect}
                 type="button"
               >
                 <X className="h-3.5 w-3.5" />
