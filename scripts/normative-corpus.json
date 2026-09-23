@@ -2348,6 +2348,127 @@
     }
   },
   {
+    "_group": "Verified Databricks Opus UC service and exact-record boundaries"
+  },
+  {
+    "id": "dbv2-opus-uc-exact",
+    "provider": "databricks_v2",
+    "raw_model_id": "data_workflow_tools.goose.goose-claude-opus-5-5",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Opus 5.5"
+    }
+  },
+  {
+    "id": "dbv2-opus-uc-case",
+    "provider": "databricks_v2",
+    "raw_model_id": "DATA_WORKFLOW_TOOLS.GOOSE.GOOSE-CLAUDE-OPUS-5-5",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Opus 5.5"
+    }
+  },
+  {
+    "id": "dbv2-opus-uc-namespace",
+    "provider": "databricks_v2",
+    "raw_model_id": "other.goose.goose-claude-opus-5-5",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-opus-uc-service",
+    "provider": "databricks_v2",
+    "raw_model_id": "data_workflow_tools.goose.goose-claude-opus-5-5-preview",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-opus-uc-system",
+    "provider": "databricks_v2",
+    "raw_model_id": "system.ai.claude-opus-5-5",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-opus-uc-provider",
+    "provider": "openai",
+    "raw_model_id": "data_workflow_tools.goose.goose-claude-opus-5-5",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "not-applicable",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
     "_group": "Databricks FQN GPT-5+ Responses routing",
     "_note": "Only the service component selects Responses; effort capabilities remain neutral."
   },

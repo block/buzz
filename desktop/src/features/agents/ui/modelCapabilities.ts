@@ -328,13 +328,13 @@ export function resolveModelCapabilities(
 ): CapabilityResult {
   const canon = canonicalizeProvider(provider);
   const blank = rawModelId.trim().length === 0;
-  // FQNs keep neutral effort capabilities; only GPT-5+ service names
-  // select Responses. Catalog/schema names never choose the protocol.
+  // Uncurated FQNs keep neutral effort capabilities; verified exact records
+  // take precedence. Catalog/schema names never infer a protocol.
   const modelServiceFqn =
     canon === "databricks_v2" && isDatabricksModelServiceFqn(rawModelId);
 
   // 1. Provider-qualified exact-record lookup (case-insensitive on the id).
-  if (!blank && !modelServiceFqn) {
+  if (!blank) {
     const idLower = rawModelId.toLowerCase();
     for (const rec of MANIFEST.exact_records) {
       if (

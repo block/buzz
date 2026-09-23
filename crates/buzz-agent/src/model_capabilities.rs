@@ -293,7 +293,8 @@ fn prefix_matches(token: &str, s: &str) -> bool {
 /// Databricks Unity Catalog model-service names are catalog data, not model
 /// family hints. Both capability interpreters use this shape check before
 /// family matching so services cannot inherit endpoint capabilities accidentally.
-/// GPT-5+ services have a route-only Responses exception.
+/// Verified exact records may supply capabilities; other GPT-5+ services have
+/// a route-only Responses exception.
 pub(crate) fn is_databricks_model_service_fqn(model: &str) -> bool {
     let mut components = model.split('.');
     let (Some(catalog), Some(schema), Some(service)) =
@@ -334,14 +335,14 @@ pub fn resolve(provider: &str, raw_model_id: &str) -> CapabilityResult {
     let canon = canonical_provider(provider);
     let blank = raw_model_id.trim().is_empty();
 
-    // FQNs keep neutral effort capabilities, but GPT-5+ service names need
-    // Responses for tools with reasoning. Only inspect the service component:
-    // catalog/schema names must never choose a model protocol.
+    // Uncurated FQNs keep neutral effort capabilities. Exact records are verified
+    // service contracts, not family-name inference. The GPT-5+ route-only fallback
+    // inspects just the service component, never catalog/schema names.
     let model_service_fqn =
         canon == "databricks_v2" && is_databricks_model_service_fqn(raw_model_id);
 
     // 1. Provider-qualified exact-record lookup (case-insensitive on the id).
-    if !blank && !model_service_fqn {
+    if !blank {
         for rec in &m.exact_records {
             if rec.provider == canon && rec.raw_model_id.eq_ignore_ascii_case(raw_model_id) {
                 return CapabilityResult {
@@ -747,6 +748,13 @@ mod tests {
     Q::Vector { id: "boundary-claude-3-digit-run-anthropic-probe", provider: "anthropic", raw_model_id: "claude-35", note: Some("Probes whether the claude-3 prefix binds a longer digit run ('35').") },
     Q::Vector { id: "boundary-claude-opus-4-70-anthropic-probe", provider: "anthropic", raw_model_id: "claude-opus-4-70", note: Some("Probes whether the claude-opus-4-7 prefix binds a longer digit run ('70').") },
     Q::Vector { id: "boundary-gpt-5-1234-openai-probe", provider: "openai", raw_model_id: "gpt-5-1234", note: Some("Probes a 4-digit run after the gpt-5 stem.") },
+    Q::Section { group: "Verified Databricks Opus UC service and exact-record boundaries", note: None },
+    Q::Vector { id: "dbv2-opus-uc-exact", provider: "databricks_v2", raw_model_id: "data_workflow_tools.goose.goose-claude-opus-5-5", note: None },
+    Q::Vector { id: "dbv2-opus-uc-case", provider: "databricks_v2", raw_model_id: "DATA_WORKFLOW_TOOLS.GOOSE.GOOSE-CLAUDE-OPUS-5-5", note: None },
+    Q::Vector { id: "dbv2-opus-uc-namespace", provider: "databricks_v2", raw_model_id: "other.goose.goose-claude-opus-5-5", note: None },
+    Q::Vector { id: "dbv2-opus-uc-service", provider: "databricks_v2", raw_model_id: "data_workflow_tools.goose.goose-claude-opus-5-5-preview", note: None },
+    Q::Vector { id: "dbv2-opus-uc-system", provider: "databricks_v2", raw_model_id: "system.ai.claude-opus-5-5", note: None },
+    Q::Vector { id: "dbv2-opus-uc-provider", provider: "openai", raw_model_id: "data_workflow_tools.goose.goose-claude-opus-5-5", note: None },
     Q::Section { group: "Databricks FQN GPT-5+ Responses routing", note: Some("Only the service component selects Responses; effort capabilities remain neutral.") },
     Q::Vector { id: "dbv2-fqn-responses-0", provider: "databricks_v2", raw_model_id: "catalog.schema.goose-gpt-6-astra", note: None },
     Q::Vector { id: "dbv2-fqn-responses-1", provider: "databricks_v2", raw_model_id: "catalog.schema.goose-gpt-5", note: None },
@@ -886,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn corpus_has_exactly_158_executable_vectors() {
+    fn corpus_has_exactly_164_executable_vectors() {
         // Locks the vector count so a silent INPUTS edit can't quietly drop
         // coverage; must equal the gate in the TS harness
         // (modelCapabilitiesCorpus.test.mjs).
@@ -895,7 +903,7 @@ mod tests {
             .filter(|q| matches!(q, Q::Vector { .. }))
             .count();
         assert_eq!(
-            vectors, 158,
+            vectors, 164,
             "corpus executable-vector count changed; update this gate deliberately"
         );
     }
