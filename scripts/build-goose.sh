@@ -36,4 +36,4 @@ if [[ "$TARGET" == *windows* ]]; then
 fi
 DEST_DIR="${ROOT}/target/${TARGET:+$TARGET/}release"
 mkdir -p "$DEST_DIR"
-install -m 755 "$SRC_DIR/goose-acp$EXE" "$DEST_DIR/goose$EXE"
+install -m 755 "$SRC_DIR/goose-acp$EXE" "$DEST_DIR/goose-acp$EXE"

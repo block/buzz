@@ -171,7 +171,7 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
-    SIDECARS=(buzz-acp buzz-agent goose buzz-dev-mcp git-credential-nostr buzz)
+    SIDECARS=(buzz-acp buzz-agent goose-acp buzz-dev-mcp git-credential-nostr buzz)
     if [[ "$TARGET" != *windows* ]]; then
         SIDECARS+=(buzz-backend-kubernetes)
     fi
