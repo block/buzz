@@ -525,7 +525,12 @@ export function generateDatabricksLabel(rawModelId: string): string | null {
     if (isDateToken(tok) && next === undefined) break;
     const hasMinor = next !== undefined && isVersionToken(next);
     // A third number (`3-7-1`) would read as a separate version.
-    if (hasMinor && isVersionToken(rest[i + 2] ?? "")) return null;
+    if (
+      hasMinor &&
+      (isVersionToken(tok) || isLetterVersionToken(tok)) &&
+      isVersionToken(rest[i + 2] ?? "")
+    )
+      return null;
     if (isVersionToken(tok)) {
       afterMinor = hasMinor;
       parts.push({ version: true, text: afterMinor ? `${tok}.${next}` : tok });
