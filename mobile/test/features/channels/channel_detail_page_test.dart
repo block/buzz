@@ -19,6 +19,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/channel_window.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
@@ -63,6 +64,8 @@ import 'package:buzz/shared/widgets/lucide_star_icon.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+part 'thread_reply_refresh_cases.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -471,6 +474,7 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  threadReplyRefreshTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
@@ -555,14 +559,25 @@ void main() {
           pubkey: 'bot',
           content: 'Bot message',
         );
+        final reply = _textMsg(
+          id: 'bot-reply',
+          pubkey: 'alice',
+          content: 'Reply to bot',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', 'bot-message', '', 'reply'],
+          ],
+        );
         await tester.pumpWidget(
           _buildTestable(
-            messages: [message],
+            messages: [message, reply],
             users: const {
               'bot': UserProfile(pubkey: 'bot', displayName: 'Bot'),
             },
             loadChannelBotPubkeys: () async => const {'bot'},
-            threadReplies: const {'bot-message': []},
+            threadReplies: {
+              'bot-message': [reply],
+            },
           ),
         );
         await tester.pumpAndSettle();
@@ -10252,6 +10267,254 @@ void main() {
     });
   });
 
+  group('Message row thread navigation', () {
+    testWidgets('a local reply makes its thread immediately tappable', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'local-root',
+        pubkey: 'alice',
+        content: 'Start a local thread',
+      );
+      final reply = _textMsg(
+        id: 'local-reply',
+        pubkey: 'self',
+        content: 'Waiting for relay echo',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'local-root', '', 'reply'],
+        ],
+      );
+      final query = Completer<List<NostrEvent>>();
+      final notifier = _FakeMessagesNotifier([root]);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          messagesNotifier: notifier,
+          pendingThreadReplies: {'local-root': query.future},
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(findRichText('Start a local thread'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsNothing);
+
+      notifier.addLocalMessage(reply);
+      notifier.completeLocalMessage('local-reply');
+      await tester.pumpAndSettle();
+      await tester.tap(findRichText('Start a local thread'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(findRichText('Waiting for relay echo'), findsOneWidget);
+
+      query.complete([reply]);
+      await tester.pumpAndSettle();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      await tester.tap(findRichText('Start a local thread'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(findRichText('Waiting for relay echo'), findsOneWidget);
+    });
+
+    testWidgets(
+      'pending recount renders a lower-bound count and remains tappable',
+      (tester) async {
+        final root = _textMsg(
+          id: 'overflow-root',
+          pubkey: 'alice',
+          content: 'Overflow thread',
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root],
+            messagesNotifier: _FakeMessagesNotifier(
+              [root],
+              summaries: const {
+                'overflow-root': ChannelWindowThreadSummary(
+                  replyCount: 256,
+                  descendantCount: 256,
+                  lastReplyAt: 1100,
+                  participantPubkeys: ['bob'],
+                  isLowerBound: true,
+                ),
+              },
+            ),
+            threadReplies: const {'overflow-root': []},
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(findRichText('256+ replies'), findsOneWidget);
+        await tester.tap(findRichText('Overflow thread'));
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'unknown deletion hides the number while preserving thread navigation',
+      (tester) async {
+        final root = _textMsg(
+          id: 'overflow-root',
+          pubkey: 'alice',
+          content: 'Overflow thread',
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root],
+            messagesNotifier: _FakeMessagesNotifier(
+              [root],
+              summaries: const {
+                'overflow-root': ChannelWindowThreadSummary(
+                  replyCount: 256,
+                  descendantCount: 256,
+                  lastReplyAt: 1100,
+                  participantPubkeys: ['bob'],
+                  isCountPending: true,
+                ),
+              },
+            ),
+            threadReplies: const {'overflow-root': []},
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(findRichText('Replies'), findsOneWidget);
+        await tester.tap(findRichText('Overflow thread'));
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
+      },
+    );
+
+    testWidgets('tapping a message with unloaded replies opens its thread', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'remote-root',
+        pubkey: 'alice',
+        content: 'Replies are on the relay',
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          messagesNotifier: _FakeMessagesNotifier(
+            [root],
+            summaries: const {
+              'remote-root': ChannelWindowThreadSummary(
+                replyCount: 1,
+                descendantCount: 1,
+                lastReplyAt: 1100,
+                participantPubkeys: ['bob'],
+              ),
+            },
+          ),
+          threadReplies: const {'remote-root': []},
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(findRichText('Replies are on the relay'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+    });
+
+    for (final directReplies in [0, 1]) {
+      testWidgets(
+        'cold broadcast row with $directReplies relay-only direct replies',
+        (tester) async {
+          final root = _textMsg(
+            id: 'outer-root',
+            pubkey: 'bob',
+            content: 'Outer root',
+          );
+          final broadcast = _textMsg(
+            id: 'broadcast-reply',
+            pubkey: 'alice',
+            content: 'Broadcast reply with unloaded children',
+            extraTags: const [
+              ['e', 'outer-root', '', 'root'],
+              ['e', 'outer-root', '', 'reply'],
+              ['broadcast', '1'],
+            ],
+          );
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [root, broadcast],
+              messagesNotifier: _FakeMessagesNotifier(
+                [root, broadcast],
+                summaries: {
+                  'broadcast-reply': ChannelWindowThreadSummary(
+                    replyCount: directReplies,
+                    descendantCount: 0,
+                    lastReplyAt: 1100,
+                    participantPubkeys: const ['bob'],
+                  ),
+                },
+              ),
+              threadReplies: const {'broadcast-reply': []},
+            ),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(
+            findRichText('Broadcast reply with unloaded children'),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byType(ThreadDetailPage),
+            directReplies > 0 ? findsOneWidget : findsNothing,
+          );
+        },
+      );
+    }
+
+    for (final hasReplies in [false, true]) {
+      testWidgets(
+        hasReplies
+            ? 'tapping a message with replies opens its thread'
+            : 'tapping a message without replies stays in the channel',
+        (tester) async {
+          final root = _textMsg(
+            id: 'tap-root',
+            pubkey: 'alice',
+            content: 'Tap this message',
+          );
+          final replies = [
+            if (hasReplies)
+              _textMsg(
+                id: 'tap-reply',
+                pubkey: 'bob',
+                content: 'A reply',
+                createdAt: 1100,
+                extraTags: const [
+                  ['e', 'tap-root', '', 'reply'],
+                ],
+              ),
+          ];
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [root, ...replies],
+              threadReplies: {'tap-root': replies},
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(findRichText('Tap this message'));
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byType(ThreadDetailPage),
+            hasReplies ? findsOneWidget : findsNothing,
+          );
+          if (!hasReplies) {
+            await tester.longPress(findRichText('Tap this message'));
+            await tester.pumpAndSettle();
+            await tester.tap(find.text('Reply'));
+            await tester.pumpAndSettle();
+            expect(find.byType(ThreadDetailPage), findsOneWidget);
+          }
+        },
+      );
+    }
+  });
+
   group('Deep-link navigation', () {
     testWidgets('fades the target highlight in after the thread route lands', (
       tester,
@@ -14344,6 +14607,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   bool _hasLoadedMessages;
   final List<List<NostrEvent>> _olderPages;
   final bool failOlderFetch;
+  final Map<String, ChannelWindowThreadSummary> summaries;
   int fetchOlderCalls = 0;
 
   _FakeMessagesNotifier(
@@ -14352,6 +14616,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
     bool hasLoadedMessages = true,
     List<List<NostrEvent>> olderPages = const [],
     this.failOlderFetch = false,
+    this.summaries = const {},
   }) : _hasLoadedMessages = hasLoadedMessages,
        _olderPages = [...olderPages],
        super(channelId);
@@ -14361,6 +14626,9 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
 
   @override
   bool get hasLoadedMessages => _hasLoadedMessages;
+
+  @override
+  Map<String, ChannelWindowThreadSummary> get threadSummaries => summaries;
 
   @override
   bool get reachedOldest => _olderPages.isEmpty && !failOlderFetch;

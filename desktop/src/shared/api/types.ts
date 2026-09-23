@@ -69,21 +69,15 @@ export type SetChannelPurposeInput = {
   purpose: string;
 };
 
-export type CanvasResponse = {
-  content: string | null;
-  updatedAt: number | null;
-  author: string | null;
-};
+export type {
+  CanvasHistoryCursor,
+  CanvasHistoryResponse,
+  CanvasResponse,
+  CanvasRevision,
+  SetCanvasInput,
+  SetCanvasResult,
+} from "@/shared/api/canvasTypes";
 
-export type SetCanvasInput = {
-  channelId: string;
-  content: string;
-};
-
-export type SetCanvasResult = {
-  ok: boolean;
-  eventId: string;
-};
 export type AddChannelMembersInput = {
   channelId: string;
   pubkeys: string[];

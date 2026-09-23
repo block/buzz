@@ -34,6 +34,8 @@ pub mod product_feedback;
 pub mod push;
 /// Reaction persistence.
 pub mod reaction;
+/// Complete own-author read-state snapshots.
+pub mod read_state;
 /// HTTP report-resolution enforcement state machine persistence.
 pub mod relay_admin_actions;
 /// Use-limited relay invite persistence (v2 opaque tokens).
@@ -46,6 +48,8 @@ pub mod relay_operators;
 pub mod reminder;
 /// Replaceable-event persistence and coordinate locking.
 pub mod replaceable;
+/// Durable completed snapshots from the isolated media-storage worker.
+pub mod storage_accounting;
 /// Thread metadata persistence.
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.

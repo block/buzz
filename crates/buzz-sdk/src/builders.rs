@@ -1,4 +1,4 @@
-//! Typed event builder functions (38 builders).
+//! Typed event builder functions (39 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
@@ -555,9 +555,186 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
 }
 
 /// Build a canvas update event (kind 40100).
-pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, SdkError> {
-    let tags = vec![tag(&["h", &channel_id.to_string()])?];
+///
+/// When `expected_revision` is set, an `["expected-revision", …]` tag is
+/// attached. A 64-hex event ID names the head the write was composed against;
+/// the literal `none` asserts no head exists yet. The relay enforces this tag
+/// as a compare-and-swap (CAS): it reads the canonical live head under an
+/// advisory lock, checks the precondition, and rejects mismatched writes before
+/// insertion. Omit the tag for an unconditional append (backward compatible).
+pub fn build_set_canvas(
+    channel_id: Uuid,
+    content: &str,
+    expected_revision: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    if let Some(expected_revision) = expected_revision {
+        if expected_revision != "none"
+            && (expected_revision.len() != 64
+                || !expected_revision.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(SdkError::InvalidInput(format!(
+                "expected_revision must be the literal \"none\" or a 64-character hex event id (got {expected_revision:?})"
+            )));
+        }
+        tags.push(tag(&["expected-revision", expected_revision])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
+}
+
+/// Build a canvas write (kind 40100) that edits or restores against a known
+/// head, applying writer discipline in one place.
+///
+/// Sets the `expected-revision` precondition to `head_id` and stamps
+/// `created_at = max(now, head_created_at + 1)` so the event sorts strictly
+/// ahead of the head it asserts under `created_at DESC, id ASC`. This keeps a
+/// legitimate first-party restore/edit whose local clock lags the head from
+/// landing behind that head in read order (which would "succeed" without
+/// changing the visible canvas). First-party signers (CLI `set`/restore,
+/// Desktop save/restore) MUST route disciplined canvas writes through this
+/// helper rather than re-deriving the timestamp.
+///
+/// Ordering note: the `+ 1` bump guarantees a strictly greater `created_at`, so
+/// the write never ties the head. Writes that *do* share a second resolve by
+/// `id ASC` under `created_at DESC, id ASC` — the smallest event id wins the
+/// visible head, not the last write. This helper sidesteps that tie by stamping
+/// ahead; unconditional appends that omit the bump remain subject to it.
+pub fn build_set_canvas_after_head(
+    channel_id: Uuid,
+    content: &str,
+    head_id: &str,
+    head_created_at: u64,
+) -> Result<EventBuilder, SdkError> {
+    let created_at = canvas_write_created_at(head_created_at)?;
+    Ok(build_set_canvas(channel_id, content, Some(head_id))?
+        .custom_created_at(nostr::Timestamp::from(created_at)))
+}
+
+/// Build an unconditional canvas write (kind 40100) that still applies writer
+/// discipline: stamps `created_at = max(now, head_created_at + 1)` so the
+/// event sorts strictly ahead of the current head under `created_at DESC, id ASC`.
+///
+/// Unlike [`build_set_canvas_after_head`], no `expected-revision` tag is added
+/// — the write is an unconditional append that can never conflict. Use this for
+/// `buzz canvas set`, which documents unconditional replace semantics.
+///
+/// Returns an error if `head_created_at` is more than
+/// [`CANVAS_MAX_FUTURE_SKEW_SECS`] beyond `now` (poisoned timeline guard).
+pub fn build_set_canvas_unconditional_after_head(
+    channel_id: Uuid,
+    content: &str,
+    head_created_at: u64,
+) -> Result<EventBuilder, SdkError> {
+    let created_at = canvas_write_created_at(head_created_at)?;
+    Ok(build_set_canvas(channel_id, content, None)?
+        .custom_created_at(nostr::Timestamp::from(created_at)))
+}
+
+/// Maximum future skew a canvas head may carry before a first-party client
+/// refuses to ratchet past it (seconds). A head timestamped beyond `now +
+/// CANVAS_MAX_FUTURE_SKEW_SECS` is treated as poisoned: stamping
+/// `max(now, head + 1)` against it would silently extend a bogus timeline
+/// arbitrarily far ahead, and every later legitimate write would inherit that
+/// floor.
+///
+/// This is kept well below the relay's general ±900 s drift window. A ceiling
+/// head at `now + 60` produces a write at `now + 61`, which is within the relay's
+/// kind-40100-specific future bound (`CANVAS_MAX_INGEST_FUTURE_SECS = 300` in
+/// ingest.rs) and far inside the general ±900 s window — first-party clients
+/// can never construct an ingest-rejected event through ordinary use.
+pub const CANVAS_MAX_FUTURE_SKEW_SECS: u64 = 60;
+
+/// Contract-v3 writer-discipline timestamp for a canvas write asserting a head
+/// at `head_created_at`: `max(now, head_created_at + 1)` (Unix seconds).
+///
+/// The single home for canvas timestamp discipline. `build_set_canvas_after_head`
+/// stamps CLI restore/`set` writes with this, and Desktop's `set_canvas` calls
+/// it directly for the same reason, so the `max(now, head + 1)` rule is never
+/// re-derived per surface.
+///
+/// Rejects a head timestamped more than [`CANVAS_MAX_FUTURE_SKEW_SECS`] beyond
+/// `now` rather than ratcheting past it: extending a poisoned future timeline
+/// would strand every later write behind a floor arbitrarily far ahead.
+/// `u64::MAX` is covered by the same ceiling.
+pub fn canvas_write_created_at(head_created_at: u64) -> Result<u64, SdkError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    canvas_write_created_at_at(head_created_at, now)
+}
+
+/// Pure core of [`canvas_write_created_at`] with `now` injected — the clock
+/// seam. The public wrapper reads the real clock; tests drive the exact
+/// `now + 60` / `now + 61` boundaries against a fixed `now`.
+fn canvas_write_created_at_at(head_created_at: u64, now: u64) -> Result<u64, SdkError> {
+    if head_created_at > now.saturating_add(CANVAS_MAX_FUTURE_SKEW_SECS) {
+        return Err(SdkError::InvalidInput(
+            "canvas head is timestamped too far in the future; refusing to extend it".into(),
+        ));
+    }
+    Ok(now.max(head_created_at.saturating_add(1)))
+}
+
+/// Maximum ancestry links the post-write supersession walk follows before
+/// failing safe (reporting superseded). A legitimate descendant chain visible
+/// in one history page is far shorter; the bound only caps a pathological or
+/// adversarial revision stream so the walk can never loop or run unbounded.
+pub const CANVAS_ANCESTRY_WALK_MAX: usize = 256;
+
+/// Whether a just-published canvas write still survives as — or anywhere in the
+/// accepted ancestry of — the live head read back after submit. The post-write
+/// supersession check.
+///
+/// `revisions` is a recent slice of the channel's canvas stream ordered newest
+/// first, each entry `(event_id, the expected-revision it built on)`;
+/// `revisions[0]` is the live head. A conflict-checked write (Desktop
+/// save/restore, CLI `restore`) re-reads this stream after publishing and the
+/// walk starts at the head, following `expected-revision` links backward:
+/// - the head **is** our event → survived;
+/// - our event is reached anywhere in the head's ancestry chain (e.g. A→B→C
+///   with C the head and A ours, each linked by `expected-revision`) → a later
+///   write legitimately layered on top of ours → survived;
+/// - the chain ends, reaches a link outside `revisions`, cycles, exceeds
+///   [`CANVAS_ANCESTRY_WALK_MAX`], or there is no head at all → not survived: a
+///   concurrent write won the visible head and ours is superseded (preserved in
+///   history, not lost). Every non-survival outcome, including a truncated or
+///   adversarial stream, fails safe as superseded and never hangs.
+///
+/// All id comparisons are case-insensitive, matching the precondition check's
+/// `eq_ignore_ascii_case` convention. This only detects a competitor already
+/// visible at verification time; a competitor that lands after this read is
+/// still missed — the relay's advisory-lock CAS prevents concurrent conflicting
+/// writes from both being accepted, but this client check is a secondary
+/// confirmation for the caller's own visibility.
+pub fn canvas_write_survived(our_id: &str, revisions: &[(String, Option<String>)]) -> bool {
+    let Some((head_id, _)) = revisions.first() else {
+        return false; // no head after an accepted write → conservatively superseded
+    };
+    if head_id.eq_ignore_ascii_case(our_id) {
+        return true;
+    }
+    // Lowercased id → its expected-revision, for walking the chain backward.
+    let by_id: std::collections::HashMap<String, Option<&str>> = revisions
+        .iter()
+        .map(|(id, expected)| (id.to_ascii_lowercase(), expected.as_deref()))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor = head_id.to_ascii_lowercase();
+    for _ in 0..CANVAS_ANCESTRY_WALK_MAX {
+        if !seen.insert(cursor.clone()) {
+            return false; // cycle guard
+        }
+        // The link out of `cursor`; absent id or missing tag ends the walk.
+        let Some(expected) = by_id.get(&cursor).copied().flatten() else {
+            return false;
+        };
+        if expected.eq_ignore_ascii_case(our_id) {
+            return true;
+        }
+        cursor = expected.to_ascii_lowercase();
+    }
+    false // depth exhausted → fail safe (superseded)
 }
 
 /// Build a NIP-01 profile metadata event (kind 0).
@@ -2991,10 +3168,238 @@ mod tests {
     #[test]
     fn set_canvas_happy_path() {
         let cid = uuid();
-        let ev = sign(build_set_canvas(cid, "# Canvas\nHello").unwrap());
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHello", None).unwrap());
         assert_eq!(ev.kind.as_u16(), 40100);
         assert!(has_tag(&ev, "h", &cid.to_string()));
         assert_eq!(ev.content, "# Canvas\nHello");
+        assert!(!ev.tags.iter().any(|t| t
+            .as_slice()
+            .first()
+            .is_some_and(|k| k == "expected-revision")));
+    }
+
+    #[test]
+    fn set_canvas_pins_expected_revision() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHi", Some(&head)).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+
+        let create = sign(build_set_canvas(cid, "# New", Some("none")).unwrap());
+        assert!(has_tag(&create, "expected-revision", "none"));
+    }
+
+    #[test]
+    fn set_canvas_after_head_pins_revision_and_bumps_timestamp() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Head created ahead of the signer's clock but within the future-skew
+        // ceiling: the discipline must still stamp strictly ahead of it.
+        let future_head = now + CANVAS_MAX_FUTURE_SKEW_SECS;
+        let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, future_head).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+        assert!(
+            ev.created_at.as_secs() > future_head,
+            "created_at {} must be strictly ahead of future head {future_head}",
+            ev.created_at.as_secs()
+        );
+
+        // Head in the past: the signer's `now` wins and is still ahead.
+        let past_head = 1_000_u64;
+        let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, past_head).unwrap());
+        assert!(ev.created_at.as_secs() > past_head);
+    }
+
+    #[test]
+    fn set_canvas_rejects_malformed_expected_revision() {
+        let cid = uuid();
+        // Wrong length (63 hex chars).
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"a".repeat(63))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Correct length but non-hex.
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"z".repeat(64))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Literal "none" and a valid 64-hex id are accepted.
+        assert!(build_set_canvas(cid, "x", Some("none")).is_ok());
+        assert!(build_set_canvas(cid, "x", Some(&"a".repeat(64))).is_ok());
+    }
+
+    #[test]
+    fn set_canvas_after_head_rejects_max_head_created_at() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        // u64::MAX is far beyond the future-skew ceiling: reject instead of
+        // silently saturating and breaking the head-advancement guarantee.
+        assert!(matches!(
+            build_set_canvas_after_head(cid, "# Restored", &head, u64::MAX),
+            Err(SdkError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn canvas_write_created_at_skew_boundary() {
+        // Fixed clock: the injected-`now` core removes the second-rollover seam
+        // that a real-clock read introduces. A head exactly at the ceiling
+        // (`now + 60`) is accepted and stamped strictly ahead; one second past
+        // it is rejected as poisoned.
+        //
+        // Invariant contract (pinned with literals, not constants, so a constant
+        // mutation also fails this test): the client ceiling is 60 s; the relay
+        // canvas ingest bound is 300 s; the relay general drift bound is 900 s.
+        // A ceiling head at now+60 produces now+61, well below both relay bounds.
+        // These numeric assertions must stay consistent with CANVAS_MAX_FUTURE_SKEW_SECS
+        // and the relay's CANVAS_MAX_INGEST_FUTURE_SECS (300) / MAX_TIMESTAMP_DRIFT_SECS (900).
+        let now = 1_700_000_000u64;
+        let at_ceiling = now + CANVAS_MAX_FUTURE_SKEW_SECS;
+        assert_eq!(
+            canvas_write_created_at_at(at_ceiling, now).unwrap(),
+            at_ceiling + 1,
+            "a head at now+60 is accepted and stamped strictly ahead"
+        );
+        assert!(
+            matches!(
+                canvas_write_created_at_at(at_ceiling + 1, now),
+                Err(SdkError::InvalidInput(_))
+            ),
+            "a head at now+61 is poisoned and rejected"
+        );
+
+        // Fixed-literal contract: client ceiling IS 60 s, NOT the old 900 s.
+        // Mutating CANVAS_MAX_FUTURE_SKEW_SECS back to 900 makes these fail.
+        assert!(
+            canvas_write_created_at_at(now + 60, now).is_ok(),
+            "now+60 is within the 60 s client ceiling"
+        );
+        assert!(
+            matches!(
+                canvas_write_created_at_at(now + 61, now),
+                Err(SdkError::InvalidInput(_))
+            ),
+            "now+61 is one second past the 60 s client ceiling"
+        );
+        // Confirm the old 900 s ceiling is now rejected (prevents silent
+        // reversion): a head at now+900 must not be ratcheted past.
+        assert!(
+            matches!(
+                canvas_write_created_at_at(now + 900, now),
+                Err(SdkError::InvalidInput(_))
+            ),
+            "now+900 must be rejected by the 60 s client ceiling"
+        );
+    }
+
+    /// Standalone numeric contract for the client-side canvas future-skew ceiling.
+    ///
+    /// No constants used — if CANVAS_MAX_FUTURE_SKEW_SECS changes, this test
+    /// catches it regardless of whether the constant-based assertions remain
+    /// self-consistent. The client ceiling IS 60 s: now+60 is the last accepted
+    /// head; now+61 is the first rejected head.
+    ///
+    /// Cross-crate invariant: the relay canvas ingest bound is 300 s and the
+    /// relay general drift bound is 900 s. A ceiling head at now+60 is stamped
+    /// now+61, comfortably below both relay bounds.
+    #[test]
+    fn canvas_write_created_at_numeric_contract() {
+        let now = 1_700_000_000u64;
+        // The client ceiling is exactly 60 s — not 900 s (the old value).
+        // These assertions use only fixed numeric literals; they cannot be
+        // self-referential regardless of what CANVAS_MAX_FUTURE_SKEW_SECS holds.
+        assert!(
+            canvas_write_created_at_at(now + 60, now).is_ok(),
+            "now+60 must be accepted: client ceiling is 60 s",
+        );
+        assert!(
+            canvas_write_created_at_at(now + 61, now).is_err(),
+            "now+61 must be rejected: one second past the 60 s client ceiling",
+        );
+        // Old 900 s value must also be rejected (prevents silent reversion).
+        assert!(
+            canvas_write_created_at_at(now + 900, now).is_err(),
+            "now+900 must be rejected: the old 900 s ceiling is no longer valid",
+        );
+    }
+
+    #[test]
+    fn canvas_write_survived_classifies_head_ancestry() {
+        let ours = "a".repeat(64);
+        let other = "b".repeat(64);
+        let third = "c".repeat(64);
+        // Head is our own event → survived.
+        assert!(canvas_write_survived(&ours, &[(ours.clone(), None)]));
+        // Head is case-insensitively our event → survived.
+        assert!(canvas_write_survived(&ours, &[(ours.to_uppercase(), None)]));
+        // Head is a stranger that builds directly on us (case-insensitively) →
+        // survived.
+        assert!(canvas_write_survived(
+            &ours,
+            &[(other.clone(), Some(ours.to_uppercase()))]
+        ));
+        // Transitive descendant: A(ours) → B(exp=A) → C(exp=B, the head). Ours
+        // is reached by walking the chain, so the write survived.
+        assert!(canvas_write_survived(
+            &ours,
+            &[
+                (third.clone(), Some(other.clone())),
+                (other.clone(), Some(ours.clone())),
+                (ours.clone(), None),
+            ]
+        ));
+        // Head is a stranger that builds on someone else, and that ancestor is
+        // not ours and not in the stream → superseded.
+        assert!(!canvas_write_survived(
+            &ours,
+            &[(other.clone(), Some(third.clone()))]
+        ));
+        // Head is a stranger with no ancestry tag → superseded.
+        assert!(!canvas_write_survived(&ours, &[(other.clone(), None)]));
+        // No head at all after an accepted write → superseded, never silent
+        // success (shouldn't happen, classified conservatively).
+        assert!(!canvas_write_survived(&ours, &[]));
+        // A descendant chain that never reaches ours before the stream ends →
+        // superseded (fails safe rather than assuming survival).
+        assert!(!canvas_write_survived(
+            &ours,
+            &[
+                (third.clone(), Some(other.clone())),
+                (other.clone(), Some("d".repeat(64))),
+            ]
+        ));
+    }
+
+    #[test]
+    fn canvas_write_survived_fails_safe_on_cycles_and_depth() {
+        let ours = "a".repeat(64);
+        let x = "b".repeat(64);
+        let y = "c".repeat(64);
+        // A cycle in the stream (x→y→x) that never touches ours must terminate
+        // as superseded, not loop forever.
+        assert!(!canvas_write_survived(
+            &ours,
+            &[(x.clone(), Some(y.clone())), (y.clone(), Some(x.clone()))]
+        ));
+        // A chain longer than the walk bound that never reaches ours fails safe
+        // as superseded. Each link i points to link i+1; ours is never in it.
+        let mut revisions: Vec<(String, Option<String>)> = (0..(CANVAS_ANCESTRY_WALK_MAX + 10))
+            .map(|i| {
+                let id = format!("{i:064x}");
+                let next = format!("{:064x}", i + 1);
+                (id, Some(next))
+            })
+            .collect();
+        // Terminate the last link at ours so only the depth bound (not a missing
+        // link) can stop the walk — proving the bound itself is the guard.
+        let last = revisions.len() - 1;
+        revisions[last].1 = Some(ours.clone());
+        assert!(!canvas_write_survived(&ours, &revisions));
     }
 
     #[test]

@@ -11,9 +11,21 @@ pub enum ApnsEnvironment {
 #[derive(Debug, Clone)]
 pub struct AppProfileConfig {
     pub app_attest_app_id: String,
+    /// Exact Apple attestation environment accepted for enrollment.
+    pub app_attest_environment: AppAttestEnvironment,
     pub apns_cert_path: PathBuf,
     pub apns_topic: String,
     pub apns_environment: ApnsEnvironment,
+}
+
+/// Apple App Attest environment, independent of the APNs transport environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppAttestEnvironment {
+    /// Distributed applications, also the default for personal development builds.
+    Production,
+    /// Development-signed applications in an explicitly opted-in gateway build.
+    #[cfg(feature = "personal-dev-app-attest")]
+    Development,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +38,8 @@ pub struct KeyConfig {
 pub struct Config {
     pub bind_addr: SocketAddr,
     pub health_addr: SocketAddr,
-    pub public_delivery_url: url::Url,
+    /// External gateway origin, delivery URL, and registered transcript audiences.
+    pub gateway_urls: GatewayUrls,
     pub max_grant_lifetime_seconds: i64,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
@@ -40,6 +53,54 @@ pub struct Config {
     /// Independent token-custody keyring. These keys MUST NOT be reused for
     /// externally presented delivery capabilities.
     pub token_keys: Vec<KeyConfig>,
+}
+
+/// Gateway transport URLs and registered NIP-PL v1 transcript audiences.
+#[derive(Debug, Clone)]
+pub struct GatewayUrls {
+    /// External HTTPS origin serving the gateway.
+    pub origin: url::Url,
+    /// Exact NIP-98 delivery endpoint used by relays.
+    pub delivery: url::Url,
+    /// App Attest audience for installation enrollment.
+    pub enroll_audience: String,
+    /// App Attest audience for relay delegation.
+    pub delegate_audience: String,
+    /// App Attest audience for endpoint rotation.
+    pub rotate_endpoint_audience: String,
+    /// App Attest audience for delegation revocation.
+    pub revoke_delegation_audience: String,
+    /// App Attest audience for installation revocation.
+    pub revoke_installation_audience: String,
+}
+
+impl GatewayUrls {
+    pub(crate) fn from_origin(origin: url::Url) -> Result<Self, ConfigError> {
+        let derive = |path: &str| {
+            origin
+                .join(path)
+                .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_GATEWAY_ORIGIN"))
+        };
+        let delivery = derive("v1/deliveries/apns")?;
+        // NIP-PL v1 registers these exact audience strings. The configurable
+        // origin controls transport only; changing transcript bytes requires
+        // a separately versioned protocol profile.
+        let enroll_audience = "https://push.buzz.xyz/v1/installations".to_owned();
+        let delegate_audience = "https://push.buzz.xyz/v1/delegations".to_owned();
+        let rotate_endpoint_audience = "https://push.buzz.xyz/v1/installations/endpoint".to_owned();
+        let revoke_delegation_audience = "https://push.buzz.xyz/v1/delegations/revoke".to_owned();
+        let revoke_installation_audience =
+            "https://push.buzz.xyz/v1/installations/revoke".to_owned();
+        Ok(Self {
+            origin,
+            delivery,
+            enroll_audience,
+            delegate_audience,
+            rotate_endpoint_audience,
+            revoke_delegation_audience,
+            revoke_installation_audience,
+        })
+    }
 }
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -94,6 +155,15 @@ fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, Config
             .ok_or(ConfigError::Missing(key))
     };
     let app_attest_app_id = required(app_id_key)?.to_owned();
+    let app_attest_environment = match e
+        .get("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT")
+        .map(String::as_str)
+    {
+        None | Some("production") => AppAttestEnvironment::Production,
+        #[cfg(feature = "personal-dev-app-attest")]
+        Some("development") => AppAttestEnvironment::Development,
+        Some(_) => return Err(ConfigError::Invalid("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT")),
+    };
     let apns_topic = required(topic_key)?.to_owned();
     let apns_cert_path = PathBuf::from(required(cert_key)?);
     let apns_environment = match e.get(environment_key).map(String::as_str) {
@@ -103,6 +173,7 @@ fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, Config
     };
     Ok(AppProfileConfig {
         app_attest_app_id,
+        app_attest_environment,
         apns_cert_path,
         apns_topic,
         apns_environment,
@@ -132,20 +203,21 @@ impl Config {
         }) {
             return Err(ConfigError::Invalid("BUZZ_PUSH_TOKEN_KEYS"));
         }
-        let public_delivery_url = req(e, "BUZZ_PUSH_PUBLIC_DELIVERY_URL")?
+        let gateway_origin = req(e, "BUZZ_PUSH_GATEWAY_ORIGIN")?
             .parse::<url::Url>()
-            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_PUBLIC_DELIVERY_URL"))?;
-        if public_delivery_url.scheme() != "https"
-            || public_delivery_url.host_str() != Some("push.buzz.xyz")
-            || public_delivery_url.port().is_some()
-            || public_delivery_url.path() != "/v1/deliveries/apns"
-            || public_delivery_url.query().is_some()
-            || public_delivery_url.fragment().is_some()
-            || !public_delivery_url.username().is_empty()
-            || public_delivery_url.password().is_some()
+            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_GATEWAY_ORIGIN"))?;
+        if gateway_origin.scheme() != "https"
+            || gateway_origin.host().is_none()
+            || gateway_origin.port().is_some()
+            || gateway_origin.path() != "/"
+            || gateway_origin.query().is_some()
+            || gateway_origin.fragment().is_some()
+            || !gateway_origin.username().is_empty()
+            || gateway_origin.password().is_some()
         {
-            return Err(ConfigError::Invalid("BUZZ_PUSH_PUBLIC_DELIVERY_URL"));
+            return Err(ConfigError::Invalid("BUZZ_PUSH_GATEWAY_ORIGIN"));
         }
+        let gateway_urls = GatewayUrls::from_origin(gateway_origin)?;
         let max_grant_lifetime_seconds = req(e, "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS")?
             .parse::<i64>()
             .ok()
@@ -191,7 +263,7 @@ impl Config {
         Ok(Self {
             bind_addr,
             health_addr,
-            public_delivery_url,
+            gateway_urls,
             max_grant_lifetime_seconds,
             max_installation_lifetime_seconds,
             endpoint_quota_window_seconds,
@@ -208,6 +280,47 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attestation_environment_is_explicit_and_build_gated() {
+        let mut env = base();
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .profile
+                .app_attest_environment,
+            AppAttestEnvironment::Production
+        );
+        for value in ["", "sandbox", "Production", "unknown"] {
+            env.insert("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(), value.into());
+            assert!(Config::from_map(&env).is_err());
+        }
+        env.insert(
+            "BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(),
+            "production".into(),
+        );
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .profile
+                .app_attest_environment,
+            AppAttestEnvironment::Production
+        );
+        env.insert(
+            "BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(),
+            "development".into(),
+        );
+        #[cfg(feature = "personal-dev-app-attest")]
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .profile
+                .app_attest_environment,
+            AppAttestEnvironment::Development
+        );
+        #[cfg(not(feature = "personal-dev-app-attest"))]
+        assert!(Config::from_map(&env).is_err());
+    }
+
     fn base() -> HashMap<String, String> {
         HashMap::from([
             (
@@ -227,8 +340,8 @@ mod tests {
                 ),
             ),
             (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL".into(),
-                "https://push.buzz.xyz/v1/deliveries/apns".into(),
+                "BUZZ_PUSH_GATEWAY_ORIGIN".into(),
+                "https://push.example".into(),
             ),
             (
                 "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS".into(),
@@ -286,6 +399,36 @@ mod tests {
     }
 
     #[test]
+    fn gateway_transport_uses_configured_origin_and_transcript_audiences_stay_registered() {
+        let config = Config::from_map(&base()).unwrap();
+        assert_eq!(config.gateway_urls.origin.as_str(), "https://push.example/");
+        assert_eq!(
+            config.gateway_urls.delivery.as_str(),
+            "https://push.example/v1/deliveries/apns"
+        );
+        assert_eq!(
+            config.gateway_urls.enroll_audience,
+            "https://push.buzz.xyz/v1/installations"
+        );
+        assert_eq!(
+            config.gateway_urls.delegate_audience,
+            "https://push.buzz.xyz/v1/delegations"
+        );
+        assert_eq!(
+            config.gateway_urls.rotate_endpoint_audience,
+            "https://push.buzz.xyz/v1/installations/endpoint"
+        );
+        assert_eq!(
+            config.gateway_urls.revoke_delegation_audience,
+            "https://push.buzz.xyz/v1/delegations/revoke"
+        );
+        assert_eq!(
+            config.gateway_urls.revoke_installation_audience,
+            "https://push.buzz.xyz/v1/installations/revoke"
+        );
+    }
+
+    #[test]
     fn keyrings_preserve_current_then_predecessor_order_and_are_independent() {
         let config = Config::from_map(&base()).unwrap();
         assert_eq!(config.grant_keys[0].id, "current");
@@ -298,14 +441,10 @@ mod tests {
     #[test]
     fn malformed_security_configuration_fails_startup() {
         for (key, value) in [
-            (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL",
-                "http://push.example/v1/deliveries/apns",
-            ),
-            (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL",
-                "https://push.example/v1/deliveries/apns",
-            ),
+            ("BUZZ_PUSH_GATEWAY_ORIGIN", "http://push.example"),
+            ("BUZZ_PUSH_GATEWAY_ORIGIN", "https://push.example/path"),
+            ("BUZZ_PUSH_GATEWAY_ORIGIN", "https://push.example?token=x"),
+            ("BUZZ_PUSH_GATEWAY_ORIGIN", "https://user@push.example"),
             ("BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID", ""),
             ("BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT", "staging"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),

@@ -23,8 +23,7 @@ pub async fn handle_count(
 ) {
     // Require auth
     let (pubkey_bytes, token_channel_ids) = {
-        let auth = conn.auth_state.read().await;
-        match &*auth {
+        match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => {
                 (ctx.pubkey.to_bytes().to_vec(), ctx.channel_ids.clone())
             }

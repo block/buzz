@@ -18,3 +18,7 @@ export async function applyCommunity(
 
 export const setAgentManagedProfiles = (enabled: boolean) =>
   invokeTauri("set_agent_managed_profiles", { enabled });
+
+/** Refresh source trust without applying/resetting the active workspace. */
+export const setAgentAvatarCommunities = (relayUrls: string[]) =>
+  invokeTauri<void>("set_agent_avatar_communities", { relayUrls });

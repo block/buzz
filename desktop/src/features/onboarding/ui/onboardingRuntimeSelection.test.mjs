@@ -12,11 +12,13 @@ function runtime(id, availability, status) {
   return { id, availability, authStatus: { status } };
 }
 
-test("all bundled harnesses are visible in onboarding", () => {
+test("the V3 harness catalog is visible in onboarding", () => {
   assert.equal(runtimeIsVisibleInOnboarding("claude"), true);
   assert.equal(runtimeIsVisibleInOnboarding("codex"), true);
   assert.equal(runtimeIsVisibleInOnboarding("goose"), true);
   assert.equal(runtimeIsVisibleInOnboarding("buzz-agent"), true);
+  assert.equal(runtimeIsVisibleInOnboarding("cursor"), true);
+  assert.equal(runtimeIsVisibleInOnboarding("openclaw"), true);
   assert.equal(runtimeIsVisibleInOnboarding("custom"), false);
 });
 

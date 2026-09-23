@@ -112,6 +112,10 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 Run `just ci` before every PR — it runs repository-wide formatting, lint,
 and static checks; Rust, Tauri, desktop, and mobile tests; and desktop and web
 builds. Clippy passing does not mean fmt passes; run both.
+For changes limited to Flutter/Dart code in the mobile app, run
+`just mobile-install mobile-check mobile-test` instead of `just ci`.
+Native code and build-configuration changes also require the corresponding
+platform checks.
 
 Run `just test` for integration tests if you touched `buzz-relay`,
 `buzz-db`, or `buzz-auth` — these require a running Postgres and Redis.
@@ -691,7 +695,7 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 cd mobile
 dart format --output=none --set-exit-if-changed .
 flutter analyze
-flutter test
+flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).

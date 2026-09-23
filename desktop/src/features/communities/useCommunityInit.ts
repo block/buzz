@@ -8,7 +8,10 @@ import {
   autoConnectDefaultRelayEnabled,
   getDefaultRelayUrl,
 } from "@/shared/api/tauri";
-import { applyCommunity } from "@/shared/api/tauriWorkspace";
+import {
+  applyCommunity,
+  setAgentAvatarCommunities,
+} from "@/shared/api/tauriWorkspace";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { clearTrayAgentActivity } from "@/shared/api/trayMenu";
 import { getOverrides } from "@/shared/features";
@@ -48,6 +51,7 @@ import {
   shouldAutoConnectDefaultRelay,
 } from "./communityStorage";
 import type { Community } from "./types";
+import { communityRelaySetKey } from "./communityRelaySet";
 
 /**
  * Tear down all community-scoped module singletons so the new
@@ -126,12 +130,35 @@ export function useCommunityInit(
   communityKey: string,
   isSharedIdentity: boolean,
   suppressAutoConnect = false,
+  communities: readonly Community[] = [],
 ): CommunityInitResult {
+  const communityRelaysKey = communityRelaySetKey(communities);
   const [result, setResult] = useState<CommunityInitResult>({
     isReady: false,
     needsSetup: false,
     appliedKey: null,
   });
+
+  // Trust-list edits must not reset active drafts, connections, or providers.
+  // Startup waits for this narrow IPC before workspace apply can restore agents.
+  const avatarTrustUpdateRef = useRef(Promise.resolve());
+  useEffect(() => {
+    // Keep native writes ordered too, not just the frontend waiters. A failed
+    // update leaves the chain rejected so restoration stays blocked until reload.
+    const update = avatarTrustUpdateRef.current.then(() =>
+      setAgentAvatarCommunities(JSON.parse(communityRelaysKey) as string[]),
+    );
+    avatarTrustUpdateRef.current = update;
+    void update.catch((error) => {
+      console.error("Failed to refresh avatar source communities:", error);
+      setResult({
+        isReady: false,
+        needsSetup: false,
+        appliedKey: null,
+        error: "Could not refresh avatar source permissions. Reload to retry.",
+      });
+    });
+  }, [communityRelaysKey]);
 
   // Track whether this is the initial mount or a community switch.
   // On the initial mount we skip resetting singletons (they're fresh).
@@ -309,6 +336,14 @@ export function useCommunityInit(
       // imported key. `loadCommunities()` strips lingering `nsec` fields from
       // legacy entries; this site refuses to apply one even if present.
       try {
+        // A list edit can replace the promise while startup is awaiting it.
+        // Only the latest completed allowlist may release agent restoration.
+        let trustUpdate: Promise<void>;
+        do {
+          trustUpdate = avatarTrustUpdateRef.current;
+          await trustUpdate;
+          if (cancelled) return;
+        } while (trustUpdate !== avatarTrustUpdateRef.current);
         await applyCommunity(
           activeCommunity.relayUrl,
           undefined,

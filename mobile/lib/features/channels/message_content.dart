@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -33,6 +34,7 @@ import 'message_media.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
+part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
 part 'message_content/video_preview.dart';
 
@@ -176,13 +178,33 @@ class MessageContent extends HookConsumerWidget {
                 in ref.watch(channelsProvider).asData?.value ?? const [])
               channel.name.toLowerCase(): channel.id,
           };
-    final resolvedChannelTap =
-        onChannelTap ??
-        (String channelId) {
+    final channelHandler = useRef(onChannelTap)..value = onChannelTap;
+    final resolvedChannelTap = useMemoized(
+      () => (String channelId) {
+        final handler = channelHandler.value;
+        if (handler != null) {
+          handler(channelId);
+        } else {
           ref
               .read(pendingDeepLinkProvider.notifier)
               .open(Uri(scheme: 'buzz', host: 'channel', path: channelId));
-        };
+        }
+      },
+      const [],
+    );
+    final replyHandler = useRef(onMediaReply)..value = onMediaReply;
+    final moreHandler = useRef(onMediaMore)..value = onMediaMore;
+    final mediaReply = useMemoized(
+      () =>
+          () => replyHandler.value?.call(),
+      const [],
+    );
+    final mediaMore = useMemoized(
+      () =>
+          (BuildContext context, String url) =>
+              moreHandler.value?.call(context, url),
+      const [],
+    );
     final channelPresentationKey = [
       for (final entry
           in (resolvedChannelNames.entries.toList()
@@ -265,7 +287,23 @@ class MessageContent extends HookConsumerWidget {
         result = '\u200B$result';
       }
       return result;
-    }, [linkNormalizedContent, resolvedMentionNames]);
+    }, [linkNormalizedContent, mentionPresentationKey]);
+
+    final inlineComponents = _useMessageInlineComponents(
+      content: content,
+      finalContent: finalContent,
+      mentionNames: resolvedMentionNames,
+      bindings: mentionBindings,
+      agentPubkeys: resolvedAgentMentionPubkeys,
+      channelNames: resolvedChannelNames,
+      customEmoji: customEmoji,
+      emojiSize: inlineCustomEmojiSize,
+      tags: tags,
+      hasMediaReply: onMediaReply != null,
+      hasMediaMore: onMediaMore != null,
+      onMentionTap: onMentionTap,
+      onChannelTap: resolvedChannelTap,
+    );
 
     final markdown = KeyedSubtree(
       key: ValueKey(
@@ -291,35 +329,16 @@ class MessageContent extends HookConsumerWidget {
           resolvedChannelTap,
           resolvedChannelNames,
         ),
-        imageBuilder: (context, imageUrl, _, _) =>
-            _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
+        imageBuilder: (context, imageUrl, _, _) => _buildMedia(
+          context,
+          imageUrl,
+          imetaByUrl[imageUrl],
+          onReply: onMediaReply == null ? null : mediaReply,
+          onMore: onMediaMore == null ? null : mediaMore,
+        ),
         textAlign: textAlign,
         maxLines: maxLines,
-        inlineComponents: [
-          _MentionMd(
-            mentionNames: resolvedMentionNames,
-            bindings: mentionBindings,
-            displayLabels: {
-              for (final range in mentionOccurrences(
-                content,
-                mentionBindings.keys,
-              ))
-                range.label: content.substring(range.start + 1, range.end),
-            },
-            agentMentionPubkeys: resolvedAgentMentionPubkeys,
-            onMentionTap: onMentionTap,
-          ),
-          CustomEmojiMd(
-            customEmoji,
-            content: finalContent,
-            size: inlineCustomEmojiSize,
-          ),
-          _ChannelLinkMd(
-            channelNames: resolvedChannelNames,
-            onChannelTap: resolvedChannelTap,
-          ),
-          ...MarkdownComponent.inlineComponents,
-        ],
+        inlineComponents: inlineComponents,
       ),
     );
     if (trailingGallery == null) return markdown;
@@ -343,7 +362,13 @@ class MessageContent extends HookConsumerWidget {
     );
   }
 
-  Widget _buildMedia(BuildContext context, String imageUrl, ImetaEntry? imeta) {
+  Widget _buildMedia(
+    BuildContext context,
+    String imageUrl,
+    ImetaEntry? imeta, {
+    VoidCallback? onReply,
+    MediaViewerMoreAction? onMore,
+  }) {
     final mediaKind = classifyMediaUrl(imageUrl, imeta: imeta);
     if (mediaKind == MessageMediaKind.audio) {
       return Padding(
@@ -360,15 +385,15 @@ class MessageContent extends HookConsumerWidget {
       return _MessageVideoPreview(
         url: imageUrl,
         imeta: imeta,
-        onReply: onMediaReply,
+        onReply: onReply,
       );
     }
     return _MessageImagePreview(
       url: imageUrl,
       imeta: imeta,
       semanticLabel: imeta?.alt ?? 'Message image',
-      onReply: onMediaReply,
-      onMore: onMediaMore,
+      onReply: onReply,
+      onMore: onMore,
     );
   }
 

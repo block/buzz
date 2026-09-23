@@ -381,6 +381,25 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
 - Rust: `definition_validation` and inbound persona tests pin the shared
   Unicode/control-character policy at local, import, publish, and sync gates.
 
+## Managed avatar media
+
+Desktop-managed profiles retain the saved persona/instance avatar as the desired
+source. Never publish another configured community's authenticated `/media/` URL
+verbatim: `relay::profile_avatar::localize_avatar` verifies/copies its bytes into
+the caller-pinned target before kind:0 comparison/publication. The shared record
+keeps the source URL, not the target projection. Transfer or kind:0 rejection
+leaves the previous profile intact so normal reconciliation can retry. The
+Agent-managed profiles opt-out still disables automatic reconciliation.
+
+The configured community origin set is refreshed through narrow workspace IPC
+before startup restore and when inactive communities change, without resetting
+active community state. After source removal, the shared writer may reuse an
+already-published target-local picture with the same original content hash;
+this is not permission to fetch the removed source. It is not learned from profile URLs. Media transfer
+uses the fixed agent signer, origin-scoped Blossom auth, no redirects, byte caps,
+and hash/descriptor verification; ordinary public external avatars remain
+unauthenticated passthrough. No image-reader proxy or tenant isolation exception.
+
 ## Keep this file true
 
 **If you change how agent configuration is modeled, rendered, persisted,

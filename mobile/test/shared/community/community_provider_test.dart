@@ -43,12 +43,14 @@ void main() {
   tearDown(() => container.dispose());
 
   ProviderContainer createContainer() {
+    Future<void> writeSnapshot(List<Community> communities) async {
+      snapshots.add(List.of(communities));
+    }
+
     return ProviderContainer(
       overrides: [
         communityStorageProvider.overrideWithValue(communityStorage),
-        communitySnapshotWriterProvider.overrideWithValue((communities) async {
-          snapshots.add(List.of(communities));
-        }),
+        communitySnapshotWriterProvider.overrideWithValue(writeSnapshot),
         communityPushLeaseDeactivatorProvider.overrideWithValue(deactivator),
         communityPushLeaseRevocationEnqueuerProvider.overrideWithValue((
           community,
@@ -204,10 +206,13 @@ void main() {
       final notifier = container.read(communityListProvider.notifier);
       await notifier.addCommunity(community);
 
-      await notifier.markPushLeaseAccepted(
-        community.id,
-        subscriptions: const [],
-        generation: 5,
+      expect(
+        await notifier.markPushLeaseAccepted(
+          community.id,
+          subscriptions: const [],
+          generation: 5,
+        ),
+        isFalse,
       );
 
       final stored = (await communityStorage.loadAll()).single;
@@ -215,6 +220,54 @@ void main() {
       expect(
         stored.pushSubscriptionState.accepted!.single.toJson(),
         subscription.toJson(),
+      );
+    });
+
+    test('lease success cannot accept stale desired subscriptions', () async {
+      container = createContainer();
+      await container.read(communityListProvider.future);
+      final original = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+        notificationClass: 'default',
+      );
+      final replacement = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['b' * 64]),
+        notificationClass: 'default',
+      );
+      final community =
+          Community.create(
+            name: 'Test',
+            relayUrl: 'https://test.example.com',
+          ).copyWith(
+            pushNotificationsEnabled: true,
+            pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+              desired: [original],
+            ),
+          );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+
+      final generation = await notifier.reservePushLeaseGeneration(
+        community.id,
+      );
+      await notifier.updateDesiredPushSubscriptions(community.id, [
+        replacement,
+      ]);
+
+      expect(
+        await notifier.markPushLeaseAccepted(
+          community.id,
+          subscriptions: [original],
+          generation: generation,
+        ),
+        isFalse,
+      );
+
+      final stored = (await communityStorage.loadAll()).single;
+      expect(stored.pushSubscriptionState.accepted, isNull);
+      expect(
+        stored.pushSubscriptionState.desired.single.toJson(),
+        replacement.toJson(),
       );
     });
 
