@@ -35,12 +35,17 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
-          token: ''
+          # PR files come from GitHub's PR diff. A tokenless comparison uses the
+          # checked-out merge commit and can include newer, unrelated base changes.
+          token: ${{ github.token }}
+          # Ordinary Markdown is documentation; explicitly retain Markdown that
+          # is embedded in runtime binaries as prompts or agent skills.
           filters: |
             rust:
-              - 'crates/**'
-              - 'migrations/**'
-              - 'schema/**'
+              - 'crates/**/!(*.md)'
+              - 'crates/buzz-acp/src/{base_prompt,session_model_channel,session_model_thread}.md'
+              - 'migrations/**/!(*.md)'
+              - 'schema/**/!(*.md)'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -64,15 +69,17 @@ jobs:
             desktop:
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
-              - 'desktop/**'
+              - 'desktop/**/!(*.md)'
+              - 'desktop/src-tauri/src/managed_agents/{nest_agents,nest_skill,screenshot_skill}.md'
               - 'pnpm-lock.yaml'
             desktop-rust:
-              - 'desktop/src-tauri/**'
+              - 'desktop/src-tauri/**/!(*.md)'
+              - 'desktop/src-tauri/src/managed_agents/{nest_agents,nest_skill,screenshot_skill}.md'
             web:
-              - 'web/**'
+              - 'web/**/!(*.md)'
               - 'pnpm-lock.yaml'
             mobile:
-              - 'mobile/**'
+              - 'mobile/**/!(*.md)'
               - 'scripts/mobile-release.sh'
               - 'scripts/mobile-worktree-overrides.sh'
               - 'scripts/mobile-worktree-clean.sh'
