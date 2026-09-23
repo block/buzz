@@ -9,6 +9,7 @@ import {
   playgroundDeviceNubGutter,
   playgroundStageBoundsSyncTargets,
   playgroundStageChromeElement,
+  playgroundStageMeasureElement,
   readPlaygroundStageBounds,
   rotateBezelEdge,
   scalePlaygroundDeviceBezel,
@@ -88,14 +89,37 @@ test("landscape rotates padding and nubs onto the long edge", () => {
   assert.ok(outer.height > viewport.height);
 });
 
-test("native stage bounds come from the inner screen, not the bezel box", () => {
+test("native stage bounds come from the live inner screen rect, not CSS viewport", () => {
   const screen = {
-    getBoundingClientRect: () => ({ x: 48, y: 80, width: 200, height: 100 }),
+    getBoundingClientRect: () => ({
+      x: 48,
+      y: 80,
+      left: 48,
+      top: 80,
+      width: 393,
+      height: 852,
+      bottom: 932,
+    }),
+    closest(selector) {
+      return selector.includes("playground-device-screen") ? this : null;
+    },
   };
   const frame = {
-    getBoundingClientRect: () => ({ x: 20, y: 20, width: 260, height: 180 }),
+    getBoundingClientRect: () => ({
+      x: 20,
+      y: 20,
+      left: 20,
+      top: 20,
+      width: 425,
+      height: 920,
+      bottom: 940,
+    }),
+    closest() {
+      return null;
+    },
   };
   const viewport = { width: 393, height: 852 };
+  // Live screen hole wins — do not substitute a mismatched CSS viewport size.
   assert.deepEqual(readPlaygroundStageBounds(screen, viewport), {
     x: 48,
     y: 80,
@@ -108,15 +132,78 @@ test("native stage bounds come from the inner screen, not the bezel box", () => 
   );
 });
 
+test("nested webview host measures the museum screen hole", () => {
+  const screen = {
+    id: "screen",
+    getBoundingClientRect: () => ({
+      x: 120,
+      y: 90,
+      left: 120,
+      top: 90,
+      width: 393,
+      height: 852,
+      bottom: 942,
+    }),
+  };
+  const host = {
+    id: "host",
+    getBoundingClientRect: () => ({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      width: 10,
+      height: 10,
+      bottom: 10,
+    }),
+    closest(selector) {
+      return selector.includes("playground-device-screen") ? screen : null;
+    },
+  };
+  assert.equal(playgroundStageMeasureElement(host), screen);
+  assert.deepEqual(readPlaygroundStageBounds(host), {
+    x: 120,
+    y: 90,
+    width: 393,
+    height: 852,
+  });
+});
+
+test("viewport size is only a fallback while the screen hole is empty", () => {
+  const empty = {
+    getBoundingClientRect: () => ({
+      x: 40,
+      y: 60,
+      left: 40,
+      top: 60,
+      width: 0,
+      height: 0,
+      bottom: 60,
+    }),
+    closest() {
+      return null;
+    },
+  };
+  assert.deepEqual(
+    readPlaygroundStageBounds(empty, { width: 393, height: 852 }),
+    { x: 40, y: 60, width: 393, height: 852 },
+  );
+});
+
 test("native stage bounds never overlap playground chrome", () => {
   const host = {
     getBoundingClientRect: () => ({
       x: 0,
       y: 40,
+      left: 0,
+      top: 40,
       width: 400,
       height: 360,
       bottom: 400,
     }),
+    closest() {
+      return null;
+    },
   };
   const overlapping = { getBoundingClientRect: () => ({ bottom: 72 }) };
   assert.deepEqual(readPlaygroundStageBounds(host, undefined, overlapping), {
@@ -125,9 +212,10 @@ test("native stage bounds never overlap playground chrome", () => {
     width: 400,
     height: 328,
   });
+  // Live laid-out size wins over published viewport once the hole is non-zero.
   assert.deepEqual(
     readPlaygroundStageBounds(host, { width: 393, height: 852 }, overlapping),
-    { x: 0, y: 72, width: 393, height: 328 },
+    { x: 0, y: 72, width: 400, height: 328 },
   );
   const flush = { getBoundingClientRect: () => ({ bottom: 40 }) };
   assert.deepEqual(readPlaygroundStageBounds(host, undefined, flush), {

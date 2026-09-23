@@ -7,6 +7,7 @@ import {
   afterPlaygroundLayout,
   playgroundStageBoundsSyncTargets,
   playgroundStageChromeElement,
+  playgroundStageMeasureElement,
   readPlaygroundStageBounds,
 } from "../lib/deviceBezel";
 import {
@@ -371,9 +372,10 @@ function NativeStageHost({
       // Detached/windowed opens often mount at 0×0 before flex lays out.
       // Viewport fallback used to make bounds "usable" at stale x/y=0, which
       // painted a blank hole until resize or desktop↔mobile remount.
-      if (!hostHasLayout(hostRef.current)) return;
+      const measureEl = playgroundStageMeasureElement(hostRef.current);
+      if (!hostHasLayout(measureEl)) return;
       const bounds = readPlaygroundStageBounds(
-        hostRef.current,
+        measureEl,
         viewportWidth != null && viewportHeight != null
           ? { width: viewportWidth, height: viewportHeight }
           : undefined,
@@ -412,9 +414,17 @@ function NativeStageHost({
       });
       if (!settle || typeof window.setTimeout !== "function") return;
       window.clearTimeout(settleTimer);
-      settleTimer = window.setTimeout(() => {
+      // Flex justify-center can keep moving for a few frames after resize.
+      // Re-measure from the screen hole until layout settles so the native
+      // WKWebView cannot lag a half-phone to the right of the CSS bezel.
+      let pulses = 0;
+      const pulse = () => {
         syncNow();
-      }, 80);
+        pulses += 1;
+        if (cancelled || pulses >= 10) return;
+        settleTimer = window.setTimeout(pulse, 32);
+      };
+      settleTimer = window.setTimeout(pulse, 32);
     };
 
     syncNow();
@@ -490,6 +500,11 @@ function NativeStageHost({
       data-viewport-width={viewport?.width}
       data-viewport-height={viewport?.height}
       ref={hostRef}
+      style={
+        viewport
+          ? { width: viewport.width, height: viewport.height }
+          : undefined
+      }
     />
   );
 }

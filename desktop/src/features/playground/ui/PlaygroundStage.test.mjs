@@ -102,8 +102,9 @@ test("mobile stage paints a hardware bezel around a smaller inner screen", async
 test("native bounds follow the inner screen host, not the outer bezel", async () => {
   const screen = await renderStage("mobile");
   const host = screen.getByTestId("playground-webview-host");
+  const hole = screen.getByTestId("playground-device-screen");
   const frame = screen.getByTestId("playground-device-frame");
-  host.getBoundingClientRect = () => ({
+  const holeRect = {
     x: 64,
     y: 96,
     width: 393,
@@ -113,7 +114,9 @@ test("native bounds follow the inner screen host, not the outer bezel", async ()
     right: 457,
     bottom: 948,
     toJSON() {},
-  });
+  };
+  host.getBoundingClientRect = () => holeRect;
+  hole.getBoundingClientRect = () => holeRect;
   frame.getBoundingClientRect = () => ({
     x: 20,
     y: 20,
@@ -210,10 +213,15 @@ test("clamp native bounds below playground chrome", async () => {
     getBoundingClientRect: () => ({
       x: 8,
       y: 48,
+      left: 8,
+      top: 48,
       width: 640,
       height: 400,
       bottom: 448,
     }),
+    closest() {
+      return null;
+    },
   };
   const chrome = {
     getBoundingClientRect: () => ({ bottom: 80 }),

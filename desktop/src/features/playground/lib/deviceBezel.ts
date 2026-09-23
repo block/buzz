@@ -299,47 +299,69 @@ export function playgroundDeviceNubGutter(
 }
 
 /**
+ * Prefer the museum screen hole when the host is nested inside DeviceBezel.
+ * Native bounds must track this rect — not the outer frame / decorative border.
+ */
+export function playgroundStageMeasureElement(host: HTMLElement): HTMLElement {
+  const screen = host.closest?.('[data-testid="playground-device-screen"]');
+  // Avoid `instanceof HTMLElement` — unit tests run without a DOM global.
+  if (
+    screen != null &&
+    typeof (screen as HTMLElement).getBoundingClientRect === "function"
+  ) {
+    return screen as HTMLElement;
+  }
+  return host;
+}
+
+/**
  * Native WKWebView bounds come from the inner screen host, never the outer
- * bezel box. `viewport` is the published CSS size when the host may not have
- * finished layout.
+ * bezel box. When the element has laid out, use the **live** rect for x/y and
+ * size so flex recenter (justify-center) cannot leave a CSS viewport sized
+ * webview at a stale offset. `viewport` is only a size fallback while the
+ * screen hole is still 0×0.
  *
  * Native WKWebView always paints on top of HTML. Clamp y to the bottom of
  * playground chrome so Desktop/Responsive/Mobile cannot sit under the page.
- * Desktop fills the remaining host; mobile/responsive keep published viewport.
  */
 export function readPlaygroundStageBounds(
   el: HTMLElement,
   viewport?: { width: number; height: number },
   chrome?: Element | null,
 ): { x: number; y: number; width: number; height: number } {
-  const rect = el.getBoundingClientRect();
+  const measure = playgroundStageMeasureElement(el);
+  const rect = measure.getBoundingClientRect();
   const chromeEl =
     chrome ??
-    el
+    measure
       .closest?.('[data-testid="playground-overlay"]')
       ?.querySelector('[data-testid="playground-chrome"]');
   const chromeBottom = chromeEl?.getBoundingClientRect().bottom;
-  const rawY = rect.y;
+  const rawX = typeof rect.left === "number" ? rect.left : rect.x;
+  const rawY = typeof rect.top === "number" ? rect.top : rect.y;
   const y =
     typeof chromeBottom === "number" ? Math.max(rawY, chromeBottom) : rawY;
   const bottom =
-    typeof rect.bottom === "number" ? rect.bottom : rect.y + rect.height;
+    typeof rect.bottom === "number" ? rect.bottom : rawY + rect.height;
   const hostHeight = Math.max(0, bottom - y);
-  const width = viewport?.width ?? rect.width;
-  // Published CSS viewport sizes the WKWebView when the screen hole has not
-  // finished layout. If chrome raised `y`, shrink height so the native child
-  // cannot spill past the host bottom (bezel/window resize misalignment).
-  const height =
-    viewport != null
+  const liveWidth = Math.max(0, rect.width);
+  const liveUsable = liveWidth >= 1 && hostHeight >= 1;
+  // Live screen hole wins once laid out. Published CSS viewport is only for
+  // the 0×0 mount race — using it after layout desyncs size from position when
+  // the bezel recenters (content mid-phone, spilling past the right edge).
+  const width = liveUsable ? liveWidth : (viewport?.width ?? liveWidth);
+  const height = liveUsable
+    ? hostHeight
+    : viewport != null
       ? y > rawY
         ? Math.min(viewport.height, hostHeight || viewport.height)
         : viewport.height
       : hostHeight;
   return {
-    x: rect.x,
-    y,
-    width,
-    height,
+    x: Math.round(rawX),
+    y: Math.round(y),
+    width: Math.max(1, Math.round(width)),
+    height: Math.max(1, Math.round(height)),
   };
 }
 
