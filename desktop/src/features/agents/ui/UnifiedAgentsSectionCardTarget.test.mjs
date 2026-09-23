@@ -40,6 +40,7 @@ let screen;
 let createElement;
 let QueryClient;
 let QueryClientProvider;
+let CommunitiesProvider;
 let UnifiedAgentsSection;
 let useAgentAvailabilityLookup;
 
@@ -129,7 +130,11 @@ function renderSection(props) {
     createElement(
       QueryClientProvider,
       { client },
-      createElement(Surface, props),
+      createElement(
+        CommunitiesProvider,
+        null,
+        createElement(Surface, props),
+      ),
     ),
   );
 }
@@ -139,6 +144,8 @@ before(async () => {
     document: dom.window.document,
     HTMLElement: dom.window.HTMLElement,
     window: dom.window,
+    localStorage: dom.window.localStorage,
+    sessionStorage: dom.window.sessionStorage,
     IS_REACT_ACT_ENVIRONMENT: true,
   });
   Object.defineProperty(globalThis, "navigator", {
@@ -166,6 +173,9 @@ before(async () => {
   ({ createElement } = await import("react"));
   ({ QueryClient, QueryClientProvider } = await import(
     "@tanstack/react-query"
+  ));
+  ({ CommunitiesProvider } = await import(
+    "@/features/communities/useCommunities.tsx"
   ));
   ({ UnifiedAgentsSection } = await import("./UnifiedAgentsSection.tsx"));
   ({ useAgentAvailabilityLookup } = await import(
@@ -462,7 +472,11 @@ test("N cards share a snapshot, one poll, failure recovery and live subscription
     createElement(
       QueryClientProvider,
       { client },
-      createElement(SubscribedSurface, next),
+      createElement(
+        CommunitiesProvider,
+        null,
+        createElement(SubscribedSurface, next),
+      ),
     );
   const settle = async () =>
     act(async () => {

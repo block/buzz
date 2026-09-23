@@ -219,12 +219,20 @@ function installIpc() {
     ipcCalls.push({ cmd: "update_managed_agent", args });
     return Promise.resolve({ agent: rawAgent(), profile_sync_error: null });
   });
+  set("update_persona", (args) => {
+    ipcCalls.push({ cmd: "update_persona", args });
+    return Promise.resolve(rawPersona());
+  });
   // No-op: the auto-restart setter is a standalone IPC that existing tests
   // never trigger (agent state matches dialog default), but mock it so a
   // test that flips autoRestartOnConfigChange doesn't hit "unmocked command".
   set("set_managed_agent_auto_restart", (args) => {
     ipcCalls.push({ cmd: "set_managed_agent_auto_restart", args });
     return Promise.resolve();
+  });
+  set("set_managed_agent_use_openclaw_workspace", (args) => {
+    ipcCalls.push({ cmd: "set_managed_agent_use_openclaw_workspace", args });
+    return Promise.resolve(rawAgent());
   });
 }
 
@@ -339,6 +347,7 @@ function toCamelAgent(raw) {
     logPath: raw.log_path,
     startOnAppLaunch: raw.start_on_app_launch,
     autoRestartOnConfigChange: raw.auto_restart_on_config_change,
+    useOpenClawWorkspace: raw.use_openclaw_workspace ?? false,
     backend: raw.backend,
     backendAgentId: raw.backend_agent_id,
     respondTo: raw.respond_to,
