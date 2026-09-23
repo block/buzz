@@ -799,6 +799,26 @@ fn openai_body(
         "max_completion_tokens": cfg.max_output_tokens, "messages": messages });
     if let Some(e) = effort {
         body["reasoning_effort"] = json!(e.openai_effort_str());
+        // Also drive thinking via the chat-template kwarg. `reasoning_effort`
+        // is the OpenAI-native knob, but it is honoured only by some backends:
+        // llama.cpp's HTTP server maps it onto Qwen3's `/think` switch, whereas
+        // vLLM's OpenAI-compat endpoint ignores it and reads thinking control
+        // exclusively from `chat_template_kwargs.enable_thinking` (the Qwen3
+        // template variable). Sending both keeps on/off correct across backends
+        // for a given effort level — and is a no-op where a field is ignored,
+        // since each backend reads only its own. When no effort is set (the
+        // provider's default) neither field is emitted, so the default is
+        // preserved.
+        let thinking_on = matches!(
+            e,
+            ThinkingEffort::Minimal
+                | ThinkingEffort::Low
+                | ThinkingEffort::Medium
+                | ThinkingEffort::High
+                | ThinkingEffort::XHigh
+                | ThinkingEffort::Max
+        );
+        body["chat_template_kwargs"] = json!({ "enable_thinking": thinking_on });
     }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
@@ -3789,6 +3809,66 @@ mod tests {
             Some(ThinkingEffort::Medium),
         );
         assert_eq!(body["reasoning_effort"], "medium");
+    }
+
+    // The OpenAI-compat path must also set `chat_template_kwargs.enable_thinking`
+    // so that backends which ignore `reasoning_effort` (e.g. vLLM serving Qwen3)
+    // still honour the on/off intent.
+    #[test]
+    fn openai_body_sets_enable_thinking_false_for_none() {
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::None),
+        );
+        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    #[test]
+    fn openai_body_sets_enable_thinking_true_for_on_levels() {
+        for effort in [
+            ThinkingEffort::Minimal,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            let body = openai_body(
+                &cfg(Provider::OpenAi),
+                "system",
+                &[HistoryItem::User("hi".into())],
+                &[],
+                "model",
+                Some(effort),
+            );
+            assert_eq!(
+                body["chat_template_kwargs"]["enable_thinking"], true,
+                "enable_thinking must be true for {effort:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_body_omits_chat_template_kwargs_when_effort_none_unset() {
+        // No effort set (provider default) → neither thinking field is emitted,
+        // so the server's own default behaviour is preserved.
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            None,
+        );
+        assert!(
+            body.get("chat_template_kwargs").is_none(),
+            "chat_template_kwargs must be absent when no effort is set"
+        );
     }
 
     #[test]
