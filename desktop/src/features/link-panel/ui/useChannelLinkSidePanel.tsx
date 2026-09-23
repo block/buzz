@@ -44,15 +44,17 @@ export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
     getLinkSidePanelStore,
   );
   const panel = store.panel;
-  const _location = useLocation();
+  const location = useLocation();
 
   React.useEffect(() => {
     // Pathname change (or ChannelScreen unmount) tears down fullscreen /
-    // side web so Projects and other shells are not covered.
+    // side web so Projects and other shells are not covered. Reading
+    // pathname keeps the dep intentional for cleanup-on-navigate.
+    void location.pathname;
     return () => {
       closeLinkSidePanel();
     };
-  }, []);
+  }, [location.pathname]);
 
   const headerActions = React.useMemo(() => {
     if (!panel) return undefined;
