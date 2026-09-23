@@ -662,6 +662,14 @@ impl ChannelInfoResolver {
         }
     }
 
+    /// Synchronous cache peek used by mid-turn native steer (no async refresh).
+    pub fn cached_channel(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
+        self.cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&channel_id).cloned())
+    }
+
     pub async fn resolve_channel_metadata(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
         if let Some(info) = self
             .cache
@@ -1333,6 +1341,42 @@ async fn resolve_new_session_channel_context(
     let is_dm = info.channel_type == "dm";
     let title_channel = (!is_dm && info.name != UNKNOWN_CHANNEL_NAME).then(|| info.name.clone());
     (is_dm, title_channel, Some(info.channel_type.clone()))
+}
+
+/// Channel name fragment used for session titles — same rules as
+/// [`resolve_new_session_channel_context`] (DMs / unknown omitted).
+fn title_channel_name(channel_info: Option<&PromptChannelInfo>) -> Option<&str> {
+    let info = channel_info?;
+    if info.channel_type == "dm" || info.name == UNKNOWN_CHANNEL_NAME {
+        None
+    } else {
+        Some(info.name.as_str())
+    }
+}
+
+/// Compose the ACP session title when `BUZZ_ACP_SESSION_TITLE` is configured.
+///
+/// Uses the same inputs as `_meta.sessionTitle` on `session/new`.
+pub(crate) fn computed_prompt_session_title(
+    session_title_agent: Option<&str>,
+    channel_info: Option<&PromptChannelInfo>,
+    scope: Option<&SessionScope>,
+) -> Option<String> {
+    let agent = session_title_agent
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    Some(compose_scoped_session_title(
+        agent,
+        title_channel_name(channel_info),
+        scope.and_then(SessionScope::root_event_id),
+    ))
+}
+
+/// Append the OpenClaw sidebar-label rename instruction when a title is set.
+fn push_session_title_rename(sections: &mut Vec<String>, title: Option<&str>) {
+    if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        sections.push(crate::prompt_framing::openclaw_session_label_section(title));
+    }
 }
 
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
@@ -2552,7 +2596,7 @@ pub async fn run_prompt_task(
                 target: "pool::session",
                 "sending initial_message to session {session_id} for channel {cid}"
             );
-            let init_msg = prepend_standing_for_legacy(
+            let mut init_msg = prepend_standing_for_legacy(
                 if agent.has_system_prompt_support() {
                     2
                 } else {
@@ -2561,6 +2605,19 @@ pub async fn run_prompt_task(
                 &standing,
                 initial_msg,
             );
+            // Same OpenClaw label workaround as ordinary prompts — initial_message
+            // is also a session/prompt turn.
+            let init_title = computed_prompt_session_title(
+                ctx.session_title.as_deref(),
+                resolved_channel_info.as_ref(),
+                Some(scope),
+            );
+            if let Some(title) = init_title.as_deref() {
+                init_msg.push_str("\n\n");
+                init_msg.push_str(&crate::prompt_framing::openclaw_session_label_section(
+                    title,
+                ));
+            }
             let init_result = agent
                 .acp
                 .session_prompt_with_idle_timeout(
@@ -2709,6 +2766,13 @@ pub async fn run_prompt_task(
     // Event IDs represented by this prompt. Commit only after ACP reports a
     // successful turn; failed/cancelled prompts must be retryable without loss.
     let mut pending_delivered_event_ids = HashSet::new();
+    // Same title we send as `_meta.sessionTitle` — used for the OpenClaw
+    // sidebar-label rename workaround on every prompt.
+    let prompt_session_title = computed_prompt_session_title(
+        ctx.session_title.as_deref(),
+        resolved_channel_info.as_ref(),
+        source.scope(),
+    );
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -2731,7 +2795,9 @@ pub async fn run_prompt_task(
                 &text,
             )
         };
-        vec![text]
+        let mut sections = vec![text];
+        push_session_title_rename(&mut sections, prompt_session_title.as_deref());
+        sections
     } else if let Some(ref b) = batch {
         // Project authority was resolved before any ACP session boundary above;
         // reuse that exact typed result for prompt formatting.
@@ -2802,6 +2868,7 @@ pub async fn run_prompt_task(
                 team_instructions: standing.team_instructions,
                 agent_canvas: standing.agent_canvas,
                 standing_context_sent,
+                session_title: prompt_session_title.as_deref(),
             },
         )
     } else {

@@ -452,7 +452,9 @@ pub struct CliArgs {
 
     /// Title for the agent's ACP sessions, passed out-of-band in `session/new`
     /// `_meta`. Adapters that recognize it name the session after this value;
-    /// others ignore it. Never enters the prompt.
+    /// others ignore it. OpenClaw currently ignores `_meta.sessionTitle`, so
+    /// when this is set buzz-acp also appends a short rename instruction to
+    /// every `session/prompt` (see [`crate::prompt_framing::openclaw_session_label_section`]).
     #[arg(long, env = "BUZZ_ACP_SESSION_TITLE")]
     pub session_title: Option<String>,
 

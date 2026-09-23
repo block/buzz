@@ -642,6 +642,8 @@ impl QueuedNormalListenerEvent {
         pool: &mut AgentPool,
         queue: &mut EventQueue,
         steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
+        session_title_agent: Option<&str>,
+        channel_info: &pool::ChannelInfoResolver,
     ) {
         if !self.accepted || !queue.is_scope_in_flight(&self.scope) {
             return;
@@ -657,6 +659,8 @@ impl QueuedNormalListenerEvent {
                 self.event_for_steer,
                 self.prompt_tag_for_steer,
                 steer_ack_tx,
+                session_title_agent,
+                channel_info,
             );
         if !native_attempted {
             signal_in_flight_task_for_scope(pool, &self.scope, signal);
@@ -3589,6 +3593,8 @@ async fn tokio_main() -> Result<()> {
                                 &mut pool,
                                 &mut queue,
                                 &steer_ack_tx,
+                                ctx.session_title.as_deref(),
+                                &ctx.channel_info,
                             );
                             if pool_ready {
                                 for (scope, thread_tags) in
@@ -4318,6 +4324,8 @@ fn try_native_steer(
     event: nostr::Event,
     prompt_tag: String,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
+    session_title_agent: Option<&str>,
+    channel_info: &pool::ChannelInfoResolver,
 ) -> bool {
     let channel_id = scope.channel_id();
     // Build the steer body: framing strings come from
@@ -4347,7 +4355,16 @@ fn try_native_steer(
         &[("type", prompt_tag.as_str())],
         &event_block,
     );
-    let body = format!("{new_message}\n\n{event_section}\n\n{closing}");
+    let mut body = format!("{new_message}\n\n{event_section}\n\n{closing}");
+    // Every ACP prompt — including native steers — carries the OpenClaw
+    // sidebar-label rename instruction when session titles are configured.
+    let cached = channel_info.cached_channel(channel_id);
+    if let Some(title) =
+        pool::computed_prompt_session_title(session_title_agent, cached.as_ref(), Some(&scope))
+    {
+        body.push_str("\n\n");
+        body.push_str(&prompt_framing::openclaw_session_label_section(&title));
+    }
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {

@@ -50,6 +50,19 @@ pub(crate) fn normalize_semantic_section(tag: &str, legacy_label: &str, content:
     semantic_section(tag, content.strip_prefix(&legacy).unwrap_or(content))
 }
 
+/// Ask an OpenClaw-driven agent to set its Control UI sidebar session label.
+///
+/// OpenClaw currently ignores `_meta.sessionTitle` on `session/new`, so when
+/// buzz-acp has a computed session title we append this short instruction to
+/// every `session/prompt`. Wording is idempotent so repeated turns do not thrash.
+pub(crate) fn openclaw_session_label_section(title: &str) -> String {
+    let safe = escape_semantic_text(title);
+    let body = format!(
+        "Ensure this OpenClaw session's sidebar label/name is exactly `{safe}`. If it is not already named that, rename it now using the sessions tool or Control UI rename."
+    );
+    semantic_section("openclaw-session-label", &body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +121,16 @@ mod tests {
             ),
             "<buzz-event type=\"say &quot;hi&quot; &amp; &lt;go&gt;\">\nkeep </buzz-event> & <literal>\n</buzz-event>"
         );
+    }
+
+    #[test]
+    fn openclaw_session_label_section_is_idempotent_wording_with_escaped_title() {
+        let section = openclaw_session_label_section("buzz #hula:<root>");
+        assert!(section.starts_with("<openclaw-session-label>\n"));
+        assert!(section.ends_with("\n</openclaw-session-label>"));
+        assert!(section.contains("exactly `buzz #hula:&lt;root&gt;`"));
+        assert!(section.contains("If it is not already named that, rename it now"));
+        assert!(section.contains("sessions tool"));
+        assert!(section.contains("Control UI rename"));
     }
 }
