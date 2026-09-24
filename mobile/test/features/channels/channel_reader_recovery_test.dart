@@ -430,6 +430,81 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       expect(names(), ['mine']);
       expect(prefs().getString(prefs().getKeys().single), contains('"mine"'));
     });
+
+    fakeAsyncTest('a newer live head cancels the pending edit', (clock) {
+      start(clock).createSection('mine');
+      relay.emit(
+        relay.event('channel-sections', blob('peer'), nowSeconds() + 9),
+      );
+      clock.elapse(const Duration(seconds: 6));
+      expect(relay.published, isEmpty);
+      expect(names(), ['peer']);
+      expect(prefs().getString(prefs().getKeys().single), contains('"peer"'));
+
+      m.renameSection('peer', 'after');
+      clock.elapse(const Duration(seconds: 6));
+      expect(relay.published, hasLength(1));
+      expect(
+        jsonEncode(relay.decrypt(relay.published.single)),
+        contains('"after"'),
+      );
+    });
+
+    fakeAsyncTest('a local edit during the OK wait still publishes', (clock) {
+      relay.holdOk = Completer<void>();
+      start(clock).createSection('mine');
+      clock.elapse(const Duration(seconds: 5));
+      expect(relay.published, hasLength(1));
+      m.renameSection(m.store.sections.single.id, 'new-local');
+      relay.holdOk!.complete();
+      relay.holdOk = null;
+      clock.flushMicrotasks();
+      expect(names(), ['new-local']);
+      clock.elapse(const Duration(seconds: 5));
+      expect(relay.published, hasLength(2));
+      expect(
+        jsonEncode(relay.decrypt(relay.published.last)),
+        contains('"new-local"'),
+      );
+    });
+
+    fakeAsyncTest('a retired late OK cannot rewrite the successor cache', (
+      clock,
+    ) {
+      relay.holdOk = Completer<void>();
+      start(clock).createSection('mine');
+      clock.elapse(const Duration(seconds: 5));
+      final own = relay.published.single;
+      final loser = relay.event(
+        'channel-sections',
+        blob('loser'),
+        own.createdAt,
+        id: ''.padLeft(64, 'f'),
+      );
+      relay
+        ..stored.add(loser)
+        ..emit(loser);
+      clock.elapse(const Duration(milliseconds: 20));
+      expect(names(), ['loser']);
+      m.dispose(flushPending: false);
+      m = ChannelSectionsManager(
+        pubkey: relay.pubkey,
+        prefs: prefs(),
+        crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
+        relaySession: relay.session,
+        signedEventRelay: relay.signer,
+        remoteEnabled: false,
+        onChanged: () {},
+      )..initialize();
+      m.renameSection('loser', 'successor-local');
+      clock.flushMicrotasks();
+      final before = prefs().getString(prefs().getKeys().single);
+      expect(before, contains('"successor-local"'));
+      relay.holdOk!.complete();
+      clock.flushMicrotasks();
+      expect(names(), ['successor-local']);
+      expect(prefs().getString(prefs().getKeys().single), before);
+    });
   });
 
   group('sort', () {

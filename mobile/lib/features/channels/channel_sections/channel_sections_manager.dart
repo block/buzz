@@ -416,10 +416,22 @@ class ChannelSectionsManager {
         _lastRemoteEventId = event.id;
         _store = incoming;
         _persist();
+        _cancelPendingPublish();
       }
     } catch (_) {
       // Decryption failure or parse error — keep existing state.
     }
+  }
+
+  /// A newer remote layout supersedes a local edit still waiting on its
+  /// debounce (desktop's `cancelPendingPublish`). A publish already running
+  /// has no timer here and is left to finish.
+  void _cancelPendingPublish() {
+    final debounce = _publishDebounce;
+    if (debounce == null) return;
+    debounce.cancel();
+    _publishDebounce = null;
+    _publishPending = false;
   }
 
   /// Last-write-wins. Relay retains `ORDER BY created_at DESC, id ASC`: at
@@ -496,10 +508,12 @@ class ChannelSectionsManager {
         _lastRemoteEventId = signedId;
         // A same-second loser merged during the await must not strand the
         // device on content the relay did not keep.
-        if (revision == _localRevision && !identical(_store, submitted)) {
+        if (!_disposed &&
+            revision == _localRevision &&
+            !identical(_store, submitted)) {
           _store = submitted;
           _persist();
-          if (!_disposed) _onChanged();
+          _onChanged();
         }
       }
       _lastPublishedStore = ChannelSectionStore(
