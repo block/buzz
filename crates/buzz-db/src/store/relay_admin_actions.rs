@@ -480,6 +480,15 @@ pub async fn execute_ban_with_marker(
         return Ok(false);
     }
 
+    // Acquire the action-row lock before evaluating the wall-clock expiry check.
+    // PostgreSQL can evaluate clock_timestamp() in the marker UPDATE predicate
+    // before waiting on the row; a lock acquired here ensures expiry is checked
+    // under the lock, not before it.
+    sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
+        .bind(action_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
     sqlx::query(
         r#"
         INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey, ban_reason)
@@ -558,6 +567,12 @@ pub async fn execute_timeout_with_marker(
         tx.rollback().await?;
         return Ok(false);
     }
+
+    // Acquire the action-row lock before evaluating the wall-clock expiry check.
+    sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
+        .bind(action_id)
+        .fetch_optional(&mut *tx)
+        .await?;
 
     sqlx::query(
         r#"
@@ -655,6 +670,12 @@ pub async fn execute_kick_with_marker(
         return Ok(KickWithMarkerResult::AlreadyMarked);
     }
 
+    // Acquire the action-row lock before evaluating the wall-clock expiry check.
+    sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
+        .bind(action_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
     let kick = sqlx::query(
         r#"
         UPDATE channel_members
@@ -736,6 +757,12 @@ pub async fn execute_delete_with_marker(
         tx.rollback().await?;
         return Ok(false);
     }
+
+    // Acquire the action-row lock before evaluating the wall-clock expiry check.
+    sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
+        .bind(action_id)
+        .fetch_optional(&mut *tx)
+        .await?;
 
     // Canonical delete + thread_metadata counters, fenced by this transaction.
     // Counters move only when the row transitions to deleted, so a second
@@ -1011,6 +1038,36 @@ pub async fn record_failure(
     lease_token: Uuid,
     error: &str,
 ) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+
+    // Acquire the action-row lock first so the wall-clock expiry check below
+    // is evaluated under the lock, not before it. Without this, Postgres can
+    // test clock_timestamp() before waiting on a locked row, allowing an
+    // expired writer to record failure after its lease ended.
+    let row = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT action_lease_expires_at > clock_timestamp()
+        FROM relay_admin_actions
+        WHERE id = $1
+          AND action_lease_token = $2
+          AND state = 'enforcing'
+          AND step_marker IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(action_id)
+    .bind(lease_token)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    match row {
+        Some(true) => {}
+        _ => {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+    }
+
     let result = sqlx::query(
         r#"
         UPDATE relay_admin_actions
@@ -1023,9 +1080,16 @@ pub async fn record_failure(
     .bind(action_id)
     .bind(error)
     .bind(lease_token)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(result.rows_affected() > 0)
+
+    if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// Cancel a failed action (pre-mutation only) and return its report to 'open'.
@@ -3075,12 +3139,12 @@ mod postgres_tests {
         assert_eq!(counts(&pool, cid, &root).await, (1, 2));
     }
 
-    /// Regression for the in-flight lease expiry gap: the lease is live at transaction
-    /// entry but expires while the event write blocks (simulated by a per-row trigger
-    /// that sleeps 1 s, shorter than the 500 ms lease). Before the `clock_timestamp()`
-    /// fix the final marker fence used `now()` (transaction start time) and committed
-    /// despite the expired lease. The trigger is installed only in this isolated test
-    /// database and is dropped with the database on teardown.
+    /// Regression: lease live at transaction entry, expires while the event write blocks
+    /// (simulated by a per-row trigger that sleeps 1 s; the lease expires after 500 ms,
+    /// so 1 s is *longer* than 500 ms). Before the `clock_timestamp()` + row-lock fix
+    /// the final marker fence committed despite the expired lease. The trigger is
+    /// installed only in this isolated test database and is dropped with the database
+    /// on teardown.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn admin_delete_with_lease_expiring_during_write_changes_nothing() {
@@ -3090,7 +3154,7 @@ mod postgres_tests {
         let [root, reply, nested] = make_thread(&pool, cid).await;
 
         // Install a trigger that delays every UPDATE on events by 1 second.
-        // The lease expires after 500 ms, so the final fence is reached after expiry.
+        // The lease expires after 500 ms; 1 s > 500 ms, so the trigger runs past expiry.
         sqlx::raw_sql(
             "CREATE FUNCTION _test_delay_event_update() RETURNS trigger LANGUAGE plpgsql AS \
              $$ BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$; \
@@ -3103,6 +3167,20 @@ mod postgres_tests {
 
         let lease_until = Utc::now() + chrono::Duration::milliseconds(500);
         let (action_id, token) = enforcing_action(&pool, community_id, lease_until).await;
+
+        // Precondition: setup must complete before the lease expires. A slow environment
+        // should fail here rather than pass the wrong code path (early rejection).
+        let live_at_entry: bool = sqlx::query_scalar(
+            "SELECT action_lease_expires_at > clock_timestamp() FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .expect("live-at-entry check");
+        assert!(
+            live_at_entry,
+            "setup consumed the lease before entry — precondition failed, not a test failure"
+        );
 
         let committed = execute_delete_with_marker(
             &pool,
@@ -3130,6 +3208,12 @@ mod postgres_tests {
             !deleted,
             "event must not be deleted when lease expires mid-write"
         );
+        let stored_marker = get_action(&pool, action_id)
+            .await
+            .expect("action lookup")
+            .expect("action exists")
+            .step_marker;
+        assert_eq!(stored_marker, None, "step_marker must not be persisted");
         assert_eq!(
             counts(&pool, cid, &reply).await,
             (1, 0),
@@ -3139,6 +3223,157 @@ mod postgres_tests {
             counts(&pool, cid, &root).await,
             (1, 2),
             "root counts must be unchanged"
+        );
+    }
+
+    /// Regression for the row-lock wait gap: Postgres can evaluate
+    /// `clock_timestamp()` before waiting to lock the action row. If another
+    /// transaction holds the row and releases it unchanged after the lease expires,
+    /// the final marker UPDATE would commit without the lock-first shape.
+    ///
+    /// This test locks the action row externally, confirms the worker is blocked
+    /// at the marker UPDATE while the lease is still live, waits for DB-clock
+    /// expiry, releases the lock unchanged, and asserts the worker rejects.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_delete_with_lease_expiring_during_row_lock_wait_changes_nothing() {
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let cid = CommunityId::from_uuid(community_id);
+        let [root, reply, nested] = make_thread(&pool, cid).await;
+
+        // 3-second lease gives enough headroom for setup; will be expired before unlock.
+        let (action_id, token) = enforcing_action(
+            &pool,
+            community_id,
+            Utc::now() + chrono::Duration::seconds(3),
+        )
+        .await;
+
+        // Lock the action row without changing it; the worker will block at the
+        // explicit FOR UPDATE in execute_delete_with_marker.
+        let mut locker = pool.begin().await.expect("locker tx");
+        let locker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *locker)
+            .await
+            .expect("locker pid");
+        sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
+            .bind(action_id)
+            .fetch_one(&mut *locker)
+            .await
+            .expect("lock action row");
+
+        let worker_pool = pool.clone();
+        let nr = nested.clone();
+        let pr = reply.clone();
+        let rr = root.clone();
+        let worker = tokio::spawn(async move {
+            execute_delete_with_marker(
+                &worker_pool,
+                action_id,
+                token,
+                cid,
+                &nr,
+                Some(&pr),
+                Some(&rr),
+            )
+            .await
+        });
+
+        // Wait until the worker is blocked at the action-row lock.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (\
+                       SELECT 1 FROM pg_stat_activity \
+                       WHERE datname = current_database() \
+                         AND wait_event_type = 'Lock' \
+                         AND query LIKE '%relay_admin_actions%FOR UPDATE%' \
+                         AND $1 = ANY(pg_blocking_pids(pid))\
+                     )",
+                )
+                .bind(locker_pid)
+                .fetch_one(&pool)
+                .await
+                .expect("observe worker blocked");
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker must block on the action-row FOR UPDATE within 10 s");
+
+        // Precondition: lease must still be live when the worker is blocked.
+        let live_when_blocked: bool = sqlx::query_scalar(
+            "SELECT action_lease_expires_at > clock_timestamp() FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .expect("live_when_blocked");
+        assert!(
+            live_when_blocked,
+            "lease must be live when worker reaches the row lock"
+        );
+
+        // Wait until the lease is definitely expired according to the DB clock.
+        sqlx::query(
+            "SELECT pg_sleep(GREATEST(EXTRACT(EPOCH FROM action_lease_expires_at - clock_timestamp()), 0)::double precision + 0.05) \
+             FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .execute(&pool)
+        .await
+        .expect("wait through expiry");
+
+        let expired: bool = sqlx::query_scalar(
+            "SELECT action_lease_expires_at <= clock_timestamp() FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .expect("expired_before_unlock");
+        assert!(
+            expired,
+            "lease must be expired before releasing the row lock"
+        );
+
+        // Release the row lock without writing a new tuple version.
+        locker.rollback().await.expect("release row lock");
+
+        let committed = worker.await.expect("worker join").expect("worker result");
+
+        let deleted: bool = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id)
+        .bind(&nested)
+        .fetch_one(&pool)
+        .await
+        .expect("event row");
+        let stored_marker = get_action(&pool, action_id)
+            .await
+            .expect("action lookup")
+            .expect("action exists")
+            .step_marker;
+
+        assert!(
+            !committed,
+            "lease expired during row-lock wait must not commit"
+        );
+        assert!(!deleted, "event must not be deleted");
+        assert_eq!(stored_marker, None, "step_marker must not be persisted");
+        assert_eq!(
+            counts(&pool, cid, &reply).await,
+            (1, 0),
+            "parent counts unchanged"
+        );
+        assert_eq!(
+            counts(&pool, cid, &root).await,
+            (1, 2),
+            "root counts unchanged"
         );
     }
 
