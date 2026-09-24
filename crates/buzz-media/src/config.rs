@@ -8,8 +8,8 @@ use std::str::FromStr;
 pub enum S3AddressingStyle {
     /// Put the bucket in the request path (`https://endpoint/bucket/key`).
     ///
-    /// This preserves compatibility with the bundled MinIO deployments, whose
-    /// internal DNS only resolves the endpoint hostname.
+    /// This preserves compatibility with bundled S3-compatible deployments,
+    /// whose internal DNS only resolves the endpoint hostname.
     #[default]
     Path,
     /// Put the bucket in the hostname (`https://bucket.endpoint/key`).
@@ -45,7 +45,7 @@ fn default_s3_region() -> String {
     "us-east-1".to_string()
 }
 
-/// Configuration for media storage (S3/MinIO).
+/// Configuration for media storage (S3-compatible).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MediaConfig {
     /// S3-compatible endpoint URL (e.g. "http://localhost:9000").
@@ -64,7 +64,7 @@ pub struct MediaConfig {
     /// the value is not meaningfully checked.
     #[serde(default = "default_s3_region")]
     pub s3_region: String,
-    /// S3 URL addressing style. Defaults to path style for MinIO compatibility.
+    /// S3 URL addressing style. Defaults to path style for local compatibility.
     #[serde(default)]
     pub s3_addressing_style: S3AddressingStyle,
     /// Maximum upload size for images (bytes). Default: 50 MB.

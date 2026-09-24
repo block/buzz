@@ -84,7 +84,7 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 | Node.js | 24+ | Required for desktop app commands and `just ci` |
 | pnpm | 10+ | Required for desktop app commands and `just ci` |
 | Flutter | 3.41+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
-| Docker | 24+ | For Postgres, Redis, MinIO |
+| Docker | 24+ | For Postgres, Redis, RustFS |
 | `just` | latest | Task runner — `cargo install just` |
 | `lefthook` | 2.1.3 (Hermit-pinned) | Auto-installed by `just hooks` — no manual install needed |
 | `sqlx` migrations | workspace crate | `just migrate` applies embedded migrations from `migrations/` |
@@ -157,7 +157,7 @@ cached thereafter). You can also run `just bootstrap` independently at any time;
 it is safe to re-run.
 
 `just setup` then starts Docker services (Postgres on `:5432`, Redis on `:6379`,
-Adminer on `:8082`, Keycloak on `:8180` for local OAuth/OIDC testing, MinIO on
+Adminer on `:8082`, Keycloak on `:8180` for local OAuth/OIDC testing, RustFS on
 `:9000` for media storage, and Prometheus on `:9090` for metrics) and runs all
 pending database migrations.
 

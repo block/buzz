@@ -69,11 +69,23 @@ upload_fixture() {
   size="$(fixture_size "${path}")"
   sidecar="$(printf '{"dim":"%s","blurhash":"","thumb_url":"","ext":"%s","mime_type":"%s","size":%s,"uploaded_at":0}' \
     "${dimensions}" "${extension}" "${mime}" "${size}")"
-  docker exec -i buzz-minio mc pipe --quiet --attr "Content-Type=${mime}" \
+  rustfs_rc pipe --quiet --content-type "${mime}" \
     "local/${BUZZ_S3_BUCKET:-buzz-media}/${hash}.${extension}" < "${path}"
-  printf '%s' "${sidecar}" | docker exec -i buzz-minio mc pipe --quiet \
-    --attr "Content-Type=application/json" \
+  printf '%s' "${sidecar}" | rustfs_rc pipe --quiet \
+    --content-type application/json \
     "local/${BUZZ_S3_BUCKET:-buzz-media}/_meta/${community_id}/${hash}.json"
+}
+
+RUSTFS_RC_IMAGE="rustfs/rc@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699"
+rustfs_rc() {
+  docker run --rm -i --network buzz-net \
+    -e "BUZZ_S3_ACCESS_KEY=${BUZZ_S3_ACCESS_KEY:-buzz_dev}" \
+    -e "BUZZ_S3_SECRET_KEY=${BUZZ_S3_SECRET_KEY:-buzz_dev_secret}" \
+    --entrypoint /bin/sh "${RUSTFS_RC_IMAGE}" -c '
+      set -eu
+      rc alias set local http://rustfs:9000 "$BUZZ_S3_ACCESS_KEY" "$BUZZ_S3_SECRET_KEY" >/dev/null
+      exec rc "$@"
+    ' -- "$@"
 }
 
 fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/buzz-admin-feedback.XXXXXX")"
@@ -96,9 +108,8 @@ quality_image_hash="$(fixture_hash "${quality_image}")"
 composer_diagnostics_hash="$(fixture_hash "${composer_diagnostics}")"
 workspace_diagnostics_hash="$(fixture_hash "${workspace_diagnostics}")"
 
-if ! docker exec buzz-minio mc alias set local http://localhost:9000 \
-  "${BUZZ_S3_ACCESS_KEY:-buzz_dev}" "${BUZZ_S3_SECRET_KEY:-buzz_dev_secret}" >/dev/null; then
-  echo "error: local MinIO is unavailable; run just setup first" >&2
+if ! rustfs_rc ping local --quiet >/dev/null; then
+  echo "error: local RustFS is unavailable; run just setup first" >&2
   exit 1
 fi
 

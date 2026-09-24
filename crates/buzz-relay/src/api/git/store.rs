@@ -1024,7 +1024,7 @@ mod probe {
     //!   BUZZ_GIT_S3_PROBE=1 cargo test -p buzz-relay --lib \
     //!     api::git::store::probe -- --nocapture --test-threads=1
     //!
-    //! Pre-req: `docker compose up minio` and the `buzz-git` bucket exists.
+    //! Pre-req: `docker compose up rustfs` and the `buzz-git` bucket exists.
 
     use super::*;
 

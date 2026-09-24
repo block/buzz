@@ -61,7 +61,7 @@ err()   { echo -e "${RED}[relay-test]${NC} $*" >&2; }
 cd "${REPO_ROOT}"
 
 log "Starting docker compose services..."
-docker compose up -d postgres redis minio minio-init
+docker compose up -d postgres redis rustfs rustfs-init
 
 # ── Wait for services to be healthy ──────────────────────────────────────────
 
@@ -84,7 +84,7 @@ wait_healthy() {
 
 wait_healthy "Postgres" "buzz-postgres"
 wait_healthy "Redis" "buzz-redis"
-wait_healthy "MinIO" "buzz-minio"
+wait_healthy "RustFS" "buzz-rustfs"
 
 # ── Apply database schema ────────────────────────────────────────────────────
 

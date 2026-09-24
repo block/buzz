@@ -83,7 +83,7 @@ jobs:
       - name: Start integration services
         run: |
           for attempt in 1 2 3; do
-            if docker compose up -d postgres redis minio minio-init; then
+            if docker compose up -d postgres redis rustfs rustfs-init; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then

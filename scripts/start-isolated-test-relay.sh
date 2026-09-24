@@ -12,7 +12,7 @@
 #     compose project : buzz-harness
 #     postgres        : localhost:5471  (db=buzz, user=buzz, pass=buzz_dev)
 #     redis           : localhost:6471
-#     minio           : localhost:9471 (console 9472)
+#     RustFS          : localhost:9471 (console 9472)
 #     relay main      : localhost:3030   ← BUZZ_E2E_RELAY_URL=http://localhost:3030
 #     relay health    : localhost:8088
 #     relay metrics   : localhost:9202
@@ -57,7 +57,7 @@ COMPOSE_FILE="docker-compose.harness.yml"
 # evaperf :5470/:6470/:9470/:3170 stack).
 PG_PORT=5471
 REDIS_PORT=6471
-MINIO_PORT=9471
+RUSTFS_PORT=9471
 RELAY_MAIN=3030
 RELAY_HEALTH=8088
 RELAY_METRICS=9202
@@ -148,7 +148,7 @@ tmux new-session -d -s "${TMUX_SESSION}" "cd '${REPO_ROOT}' && env \
   BUZZ_BIND_ADDR=0.0.0.0:${RELAY_MAIN} \
   BUZZ_HEALTH_PORT=${RELAY_HEALTH} \
   BUZZ_METRICS_PORT=${RELAY_METRICS} \
-  BUZZ_S3_ENDPOINT=http://localhost:${MINIO_PORT} \
+  BUZZ_S3_ENDPOINT=http://localhost:${RUSTFS_PORT} \
   BUZZ_S3_ACCESS_KEY=buzz_dev \
   BUZZ_S3_SECRET_KEY=buzz_dev_secret \
   BUZZ_S3_BUCKET=buzz-media \

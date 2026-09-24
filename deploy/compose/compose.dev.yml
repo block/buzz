@@ -7,7 +7,7 @@ services:
     ports:
       - "${REDIS_PORT:-6379}:6379"
 
-  minio:
+  rustfs:
     ports:
       - "${MINIO_API_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
