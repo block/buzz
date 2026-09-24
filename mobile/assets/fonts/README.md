@@ -45,3 +45,8 @@ python3 mobile/test/visual/verify_heart_screenshots.py before.png after.png
 
 Use original 1206×2622 captures from the documented simulator and fixture for
 this check. PR images may be cropped afterward for readability.
+
+`test/shared/fonts/inter_assets_test.dart` pins the verified generated font
+artifacts in the existing Flutter test lane. Restoring either original font or
+changing any other font data fails CI. When upgrading Inter, verify the
+transformation and native rendering before updating the expected digests.
