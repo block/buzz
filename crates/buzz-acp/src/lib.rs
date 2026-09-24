@@ -8,6 +8,7 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod live_effort;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -1615,6 +1616,9 @@ fn handle_relay_observer_control_event(
         Some("cancel_turn") => {
             handle_cancel_turn_control(&payload, pool, observer);
         }
+        Some("switch_effort") => {
+            pool.queue_live_effort(&payload, observer);
+        }
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
         }
@@ -3027,6 +3031,7 @@ async fn run_harness(
     }
 
     loop {
+        pool.apply_pending_effort(observer.as_ref()).await;
         // Whether buffered work is waiting on a lazy pool. Also gates the
         // retry-deadline sleep arm below: a `Failed` lifecycle keeps its
         // (possibly past) `retry_at` until the next wake, so sleeping on it
