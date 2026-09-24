@@ -50,6 +50,42 @@ fn cargo_check(target_dir: &Path, case_name: &str, features: &[&str]) -> std::pr
         })
 }
 
+fn format_valid_case_failed_status(case_name: &str, stdout: &str, stderr: &str) -> String {
+    format!(
+        "expected {case_name} to compile successfully\nstdout:\n{stdout}\nstderr:\n{stderr}\nregenerate fixture lock with `{FIXTURE_LOCK_REGEN_RECIPE}`"
+    )
+}
+
+fn format_invalid_case_missing_exact_one(case_name: &str, stderr: &str) -> String {
+    format!(
+        "expected {case_name} failure to explain the exact-one contract\nstderr:\n{stderr}\nregenerate fixture lock with `{FIXTURE_LOCK_REGEN_RECIPE}`"
+    )
+}
+
+fn assert_valid_case_success(case_name: &str, output: &std::process::Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "{}",
+        format_valid_case_failed_status(case_name, &stdout, &stderr)
+    );
+}
+
+fn assert_invalid_case_has_exact_one_diagnostic(case_name: &str, output: &std::process::Output) {
+    assert!(
+        !output.status.success(),
+        "expected {case_name} to fail compilation"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("select exactly one relay feature flag provider feature"),
+        "{}",
+        format_invalid_case_missing_exact_one(case_name, &stderr)
+    );
+}
+
 #[test]
 fn relay_fixture_lock_regeneration_recipe_is_documented() {
     let readme = std::fs::read_to_string(crate_readme()).expect("read crate README");
@@ -92,6 +128,29 @@ fn relay_readme_documents_fail_closed_launchdarkly_startup_contract() {
 }
 
 #[test]
+fn valid_case_failed_status_formatter_includes_fixture_lock_regeneration_recipe() {
+    let message = format_valid_case_failed_status(
+        "static",
+        "",
+        "error: lock file needs update but --locked was passed",
+    );
+    assert!(
+        message.contains(FIXTURE_LOCK_REGEN_RECIPE),
+        "valid-case failure formatter must include fixture lock recipe\nmessage:\n{message}"
+    );
+}
+
+#[test]
+fn invalid_case_missing_exact_one_formatter_includes_fixture_lock_regeneration_recipe() {
+    let message =
+        format_invalid_case_missing_exact_one("none", "error: unrelated nested cargo failure");
+    assert!(
+        message.contains(FIXTURE_LOCK_REGEN_RECIPE),
+        "invalid-case failure formatter must include fixture lock recipe\nmessage:\n{message}"
+    );
+}
+
+#[test]
 fn relay_artifact_provider_features_require_exactly_one_selection() {
     assert!(
         fixture_lockfile().is_file(),
@@ -108,12 +167,7 @@ fn relay_artifact_provider_features_require_exactly_one_selection() {
 
     for (case_name, features) in valid_cases {
         let output = cargo_check(target_dir.path(), case_name, features);
-        assert!(
-            output.status.success(),
-            "expected {case_name} to compile successfully\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_valid_case_success(case_name, &output);
     }
 
     let invalid_cases = [
@@ -142,15 +196,6 @@ fn relay_artifact_provider_features_require_exactly_one_selection() {
 
     for (case_name, features) in invalid_cases {
         let output = cargo_check(target_dir.path(), case_name, features);
-        assert!(
-            !output.status.success(),
-            "expected {case_name} to fail compilation"
-        );
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("select exactly one relay feature flag provider feature"),
-            "expected {case_name} failure to explain the exact-one contract\nstderr:\n{stderr}"
-        );
+        assert_invalid_case_has_exact_one_diagnostic(case_name, &output);
     }
 }
