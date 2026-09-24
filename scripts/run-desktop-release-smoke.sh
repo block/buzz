@@ -68,8 +68,8 @@ cd "${ROOT}"
 
 phase_start="$(date +%s)"
 log "starting backing services"
-docker compose up -d postgres redis minio minio-init
-for container in buzz-postgres buzz-redis buzz-minio; do
+docker compose up -d postgres redis rustfs rustfs-init
+for container in buzz-postgres buzz-redis buzz-rustfs; do
   for _ in $(seq 1 60); do
     [[ "$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || true)" == "healthy" ]] && break
     sleep 1
