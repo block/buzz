@@ -11,9 +11,21 @@ pub enum ApnsEnvironment {
 #[derive(Debug, Clone)]
 pub struct AppProfileConfig {
     pub app_attest_app_id: String,
+    /// Exact Apple attestation environment accepted for enrollment.
+    pub app_attest_environment: AppAttestEnvironment,
     pub apns_cert_path: PathBuf,
     pub apns_topic: String,
     pub apns_environment: ApnsEnvironment,
+}
+
+/// Apple App Attest environment, independent of the APNs transport environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppAttestEnvironment {
+    /// Distributed applications, also the default for personal development builds.
+    Production,
+    /// Development-signed applications in an explicitly opted-in gateway build.
+    #[cfg(feature = "personal-dev-app-attest")]
+    Development,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +155,15 @@ fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, Config
             .ok_or(ConfigError::Missing(key))
     };
     let app_attest_app_id = required(app_id_key)?.to_owned();
+    let app_attest_environment = match e
+        .get("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT")
+        .map(String::as_str)
+    {
+        None | Some("production") => AppAttestEnvironment::Production,
+        #[cfg(feature = "personal-dev-app-attest")]
+        Some("development") => AppAttestEnvironment::Development,
+        Some(_) => return Err(ConfigError::Invalid("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT")),
+    };
     let apns_topic = required(topic_key)?.to_owned();
     let apns_cert_path = PathBuf::from(required(cert_key)?);
     let apns_environment = match e.get(environment_key).map(String::as_str) {
@@ -152,6 +173,7 @@ fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, Config
     };
     Ok(AppProfileConfig {
         app_attest_app_id,
+        app_attest_environment,
         apns_cert_path,
         apns_topic,
         apns_environment,
@@ -258,6 +280,47 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attestation_environment_is_explicit_and_build_gated() {
+        let mut env = base();
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .profile
+                .app_attest_environment,
+            AppAttestEnvironment::Production
+        );
+        for value in ["", "sandbox", "Production", "unknown"] {
+            env.insert("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(), value.into());
+            assert!(Config::from_map(&env).is_err());
+        }
+        env.insert(
+            "BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(),
+            "production".into(),
+        );
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .profile
+                .app_attest_environment,
+            AppAttestEnvironment::Production
+        );
+        env.insert(
+            "BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(),
+            "development".into(),
+        );
+        #[cfg(feature = "personal-dev-app-attest")]
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .profile
+                .app_attest_environment,
+            AppAttestEnvironment::Development
+        );
+        #[cfg(not(feature = "personal-dev-app-attest"))]
+        assert!(Config::from_map(&env).is_err());
+    }
+
     fn base() -> HashMap<String, String> {
         HashMap::from([
             (
@@ -386,11 +449,35 @@ mod tests {
             ("BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT", "staging"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "31536001"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2.592e+06"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2592000.5"),
             ("BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS", "0"),
         ] {
             let mut env = base();
             env.insert(key.into(), value.into());
             assert!(Config::from_map(&env).is_err(), "accepted {key}={value}");
+        }
+    }
+
+    // The chart test supplies actual Helm-rendered environment values. Keep this
+    // separate from ordinary unit tests, which do not require Helm or fixtures.
+    #[test]
+    #[ignore = "run deploy/charts/buzz-push-gateway/tests/grant-lifetime.sh"]
+    fn helm_rendered_grant_lifetimes() {
+        let path = std::env::var("BUZZ_TEST_HELM_ENV_FILE").unwrap();
+        let cases: Vec<(String, i64, HashMap<String, String>)> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(cases.len(), 9);
+        for (label, expected, rendered) in cases {
+            let mut env = base();
+            env.extend(rendered);
+            let config = Config::from_map(&env).unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(config.max_grant_lifetime_seconds, expected, "{label}");
+            assert_eq!(
+                env["BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS"],
+                expected.to_string(),
+                "{label} must render decimal integer text"
+            );
         }
     }
 

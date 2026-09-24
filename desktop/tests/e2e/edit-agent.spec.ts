@@ -227,6 +227,82 @@ test.describe("edit agent dialog", () => {
     );
   });
 
+  test("tells colliding Databricks model names apart and persists the chosen id", async ({
+    page,
+  }) => {
+    const goosePathId = "data_workflow_tools.goose.gpt-6-astra";
+    const systemAiId = "system.ai.gpt-6-astra";
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+          envVars: { DATABRICKS_HOST: "https://databricks.example.test" },
+        },
+      ],
+      // The agent inherits Databricks from the global defaults; the mock's
+      // update_managed_agent does not echo a per-agent provider.
+      globalAgentConfig: {
+        preferred_runtime: "goose",
+        provider: "databricks_v2",
+        model: null,
+        env_vars: {},
+      },
+      discoverAgentModels: {
+        models: [
+          { id: goosePathId, name: goosePathId },
+          { id: systemAiId, name: systemAiId },
+        ],
+        supportsSwitching: true,
+        selectedModel: null,
+      },
+    });
+
+    await openEditDialog(page);
+
+    await page.locator("#edit-agent-model").click();
+    await expect(
+      page.getByRole("menuitemradio", {
+        name: "GPT-6 Astra (data_workflow_tools.goose)",
+      }),
+    ).toBeVisible();
+    await page
+      .getByRole("menuitemradio", { name: "GPT-6 Astra (system.ai)" })
+      .click();
+    await expect(page.locator("#edit-agent-model")).toHaveText(
+      "GPT-6 Astra (system.ai)",
+    );
+
+    const submit = page.getByTestId("edit-agent-dialog-submit");
+    await expect(submit).toBeEnabled({ timeout: 10_000 });
+    await submit.click();
+    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
+
+    const persistedModel = () =>
+      page.evaluate(async (pubkey) => {
+        const agents = (await (
+          window as typeof window & {
+            __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+              command: string,
+              payload: unknown,
+            ) => Promise<unknown>;
+          }
+        ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("list_managed_agents", null)) as
+          | Array<{ pubkey: string; model: string | null }>
+          | undefined;
+        return agents?.find((agent) => agent.pubkey === pubkey)?.model;
+      }, AGENT_PUBKEY);
+    await expect.poll(persistedModel).toBe(systemAiId);
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(page.locator("#edit-agent-model")).toHaveText(
+      "GPT-6 Astra (system.ai)",
+      { timeout: 10_000 },
+    );
+  });
+
   test("keeps the custom command visible without opening Advanced", async ({
     page,
   }) => {

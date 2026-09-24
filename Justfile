@@ -365,6 +365,7 @@ test-unit:
     ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        cargo nextest run -p buzz-audit --lib
         # buzz-auth NIP-FI verifier doctests. The sealed-authority
         # `compile_fail` doctests prove the default-feature public API alone
         # cannot forge the issuer→JWKS authority; nextest does not run
@@ -374,6 +375,13 @@ test-unit:
         cargo test -p buzz-auth --doc
         cargo nextest run -p buzz-voice --lib
         cargo nextest run -p buzz-cli
+        # buzz-sdk builder/validation unit tests: pure event-builder and input
+        # validation (e.g. the canvas writer-discipline/skew guard and the
+        # canvas_write_survived predicate), no infra. `--lib` runs all unit
+        # tests without the rustdoc dependency-resolution flake the full-package
+        # invocation hits. Enumerated explicitly because nothing in CI runs
+        # `cargo test --workspace` — membership buys clippy/check, not tests.
+        cargo nextest run -p buzz-sdk --lib
         # buzz-acp owns the relay-to-agent trust boundary. Run its tests here so
         # forged relay events cannot regain a path into agent routing unnoticed.
         cargo nextest run -p buzz-acp
@@ -390,7 +398,7 @@ test-unit:
         cargo nextest run -p buzz-media --lib \
             -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys)'
         cargo nextest run -p buzz-admin \
-            -E 'test(=storage_snapshot_tests::failed_fold_never_invokes_snapshot_persistence)'
+            -E 'test(storage_snapshot)'
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the
@@ -399,6 +407,7 @@ test-unit:
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway
+        cargo nextest run -p buzz-push-gateway --features personal-dev-app-attest
         # Kubernetes backend provider: the decision layers (state machine, GC
         # planner, env precedence, naming, wire) are pure functions with a fake
         # substrate, so they belong in the unit job. Enumerated explicitly
@@ -507,23 +516,23 @@ mesh-dev-fresh:
 mesh-e2e-hardware:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo run -p buzz-relay --example mesh_serve_client_smoke
+    cargo run -p buzz-mesh-smoke --example mesh_serve_client_smoke
 
 # Three isolated node processes: trusted member joins and infers; stranger is rejected.
 # Uses temp homes and explicit mesh owner keystores. Never reads the Buzz Keychain.
 mesh-e2e-admission:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo run -p buzz-relay --example mesh_admission_smoke
+    cargo run -p buzz-mesh-smoke --example mesh_admission_smoke
 
 # Full hardware confidence suite: routing, owner admission, and real agent inference.
 mesh-e2e-confidence:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --release -p buzz-agent -p buzz-dev-mcp
-    cargo run -p buzz-relay --example mesh_serve_client_smoke
-    cargo run -p buzz-relay --example mesh_admission_smoke
-    cargo run -p buzz-relay --example mesh_agent_e2e
+    cargo run -p buzz-mesh-smoke --example mesh_serve_client_smoke
+    cargo run -p buzz-mesh-smoke --example mesh_admission_smoke
+    cargo run -p buzz-mesh-smoke --example mesh_agent_e2e
 
 # Take desktop screenshots using the mock bridge
 desktop-screenshot *ARGS:

@@ -58,7 +58,7 @@ CREATE TABLE communities (
     -- Added by migration 0003; kept here so desired-state applies match.
     icon            TEXT,
     -- Whether thread replies are projected into the channel timeline.
-    -- Added by migration 0047; kept here so fresh DB setup matches migrations.
+    -- Added by migration 0050; kept here so fresh DB setup matches migrations.
     thread_replies_in_channel BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at     TIMESTAMPTZ,
@@ -534,6 +534,8 @@ CREATE TABLE thread_metadata (
 
 CREATE INDEX idx_thread_metadata_parent ON thread_metadata (community_id, parent_event_id);
 CREATE INDEX idx_thread_metadata_root ON thread_metadata (community_id, root_event_id);
+CREATE INDEX idx_thread_metadata_window
+    ON thread_metadata (community_id, root_event_id, event_created_at DESC, event_id ASC);
 CREATE INDEX idx_thread_metadata_channel_depth
     ON thread_metadata (community_id, channel_id, depth, event_created_at);
 CREATE INDEX idx_thread_metadata_event_id ON thread_metadata (community_id, event_id);
@@ -648,6 +650,7 @@ CREATE TABLE archived_identities (
 CREATE TABLE audit_log (
     community_id    UUID NOT NULL REFERENCES communities(id),
     seq             BIGINT NOT NULL,
+    hash_version    SMALLINT NOT NULL DEFAULT 1 CHECK (hash_version IN (1, 2)),
     hash            BYTEA NOT NULL,
     prev_hash       BYTEA,
     action          VARCHAR(64) NOT NULL,
@@ -1809,6 +1812,14 @@ CREATE TABLE relay_admin_actions (
     -- retries and lets the recovery worker claim/re-drive stranded actions.
     action_lease_token      UUID,
     action_lease_expires_at TIMESTAMPTZ,
+    -- Authoritative enforcement target (migration 0047): persisted at claim time
+    -- so crash-recovery can fire live side effects without re-deriving from mutable
+    -- sources. enforcement_target_pubkey is the resolved target pubkey bytes for
+    -- kick/ban/timeout actions; NULL for event/blob targets. enforcement_channel_id
+    -- is the channel targeted by kick actions; NULL for community-wide actions.
+    enforcement_target_pubkey BYTEA
+        CHECK (enforcement_target_pubkey IS NULL OR length(enforcement_target_pubkey) = 32),
+    enforcement_channel_id  UUID,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- Report-scoped idempotency: one action per (report, request_id).

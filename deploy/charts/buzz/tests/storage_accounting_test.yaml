@@ -4,7 +4,7 @@ templates:
   - templates/deployment.yaml
   - templates/secret-chart.yaml
 tests:
-  - it: renders no worker by default
+  - it: enables the snapshot reader without requiring a worker
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -17,6 +17,12 @@ tests:
       - hasDocuments:
           count: 0
         template: templates/storage-accounting-cronjob.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_STORAGE_METRICS
+            value: external
+        template: templates/deployment.yaml
   - it: renders a non-overlapping worker with an isolated cap
     set:
       relayUrl: wss://buzz.example.com

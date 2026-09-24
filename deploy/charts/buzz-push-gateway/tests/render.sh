@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+bash deploy/charts/buzz-push-gateway/tests/grant-lifetime.sh
 out=$(mktemp); production_out=$(mktemp); route_out=$(mktemp); datadog_out=$(mktemp)
 trap 'rm -f "$out" "$production_out" "$route_out" "$datadog_out" "${monitoring_out:-}"' EXIT
 gateway_origin_arg=(--set 'gatewayOrigin=https://push.example')
@@ -32,6 +33,18 @@ env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml -rset \
   - "$out" "$production_out" "$route_out" <<'RUBY'
 def assert!(condition, detail = "assertion failed")
   raise detail unless condition
+end
+
+# The application serves plaintext HTTP behind ingress TLS termination. Check
+# every ingress mode so service discovery never advertises application TLS.
+ARGV.each do |path|
+  resources = YAML.load_stream(File.read(path)).compact
+  service = resources.find { |x| x["kind"] == "Service" }
+  ports = service.dig("spec", "ports")
+  assert!(ports == [{ "name" => "http", "port" => 8080, "targetPort" => "public" }], ports.inspect)
+  deployment = resources.find { |x| x["kind"] == "Deployment" }
+  container_ports = deployment.dig("spec", "template", "spec", "containers", 0, "ports")
+  assert!(container_ports.any? { |port| port["name"] == "public" && port["containerPort"] == 8080 })
 end
 
 xs = YAML.load_stream(File.read(ARGV[0])).compact

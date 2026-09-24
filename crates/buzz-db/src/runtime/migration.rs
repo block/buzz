@@ -703,7 +703,17 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 47);
+        assert_eq!(migrations.len(), 50);
+        assert_eq!(migrations[48].version, 49);
+        assert!(migrations[48]
+            .sql
+            .as_str()
+            .contains("idx_thread_metadata_window"));
+        assert_eq!(migrations[49].version, 50);
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("thread_replies_in_channel"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1302,8 +1312,8 @@ mod postgres_tests {
 
         // Same additive-migration rule for projected thread replies in the
         // channel timeline: its own version, never folded into 0001.
-        assert_eq!(migrations[46].version, 47);
-        assert!(migrations[46]
+        assert_eq!(migrations[49].version, 50);
+        assert!(migrations[49]
             .sql
             .as_str()
             .contains("thread_replies_in_channel"));
@@ -2277,9 +2287,9 @@ mod postgres_tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(39, &migrated)
+            .run_to(47, &migrated)
             .await
-            .expect("apply migrations 1-39");
+            .expect("apply migrations 1-47");
 
         for table in [
             "relay_admin_actions",
