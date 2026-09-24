@@ -99,21 +99,36 @@ pre-push:
     rust-tests:
       files: git diff --name-only origin/main...HEAD
       glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
+      env:
+        # Lanes run under a pty; with agent shells' TERM=dumb, nextest's
+        # progress bar swallows every FAIL line, panic, and summary.
+        NEXTEST_SHOW_PROGRESS: counter
+        # An orphaned nextest otherwise spins on the dead pty's input.
+        NEXTEST_NO_INPUT_HANDLER: "1"
       run: ./scripts/without-git-env.sh just test-unit
     desktop-check:
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
+      env: &pnpm-verify-deps
+        # Warn when node_modules looks stale against the workspace (pnpm uses
+        # recorded workspace state and manifest mtimes; not a complete
+        # lockfile-content check). `warn`, not `error`: `just
+        # bump-desktop-version` leaves the workspace flagged, and release prep
+        # pushes through this hook.
+        pnpm_config_verify_deps_before_run: warn
       run: ./scripts/without-git-env.sh just desktop-check
     desktop-typecheck:
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
+      env: *pnpm-verify-deps
       run: ./scripts/without-git-env.sh just desktop-typecheck
     desktop-test:
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
+      env: *pnpm-verify-deps
       run: ./scripts/without-git-env.sh just desktop-test
     desktop-tauri-checks:
       # Keep local lint parity with Desktop Core CI for every path that can
