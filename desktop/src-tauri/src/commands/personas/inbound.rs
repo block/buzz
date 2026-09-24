@@ -211,6 +211,12 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
     if let Some(managed_agent) = &inbound_managed_agent {
         validate_inbound_managed_agent_definition(managed_agent)?;
     }
+    let inbound_team = (kind == KIND_TEAM)
+        .then(|| team_content_from_event(&event))
+        .transpose()?;
+    if let Some(team) = &inbound_team {
+        validate_inbound_team_definition(team)?;
+    }
     let d_tag = match &inbound_persona {
         Some(persona) => persona_d_tag(persona),
         None => event_d_tag(&event)?,
@@ -300,12 +306,16 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
         }
         KIND_TEAM => {
             let team_id = d_tag.clone();
+            // Parsed and validated above, before retention — reuse instead of
+            // re-parsing so an unsafe event never reaches the local store.
+            let inbound = inbound_team
+                .ok_or_else(|| "team content was not parsed before retention".to_string())?;
             let outcome = commit_inbound_with_store(&conn, &inbound_retained_event, || {
                 let mut teams = load_teams(&app)?;
                 commit_inbound_team(
                     &mut teams,
                     d_tag,
-                    team_content_from_event(&event)?,
+                    inbound,
                     |teams| save_teams(&app, teams),
                     || load_managed_agents(&app),
                     |records| save_managed_agents(&app, records),
@@ -456,6 +466,19 @@ fn validate_inbound_persona_definition(persona: &AgentDefinition) -> Result<(), 
     .map_err(|error| format!("Inbound persona definition is unsafe: {error}"))?;
     crate::managed_agents::validate_agent_description_text(persona.description.as_deref())
         .map_err(|error| format!("Inbound persona definition is unsafe: {error}"))
+}
+
+/// Team `instructions` are runtime-layered into every member deployment, so an
+/// inbound team carries executable text under the same review contract as a
+/// persona. The wire type is a double option: absent means "publisher predates
+/// always-publish, preserve local" and `null` means "explicitly cleared" --
+/// neither delivers text to validate.
+fn validate_inbound_team_definition(team: &TeamEventContent) -> Result<(), String> {
+    crate::managed_agents::validate_team_definition_text(
+        &team.name,
+        team.instructions.clone().flatten().as_deref(),
+    )
+    .map_err(|error| format!("Inbound team definition is unsafe: {error}"))
 }
 
 fn validate_inbound_managed_agent_definition(
