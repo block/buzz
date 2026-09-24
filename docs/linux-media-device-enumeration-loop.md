@@ -242,7 +242,11 @@ Remaining known limitation: if WebKitGTK leaks a few FDs per enumeration cycle e
 outside the runaway loop, heavy use of the picker leaks slowly. That part is
 upstream — file the bug below.
 
-## Upstream WebKitGTK bug (draft)
+## Upstream WebKitGTK bug
+
+Filed upstream as [Bug 325151](https://bugs.webkit.org/show_bug.cgi?id=325151)
+on 2026-09-24; the text below is what was submitted (attachment:
+`webkitgtk-repro.html`, a re-enumerating page that logs each trigger).
 
 **Title:** `enumerateDevices()` re-announces known devices as `devicechange` and
 leaks file descriptors in the WebKitWebProcess
