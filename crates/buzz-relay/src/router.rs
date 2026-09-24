@@ -1292,11 +1292,11 @@ mod tests {
                 );
                 assert!(!final_scrape.contains("sensitive-sql-or-url"));
                 // Freshness is part of the frozen contract: one unlabelled
-                // gauge carrying when the cached report completed, so
-                // `time() - <gauge>` ages a stalled sampler out from a scrape
+                // counter carrying when the cached report completed, so
+                // `time() - <counter>` ages a stalled sampler out from a scrape
                 // alone.
                 assert!(final_scrape.contains(
-                    "# TYPE buzz_readiness_dependency_sample_completed_timestamp_seconds gauge"
+                    "# TYPE buzz_readiness_dependency_sample_completed_timestamp_seconds counter"
                 ));
                 assert_eq!(
                     final_scrape

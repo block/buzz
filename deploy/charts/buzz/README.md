@@ -174,7 +174,7 @@ listener returns the same lifecycle answer but does not change these metrics.
 | `buzz_readiness_state` | gauge | `check="overall"`; latest private probe observation, 1 ready or 0 shutting down | `/_readiness` |
 | `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` | dependency sampler |
 | `buzz_readiness_check_duration_seconds` | histogram | `check` only | dependency sampler |
-| `buzz_readiness_dependency_sample_completed_timestamp_seconds` | gauge | none; Unix time the cached report completed | dependency sampler |
+| `buzz_readiness_dependency_sample_completed_timestamp_seconds` | counter | none; Unix time the cached report completed | dependency sampler |
 
 The three dependency families keep their `buzz_readiness_*` names for dashboard
 continuity, but nothing about them is request-driven any more: the 30-second
@@ -194,7 +194,7 @@ emitted until the first sample completes: its absence means "not yet sampled",
 not "fresh".
 
 That is the whole server-side contract. Freshness alerting is built from this
-gauge in the monitoring provider, and the monitor query, thresholds, and
+counter in the monitoring provider, and the monitor query, thresholds, and
 per-pod tag grouping belong with the deployment's monitor configuration rather
 than in this chart — they depend on the provider's query grammar and on the
 tags its agent attaches, neither of which this repo owns.
@@ -208,7 +208,7 @@ reading a single pod is already on the `sample`, `sample_age_seconds`, and
 `sample_interval_seconds` fields of `/_status` above.
 
 The schema has a ceiling of 87 raw Prometheus series per pod: 2 probe reasons,
-11 valid dependency/outcome pairs, 72 histogram series, and 2 gauges. Do not
+11 valid dependency/outcome pairs, 72 histogram series, and 1 gauge plus 1 completion-timestamp counter. Do not
 add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant, user,
 community, pubkey, header, query, or other request-controlled labels. A
 readiness probe records no dependency attempt or latency sample at all.

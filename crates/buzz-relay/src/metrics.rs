@@ -332,9 +332,8 @@ pub(crate) fn describe_readiness_metrics() {
         "buzz_readiness_state",
         "Latest private readiness-probe observation, where 1 is ready and 0 is shutting down"
     );
-    metrics::describe_gauge!(
+    metrics::describe_counter!(
         "buzz_readiness_dependency_sample_completed_timestamp_seconds",
-        metrics::Unit::Seconds,
         "Unix time the cached /_status dependency report completed, absent until the first sample completes"
     );
 }
@@ -561,7 +560,17 @@ pub(crate) fn readiness_test_recorder() -> (
     metrics_exporter_prometheus::PrometheusRecorder,
     metrics_exporter_prometheus::PrometheusHandle,
 ) {
-    let recorder = configured_prometheus_builder(300).build_recorder();
+    readiness_test_recorder_with_idle_timeout(300)
+}
+
+#[cfg(test)]
+pub(crate) fn readiness_test_recorder_with_idle_timeout(
+    gauge_idle_timeout_secs: u64,
+) -> (
+    metrics_exporter_prometheus::PrometheusRecorder,
+    metrics_exporter_prometheus::PrometheusHandle,
+) {
+    let recorder = configured_prometheus_builder(gauge_idle_timeout_secs).build_recorder();
     let handle = recorder.handle();
     (recorder, handle)
 }
