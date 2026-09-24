@@ -35,6 +35,9 @@ phase() {
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
+  if [[ "${status}" -ne 0 ]]; then
+    "${ROOT}/scripts/diagnose-compose-runtime.sh" postgres redis rustfs rustfs-init || true
+  fi
   if [[ -n "${RELAY_PID}" ]]; then
     kill "${RELAY_PID}" 2>/dev/null || true
     for _ in $(seq 1 50); do

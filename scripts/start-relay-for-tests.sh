@@ -61,7 +61,11 @@ err()   { echo -e "${RED}[relay-test]${NC} $*" >&2; }
 cd "${REPO_ROOT}"
 
 log "Starting docker compose services..."
-docker compose up -d postgres redis rustfs rustfs-init
+if ! docker compose up -d postgres redis rustfs rustfs-init; then
+  err "dependency image/startup failure while starting Compose services"
+  "${SCRIPT_DIR}/diagnose-compose-runtime.sh" postgres redis rustfs rustfs-init || true
+  exit 1
+fi
 
 # ── Wait for services to be healthy ──────────────────────────────────────────
 
@@ -78,7 +82,8 @@ wait_healthy() {
     sleep 2
   done
   err "${service} did not become healthy within 120s"
-  docker logs "${container}" || true
+  err "dependency readiness failure: ${service}"
+  "${SCRIPT_DIR}/diagnose-compose-runtime.sh" postgres redis rustfs rustfs-init || true
   return 1
 }
 
@@ -101,7 +106,8 @@ wait_completed() {
     sleep 2
   done
   err "${service} did not complete within 120s"
-  docker logs "${container}" || true
+  err "dependency initialization failure: ${service}"
+  "${SCRIPT_DIR}/diagnose-compose-runtime.sh" postgres redis rustfs rustfs-init || true
   return 1
 }
 

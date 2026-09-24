@@ -52,6 +52,8 @@ jobs:
               - 'scripts/check-postgres-test-discovery.py'
               - 'scripts/test-postgres-test-discovery.sh'
               - 'scripts/test-postgres-test-wrapper.sh'
+              - 'scripts/start-relay-for-tests.sh'
+              - 'scripts/diagnose-compose-runtime.sh'
               - 'deny.toml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'

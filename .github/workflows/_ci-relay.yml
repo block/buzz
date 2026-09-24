@@ -229,7 +229,8 @@ jobs:
               break
             fi
             if [ "$attempt" -eq 3 ]; then
-              echo "docker compose up failed after 3 attempts" >&2
+              echo "::error::dependency image/startup failure: docker compose up failed after 3 attempts" >&2
+              ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
               exit 1
             fi
             echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2
@@ -281,7 +282,8 @@ jobs:
               fi
               sleep 2
             done
-            docker logs "${container}" || true
+            echo "::error::dependency readiness failure: ${service}" >&2
+            ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
             return 1
           }
           wait_healthy "Postgres" "buzz-postgres"
@@ -303,7 +305,8 @@ jobs:
               fi
               sleep 2
             done
-            docker logs "${container}" || true
+            echo "::error::dependency initialization failure: ${service}" >&2
+            ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
             return 1
           }
           wait_completed "RustFS bucket initialization" "buzz-rustfs-init"
@@ -444,7 +447,8 @@ jobs:
               break
             fi
             if [ "$attempt" -eq 3 ]; then
-              echo "docker compose up failed after 3 attempts" >&2
+              echo "::error::dependency image/startup failure: docker compose up failed after 3 attempts" >&2
+              ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
               exit 1
             fi
             echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2
@@ -463,7 +467,8 @@ jobs:
               fi
               sleep 2
             done
-            docker logs "${container}" || true
+            echo "::error::dependency readiness failure: ${service}" >&2
+            ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
             return 1
           }
           wait_healthy "Postgres" "buzz-postgres"
@@ -485,7 +490,8 @@ jobs:
               fi
               sleep 2
             done
-            docker logs "${container}" || true
+            echo "::error::dependency initialization failure: ${service}" >&2
+            ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
             return 1
           }
           wait_completed "RustFS bucket initialization" "buzz-rustfs-init"
