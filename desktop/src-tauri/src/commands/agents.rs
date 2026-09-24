@@ -708,7 +708,9 @@ pub async fn create_managed_agent(
                 })
                 .transpose()?
                 .unwrap_or_default(),
-            managed_project_ids: input.managed_project_ids.clone().unwrap_or_default(),
+            managed_project_ids: crate::managed_agents::normalize_managed_project_ids(
+                input.managed_project_ids.clone().unwrap_or_default(),
+            )?,
             collab_helper_root: input
                 .collab_helper_root
                 .as_deref()

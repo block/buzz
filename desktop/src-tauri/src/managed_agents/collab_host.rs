@@ -38,19 +38,50 @@ pub(crate) fn normalize_collaboration_role(value: &str) -> Result<String, String
     }
 }
 
-/// Fail closed when a role is set without a unique project and helper root.
+/// Fail closed when a role is set without at least one valid project and helper root.
+pub(crate) fn is_project_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    let first = bytes[0];
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+pub(crate) fn normalize_managed_project_ids(ids: Vec<String>) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for raw in ids {
+        let id = raw.trim().to_string();
+        if id.is_empty() {
+            return Err("managed project id cannot be empty".into());
+        }
+        if !is_project_id(&id) {
+            return Err(
+                "managed project id must be 1–64 lowercase letters, digits, or hyphens".into(),
+            );
+        }
+        if out.iter().any(|existing| existing == &id) {
+            return Err("duplicate managed project id".into());
+        }
+        out.push(id);
+    }
+    Ok(out)
+}
+
 pub(crate) fn validate_collaboration_binding(record: &ManagedAgentRecord) -> Result<(), String> {
     let role = record.collaboration_role.trim();
     if role.is_empty() {
         return Ok(());
     }
     let _ = normalize_collaboration_role(role)?;
-    if record.managed_project_ids.len() != 1
-        || record.managed_project_ids[0].trim().is_empty()
-    {
-        return Err(
-            "collaboration role requires exactly one managed project id".into(),
-        );
+    let ids = normalize_managed_project_ids(record.managed_project_ids.clone())?;
+    if ids.is_empty() {
+        return Err("collaboration role requires at least one managed project id".into());
     }
     if record.collab_helper_root.trim().is_empty() {
         return Err("collaboration role requires collab_helper_root".into());
@@ -111,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn main_role_requires_unique_project_and_helper() {
+    fn main_role_requires_projects_and_helper() {
         let mut record = record();
         record.collaboration_role = "main".into();
         assert!(validate_collaboration_binding(&record).is_err());
@@ -120,6 +151,12 @@ mod tests {
         record.collab_helper_root = "/tmp/helper".into();
         assert!(validate_collaboration_binding(&record).is_ok());
         record.managed_project_ids = vec!["a".into(), "b".into()];
+        assert!(validate_collaboration_binding(&record).is_ok());
+        record.managed_project_ids = vec!["demo".into(), "demo".into()];
+        assert!(validate_collaboration_binding(&record).is_err());
+        record.managed_project_ids = vec!["Just-Start".into()];
+        assert!(validate_collaboration_binding(&record).is_err());
+        record.managed_project_ids = Vec::new();
         assert!(validate_collaboration_binding(&record).is_err());
     }
 

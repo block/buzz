@@ -111,7 +111,8 @@ pub(crate) use session_policy::{
     AcpSessionPolicy, ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR,
 };
 pub(crate) use collab_host::{
-    apply_collab_host_env, normalize_collaboration_role, validate_collaboration_binding,
+    apply_collab_host_env, normalize_collaboration_role, normalize_managed_project_ids,
+    validate_collaboration_binding,
 };
 pub use storage::*;
 pub use teams::*;

@@ -272,8 +272,8 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_COLLAB_ROLE", default_value = "")]
     pub collab_role: String,
 
-    /// Comma-separated project IDs this agent may coordinate. A unique ID is
-    /// required before a turn envelope can be issued.
+    /// Comma-separated project IDs this agent may coordinate. At least one ID
+    /// is required; the current envelope still carries the thread-selected ID.
     #[arg(long, env = "BUZZ_COLLAB_PROJECT_IDS", default_value = "")]
     pub collab_project_ids: String,
 
@@ -285,7 +285,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_COLLAB_MCP_COMMAND", default_value = "")]
     pub collab_mcp_command: String,
 
-    #[arg(long, env = "BUZZ_COLLAB_AUTHORITY", default_value = "buzz-desktop")]
+    #[arg(
+        long,
+        env = "BUZZ_COLLAB_AUTHORITY",
+        default_value = "buzz-desktop",
+        hide_env_values = true
+    )]
     pub collab_authority: String,
 
     /// Idle timeout: max seconds of silence before killing a turn.
@@ -1578,6 +1583,7 @@ fn collab_host_config_from_args(args: &CliArgs) -> crate::collab_context::Collab
         authority: args.collab_authority.clone(),
         hmac_key: generate_hmac_key(),
         turn_path: turn_dir.join("turn.json"),
+        ..CollabHostConfig::default()
     }
 }
 

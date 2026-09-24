@@ -654,6 +654,10 @@ pub enum PromptOutcome {
     CancelDrainTimeout(Duration),
 }
 
+/// Internal agent-error code for an event rejected by the collaboration
+/// project/thread boundary before any model prompt is sent.
+pub(crate) const COLLAB_REJECTION_ERROR_CODE: i64 = -32098;
+
 /// Immutable config subset shared (via `Arc`) by all spawned prompt tasks.
 ///
 /// Built once from `Config` at startup. Avoids cloning the full config
@@ -2660,6 +2664,10 @@ pub async fn run_prompt_task(
             .as_ref()
             .map(|item| item.events.as_slice())
             .unwrap_or(&[]),
+        batch
+            .as_ref()
+            .map(|item| item.cancelled_events.as_slice())
+            .unwrap_or(&[]),
     ) {
         tracing::warn!(
             %error,
@@ -2670,7 +2678,10 @@ pub async fn run_prompt_task(
             &turn_id,
             agent,
             source,
-            PromptOutcome::Error(AcpError::Protocol(error)),
+            PromptOutcome::Error(AcpError::AgentError {
+                code: COLLAB_REJECTION_ERROR_CODE,
+                message: error,
+            }),
             requeue_batch_if_queue(&ctx, batch),
         );
         return;

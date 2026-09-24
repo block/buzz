@@ -323,11 +323,8 @@ pub async fn update_managed_agent(
                 crate::managed_agents::normalize_collaboration_role(&role)?;
         }
         if let Some(project_ids) = input.managed_project_ids {
-            record.managed_project_ids = project_ids
-                .into_iter()
-                .map(|id| id.trim().to_string())
-                .filter(|id| !id.is_empty())
-                .collect();
+            record.managed_project_ids =
+                crate::managed_agents::normalize_managed_project_ids(project_ids)?;
         }
         if let Some(helper_root) = input.collab_helper_root {
             record.collab_helper_root = helper_root.trim().to_string();

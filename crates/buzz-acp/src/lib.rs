@@ -3555,7 +3555,10 @@ async fn tokio_main() -> Result<()> {
                             // event data through the optional steer/interrupt
                             // decision.
                             queued.steer_or_interrupt(
-                                config.multiple_event_handling,
+                                effective_event_handling(
+                                    config.multiple_event_handling,
+                                    ctx.collab.is_active(),
+                                ),
                                 owner_cache.get(),
                                 &mut pool,
                                 &mut queue,
@@ -4201,6 +4204,20 @@ fn mode_gate_signal(
     }
 }
 
+/// Collaboration capabilities bind one exact event. Keep later events queued
+/// for their own signed turn instead of steering or cancel-merging them into
+/// the capability that belongs to the in-flight event.
+fn effective_event_handling(
+    configured: MultipleEventHandling,
+    collaboration_active: bool,
+) -> MultipleEventHandling {
+    if collaboration_active {
+        MultipleEventHandling::Queue
+    } else {
+        configured
+    }
+}
+
 /// Send a control signal to the in-flight task for `channel_id`.
 ///
 /// Channel-targeted: refuses channels with multiple session scopes. Used only
@@ -4387,6 +4404,20 @@ fn try_native_steer(
 
 // ── dispatch_pending ──────────────────────────────────────────────────────────
 
+/// Select the next production prompt batch. Collaboration turns are strictly
+/// one event wide because the host envelope binds a single event, user, root,
+/// and statement. The queue retains any remainder for subsequent turns.
+fn flush_next_prompt_batch(
+    queue: &mut EventQueue,
+    collaboration_active: bool,
+) -> Option<FlushBatch> {
+    if collaboration_active {
+        queue.flush_next_with_limit(1)
+    } else {
+        queue.flush_next()
+    }
+}
+
 /// Flush queued work to available agents.
 fn dispatch_pending(
     pool: &mut AgentPool,
@@ -4410,7 +4441,7 @@ fn dispatch_pending(
     // measured against the same instant.
     let now = tokio::time::Instant::now();
     loop {
-        let batch = match queue.flush_next() {
+        let batch = match flush_next_prompt_batch(queue, ctx.collab.is_active()) {
             Some(b) => b,
             None => break,
         };
@@ -4616,6 +4647,14 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+fn is_collaboration_rejection(error: &acp::AcpError) -> bool {
+    matches!(
+        error,
+        acp::AcpError::AgentError { code, .. }
+            if *code == pool::COLLAB_REJECTION_ERROR_CODE
+    )
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -4774,6 +4813,19 @@ fn handle_prompt_result(
                     different model from the dropdown, and save your changes. Restart the agent \
                     to apply the new configuration, then re-send your request."
                     .to_string();
+                spawn_failure_notice(rest_client, &batch, content);
+            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_collaboration_rejection(e))
+            {
+                // The host rejected this signed event's project/thread context
+                // before prompting the model. Retrying cannot change the event,
+                // and would block later valid events behind the same poison
+                // message, so dead-letter it immediately.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — collaboration context rejected"
+                );
+                let content = "⚠️ I couldn't process this request because its collaboration project/thread context was rejected. Start a new top-level thread with one allowed `project_id`, or continue in the thread's already-bound project.".to_string();
                 spawn_failure_notice(rest_client, &batch, content);
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
@@ -6110,6 +6162,69 @@ mod owner_control_command_tests {
             mode_gate_signal(MultipleEventHandling::OwnerInterrupt, &owner, None).is_none(),
             "owner-interrupt must not fire when the owner is unknown"
         );
+    }
+
+    #[test]
+    fn collaboration_turns_force_queue_handling() {
+        for configured in [
+            MultipleEventHandling::Queue,
+            MultipleEventHandling::Steer,
+            MultipleEventHandling::Interrupt,
+            MultipleEventHandling::OwnerInterrupt,
+        ] {
+            assert_eq!(
+                effective_event_handling(configured, true),
+                MultipleEventHandling::Queue
+            );
+            assert_eq!(effective_event_handling(configured, false), configured);
+        }
+    }
+
+    #[test]
+    fn collaboration_prompt_batches_keep_each_event_in_its_own_turn() {
+        let channel_id = Uuid::new_v4();
+        let scope = scope::SessionScope::Conversation { channel_id };
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        for content in ["first", "second", "third"] {
+            assert!(queue.push(QueuedEvent {
+                channel_id,
+                scope: scope.clone(),
+                event: make_event(KIND_STREAM_MESSAGE, content, None),
+                received_at: std::time::Instant::now(),
+                prompt_tag: "test".into(),
+            }));
+        }
+
+        let first = flush_next_prompt_batch(&mut queue, true).expect("first collaboration turn");
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(first.events[0].event.content, "first");
+        assert_eq!(queue.queued_event_count(channel_id), 2);
+
+        queue.mark_complete(&scope);
+        let second = flush_next_prompt_batch(&mut queue, true).expect("second collaboration turn");
+        assert_eq!(second.events.len(), 1);
+        assert_eq!(second.events[0].event.content, "second");
+        assert_eq!(queue.queued_event_count(channel_id), 1);
+    }
+
+    #[test]
+    fn ordinary_prompt_batches_keep_existing_multi_event_behavior() {
+        let channel_id = Uuid::new_v4();
+        let scope = scope::SessionScope::Conversation { channel_id };
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        for content in ["first", "second"] {
+            assert!(queue.push(QueuedEvent {
+                channel_id,
+                scope: scope.clone(),
+                event: make_event(KIND_STREAM_MESSAGE, content, None),
+                received_at: std::time::Instant::now(),
+                prompt_tag: "test".into(),
+            }));
+        }
+
+        let batch = flush_next_prompt_batch(&mut queue, false).expect("ordinary turn");
+        assert_eq!(batch.events.len(), 2);
+        assert_eq!(queue.queued_event_count(channel_id), 0);
     }
 
     #[tokio::test]
@@ -11020,6 +11135,96 @@ mod error_outcome_emission_tests {
             !is_auth_error(&timeout),
             "WriteTimeout must not be classified as auth error"
         );
+    }
+
+    #[test]
+    fn collaboration_rejection_has_a_dedicated_non_transport_classification() {
+        let rejected = acp::AcpError::AgentError {
+            code: pool::COLLAB_REJECTION_ERROR_CODE,
+            message: "当前线程项目不在宿主允许名单内".to_string(),
+        };
+        assert!(is_collaboration_rejection(&rejected));
+        assert!(!is_auth_error(&rejected));
+        assert!(!is_collaboration_rejection(&acp::AcpError::Protocol(
+            "unrelated protocol error".to_string()
+        )));
+    }
+
+    #[tokio::test]
+    async fn collaboration_rejection_dead_letters_immediately_without_blocking_the_queue() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "project_id=secret")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let scope = scope::SessionScope::Conversation { channel_id };
+        let batch = FlushBatch {
+            channel_id,
+            scope: scope.clone(),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(scope.clone()),
+                turn_id: "collab-rejection-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope),
+            turn_id: "collab-rejection-turn".to_string(),
+            outcome: PromptOutcome::Error(acp::AcpError::AgentError {
+                code: pool::COLLAB_REJECTION_ERROR_CODE,
+                message: "当前线程项目不在宿主允许名单内".to_string(),
+            }),
+            batch: Some(batch),
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        assert_eq!(queue.pending_channels(), 0);
+        assert_eq!(queue.queued_event_count(channel_id), 0);
+        assert_eq!(pool.live_count(), 1, "healthy ACP worker must be returned");
     }
 
     // ── auth error dead-letter behavior ────────────────────────────────────

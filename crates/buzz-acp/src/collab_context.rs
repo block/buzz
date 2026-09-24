@@ -128,12 +128,17 @@ pub struct RecipientBinding {
 #[derive(Debug, Clone)]
 pub struct CollabHostConfig {
     pub role: CollabRole,
+    /// Allowlist. The current envelope still carries exactly one project ID,
+    /// selected from the top-level thread's first declaration.
     pub project_ids: Vec<String>,
     pub helper_root: Option<PathBuf>,
     pub mcp_command: String,
     pub authority: String,
     pub hmac_key: Vec<u8>,
     pub turn_path: PathBuf,
+    /// Bound project per NIP-10 root. Survives heartbeats; not taken from
+    /// `project_ids[0]`.
+    pub thread_projects: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Default for CollabHostConfig {
@@ -146,6 +151,7 @@ impl Default for CollabHostConfig {
             authority: "buzz-desktop".into(),
             hmac_key: vec![0; 32],
             turn_path: PathBuf::new(),
+            thread_projects: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -153,14 +159,95 @@ impl Default for CollabHostConfig {
 impl CollabHostConfig {
     pub fn is_active(&self) -> bool {
         !self.role.is_unset()
-            && self.project_ids.len() == 1
+            && !self.project_ids.is_empty()
             && self.hmac_key.len() >= 32
             && !self.turn_path.as_os_str().is_empty()
             && self.helper_root.is_some()
     }
+}
 
-    pub fn project_id(&self) -> Option<&str> {
-        (self.project_ids.len() == 1).then_some(self.project_ids[0].as_str())
+pub fn is_project_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    let first = bytes[0];
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+/// Dedicated line slots: `project_id=id`, `project_id:id`, or `project_id：id`.
+pub fn declared_project_ids(statement: &str) -> Result<Vec<String>, String> {
+    let mut ids = Vec::new();
+    for line in statement.lines() {
+        let line = line.trim();
+        if line.is_empty() || !line.to_ascii_lowercase().starts_with("project_id") {
+            continue;
+        }
+        let rest = line["project_id".len()..].trim_start();
+        let Some(sep) = rest.chars().next() else {
+            return Err("project_id 槽位不完整".into());
+        };
+        if sep != '=' && sep != ':' && sep != '：' {
+            return Err("project_id 槽位不完整".into());
+        }
+        let id = rest[sep.len_utf8()..].trim();
+        if !is_project_id(id) {
+            return Err("项目 ID 格式无效".into());
+        }
+        if !ids.iter().any(|existing| existing == id) {
+            ids.push(id.to_string());
+        }
+    }
+    if ids.len() > 1 {
+        return Err("一条消息不能声明多个项目".into());
+    }
+    Ok(ids)
+}
+
+pub fn resolve_thread_project(
+    statement: &str,
+    root_event_id: &str,
+    is_root: bool,
+    allowlist: &[String],
+    bindings: &Arc<Mutex<HashMap<String, String>>>,
+) -> Result<String, String> {
+    let declared = declared_project_ids(statement)?;
+    let declared = declared.into_iter().next();
+    let mut map = bindings
+        .lock()
+        .map_err(|_| "协作项目绑定锁损坏".to_string())?;
+    let bound = map.get(root_event_id).cloned();
+    let require_allowed = |project_id: &str| {
+        if allowlist.iter().any(|item| item == project_id) {
+            Ok(())
+        } else {
+            Err("当前线程项目不在宿主允许名单内".to_string())
+        }
+    };
+    match (declared.as_deref(), bound.as_deref(), is_root) {
+        (Some(id), Some(existing), _) if id == existing => {
+            require_allowed(id)?;
+            Ok(id.to_string())
+        }
+        (Some(_), Some(_), _) => Err("不能在同一线程切换项目".into()),
+        (Some(id), None, true) => {
+            require_allowed(id)?;
+            map.insert(root_event_id.to_string(), id.to_string());
+            Ok(id.to_string())
+        }
+        (Some(_), None, false) => {
+            Err("线程尚未绑定项目，不能从回复签发协作信封".into())
+        }
+        (None, Some(existing), _) => {
+            require_allowed(existing)?;
+            Ok(existing.to_string())
+        }
+        (None, None, _) => Err("宿主未从当前线程选定项目，不能签发协作信封".into()),
     }
 }
 
@@ -319,14 +406,21 @@ pub fn claim_from_admitted_event(
     config: &CollabHostConfig,
     agent_principal_id: &str,
 ) -> Result<TurnClaim, String> {
-    let project_id = config
-        .project_id()
-        .ok_or("宿主未绑定唯一项目，不能签发协作信封")?
-        .to_string();
     if config.role.is_unset() {
         return Err("宿主未绑定协作角色".into());
     }
+    if config.project_ids.is_empty() {
+        return Err("宿主未绑定可管理项目，不能签发协作信封".into());
+    }
     let tags = parse_thread_tags(event);
+    let root = root_event_id(event);
+    let project_id = resolve_thread_project(
+        &event.content,
+        &root,
+        root == event.id.to_hex(),
+        &config.project_ids,
+        &config.thread_projects,
+    )?;
     let recipient = select_recipient(
         &tags.mentioned_pubkeys,
         agent_principal_id,
@@ -348,7 +442,7 @@ pub fn claim_from_admitted_event(
             })
             .unwrap_or_else(|| event.id.to_hex()),
         session_id: session_id.to_string(),
-        root_event_id: root_event_id(event),
+        root_event_id: root,
         event_id: event.id.to_hex(),
         user_principal_id: event.pubkey.to_hex(),
         event_time: created.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
@@ -508,8 +602,8 @@ pub fn clear_turn(path: &Path) -> Result<(), String> {
 }
 
 /// Sign and publish the current channel turn, or drop stale context on heartbeat.
-/// Active collaboration with no unique project / helper refuses rather than
-/// leaving a previous event's confirmation capability in place.
+/// Active collaboration that cannot select a thread project refuses and clears
+/// the previous turn rather than leaving a confirmation capability in place.
 pub fn publish_prompt_turn(
     broker: &CollabContextBroker,
     config: &CollabHostConfig,
@@ -517,6 +611,7 @@ pub fn publish_prompt_turn(
     session_id: &str,
     channel_id: Option<&str>,
     events: &[BatchEvent],
+    cancelled_events: &[BatchEvent],
 ) -> Result<(), String> {
     if !config.is_active() {
         return Ok(());
@@ -525,13 +620,21 @@ pub fn publish_prompt_turn(
         broker.clear(agent_principal, session_id);
         return clear_turn(&config.turn_path);
     };
-    let envelope = envelope_for_batch(
+    let envelope = match envelope_for_batch(
         config,
         agent_principal,
         session_id,
         channel_id,
         events,
-    )?;
+        cancelled_events,
+    ) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            broker.clear(agent_principal, session_id);
+            let _ = clear_turn(&config.turn_path);
+            return Err(error);
+        }
+    };
     publish_turn(broker, config, agent_principal, session_id, envelope)
 }
 
@@ -541,9 +644,13 @@ pub fn envelope_for_batch(
     session_id: &str,
     channel_id: &str,
     events: &[BatchEvent],
+    cancelled_events: &[BatchEvent],
 ) -> Result<SignedEnvelope, String> {
+    if events.len() != 1 || !cancelled_events.is_empty() {
+        return Err("协作 turn 必须且只能包含一条已接纳事件".into());
+    }
     let event = events
-        .last()
+        .first()
         .map(|item| &item.event)
         .ok_or("当前批次没有已接纳事件")?;
     let claim = claim_from_batch_event(event, channel_id, session_id, config, agent_principal)?;
@@ -694,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_unique_project_refuses_to_issue() {
+    fn allowlist_without_thread_declaration_refuses_to_issue() {
         let config = CollabHostConfig {
             role: CollabRole::Main,
             project_ids: vec!["a".into(), "b".into()],
@@ -710,13 +817,208 @@ mod tests {
             &event.pubkey.to_hex(),
         )
         .unwrap_err();
-        assert!(error.contains("唯一项目"));
+        assert!(error.contains("选定项目"), "{error}");
+    }
+
+    #[test]
+    fn thread_declaration_selects_allowlisted_project() {
+        let config = CollabHostConfig {
+            role: CollabRole::Main,
+            project_ids: vec!["demo".into(), "just-start".into()],
+            hmac_key: KEY.to_vec(),
+            ..CollabHostConfig::default()
+        };
+        let event = signed_text_note("@first-mate\nproject_id=just-start\n检查", vec![]);
+        let claim = claim_from_batch_event(
+            &event,
+            &Uuid::new_v4().to_string(),
+            "session-1",
+            &config,
+            &event.pubkey.to_hex(),
+        )
+        .expect("thread project");
+        assert_eq!(claim.project_id, "just-start");
+        assert_ne!(claim.project_id, config.project_ids[0]);
+    }
+
+    #[test]
+    fn first_allowlist_item_is_not_used_without_declaration() {
+        let config = CollabHostConfig {
+            role: CollabRole::Main,
+            project_ids: vec!["first".into(), "second".into()],
+            hmac_key: KEY.to_vec(),
+            ..CollabHostConfig::default()
+        };
+        let event = signed_text_note("no slot here", vec![]);
+        assert!(claim_from_batch_event(
+            &event,
+            "channel-1",
+            "session-1",
+            &config,
+            &event.pubkey.to_hex(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn out_of_allowlist_and_multiple_slots_are_rejected() {
+        let config = CollabHostConfig {
+            role: CollabRole::Main,
+            project_ids: vec!["demo".into(), "other".into()],
+            hmac_key: KEY.to_vec(),
+            ..CollabHostConfig::default()
+        };
+        let outside = signed_text_note("project_id=secret", vec![]);
+        let outside_error = claim_from_batch_event(
+            &outside,
+            "channel-1",
+            "session-1",
+            &config,
+            &outside.pubkey.to_hex(),
+        )
+        .unwrap_err();
+        assert!(outside_error.contains("允许名单"), "{outside_error}");
+        let many = signed_text_note("project_id=demo\nproject_id=other", vec![]);
+        let many_error = claim_from_batch_event(
+            &many,
+            "channel-1",
+            "session-1",
+            &config,
+            &many.pubkey.to_hex(),
+        )
+        .unwrap_err();
+        assert!(many_error.contains("多个项目"), "{many_error}");
+    }
+
+    #[test]
+    fn reply_keeps_root_binding_and_rejects_switch() {
+        let config = CollabHostConfig {
+            role: CollabRole::Main,
+            project_ids: vec!["demo".into(), "other".into()],
+            hmac_key: KEY.to_vec(),
+            ..CollabHostConfig::default()
+        };
+        let root = signed_text_note("project_id=demo\nstart", vec![]);
+        claim_from_batch_event(
+            &root,
+            "channel-1",
+            "session-1",
+            &config,
+            &root.pubkey.to_hex(),
+        )
+        .expect("bind root");
+        let reply_tags = vec![
+            Tag::parse(["e", &root.id.to_hex(), "", "root"]).expect("root tag"),
+            Tag::parse(["e", &root.id.to_hex(), "", "reply"]).expect("reply tag"),
+        ];
+        let same = signed_text_note("continue without repeating", reply_tags.clone());
+        let claim = claim_from_batch_event(
+            &same,
+            "channel-1",
+            "session-1",
+            &config,
+            &same.pubkey.to_hex(),
+        )
+        .expect("reuse binding");
+        assert_eq!(claim.project_id, "demo");
+        assert_eq!(claim.root_event_id, root.id.to_hex());
+        let switched = signed_text_note("project_id=other", reply_tags);
+        let error = claim_from_batch_event(
+            &switched,
+            "channel-1",
+            "session-1",
+            &config,
+            &switched.pubkey.to_hex(),
+        )
+        .unwrap_err();
+        assert!(error.contains("切换项目"), "{error}");
+    }
+
+    #[test]
+    fn issue_failure_clears_previous_turn() {
+        let dir = std::env::temp_dir().join(format!("buzz-collab-clear-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let turn_path = dir.join("turn.json");
+        let config = CollabHostConfig {
+            role: CollabRole::Main,
+            project_ids: vec!["demo".into(), "other".into()],
+            helper_root: Some(PathBuf::from("/tmp/helper")),
+            hmac_key: KEY.to_vec(),
+            turn_path: turn_path.clone(),
+            ..CollabHostConfig::default()
+        };
+        let broker = CollabContextBroker::new();
+        let first = signed_text_note("project_id=demo\nfirst", vec![]);
+        let agent = first.pubkey.to_hex();
+        publish_prompt_turn(
+            &broker,
+            &config,
+            &agent,
+            "session-1",
+            Some("channel-1"),
+            &[batch_event(first)],
+            &[],
+        )
+        .unwrap();
+        assert!(turn_path.exists());
+        let bad = signed_text_note("project_id=secret", vec![]);
+        let error = publish_prompt_turn(
+            &broker,
+            &config,
+            &agent,
+            "session-1",
+            Some("channel-1"),
+            &[batch_event(bad)],
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.contains("允许名单"), "{error}");
+        assert!(broker.get(&agent, "session-1").is_none());
+        assert!(!turn_path.exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn shell_env_must_not_carry_hmac_key() {
         assert_eq!(HMAC_KEY_ENV, "BUZZ_COLLAB_HMAC_KEY");
         assert_ne!(HMAC_KEY_ENV, "BUZZ_PRIVATE_KEY");
+    }
+
+    #[test]
+    fn mixed_event_batch_is_rejected_before_the_last_event_can_authorize_it() {
+        let config = active_config(PathBuf::from("/tmp/unused-turn.json"));
+        let agent = Keys::generate().public_key().to_hex();
+        let rejected = signed_text_note("project_id=secret\nreject me", vec![]);
+        let allowed = signed_text_note("project_id=demo\nallow me", vec![]);
+        let error = envelope_for_batch(
+            &config,
+            &agent,
+            "session-1",
+            "channel-1",
+            &[batch_event(rejected), batch_event(allowed)],
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.contains("只能包含一条"), "{error}");
+        assert!(config.thread_projects.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelled_event_cannot_share_a_collaboration_turn() {
+        let config = active_config(PathBuf::from("/tmp/unused-turn.json"));
+        let agent = Keys::generate().public_key().to_hex();
+        let current = signed_text_note("project_id=demo\ncurrent", vec![]);
+        let cancelled = signed_text_note("project_id=demo\nprevious", vec![]);
+        let error = envelope_for_batch(
+            &config,
+            &agent,
+            "session-1",
+            "channel-1",
+            &[batch_event(current)],
+            &[batch_event(cancelled)],
+        )
+        .unwrap_err();
+        assert!(error.contains("只能包含一条"), "{error}");
     }
 
     fn batch_event(event: Event) -> BatchEvent {
@@ -745,7 +1047,7 @@ mod tests {
         let turn_path = dir.join("turn.json");
         let config = active_config(turn_path.clone());
         let broker = CollabContextBroker::new();
-        let first = signed_text_note("first", vec![]);
+        let first = signed_text_note("project_id=demo\nfirst", vec![]);
         let agent = first.pubkey.to_hex();
         publish_prompt_turn(
             &broker,
@@ -754,10 +1056,11 @@ mod tests {
             "session-1",
             Some("channel-1"),
             &[batch_event(first.clone())],
+            &[],
         )
         .unwrap();
         let first_id = broker.get(&agent, "session-1").unwrap().payload["event_id"].clone();
-        let second = signed_text_note("second", vec![]);
+        let second = signed_text_note("project_id=demo\nsecond", vec![]);
         publish_prompt_turn(
             &broker,
             &config,
@@ -765,6 +1068,7 @@ mod tests {
             "session-1",
             Some("channel-1"),
             &[batch_event(second.clone())],
+            &[],
         )
         .unwrap();
         let updated = broker.get(&agent, "session-1").unwrap();
@@ -773,7 +1077,7 @@ mod tests {
         let on_disk: SignedEnvelope =
             serde_json::from_slice(&std::fs::read(&turn_path).unwrap()).unwrap();
         assert_eq!(on_disk.payload["event_id"], json!(second.id.to_hex()));
-        publish_prompt_turn(&broker, &config, &agent, "session-1", None, &[]).unwrap();
+        publish_prompt_turn(&broker, &config, &agent, "session-1", None, &[], &[]).unwrap();
         assert!(broker.get(&agent, "session-1").is_none());
         assert!(!turn_path.exists());
         let _ = std::fs::remove_dir_all(dir);

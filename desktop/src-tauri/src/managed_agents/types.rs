@@ -496,8 +496,8 @@ pub struct ManagedAgentRecord {
     /// from persona name or prompt.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub collaboration_role: String,
-    /// Project IDs this agent may coordinate. A unique ID is required before
-    /// ACP will issue a turn envelope.
+    /// Project IDs this agent may coordinate. At least one ID is required;
+    /// ACP still issues each turn for a single thread-selected project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_project_ids: Vec<String>,
     /// Fusion-layer helper root containing `scripts/collab_invoke.py`.

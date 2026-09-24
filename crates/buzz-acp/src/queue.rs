@@ -370,6 +370,17 @@ impl EventQueue {
     /// across channels), drains ALL events for that channel into a single batch,
     /// inserts into `in_flight_channels`, and returns the batch.
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
+        self.flush_next_with_limit(MAX_BATCH_EVENTS)
+    }
+
+    /// Flush the next batch while capping how many newly queued events enter it.
+    ///
+    /// Collaboration turns use a limit of one because their host-signed
+    /// capability binds one exact user event. The remaining events stay queued
+    /// in their original order for later turns. Other callers retain the
+    /// historical [`MAX_BATCH_EVENTS`] behavior through [`flush_next`](Self::flush_next).
+    pub(crate) fn flush_next_with_limit(&mut self, max_events: usize) -> Option<FlushBatch> {
+        let max_events = max_events.clamp(1, MAX_BATCH_EVENTS);
         let now = Instant::now();
 
         // Auto-expire any stuck in-flight entries that missed mark_complete.
@@ -448,9 +459,9 @@ impl EventQueue {
         };
         let channel_id = scope.channel_id();
 
-        // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
+        // Drain up to the caller's bounded limit; leave any remainder in the queue.
         let queue = self.queues.entry(scope.clone()).or_default();
-        let drain_count = MAX_BATCH_EVENTS.min(queue.len());
+        let drain_count = max_events.min(queue.len());
         let mut events: Vec<BatchEvent> = queue
             .drain(..drain_count)
             .map(|qe| BatchEvent {
