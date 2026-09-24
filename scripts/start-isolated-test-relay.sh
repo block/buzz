@@ -84,6 +84,29 @@ wait_pg() {
 }
 wait_pg
 
+wait_rustfs_init() {
+  local container status exit_code
+  for _ in $(seq 1 60); do
+    container="$(docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" ps -q rustfs-init 2>/dev/null || true)"
+    status="$(docker inspect --format='{{.State.Status}}' "${container}" 2>/dev/null || true)"
+    if [[ "${status}" == "exited" ]]; then
+      exit_code="$(docker inspect --format='{{.State.ExitCode}}' "${container}" 2>/dev/null || true)"
+      if [[ "${exit_code}" == "0" ]]; then
+        ok "RustFS bucket initialization completed"
+        return 0
+      fi
+      err "RustFS bucket initialization failed with exit code ${exit_code}"
+      docker logs "${container}" || true
+      return 1
+    fi
+    sleep 2
+  done
+  err "RustFS bucket initialization did not complete"
+  docker logs "${container}" || true
+  return 1
+}
+wait_rustfs_init
+
 # ── Schema + partitions ──────────────────────────────────────────────────────
 export PGPASSWORD=buzz_dev
 psql_h() { docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" exec -T postgres \

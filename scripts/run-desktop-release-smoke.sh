@@ -79,6 +79,22 @@ for container in buzz-postgres buzz-redis buzz-rustfs; do
     exit 1
   }
 done
+for _ in $(seq 1 60); do
+  init_status="$(docker inspect --format='{{.State.Status}}' buzz-rustfs-init 2>/dev/null || true)"
+  if [[ "${init_status}" == "exited" ]]; then
+    init_exit_code="$(docker inspect --format='{{.State.ExitCode}}' buzz-rustfs-init 2>/dev/null || true)"
+    if [[ "${init_exit_code}" == "0" ]]; then
+      break
+    fi
+    docker logs buzz-rustfs-init || true
+    exit 1
+  fi
+  sleep 1
+done
+[[ "$(docker inspect --format='{{.State.Status}}' buzz-rustfs-init 2>/dev/null || true)" == "exited" ]] || {
+  docker logs buzz-rustfs-init || true
+  exit 1
+}
 phase services "${phase_start}"
 
 phase_start="$(date +%s)"

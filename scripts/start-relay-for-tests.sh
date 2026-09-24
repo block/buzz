@@ -82,9 +82,33 @@ wait_healthy() {
   return 1
 }
 
+wait_completed() {
+  local service="$1"
+  local container="$2"
+  log "Waiting for ${service} to complete..."
+  for attempt in $(seq 1 60); do
+    status=$(docker inspect --format='{{.State.Status}}' "${container}" 2>/dev/null || echo "not_found")
+    if [ "${status}" = "exited" ]; then
+      exit_code=$(docker inspect --format='{{.State.ExitCode}}' "${container}" 2>/dev/null || echo "unknown")
+      if [ "${exit_code}" = "0" ]; then
+        ok "${service} completed"
+        return 0
+      fi
+      err "${service} failed with exit code ${exit_code}"
+      docker logs "${container}" || true
+      return 1
+    fi
+    sleep 2
+  done
+  err "${service} did not complete within 120s"
+  docker logs "${container}" || true
+  return 1
+}
+
 wait_healthy "Postgres" "buzz-postgres"
 wait_healthy "Redis" "buzz-redis"
 wait_healthy "RustFS" "buzz-rustfs"
+wait_completed "RustFS bucket initialization" "buzz-rustfs-init"
 
 # ── Apply database schema ────────────────────────────────────────────────────
 
