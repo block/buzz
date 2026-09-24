@@ -16,6 +16,7 @@
 //! evaluations could be in flight at once.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -33,6 +34,13 @@ const DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
 /// enough that an operator opening `/_status` during an incident reads
 /// something current. Documented in `deploy/charts/buzz/README.md`.
 pub const DEPENDENCY_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The completion-epoch publisher always refreshes at least this frequently.
+///
+/// Main computes a cadence from the configured gauge idle timeout and caps it
+/// at this value so the completion timestamp series survives idle eviction
+/// without adding high-frequency noise.
+const DEPENDENCY_SAMPLE_COMPLETION_REPUBLISH_MAX_INTERVAL: Duration = DEPENDENCY_SAMPLE_INTERVAL;
 
 /// Age past which a cached report is reported stale rather than current.
 ///
@@ -54,8 +62,7 @@ pub(crate) const READINESS_REASON_LABELS: [&str; 2] = ["ready", "shutting_down"]
 /// - 2 probe reasons
 /// - 11 valid dependency/outcome pairs (Postgres 5, Redis 3, catalog 3)
 /// - 4 histograms x (15 configured buckets + `+Inf` + count + sum) = 72
-/// - 1 overall readiness gauge
-/// - 1 sample-completion timestamp counter
+/// - 2 readiness gauges (overall lifecycle + completion epoch)
 #[cfg(test)]
 pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 2 + 11 + (4 * 18) + 1 + 1;
 
@@ -432,6 +439,22 @@ pub(crate) enum DependencySnapshot {
     },
 }
 
+/// Republish cadence for the completion-epoch gauge.
+///
+/// The configured gauge idle timeout comes from `main.rs`; this returns a
+/// bounded cadence that is strictly below that timeout and never slower than
+/// the dependency sampler itself.
+pub fn dependency_sample_completion_republish_interval(gauge_idle_timeout_secs: u64) -> Duration {
+    let idle_timeout_secs = gauge_idle_timeout_secs.max(1);
+    let refresh_secs = idle_timeout_secs.saturating_div(3).max(1);
+    let strict_upper_bound_secs = idle_timeout_secs.saturating_sub(1).max(1);
+    Duration::from_secs(
+        refresh_secs
+            .min(strict_upper_bound_secs)
+            .min(DEPENDENCY_SAMPLE_COMPLETION_REPUBLISH_MAX_INTERVAL.as_secs()),
+    )
+}
+
 /// The per-pod owner of shared-dependency evaluation.
 ///
 /// [`run_dependency_sampler`] is the only caller of [`Self::sample`], so at
@@ -440,6 +463,8 @@ pub(crate) enum DependencySnapshot {
 pub(crate) struct DependencyDiagnostics {
     evaluator: Arc<dyn DependencyEvaluator>,
     latest: Mutex<Option<DependencySample>>,
+    sample_completion_epoch_seconds: AtomicU64,
+    sample_completion_written: AtomicBool,
 }
 
 impl Default for DependencyDiagnostics {
@@ -453,6 +478,8 @@ impl DependencyDiagnostics {
         Self {
             evaluator,
             latest: Mutex::new(None),
+            sample_completion_epoch_seconds: AtomicU64::new(0),
+            sample_completion_written: AtomicBool::new(false),
         }
     }
 
@@ -470,7 +497,7 @@ impl DependencyDiagnostics {
             observed_at: Instant::now(),
         };
         *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = Some(sample);
-        record_dependency_sample_completion(SystemTime::now());
+        self.record_dependency_sample_completion(SystemTime::now());
     }
 
     /// The latest completed evaluation with its age. Starts no dependency work.
@@ -488,6 +515,27 @@ impl DependencyDiagnostics {
             }
         }
     }
+
+    fn record_dependency_sample_completion(&self, completed_at: SystemTime) {
+        let epoch_seconds = dependency_sample_completion_epoch_seconds(completed_at);
+        self.sample_completion_epoch_seconds
+            .store(epoch_seconds, Ordering::Release);
+        self.sample_completion_written
+            .store(true, Ordering::Release);
+        publish_dependency_sample_completion_metric(epoch_seconds);
+    }
+
+    fn latest_sample_completion_epoch_seconds(&self) -> Option<u64> {
+        self.sample_completion_written
+            .load(Ordering::Acquire)
+            .then(|| self.sample_completion_epoch_seconds.load(Ordering::Acquire))
+    }
+
+    fn republish_dependency_sample_completion(&self) {
+        if let Some(epoch_seconds) = self.latest_sample_completion_epoch_seconds() {
+            publish_dependency_sample_completion_metric(epoch_seconds);
+        }
+    }
 }
 
 /// Runs the per-pod dependency sampling loop until `cancel` fires.
@@ -499,7 +547,15 @@ impl DependencyDiagnostics {
 /// already slow. The first tick fires immediately, so the not-yet-sampled
 /// window is one evaluation long.
 pub async fn run_dependency_sampler(state: Arc<AppState>, cancel: CancellationToken) {
-    let mut interval = tokio::time::interval(DEPENDENCY_SAMPLE_INTERVAL);
+    run_dependency_sampler_with_interval(state, cancel, DEPENDENCY_SAMPLE_INTERVAL).await;
+}
+
+async fn run_dependency_sampler_with_interval(
+    state: Arc<AppState>,
+    cancel: CancellationToken,
+    sample_interval: Duration,
+) {
+    let mut interval = tokio::time::interval(sample_interval.max(Duration::from_millis(1)));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -511,6 +567,37 @@ pub async fn run_dependency_sampler(state: Arc<AppState>, cancel: CancellationTo
                     .sample(&state.db, &state.redis_pool)
                     .await;
             }
+        }
+    }
+}
+
+/// Re-emits the latest completion epoch so the gauge survives recorder idle
+/// eviction even when no newer dependency sample completes.
+pub async fn run_dependency_sample_completion_publisher(
+    state: Arc<AppState>,
+    republish_interval: Duration,
+    cancel: CancellationToken,
+) {
+    run_dependency_sample_completion_publisher_for_diagnostics(
+        Arc::clone(&state.dependency_diagnostics),
+        republish_interval,
+        cancel,
+    )
+    .await;
+}
+
+async fn run_dependency_sample_completion_publisher_for_diagnostics(
+    diagnostics: Arc<DependencyDiagnostics>,
+    republish_interval: Duration,
+    cancel: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(republish_interval.max(Duration::from_millis(1)));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => diagnostics.republish_dependency_sample_completion(),
         }
     }
 }
@@ -546,19 +633,22 @@ fn record_dependency_report(report: &DependencyReport) {
 /// — and grows on its own while this pod is wedged. A gauge carrying the age
 /// needs a writer to advance it, so the one failure it most needs to expose, a
 /// sampler that stopped running, is the one that would freeze it at its last
-/// value and read as permanently fresh. Nothing but a completed sample writes
-/// this, which also keeps the `buzz_storage_sweep_age_seconds` convention that
-/// absence means "not yet sampled" rather than "fresh".
+/// value and read as permanently fresh. A completed sample is the only thing
+/// that may advance this epoch; the independent publisher only re-emits the
+/// stored value so the series survives gauge idle-eviction. This keeps the
+/// `buzz_storage_sweep_age_seconds` convention that absence means
+/// "not yet sampled" rather than "fresh".
 ///
-/// This is emitted as an absolute counter so the configured gauge-idle cleanup
-/// cannot evict it between samples while scrapes continue.
-fn record_dependency_sample_completion(completed_at: SystemTime) {
-    let epoch_seconds = completed_at
+fn dependency_sample_completion_epoch_seconds(completed_at: SystemTime) -> u64 {
+    completed_at
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    metrics::counter!("buzz_readiness_dependency_sample_completed_timestamp_seconds")
-        .absolute(epoch_seconds);
+        .as_secs()
+}
+
+fn publish_dependency_sample_completion_metric(epoch_seconds: u64) {
+    metrics::gauge!("buzz_readiness_dependency_sample_completed_timestamp_seconds")
+        .set(epoch_seconds as f64);
 }
 
 fn record_dependency_attempt(dependency: &'static str, outcome: &'static str, duration: Duration) {
@@ -710,6 +800,21 @@ mod tests {
             classify_deletion_catalog_result(Err(DbError::InvalidData("catalog".into()))),
             DeletionCatalogOutcome::OperationError
         );
+    }
+
+    #[test]
+    fn completion_timestamp_republish_interval_stays_below_idle_timeout() {
+        assert_eq!(
+            dependency_sample_completion_republish_interval(900),
+            DEPENDENCY_SAMPLE_INTERVAL,
+            "default idle timeout should republish on the sampler cadence"
+        );
+        assert_eq!(
+            dependency_sample_completion_republish_interval(15),
+            Duration::from_secs(5),
+            "the minimum configured idle timeout must still get multiple republishes"
+        );
+        assert!(dependency_sample_completion_republish_interval(15) < Duration::from_secs(15));
     }
 
     /// The readiness gauge and counter use the same immutable reason sampled by
@@ -865,22 +970,22 @@ mod tests {
 
     /// The completion timestamp written since the previous snapshot, if any.
     ///
-    /// `Snapshotter::snapshot` drains, so a window in which nothing wrote the
-    /// counter either omits the key entirely or, once registered, replays as
+    /// `Snapshotter::snapshot` drains, so a window in which nothing wrote this
+    /// metric either omits the key entirely or, once registered, replays as
     /// `0`. Zero is not a time any sample could have completed at, so folding
     /// it into `None` keeps "nobody wrote this in that window" expressible —
     /// the property a completion timestamp must have and an age cannot.
-    fn sample_completion_counter(snapshot: &Snapshot) -> Option<u64> {
+    fn sample_completion_metric_write(snapshot: &Snapshot) -> Option<u64> {
         exact_metric(
             snapshot,
             "buzz_readiness_dependency_sample_completed_timestamp_seconds",
             &[],
         )
         .map(|value| {
-            let DebugValue::Counter(value) = value else {
-                panic!("the sample completion timestamp must be a counter");
+            let DebugValue::Gauge(value) = value else {
+                panic!("the sample completion timestamp must be a gauge");
             };
-            *value
+            value.into_inner() as u64
         })
         .filter(|written| *written != 0)
     }
@@ -900,6 +1005,38 @@ mod tests {
         })
     }
 
+    fn sample_completion_metric_type_from_scrape(scrape: &str) -> Option<&str> {
+        scrape.lines().find_map(|line| {
+            line.strip_prefix(
+                "# TYPE buzz_readiness_dependency_sample_completed_timestamp_seconds ",
+            )
+        })
+    }
+
+    /// Minimal model of Datadog OpenMetrics v2 with `send_monotonic_counter:true`.
+    ///
+    /// Gauge values are forwarded as-is. Counter values become per-scrape deltas
+    /// (`monotonic_count` / `.count`), so the exported sample itself is no
+    /// longer available to monitor queries.
+    fn datadog_openmetrics_v2_completion_epoch(
+        scrape: &str,
+        previous_counter_raw: &mut Option<u64>,
+    ) -> Option<u64> {
+        let raw = sample_completion_metric_value_from_scrape(scrape)?;
+        match sample_completion_metric_type_from_scrape(scrape) {
+            Some("gauge") => Some(raw),
+            Some("counter") => {
+                let transformed = previous_counter_raw
+                    .map(|previous| raw.saturating_sub(previous))
+                    .unwrap_or(raw);
+                *previous_counter_raw = Some(raw);
+                Some(transformed)
+            }
+            Some(other) => panic!("unexpected metric type: {other}"),
+            None => panic!("missing sample completion metric type"),
+        }
+    }
+
     /// The scrape-side half of the same question. Freshness is published as the
     /// Unix time the cached report completed, written only by a completed
     /// sample, so the age belongs to the query
@@ -909,7 +1046,7 @@ mod tests {
     /// needs to expose — a sampler that stopped — is the one that would freeze
     /// it at its last value and read as permanently fresh.
     #[test]
-    fn the_completion_timestamp_counter_is_written_once_per_completed_sample() {
+    fn the_completion_timestamp_gauge_tracks_completed_samples() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .start_paused(true)
@@ -924,7 +1061,7 @@ mod tests {
                 let diagnostics = ready_diagnostics();
 
                 assert_eq!(
-                    sample_completion_counter(&snapshotter.snapshot().into_vec()),
+                    sample_completion_metric_write(&snapshotter.snapshot().into_vec()),
                     None,
                     "absence is the not-yet-sampled signal, not a fresh zero"
                 );
@@ -932,7 +1069,7 @@ mod tests {
                 let before_first = epoch_seconds_now();
                 diagnostics.sample(&db, &redis_pool).await;
                 let after_first = epoch_seconds_now();
-                let first = sample_completion_counter(&snapshotter.snapshot().into_vec())
+                let first = sample_completion_metric_write(&snapshotter.snapshot().into_vec())
                     .expect("a completed sample must publish when it completed");
                 assert!(
                     (before_first..=after_first).contains(&first),
@@ -943,9 +1080,9 @@ mod tests {
                 // Paused time: no task, timer, or aging loop can run here.
                 tokio::time::advance(DEPENDENCY_SAMPLE_STALE_AFTER + Duration::from_secs(1)).await;
                 assert_eq!(
-                    sample_completion_counter(&snapshotter.snapshot().into_vec()),
+                    sample_completion_metric_write(&snapshotter.snapshot().into_vec()),
                     None,
-                    "only a completed sample may write the counter, so the age a \
+                    "only a completed sample may write the gauge, so the age a \
                      query derives from it grows with no server-side writer"
                 );
                 assert!(
@@ -956,7 +1093,7 @@ mod tests {
                 let before_second = epoch_seconds_now();
                 diagnostics.sample(&db, &redis_pool).await;
                 let after_second = epoch_seconds_now();
-                let second = sample_completion_counter(&snapshotter.snapshot().into_vec())
+                let second = sample_completion_metric_write(&snapshotter.snapshot().into_vec())
                     .expect("the next completed sample republishes the timestamp");
                 assert!(
                     (before_second..=after_second).contains(&second) && second >= first,
@@ -971,55 +1108,140 @@ mod tests {
     }
 
     #[test]
-    fn scrape_retains_the_completion_timestamp_across_gauge_idle_timeout() {
-        let timeout = Duration::from_secs(1);
-        let (recorder, handle) =
-            crate::metrics::readiness_test_recorder_with_idle_timeout(timeout.as_secs());
+    fn openmetrics_v2_preserves_epoch_only_when_raw_prometheus_type_is_gauge() {
+        let (recorder, handle) = crate::metrics::readiness_test_recorder();
+        let mut previous_counter_raw = None;
 
         assert_eq!(
-            sample_completion_metric_value_from_scrape(&handle.render()),
+            datadog_openmetrics_v2_completion_epoch(&handle.render(), &mut previous_counter_raw),
             None,
-            "absence before the first completion is the not-yet-sampled signal"
+            "absence before the first completion remains absence after transform"
         );
 
         let first = 4_750_000_001_u64;
         metrics::with_local_recorder(&recorder, || {
-            record_dependency_sample_completion(
-                SystemTime::UNIX_EPOCH + Duration::from_secs(4_750_000_001),
-            );
+            publish_dependency_sample_completion_metric(first);
         });
+        let after_first_completion = handle.render();
         assert_eq!(
-            sample_completion_metric_value_from_scrape(&handle.render()),
+            datadog_openmetrics_v2_completion_epoch(
+                &after_first_completion,
+                &mut previous_counter_raw,
+            ),
             Some(first),
-            "a completed sample publishes its Unix completion time"
+            "after first completion the transformed value must be the completion epoch"
         );
 
-        // Keep scraping while the configured idle timeout elapses; this metric must
-        // stay queryable so freshness checks keep working during a stalled
-        // sampler.
-        std::thread::sleep(timeout + Duration::from_millis(200));
+        // Same raw scrape value after idle timeout: sampler produced no new completion.
         assert_eq!(
-            sample_completion_metric_value_from_scrape(&handle.render()),
+            datadog_openmetrics_v2_completion_epoch(
+                &after_first_completion,
+                &mut previous_counter_raw,
+            ),
             Some(first),
-            "completion time must remain exported after idle timeout"
+            "idle-timeout survival still must preserve the full epoch"
         );
-        std::thread::sleep(Duration::from_millis(100));
+
+        let second = 4_750_000_005_u64;
+        metrics::with_local_recorder(&recorder, || {
+            publish_dependency_sample_completion_metric(second);
+        });
+        let after_later_completion = handle.render();
         assert_eq!(
-            sample_completion_metric_value_from_scrape(&handle.render()),
-            Some(first),
-            "continued scrapes must not age this metric out"
+            datadog_openmetrics_v2_completion_epoch(
+                &after_later_completion,
+                &mut previous_counter_raw,
+            ),
+            Some(second),
+            "a later completion must transform to the new full epoch"
         );
+
+        // Same raw value again while only the sampler is stopped.
+        assert_eq!(
+            datadog_openmetrics_v2_completion_epoch(
+                &after_later_completion,
+                &mut previous_counter_raw,
+            ),
+            Some(second),
+            "sampler stoppage must not collapse the epoch to a delta"
+        );
+    }
+
+    async fn wait_for_sample_completion_scrape_value(
+        handle: &metrics_exporter_prometheus::PrometheusHandle,
+        predicate: impl Fn(u64) -> bool,
+    ) -> u64 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(value) = sample_completion_metric_value_from_scrape(&handle.render()) {
+                if predicate(value) {
+                    return value;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for completion timestamp scrape value"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[test]
+    fn scrape_retains_the_completion_timestamp_across_gauge_idle_timeout() {
+        let timeout = Duration::from_secs(1);
+        let republish_interval = Duration::from_millis(100);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let (recorder, handle) =
+            crate::metrics::readiness_test_recorder_with_idle_timeout(timeout.as_secs());
 
         metrics::with_local_recorder(&recorder, || {
-            record_dependency_sample_completion(
-                SystemTime::UNIX_EPOCH + Duration::from_secs(4_750_000_005),
-            );
+            runtime.block_on(async {
+                let (db, redis_pool) = unreachable_dependencies();
+                let diagnostics = Arc::new(ready_diagnostics());
+                let publisher_cancel = CancellationToken::new();
+                let publisher = tokio::spawn(
+                    run_dependency_sample_completion_publisher_for_diagnostics(
+                    diagnostics.clone(),
+                    republish_interval,
+                    publisher_cancel.clone(),
+                ));
+
+                assert_eq!(
+                    sample_completion_metric_value_from_scrape(&handle.render()),
+                    None,
+                    "absence before the first completion is the not-yet-sampled signal"
+                );
+
+                diagnostics.sample(&db, &redis_pool).await;
+                let first = wait_for_sample_completion_scrape_value(&handle, |value| value > 0).await;
+
+                tokio::time::sleep(timeout + Duration::from_millis(200)).await;
+                assert_eq!(
+                    sample_completion_metric_value_from_scrape(&handle.render()),
+                    Some(first),
+                    "publisher must keep the first completion epoch exported after idle timeout"
+                );
+
+                while epoch_seconds_now() <= first {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                diagnostics.sample(&db, &redis_pool).await;
+                let second = wait_for_sample_completion_scrape_value(&handle, |value| value > first).await;
+
+                tokio::time::sleep(timeout + Duration::from_millis(200)).await;
+                assert_eq!(
+                    sample_completion_metric_value_from_scrape(&handle.render()),
+                    Some(second),
+                    "with no further samples, publisher must keep the latest epoch while the sampler is stopped"
+                );
+
+                publisher_cancel.cancel();
+                publisher.await.expect("completion publisher task");
+            });
         });
-        assert_eq!(
-            sample_completion_metric_value_from_scrape(&handle.render()),
-            Some(4_750_000_005_u64),
-            "the next completed sample republished the newer completion epoch"
-        );
     }
 
     #[test]

@@ -834,6 +834,8 @@ pub struct AppState {
     pub(crate) dependency_diagnostics: Arc<crate::readiness::DependencyDiagnostics>,
     /// Stops only the periodic dependency sampler during graceful shutdown.
     pub dependency_sampler_cancel: CancellationToken,
+    /// Stops only the completion-epoch publisher during graceful shutdown.
+    pub dependency_completion_publisher_cancel: CancellationToken,
     /// Process start time — used by `/_status` endpoint.
     pub started_at: Instant,
     /// Shared, community-scoped NIP-98 replay prevention.
@@ -1038,6 +1040,7 @@ impl AppState {
             shutting_down: Arc::new(AtomicBool::new(false)),
             dependency_diagnostics: Arc::new(crate::readiness::DependencyDiagnostics::default()),
             dependency_sampler_cancel: CancellationToken::new(),
+            dependency_completion_publisher_cancel: CancellationToken::new(),
             started_at: Instant::now(),
             nip98_replay,
             gif_http_client,

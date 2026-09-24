@@ -174,7 +174,7 @@ listener returns the same lifecycle answer but does not change these metrics.
 | `buzz_readiness_state` | gauge | `check="overall"`; latest private probe observation, 1 ready or 0 shutting down | `/_readiness` |
 | `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` | dependency sampler |
 | `buzz_readiness_check_duration_seconds` | histogram | `check` only | dependency sampler |
-| `buzz_readiness_dependency_sample_completed_timestamp_seconds` | counter | none; Unix time the cached report completed | dependency sampler |
+| `buzz_readiness_dependency_sample_completed_timestamp_seconds` | gauge | none; Unix time the cached report completed | completion publisher |
 
 The three dependency families keep their `buzz_readiness_*` names for dashboard
 continuity, but nothing about them is request-driven any more: the 30-second
@@ -183,18 +183,19 @@ endpoint no longer produces a flat dashboard during the outage it exists to
 explain.
 
 `buzz_readiness_dependency_sample_completed_timestamp_seconds` carries **when
-the cached report completed**, in Unix seconds. The relay writes it once per
-completed sample, immediately after the cache is replaced, and nothing else
-writes it — there is no background loop that ages it. So the value stands still
-when sampling stops, and the time elapsed since it was written is whatever the
-reader computes at read time.
+the cached report completed**, in Unix seconds. The relay sampler is the only
+owner allowed to advance that epoch, and it writes it immediately after the
+cache is replaced. A separate bounded publisher re-emits the stored epoch often
+enough to survive local gauge idle-timeout; republishing never advances the
+timestamp. So the value stands still when sampling stops, and the time elapsed
+since it was written is whatever the reader computes at read time.
 
 Following the `buzz_storage_sweep_age_seconds` convention, the series is not
 emitted until the first sample completes: its absence means "not yet sampled",
 not "fresh".
 
 That is the whole server-side contract. Freshness alerting is built from this
-counter in the monitoring provider, and the monitor query, thresholds, and
+gauge in the monitoring provider, and the monitor query, thresholds, and
 per-pod tag grouping belong with the deployment's monitor configuration rather
 than in this chart — they depend on the provider's query grammar and on the
 tags its agent attaches, neither of which this repo owns.
@@ -208,7 +209,7 @@ reading a single pod is already on the `sample`, `sample_age_seconds`, and
 `sample_interval_seconds` fields of `/_status` above.
 
 The schema has a ceiling of 87 raw Prometheus series per pod: 2 probe reasons,
-11 valid dependency/outcome pairs, 72 histogram series, and 1 gauge plus 1 completion-timestamp counter. Do not
+11 valid dependency/outcome pairs, 72 histogram series, and 2 gauges (overall lifecycle + completion timestamp). Do not
 add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant, user,
 community, pubkey, header, query, or other request-controlled labels. A
 readiness probe records no dependency attempt or latency sample at all.
