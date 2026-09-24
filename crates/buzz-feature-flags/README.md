@@ -253,6 +253,14 @@ operation already receives an authoritative authenticated actor for domain
 behavior. Feature targeting must not add actor/pubkey parameters to otherwise
 actor-free DB APIs.
 
+For LaunchDarkly, the adapter context always includes kind `community` plus
+optional global kind `pubkey`. Percentage rollouts must explicitly choose a
+kind present in evaluation: rollouts must set `contextKind` to a kind present
+in evaluation (`community` or `pubkey`) when they are intended to bucket Buzz
+traffic. LaunchDarkly rollouts where configuration omits `contextKind` defaults
+to `user`; Buzz does not synthesize a `user` alias, so those rollouts bucket as
+zero and pick the first positive-weight variation.
+
 ## Guardrails
 
 - Evaluation context inputs are authoritative server-resolved values
@@ -279,6 +287,8 @@ actor-free DB APIs.
   `EnvironmentEvaluator`, or LaunchDarkly); provider precedence/stacking is out
   of scope.
 - If LaunchDarkly is used, call evaluator `close()` during process shutdown.
+  `close()` blocks the calling thread while it flushes analytics, so async
+  shutdown code should offload it to a blocking shutdown path.
 - Safety invariants must never rely on remote-flag availability.
 
 ## Build and Test Expectations

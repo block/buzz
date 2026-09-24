@@ -146,6 +146,9 @@ impl LaunchDarklyEvaluator {
     }
 
     /// Gracefully stop background tasks and flush pending analytics events.
+    ///
+    /// This call blocks the current thread until pending analytics delivery
+    /// completes. Async callers should run it in a blocking shutdown path.
     pub fn close(&self) {
         self.client.close();
     }
@@ -259,6 +262,10 @@ fn authority_has_explicit_port(authority: &Authority) -> bool {
         .unwrap_or(false)
 }
 
+/// Build the LaunchDarkly context used for evaluation.
+///
+/// The adapter always includes a `community` kind context and optionally adds a
+/// global `pubkey` kind context when an actor is present.
 fn launchdarkly_context(context: &EvaluationContext) -> Result<Context, String> {
     let mut community = ContextBuilder::new(context.community().to_string());
     community.kind(COMMUNITY_CONTEXT_KIND);
@@ -280,7 +287,7 @@ mod tests {
     use super::*;
     use buzz_core::{CommunityId, PublicKey};
     use launchdarkly_server_sdk::{
-        Config, FlagBuilder, FlagValue, Kind, NullEventProcessorBuilder, TestData,
+        Config, Flag, FlagBuilder, FlagValue, Kind, NullEventProcessorBuilder, TestData,
     };
 
     fn community(id: &str) -> CommunityId {
@@ -294,6 +301,40 @@ mod tests {
 
     fn kind(name: &'static str) -> Kind {
         Kind::try_from(name).expect("valid LaunchDarkly context kind")
+    }
+
+    fn weighted_rollout_flag(key: &str, context_kind: Option<&str>) -> Flag {
+        let context_kind_json = context_kind.map_or_else(String::new, |context_kind| {
+            format!(",\"contextKind\":\"{context_kind}\"")
+        });
+
+        serde_json::from_str(&format!(
+            r#"{{
+                "key": "{key}",
+                "version": 1,
+                "on": true,
+                "targets": [],
+                "rules": [],
+                "prerequisites": [],
+                "fallthrough": {{
+                    "rollout": {{
+                        "variations": [
+                            {{ "variation": 0, "weight": 1 }},
+                            {{ "variation": 1, "weight": 99999 }}
+                        ]
+                        {context_kind_json}
+                    }}
+                }},
+                "offVariation": 0,
+                "variations": [false, true],
+                "clientSideAvailability": {{
+                    "usingMobileKey": false,
+                    "usingEnvironmentId": false
+                }},
+                "salt": "saltyA"
+            }}"#
+        ))
+        .expect("valid preconfigured weighted rollout flag")
     }
 
     fn test_config(test_data: &TestData) -> Config {
@@ -541,6 +582,32 @@ mod tests {
 
         assert!(evaluator.evaluate_bool(flag, &EvaluationContext::for_actor(community_a, actor),));
         assert!(!evaluator.evaluate_bool(flag, &EvaluationContext::for_actor(community_b, actor),));
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn community_kind_weighted_rollout_uses_community_key_bucketing() {
+        let community = community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        let test_data = TestData::new();
+        test_data.use_preconfigured_flag(weighted_rollout_flag(
+            "community-weighted-rollout",
+            Some("community"),
+        ));
+        test_data
+            .use_preconfigured_flag(weighted_rollout_flag("missing-context-kind-rollout", None));
+
+        let evaluator = started_evaluator(&test_data).await;
+        let context = EvaluationContext::for_community(community);
+
+        assert!(evaluator.evaluate_bool(
+            BooleanFlag::new("community-weighted-rollout", false),
+            &context,
+        ));
+        assert!(!evaluator.evaluate_bool(
+            BooleanFlag::new("missing-context-kind-rollout", true),
+            &context,
+        ));
+
         evaluator.close();
     }
 

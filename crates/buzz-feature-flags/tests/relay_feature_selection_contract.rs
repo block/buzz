@@ -125,6 +125,34 @@ fn relay_readme_documents_fail_closed_launchdarkly_startup_contract() {
         readme.contains("future flag registry"),
         "README.md must defer environment-name uniqueness enforcement to a future registry"
     );
+    assert!(
+        readme.contains("kind `community` plus")
+            && readme.contains("optional global kind `pubkey`"),
+        "README.md must document LaunchDarkly adapter context kinds"
+    );
+    assert!(
+        readme.contains("rollouts must set `contextKind` to a kind present")
+            && readme.contains("in evaluation"),
+        "README.md must document rollout contextKind requirements"
+    );
+    assert!(
+        readme.contains("omits `contextKind` defaults") && readme.contains("to `user`;"),
+        "README.md must document LaunchDarkly default rollout context kind"
+    );
+    assert!(
+        readme.contains("bucket as")
+            && readme.contains("zero and pick the first positive-weight variation"),
+        "README.md must document missing-kind rollout bucketing behavior"
+    );
+    assert!(
+        readme.contains("close()` blocks the calling thread")
+            && readme.contains("while it flushes analytics"),
+        "README.md must document blocking LaunchDarkly close semantics"
+    );
+    assert!(
+        readme.contains("offload it to a blocking shutdown path"),
+        "README.md must document async shutdown offloading guidance for close()"
+    );
 }
 
 #[test]

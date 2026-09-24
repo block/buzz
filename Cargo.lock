@@ -1260,6 +1260,7 @@ dependencies = [
  "buzz-core",
  "http",
  "launchdarkly-server-sdk",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
