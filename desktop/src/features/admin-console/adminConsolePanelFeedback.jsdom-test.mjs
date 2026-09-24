@@ -851,6 +851,40 @@ test("non-image-attachment-save-button: a non-image attachment shows a Save butt
       ),
       `cancel must leave the Save control, not an error; got: ${container.textContent?.slice(0, 400)}`,
     );
+
+    // A rejected save keeps Save reachable, shows the error beside it,
+    // and a retry clears the error and succeeds.
+    saveResult = "rejected";
+    setIpcHandler("admin_save_attachment", (args) => {
+      saveArgs = args;
+      return saveResult === "rejected"
+        ? Promise.reject("admin_attachment_network_error")
+        : Promise.resolve(saveResult);
+    });
+    const findSave = () =>
+      Array.from(container.querySelectorAll("button")).find((b) =>
+        (b.textContent ?? "").includes("Save attachment"),
+      );
+    await act(async () => {
+      fireEvent.click(findSave());
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    assert.ok(
+      (container.textContent ?? "").includes("admin_attachment_network_error"),
+      `rejection must show the save error; got: ${container.textContent?.slice(0, 400)}`,
+    );
+    const retryBtn = findSave();
+    assert.ok(retryBtn, "Save must stay visible after a rejected save");
+    saveResult = true;
+    await act(async () => {
+      fireEvent.click(retryBtn);
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    assert.ok(
+      !(container.textContent ?? "").includes("admin_attachment_network_error"),
+      "retry must clear the save error",
+    );
+    assert.deepEqual(capturedToasts, ["Attachment saved", "Attachment saved"]);
   } finally {
     await unmount();
   }

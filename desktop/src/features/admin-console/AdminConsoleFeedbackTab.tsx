@@ -185,6 +185,9 @@ function AttachmentViewer({
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [error, setError] = useState<AdminAttachmentErrorCode | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<AdminAttachmentErrorCode | null>(
+    null,
+  );
   const blobUrlRef = useRef<string | null>(null);
   // Per-load generation: incremented when a new load starts AND in cleanup so
   // that unmount or panelGeneration change invalidates any in-flight load.
@@ -273,6 +276,7 @@ function AttachmentViewer({
   // in WKWebView.
   const save = useCallback(async () => {
     setSaving(true);
+    setSaveError(null);
     try {
       const saved = await saveAdminAttachment(
         origin,
@@ -285,7 +289,7 @@ function AttachmentViewer({
         toast.success("Attachment saved");
       }
     } catch (e) {
-      setError(
+      setSaveError(
         typeof e === "string" ? (e as AdminAttachmentErrorCode) : String(e),
       );
     } finally {
@@ -294,43 +298,33 @@ function AttachmentViewer({
   }, [origin, feedbackId, attachment.sha256, attachment.mime, attachment.size]);
 
   if (error) {
-    const friendlyError: Record<string, string> = {
-      admin_attachment_too_large: "Attachment exceeds the 10 MiB desktop cap.",
-      admin_attachment_mime_mismatch:
-        "Attachment MIME type does not match the imeta record.",
-      admin_attachment_size_mismatch:
-        "Attachment byte count does not match the imeta record.",
-      admin_attachment_network_error: "Network error fetching attachment.",
-    };
-    return (
-      <div className="flex items-center gap-1.5 text-xs text-destructive">
-        <AlertCircle className="h-3.5 w-3.5" />
-        {friendlyError[error] ?? `Error: ${error}`}
-      </div>
-    );
+    return <AttachmentError code={error} />;
   }
 
   // Non-image types are never previewed: Save writes them through the native
   // dialog (a blob `<a download>` is a no-op in WKWebView).
   if (!attachment.mime.startsWith("image/")) {
     return (
-      <Button
-        className="gap-1.5"
-        disabled={saving}
-        onClick={() => void save()}
-        size="sm"
-        type="button"
-        variant="outline"
-      >
-        {saving ? (
-          <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <>
-            <Download className="h-3.5 w-3.5" />
-            {`Save attachment (${attachment.mime})`}
-          </>
-        )}
-      </Button>
+      <div className="flex flex-col items-start gap-1">
+        <Button
+          className="gap-1.5"
+          disabled={saving}
+          onClick={() => void save()}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          {saving ? (
+            <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <>
+              <Download className="h-3.5 w-3.5" />
+              {`Save attachment (${attachment.mime})`}
+            </>
+          )}
+        </Button>
+        {saveError ? <AttachmentError code={saveError} /> : null}
+      </div>
     );
   }
 
@@ -561,6 +555,24 @@ export function FeedbackDetail({
           )}
         </>
       )}
+    </div>
+  );
+}
+
+const FRIENDLY_ATTACHMENT_ERROR: Record<string, string> = {
+  admin_attachment_too_large: "Attachment exceeds the 10 MiB desktop cap.",
+  admin_attachment_mime_mismatch:
+    "Attachment MIME type does not match the imeta record.",
+  admin_attachment_size_mismatch:
+    "Attachment byte count does not match the imeta record.",
+  admin_attachment_network_error: "Network error fetching attachment.",
+};
+
+function AttachmentError({ code }: { code: AdminAttachmentErrorCode }) {
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-destructive">
+      <AlertCircle className="h-3.5 w-3.5" />
+      {FRIENDLY_ATTACHMENT_ERROR[code] ?? `Error: ${code}`}
     </div>
   );
 }
