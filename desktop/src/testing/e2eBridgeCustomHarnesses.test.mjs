@@ -53,6 +53,7 @@ describe("handleSaveCustomHarness", () => {
     assert.equal(entry.id, "my-rt");
     assert.equal(entry.label, "My RT");
     assert.equal(entry.source, "custom");
+    assert.equal(entry.mcp_command, "buzz-dev-mcp");
   });
 
   it("stores the entry in mockCustomHarnesses", () => {

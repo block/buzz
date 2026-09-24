@@ -88,7 +88,7 @@ export function handleSaveCustomHarness(args: {
     command: def.command ?? null,
     binary_path: null,
     default_args: def.args ?? [],
-    mcp_command: null,
+    mcp_command: "buzz-dev-mcp",
     install_hint: def.installHint ?? "",
     install_instructions_url: def.installInstructionsUrl ?? "",
     can_auto_install: false,
