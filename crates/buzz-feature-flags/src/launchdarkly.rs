@@ -1,4 +1,4 @@
-use http::Uri;
+use http::{uri::Authority, Uri};
 use launchdarkly_server_sdk::{
     BuildError, Client, ConfigBuildError, ConfigBuilder, Context, ContextBuilder,
     MultiContextBuilder,
@@ -198,6 +198,12 @@ fn validate_relay_proxy_endpoint(endpoint: &str) -> Result<String, LaunchDarklyI
         ));
     }
 
+    if endpoint.contains('#') {
+        return Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
+            InvalidRelayProxyEndpointReason::MalformedUri,
+        ));
+    }
+
     let parsed = endpoint.parse::<Uri>().map_err(|_| {
         LaunchDarklyInitError::InvalidRelayProxyEndpoint(
             InvalidRelayProxyEndpointReason::MalformedUri,
@@ -207,6 +213,12 @@ fn validate_relay_proxy_endpoint(endpoint: &str) -> Result<String, LaunchDarklyI
     if !matches!(parsed.scheme_str(), Some("http" | "https")) {
         return Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
             InvalidRelayProxyEndpointReason::InvalidScheme,
+        ));
+    }
+
+    if parsed.query().is_some() {
+        return Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
+            InvalidRelayProxyEndpointReason::MalformedUri,
         ));
     }
 
@@ -222,7 +234,29 @@ fn validate_relay_proxy_endpoint(endpoint: &str) -> Result<String, LaunchDarklyI
         ));
     }
 
+    if authority_has_explicit_port(authority) && authority.port_u16().is_none() {
+        return Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(
+            InvalidRelayProxyEndpointReason::MalformedUri,
+        ));
+    }
+
     Ok(endpoint.to_owned())
+}
+
+fn authority_has_explicit_port(authority: &Authority) -> bool {
+    let authority = authority
+        .as_str()
+        .rsplit_once('@')
+        .map_or_else(|| authority.as_str(), |(_, host_and_port)| host_and_port);
+
+    if authority.starts_with('[') {
+        return authority.contains("]:");
+    }
+
+    authority
+        .rsplit_once(':')
+        .map(|(_, port)| !port.is_empty())
+        .unwrap_or(false)
 }
 
 fn launchdarkly_context(context: &EvaluationContext) -> Result<Context, String> {
@@ -373,6 +407,30 @@ mod tests {
                 result,
                 Err(LaunchDarklyInitError::InvalidRelayProxyEndpoint(_))
             ));
+        }
+    }
+
+    #[test]
+    fn relay_proxy_endpoint_rejects_query_fragment_and_invalid_ports() {
+        let invalid_cases = [
+            "https://relay.internal/path?env=staging",
+            "https://relay.internal/path#fragment",
+            "https://relay.internal:notaport/path-prefix",
+            "https://relay.internal:99999/path-prefix",
+        ];
+
+        for endpoint in invalid_cases {
+            let error = LaunchDarklyEvaluator::from_runtime_config(
+                LaunchDarklyRuntimeConfig::new("sdk-key").with_relay_proxy_endpoint(endpoint),
+            )
+            .expect_err("endpoint should be rejected");
+
+            assert!(matches!(
+                error,
+                LaunchDarklyInitError::InvalidRelayProxyEndpoint(_)
+            ));
+            assert!(!format!("{error}").contains(endpoint));
+            assert!(!format!("{error:?}").contains(endpoint));
         }
     }
 
