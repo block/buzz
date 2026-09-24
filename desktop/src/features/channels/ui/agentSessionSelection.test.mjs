@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveAgentSessionReturnTarget } from "./agentSessionSelection.ts";
+import {
+  resolveAgentSessionCloseTarget,
+  resolveAgentSessionReturnTarget,
+} from "./agentSessionSelection.ts";
 
 test("returns the open thread when activity opens over a thread", () => {
   assert.deepEqual(
@@ -38,6 +41,36 @@ test("returns null when activity opens over no pane", () => {
     resolveAgentSessionReturnTarget({
       openThreadHeadId: null,
       profilePanelPubkey: null,
+    }),
+    null,
+  );
+});
+
+test("close target prefers the captured return stack", () => {
+  assert.deepEqual(
+    resolveAgentSessionCloseTarget({
+      fallbackThreadHeadId: "seeded-thread",
+      returnTarget: { kind: "profile", pubkey: "abc" },
+    }),
+    { kind: "profile", pubkey: "abc" },
+  );
+});
+
+test("close target falls back to the seeded companion thread", () => {
+  assert.deepEqual(
+    resolveAgentSessionCloseTarget({
+      fallbackThreadHeadId: "seeded-thread",
+      returnTarget: null,
+    }),
+    { kind: "thread", threadHeadId: "seeded-thread" },
+  );
+});
+
+test("close target is null when there is nothing to restore", () => {
+  assert.equal(
+    resolveAgentSessionCloseTarget({
+      fallbackThreadHeadId: null,
+      returnTarget: null,
     }),
     null,
   );

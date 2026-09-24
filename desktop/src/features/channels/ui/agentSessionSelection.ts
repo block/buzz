@@ -78,6 +78,31 @@ export function resolveAgentSessionReturnTarget({
   return null;
 }
 
+/**
+ * Where Activity should land after dismiss (X or Back).
+ *
+ * Prefer the captured Back-stack target. When none exists (e.g. Activity was
+ * opened via a search-only navigation that never captured, common in thread
+ * OS companions after #111), fall back to the companion's seeded thread so
+ * dismiss never leaves a blank single-panel surface.
+ */
+export function resolveAgentSessionCloseTarget({
+  fallbackThreadHeadId,
+  returnTarget,
+}: {
+  fallbackThreadHeadId?: string | null;
+  returnTarget: AgentSessionReturnTarget | null;
+}): AgentSessionReturnTarget | null {
+  if (returnTarget) {
+    return returnTarget;
+  }
+  const threadHeadId = fallbackThreadHeadId?.trim();
+  if (threadHeadId) {
+    return { kind: "thread", threadHeadId };
+  }
+  return null;
+}
+
 export function isAgentInActivityList({
   activityAgents,
   selectedAgent,

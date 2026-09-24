@@ -15,6 +15,7 @@ import {
 } from "@/shared/lib/rosterDerivations";
 import {
   type AgentSessionReturnTarget,
+  resolveAgentSessionCloseTarget,
   resolveAgentSessionReturnTarget,
 } from "./agentSessionSelection";
 import type { PanelValueSetter } from "./useChannelPanelHistoryState";
@@ -34,6 +35,8 @@ type UseChannelAgentSessionsOptions = {
   channelMembers?: ChannelMember[];
   handleOpenThread: (message: TimelineMessage) => void;
   managedAgents: ChannelAgentSessionAgent[];
+  /** Seeded thread for OS thread companions when Activity dismiss has no Back stack. */
+  fallbackThreadHeadId?: string | null;
   openAgentSessionPubkey: string | null;
   openThreadHeadId: string | null;
   profilePanelPubkey?: string | null;
@@ -168,6 +171,7 @@ export function useChannelAgentSessions({
   activeChannelId,
   agentsLoaded,
   channelMembers,
+  fallbackThreadHeadId = null,
   handleOpenThread,
   managedAgents,
   openAgentSessionPubkey,
@@ -195,18 +199,37 @@ export function useChannelAgentSessions({
   );
   const agentSessionAgents = managedAgents;
 
-  // Breadcrumb for the Activity panel back arrow: captured on the
-  // closed→open transition, consumed exactly once on back, cleared on any
-  // other close so a stale target can't resurface later. Channel switches
-  // drop it via the reset key.
+  // Breadcrumb for Activity dismiss (X/Back): captured on the closed→open
+  // transition, consumed once on dismiss. Channel switches drop it via the
+  // reset key.
   const { hasTarget: hasAgentSessionReturnTarget, store: returnTarget } =
     usePanelReturnTarget<AgentSessionReturnTarget>(activeChannelId);
   const isAgentSessionOpen = openAgentSessionPubkey != null;
 
-  const closeAgentSession = React.useCallback(() => {
-    returnTarget.clear();
+  const dismissAgentSession = React.useCallback(() => {
+    // X and Back both restore: prefer the Back stack, else the companion's
+    // seeded thread. Clearing without restore blanked thread OS pop-outs after
+    // #111 lifted them into channel|Activity (single-panel with nothing left).
+    const target = resolveAgentSessionCloseTarget({
+      fallbackThreadHeadId,
+      returnTarget: returnTarget.consume(),
+    });
     setOpenAgentSessionPubkey(null);
-  }, [returnTarget, setOpenAgentSessionPubkey]);
+    if (target?.kind === "thread") {
+      setOpenThreadHeadId(target.threadHeadId);
+      return;
+    }
+    if (target?.kind === "profile") {
+      setProfilePanelPubkey(target.pubkey);
+    }
+  }, [
+    fallbackThreadHeadId,
+    returnTarget,
+    setOpenAgentSessionPubkey,
+    setOpenThreadHeadId,
+    setProfilePanelPubkey,
+  ]);
+  const closeAgentSession = dismissAgentSession;
 
   const openAgentSession = React.useCallback(
     (pubkey: string, channelId?: string | null) => {
@@ -248,25 +271,8 @@ export function useChannelAgentSessions({
     ],
   );
 
-  // Back restores the pane the Activity panel replaced; with no recorded
-  // target (opened from the composer with no pane, or a direct/restored
-  // `agentSession` URL) it simply closes — never a blind history pop.
-  const backFromAgentSession = React.useCallback(() => {
-    const target = returnTarget.consume();
-    setOpenAgentSessionPubkey(null);
-    if (target?.kind === "thread") {
-      setOpenThreadHeadId(target.threadHeadId);
-      return;
-    }
-    if (target?.kind === "profile") {
-      setProfilePanelPubkey(target.pubkey);
-    }
-  }, [
-    returnTarget,
-    setOpenAgentSessionPubkey,
-    setOpenThreadHeadId,
-    setProfilePanelPubkey,
-  ]);
+  // Back shares dismissAgentSession so X and Back never leave companions blank.
+  const backFromAgentSession = dismissAgentSession;
 
   const selectAgentSession = React.useCallback(
     (pubkey: string, channelId?: string | null) => {

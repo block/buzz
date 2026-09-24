@@ -19,6 +19,7 @@ import {
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
 import {
+  usePopoutLayoutPayload,
   usePopoutSplitLayout,
   usePopoutThreadOnlyLayout,
 } from "@/features/popout/lib/popoutLayout";
@@ -592,6 +593,12 @@ export function ChannelScreen({
     setChannelManagementOpen(false);
     void goHome({ replace: true });
   }, [setChannelManagementOpen, goHome]);
+  const popoutPayload = usePopoutLayoutPayload();
+  const isPopoutThreadOnlyEarly = usePopoutThreadOnlyLayout();
+  const activityCloseFallbackThreadHeadId =
+    isPopoutThreadOnlyEarly && popoutPayload?.threadId
+      ? popoutPayload.threadId
+      : null;
   const {
     agentSessionAgents,
     backFromAgentSession: handleBackFromAgentSession,
@@ -603,6 +610,7 @@ export function ChannelScreen({
   } = useChannelAgentSessions({
     activeChannel,
     activeChannelId,
+    fallbackThreadHeadId: activityCloseFallbackThreadHeadId,
     agentsLoaded:
       !channelMembersQuery.isLoading &&
       !managedAgentsQuery.isLoading &&
@@ -715,7 +723,7 @@ export function ChannelScreen({
   const isNarrowPanelViewport =
     channelContentWidthPx > 0 &&
     channelContentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
-  const isPopoutThreadOnly = usePopoutThreadOnlyLayout();
+  const isPopoutThreadOnly = isPopoutThreadOnlyEarly;
   const isPopoutPlaygroundSplit = usePopoutSplitLayout();
   const isSinglePanelView =
     isPopoutForcedSinglePanelView({
@@ -724,6 +732,7 @@ export function ChannelScreen({
           profilePanelPubkey ||
           channelManagementOpen,
       ),
+      hasThreadPanel: Boolean(effectiveOpenThreadHeadId),
       isPopoutPlaygroundSplit,
       isPopoutThreadOnly,
     }) ||

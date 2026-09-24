@@ -287,6 +287,7 @@ test("isPopoutForcedSinglePanelView lifts plain thread pop-outs for Activity", a
   assert.equal(
     isPopoutForcedSinglePanelView({
       hasNonThreadAuxiliary: false,
+      hasThreadPanel: true,
       isPopoutPlaygroundSplit: false,
       isPopoutThreadOnly: true,
     }),
@@ -295,6 +296,7 @@ test("isPopoutForcedSinglePanelView lifts plain thread pop-outs for Activity", a
   assert.equal(
     isPopoutForcedSinglePanelView({
       hasNonThreadAuxiliary: true,
+      hasThreadPanel: false,
       isPopoutPlaygroundSplit: false,
       isPopoutThreadOnly: true,
     }),
@@ -304,6 +306,7 @@ test("isPopoutForcedSinglePanelView lifts plain thread pop-outs for Activity", a
   assert.equal(
     isPopoutForcedSinglePanelView({
       hasNonThreadAuxiliary: true,
+      hasThreadPanel: false,
       isPopoutPlaygroundSplit: true,
       isPopoutThreadOnly: true,
     }),
@@ -312,8 +315,19 @@ test("isPopoutForcedSinglePanelView lifts plain thread pop-outs for Activity", a
   assert.equal(
     isPopoutForcedSinglePanelView({
       hasNonThreadAuxiliary: true,
+      hasThreadPanel: false,
       isPopoutPlaygroundSplit: false,
       isPopoutThreadOnly: false,
+    }),
+    false,
+  );
+  // After Activity X with no thread restored: show channel, never blank.
+  assert.equal(
+    isPopoutForcedSinglePanelView({
+      hasNonThreadAuxiliary: false,
+      hasThreadPanel: false,
+      isPopoutPlaygroundSplit: false,
+      isPopoutThreadOnly: true,
     }),
     false,
   );

@@ -162,11 +162,18 @@ export function isPopoutSplitLayout(
  */
 export function isPopoutForcedSinglePanelView(options: {
   hasNonThreadAuxiliary: boolean;
+  /** Thread panel currently mounted (URL/local). */
+  hasThreadPanel: boolean;
   isPopoutPlaygroundSplit: boolean;
   isPopoutThreadOnly: boolean;
 }): boolean {
   if (!options.isPopoutThreadOnly) return false;
   if (options.isPopoutPlaygroundSplit) return true;
+  // Never force single-panel with nothing to show — keep the channel visible
+  // instead of a blank companion after Activity dismiss without a thread.
+  if (!options.hasNonThreadAuxiliary && !options.hasThreadPanel) {
+    return false;
+  }
   return !options.hasNonThreadAuxiliary;
 }
 
