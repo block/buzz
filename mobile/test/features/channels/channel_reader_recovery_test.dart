@@ -431,24 +431,71 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       expect(prefs().getString(prefs().getKeys().single), contains('"mine"'));
     });
 
-    fakeAsyncTest('a newer live head cancels the pending edit', (clock) {
+    fakeAsyncTest('a same-second loser adopted after an edit re-converges', (
+      clock,
+    ) {
+      relay.holdOk = Completer<void>();
       start(clock).createSection('mine');
-      relay.emit(
-        relay.event('channel-sections', blob('peer'), nowSeconds() + 9),
+      clock.elapse(const Duration(seconds: 5));
+      final own = relay.published.single;
+      m.renameSection(m.store.sections.single.id, 'new-local');
+      final loser = relay.event(
+        'channel-sections',
+        blob('loser'),
+        own.createdAt,
+        id: ''.padLeft(64, 'f'),
       );
+      relay
+        ..stored.add(loser)
+        ..emit(loser);
+      clock.elapse(const Duration(milliseconds: 20));
+      expect(names(), ['loser']);
+      relay.holdOk!.complete();
+      relay.holdOk = null;
+      clock.flushMicrotasks();
       clock.elapse(const Duration(seconds: 6));
-      expect(relay.published, isEmpty);
-      expect(names(), ['peer']);
-      expect(prefs().getString(prefs().getKeys().single), contains('"peer"'));
-
-      m.renameSection('peer', 'after');
-      clock.elapse(const Duration(seconds: 6));
-      expect(relay.published, hasLength(1));
-      expect(
-        jsonEncode(relay.decrypt(relay.published.single)),
-        contains('"after"'),
-      );
+      final heads = relay.stored.toList()
+        ..sort(
+          (a, b) => a.createdAt != b.createdAt
+              ? b.createdAt.compareTo(a.createdAt)
+              : a.id.compareTo(b.id),
+        );
+      final retained = relay.decrypt(heads.first) as Map<String, dynamic>;
+      relay.emit(heads.first);
+      m.refreshFromRelay();
+      clock.elapse(const Duration(milliseconds: 20));
+      expect(names(), [
+        for (final s in retained['sections'] as List) s['name'],
+      ]);
+      expect(prefs().getString(prefs().getKeys().single), jsonEncode(retained));
     });
+
+    fakeAsyncTest(
+      'a retired flush pre-read cannot rewrite the successor cache',
+      (clock) {
+        start(clock).createSection('mine');
+        final held = relay.holdHistory = Completer<void>();
+        m.dispose();
+        clock.flushMicrotasks();
+        m = ChannelSectionsManager(
+          pubkey: relay.pubkey,
+          prefs: prefs(),
+          crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
+          relaySession: relay.session,
+          signedEventRelay: relay.signer,
+          remoteEnabled: false,
+          onChanged: () {},
+        )..initialize();
+        m.renameSection(m.store.sections.single.id, 'successor-local');
+        clock.flushMicrotasks();
+        final before = prefs().getString(prefs().getKeys().single);
+        held.complete();
+        relay.holdHistory = null;
+        clock.flushMicrotasks();
+        expect(names(), ['successor-local']);
+        expect(prefs().getString(prefs().getKeys().single), before);
+      },
+    );
 
     fakeAsyncTest('a local edit during the OK wait still publishes', (clock) {
       relay.holdOk = Completer<void>();

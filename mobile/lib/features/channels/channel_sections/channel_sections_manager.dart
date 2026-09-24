@@ -416,22 +416,12 @@ class ChannelSectionsManager {
         _lastRemoteEventId = event.id;
         _store = incoming;
         _persist();
-        _cancelPendingPublish();
+        // A pending debounce stays armed: its republish re-converges an OK
+        // that later wins the cursor after this head replaced the store.
       }
     } catch (_) {
       // Decryption failure or parse error — keep existing state.
     }
-  }
-
-  /// A newer remote layout supersedes a local edit still waiting on its
-  /// debounce (desktop's `cancelPendingPublish`). A publish already running
-  /// has no timer here and is left to finish.
-  void _cancelPendingPublish() {
-    final debounce = _publishDebounce;
-    if (debounce == null) return;
-    debounce.cancel();
-    _publishDebounce = null;
-    _publishPending = false;
   }
 
   /// Last-write-wins. Relay retains `ORDER BY created_at DESC, id ASC`: at
@@ -508,12 +498,10 @@ class ChannelSectionsManager {
         _lastRemoteEventId = signedId;
         // A same-second loser merged during the await must not strand the
         // device on content the relay did not keep.
-        if (!_disposed &&
-            revision == _localRevision &&
-            !identical(_store, submitted)) {
+        if (revision == _localRevision && !identical(_store, submitted)) {
           _store = submitted;
           _persist();
-          _onChanged();
+          if (!_disposed) _onChanged();
         }
       }
       _lastPublishedStore = ChannelSectionStore(
@@ -525,7 +513,9 @@ class ChannelSectionsManager {
     }
   }
 
+  /// A retired manager never writes the prefs key its successor now owns.
   void _persist() {
+    if (_disposed) return;
     _storage.write(pubkey, _store);
   }
 
