@@ -1,5 +1,9 @@
 #![deny(unsafe_code)]
 
+mod git;
+#[cfg(all(test, unix))]
+mod git_runtime_tests;
+
 mod acp;
 mod config;
 mod engram_fetch;
@@ -2445,6 +2449,15 @@ mod replay_floor_tests {
 }
 
 pub fn run() -> Result<()> {
+    let argv0 = std::env::args().next().unwrap_or_default();
+    match std::path::Path::new(&argv0)
+        .file_stem()
+        .and_then(|name| name.to_str())
+    {
+        Some("git-credential-nostr") => std::process::exit(git_credential_nostr::run()),
+        Some("git-sign-nostr") => std::process::exit(git_sign_nostr::run()),
+        _ => {}
+    }
     config::propagate_legacy_env_vars();
     tokio_main()
 }
@@ -2494,7 +2507,7 @@ async fn tokio_main() -> Result<()> {
         .compact()
         .init();
 
-    let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    let config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
 
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
@@ -2507,6 +2520,57 @@ async fn tokio_main() -> Result<()> {
         tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
         return setup_mode::run_setup_listener(config, payload).await;
     }
+
+    // Register termination before creating temporary key material or spawning
+    // adapters. During startup cancellation drops the pool and key guard; once
+    // ready, the existing main-loop shutdown drains active work first.
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+    #[cfg(unix)]
+    let signals = {
+        use tokio::signal::unix::{signal, SignalKind};
+        (
+            signal(SignalKind::interrupt())?,
+            signal(SignalKind::terminate())?,
+        )
+    };
+    let tx = shutdown_tx.clone();
+    let signal_task = tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            let (mut interrupt, mut terminate) = signals;
+            tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
+        }
+        #[cfg(not(unix))]
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = tx.send(());
+    });
+    let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+    let harness = run_harness(config, shutdown_tx, shutdown_rx.clone(), ready_tx);
+    tokio::pin!(harness);
+    let result = tokio::select! {
+        biased;
+        _ = shutdown_rx.changed() => Ok(()),
+        result = &mut harness => result,
+        _ = &mut ready_rx => harness.await,
+    };
+    signal_task.abort();
+    result
+}
+
+async fn run_harness(
+    mut config: Config,
+    shutdown_tx: watch::Sender<()>,
+    mut shutdown_rx: watch::Receiver<()>,
+    startup_ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<()> {
+    let git_environment =
+        git::GitEnvironment::install(&config.keys, &config.relay_url, &std::env::current_exe()?)?;
+    config
+        .persona_env_vars
+        .retain(|(name, _)| !git::is_managed_env(name));
+    config
+        .persona_env_vars
+        .extend(git_environment.env.iter().cloned());
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
@@ -2902,25 +2966,8 @@ async fn tokio_main() -> Result<()> {
     //      `IN_FLIGHT_DEADLINE_SECS` expires.
     let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
 
-    // ── Step 7: Shutdown signal ───────────────────────────────────────────────
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
-
-    let tx = shutdown_tx.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        let _ = tx.send(());
-    });
-
-    #[cfg(unix)]
-    {
-        let tx = shutdown_tx.clone();
-        tokio::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
-            sigterm.recv().await;
-            let _ = tx.send(());
-        });
-    }
+    // Startup is complete; the main loop now owns graceful shutdown.
+    let _ = startup_ready.send(());
 
     // Track the newest membership notification timestamp per channel.
     // On reconnect the relay replays events newest-first, so the first event
@@ -5908,15 +5955,22 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     });
                 }
             }
-            // Forward the agent's display name so dev-mcp can use it as the git
-            // author name instead of the raw npub. Read from the process env
-            // rather than Config: this is a pass-through of a contract owned
-            // upstream, and absent simply means dev-mcp falls back to the npub.
+            // Preserve the display-name contract for tools. Git authorship is
+            // already normalized by the harness bootstrap.
             if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
                 if !display_name.is_empty() {
                     env.push(EnvVar {
                         name: "BUZZ_ACP_DISPLAY_NAME".into(),
                         value: display_name,
+                    });
+                }
+            }
+            for (name, value) in &config.persona_env_vars {
+                if git::is_managed_env(name) {
+                    env.retain(|entry| entry.name != *name);
+                    env.push(EnvVar {
+                        name: name.clone(),
+                        value: value.clone(),
                     });
                 }
             }
@@ -9129,7 +9183,7 @@ mod build_mcp_servers_tests {
     /// Env-var-touching tests must run serially — env vars are process-global.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn test_config() -> Config {
+    pub(super) fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
@@ -9177,6 +9231,44 @@ mod build_mcp_servers_tests {
             no_base_prompt: false,
             base_prompt_content: None,
         }
+    }
+
+    #[test]
+    fn session_new_forwards_complete_git_block_without_duplicate_names() {
+        let mut config = test_config();
+        let git = git::GitEnvironment::install(
+            &config.keys,
+            &config.relay_url,
+            &std::env::current_exe().unwrap(),
+        )
+        .unwrap();
+        config.persona_env_vars.extend(git.env.iter().cloned());
+        let servers = build_mcp_servers(&config);
+        let env = &servers[0].env;
+        for (name, value) in &git.env {
+            let entries: Vec<_> = env.iter().filter(|entry| entry.name == *name).collect();
+            assert_eq!(entries.len(), 1, "{name} must appear exactly once");
+            assert_eq!(entries[0].value, *value);
+        }
+        assert!(!env.iter().any(|entry| entry.name == "NOSTR_PRIVATE_KEY"));
+        let keyfile = git
+            .env
+            .windows(2)
+            .find(|pair| pair[0].1 == "nostr.keyfile")
+            .unwrap()[1]
+            .1
+            .clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&keyfile).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(std::path::Path::new(&keyfile).exists());
+        drop(git);
+        assert!(!std::path::Path::new(&keyfile).exists());
     }
 
     #[test]

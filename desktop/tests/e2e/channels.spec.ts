@@ -223,26 +223,29 @@ async function waitForMockLiveSubscription(
   kind?: number,
 ) {
   await expect
-    .poll(async () => {
-      return page.evaluate(
-        ({ currentChannelName, kind }) => {
-          return (
-            (
-              window as Window & {
-                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                  channelName: string;
-                  kind?: number;
-                }) => boolean;
-              }
-            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
-              channelName: currentChannelName,
-              kind,
-            }) ?? false
-          );
-        },
-        { currentChannelName: channelName, kind },
-      );
-    })
+    .poll(
+      async () => {
+        return page.evaluate(
+          ({ currentChannelName, kind }) => {
+            return (
+              (
+                window as Window & {
+                  __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                    channelName: string;
+                    kind?: number;
+                  }) => boolean;
+                }
+              ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+                channelName: currentChannelName,
+                kind,
+              }) ?? false
+            );
+          },
+          { currentChannelName: channelName, kind },
+        );
+      },
+      { timeout: 15_000 },
+    )
     .toBe(true);
 }
 
@@ -1647,7 +1650,6 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     throw new Error("Created ephemeral channel is missing its channel id.");
   }
 
-  await waitForMockLiveSubscription(page, channelName);
   await page.getByTestId("channel-general").click();
   await page.evaluate(
     ({ agentPubkey, channelId: activeChannelId }) => {
@@ -1692,6 +1694,9 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     .getByRole("button", { name: "Toggle Sidebar", exact: true })
     .click();
 
+  // The active channel's window subscription is not the background unread
+  // listener. Wait for message admission after switching away.
+  await waitForMockLiveSubscription(page, channelName, 40002);
   await page.evaluate(
     ({ channelName: targetChannelName, mentionPubkey, senderPubkey }) => {
       (window as MockFeedWindow).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -2521,7 +2526,7 @@ test("sidebar shows unread indicator for newly active channels", async ({
   await page.goto("/");
 
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
-  await waitForMockLiveSubscription(page, "random");
+  await waitForMockLiveSubscription(page, "random", 40002);
 
   // The unread tracker ignores the current user's own messages, so emit as
   // alice — simulating a real "another user posted while I was elsewhere".
@@ -2555,7 +2560,7 @@ test("sidebar shows unread indicator for new forum posts", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("channel-unread-watercooler")).toHaveCount(0);
-  await waitForMockLiveSubscription(page, "watercooler");
+  await waitForMockLiveSubscription(page, "watercooler", 45001);
 
   // Emit as alice — the unread tracker ignores self-authored messages.
   await page.evaluate(
@@ -2585,7 +2590,7 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("channel-unread-alice-tyler")).toHaveCount(0);
-  await waitForMockLiveSubscription(page, "alice-tyler");
+  await waitForMockLiveSubscription(page, "alice-tyler", 9);
 
   await page.evaluate((pubkey) => {
     window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -3187,6 +3192,88 @@ test("manage channel places canvas between channel info and actions", async ({
   expect(leaveBox).not.toBeNull();
   expect(channelIdBox?.y).toBeLessThan(canvasBox?.y);
   expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
+});
+
+test("canvas history, save-conflict, and restore journey", async ({ page }) => {
+  // Seed a two-revision canvas so the history panel has an older revision to
+  // diff and restore, and the head is the newer one.
+  await installMockBridge(page, {
+    canvasRevisions: [
+      { content: "# Kickoff\n\nfirst draft", createdAt: 1_700_000_000 },
+      { content: "# Kickoff\n\nsecond draft", createdAt: 1_700_000_100 },
+    ],
+  });
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-canvas-ingress").click();
+
+  const section = page.getByTestId("channel-canvas-section");
+  await expect(section.getByTestId("channel-canvas-content")).toContainText(
+    "second draft",
+  );
+
+  // History lists both revisions, newest first with the head marked Current.
+  await section.getByTestId("channel-canvas-history-toggle").click();
+  const historyItems = section.getByTestId("channel-canvas-history-item");
+  await expect(historyItems).toHaveCount(2);
+  await expect(historyItems.first()).toContainText("Current");
+
+  // Expanding the older revision shows a diff against the current content.
+  await historyItems.nth(1).getByRole("button").first().click();
+  await expect(section.getByTestId("channel-canvas-diff")).toContainText(
+    "first draft",
+  );
+
+  // Save-conflict: open the editor (snapshots head), move the head via a
+  // concurrent save through the bridge, then save — the save command's
+  // advisory check must surface the frozen conflict string as the
+  // reload-required conflict copy, not a raw error.
+  await section.getByTestId("channel-canvas-history-toggle").click();
+  await section.getByTestId("channel-canvas-edit").click();
+  await page.evaluate((channelId) => {
+    return (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (cmd: string, args: unknown) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__.invoke("set_canvas", {
+      channelId,
+      content: "# Kickoff\n\nconcurrent edit",
+      expectedRevision: null,
+    });
+  }, GENERAL_CHANNEL_ID);
+  await section.getByTestId("channel-canvas-editor").fill("# Kickoff\n\nmine");
+  await section.getByTestId("channel-canvas-save").click();
+  await expect(section).toContainText(
+    "This canvas changed since you loaded it",
+  );
+
+  // Cancel, reload the head (reopen the sheet → fresh get_canvas), and restore
+  // the oldest revision — restore must publish a new head (not mutate history),
+  // so the count grows.
+  await section.getByTestId("channel-canvas-cancel").click();
+  await closeChannelManagement(page);
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-canvas-ingress").click();
+  await expect(section.getByTestId("channel-canvas-content")).toContainText(
+    "concurrent edit",
+  );
+
+  await section.getByTestId("channel-canvas-history-toggle").click();
+  const items = section.getByTestId("channel-canvas-history-item");
+  await expect(items).toHaveCount(3);
+  await items.last().getByRole("button").first().click();
+  await section.getByTestId("channel-canvas-restore").click();
+  // Restore now requires explicit confirmation before it mutates the shared
+  // canvas; the dialog identifies the target revision.
+  await page.getByTestId("channel-canvas-restore-confirm-action").click();
+  await expect(section.getByTestId("channel-canvas-content")).toContainText(
+    "first draft",
+  );
+  await expect(section.getByTestId("channel-canvas-history-item")).toHaveCount(
+    4,
+  );
 });
 
 test("channel settings hides workflows and skips its query when the experiment is disabled", async ({

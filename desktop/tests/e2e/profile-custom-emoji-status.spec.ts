@@ -197,6 +197,7 @@ test("keeps an open status draft when the saved status expires", async ({
   page,
 }) => {
   await page.goto("/");
+  await waitForMockGlobalKindSubscription(page, 30315);
   const nowSeconds = Math.floor(Date.now() / 1_000);
   await seedMockStatus(page, {
     text: "Original draft",

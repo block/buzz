@@ -45,6 +45,32 @@ select among multiple application profiles.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 
+## Personal device development
+
+A development-signed iOS app uses Apple's development App Attest environment.
+The ordinary gateway binary rejects those attestations. For an isolated personal
+stack, build with Cargo feature `personal-dev-app-attest` (Docker build argument
+`BUZZ_PUSH_CARGO_FEATURES=personal-dev-app-attest`) and set
+`BUZZ_PUSH_APP_ATTEST_ENVIRONMENT=development`. The default remains `production`,
+including in that special build; ordinary builds reject the development setting.
+The gateway accepts exactly the selected AAGUID and still verifies the pinned
+Apple root, certificate chain, nonce, application identity, public key,
+credential ID, and counter. This is not a simulator or attestation bypass.
+
+Set `BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID` to the personal `TEAMID.bundle-id`,
+`BUZZ_PUSH_DOGFOOD_APNS_TOPIC` to that same bundle ID,
+`BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT=sandbox`, and supply its APNs certificate.
+This isolated stack reuses the single `buzz-ios-dogfood` wire profile for its
+server-owned personal identity; it does not add a production application profile.
+Do not point distributed dogfood clients at this personal gateway.
+
+Build the mobile client with the personal team and parent bundle ID, its matching
+`.NotificationService` extension, development APNs/App Attest entitlements, and
+an explicit `BUZZ_PUSH_GATEWAY_URL`. See `mobile/README.md` for gitignored signing
+overrides. Both targets need matching provisioning profiles; the parent profile
+must include the capabilities in `Runner.entitlements`. Validate enrollment and
+notification presentation on a physical device, not a simulator.
+
 ## Secret and key rotation rules
 
 Mount the App Attest root read-only and startup will reject any byte mismatch. The sole accepted artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs certificate identity and both AEAD keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Keep the current AEAD key first and retain decrypt-only predecessors until every capability/token encrypted under them has expired or been re-encrypted. Grant and token key ids and bytes must be distinct. Rotation is an operator rollout: add the new current key while retaining predecessors, deploy, wait through the retention window, then remove the old key.
@@ -263,8 +289,14 @@ Kubernetes does not restart pods when referenced Secret bytes change. AEAD or AP
 The gateway chart has a collision-free release lane separate from the main
 `buzz` chart. To publish chart version `X.Y.Z`, update `version` in
 `deploy/charts/buzz-push-gateway/Chart.yaml` and keep `appVersion` equal to the
-gateway binary's workspace package version. Validate the chart, then open a
-same-repository PR whose branch is exactly `push-chart-release/X.Y.Z`:
+gateway binary's workspace package version.
+
+The render tests require Helm, Ruby, and the repository's Rust toolchain. They
+pass rendered environment values into the gateway's configuration parser with
+synthetic credentials; no running gateway or database is needed.
+
+Validate the chart, then open a same-repository PR whose branch is exactly
+`push-chart-release/X.Y.Z`:
 
 ```bash
 deploy/charts/buzz-push-gateway/tests/render.sh
