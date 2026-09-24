@@ -67,6 +67,7 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
+import { harnessOwnsModelSelection } from "../lib/agentConfigCore";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -403,6 +404,10 @@ export function AgentDefinitionDialog({
   const runtimeCanChooseLlmProvider =
     runtimeSupportsLlmProviderSelection(runtime) ||
     blankRuntimeModelProviderEditable;
+  // Harness-owned model: the runtime resolves its own model, so the field is
+  // absent by capability (agentConfigCore omits it with a named reason) rather
+  // than by a per-surface decision.
+  const runtimeOwnsModel = harnessOwnsModelSelection(selectedRuntime);
   const llmProviderFieldVisible =
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
@@ -487,12 +492,15 @@ export function AgentDefinitionDialog({
   const providerIsRequired =
     aiConfigurationMode === "custom" && runtimeCanChooseLlmProvider;
   const modelFieldVisible =
-    runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
-  const isExplicitModelRequired = aiConfigurationMode === "custom";
+    (runtime.trim().length > 0 || blankRuntimeModelProviderEditable) &&
+    !runtimeOwnsModel;
+  const isExplicitModelRequired =
+    aiConfigurationMode === "custom" && !runtimeOwnsModel;
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
     runtimeCanChooseLlmProvider,
+    !runtimeOwnsModel,
   );
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||

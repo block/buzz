@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   deriveAgentConfigFieldModel,
   deriveNumericDescriptors,
+  harnessOwnsModelSelection,
   structuredEnvKeys,
 } from "./agentConfigCore.ts";
 import { NUMERIC_KIND_MIN } from "../ui/buzzAgentModelTuningFields.tsx";
@@ -719,5 +720,80 @@ test("buzz_agent_optionSource_unchanged_still_buzzAgentCatalog", () => {
     field(model, "effort").optionSource,
     "buzzAgentCatalog",
     "buzz-agent optionSource must remain buzzAgentCatalog",
+  );
+});
+
+// A harness that selects its own model (a profile-variant entry declaring
+// `modelSelection: "harness"`) must not offer a model picker. The catalog fact
+// is the only source; the persona dialogs ask this predicate instead of
+// re-deriving the answer, so both paths are pinned here.
+test("harnessOwnsModelSelection_is_true_only_for_the_harness_selection", () => {
+  assert.equal(
+    harnessOwnsModelSelection(undefined),
+    false,
+    "an unknown runtime never owns the model",
+  );
+  assert.equal(
+    harnessOwnsModelSelection(runtime("hermes-profiles")),
+    false,
+    "an entry with no modelSelection fact keeps the picker",
+  );
+  assert.equal(
+    harnessOwnsModelSelection(
+      runtime("hermes-profiles", { modelSelection: "user" }),
+    ),
+    false,
+  );
+  assert.equal(
+    harnessOwnsModelSelection(
+      runtime("hermes-profiles", { modelSelection: "harness" }),
+    ),
+    true,
+  );
+});
+
+test("harness_owned_model_selection_omits_the_model_field_with_a_named_reason", () => {
+  const owned = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("hermes-profiles", {
+      modelSelection: "harness",
+      modelEnvVar: "HERMES_MODEL",
+    }),
+    scope: "global",
+  });
+
+  assert.equal(
+    field(owned, "model"),
+    undefined,
+    "no model control can render for a harness-owned selection",
+  );
+  assert.equal(
+    owned.fields.some((item) => item.kind === "model"),
+    false,
+  );
+  assert.deepEqual(
+    owned.omissions.find((item) => item.kind === "model"),
+    { kind: "model", reason: "ownedByHarnessSelection" },
+    "the absence carries a named reason, never a boolean",
+  );
+});
+
+test("user_model_selection_keeps_the_model_field", () => {
+  const chosen = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("hermes-profiles", {
+      modelSelection: "user",
+      modelEnvVar: "HERMES_MODEL",
+    }),
+    scope: "global",
+  });
+
+  assert.deepEqual(field(chosen, "model").targetApplication, {
+    kind: "envVar",
+    key: "HERMES_MODEL",
+  });
+  assert.equal(
+    chosen.omissions.some((item) => item.kind === "model"),
+    false,
   );
 });

@@ -1058,6 +1058,12 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
             login_hint: None,
             source: HarnessSource::Builtin,
             definition_env: Default::default(),
+            // Builtin runtimes are always user-selected and are never generated
+            // from another definition's `variants` block.
+            definition_variants: None,
+            model_selection: None,
+            generated: false,
+            generated_from: None,
             max_parallelism: super::parallelism::harness_max_parallelism(runtime.id),
         },
     }
@@ -1199,6 +1205,12 @@ pub fn discover_acp_runtimes_from(
                 login_hint: None,
                 source: HarnessSource::Custom,
                 definition_env: def.env.clone(), // preserve for edit round-trip
+                // Same round-trip reason: the harness form does not author this
+                // block, so carry it or an edit would erase it.
+                definition_variants: def.variants.clone(),
+                model_selection: Some(def.model_selection),
+                generated: def.generated,
+                generated_from: def.generated_from.clone(),
                 max_parallelism: super::parallelism::harness_max_parallelism(&def.command),
             });
         }

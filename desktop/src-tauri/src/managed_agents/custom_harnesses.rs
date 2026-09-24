@@ -18,6 +18,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use super::types::{
+    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, HarnessSource, ModelSelection,
+};
+
 /// Regex-equivalent predicate for a valid harness ID.
 ///
 /// IDs must match `[a-z0-9_][a-z0-9_-]*` — lowercase alphanumeric plus
@@ -44,7 +48,7 @@ pub(crate) fn is_valid_harness_id_pub(id: &str) -> bool {
 /// Only the fields a custom harness definition is permitted to carry are
 /// included here — install commands and avatar URLs are intentionally absent
 /// (security line: no remote icon URLs from user-editable config).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HarnessDefinition {
     /// Unique identifier, must match `[a-z0-9_][a-z0-9_-]*`.
@@ -67,7 +71,38 @@ pub(crate) struct HarnessDefinition {
     /// Human-readable install hint shown in Doctor.
     #[serde(default)]
     pub install_hint: String,
+    /// Who chooses the LLM model for agents on this harness. Defaults to
+    /// `User` (Buzz shows the model picker). `Harness` declares that the
+    /// harness decides — see [`ModelSelection`].
+    #[serde(default)]
+    pub model_selection: ModelSelection,
+    /// Optional profile-variant expansion. When present, the definition also
+    /// yields one generated entry per profile directory found under
+    /// [`HarnessVariants::dir`] (see [`expand_variant_definitions`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variants: Option<HarnessVariants>,
+    /// True when this definition was materialized from another definition's
+    /// `variants` block instead of being read from its own file.
+    ///
+    /// Set by the loader and never serialized: it describes provenance (and
+    /// gates the UI's edit/delete affordances), not configuration. Generated
+    /// entries are managed by editing the template file that produced them.
+    #[serde(default, skip)]
+    pub generated: bool,
+    /// For a generated variant, the id of the definition whose `variants` block
+    /// produced it. Not serialized for the same reason as [`Self::generated`]:
+    /// it describes provenance, not configuration.
+    #[serde(default, skip)]
+    pub generated_from: Option<String>,
 }
+
+// ── Profile variants ─────────────────────────────────────────────────────────
+//
+// The expansion itself lives in `variants.rs` so this module keeps its own
+// responsibilities (loading, validation, the built-in id set) and stays
+// reviewable.
+pub(crate) mod variants;
+pub(crate) use variants::{expand_variant_definitions, HarnessVariants};
 
 /// Scan `dir` for `*.json` files and deserialize each into a `HarnessDefinition`.
 ///
@@ -131,25 +166,37 @@ pub(crate) fn load_custom_harnesses(dir: &Path) -> Vec<HarnessDefinition> {
             continue;
         }
 
-        // A custom file must never shadow a built-in or preset id — enforced at
-        // the loader so the warm path can't admit what discovery would reject.
-        if let Err(reason) = check_id_collision(&def.id) {
-            tracing::warn!("custom_harnesses: skipping {} — {reason}", path.display());
-            continue;
-        }
+        // A definition carrying a `variants` block expands to itself (the
+        // file-backed template entry the user can edit) plus one generated entry
+        // per detected profile. Plain definitions fall through as a
+        // single-element expansion.
+        for variant in expand_variant_definitions(&def) {
+            // A custom file must never shadow a built-in or preset id —
+            // enforced at the loader so the warm path can't admit what
+            // discovery would reject.
+            if let Err(reason) = check_id_collision(&variant.id) {
+                tracing::warn!(
+                    "custom_harnesses: skipping {} (id {:?}) — {reason}",
+                    path.display(),
+                    variant.id
+                );
+                continue;
+            }
 
-        // Dedup within the directory itself (a file's id is taken from its JSON
-        // content, not its filename, so two files can carry the same id).
-        if !seen_ids.insert(def.id.clone()) {
-            tracing::warn!(
-                "custom_harnesses: skipping {} — duplicate id {:?}",
-                path.display(),
-                def.id
-            );
-            continue;
-        }
+            // Dedup within the directory itself (an id is taken from JSON
+            // content, not the filename, so two files — or two profiles
+            // slugified the same way — can carry the same id).
+            if !seen_ids.insert(variant.id.clone()) {
+                tracing::warn!(
+                    "custom_harnesses: skipping {} — duplicate id {:?}",
+                    path.display(),
+                    variant.id
+                );
+                continue;
+            }
 
-        definitions.push(def);
+            definitions.push(variant);
+        }
     }
 
     definitions
@@ -173,6 +220,10 @@ fn validate_harness_definition(def: &HarnessDefinition) -> Result<(), String> {
     if def.label.trim().is_empty() {
         return Err("label must not be empty".into());
     }
+    // A `variants` block is a template the loader expands into real entries, so
+    // its dir, args, and env must satisfy the same invariants the template's own
+    // The block's own invariants are validated in `variants`.
+    variants::validate_variants(def)?;
     // Args travel to the harness through the comma-delimited
     // `BUZZ_ACP_AGENT_ARGS` env transport (clap `value_delimiter = ','` on the
     // buzz-acp side), so a literal comma inside one argument would silently
@@ -208,6 +259,52 @@ fn validate_harness_definition(def: &HarnessDefinition) -> Result<(), String> {
 /// without duplicating the rules.
 pub(crate) fn validate_harness_definition_pub(def: &HarnessDefinition) -> Result<(), String> {
     validate_harness_definition(def)
+}
+
+/// Build the catalog entry for a user-defined harness definition.
+///
+/// The command layer resolves availability, the command to launch, and the
+/// resolved binary path; every field the definition file itself contributes is
+/// applied here, so adding a field to [`HarnessDefinition`] means editing one
+/// constructor instead of every caller.
+pub(crate) fn custom_harness_entry(
+    definition: &HarnessDefinition,
+    availability: AcpAvailabilityStatus,
+    command_opt: Option<String>,
+    binary_path: Option<String>,
+) -> AcpRuntimeCatalogEntry {
+    AcpRuntimeCatalogEntry {
+        id: definition.id.clone(),
+        label: definition.label.clone(),
+        avatar_url: String::new(),
+        availability,
+        command: command_opt,
+        binary_path,
+        default_args: super::normalize_agent_args(&definition.command, definition.args.clone()),
+        mcp_command: None,
+        model_env_var: None,
+        provider_env_var: None,
+        thinking_env_var: None,
+        effort_canonical_values: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        install_hint: definition.install_hint.clone(),
+        install_instructions_url: definition.install_instructions_url.clone(),
+        can_auto_install: false,
+        requires_external_cli: false,
+        underlying_cli_path: None,
+        node_required: false,
+        auth_status: AuthStatus::NotApplicable,
+        login_hint: None,
+        source: HarnessSource::Custom,
+        definition_env: definition.env.clone(),
+        definition_variants: definition.variants.clone(),
+        model_selection: Some(definition.model_selection),
+        generated: definition.generated,
+        generated_from: definition.generated_from.clone(),
+        max_parallelism: super::harness_max_parallelism(&definition.command),
+    }
 }
 
 // ── Built-in ID set ──────────────────────────────────────────────────────────
@@ -739,7 +836,7 @@ mod tests {
     // They prove: create, same-ID edit (backup-swap), rename (old file removed),
     // backup file cleaned up on success.
 
-    fn make_def(id: &str, label: &str) -> HarnessDefinition {
+    pub(super) fn make_def(id: &str, label: &str) -> HarnessDefinition {
         HarnessDefinition {
             id: id.to_string(),
             label: label.to_string(),
@@ -748,6 +845,7 @@ mod tests {
             env: BTreeMap::new(),
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            ..Default::default()
         }
     }
 
@@ -857,6 +955,7 @@ mod tests {
             env,
             install_instructions_url: "https://example.com".to_string(),
             install_hint: "Install from example.com".to_string(),
+            ..Default::default()
         };
 
         save_custom_harness_to_dir(dir.path(), &def, None).unwrap();
@@ -888,6 +987,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            ..Default::default()
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
@@ -917,6 +1017,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            ..Default::default()
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
@@ -938,6 +1039,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            ..Default::default()
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
@@ -959,6 +1061,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            ..Default::default()
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
@@ -981,6 +1084,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            ..Default::default()
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
@@ -1002,6 +1106,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            ..Default::default()
         };
         assert!(
             validate_harness_definition_pub(&def).is_ok(),

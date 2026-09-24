@@ -534,8 +534,67 @@ export type AcpRuntimeCatalogEntry = {
    * builtin/preset entries.
    */
   definitionEnv?: Record<string, string>;
+  /**
+   * Who chooses the LLM model for agents on this harness. `"harness"` means the
+   * harness decides (a profile directory, its own config file), so the UI hides
+   * the model picker for agents pinned to this entry. Absent for builtin and
+   * preset entries, which are always user-selected.
+   */
+  modelSelection?: "user" | "harness";
+  /**
+   * Definition-level profile-variant template for `source: custom` entries.
+   * Carried so a save through the harness form cannot erase a hand-authored
+   * block the form does not edit.
+   */
+  definitionVariants?: HarnessVariants;
+  /**
+   * True when this entry was materialized from another definition's `variants`
+   * block (a detected profile). Generated entries are read-only: they are edited
+   * and deleted through the definition file that produced them. Absent on every
+   * other entry, and absent from entries produced before this field existed, so
+   * consumers must treat `undefined` as false.
+   */
+  generated?: boolean;
+  /**
+   * Id of the definition whose `variants` block produced this entry. Present
+   * only alongside `generated: true`; names the file the user must edit.
+   */
+  generatedFrom?: string;
   /** Spawn-time parallelism cap; absent for uncapped harnesses. */
   maxParallelism?: number;
+};
+
+/**
+ * Profile-variant expansion for a custom harness definition: one definition file
+ * then covers a whole family of harnesses that differ only by directory.
+ *
+ * Mirrors `HarnessVariants` in `src-tauri/src/managed_agents/custom_harnesses.rs`.
+ */
+export type HarnessVariants = {
+  /** Directory whose immediate subdirectories are the profiles. Supports `~`. */
+  dir: string;
+  /** File that must exist inside a subdirectory for it to count as a profile. */
+  marker?: string;
+  /** Cap on expanded entries; clamped to 64. */
+  max?: number;
+  /** Variant id template. `{id}`, `{slug}`. Defaults to `"{id}-{slug}"`. */
+  idTemplate?: string;
+  /** Variant label template. `{label}`, `{name}`, `{meta}`. Defaults to
+   * `"{label} ({name})"`, or `"{label} [{meta}] ({name})"` when `labelFrom` is
+   * set. `{meta}` renders as the empty string when the value is missing, so a
+   * template conditional on it never prints empty brackets. */
+  labelTemplate?: string;
+  /**
+   * Optional label source read from a file inside each profile directory.
+   * `file` must resolve inside the profile directory (no absolute paths, no
+   * `..`); `key` is a dotted path into the document (`ui_meta.hermes-bots.title`).
+   * Missing file, missing key, or an unparseable document yields no metadata.
+   */
+  labelFrom?: { file: string; key: string };
+  /** Extra env for each variant. `{name}`, `{slug}`, `{dir}`, `{root}`. */
+  env?: Record<string, string>;
+  /** Extra args appended to the template's args; same placeholders. */
+  args?: string[];
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */

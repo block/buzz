@@ -90,10 +90,26 @@ export type AgentConfigFieldDescriptor =
       value: string | null;
     };
 
-export type AgentConfigOmission = {
-  kind: "effort";
-  reason: "ownedByModelId" | "unsupportedByHarness";
-};
+export type AgentConfigOmission =
+  | { kind: "effort"; reason: "ownedByModelId" | "unsupportedByHarness" }
+  | { kind: "model"; reason: "ownedByHarnessSelection" };
+
+/**
+ * Whether `runtime` resolves its own LLM model (a Hermes profile root, a
+ * per-project config file). The model is then a property of the harness rather
+ * than of the agent, so no picker is rendered.
+ *
+ * This is the single projection of the catalog fact `modelSelection`. The
+ * shared field renderer reads it through `deriveAgentConfigFieldModel`, which
+ * omits the model descriptor; the persona dialogs render their own control
+ * instead of that renderer, so they call this predicate to reach the same
+ * answer rather than re-deriving it from a boolean prop.
+ */
+export function harnessOwnsModelSelection(
+  runtime: AcpRuntimeCatalogEntry | undefined,
+) {
+  return runtime?.modelSelection === "harness";
+}
 
 /**
  * A numeric tuning descriptor: one of the three env-var-backed number fields
@@ -192,16 +208,22 @@ export function deriveAgentConfigFieldModel({
     });
   }
 
-  fields.push({
-    kind: "model",
-    optionSource: "acpModels",
-    persistence: { kind: "normalizedField", field: "model" },
-    targetApplication: runtime?.modelEnvVar
-      ? { kind: "envVar", key: runtime.modelEnvVar }
-      : { kind: "acpNative" },
-    render: "control",
-    value: config.model,
-  });
+  if (harnessOwnsModelSelection(runtime)) {
+    // Omitted with a named reason, not a per-surface flag: the harness picks the
+    // model, so the absence is a capability fact about this runtime.
+    omissions.push({ kind: "model", reason: "ownedByHarnessSelection" });
+  } else {
+    fields.push({
+      kind: "model",
+      optionSource: "acpModels",
+      persistence: { kind: "normalizedField", field: "model" },
+      targetApplication: runtime?.modelEnvVar
+        ? { kind: "envVar", key: runtime.modelEnvVar }
+        : { kind: "acpNative" },
+      render: "control",
+      value: config.model,
+    });
+  }
 
   if (runtime?.thinkingEnvVar) {
     // targetApplication is always the runtime's native key — how the harness

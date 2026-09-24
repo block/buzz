@@ -66,10 +66,12 @@ export function agentAiConfigurationModeSatisfied(
   mode: AgentAiConfigurationMode,
   pair: AgentAiConfigurationPair,
   needsProviderSelection = true,
+  needsModelSelection = true,
 ) {
   if (mode === "defaults") {
     return true;
   }
   const providerOk = !needsProviderSelection || pair.provider.trim().length > 0;
-  return providerOk && pair.model.trim().length > 0;
+  const modelOk = !needsModelSelection || pair.model.trim().length > 0;
+  return providerOk && modelOk;
 }

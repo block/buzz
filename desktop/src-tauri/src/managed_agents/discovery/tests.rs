@@ -1541,10 +1541,7 @@ fn deleted_harness_summary_display_and_spawn_sentence_agree() {
         id: "doomed".to_string(),
         label: "Doomed".to_string(),
         command: "doomed-bin".to_string(),
-        args: vec![],
-        env: Default::default(),
-        install_instructions_url: String::new(),
-        install_hint: String::new(),
+        ..Default::default()
     };
     save_and_warm(dir.path(), &def, None).unwrap();
     let record = record_with(Some("doomed"), None, None);
@@ -1685,10 +1682,7 @@ fn harness_def(
         id: id.to_string(),
         label: label.to_string(),
         command: command.to_string(),
-        args: vec![],
-        env: Default::default(),
-        install_instructions_url: String::new(),
-        install_hint: String::new(),
+        ..Default::default()
     }
 }
 /// A `save_and_warm` landing mid-discovery (after the scan, before the

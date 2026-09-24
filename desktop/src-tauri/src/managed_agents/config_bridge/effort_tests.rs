@@ -133,6 +133,7 @@ fn harness_def(env: BTreeMap<String, String>) -> HarnessDefinition {
         env,
         install_instructions_url: String::new(),
         install_hint: String::new(),
+        ..Default::default()
     }
 }
 
