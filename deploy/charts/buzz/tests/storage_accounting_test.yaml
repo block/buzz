@@ -270,8 +270,8 @@ tests:
   # ── Label-safety of arbitrary OCI tags (PR #7876 review, P0) ───────────────
   # image.tag is an unconstrained string in values.schema.json, so any tag the
   # OCI grammar allows must still yield a valid Kubernetes label value. The
-  # chart renders a bounded sanitized prefix plus a stable hash of the exact
-  # revision whenever the revision is not already label-safe.
+  # chart replaces any revision that is not already label-safe with the first
+  # 63 hex characters of its SHA-256, the same shape it uses for digests.
   - it: sanitizes a leading underscore that OCI allows but Kubernetes labels do not
     set:
       relayUrl: wss://buzz.example.com
@@ -288,7 +288,7 @@ tests:
       # Leading '_' is a valid OCI tag byte but an invalid first label byte.
       - equal:
           path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
-          value: "foo-583da8894a"
+          value: "583da8894acbb7b121f9b85bc263859bd68c3a239f4934b62fc13f4f0beedc6"
         template: templates/storage-accounting-cronjob.yaml
       # The rendered label must satisfy the Kubernetes label-value grammar:
       # <=63 bytes, alphanumeric first and last byte, [-._a-zA-Z0-9] inside.
@@ -316,10 +316,11 @@ tests:
       storageAccounting:
         enabled: true
     asserts:
-      # A one-pass '-'/'.'/'_' trim leaves a trailing '-' for a tag ending '-_.'.
+      # A one-pass '-'/'.'/'_' trim left a trailing '-' for a tag ending '-_.';
+      # a hex label has no delimiters to trim.
       - equal:
           path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
-          value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-e4fb46fc85"
+          value: "e4fb46fc85bd57715b5a11055e17387d439f906e568445c24d27ba91fc4995f"
         template: templates/storage-accounting-cronjob.yaml
       # The rendered label must satisfy the Kubernetes label-value grammar:
       # <=63 bytes, alphanumeric first and last byte, [-._a-zA-Z0-9] inside.
@@ -350,7 +351,7 @@ tests:
       # Plain truncation collapses both tags to the same telemetry version.
       - equal:
           path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
-          value: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-2aad1d5b65"
+          value: "2aad1d5b65b546c6b4a5f4d46845078c7dfb91302d9824c884fff9f45f6398c"
         template: templates/storage-accounting-cronjob.yaml
       # The rendered label must satisfy the Kubernetes label-value grammar:
       # <=63 bytes, alphanumeric first and last byte, [-._a-zA-Z0-9] inside.
@@ -378,10 +379,10 @@ tests:
       storageAccounting:
         enabled: true
     asserts:
-      # Same 63-byte prefix as the previous case; the hash suffix keeps them apart.
+      # Same 63-byte tag prefix as the previous case, different SHA-256.
       - equal:
           path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
-          value: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-86dde532eb"
+          value: "86dde532eb8217d9ab8648f38f12cd3568983910e0e668489a66c036734ae9a"
         template: templates/storage-accounting-cronjob.yaml
       # The rendered label must satisfy the Kubernetes label-value grammar:
       # <=63 bytes, alphanumeric first and last byte, [-._a-zA-Z0-9] inside.
@@ -395,4 +396,104 @@ tests:
           content:
             name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
             value: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-two"
+        template: templates/storage-accounting-cronjob.yaml
+  # ── Known 40-bit collision pair (PR #7876 second review, P0) ───────────────
+  # These two tags were found by brute force against the previous fallback,
+  # which kept only 10 hex characters of SHA-256: both rendered
+  # b*52-430be57931. They share a 40-bit SHA-256 prefix and diverge at the
+  # 11th hex character, so they pin the width of the retained hash.
+  - it: keeps the first tag of the known 40-bit collision pair distinct
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-collision-22356"
+      storageAccounting:
+        enabled: true
+    asserts:
+      # Shares its first 10 SHA-256 hex characters with the next case.
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "430be579311332ea582db391704bd58601bcf0f3f5682d22bdabdac24a47169"
+        template: templates/storage-accounting-cronjob.yaml
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          pattern: ^[a-zA-Z0-9]([-._a-zA-Z0-9]{0,61}[a-zA-Z0-9])?$
+        template: templates/storage-accounting-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
+            value: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-collision-22356"
+        template: templates/storage-accounting-cronjob.yaml
+  - it: keeps the second tag of the known 40-bit collision pair distinct
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-collision-914141"
+      storageAccounting:
+        enabled: true
+    asserts:
+      # Same 40-bit SHA-256 prefix as the previous case, different label.
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "430be5793136081a42faa8d72f746af34f0b3bad1a5f65f22bac19e22bd71c5"
+        template: templates/storage-accounting-cronjob.yaml
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          pattern: ^[a-zA-Z0-9]([-._a-zA-Z0-9]{0,61}[a-zA-Z0-9])?$
+        template: templates/storage-accounting-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
+            value: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-collision-914141"
+        template: templates/storage-accounting-cronjob.yaml
+  # ── Reserved hash shape is not reachable by a passthrough tag ──────────────
+  # The hashed and digest branches both emit exactly 63 lowercase hex
+  # characters. If a label-safe tag of that same shape were passed through, an
+  # operator could collide two revisions with no hash work at all, by copying a
+  # rendered label into image.tag. The label below is exactly what
+  # "b"x52 + "-collision-22356" renders, so the chart must hash it rather than
+  # echo it back.
+  - it: hashes a tag that has the reserved 63-hex shape instead of passing it through
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: "430be579311332ea582db391704bd58601bcf0f3f5682d22bdabdac24a47169"
+      storageAccounting:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "9f615034d2fe14c5266fe5ca3eb7c26c4179eae8dce01f506def01a8cc6a77e"
+        template: templates/storage-accounting-cronjob.yaml
+      # Must not echo the tag back: that is the label of a different revision.
+      - notEqual:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "430be579311332ea582db391704bd58601bcf0f3f5682d22bdabdac24a47169"
+        template: templates/storage-accounting-cronjob.yaml
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          pattern: ^[a-zA-Z0-9]([-._a-zA-Z0-9]{0,61}[a-zA-Z0-9])?$
+        template: templates/storage-accounting-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
+            value: "430be579311332ea582db391704bd58601bcf0f3f5682d22bdabdac24a47169"
         template: templates/storage-accounting-cronjob.yaml

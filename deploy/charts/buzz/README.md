@@ -503,15 +503,28 @@ a tag the chart used to accept:
 | Revision | Label |
 |---|---|
 | `sha256:<64 hex>` digest | the hex without `sha256:`, first 63 characters |
-| already a valid label value | emitted byte for byte (e.g. `1.2.3-rc.4`) |
-| anything else | up to 52 sanitized bytes + `-` + 10 hex of the revision's SHA-256 |
+| already a valid label value, and not exactly 63 lowercase hex characters | emitted byte for byte (e.g. `1.2.3-rc.4`) |
+| anything else | the first 63 hex characters of the revision's SHA-256 |
 
-The third case is what makes the mapping total: `_foo` renders
-`foo-583da8894a`, and two overlong tags sharing their first 63 bytes still
-render distinct versions. `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` is never sanitized —
-it always carries the exact revision, so the snapshot row remains the precise
-record and the label remains the joinable telemetry key. See
-`docs/deployment-identity.md`.
+Exactly 63 lowercase hex characters is a **reserved shape** — it is what the
+first and third rows emit, so the passthrough row must not be able to emit it
+too. A tag of that shape is hashed rather than preserved. Shorter hex tags and
+ordinary 40-character git SHAs are unaffected.
+
+Arbitrary OCI revisions outnumber 63-byte label values, so **no mapping onto
+this grammar can be injective** and the chart does not claim one. What it does
+claim is collision *resistance*: every case retains 252 bits of SHA-256, the
+same margin the digest case has always relied on, and the reserved shape keeps
+that margin across cases rather than only within one. Two earlier iterations
+fell short of this — one kept a readable prefix with only 40 bits of hash (a
+colliding tag pair was brute-forced in about a second), and one let a
+passthrough tag reproduce a hashed label with no hash work at all, by copying a
+rendered label into `image.tag`.
+
+`BUZZ_STORAGE_SNAPSHOT_CODE_SHA` is never hashed or sanitized: it always
+carries the exact revision, so the snapshot row stays the precise record while
+the label is the joinable telemetry key. The image reference in the Pod spec is
+exact too. See `docs/deployment-identity.md`.
 
 ## Device pairing relay
 

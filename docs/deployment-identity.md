@@ -99,13 +99,18 @@ cannot drift apart.
 The environment variable always keeps the exact revision. The label cannot: a
 label value is capped at 63 bytes, must begin and end with an alphanumeric, and
 may otherwise contain only `[-._a-zA-Z0-9]`, while `image.tag` accepts any OCI
-tag. The chart therefore maps the revision onto that grammar deterministically —
-a digest keeps the first 63 characters of its hex, a revision that is already a
+tag. Because that domain is larger than the label codomain, no mapping onto it
+is injective; the chart provides a deterministic, collision-resistant one. A
+digest keeps the first 63 characters of its hex, a revision that is already a
 valid label value is preserved byte for byte, and anything else (a leading `_`,
-a byte outside the label alphabet, more than 63 bytes) becomes a sanitized
-prefix of at most 52 bytes plus 10 hex characters of the revision's SHA-256.
-The hash suffix is what keeps two long tags sharing a 63-byte prefix from
-reporting the same version.
+a byte outside the label alphabet, more than 63 bytes) is replaced by the first
+63 hex characters of its SHA-256 — 252 retained bits, the same margin as the
+digest case, and no readable prefix.
+
+Exactly 63 lowercase hex characters is reserved for those hashed and digest
+forms: a tag of that shape is hashed instead of preserved, so a rendered label
+cannot be copied into `image.tag` to make two revisions report one version.
+Shorter hex tags and 40-character git SHAs pass through unchanged.
 
 Any `tags.datadoghq.com/version` supplied through `storageAccounting.podLabels`
 is ignored; see the chart README's "Storage accounting worker" section.
