@@ -29,7 +29,7 @@ pub const OPENCLAW_WORKSPACE_STANDING_INSTRUCTIONS: &str = "\
 
 Treat the OpenClaw remote Hula root (`Hula/` under the workspace) as the **only** project root. Access it exclusively via the `openclaw-workspace` MCP server (filesystem tools on that server). Never `cd` to, open, or treat as project root `~/Documents/Hula`, `/Users/.../Hula`, or any other local Mac Hula checkout.
 
-At session start, **before planning**: MCP-read `Hula/CLAUDE.md` (fall back to `CLAUDE.md` at the workspace root) and follow it.
+The host already injects Hula-root `CLAUDE.md` at spawn. Whenever you **navigate / focus work into a new subdirectory** under `Hula/` (for example the user asks to work in `Hula/products/<repo>`, or you choose that focus yourself), **before planning in that directory** call MCP tool `project_instructions` on `openclaw-workspace` with `path` set to that workspace-relative directory. Follow every `CLAUDE.md` in the returned chain (already ordered root → leaf). Call again whenever focus moves to a different subdirectory.
 
 **Primary skills source:** call MCP tools `skills_list` then `skills_get` on `openclaw-workspace` (exact gateway tool names). Do not treat local `~/.claude/skills` as the source of truth — the skill pack is under the OpenClaw workspace (`SKILL_ROOTS`).
 
@@ -147,23 +147,54 @@ pub fn maybe_inject_standing_instructions(
 }
 
 /// Strip trailing `/mcp` (and slash) from the grant MCP URL → `{base}/project-instructions`.
-fn project_instructions_url(mcp_url: &str) -> String {
+/// Optional `path` appends `?path=` (workspace-relative focus for CLAUDE.md chain).
+fn project_instructions_url(mcp_url: &str, path: Option<&str>) -> String {
     let trimmed = mcp_url.trim().trim_end_matches('/');
     let base = if let Some(rest) = trimmed.strip_suffix("/mcp") {
         rest.trim_end_matches('/')
     } else {
         trimmed
     };
-    format!("{base}/project-instructions")
+    let mut url = format!("{base}/project-instructions");
+    if let Some(p) = path.map(str::trim).filter(|s| !s.is_empty()) {
+        url.push_str("?path=");
+        url.push_str(&encode_path_query(p));
+    }
+    url
+}
+
+/// Percent-encode a workspace-relative path for a `path` query value.
+/// Keeps `/` unencoded so the gateway sees normal path segments.
+fn encode_path_query(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for b in raw.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(*b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// GET remote CLAUDE.md / project instructions for the OpenClaw workspace grant.
 /// Soft-fails (Ok(None) + eprintln) on network/HTTP errors so spawn still works
 /// if the gateway has not yet been upgraded with `/project-instructions`.
+/// Pass `path` for hierarchical CLAUDE.md chain under a subdirectory focus.
 pub fn fetch_project_instructions(
     grant: &OpenClawWorkspaceGrant,
 ) -> Result<Option<String>, String> {
-    let url = project_instructions_url(&grant.url);
+    fetch_project_instructions_at(grant, None)
+}
+
+/// Like [`fetch_project_instructions`], with optional workspace-relative `path`
+/// (`?path=` on the gateway).
+pub fn fetch_project_instructions_at(
+    grant: &OpenClawWorkspaceGrant,
+    path: Option<&str>,
+) -> Result<Option<String>, String> {
+    let url = project_instructions_url(&grant.url, path);
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -186,9 +217,7 @@ pub fn fetch_project_instructions(
     let response = match req.send() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!(
-                "buzz-desktop: openclaw project-instructions fetch failed ({url}): {e}"
-            );
+            eprintln!("buzz-desktop: openclaw project-instructions fetch failed ({url}): {e}");
             return Ok(None);
         }
     };
@@ -208,9 +237,7 @@ pub fn fetch_project_instructions(
     let text = match response.text() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!(
-                "buzz-desktop: openclaw project-instructions body read failed ({url}): {e}"
-            );
+            eprintln!("buzz-desktop: openclaw project-instructions body read failed ({url}): {e}");
             return Ok(None);
         }
     };
@@ -693,35 +720,53 @@ mod tests {
     #[test]
     fn standing_requires_remote_hula_and_skills_tools() {
         let text = OPENCLAW_WORKSPACE_STANDING_INSTRUCTIONS;
-        assert!(text.contains("Hula/CLAUDE.md"));
+        assert!(text.contains("Hula/CLAUDE.md") || text.contains("CLAUDE.md"));
+        assert!(text.contains("project_instructions"));
+        assert!(text.contains("subdirectory") || text.contains("navigate"));
         assert!(text.contains("skills_list"));
         assert!(text.contains("skills_get"));
         assert!(text.contains("openclaw-workspace"));
         assert!(text.contains("~/Documents/Hula") || text.contains("/Users/.../Hula"));
         // Forbids treating local Mac checkout as project root.
-        assert!(text.to_lowercase().contains("never") || text.contains("Do **not**") || text.contains("only"));
-        assert!(text.contains("Never `cd`") || text.contains("Never cd") || text.contains("never `cd`") || text.contains("Never `cd` to"));
+        assert!(
+            text.to_lowercase().contains("never")
+                || text.contains("Do **not**")
+                || text.contains("only")
+        );
+        assert!(
+            text.contains("Never `cd`")
+                || text.contains("Never cd")
+                || text.contains("never `cd`")
+                || text.contains("Never `cd` to")
+        );
     }
 
     #[test]
     fn project_instructions_url_strips_mcp() {
-        // Aligns with openclaw-workspace-gateway PR #8:
+        // Aligns with openclaw-workspace-gateway:
         // GET {base}/project-instructions after stripping trailing /mcp.
         assert_eq!(
-            project_instructions_url("https://workspace.hulapreview.com/mcp"),
+            project_instructions_url("https://workspace.hulapreview.com/mcp", None),
             "https://workspace.hulapreview.com/project-instructions"
         );
         assert_eq!(
-            project_instructions_url("https://gw.example/v1/mcp"),
+            project_instructions_url("https://gw.example/v1/mcp", None),
             "https://gw.example/v1/project-instructions"
         );
         assert_eq!(
-            project_instructions_url("https://gw.example/v1/mcp/"),
+            project_instructions_url("https://gw.example/v1/mcp/", None),
             "https://gw.example/v1/project-instructions"
         );
         assert_eq!(
-            project_instructions_url("https://gw.example/v1/other"),
+            project_instructions_url("https://gw.example/v1/other", None),
             "https://gw.example/v1/other/project-instructions"
+        );
+        assert_eq!(
+            project_instructions_url(
+                "https://workspace.hulapreview.com/mcp",
+                Some("Hula/products/claimminer")
+            ),
+            "https://workspace.hulapreview.com/project-instructions?path=Hula/products/claimminer"
         );
     }
 
@@ -736,7 +781,9 @@ mod tests {
         assert!(once.contains("Be kind."));
         assert!(once.contains("OpenClaw workspace (Hula)"));
         // CLAUDE.md precedes standing block content from standing merge.
-        assert!(once.find("host-injected").unwrap() < once.find("OpenClaw workspace (Hula)").unwrap());
+        assert!(
+            once.find("host-injected").unwrap() < once.find("OpenClaw workspace (Hula)").unwrap()
+        );
         let twice = merge_host_injected_claude_md(Some(once.clone()), Some("# Rules\nBe kind."));
         assert_eq!(Some(once), twice);
     }

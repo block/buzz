@@ -661,12 +661,11 @@ pub fn spawn_agent_child(
     } else {
         None
     };
-    let effective_prompt =
-        super::openclaw_workspace_mcp::maybe_inject_openclaw_workspace_prompt(
-            record,
-            openclaw_grant.as_ref(),
-            effective_prompt,
-        );
+    let effective_prompt = super::openclaw_workspace_mcp::maybe_inject_openclaw_workspace_prompt(
+        record,
+        openclaw_grant.as_ref(),
+        effective_prompt,
+    );
 
     if let Some(prompt) = &effective_prompt {
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
