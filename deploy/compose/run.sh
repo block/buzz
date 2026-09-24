@@ -35,6 +35,20 @@ MSG
   fi
 }
 
+guard_legacy_minio_volume() {
+  local legacy_volume="buzz-prod_buzz-minio-data"
+  local rustfs_volume="buzz-prod_buzz-rustfs-data"
+  if docker volume inspect "${legacy_volume}" >/dev/null 2>&1 &&
+    ! docker volume inspect "${rustfs_volume}" >/dev/null 2>&1; then
+    cat >&2 <<'MSG'
+The previous MinIO data volume exists, but the RustFS data volume does not.
+Buzz will not create a new empty RustFS store and hide existing objects.
+Migrate the objects through the S3 API, verify the backup, then retry.
+MSG
+    return 1
+  fi
+}
+
 backup_hint() {
   cat <<'MSG'
 Back up these before upgrades and on a regular schedule:
@@ -53,6 +67,7 @@ MSG
 case "${1:-help}" in
   start|up)
     require_env
+    guard_legacy_minio_volume
     compose up -d --wait
     ;;
   stop|down)
@@ -60,6 +75,7 @@ case "${1:-help}" in
     ;;
   restart)
     require_env
+    guard_legacy_minio_volume
     compose up -d --wait --force-recreate relay
     ;;
   pull)
@@ -68,6 +84,7 @@ case "${1:-help}" in
     ;;
   upgrade)
     require_env
+    guard_legacy_minio_volume
     compose pull
     compose up -d --wait
     backup_hint
