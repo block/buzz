@@ -465,7 +465,7 @@ pub async fn execute_ban_with_marker(
             SELECT 1 FROM relay_admin_actions
             WHERE id = $1
               AND action_lease_token = $2
-              AND action_lease_expires_at > clock_timestamp()
+              AND action_lease_expires_at > now()
               AND state = 'enforcing'
         )
         "#,
@@ -553,7 +553,7 @@ pub async fn execute_timeout_with_marker(
             SELECT 1 FROM relay_admin_actions
             WHERE id = $1
               AND action_lease_token = $2
-              AND action_lease_expires_at > clock_timestamp()
+              AND action_lease_expires_at > now()
               AND state = 'enforcing'
         )
         "#,
@@ -653,7 +653,7 @@ pub async fn execute_kick_with_marker(
             SELECT 1 FROM relay_admin_actions
             WHERE id = $1
               AND action_lease_token = $2
-              AND action_lease_expires_at > clock_timestamp()
+              AND action_lease_expires_at > now()
               AND state = 'enforcing'
         )
         "#,
@@ -743,7 +743,7 @@ pub async fn execute_delete_with_marker(
             SELECT 1 FROM relay_admin_actions
             WHERE id = $1
               AND action_lease_token = $2
-              AND action_lease_expires_at > clock_timestamp()
+              AND action_lease_expires_at > now()
               AND state = 'enforcing'
         )
         "#,
