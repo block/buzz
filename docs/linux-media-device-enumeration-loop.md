@@ -51,20 +51,18 @@ libcamera is the loud, heavy amplifier that made the loop visible:
    queries the Rust cpal backend, not `mediaDevices`.)
 2. **WebKitGTK (engine).** Media capture is enabled on Linux
    (`desktop/src-tauri/src/linux_media.rs`, `set_enable_media_stream(true)`), so
-   `mediaDevices` exists. **Every `enumerateDevices()` call makes WebKitGTK's
-   `GStreamerCaptureDeviceManager` start a fresh `GstDeviceMonitor`**, which starts
-   **all** matching device providers — audio (pulse) *and* video. Video monitors
-   include the distro's libcamera provider, which constructs a fresh
-   `CameraManager` per start — hence the log lines. WebKitGTK fires `devicechange`
-   on DEVICE_ADDED
-   messages and has a flush trick for messages queued during the initial provider
-   probe (`gst_bus_set_flushing` in upstream
-   `Source/WebCore/platform/mediastream/gstreamer/GStreamerCaptureDeviceManager.cpp`),
-   but providers that add devices asynchronously *after* that flush window deliver
-   them as `devicechange`. The measured result (below) shows this re-announcement is
-   not specific to libcamera: **each monitor start re-announces already-known
-   devices**, so any `devicechange`-triggered re-enumeration re-announces again,
-   forever.
+   `mediaDevices` exists. **Correction (2026-09-25, after standalone
+   instrumentation and an engine-build comparison):** this behavior depends on
+   the WebKitGTK build — details upstream (Bug 325151). On the WebKitGTK
+   bundled in our AppImage — what the website ships — every `enumerateDevices()`
+   restarts device-monitor machinery, leaks ≈1 fd, and re-announces known
+   devices as `devicechange`, so the shipped engine exhibits the full pathology
+   and drives the in-app storm. On the newer system WebKitGTK build tested
+   standalone (2.52.6, MiniBrowser) the capture machinery initializes once and
+   enumeration is leak-free — which is why standalone testing initially missed
+   the enumerate-side leak; only getUserMedia start/stop cycles leak ≈1 fd/cycle
+   there. The demand-driven fix below removes our amplifier and bounds
+   enumerations on every engine build.
 3. **libcamera + gst plugin (loud, heavy amplifier).** Each fresh `CameraManager` spawns
    threads and opens device nodes (video nodes, media-controller devices, eventfds).
    When the loop runs, these accumulate faster than they are released and the process
@@ -77,22 +75,25 @@ interpretation matrix: the libcamera log spam disappeared entirely, but the
 WebKitWebProcess FD count still exploded (117 → 634 within minutes) and the web
 process died, freezing the app. The main process stayed flat (~53–60 FDs).
 
-This proves the loop does **not** need libcamera. With only the v4l2 and pulse
-providers active, WebKitGTK still re-announces devices on every monitor start,
-feeding the app's `devicechange` listeners, and each enumeration cycle leaks file
-descriptors in the web process by itself. libcamera was only the loudest, heaviest
-amplifier — the engine is WebKitGTK's monitor-per-enumeration plus the app's
-event-driven re-enumeration. The app fix below therefore removes the event-driven
-re-enumeration instead of relying on hiding system plugins, and a WebKitGTK upstream
-bug (draft at the bottom) covers the per-enumeration re-announcement and FD leak.
+This proves the explosion does **not** need libcamera: with only the v4l2 and
+pulse providers active, the WebKitWebProcess still exhausted its FDs and died,
+while the main process stayed flat (~53–60 FDs). libcamera was only the
+loudest, heaviest amplifier. *(Interpretation corrected 2026-09-25 — see the root-cause correction:
+enumeration alone does leak on the AppImage's bundled engine; getUserMedia
+cycles leak ≈1 fd/cycle on every engine tested; engine-build details are
+tracked upstream, Bug 325151.)* The app fix below therefore
+removes the event-driven re-enumeration instead of relying on hiding system
+plugins, and a WebKitGTK upstream bug (draft at the bottom) covers the leak.
 
 Why it triggers without using the camera: the trigger is the huddle **audio**-device
 listing; a single `enumerateDevices()` scans audio *and* video providers, so the
 webcam's libcamera provider gets spun too. Nothing ever captures from it.
 
-Why not every Linux user hits it: it requires a distro that ships the GStreamer
-libcamera plugin **and** a camera the libcamera uvcvideo pipeline handler matches.
-Check with `gst-inspect-1.0 libcamera` (shows `libcameraprovider: libcamera Device
+Why not every Linux user hits it: the loud log storm requires a distro that
+ships the GStreamer libcamera plugin **and** a camera the libcamera uvcvideo
+pipeline handler matches; the fd exhaustion itself does not — with the plugin
+hidden the crash still reproduced (see "Falsification result"). Check with
+`gst-inspect-1.0 libcamera` (shows `libcameraprovider: libcamera Device
 Provider` when present).
 
 ## Proving the diagnosis (and stopgap): hide the libcamera GStreamer plugin
@@ -238,15 +239,33 @@ Post-fix behavior on direct launch: the bounded startup burst (6
 capture-device-manager init, not app code, and does not grow. The remaining
 per-enumeration fd leak is the upstream WebKitGTK bug (below).
 
-Remaining known limitation: if WebKitGTK leaks a few FDs per enumeration cycle even
-outside the runaway loop, heavy use of the picker leaks slowly. That part is
-upstream — file the bug below.
+Measured standalone (WebKitGTK 2.52.6, MiniBrowser, instrumented): on the newer
+system engine, enumeration-only and enumerate-with-live-capture loops are leak-free;
+**getUserMedia open/stop cycles leak ≈1 fd/cycle** in the WebKitWebProcess (82
+cycles / 230 s → ~+80 fds, net of GC sawtooth). On the older engine bundled in our
+AppImage, every enumeration additionally leaks ≈1 fd (see the root-cause
+correction). Picker flows that open and stop capture repeatedly therefore leak
+slowly on every engine — that part is upstream, tracked in the bug below.
 
 ## Upstream WebKitGTK bug
 
 Filed upstream as [Bug 325151](https://bugs.webkit.org/show_bug.cgi?id=325151)
 on 2026-09-24; the text below is what was submitted (attachment:
 `webkitgtk-repro.html`, a re-enumerating page that logs each trigger).
+
+**Amendment (same day, after standalone instrumentation):** the enumerate-only
+attachment does **not** reproduce standalone — the capture machinery initializes
+once, and enumeration (even with a live capture stream held open, even after real
+hardware churn fires `devicechange`) neither restarts monitors nor leaks FDs.
+The standalone-provable defect is per-getUserMedia-cycle FD leakage (≈1 fd/cycle);
+corrected repro attached upstream as `webkitgtk-repro-gum-cycles.html`. The
+submitted text below is kept as filed for the record.
+
+**Scope note (2026-09-25, engine-build comparison):** the amendment above holds
+for the newer-baseline engine tested standalone; on the older-baseline engine
+bundled in our AppImage the enumerate-only attachment **does** reproduce
+(≈1 fd/enumerate, with `devicechange` re-announcements). Build-dependent
+details and evidence are tracked on the bug.
 
 **Title:** `enumerateDevices()` re-announces known devices as `devicechange` and
 leaks file descriptors in the WebKitWebProcess
