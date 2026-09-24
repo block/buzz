@@ -77,6 +77,10 @@ fn json_string(val: &serde_json::Value, key: &str) -> Option<String> {
 
 pub(crate) const OPENCLAW_WORKSPACE_MCP_NAME: &str = "openclaw-workspace";
 
+/// Per-server Claude Code MCP tool timeout for openclaw-workspace (ms).
+/// Fail fast on bad calls instead of hanging ~5 minutes.
+pub(crate) const OPENCLAW_WORKSPACE_MCP_TIMEOUT_MS: u64 = 60_000;
+
 /// Resolve the `.claude.json` path the same way [`read_config_file`] does.
 pub(crate) fn mcp_config_path(config_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?;
@@ -144,7 +148,9 @@ pub(crate) fn upsert_http_mcp_server(
         serde_json::json!({
             "type": "http",
             "url": url,
-            "headers": header_map
+            "headers": header_map,
+            // Claude Code per-server MCP tool timeout (milliseconds).
+            "timeout": OPENCLAW_WORKSPACE_MCP_TIMEOUT_MS
         }),
     );
     let pretty = serde_json::to_string_pretty(&root)
@@ -378,6 +384,7 @@ mod tests {
         assert_eq!(server["type"], "http");
         assert_eq!(server["url"], "https://workspace.hulapreview.com/mcp");
         assert_eq!(server["headers"]["Authorization"], "Bearer test.jwt.token");
+        assert_eq!(server["timeout"], OPENCLAW_WORKSPACE_MCP_TIMEOUT_MS);
         remove_mcp_server(Some(dir.path()), OPENCLAW_WORKSPACE_MCP_NAME).unwrap();
         let raw2 = std::fs::read_to_string(&path).unwrap();
         let val2: serde_json::Value = serde_json::from_str(&raw2).unwrap();
