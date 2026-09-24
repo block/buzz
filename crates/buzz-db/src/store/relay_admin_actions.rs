@@ -502,7 +502,7 @@ pub async fn execute_ban_with_marker(
         SET step_marker = 'mutation_committed', updated_at = now()
         WHERE id = $1
           AND action_lease_token = $2
-          AND action_lease_expires_at > now()
+          AND action_lease_expires_at > clock_timestamp()
           AND state = 'enforcing'
           AND step_marker IS NULL
         "#,
@@ -584,7 +584,7 @@ pub async fn execute_timeout_with_marker(
         SET step_marker = 'mutation_committed', updated_at = now()
         WHERE id = $1
           AND action_lease_token = $2
-          AND action_lease_expires_at > now()
+          AND action_lease_expires_at > clock_timestamp()
           AND state = 'enforcing'
           AND step_marker IS NULL
         "#,
@@ -680,7 +680,7 @@ pub async fn execute_kick_with_marker(
         SET step_marker = 'mutation_committed', updated_at = now()
         WHERE id = $1
           AND action_lease_token = $2
-          AND action_lease_expires_at > now()
+          AND action_lease_expires_at > clock_timestamp()
           AND state = 'enforcing'
           AND step_marker IS NULL
         "#,
@@ -755,7 +755,7 @@ pub async fn execute_delete_with_marker(
         SET step_marker = 'mutation_committed', updated_at = now()
         WHERE id = $1
           AND action_lease_token = $2
-          AND action_lease_expires_at > now()
+          AND action_lease_expires_at > clock_timestamp()
           AND state = 'enforcing'
           AND step_marker IS NULL
         "#,
@@ -1017,7 +1017,7 @@ pub async fn record_failure(
         SET state = 'failed', error_message = $2, updated_at = now()
         WHERE id = $1 AND state = 'enforcing' AND step_marker IS NULL
           AND action_lease_token = $3
-          AND action_lease_expires_at > now()
+          AND action_lease_expires_at > clock_timestamp()
         "#,
     )
     .bind(action_id)
@@ -3041,7 +3041,7 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn admin_delete_with_lost_lease_changes_nothing() {
+    async fn admin_delete_with_already_expired_lease_changes_nothing() {
         let pool = setup_pool().await;
         let community_id = make_community(&pool).await;
         let cid = CommunityId::from_uuid(community_id);
@@ -3073,6 +3073,73 @@ mod postgres_tests {
         assert!(!deleted, "delete must roll back with the fence");
         assert_eq!(counts(&pool, cid, &reply).await, (1, 0));
         assert_eq!(counts(&pool, cid, &root).await, (1, 2));
+    }
+
+    /// Regression for the in-flight lease expiry gap: the lease is live at transaction
+    /// entry but expires while the event write blocks (simulated by a per-row trigger
+    /// that sleeps 1 s, shorter than the 500 ms lease). Before the `clock_timestamp()`
+    /// fix the final marker fence used `now()` (transaction start time) and committed
+    /// despite the expired lease. The trigger is installed only in this isolated test
+    /// database and is dropped with the database on teardown.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_delete_with_lease_expiring_during_write_changes_nothing() {
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let cid = CommunityId::from_uuid(community_id);
+        let [root, reply, nested] = make_thread(&pool, cid).await;
+
+        // Install a trigger that delays every UPDATE on events by 1 second.
+        // The lease expires after 500 ms, so the final fence is reached after expiry.
+        sqlx::raw_sql(
+            "CREATE FUNCTION _test_delay_event_update() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$; \
+             CREATE TRIGGER _test_delay_event_update \
+             BEFORE UPDATE ON events FOR EACH ROW EXECUTE FUNCTION _test_delay_event_update();",
+        )
+        .execute(&pool)
+        .await
+        .expect("install delay trigger");
+
+        let lease_until = Utc::now() + chrono::Duration::milliseconds(500);
+        let (action_id, token) = enforcing_action(&pool, community_id, lease_until).await;
+
+        let committed = execute_delete_with_marker(
+            &pool,
+            action_id,
+            token,
+            cid,
+            &nested,
+            Some(&reply),
+            Some(&root),
+        )
+        .await
+        .expect("execute delete");
+
+        assert!(!committed, "lease expired mid-write must not commit");
+
+        let deleted: bool = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id)
+        .bind(&nested)
+        .fetch_one(&pool)
+        .await
+        .expect("event row");
+        assert!(
+            !deleted,
+            "event must not be deleted when lease expires mid-write"
+        );
+        assert_eq!(
+            counts(&pool, cid, &reply).await,
+            (1, 0),
+            "parent counts must be unchanged"
+        );
+        assert_eq!(
+            counts(&pool, cid, &root).await,
+            (1, 2),
+            "root counts must be unchanged"
+        );
     }
 
     #[tokio::test]
