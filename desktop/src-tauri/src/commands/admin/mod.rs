@@ -749,21 +749,35 @@ pub async fn admin_save_attachment(
 
 // ── Member restrictions ───────────────────────────────────────────────────
 
+/// Shown by the UI when a restriction call targets a relay other than the one
+/// its list loaded from.
+const RELAY_SCOPE_CHANGED: &str =
+    "active community changed since restrictions loaded; nothing was sent. Reload to continue.";
+
 /// Build a restrictions-route URL scoped to the active relay's community.
 ///
 /// The community is named by the active relay's host authority — the same
 /// `relay_url_authority` the relay's own connection binding uses — so the relay
 /// resolves its tenant. The desktop's local community ids are never sent.
+///
+/// `expected_relay` is the relay the caller's restriction list loaded from. The
+/// native relay is read once; if it no longer matches, the call fails before
+/// any request so a workspace switch cannot retarget a page or removal.
 fn restrictions_url(
     origin: &str,
     route: &routes::AdminRoute,
     cursor: Option<String>,
+    expected_relay: &str,
     state: &crate::app_state::AppState,
 ) -> Result<String, String> {
     let origin = origin::AdminOrigin::parse(origin)?;
-    let host = buzz_core_pkg::tenant::relay_url_authority(
-        &crate::relay::relay_api_base_url_with_override(state),
-    );
+    let relay_base = crate::relay::relay_api_base_url_with_override(state);
+    if expected_relay.trim().is_empty()
+        || crate::relay::assert_expected_relay_scope(Some(expected_relay), &relay_base).is_err()
+    {
+        return Err(RELAY_SCOPE_CHANGED.to_string());
+    }
+    let host = buzz_core_pkg::tenant::relay_url_authority(&relay_base);
     if host.is_empty() {
         return Err("admin_community_host_unresolved".to_string());
     }
@@ -784,12 +798,14 @@ fn restrictions_url(
 pub async fn admin_list_restrictions(
     origin: String,
     cursor: Option<String>,
+    expected_relay: String,
     state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<serde_json::Value, String> {
     let url = restrictions_url(
         &origin,
         &routes::AdminRoute::MemberRestrictionsList,
         cursor,
+        &expected_relay,
         &state,
     )?;
     let bytes = fetch_admin_json(&url, SUCCESS_JSON_CAP, &state).await?;
@@ -805,6 +821,7 @@ pub async fn admin_list_restrictions(
 pub async fn admin_lift_ban(
     origin: String,
     pubkey: String,
+    expected_relay: String,
     state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<(), AdminMutationError> {
     let pubkey =
@@ -813,6 +830,7 @@ pub async fn admin_lift_ban(
         &origin,
         &routes::AdminRoute::MemberBanDelete { pubkey },
         None,
+        &expected_relay,
         &state,
     )?;
     // 204 No Content: empty body is the success signal. delete_admin_json
@@ -828,6 +846,7 @@ pub async fn admin_lift_ban(
 pub async fn admin_lift_timeout(
     origin: String,
     pubkey: String,
+    expected_relay: String,
     state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<(), AdminMutationError> {
     let pubkey =
@@ -836,6 +855,7 @@ pub async fn admin_lift_timeout(
         &origin,
         &routes::AdminRoute::MemberTimeoutDelete { pubkey },
         None,
+        &expected_relay,
         &state,
     )?;
     let _bytes = delete_admin_json(&url, SUCCESS_JSON_CAP, &state).await?;

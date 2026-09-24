@@ -557,6 +557,9 @@ export type AdminRestrictionsPage = {
 
 /**
  * List one page of active bans and timeouts for the active relay's community.
+ * `expectedRelay` is the relay the list loaded from; the native command
+ * rejects the call if the active relay has since changed. The same applies
+ * to `liftAdminBan` and `liftAdminTimeout`.
  * The native command names the community by the active relay's host, which
  * the relay resolves to its tenant. Pass the prior page's `nextCursor` to
  * continue.
@@ -565,11 +568,13 @@ export type AdminRestrictionsPage = {
  */
 export async function listAdminRestrictions(
   origin: string,
+  expectedRelay: string,
   cursor: string | null = null,
 ): Promise<AdminRestrictionsPage> {
   return invokeTauri<AdminRestrictionsPage>("admin_list_restrictions", {
     origin,
     cursor,
+    expectedRelay,
   });
 }
 
@@ -584,8 +589,9 @@ export async function listAdminRestrictions(
 export async function liftAdminBan(
   origin: string,
   pubkey: string,
+  expectedRelay: string,
 ): Promise<void> {
-  return invokeTauri<void>("admin_lift_ban", { origin, pubkey });
+  return invokeTauri<void>("admin_lift_ban", { origin, pubkey, expectedRelay });
 }
 
 /**
@@ -599,8 +605,13 @@ export async function liftAdminBan(
 export async function liftAdminTimeout(
   origin: string,
   pubkey: string,
+  expectedRelay: string,
 ): Promise<void> {
-  return invokeTauri<void>("admin_lift_timeout", { origin, pubkey });
+  return invokeTauri<void>("admin_lift_timeout", {
+    origin,
+    pubkey,
+    expectedRelay,
+  });
 }
 
 // ── Attachment ────────────────────────────────────────────────────────────

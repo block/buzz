@@ -21,9 +21,13 @@ export const ipcHandlers = new Map();
 export function setIpcHandler(cmd, fn) {
   ipcHandlers.set(cmd, fn);
 }
+export const TEST_RELAY_WS_URL = "wss://relay.test";
 export function clearIpcHandlers() {
   ipcHandlers.clear();
+  // The restrictions list captures the native relay it loads from.
+  ipcHandlers.set("get_relay_ws_url", () => Promise.resolve(TEST_RELAY_WS_URL));
 }
+clearIpcHandlers();
 
 const tauriMock = {
   invoke(cmd, args) {

@@ -22,6 +22,7 @@ import { Badge } from "@/shared/ui/badge";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { getRelayWsUrl } from "@/shared/api/tauri";
 import type { UserProfileSummary } from "@/shared/api/types";
 import {
   AlertDialog,
@@ -177,14 +178,21 @@ function RestrictionsSection({
   const [pendingLiftTimeout, setPendingLiftTimeout] =
     useState<AdminMemberRestrictionDto | null>(null);
 
+  // The list captures the native relay it loaded from; every later page and
+  // removal carries it so a relay switch fails loudly instead of retargeting.
   const listState: AsyncState<{
+    relay: string;
     items: AdminMemberRestrictionDto[];
     nextCursor: string | null;
   }> = useAsyncLoad(
-    () => listAdminRestrictions(origin),
+    async () => {
+      const relay = await getRelayWsUrl();
+      return { relay, ...(await listAdminRestrictions(origin, relay)) };
+    },
     [origin, relayKey],
     generation + listGen,
   );
+  const loadedRelay = listState.status === "ok" ? listState.data.relay : "";
 
   const handleConfirmLiftBan = async () => {
     const row = pendingLiftBan;
@@ -193,7 +201,7 @@ function RestrictionsSection({
     setLiftError(null);
     setWorkingPubkey(row.pubkey);
     try {
-      await liftAdminBan(origin, row.pubkey);
+      await liftAdminBan(origin, row.pubkey, loadedRelay);
       setListGen((g) => g + 1);
     } catch (e) {
       const msg = adminErrorMessage(e);
@@ -215,7 +223,7 @@ function RestrictionsSection({
     setLiftError(null);
     setWorkingPubkey(row.pubkey);
     try {
-      await liftAdminTimeout(origin, row.pubkey);
+      await liftAdminTimeout(origin, row.pubkey, loadedRelay);
       setListGen((g) => g + 1);
     } catch (e) {
       const msg = adminErrorMessage(e);
@@ -267,7 +275,7 @@ function RestrictionsSection({
     const gen = loadGen;
     setMoreRequest({ gen, busy: true, error: null });
     try {
-      const page = await listAdminRestrictions(origin, nextCursor);
+      const page = await listAdminRestrictions(origin, loadedRelay, nextCursor);
       if (loadGenRef.current !== gen) return;
       setMore({
         gen,

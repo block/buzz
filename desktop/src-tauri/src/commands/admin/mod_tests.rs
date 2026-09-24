@@ -1247,6 +1247,7 @@ fn restrictions_url_names_the_active_relay_authority() {
         "https://admin.example.com",
         &routes::AdminRoute::MemberBanDelete { pubkey },
         None,
+        "wss://Community.Example.com:8443/ws",
         &state,
     )
     .unwrap();
@@ -1264,6 +1265,7 @@ fn restrictions_url_carries_the_cursor_and_default_port_host() {
         "https://admin.example.com",
         &routes::AdminRoute::MemberRestrictionsList,
         Some("tok".to_string()),
+        "wss://relay.example.com",
         &state,
     )
     .unwrap();
@@ -1281,8 +1283,30 @@ fn restrictions_url_errors_when_the_relay_host_is_unresolvable() {
         "https://admin.example.com",
         &routes::AdminRoute::MemberRestrictionsList,
         None,
+        "not a url",
         &state,
     )
     .unwrap_err();
     assert_eq!(err, "admin_community_host_unresolved");
+}
+
+#[test]
+fn restrictions_url_rejects_a_caller_relay_that_no_longer_matches() {
+    // The list loaded from relay A; the native relay has since switched to B.
+    // Every restriction route must fail before building a request URL.
+    let state = relay_state("wss://relay-b.example.com");
+    let pubkey = routes::HexPubkey::parse(&"ab".repeat(32)).unwrap();
+    for route in [
+        routes::AdminRoute::MemberRestrictionsList,
+        routes::AdminRoute::MemberBanDelete {
+            pubkey: pubkey.clone(),
+        },
+        routes::AdminRoute::MemberTimeoutDelete { pubkey },
+    ] {
+        for expected in ["wss://relay-a.example.com", "", "  "] {
+            let err = restrictions_url("https://admin.example.com", &route, None, expected, &state)
+                .unwrap_err();
+            assert_eq!(err, RELAY_SCOPE_CHANGED);
+        }
+    }
 }

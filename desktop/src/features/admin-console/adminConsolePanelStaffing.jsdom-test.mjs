@@ -23,6 +23,7 @@ import {
   CM_ORIGIN,
   CM_PUBKEY,
   CM_OP_PUBKEY,
+  TEST_RELAY_WS_URL,
 } from "./adminConsolePanelTestHelpers.jsdom.mjs";
 
 afterEach(resetTestState);
@@ -1300,6 +1301,11 @@ test("restrictions-lift-ban-confirm: confirming lift-ban calls admin_lift_ban wi
       false,
       "admin_lift_ban must not send a client community id; the native command derives the relay host",
     );
+    assert.equal(
+      liftCalls[0]?.expectedRelay,
+      TEST_RELAY_WS_URL,
+      "admin_lift_ban carries the relay the list loaded from",
+    );
 
     // After the lift the list refreshes and the row must be gone.
     await settle(50);
@@ -1483,9 +1489,11 @@ test("restrictions-load-more: second page is fetched with the cursor and appende
   const firstPubkey = "d4".repeat(32);
   const secondPubkey = "e5".repeat(32);
   const cursors = [];
+  const relays = [];
 
   setIpcHandler("admin_list_restrictions", (args) => {
     cursors.push(args?.cursor ?? null);
+    relays.push(args?.expectedRelay);
     return Promise.resolve(
       args?.cursor === "page-2"
         ? { items: [makeBanRecord(secondPubkey)], nextCursor: null }
@@ -1517,6 +1525,11 @@ test("restrictions-load-more: second page is fetched with the cursor and appende
 
     assert.equal(cursors.at(-1), "page-2", "Load more forwards nextCursor");
     assert.equal(cursors.filter((c) => c !== null).length, 1);
+    assert.deepEqual(
+      [...new Set(relays)],
+      [TEST_RELAY_WS_URL],
+      "every page carries the relay the list loaded from",
+    );
     assert.ok(row(firstPubkey), "first page row stays");
     assert.ok(row(secondPubkey), "second page row is appended");
     assert.ok(
@@ -1588,5 +1601,59 @@ test("restrictions-load-more-stale-error: a failed old page does not survive a s
     );
   } finally {
     await m.unmount();
+  }
+});
+
+test("restrictions-relay-changed: a removal rejected for a changed relay shows the error and keeps the row", async () => {
+  // The native command rejects when the active relay no longer matches the
+  // relay the list loaded from; the UI must say so, not silently drop the row.
+  const origin = "https://admin-restrictions-relay-changed.example.com";
+  const pubkey = "3a".repeat(32);
+  const bannedPubkey = "4b".repeat(32);
+  const scopeError =
+    "active community changed since restrictions loaded; nothing was sent. Reload to continue.";
+
+  setIpcHandler("admin_list_restrictions", () =>
+    Promise.resolve({ items: [makeBanRecord(bannedPubkey)], nextCursor: null }),
+  );
+  setIpcHandler("admin_lift_ban", () => mutationReject(scopeError, null));
+
+  const { container, doRender, unmount } = mountStaffingPanel(
+    origin,
+    pubkey,
+    [],
+  );
+  await doRender();
+  await settle(50);
+
+  try {
+    await act(async () => {
+      fireEvent.click(
+        container.querySelector(
+          `[data-testid='restrictions-lift-ban-btn-${bannedPubkey}']`,
+        ),
+      );
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    await act(async () => {
+      fireEvent.click(
+        document.body.querySelector(
+          "[data-testid='restrictions-lift-ban-confirm']",
+        ),
+      );
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    assert.ok(
+      container.textContent.includes("active community changed"),
+      `scope error must be shown; got: ${container.textContent}`,
+    );
+    assert.ok(
+      container.querySelector(
+        `[data-testid='restriction-row-${bannedPubkey}']`,
+      ),
+      "the row stays: nothing was lifted",
+    );
+  } finally {
+    await unmount();
   }
 });
