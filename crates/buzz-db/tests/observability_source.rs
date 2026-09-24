@@ -628,7 +628,20 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
 }
 
 #[test]
-fn event_write_paths_use_tenant_local_chokepoint() {
+fn insert_mentions_docs_describe_syntactic_scope_and_db_backstop() {
+    let runtime = include_str!("../src/runtime/mod.rs");
+    assert!(
+        runtime.contains("does not provide application-admission provenance"),
+        "runtime::insert_mentions docs must describe syntactic-only routing scope"
+    );
+    assert!(
+        runtime.contains("community-write fence remains the authoritative safety"),
+        "runtime::insert_mentions docs must name database fencing as the safety backstop"
+    );
+}
+
+#[test]
+fn event_write_paths_include_tenant_local_chokepoint_calls() {
     let event = include_str!("../src/store/event.rs");
     let insert_event = event
         .split_once("pub async fn insert_event(\n")
@@ -639,7 +652,7 @@ fn event_write_paths_use_tenant_local_chokepoint() {
         .0;
     assert!(
         insert_event.contains("begin_community_event_write_transaction"),
-        "pool-level event inserts must enter through the tenant-local event-write chokepoint"
+        "pool-level event inserts must include a tenant-local event-write chokepoint call"
     );
     let insert_with_thread_meta = event
         .split_once("pub async fn insert_event_with_thread_metadata(\n")
@@ -650,7 +663,7 @@ fn event_write_paths_use_tenant_local_chokepoint() {
         .0;
     assert!(
         insert_with_thread_meta.contains("begin_community_event_write_transaction"),
-        "thread-metadata event inserts must enter through the tenant-local chokepoint"
+        "thread-metadata event inserts must include a tenant-local chokepoint call"
     );
 
     let replaceable = include_str!("../src/store/replaceable.rs");
@@ -663,7 +676,7 @@ fn event_write_paths_use_tenant_local_chokepoint() {
         .0;
     assert!(
         replace_addressable.contains("begin_community_event_write_transaction"),
-        "addressable replacements must enter through the tenant-local chokepoint"
+        "addressable replacements must include a tenant-local chokepoint call"
     );
     let replace_parameterized = replaceable
         .split_once("pub async fn replace_parameterized_event(\n")
@@ -674,7 +687,7 @@ fn event_write_paths_use_tenant_local_chokepoint() {
         .0;
     assert!(
         replace_parameterized.contains("begin_community_event_write_transaction"),
-        "parameterized replacements must enter through the tenant-local chokepoint"
+        "parameterized replacements must include a tenant-local chokepoint call"
     );
 
     let channel_members = include_str!("../src/store/channel_members.rs");
@@ -687,7 +700,7 @@ fn event_write_paths_use_tenant_local_chokepoint() {
         .0;
     assert!(
         snapshot_lock.contains("begin_community_event_write_transaction"),
-        "snapshot publication locks must enter through the tenant-local chokepoint"
+        "snapshot publication locks must include a tenant-local chokepoint call"
     );
 
     let relay_members = include_str!("../src/store/relay_members.rs");
@@ -700,7 +713,7 @@ fn event_write_paths_use_tenant_local_chokepoint() {
         .0;
     assert!(
         publish_snapshot.contains("begin_community_event_write_transaction"),
-        "NIP-43 membership publication must enter through the tenant-local chokepoint"
+        "NIP-43 membership publication must include a tenant-local chokepoint call"
     );
 
     let push = include_str!("../src/store/push.rs");
@@ -713,7 +726,7 @@ fn event_write_paths_use_tenant_local_chokepoint() {
         .0;
     assert!(
         accept_lease.contains("begin_community_event_write_transaction"),
-        "push lease source-event writes must enter through the tenant-local chokepoint"
+        "push lease source-event writes must include a tenant-local chokepoint call"
     );
 
     let reaction = include_str!("../src/store/reaction.rs");
@@ -726,18 +739,21 @@ fn event_write_paths_use_tenant_local_chokepoint() {
         .0;
     assert!(
         insert_reaction.contains("begin_community_event_write_transaction"),
-        "live kind:7 reaction inserts must enter through the tenant-local chokepoint"
+        "live kind:7 reaction inserts must include a tenant-local chokepoint call"
     );
 }
 
-/// Function-level tenant-lock policy backstop.
+/// Function-level syntactic routing backstop.
 ///
 /// A file can contain both a legitimate chokepoint writer and a bypass writer.
-/// This check enforces each guarded-table mutation seam independently: every
-/// writing function must either enter through the tenant-local community
-/// chokepoint itself, accept a caller-owned guarded transaction/connection, or
-/// use reviewed adapter-owned transaction state whose constructor is pinned to
-/// the same chokepoint.
+/// This check is intentionally source-shape only: every writing function must
+/// expose a syntactic route marker by either calling the tenant-local
+/// community chokepoint, accepting a caller-owned guarded
+/// transaction/connection, or using reviewed adapter-owned transaction state
+/// whose constructor is pinned to the same chokepoint.
+///
+/// It does not prove transaction/connection provenance or relay-side admission;
+/// commit-time database fences remain the authoritative safety backstop.
 const GUARDED_TABLE_WRITE_MARKERS: [&str; 9] = [
     "INSERT INTO events",
     "UPDATE events",
@@ -856,7 +872,10 @@ fn adapter_constructor_is_chokepoint_pinned(production_source: &str, method_head
     false
 }
 
-fn function_has_guarded_write_seam(function_source: &str, production_source: &str) -> bool {
+fn function_has_syntactic_guarded_write_route(
+    function_source: &str,
+    production_source: &str,
+) -> bool {
     let header = function_header(function_source);
 
     function_source.contains(COMMUNITY_CHOKEPOINT_MARKER)
@@ -865,14 +884,14 @@ fn function_has_guarded_write_seam(function_source: &str, production_source: &st
             && adapter_constructor_is_chokepoint_pinned(production_source, header))
 }
 
-fn guarded_write_policy_violations(production_source: &str) -> Vec<String> {
+fn syntactic_guarded_write_route_violations(production_source: &str) -> Vec<String> {
     function_slices(production_source)
         .into_iter()
         .filter(|function_source| {
             let header = function_header(function_source);
             production_contains_guarded_write(function_source)
                 && !function_is_guarded_write_exception(header)
-                && !function_has_guarded_write_seam(function_source, production_source)
+                && !function_has_syntactic_guarded_write_route(function_source, production_source)
         })
         .map(|function_source| function_header(function_source).to_owned())
         .collect()
@@ -898,7 +917,7 @@ pub async fn unguarded_writer(pool: &sqlx::PgPool) {
 }
 "#;
 
-    let violations = guarded_write_policy_violations(mixed_source);
+    let violations = syntactic_guarded_write_route_violations(mixed_source);
     assert!(
         violations
             .iter()
@@ -938,7 +957,7 @@ pub async fn bypass_with_pool_begin(pool: &sqlx::PgPool) {
 }
 "#;
 
-    let acquire_writer_violations = guarded_write_policy_violations(acquire_writer_bypass);
+    let acquire_writer_violations = syntactic_guarded_write_route_violations(acquire_writer_bypass);
     assert!(
         acquire_writer_violations
             .iter()
@@ -947,7 +966,7 @@ pub async fn bypass_with_pool_begin(pool: &sqlx::PgPool) {
          {acquire_writer_violations:?}"
     );
 
-    let pool_begin_violations = guarded_write_policy_violations(pool_begin_bypass);
+    let pool_begin_violations = syntactic_guarded_write_route_violations(pool_begin_bypass);
     assert!(
         pool_begin_violations
             .iter()
@@ -958,7 +977,7 @@ pub async fn bypass_with_pool_begin(pool: &sqlx::PgPool) {
 }
 
 #[test]
-fn serving_table_writes_enter_the_tenant_local_chokepoint() {
+fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
     use std::path::{Path, PathBuf};
 
     fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -997,14 +1016,13 @@ fn serving_table_writes_enter_the_tenant_local_chokepoint() {
         let production = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
         if production_contains_guarded_write(production) {
             checked_guarded_files += 1;
-            let violations = guarded_write_policy_violations(production);
+            let violations = syntactic_guarded_write_route_violations(production);
             assert!(
                 violations.is_empty(),
-                "{relative} has guarded-table INSERT/UPDATE/DELETE seams without an in-function \
-                 guard (tenant-local chokepoint entry or caller-owned guarded \
-                 transaction/connection): {violations:?}; route the write through the chokepoint, \
-                 receive a guarded transaction/connection, or add a narrowly justified exception to \
-                 serving_table_writes_enter_the_tenant_local_chokepoint"
+                "{relative} has guarded-table INSERT/UPDATE/DELETE seams without a syntactic \
+                 route marker (tenant-local chokepoint call or caller-owned guarded \
+                 transaction/connection): {violations:?}; this source policy does not prove \
+                 provenance, so database fences remain the authoritative backstop"
             );
         }
     }

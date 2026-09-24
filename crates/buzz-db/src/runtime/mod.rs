@@ -21,10 +21,19 @@ use buzz_core::{CommunityId, StoredEvent};
 
 /// Extract p-tag mentions from an event and insert into the `event_mentions` table.
 ///
-/// This pool-owning wrapper propagates failures to its caller. Replacement writes
-/// use the transaction-bound helper below so event storage and mention indexing
-/// commit or roll back together. Duplicate inserts are silently skipped with
-/// `INSERT ... ON CONFLICT DO NOTHING`.
+/// This pool-owning wrapper is a transitional, syntactic route only: it
+/// propagates failures to its caller, but opens a raw writer transaction and
+/// does not provide application-admission provenance. Supported serving writes
+/// should call `begin_community_event_write_transaction` and then
+/// `insert_mentions_in_transaction` so event storage and mention indexing commit
+/// or roll back together.
+///
+/// While this path remains, commit-time trigger fencing in Postgres is still
+/// authoritative; the community-write fence remains the authoritative safety
+/// backstop.
+///
+/// Duplicate inserts are silently skipped with `INSERT ... ON CONFLICT DO
+/// NOTHING`.
 pub async fn insert_mentions(
     pool: &PgPool,
     community_id: CommunityId,
