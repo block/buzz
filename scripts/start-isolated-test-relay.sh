@@ -87,7 +87,7 @@ wait_pg
 wait_rustfs_init() {
   local container status exit_code
   for _ in $(seq 1 60); do
-    container="$(docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" ps -q rustfs-init 2>/dev/null || true)"
+    container="$(docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" ps -a -q rustfs-init 2>/dev/null || true)"
     status="$(docker inspect --format='{{.State.Status}}' "${container}" 2>/dev/null || true)"
     if [[ "${status}" == "exited" ]]; then
       exit_code="$(docker inspect --format='{{.State.ExitCode}}' "${container}" 2>/dev/null || true)"
