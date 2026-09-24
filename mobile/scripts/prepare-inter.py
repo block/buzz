@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Remove only Inter's U+2764 mapping so hearts use native font fallback.
+"""Remove Inter's heart and warning mappings for native emoji fallback.
 
 Requires fonttools==4.60.1. See assets/fonts/README.md for source and commands.
 """
@@ -15,7 +15,7 @@ SOURCES = {
     "InterVariable.ttf": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
     "InterVariable-Italic.ttf": "d6f1f6a172d9e588438db9f986fd5cfad7b30f644374080a8a9d4d91e344586f",
 }
-HEART = 0x2764
+NATIVE_EMOJI = (0x2764, 0x26A0)
 
 
 def verify(source: Path, output: Path) -> None:
@@ -41,9 +41,10 @@ def verify(source: Path, output: Path) -> None:
                 raise ValueError("Character-map identity changed")
             expected = dict(old.cmap)
             if old.isUnicode():
-                del expected[HEART]
+                for codepoint in NATIVE_EMOJI:
+                    del expected[codepoint]
             if new.cmap != expected:
-                raise ValueError("Character mappings changed beyond U+2764")
+                raise ValueError("Character mappings changed beyond U+2764 and U+26A0")
 
 
 def main() -> None:
@@ -61,15 +62,16 @@ def main() -> None:
         if not args.check:
             with TTFont(source, lazy=True, recalcTimestamp=False) as font:
                 tables = [t for t in font["cmap"].tables if t.isUnicode()]
-                if not tables or any(HEART not in t.cmap for t in tables):
-                    raise ValueError(f"Expected heart mapping in {name}")
+                if not tables or any(codepoint not in t.cmap for t in tables for codepoint in NATIVE_EMOJI):
+                    raise ValueError(f"Expected heart and warning mappings in {name}")
                 # FontTools shares dictionaries between equivalent subtables.
                 for cmap in {id(t.cmap): t.cmap for t in tables}.values():
-                    del cmap[HEART]
+                    for codepoint in NATIVE_EMOJI:
+                        del cmap[codepoint]
                 args.output_dir.mkdir(parents=True, exist_ok=True)
                 font.save(output, reorderTables=False)
         verify(source, output)
-        print(f"{name}: only U+2764 mapping removed; other mappings and glyph data unchanged")
+        print(f"{name}: only U+2764 and U+26A0 mappings removed; other mappings and glyph data unchanged")
 
 
 if __name__ == "__main__":

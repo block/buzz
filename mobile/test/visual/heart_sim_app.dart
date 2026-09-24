@@ -23,7 +23,7 @@ void main() => runApp(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const SizedBox(height: 24),
-                const Text('Hearts and text rendering'),
+                const Text('Hearts, warnings, and text'),
                 const SizedBox(height: 24),
                 const Text('Selected'),
                 _reactions(true),
@@ -34,7 +34,7 @@ void main() => runApp(
                 const Text('Message text'),
                 const SizedBox(height: 8),
                 _message('Plain ❤   Emoji ❤️   Text ❤︎'),
-                _message('**Bold ❤️**   *Italic ❤️*'),
+                _message('**Bold ❤️ ⚠️**   *Italic ❤️ ⚠️*'),
                 _message('Warnings: ⚠  ⚠️  ⚠︎'),
                 const SizedBox(height: 16),
                 const Text('Preserved symbols and text'),
@@ -43,7 +43,7 @@ void main() => runApp(
                 _message('Ελληνικά · Кириллица · Tiếng Việt'),
                 const SizedBox(height: 16),
                 const Text('Emoji-only message'),
-                _message('❤️'),
+                _message('❤️ ⚠️'),
               ],
             ),
           ),
@@ -56,7 +56,7 @@ void main() => runApp(
 Widget _reactions(bool selected) => ReactionRow(
   messageId: 'heart-$selected',
   reactions: [
-    for (final emoji in ['❤️', '👍', '🎉'])
+    for (final emoji in ['❤️', '⚠️', '👍'])
       TimelineReaction(
         emoji: emoji,
         count: 5,
