@@ -41,6 +41,7 @@ import {
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { discoverAcpCommands } from "@/shared/api/acpCommands";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 import {
@@ -136,6 +137,7 @@ export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
+export const acpCommandsQueryKey = ["acp-commands"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
 export const gitBashPrerequisiteQueryKey = ["git-bash-prerequisite"] as const;
 
@@ -322,6 +324,15 @@ export function useGitBashPrerequisiteQuery() {
     queryKey: gitBashPrerequisiteQueryKey,
     queryFn: discoverGitBashPrerequisite,
     staleTime: 15_000,
+  });
+}
+
+export function useAcpCommandsQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    enabled: options?.enabled ?? true,
+    queryKey: acpCommandsQueryKey,
+    queryFn: discoverAcpCommands,
+    staleTime: 30_000,
   });
 }
 

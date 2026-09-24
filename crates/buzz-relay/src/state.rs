@@ -703,7 +703,7 @@ pub struct AppState {
     pub audit_tx: Option<mpsc::Sender<buzz_audit::NewAuditEntry>>,
     /// Media storage client (S3/MinIO).
     pub media_storage: Arc<MediaStorage>,
-    /// Single-flight + cache state for the hourly S3 storage sweep. See
+    /// Cached worker snapshot and storage metric emission bookkeeping. See
     /// `storage_sweep` module docs; shared with the usage-metrics tick via
     /// `Arc` the same way other cross-tick poller state lives on `AppState`.
     pub storage_sweep: Arc<tokio::sync::Mutex<crate::storage_sweep::StorageSweepState>>,

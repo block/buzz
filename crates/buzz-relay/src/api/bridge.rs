@@ -24,6 +24,7 @@ use crate::state::AppState;
 use super::{api_error, internal_error, not_found};
 
 mod thread_roots;
+mod thread_window;
 
 pub(crate) async fn enforce_http_admission(
     state: &AppState,
@@ -1191,6 +1192,7 @@ async fn query_events_authed(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    let thread_windows = thread_window::parse(&raw_filters)?;
     let filters: Vec<nostr::Filter> = raw_filters
         .iter()
         .map(|v| serde_json::from_value(v.clone()))
@@ -1221,6 +1223,26 @@ async fn query_events_authed(
         ));
     }
 
+    if thread_windows.iter().any(Option::is_some) {
+        if thread_windows.iter().any(Option::is_none) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "thread_window cannot mix with other query modes",
+            ));
+        }
+        return tokio::time::timeout(
+            thread_window::DEADLINE,
+            thread_window::query_batch(state, tenant, &pubkey, thread_windows.iter().flatten()),
+        )
+        .await
+        .map_err(|_| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "thread window deadline exceeded",
+            )
+        })?
+        .map(|events| Json(Value::Array(events)));
+    }
     if read_state_snapshot::requested(&raw_filters) {
         return read_state_snapshot::query(state, tenant, &pubkey, &raw_filters).await;
     }

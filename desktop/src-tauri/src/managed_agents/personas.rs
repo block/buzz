@@ -126,6 +126,7 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
             avatar_url: persona.avatar_url.map(|s| s.to_string()),
             description: None,
             system_prompt: persona.system_prompt.to_string(),
+            acp_command: None,
             runtime: persona.runtime.map(|s| s.to_string()),
             model: persona.model.map(|s| s.to_string()),
             provider: None,

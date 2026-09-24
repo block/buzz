@@ -2856,10 +2856,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn databricks_v2_model_service_fqn_summary_uses_mlflow_chat() {
+    async fn databricks_v2_claude_model_service_fqn_summary_uses_anthropic_messages() {
         let model = "catalog.schema.claude-gpt-5";
-        let (base_url, captured) =
-            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("summary"))]).await;
+        let response = json!({
+            "content": [{"type": "text", "text": "summary"}],
+            "stop_reason": "end_turn"
+        });
+        let (base_url, captured) = spawn_sequence_stub(vec![StubHttpResponse::ok(response)]).await;
         let mut config = cfg(Provider::DatabricksV2);
         config.base_url = base_url;
         let llm = Llm::new(&config).unwrap();
@@ -2875,11 +2878,11 @@ mod tests {
             .iter()
             .find(|request| request.method == "POST")
             .expect("summary must issue one POST");
-        assert_eq!(request.path, "/v1/ai-gateway/mlflow/v1/chat/completions");
+        assert_eq!(request.path, "/v1/ai-gateway/anthropic/v1/messages");
         let body = request.body.as_ref().expect("summary body");
         assert_eq!(body["model"], model);
         assert!(body["messages"].is_array());
-        assert_eq!(body["max_completion_tokens"], 128);
+        assert_eq!(body["max_tokens"], 128);
     }
 
     fn image_history() -> Vec<HistoryItem> {
@@ -3295,10 +3298,19 @@ mod tests {
     fn databricks_v2_model_service_fqn_shape_is_strict_and_precedes_manifest() {
         use crate::model_capabilities::{resolve, DatabricksV2Route as Manifest};
 
-        for model in [
-            "catalog.schema.service",
-            "catalog.schema.claude-gpt-5",
-            "data_tools.goose.kimi-k3",
+        for (model, expected) in [
+            (
+                "catalog.schema.service",
+                DatabricksV2Route::MlflowChatCompletions,
+            ),
+            (
+                "catalog.schema.claude-gpt-5",
+                DatabricksV2Route::AnthropicMessages,
+            ),
+            (
+                "data_tools.goose.kimi-k3",
+                DatabricksV2Route::MlflowChatCompletions,
+            ),
         ] {
             assert!(
                 crate::model_capabilities::is_databricks_model_service_fqn(model),
@@ -3306,8 +3318,8 @@ mod tests {
             );
             assert_eq!(
                 databricks_v2_route(model),
-                DatabricksV2Route::MlflowChatCompletions,
-                "FQN route must precede manifest family inference: {model}"
+                expected,
+                "only a Claude service component may select Anthropic Messages: {model}"
             );
         }
 

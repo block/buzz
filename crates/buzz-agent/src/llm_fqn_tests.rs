@@ -127,11 +127,11 @@ async fn opus_uc_replays_ordered_signed_content_with_high_effort() {
 }
 
 #[tokio::test]
-async fn neighboring_opus_uc_services_stay_on_mlflow_chat() {
+async fn neighboring_opus_uc_services_use_anthropic_messages_without_effort() {
     for model in ["system.ai.claude-opus-5-5", "other.goose.goose-claude-opus-5-5",
         "data_workflow_tools.goose.goose-claude-opus-5-5-preview"] {
         let (base_url, captured) = spawn_sequence_stub(vec![StubHttpResponse::ok(json!({
-            "choices":[{"finish_reason":"stop", "message":{"content":"ok"}}]
+            "stop_reason":"end_turn", "content":[{"type":"text", "text":"ok"}]
         }))]).await;
         let mut config = cfg(Provider::DatabricksV2);
         config.base_url = base_url;
@@ -139,11 +139,12 @@ async fn neighboring_opus_uc_services_stay_on_mlflow_chat() {
         Llm::new(&config).unwrap().complete(&config, "system", &[HistoryItem::User("hi".into())], &[], model).await.unwrap();
         let requests = captured.lock().await;
         let post = requests.iter().find(|r| r.method == "POST").unwrap();
-        assert_eq!(post.path, "/v1/ai-gateway/mlflow/v1/chat/completions");
+        assert_eq!(post.path, "/v1/ai-gateway/anthropic/v1/messages");
         let body = post.body.as_ref().unwrap();
         assert_eq!(body["model"], model);
-        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
     }
 }
 
@@ -162,4 +163,54 @@ fn native_thinking_tail_is_not_cache_stamped_or_leaked_to_chat() {
         assert!(chat["messages"][1].get("reasoning_details").is_none());
         assert!(!responses_body(&config, "system", &history, &[], "other", None).to_string().contains("anthropic_content"));
     }
+}
+
+#[tokio::test]
+async fn uncurated_claude_fqn_completion_and_summary_use_anthropic_messages_without_effort() {
+    let response = json!({
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn"
+    });
+    let (base_url, captured) = spawn_sequence_stub(vec![
+        StubHttpResponse::ok(response.clone()),
+        StubHttpResponse::ok(response),
+    ])
+    .await;
+    let mut config = cfg(Provider::DatabricksV2);
+    config.base_url = base_url;
+    config.thinking_effort = Some(ThinkingEffort::High);
+    let model = "catalog.schema.claude-sonnet-custom";
+    let llm = Llm::new(&config).unwrap();
+
+    assert_eq!(
+        llm.complete(
+            &config,
+            "system",
+            &[HistoryItem::User("hello".into())],
+            &[],
+            model,
+        )
+        .await
+        .unwrap()
+        .text,
+        "ok"
+    );
+    assert_eq!(
+        llm.summarize(&config, "system", "conversation", 128, model)
+            .await
+            .unwrap(),
+        "ok"
+    );
+
+    let posts = captured.lock().await;
+    assert_eq!(posts.len(), 2);
+    for request in &*posts {
+        assert_eq!(request.path, "/v1/ai-gateway/anthropic/v1/messages");
+        let body = request.body.as_ref().unwrap();
+        assert_eq!(body["model"], model);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+    assert_eq!(posts[1].body.as_ref().unwrap()["max_tokens"], 128);
 }

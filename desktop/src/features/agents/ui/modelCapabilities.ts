@@ -289,7 +289,7 @@ function toResult(
   };
 }
 
-function isDatabricksModelServiceFqn(model: string): boolean {
+export function isDatabricksModelServiceFqn(model: string): boolean {
   const components = model.split(".");
   return (
     components.length === 3 &&
@@ -302,7 +302,17 @@ function isDatabricksModelServiceFqn(model: string): boolean {
   );
 }
 
-// Mirror fqn_requires_responses: routing is the only inferred FQN capability.
+// Mirror fqn_requires_anthropic_messages: only the service component may
+// select Anthropic Messages, and doing so does not infer effort support.
+function fqnRequiresAnthropicMessages(model: string): boolean {
+  const service = model.split(".").at(-1) ?? "";
+  const stripped = stripCatalogPrefix(
+    service.toLowerCase(),
+    MANIFEST.family_tokens,
+  );
+  return stripped.startsWith("claude-");
+}
+
 function fqnRequiresResponses(model: string): boolean {
   const service = model.split(".").at(-1) ?? "";
   const stripped = stripCatalogPrefix(
@@ -328,8 +338,9 @@ export function resolveModelCapabilities(
 ): CapabilityResult {
   const canon = canonicalizeProvider(provider);
   const blank = rawModelId.trim().length === 0;
-  // Uncurated FQNs keep neutral effort capabilities; verified exact records
-  // take precedence. Catalog/schema names never infer a protocol.
+  // Exact records are verified service contracts and take precedence. Among
+  // uncurated FQNs, Claude exposes no effort choices; other services retain
+  // neutral fallback effort. Routing inspects only the service component.
   const modelServiceFqn =
     canon === "databricks_v2" && isDatabricksModelServiceFqn(rawModelId);
 
@@ -383,10 +394,27 @@ export function resolveModelCapabilities(
   // 3. Provider fallback (blank vs. concrete-unknown); never carries a label.
   const pair = fallbackPair(canon);
   const state = blank ? pair.blank : pair.concrete_unknown;
-  const route =
-    modelServiceFqn && fqnRequiresResponses(rawModelId)
+  const fqnAnthropicMessages =
+    modelServiceFqn && fqnRequiresAnthropicMessages(rawModelId);
+  const route = fqnAnthropicMessages
+    ? "anthropic-messages"
+    : modelServiceFqn && fqnRequiresResponses(rawModelId)
       ? "openai-responses"
       : state.databricks_v2_wire_route;
+  if (fqnAnthropicMessages) {
+    // Route inference does not prove thinking support. Verified exact records
+    // returned above; uncurated Claude services advertise no effort controls.
+    return toResult(
+      {
+        ...state,
+        supported_efforts: [],
+        default_effort: null,
+        normalization_policy: "none",
+      },
+      route,
+      null,
+    );
+  }
   return toResult(state, route, null);
 }
 
@@ -400,11 +428,19 @@ export type RegistryLabelRecord = {
   readonly registry_label: string;
 };
 
+/**
+ * Display label for a Databricks endpoint id: exact record → unique alias →
+ * generative grammar (only when `generate` and no record matched) → `null`
+ * (show the raw id). An ambiguous alias match stays `null`.
+ */
 export function databricksRegistryLabelForRecords(
   rawModelId: string,
   records: ReadonlyArray<RegistryLabelRecord>,
   familyTokens: ReadonlyArray<string>,
+  generate = true,
 ): string | null {
+  const unmatched = () =>
+    generate ? generateDatabricksLabel(rawModelId) : null;
   if (!rawModelId.trim()) return null;
 
   const idLower = rawModelId.toLowerCase();
@@ -416,7 +452,7 @@ export function databricksRegistryLabelForRecords(
   if (exact) return exact.registry_label;
 
   const strippedQuery = stripCatalogPrefix(idLower, familyTokens);
-  if (strippedQuery === idLower) return null;
+  if (strippedQuery === idLower) return unmatched();
   let matchingRecord: RegistryLabelRecord | null = null;
   for (const rec of records) {
     if (rec.provider !== "databricks_v2") continue;
@@ -429,13 +465,155 @@ export function databricksRegistryLabelForRecords(
       matchingRecord = rec;
     }
   }
-  return matchingRecord?.registry_label ?? null;
+  return matchingRecord?.registry_label ?? unmatched();
 }
 
-export function databricksRegistryLabel(rawModelId: string): string | null {
+/**
+ * `generate: false` limits the lookup to curated records — for ids whose
+ * provider is unknown, which must not be humanized by Databricks grammar.
+ */
+export function databricksRegistryLabel(
+  rawModelId: string,
+  { generate = true }: { generate?: boolean } = {},
+): string | null {
   return databricksRegistryLabelForRecords(
     rawModelId,
     MANIFEST.exact_records,
     MANIFEST.label_family_tokens,
+    generate,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Generative display-label grammar — mirrors crates/buzz-agent/src/
+// databricks_label_grammar.rs. Reached only after an exact-record and a
+// unique-alias miss; returns a label built solely from the id's own tokens, or
+// null so callers show the raw id. Only families in the manifest's
+// label_family_tokens are named; adding a vendor means adding one entry there.
+// Presentation-only: capabilities, routing,
+// and the saved id never depend on it. Both interpreters replay
+// scripts/databricks-label-fixtures.json.
+// ---------------------------------------------------------------------------
+
+const CLAUDE_TIERS = new Set(["opus", "sonnet", "haiku"]);
+const LABEL_WRAPPERS = ["databricks-", "goose-", "kgoose-", "builderbot-"];
+
+type LabelPart = { readonly version: boolean; readonly text: string };
+
+const isVersionToken = (tok: string) => /^(?:\d|[1-9]\d)$/.test(tok);
+const isDateToken = (tok: string) => /^(?:\d{4}|\d{8})$/.test(tok);
+const isLetterVersionToken = (tok: string) => /^[a-z]\d+$/.test(tok);
+const isSizeToken = (tok: string) => /^[a-z]?\d+b$/.test(tok);
+const capitalize = (word: string) =>
+  word.charAt(0).toUpperCase() + word.slice(1);
+
+/**
+ * Parse a Databricks endpoint id into a display label, or `null` when any part
+ * of the id falls outside the grammar.
+ */
+export function generateDatabricksLabel(rawModelId: string): string | null {
+  // Refuse non-ASCII before trimming or folding, so no Unicode case or
+  // whitespace rule can turn an unsupported id into an ASCII-looking one.
+  if ([...rawModelId].some((ch) => ch.charCodeAt(0) > 0x7f)) return null;
+  const id = rawModelId.trim().toLowerCase();
+  const isFqn = isDatabricksModelServiceFqn(id);
+  const service = isFqn ? id.slice(id.lastIndexOf(".") + 1) : id;
+  // Only a UC FQN or a wrapped endpoint name is attributable to Databricks; a
+  // bare id such as `gpt-5` stays raw.
+  const wrapper = LABEL_WRAPPERS.find((w) => service.startsWith(w));
+  if (!wrapper && !isFqn) return null;
+  let body = wrapper ? service.slice(wrapper.length) : service;
+  if (body.startsWith("meta-llama-")) body = body.slice("meta-".length);
+
+  const [head, ...rest] = body.split("-");
+  const familyMatch = /^([a-z]+)(\d{0,2})$/.exec(head);
+  if (!familyMatch) return null;
+  const [, family, digits] = familyMatch;
+  if (
+    !MANIFEST.label_family_tokens.some(
+      (token) => token.replace(/-$/, "") === family,
+    )
+  )
+    return null;
+  // Attached digits followed by a version (`qwen3-5`, `llama3-1`) cannot be
+  // read without guessing; checked before any reorder.
+  if (digits !== "" && isVersionToken(rest[0] ?? "")) return null;
+  // In-name digits stay whole (`nova12` → `Nova12`). The one exception is
+  // Qwen's own compact-decimal naming: `qwen35` → `Qwen3.5` when the second
+  // digit is nonzero.
+  const stem =
+    family === "qwen" && digits.length === 2 && digits[1] !== "0"
+      ? `${digits[0]}.${digits[1]}`
+      : digits;
+  if (family === "claude") {
+    // Goose's numeric-first Claude ids (`claude-4-7-opus`) name the tier after
+    // the version. Reorder only that exact shape; any other token after the
+    // version keeps its position.
+    let count = 0;
+    while (count < rest.length && isVersionToken(rest[count])) count += 1;
+    if (count >= 1 && count <= 2 && CLAUDE_TIERS.has(rest[count])) {
+      rest.splice(0, count + 1, rest[count], ...rest.slice(0, count));
+    }
+  }
+
+  const parts: LabelPart[] = [];
+  let afterMinor = false;
+  for (let i = 0; i < rest.length; i += 1) {
+    const tok = rest[i];
+    const next = rest[i + 1];
+    if (isDateToken(tok) && next === undefined) break;
+    const hasMinor = next !== undefined && isVersionToken(next);
+    // A third number (`3-7-1`) would read as a separate version.
+    if (
+      hasMinor &&
+      (isVersionToken(tok) || isLetterVersionToken(tok)) &&
+      isVersionToken(rest[i + 2] ?? "")
+    )
+      return null;
+    if (isVersionToken(tok)) {
+      afterMinor = hasMinor;
+      parts.push({ version: true, text: afterMinor ? `${tok}.${next}` : tok });
+      if (afterMinor) i += 1;
+    } else if (isLetterVersionToken(tok)) {
+      const major = capitalize(tok);
+      parts.push({
+        version: false,
+        text: hasMinor ? `${major}.${next}` : major,
+      });
+      if (hasMinor) i += 1;
+    } else if (isSizeToken(tok)) {
+      parts.push({ version: false, text: tok.toUpperCase() });
+    } else if (/^[a-z]+$/.test(tok)) {
+      const text =
+        tok === "oss"
+          ? "OSS"
+          : family === "gpt" && afterMinor && (tok === "mini" || tok === "nano")
+            ? tok
+            : capitalize(tok);
+      parts.push({ version: false, text });
+    } else {
+      return null;
+    }
+  }
+  // A versionless id (`builderbot-pr-reviews`) is a named endpoint, not a model.
+  const hasNumber =
+    stem !== "" || parts.some((part) => part.version || /\d/.test(part.text));
+  if (!hasNumber) return null;
+
+  const brand =
+    family === "gpt"
+      ? "GPT"
+      : family === "glm"
+        ? "GLM"
+        : family === "deepseek"
+          ? "DeepSeek"
+          : capitalize(family);
+  const hyphenated = family === "gpt" || family === "glm";
+  return parts.reduce(
+    (label, part, index) =>
+      label +
+      (part.version && index === 0 && hyphenated ? "-" : " ") +
+      part.text,
+    brand + stem,
   );
 }

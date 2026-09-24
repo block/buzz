@@ -152,6 +152,7 @@ pub(super) fn sample_persona() -> AgentDefinition {
         display_name: "Test Persona".to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
         system_prompt: "You are a test assistant.".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: Some("claude-opus-4".to_string()),
         provider: Some("anthropic".to_string()),
@@ -283,7 +284,8 @@ fn shared_persona_event_has_exact_tag_and_round_trips() {
 
 #[test]
 fn round_trip_serialization() {
-    let record = sample_persona();
+    let mut record = sample_persona();
+    record.acp_command = Some("buzz-janet-acp".to_string());
     let builder = build_persona_event(&record).unwrap();
     let keys = nostr::Keys::generate();
     let event = builder.sign_with_keys(&keys).unwrap();
@@ -296,6 +298,7 @@ fn round_trip_serialization() {
         Some("https://example.com/avatar.png".to_string())
     );
     assert_eq!(restored.system_prompt, "You are a test assistant.");
+    assert_eq!(restored.acp_command.as_deref(), Some("buzz-janet-acp"));
     assert_eq!(restored.runtime, Some("goose".to_string()));
     assert_eq!(restored.model, Some("claude-opus-4".to_string()));
     assert_eq!(restored.provider, Some("anthropic".to_string()));
@@ -327,6 +330,7 @@ fn content_matches_nip_ap_vector() {
         description: None,
         display_name: "Test Agent".to_string(),
         system_prompt: Some("You are a test assistant.".to_string()),
+        acp_command: None,
         avatar_url: Some("https://example.com/avatar.png".to_string()),
         runtime: Some("goose".to_string()),
         model: Some("claude-opus-4".to_string()),
@@ -340,6 +344,16 @@ fn content_matches_nip_ap_vector() {
         serde_json::to_string(&content).unwrap(),
         VECTOR,
         "serialized content drifted from the NIP-AP Event 1 vector"
+    );
+
+    let mut with_transport = content.clone();
+    with_transport.acp_command = Some("buzz-janet-acp".into());
+    assert_eq!(
+        serde_json::to_string(&with_transport).unwrap(),
+        VECTOR.replace(
+            "\"avatar_url\":",
+            "\"acp_command\":\"buzz-janet-acp\",\"avatar_url\":"
+        )
     );
 
     // Hash invariance across the unified-model widening: REAL pre-revision
@@ -384,6 +398,7 @@ fn content_matches_nip_ap_vector() {
         display_name: "Test Agent".to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
         system_prompt: "You are a test assistant.".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: Some("claude-opus-4".to_string()),
         provider: Some("anthropic".to_string()),
@@ -418,6 +433,7 @@ fn round_trip_minimal_persona() {
         display_name: "Minimal".to_string(),
         avatar_url: None,
         system_prompt: "Hello".to_string(),
+        acp_command: None,
         runtime: None,
         model: None,
         provider: None,
@@ -518,6 +534,7 @@ fn quad_absent_definition_hash_stable_across_activation() {
         display_name: "Test".to_string(),
         avatar_url: None,
         system_prompt: "Hello".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: Some("gpt-oss".to_string()),
         provider: None,
@@ -566,6 +583,7 @@ fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDef
         display_name: content.display_name,
         avatar_url: content.avatar_url,
         system_prompt: content.system_prompt.unwrap_or_default(),
+        acp_command: content.acp_command,
         runtime: content.runtime,
         model: content.model,
         provider: content.provider,
@@ -594,6 +612,7 @@ fn persona_content_hash_is_deterministic() {
         display_name: "Test".to_string(),
         avatar_url: None,
         system_prompt: Some("Hello".to_string()),
+        acp_command: None,
         runtime: None,
         model: None,
         provider: None,
@@ -616,6 +635,7 @@ fn persona_content_hash_changes_on_edit() {
         display_name: "Test".to_string(),
         avatar_url: None,
         system_prompt: Some("Hello".to_string()),
+        acp_command: None,
         runtime: None,
         model: None,
         provider: None,
@@ -693,6 +713,7 @@ fn description_change_does_not_change_content_hash() {
         display_name: "Test".to_string(),
         avatar_url: None,
         system_prompt: Some("Hello".to_string()),
+        acp_command: None,
         runtime: None,
         model: None,
         provider: None,
@@ -716,6 +737,34 @@ fn description_change_does_not_change_content_hash() {
         persona_content_hash(&edited),
         "description-only edits must not change the content hash"
     );
+}
+
+#[test]
+fn snapshot_applies_persona_acp_command_to_linked_instance() {
+    let mut record = sample_record();
+    let mut persona = sample_persona();
+    persona.acp_command = Some("buzz-janet-acp".to_string());
+
+    apply_persona_snapshot(&mut record, &persona);
+
+    assert_eq!(record.acp_command, "buzz-janet-acp");
+
+    // Saving stock transport round-trips through the unified store as None.
+    persona.acp_command = Some("buzz-acp".to_string());
+    let restored = persona
+        .clone()
+        .into_agent_record()
+        .to_definition_view()
+        .unwrap();
+    assert_eq!(restored.acp_command, None);
+    apply_persona_snapshot(&mut record, &restored);
+    assert_eq!(record.acp_command, "buzz-acp");
+
+    // Owner-controlled legacy custom commands remain definition state.
+    persona.acp_command = Some("/opt/custom-acp".to_string());
+    let restored = persona.into_agent_record().to_definition_view().unwrap();
+    apply_persona_snapshot(&mut record, &restored);
+    assert_eq!(record.acp_command, "/opt/custom-acp");
 }
 
 // ── PersonaSnapshot.runtime ───────────────────────────────────────────────

@@ -141,7 +141,7 @@ export async function buildInstanceInputForDefinition(
 
   return {
     ...base,
-    acpCommand: "buzz-acp",
+    acpCommand: persona.acpCommand || "buzz-acp",
     agentCommand: runtime.command,
     // Do NOT seed agentArgs from runtime.defaultArgs: record.agent_args must
     // remain empty so spawn resolves args live from the definition on every

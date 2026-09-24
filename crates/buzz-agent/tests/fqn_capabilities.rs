@@ -1,4 +1,5 @@
-//! UC route selection must change only the route, never effort or model identity.
+//! UC fallback routing preserves model identity; GPT routes retain neutral effort,
+//! while uncurated Claude routes intentionally advertise no effort controls.
 use buzz_agent::model_capabilities::{resolve, DatabricksV2Route};
 
 #[test]
@@ -30,11 +31,10 @@ fn gpt_fqn_route_preserves_neutral_capabilities() {
 }
 
 #[test]
-fn unrelated_fqns_do_not_select_responses() {
+fn unrelated_fqns_do_not_select_family_routes() {
     for model in [
         "gpt-6.schema.other",
         "catalog.gpt-5.other",
-        "catalog.schema.claude-gpt-6",
         "catalog.schema.mygpt-6-astra",
         "catalog.schema.gpt-4",
         "catalog.schema.gpt-4o",

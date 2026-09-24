@@ -289,8 +289,14 @@ Kubernetes does not restart pods when referenced Secret bytes change. AEAD or AP
 The gateway chart has a collision-free release lane separate from the main
 `buzz` chart. To publish chart version `X.Y.Z`, update `version` in
 `deploy/charts/buzz-push-gateway/Chart.yaml` and keep `appVersion` equal to the
-gateway binary's workspace package version. Validate the chart, then open a
-same-repository PR whose branch is exactly `push-chart-release/X.Y.Z`:
+gateway binary's workspace package version.
+
+The render tests require Helm, Ruby, and the repository's Rust toolchain. They
+pass rendered environment values into the gateway's configuration parser with
+synthetic credentials; no running gateway or database is needed.
+
+Validate the chart, then open a same-repository PR whose branch is exactly
+`push-chart-release/X.Y.Z`:
 
 ```bash
 deploy/charts/buzz-push-gateway/tests/render.sh
