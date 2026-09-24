@@ -1662,8 +1662,18 @@ fn format_context_hints(
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = reply_anchor {
+        }
+        // Fix for #6984: this used to be nested inside the `if let Some(root)`
+        // block above, so a top-level DM (no thread root yet) never received
+        // a send instruction — the agent would complete the turn and never
+        // publish a reply. Mirrors the channel branch below: threaded DMs
+        // reply in place, top-level DMs start a new thread anchored to the
+        // triggering event.
+        if let Some(event_id) = reply_anchor {
+            if thread_tags.root_event_id.is_some() {
                 append_reply_instruction(&mut s, event_id);
+            } else {
+                append_new_thread_reply_instruction(&mut s, event_id);
             }
         }
         crate::prompt_framing::semantic_section("context", &s)
@@ -2037,10 +2047,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // there. DMs are always 1:1 with a human, so they always anchor.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        // Fix for #6984: this used to be `.is_some().then(...)`, so a
+        // top-level DM (no thread root yet) got `None` here, which meant the
+        // DM branch below never emitted a send instruction at all — the
+        // agent would complete the turn and never publish a reply. Per the
+        // comment above, DMs always anchor; a top-level DM anchors to the
+        // triggering event itself (it becomes the root), matching the
+        // channel branch's top-level case.
+        Some(last_event.event.id.to_hex())
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -4055,23 +4069,27 @@ mod tests {
                                 "Scope: channel"
                             }));
                         }
+                        // Fix for #6984: a top-level DM now gets the same
+                        // new-thread instruction a top-level channel message
+                        // already got — "is_dm" no longer suppresses it.
                         assert_eq!(
                             prompt.contains("This is a new top-level message"),
-                            !is_dm && !is_reply
+                            !is_reply
                         );
-                        if !is_dm || is_reply {
-                            let anchor = if is_dm {
+                        // Fix for #6984: every case now anchors a send
+                        // instruction, including top-level DM (previously the
+                        // only case with none at all — the root cause of the
+                        // agent completing a turn and never publishing).
+                        let anchor = if is_reply {
+                            if is_dm {
                                 reply.id.to_hex()
-                            } else if is_reply {
-                                root.to_uppercase()
                             } else {
-                                root.clone()
-                            };
-                            assert!(prompt.contains(&format!("--reply-to {anchor}")));
+                                root.to_uppercase()
+                            }
                         } else {
-                            assert!(!prompt.contains("--reply-to"));
-                            assert!(prompt.contains("buzz messages get"));
-                        }
+                            root.clone()
+                        };
+                        assert!(prompt.contains(&format!("--reply-to {anchor}")));
                     }
                 }
             }
@@ -5353,9 +5371,15 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_absent_for_dm_non_reply() {
+    fn test_reply_instruction_present_for_dm_non_reply() {
+        // Regression test for #6984: a top-level (non-reply) DM message used
+        // to produce a context block with no send instruction at all, so the
+        // agent would complete the turn and never publish anything. Fixed to
+        // mirror the channel top-level case: the reply opens a new thread
+        // anchored to the triggering event.
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             scope: conv(ch),
@@ -5383,8 +5407,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "top-level DM message should anchor a new thread at the triggering event"
+        );
+        assert!(
+            prompt.contains("new top-level message"),
+            "top-level DM message should use the new-thread instruction"
         );
     }
 
