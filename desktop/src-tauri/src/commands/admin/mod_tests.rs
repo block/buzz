@@ -433,6 +433,83 @@ fn relay_host_slug_two_relays_produce_distinct_slugs() {
     );
 }
 
+#[test]
+fn relay_host_slug_keeps_distinct_ipv6_relays_apart() {
+    // The old `split(':')` port-drop kept only `[2001` for both.
+    assert_ne!(
+        slug("wss://[2001:db8::1]"),
+        slug("wss://[2001:db8::2]:8443")
+    );
+    assert_eq!(slug("wss://[2001:db8::1]"), "ip6_2001-db8-0-0-0-0-0-1");
+}
+
+#[test]
+fn relay_host_slug_ipv6_never_matches_a_dns_slug() {
+    // A DNS host spelled like the IPv6 slug still maps elsewhere.
+    assert_ne!(
+        slug("wss://[2001:db8::1]"),
+        slug("wss://ip6-2001-db8-0-0-0-0-0-1.example")
+    );
+    assert!(!slug("wss://ip6_2001-db8-0-0-0-0-0-1").starts_with("ip6_"));
+}
+
+#[test]
+fn storage_ipv6_relays_are_isolated_and_spelling_independent() {
+    let dir = tempfile::tempdir().unwrap();
+    let pubkey = "a".repeat(64);
+    set_admin_origin_core(
+        dir.path(),
+        &pubkey,
+        &relay_state("wss://[2001:db8::1]"),
+        Some("https://admin-a.example.com".to_string()),
+    )
+    .unwrap();
+
+    // Same first group, different address: nothing saved for it.
+    assert_eq!(
+        get_admin_origin_core(dir.path(), &pubkey, &relay_state("wss://[2001:db8::2]")).unwrap(),
+        None
+    );
+    // Expanded, upper-case, with port: the same address reads the same file.
+    let same = get_admin_origin_core(
+        dir.path(),
+        &pubkey,
+        &relay_state("wss://[2001:0DB8:0:0:0:0:0:1]:8443/ws"),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(same.contains("admin-a"), "{same}");
+
+    // Clearing through the equivalent spelling removes that one file.
+    set_admin_origin_core(
+        dir.path(),
+        &pubkey,
+        &relay_state("wss://[2001:db8:0::1]"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        get_admin_origin_core(dir.path(), &pubkey, &relay_state("wss://[2001:db8::1]")).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn storage_ignores_a_file_saved_under_the_old_ambiguous_ipv6_slug() {
+    let dir = tempfile::tempdir().unwrap();
+    let pubkey = "a".repeat(64);
+    std::fs::write(
+        dir.path()
+            .join(format!("admin-console-origin-{pubkey}-2001.json")),
+        r#"{"origin":"https://admin-other.example.com"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        get_admin_origin_core(dir.path(), &pubkey, &relay_state("wss://[2001:db8::1]")).unwrap(),
+        None
+    );
+}
+
 // ── Live stub helpers ─────────────────────────────────────────────────────
 
 /// Serve sequential HTTP responses from a background thread.

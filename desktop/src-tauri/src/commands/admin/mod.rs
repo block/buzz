@@ -1057,34 +1057,45 @@ fn admin_origin_path(
 /// never breaks during relay bootstrapping.
 fn relay_host_slug(state: &crate::app_state::AppState) -> String {
     let base = crate::relay::relay_api_base_url_with_override(state);
-    let host = base
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        // Drop port so `relay.example.com:8080` and `relay.example.com`
-        // scope to the same host entry.
-        .split(':')
-        .next()
-        .unwrap_or("");
-    if host.is_empty() {
-        return "default".to_string();
-    }
-    // Retain only hostname-safe chars (alphanumeric, hyphen, dot) and
-    // normalise to lowercase so the slug is consistent and filename-safe.
-    let slug: String = host
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
-                c.to_ascii_lowercase()
+    // `Url` lowercases DNS hosts and canonicalizes IPv6 literals, so every
+    // spelling of one address yields one slug. The port is dropped on
+    // purpose: `relay.example.com:8080` and `relay.example.com` share an entry.
+    match url::Url::parse(&base)
+        .ok()
+        .and_then(|u| u.host().map(|h| h.to_owned()))
+    {
+        // `_` never appears in a DNS slug, so IPv6 slugs cannot collide with
+        // one; all eight segments are kept, so they cannot collide with each other.
+        Some(url::Host::Ipv6(addr)) => format!(
+            "ip6_{}",
+            addr.segments()
+                .iter()
+                .map(|seg| format!("{seg:x}"))
+                .collect::<Vec<_>>()
+                .join("-")
+        ),
+        Some(url::Host::Ipv4(addr)) => addr.to_string(),
+        Some(url::Host::Domain(host)) => {
+            // Retain only hostname-safe chars so the slug is filename-safe.
+            let slug: String = host
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            let slug = slug.trim_matches('-');
+            if slug.is_empty() {
+                "default".to_string()
             } else {
-                '-'
+                slug.to_string()
             }
-        })
-        .collect();
-    // Trim leading/trailing hyphens that could result from non-ASCII prefixes.
-    slug.trim_matches('-').to_string()
+        }
+        None => "default".to_string(),
+    }
 }
 
 // ── NIP-11 admin-origin discovery ─────────────────────────────────────────
