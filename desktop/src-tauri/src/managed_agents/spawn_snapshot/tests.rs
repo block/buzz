@@ -939,6 +939,51 @@ fn openclaw_cap_crossing_parallelism_snapshots_differ() {
     );
 }
 
+/// Prospective OpenClaw prompt must equal a grant=None standing stamp, and
+/// that stamp must NOT equal a host-injected CLAUDE.md prompt — otherwise
+/// spawn-stamping the fetched body reintroduces a permanent restart badge.
+#[test]
+fn openclaw_prospective_system_prompt_matches_standing_only_stamp() {
+    let mut rec = record();
+    rec.use_openclaw_workspace = true;
+    rec.system_prompt = Some("persona base".into());
+    rec.runtime = Some("claude".into());
+    rec.agent_command = "claude".into();
+
+    let prospective = prospective_spawn_config_snapshot(
+        &rec,
+        &[],
+        &[],
+        "wss://ws.example",
+        &Default::default(),
+        false,
+        AcpSessionPolicy::Channel,
+    );
+
+    let standing_stamp =
+        crate::managed_agents::openclaw_workspace_mcp::maybe_inject_openclaw_workspace_prompt(
+            &rec,
+            None,
+            Some("persona base".into()),
+        );
+    assert_eq!(
+        prospective.system_prompt, standing_stamp,
+        "prospective must match spawn stamp with grant=None (standing only)"
+    );
+
+    let with_claude = crate::managed_agents::openclaw_workspace_mcp::merge_host_injected_claude_md(
+        standing_stamp.clone(),
+        Some("# Remote CLAUDE.md\nBe kind."),
+    );
+    assert_ne!(
+        standing_stamp, with_claude,
+        "stamp must not include host-injected CLAUDE.md (would perpetual restart badge)"
+    );
+    assert!(with_claude.as_ref().unwrap().contains(
+        crate::managed_agents::openclaw_workspace_mcp::HULA_CLAUDE_MD_INJECT_MARKER
+    ));
+}
+
 #[cfg(test)]
 #[path = "tests_ext.rs"]
 mod ext;

@@ -643,7 +643,7 @@ pub fn spawn_agent_child(
     // spawn semantics in lock-step (see `EffectiveAgentConfig::relay_mesh_model_id`).
     #[cfg(feature = "mesh-llm")]
     let mesh_model_id = effective_cfg.relay_mesh_model_id();
-    let effective_prompt = effective_cfg.system_prompt.value;
+    let base_prompt = effective_cfg.system_prompt.value;
     let effective_model = effective_cfg.model.value;
     let effective_provider = effective_cfg.provider.value;
 
@@ -661,10 +661,20 @@ pub fn spawn_agent_child(
     } else {
         None
     };
+    // Snapshot stamp uses grant=None (standing only) — same as
+    // prospective_spawn_config_snapshot (see spawn_snapshot.rs grant=None
+    // comment). Env still gets full inject including host-fetched CLAUDE.md.
+    // Stamping the fetched body made system_prompt always drift → permanent
+    // "Restart required" after every restart.
+    let snapshot_prompt = super::openclaw_workspace_mcp::maybe_inject_openclaw_workspace_prompt(
+        record,
+        None,
+        base_prompt.clone(),
+    );
     let effective_prompt = super::openclaw_workspace_mcp::maybe_inject_openclaw_workspace_prompt(
         record,
         openclaw_grant.as_ref(),
-        effective_prompt,
+        base_prompt,
     );
 
     if let Some(prompt) = &effective_prompt {
@@ -824,7 +834,7 @@ pub fn spawn_agent_child(
             descriptor: &descriptor,
             relay_url: &effective_relay_url,
             team_instructions: team_instructions.as_deref(),
-            system_prompt: effective_prompt.as_deref(),
+            system_prompt: snapshot_prompt.as_deref(),
             model: effective_model.as_deref(),
             provider: effective_provider.as_deref(),
             enforced_owner_only: super::owner_only_access_build(),

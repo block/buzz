@@ -802,4 +802,32 @@ mod tests {
         assert_eq!(HULA_CLAUDE_MD_PATHS[0], "Hula/CLAUDE.md");
         assert!(HULA_CLAUDE_MD_PATHS.contains(&"CLAUDE.md"));
     }
+
+    /// Spawn stamps system_prompt with grant=None (standing only). Env may
+    /// still carry host-injected CLAUDE.md. If stamp used the fetched body,
+    /// prospective (also grant=None) would always drift → permanent restart badge.
+    #[test]
+    fn spawn_snapshot_stamp_is_standing_only_not_host_injected_claude_md() {
+        let rec = bare_record(true);
+        let base = Some("persona base".into());
+        let standing = maybe_inject_openclaw_workspace_prompt(&rec, None, base.clone());
+        assert!(standing.as_ref().unwrap().contains("OpenClaw workspace (Hula)"));
+        assert!(!standing
+            .as_ref()
+            .unwrap()
+            .contains(HULA_CLAUDE_MD_INJECT_MARKER));
+
+        let with_claude = merge_host_injected_claude_md(
+            standing.clone(),
+            Some("# Remote CLAUDE.md\nBe kind."),
+        );
+        assert_ne!(
+            standing, with_claude,
+            "standing stamp must differ from host-injected CLAUDE.md prompt"
+        );
+        assert!(with_claude
+            .as_ref()
+            .unwrap()
+            .contains(HULA_CLAUDE_MD_INJECT_MARKER));
+    }
 }
