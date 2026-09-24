@@ -85,7 +85,6 @@ class ChannelStarsStorage {
     }
   }
 
-  void write(String pubkey, ChannelStarStore store) {
-    _prefs.setString(channelStarsKey(pubkey), jsonEncode(store.toJson()));
-  }
+  Future<bool> write(String pubkey, ChannelStarStore store) =>
+      _prefs.setString(channelStarsKey(pubkey), jsonEncode(store.toJson()));
 }

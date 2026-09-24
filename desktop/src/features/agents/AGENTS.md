@@ -308,6 +308,28 @@ with a TypeScript lookup table or an id comparison in a component.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. Verified provider-qualified exact records in `scripts/model-capabilities.json` take precedence for UC FQNs: `data_workflow_tools.goose.goose-claude-opus-5-5` uses Anthropic Messages, adaptive thinking, and `output_config.effort` (default medium). This does not confer capabilities on other namespaces or similarly named services. Uncurated UC FQNs do not inherit family effort capabilities: Claude service components select Anthropic Messages and expose no effort choices, while GPT-5-or-newer service components select OpenAI Responses with neutral fallback effort capabilities; other uncurated FQNs use MLflow Chat Completions. Catalog/schema components never infer routing. Keep exact-record precedence and fallback rules identical in the Rust and TypeScript capability interpreters and shared corpus. Effort inheritance, persistence, and clearing semantics are unchanged. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
+18. **ACP transport is persona-owned before deployment.** Select `acp_command` in the persona create/edit form beside the harness. Deployment inherits that value; linked instances do not expose a competing post-deploy override. Legacy definitions without the field use `buzz-acp`; definition-less agents retain their stored command. Switching a linked definition back to stock resets the instance transport on the next spawn. Shared persona events and restart snapshots carry the field so edits apply on the next spawn.
+
+19. **ACP command selection is convention-based.** The editor always offers
+    stock `buzz-acp` and installed executable `buzz-*-acp` aliases discovered
+    from normal executable search directories. It does not offer arbitrary
+    command entry. A persisted value outside that set remains visible as an
+    unavailable compatibility option but is not editable; selecting a conventional
+    option replaces it. Discovery returns the path produced by the same resolver
+    used at spawn, so a duplicate alias must never advertise one executable and
+    later launch another. Keep these transitions in the pure
+    `ui/acpCommandPicker.ts` helper and preserve persisted values across loading,
+    failed discovery, and late candidate arrival. ACP-only selections must mark
+    the form dirty, including catalog-update and embedded discard protection.
+    Catalog and portable agent/team snapshots carry only stock or conventional
+    aliases (ASCII letters, digits, hyphens, and underscores in the middle).
+    Foreign artifacts with other command values are rejected; exports omit
+    legacy machine-local commands. Owner-native and owner-device synchronization
+    retain custom-command compatibility and are not an execution sandbox.
+    Shared persona heads redact nonportable commands and emit explicit stock
+    for resets; owner replay of a redacted head preserves only a nonportable
+    local override. That local path is not synchronized through catalog heads.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness
@@ -361,6 +383,9 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
   every profile tab when opened from Agents and from the agent's DM.
 - `ui/AgentConfigPanelPresentation.test.mjs` — shared profile/agent config rows
   show only effective values, with an em dash for unknown values.
+- `ui/acpCommandPicker.test.mjs` — stock/discovered/unavailable command mode,
+  late discovery, query-failure compatibility, and conventional replacement of
+  persisted unknown commands.
 - `ui/effortPicker.test.mjs` — `effortPickerState` gating (local + discovered
   `effortConfigId` renders; provider backend or missing configId hides) and
   option/preselect compute, plus `effortSelectionToPersistedValue` sentinel →

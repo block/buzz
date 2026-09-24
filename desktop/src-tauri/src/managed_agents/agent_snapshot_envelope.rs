@@ -333,6 +333,7 @@ mod tests {
             version: FORMAT_VERSION,
             definition: AgentSnapshotDefinition {
                 session_policy: Default::default(),
+                acp_command: None,
                 name: "Locked Test".to_string(),
                 system_prompt: Some("You are a locked test agent.".to_string()),
                 runtime: None,

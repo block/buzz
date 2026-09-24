@@ -11,6 +11,18 @@ pub(crate) struct GitEnvironment {
 }
 
 impl GitEnvironment {
+    pub(crate) fn for_config(config: &mut crate::config::Config) -> anyhow::Result<Self> {
+        let environment =
+            Self::install(&config.keys, &config.relay_url, &std::env::current_exe()?)?;
+        config
+            .persona_env_vars
+            .retain(|(name, _)| !is_managed_env(name));
+        config
+            .persona_env_vars
+            .extend(environment.env.iter().cloned());
+        Ok(environment)
+    }
+
     pub(crate) fn install(
         keys: &nostr::Keys,
         relay_url: &str,

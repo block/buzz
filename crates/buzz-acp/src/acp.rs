@@ -460,6 +460,18 @@ impl AcpClient {
         extra_env: &[(String, String)],
         has_generated_codex_config: bool,
     ) -> Result<Self, AcpError> {
+        Self::spawn_with_env(command, args, extra_env, has_generated_codex_config, &[]).await
+    }
+
+    /// Spawn with authoritative launch environment overrides. Unlike persona
+    /// defaults, these values take precedence over the inherited environment.
+    pub(crate) async fn spawn_with_env(
+        command: &str,
+        args: &[String],
+        extra_env: &[(String, String)],
+        has_generated_codex_config: bool,
+        launch_env: &[(String, String)],
+    ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
         let mut cmd = tokio::process::Command::new(command);
@@ -572,6 +584,7 @@ impl AcpClient {
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
                 _ => None,
             };
+        cmd.envs(launch_env.iter().cloned());
         let mut child = cmd.spawn()?;
 
         let stdin = child

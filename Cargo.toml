@@ -27,6 +27,7 @@ members = [
     "crates/git-sign-nostr",
     "crates/buzz-pair-relay",
     "crates/buzz-relay-mesh",
+    "crates/buzz-mesh-smoke",
     "crates/buzz-dev-mcp",
     "crates/buzz-voice",
     "crates/buzz-backend-kubernetes",
@@ -187,3 +188,8 @@ strip = true
 # allowlist for the auth token). Revert to crates.io once #449 lands upstream.
 [patch.crates-io]
 aws-creds = { git = "https://github.com/tlongwell-block/rust-s3", rev = "c9fce3620dd434c1f810101d672cf384268dbb0f" }
+# MeshLLM 0.76 uses rusqlite 0.40 / libsqlite3-sys 0.38. SQLx 0.9.0's
+# optional SQLite driver still caps libsqlite3-sys below 0.38, which Cargo
+# resolves even though Buzz only enables PostgreSQL. Pin the merged upstream
+# compatibility fix until it is released: https://github.com/transact-rs/sqlx/pull/4402
+sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", rev = "94aafe3a68884d923b0798a767c8d7f6cfda89d2" }
