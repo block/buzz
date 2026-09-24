@@ -940,6 +940,7 @@ name = "buzz-acp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.22.1",
  "buzz-core",
  "buzz-persona",
