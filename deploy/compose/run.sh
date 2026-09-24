@@ -42,7 +42,8 @@ guard_legacy_minio_volume() {
     ! docker volume inspect "${rustfs_volume}" >/dev/null 2>&1; then
     cat >&2 <<'MSG'
 The previous MinIO data volume exists, but the RustFS data volume does not.
-Buzz will not create a new empty RustFS store and hide existing objects.
+The pinned RustFS build has not been validated for direct MinIO data-directory
+reuse. Buzz will not create a new empty RustFS store and hide existing objects.
 Migrate the objects through the S3 API, verify the backup, then retry.
 MSG
     return 1

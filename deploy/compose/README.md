@@ -47,10 +47,13 @@ keypair.
   `<bucket>.rustfs`. It is not configurable for an external S3 provider through
   `.env`; use the Helm chart or a custom Compose configuration for providers
   such as new Railway Storage Buckets that require `virtual` addressing.
-- RustFS does not read the previous MinIO filesystem layout. Existing MinIO
-  deployments must migrate objects through the S3 API and verify a backup before
-  switching; `./run.sh start`, `restart`, and `upgrade` refuse to create the new
-  RustFS volume automatically while only the legacy MinIO volume exists.
+- The bundled Compose stack uses RustFS. The Helm quickstart remains the
+  separate MinIO option, and external S3 providers require the Helm chart or a
+  custom Compose configuration. The pinned RustFS build is not validated here
+  for direct reuse of a MinIO data directory: existing MinIO deployments must
+  migrate objects through the S3 API and verify a backup before switching;
+  `./run.sh start`, `restart`, and `upgrade` refuse to create the new RustFS
+  volume automatically while only the legacy MinIO volume exists.
 
 Run `./run.sh backup-hint` for the backup checklist.
 
