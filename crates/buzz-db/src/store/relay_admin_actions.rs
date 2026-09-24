@@ -3150,7 +3150,7 @@ mod postgres_tests {
     /// observation precondition rather than passing through early rejection.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn admin_delete_with_lease_expiring_during_write_changes_nothing() {
+    async fn admin_delete_cluster_global_lease_expiring_during_write_changes_nothing() {
         let pool = setup_pool().await;
         let community_id = make_community(&pool).await;
         let cid = CommunityId::from_uuid(community_id);
@@ -3300,7 +3300,7 @@ mod postgres_tests {
     /// expiry, releases the lock unchanged, and asserts the worker rejects.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn admin_delete_with_lease_expiring_during_row_lock_wait_changes_nothing() {
+    async fn admin_delete_cluster_global_lease_expiring_during_row_lock_wait_changes_nothing() {
         let pool = setup_pool().await;
         let community_id = make_community(&pool).await;
         let cid = CommunityId::from_uuid(community_id);
