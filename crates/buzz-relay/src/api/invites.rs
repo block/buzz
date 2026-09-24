@@ -23,12 +23,14 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
 use buzz_core::invite::{
     hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS, MAX_INVITE_USES,
     MIN_INVITE_TTL_SECS, V2_PREFIX,
 };
+use buzz_db::channel::MemberRole;
 
 use crate::invite_token;
 use crate::state::AppState;
@@ -352,6 +354,194 @@ pub async fn mint_invite(
     })))
 }
 
+/// Seat a user into a single channel with all required side effects.
+///
+/// This mirrors the side-effect sequence in `handlers::side_effects::handle_put_user`
+/// (NIP-29 kind:9000 PUT_USER). The two are deliberately kept separate for now because
+/// `handle_put_user` is entangled with its signed-event and auth context, while this
+/// path is relay-automated. Any change to the sequence below must be mirrored there.
+///
+/// **CRITICAL**: This must emit all side effects that the relay needs to maintain
+/// correct state and inform clients:
+/// 1. add_member() — write membership to DB
+/// 2. invalidate_membership() — flush relay's in-memory cache
+/// 3. emit_system_message() — log the join event
+/// 4. emit_group_discovery_events() — THIS emits kind 39002 (member list) that clients read
+/// 5. emit_membership_notification() — notify connected members
+///
+/// Without step 4, the DB row exists but clients never learn about the membership (ghost row).
+///
+/// **Parameters:**
+/// - `invited_by`: The pubkey that authorized this add. None for relay-automated seating.
+///   For None on private channels, add_member returns AccessDenied (logged, not fatal).
+/// - `actor_hex`: Actor pubkey hex for system message. For explicit adds it's the signer;
+///   for relay automation it's the relay's public key.
+///
+/// **Return**: Ok(true) if member was added and side effects issued; Ok(false) if member
+/// could not be added (e.g., private channel). Errors are logged but never propagate.
+async fn seat_member_to_channel_internal(
+    state: &Arc<AppState>,
+    tenant: &buzz_core::tenant::TenantContext,
+    channel_id: Uuid,
+    member_pubkey: &[u8],
+    invited_by: Option<&[u8]>,
+    actor_hex: &str,
+    member_pubkey_hex: &str,
+) -> bool {
+    // Step 1: Try to add the member to the channel.
+    // For private channels with invited_by=None, this returns AccessDenied and we skip.
+    match state
+        .db
+        .add_member(
+            tenant.community(),
+            channel_id,
+            member_pubkey,
+            MemberRole::Member,
+            invited_by,
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(buzz_db::DbError::AccessDenied(msg)) => {
+            // Likely a private channel with no inviter.
+            // Operators should use open/public channels for default_channel_ids.
+            tracing::warn!(
+                pubkey = %member_pubkey_hex,
+                channel_id = %channel_id,
+                reason = %msg,
+                "cannot seat into channel (likely private; configure open channels for defaults)"
+            );
+            return false;
+        }
+        Err(e) => {
+            tracing::error!(
+                pubkey = %member_pubkey_hex,
+                channel_id = %channel_id,
+                error = %e,
+                "failed to add member to channel"
+            );
+            return false;
+        }
+    }
+
+    // Step 2: Invalidate the membership cache.
+    // Without this, the relay continues to serve stale authority decisions.
+    state.invalidate_membership(tenant, channel_id, member_pubkey);
+
+    // Step 3: Emit system message.
+    let member_hex = hex::encode(member_pubkey);
+    if let Err(e) = crate::handlers::side_effects::emit_system_message(
+        tenant,
+        state,
+        channel_id,
+        serde_json::json!({
+            "type": "member_joined",
+            "actor": actor_hex,
+            "target": member_hex,
+        }),
+    )
+    .await
+    {
+        tracing::error!(
+            channel = %channel_id,
+            error = %e,
+            "failed to emit member_joined system message"
+        );
+        // Continue — system message is best-effort
+    }
+
+    // Step 4: Emit group discovery events.
+    // **THIS STEP IS CRITICAL**: it emits kind 39000 (metadata), 39001 (admins), and
+    // 39002 (members) events that clients subscribe to for the member list.
+    // Without this, the relay has a ghost row: DB says member, but clients see nothing.
+    if let Err(e) =
+        crate::handlers::side_effects::emit_group_discovery_events(tenant, state, channel_id).await
+    {
+        tracing::warn!(
+            channel = %channel_id,
+            error = %e,
+            "NIP-29 group discovery emission failed (member list may not reach clients)"
+        );
+    }
+
+    // Step 5: Emit membership notification.
+    // Alert connected members of the join (best-effort).
+    let actor_bytes = hex::decode(actor_hex).unwrap_or_default();
+    if let Err(e) = crate::handlers::side_effects::emit_membership_notification(
+        tenant,
+        state,
+        channel_id,
+        member_pubkey,
+        &actor_bytes,
+        buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION,
+    )
+    .await
+    {
+        tracing::warn!(
+            channel = %channel_id,
+            error = %e,
+            "membership notification emission failed"
+        );
+    }
+
+    true
+}
+
+/// Seat a user into configured default channels as a best-effort side effect.
+/// Failures are logged but do not fail the overall claim or roll back relay membership.
+///
+/// For each configured default channel:
+/// - Calls the shared seating logic with invited_by=None
+/// - Uses the relay's pubkey as the actor (marks it as relay-automated)
+/// - Continues to next channel on any error (notably AccessDenied for private channels)
+///
+/// **Design decision on invited_by**: We pass None because:
+/// - Invite claims are relay-automated (no human actor at the moment of seating)
+/// - For open channels (expected default channels), None is idempotent and correct
+/// - For private channels: add_member returns AccessDenied, we log and continue
+/// - Operators should configure only open channels; misconfiguration is logged
+async fn seat_into_default_channels(
+    state: &Arc<AppState>,
+    tenant: &buzz_core::tenant::TenantContext,
+    claimer_pubkey_hex: &str,
+    channel_ids: &[Uuid],
+) {
+    if channel_ids.is_empty() {
+        return;
+    }
+
+    // Convert hex pubkey to bytes (32 bytes).
+    let claimer_pubkey_bytes = match hex::decode(claimer_pubkey_hex) {
+        Ok(bytes) if bytes.len() == 32 => bytes,
+        _ => {
+            tracing::error!(
+                pubkey = %claimer_pubkey_hex,
+                "cannot decode pubkey as hex to seat into default channels"
+            );
+            return;
+        }
+    };
+
+    // Use the relay's pubkey as the actor (marks this as a relay-automated action).
+    let relay_actor_hex = state.relay_keypair.public_key().to_hex();
+
+    for channel_id in channel_ids {
+        // Best-effort: no invited_by since this is relay-automated. For private channels
+        // this will fail with AccessDenied and we log and skip (operators should use open
+        // channels for default_channel_ids).
+        seat_member_to_channel_internal(
+            state,
+            tenant,
+            *channel_id,
+            &claimer_pubkey_bytes,
+            None, // invited_by: None for relay-automated seating
+            &relay_actor_hex,
+            claimer_pubkey_hex,
+        )
+        .await;
+    }
+}
+
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
 /// *joining* pubkey. Exempt from the relay-membership gate by design.
 ///
@@ -429,6 +619,14 @@ pub async fn claim_invite(
                 if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
                     tracing::warn!("failed to publish NIP-43 membership list after v2 claim: {e}");
                 }
+                // Best-effort: seat into default channels (failures do not fail the claim).
+                seat_into_default_channels(
+                    &state,
+                    &tenant,
+                    &claimer_hex,
+                    &state.config.default_channel_ids,
+                )
+                .await;
                 Ok(Json(serde_json::json!({
                     "status": "joined",
                     "community_id": tenant.community().to_string(),
@@ -504,6 +702,14 @@ pub async fn claim_invite(
         if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
             tracing::warn!("failed to publish NIP-43 membership list after claim: {e}");
         }
+        // Best-effort: seat into default channels (failures do not fail the claim).
+        seat_into_default_channels(
+            &state,
+            &tenant,
+            &claimer_hex,
+            &state.config.default_channel_ids,
+        )
+        .await;
     }
 
     Ok(Json(serde_json::json!({
@@ -1812,5 +2018,394 @@ mod postgres_tests {
 
         let response = get_page(state, "/api/join-policy/privacy").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn default_channels_not_configured_no_seating() {
+        let host = format!(
+            "invites-default-channels-unset-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        // Verify default_channel_ids is empty (unset).
+        assert!(state.config.default_channel_ids.is_empty());
+
+        let code = mint_code(state.clone(), &host, &owner, serde_json::json!({})).await;
+        let claim_body = serde_json::json!({ "code": code }).to_string();
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            claim_body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("joined")
+        );
+
+        // Verify the joiner is a relay member but not a channel member anywhere.
+        let relay_member = state
+            .db
+            .get_relay_member(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("query relay member")
+            .expect("relay member exists");
+        assert_eq!(relay_member.role, "member");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn default_channels_configured_seats_user() {
+        let host = format!(
+            "invites-default-channels-seat-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+
+        // Create a default channel
+        let default_channel_uuid = Uuid::new_v4();
+        let (_channel, _) = state
+            .db
+            .create_channel_with_id(
+                state
+                    .db
+                    .lookup_community_by_host(&host)
+                    .await
+                    .expect("lookup")
+                    .expect("community exists")
+                    .id,
+                default_channel_uuid,
+                "default-channel",
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                Some("The default channel"),
+                &owner.public_key().to_bytes().to_vec(),
+                None,
+            )
+            .await
+            .expect("create channel");
+
+        // Inject default_channel_ids into config
+        let mut state_inner = (*state).clone();
+        let mut config = state_inner.config.as_ref().clone();
+        config.default_channel_ids = vec![default_channel_uuid];
+        state_inner.config = Arc::new(config);
+        let state = Arc::new(state_inner);
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        let code = mint_code(state.clone(), &host, &owner, serde_json::json!({})).await;
+        let claim_body = serde_json::json!({ "code": code }).to_string();
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            claim_body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("joined")
+        );
+
+        // Verify the joiner is now a member of the default channel
+        let is_member = state
+            .db
+            .is_member(
+                community.id,
+                default_channel_uuid,
+                &joiner.public_key().to_bytes().to_vec(),
+            )
+            .await
+            .expect("query membership");
+        assert!(
+            is_member,
+            "joiner should be a member of the default channel"
+        );
+
+        // Verify the member role is "member"
+        let members = state
+            .db
+            .get_members(community.id, default_channel_uuid)
+            .await
+            .expect("get members");
+        let joiner_member = members
+            .iter()
+            .find(|m| m.pubkey == joiner.public_key().to_bytes().to_vec())
+            .expect("joiner is in members list");
+        assert_eq!(joiner_member.role, "member");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn default_channels_reclaim_is_idempotent() {
+        let host = format!(
+            "invites-default-channels-idempotent-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+
+        // Create a default channel
+        let default_channel_uuid = Uuid::new_v4();
+        state
+            .db
+            .create_channel_with_id(
+                state
+                    .db
+                    .lookup_community_by_host(&host)
+                    .await
+                    .expect("lookup")
+                    .expect("community exists")
+                    .id,
+                default_channel_uuid,
+                "default-channel",
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                Some("The default channel"),
+                &owner.public_key().to_bytes().to_vec(),
+                None,
+            )
+            .await
+            .expect("create channel");
+
+        // Inject default_channel_ids into config
+        let mut state_inner = (*state).clone();
+        let mut config = state_inner.config.as_ref().clone();
+        config.default_channel_ids = vec![default_channel_uuid];
+        state_inner.config = Arc::new(config);
+        let state = Arc::new(state_inner);
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        let code = mint_code(
+            state.clone(),
+            &host,
+            &owner,
+            serde_json::json!({ "max_uses": 2 }),
+        )
+        .await;
+        let claim_body = serde_json::json!({ "code": code }).to_string();
+
+        // First claim
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            claim_body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("joined")
+        );
+
+        // Verify membership after first claim
+        let is_member_after_first = state
+            .db
+            .is_member(
+                community.id,
+                default_channel_uuid,
+                &joiner.public_key().to_bytes().to_vec(),
+            )
+            .await
+            .expect("query membership");
+        assert!(is_member_after_first);
+
+        // Second claim (idempotent, should not error)
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            claim_body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("already_member")
+        );
+
+        // Verify membership is still active (not duplicated)
+        let is_member_after_second = state
+            .db
+            .is_member(
+                community.id,
+                default_channel_uuid,
+                &joiner.public_key().to_bytes().to_vec(),
+            )
+            .await
+            .expect("query membership");
+        assert!(is_member_after_second);
+
+        let members = state
+            .db
+            .get_members(community.id, default_channel_uuid)
+            .await
+            .expect("get members");
+        let joiner_count = members
+            .iter()
+            .filter(|m| m.pubkey == joiner.public_key().to_bytes().to_vec())
+            .count();
+        assert_eq!(joiner_count, 1, "should have exactly one membership entry");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn default_channels_nonexistent_channel_is_best_effort() {
+        let host = format!(
+            "invites-default-channels-bad-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+
+        // Create one valid default channel
+        let valid_channel_uuid = Uuid::new_v4();
+        state
+            .db
+            .create_channel_with_id(
+                state
+                    .db
+                    .lookup_community_by_host(&host)
+                    .await
+                    .expect("lookup")
+                    .expect("community exists")
+                    .id,
+                valid_channel_uuid,
+                "valid-channel",
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                None,
+                &owner.public_key().to_bytes().to_vec(),
+                None,
+            )
+            .await
+            .expect("create channel");
+
+        // Inject default_channel_ids with one valid and one nonexistent channel
+        let invalid_channel_uuid = Uuid::new_v4();
+        let mut state_inner = (*state).clone();
+        let mut config = state_inner.config.as_ref().clone();
+        config.default_channel_ids = vec![valid_channel_uuid, invalid_channel_uuid];
+        state_inner.config = Arc::new(config);
+        let state = Arc::new(state_inner);
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        let code = mint_code(state.clone(), &host, &owner, serde_json::json!({})).await;
+        let claim_body = serde_json::json!({ "code": code }).to_string();
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            claim_body,
+        )
+        .await;
+        // Claim should still succeed (best-effort seating)
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("joined")
+        );
+
+        // Verify joiner is seated in the valid channel despite the invalid one failing
+        let is_member = state
+            .db
+            .is_member(
+                community.id,
+                valid_channel_uuid,
+                &joiner.public_key().to_bytes().to_vec(),
+            )
+            .await
+            .expect("query membership");
+        assert!(
+            is_member,
+            "joiner should be a member of the valid channel even though one channel failed"
+        );
     }
 }
