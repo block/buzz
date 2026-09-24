@@ -96,8 +96,16 @@ label are both derived from `image.digest` — or `image.tag`, or
 `Chart.AppVersion` — so a snapshot's telemetry version and its recorded version
 cannot drift apart.
 
-Kubernetes label values may not contain `:` and are capped at 63 characters, so
-the label carries the digest hex without its `sha256:` prefix, truncated to 63
-characters. The environment variable keeps the exact revision. Any
-`tags.datadoghq.com/version` supplied through `storageAccounting.podLabels` is
-ignored; see the chart README's "Storage accounting worker" section.
+The environment variable always keeps the exact revision. The label cannot: a
+label value is capped at 63 bytes, must begin and end with an alphanumeric, and
+may otherwise contain only `[-._a-zA-Z0-9]`, while `image.tag` accepts any OCI
+tag. The chart therefore maps the revision onto that grammar deterministically —
+a digest keeps the first 63 characters of its hex, a revision that is already a
+valid label value is preserved byte for byte, and anything else (a leading `_`,
+a byte outside the label alphabet, more than 63 bytes) becomes a sanitized
+prefix of at most 52 bytes plus 10 hex characters of the revision's SHA-256.
+The hash suffix is what keeps two long tags sharing a 63-byte prefix from
+reporting the same version.
+
+Any `tags.datadoghq.com/version` supplied through `storageAccounting.podLabels`
+is ignored; see the chart README's "Storage accounting worker" section.

@@ -494,10 +494,24 @@ describe the deployment rather than the image — passes through unchanged.
 Remove any wrapper-maintained `tags.datadoghq.com/version` pin when upgrading;
 leaving it in place is harmless but dead.
 
-Because a label value may not contain `:` and is capped at 63 characters, a
-digest pin renders as the digest hex without its `sha256:` prefix, truncated to
-63 characters — a unique prefix of the full digest that the same Pod reports in
-`BUZZ_STORAGE_SNAPSHOT_CODE_SHA`. See `docs/deployment-identity.md`.
+A Kubernetes label value is capped at 63 bytes, must begin and end with an
+alphanumeric, and may otherwise contain only `[-._a-zA-Z0-9]` — a far narrower
+grammar than an OCI tag. `image.tag` is deliberately left unconstrained, so the
+label is derived through a total mapping rather than a check that could reject
+a tag the chart used to accept:
+
+| Revision | Label |
+|---|---|
+| `sha256:<64 hex>` digest | the hex without `sha256:`, first 63 characters |
+| already a valid label value | emitted byte for byte (e.g. `1.2.3-rc.4`) |
+| anything else | up to 52 sanitized bytes + `-` + 10 hex of the revision's SHA-256 |
+
+The third case is what makes the mapping total: `_foo` renders
+`foo-583da8894a`, and two overlong tags sharing their first 63 bytes still
+render distinct versions. `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` is never sanitized —
+it always carries the exact revision, so the snapshot row remains the precise
+record and the label remains the joinable telemetry key. See
+`docs/deployment-identity.md`.
 
 ## Device pairing relay
 

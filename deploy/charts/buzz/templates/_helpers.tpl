@@ -78,17 +78,39 @@ app.kubernetes.io/component: relay
 
 {{/*
 Kubernetes-label-safe rendering of "buzz.imageRevision", used for Datadog
-unified-service-tagging's version tag on chart-managed Pods.
-
-The revision is either an image tag or a "sha256:<64 hex>" digest. A label
-value may not contain ":" and is capped at 63 characters, so the digest
-algorithm prefix is stripped and the result bounded. The label is therefore a
-prefix-comparable form of the exact revision the same Pod reports in
-BUZZ_STORAGE_SNAPSHOT_CODE_SHA — one identity, derived twice, never a second
+unified-service-tagging's version tag on chart-managed Pods. The label is
+always derived from the same revision the Pod reports verbatim in
+BUZZ_STORAGE_SNAPSHOT_CODE_SHA — one identity, rendered twice, never a second
 value an operator has to keep in sync.
+
+A label value is at most 63 bytes, must begin and end with an alphanumeric,
+and may otherwise contain only [-._a-zA-Z0-9]. An OCI tag is far more
+permissive (image.tag is an unconstrained string), so the mapping is total by
+construction, in three cases:
+
+  1. A "sha256:<64 hex>" digest drops its algorithm prefix and keeps 63 hex
+     characters. Unchanged from the digest behaviour this chart already had:
+     hex is label-safe, and two digests sharing a 252-bit prefix do not occur.
+  2. A revision that is already a valid label value is emitted byte for byte,
+     so ordinary tags like 1.2.3-rc.4 stay readable and comparable.
+  3. Anything else — a leading "_", a byte outside the label alphabet, or more
+     than 63 bytes — becomes a sanitized prefix of at most 52 bytes plus a
+     10-hex-character SHA-256 of the *exact* revision. The hash restores what
+     truncation destroys: two long tags sharing a 63-byte prefix still render
+     distinct versions, and the result always ends on a hex digit, so no
+     trailing-delimiter trimming is needed.
 */}}
 {{- define "buzz.imageVersionLabel" -}}
-{{- include "buzz.imageRevision" . | trimPrefix "sha256:" | trunc 63 | trimSuffix "-" | trimSuffix "." | trimSuffix "_" -}}
+{{- $revision := include "buzz.imageRevision" . -}}
+{{- if regexMatch "^sha256:[0-9a-f]{64}$" $revision -}}
+{{- $revision | trimPrefix "sha256:" | trunc 63 -}}
+{{- else if and (le (len $revision) 63) (regexMatch "^[a-zA-Z0-9]([-._a-zA-Z0-9]*[a-zA-Z0-9])?$" $revision) -}}
+{{- $revision -}}
+{{- else -}}
+{{- $sanitized := regexReplaceAll "[^-._a-zA-Z0-9]" $revision "-" -}}
+{{- $prefix := regexReplaceAll "^[-._]+" $sanitized "" | trunc 52 -}}
+{{- printf "%s-%s" $prefix (sha256sum $revision | trunc 10) | trimPrefix "-" -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
