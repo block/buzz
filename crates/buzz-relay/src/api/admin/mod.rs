@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use auth::{
     admin_role_str, admin_source_str, authorize, require_mutation_principal, require_operator,
-    resolve_admin_principal, AdminRole,
+    AdminRole, AdminSource,
 };
 use axum::{
     body::Bytes,
@@ -1053,21 +1053,15 @@ async fn upsert_operator(
             _ => ApiError::internal(),
         })?;
 
-    // Return the effective principal so the response body matches the shape
-    // `list_operators` returns (and the desktop `AdminOperatorDto` type). Re-resolve
-    // through the shared config+DB path rather than constructing the entry inline:
-    // the 409 guard above excludes config-backed keys, so this resolves to the
-    // freshly written DB grant (`sources == ["db"]`), and re-resolving keeps the
-    // contract honest if that guard assumption ever shifts.
-    let target: [u8; 32] = target_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| ApiError::internal())?;
-    let resolved = resolve_admin_principal(&state, target).await?;
+    // Build the entry from what was just written, in the same shape
+    // `list_operators` returns (the desktop `AdminOperatorDto`). The 409 guard
+    // above excludes config-backed keys, so the effective grant is exactly the
+    // DB row: `body.role` from source `db`. Re-reading the roster here would let
+    // a concurrent DELETE turn a committed write into a 403.
     Ok(Json(OperatorEntry {
         pubkey: canonical_hex,
-        effective_role: admin_role_str(resolved.role).to_string(),
-        sources: vec![admin_source_str(&resolved.source).to_string()],
+        effective_role: body.role,
+        sources: vec![admin_source_str(&AdminSource::Db).to_string()],
     }))
 }
 
