@@ -43,7 +43,7 @@ void main() => runApp(
                 _message('Ελληνικά · Кириллица · Tiếng Việt'),
                 const SizedBox(height: 16),
                 const Text('Emoji-only message'),
-                _message('❤️ ⚠️'),
+                _message('❤️ ⚠️', scaleEmojiOnly: true),
               ],
             ),
           ),
@@ -67,7 +67,9 @@ Widget _reactions(bool selected) => ReactionRow(
   onToggle: (_) {},
 );
 
-Widget _message(String content) => MessageContent(
-  content: content,
-  channelNames: const {'general': 'general'},
-);
+Widget _message(String content, {bool scaleEmojiOnly = false}) =>
+    MessageContent(
+      content: content,
+      scaleEmojiOnly: scaleEmojiOnly,
+      channelNames: const {'general': 'general'},
+    );

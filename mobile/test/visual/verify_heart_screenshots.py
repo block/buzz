@@ -42,7 +42,7 @@ def main():
         "text-presentation message heart": (550, 980, 620, 1035),
         "bold message heart": (170, 1040, 220, 1090),
         "italic message heart": (430, 1040, 490, 1090),
-        "emoji-only message": (65, 1490, 125, 1545),
+        "emoji-only message": (65, 1490, 200, 1650),
     }
     warnings = {
         "selected warning reaction": (260, 522, 325, 606),
@@ -52,13 +52,22 @@ def main():
         "text-presentation message warning": (430, 1090, 490, 1150),
         "bold message warning": (230, 1040, 290, 1090),
         "italic message warning": (490, 1040, 550, 1090),
-        "emoji-only warning": (130, 1490, 190, 1550),
+        "emoji-only warning": (205, 1490, 335, 1650),
     }
     for cases, predicate in ((regions, is_red), (warnings, is_yellow)):
         for name, box in cases.items():
             assert not color_pixels(before, box, predicate), f"{name}: original must reproduce monochrome glyph"
             pixels = color_pixels(after, box, predicate)
             assert len(pixels) > 500, f"{name}: expected native color emoji"
+            if "emoji-only" in name:
+                # Production uses a separate 36sp path. Reject a fixture that
+                # accidentally renders normal-sized inline emoji or clips it.
+                left, right = min(x for x, _ in pixels), max(x for x, _ in pixels)
+                top, bottom = min(y for _, y in pixels), max(y for _, y in pixels)
+                assert len(pixels) > 4500, f"{name}: expected enlarged emoji"
+                assert 90 <= right - left <= 110 and 90 <= bottom - top <= 110
+                assert box[0] < left < right < box[2] - 1
+                assert box[1] < top < bottom < box[3] - 1
             if "reaction" in name:
                 center = (min(y for _, y in pixels) + max(y for _, y in pixels)) / 2
                 pill_center = (box[1] + box[3] - 1) / 2
