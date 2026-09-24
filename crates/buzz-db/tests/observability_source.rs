@@ -1106,6 +1106,43 @@ pub async fn bypass_with_pool_begin(pool: &sqlx::PgPool) {
     );
 }
 
+fn should_scan_guarded_write_source_file(path: &std::path::Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    path.extension().is_some_and(|ext| ext == "rs")
+        // Whole files loaded only via `#[cfg(test)] #[path = "..."] mod ...;` are
+        // entirely test code but carry no internal `#[cfg(test)]` marker of their
+        // own to slice against. Standalone `*_tests.rs` modules share that shape.
+        && file_name != "tests.rs"
+        && !file_name.ends_with("_tests.rs")
+}
+
+#[test]
+fn serving_table_policy_skips_standalone_test_modules() {
+    use std::path::Path;
+
+    assert!(
+        !should_scan_guarded_write_source_file(Path::new("src/runtime/tests.rs")),
+        "`tests.rs` is a standalone test-only module"
+    );
+    assert!(
+        !should_scan_guarded_write_source_file(Path::new(
+            "src/store/thread_window/postgres_tests.rs",
+        )),
+        "`*_tests.rs` modules are standalone test-only sources, not production seams"
+    );
+    assert!(
+        !should_scan_guarded_write_source_file(Path::new("src/store/foo_tests.rs")),
+        "the suffix-based rule must cover other standalone test-only modules"
+    );
+    assert!(
+        should_scan_guarded_write_source_file(Path::new("src/store/event.rs")),
+        "production source must remain in scope"
+    );
+}
+
 #[test]
 fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
     use std::path::{Path, PathBuf};
@@ -1116,12 +1153,7 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
             let path = entry.path();
             if path.is_dir() {
                 collect_rs_files(&path, out);
-            } else if path.extension().is_some_and(|ext| ext == "rs")
-                // Whole files loaded only via `#[cfg(test)] #[path = "..."] mod ...;` (e.g.
-                // `runtime/tests.rs`) are entirely test code but carry no internal
-                // `#[cfg(test)]` marker of their own to slice against.
-                && path.file_name().is_some_and(|name| name != "tests.rs")
-            {
+            } else if should_scan_guarded_write_source_file(&path) {
                 out.push(path);
             }
         }
