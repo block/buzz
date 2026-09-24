@@ -738,7 +738,7 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
         chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
     cd {{desktop_dir}}
-    export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
+    export BUZZ_RELAY_URL="wss://buzz.test.blockstaging.build"
     source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
