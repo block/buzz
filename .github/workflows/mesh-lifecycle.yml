@@ -22,8 +22,6 @@ on:
       - 'scripts/ci-mesh-lifecycle-smoke.sh'
       - 'scripts/start-relay-for-tests.sh'
       - '.github/workflows/mesh-lifecycle.yml'
-      - 'docker-compose.yml'
-      - 'docker-compose.ci.yml'
   pull_request:
     paths:
       - 'crates/buzz-mesh-smoke/**'
@@ -36,8 +34,6 @@ on:
       - 'scripts/ci-mesh-lifecycle-smoke.sh'
       - 'scripts/start-relay-for-tests.sh'
       - '.github/workflows/mesh-lifecycle.yml'
-      - 'docker-compose.yml'
-      - 'docker-compose.ci.yml'
   workflow_dispatch:
 
 concurrency:
@@ -49,8 +45,6 @@ env:
 
 jobs:
   lifecycle-smoke:
-    env:
-      COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
     name: Relay-Driven Mesh Lifecycle Smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 45

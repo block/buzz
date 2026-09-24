@@ -28,7 +28,7 @@ permissions:
 env:
   IMAGE_NAME: ghcr.io/block/buzz-minio
   COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
-  MINIO_CI_IMAGE: ghcr.io/block/buzz-minio:sha-${{ github.sha }}
+  MINIO_CI_IMAGE: ghcr.io/block/buzz-minio:sha-${{ github.sha }}-run-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   image:
@@ -51,6 +51,9 @@ jobs:
           load: true
           tags: ${{ env.MINIO_CI_IMAGE }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
+          # A maintenance dispatch must refresh apk packages even with a warm
+          # layer cache. Normal image changes can still reuse cached layers.
+          no-cache: ${{ github.event_name == 'workflow_dispatch' }}
           cache-from: type=gha,scope=minio
           cache-to: type=gha,scope=minio,mode=max
       - name: Smoke-test CI services

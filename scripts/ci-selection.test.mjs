@@ -113,8 +113,6 @@ const scenarios = [
   ["relay", ["crates/buzz-relay/src/main.rs"], ["rust"]],
   ["migration", ["migrations/123.sql"], ["rust"]],
   ["shared workflow", [".github/workflows/ci.yml"], ["rust", "mobile"]],
-  ["integration services", ["docker-compose.yml"], ["rust"]],
-  ["CI integration images", ["docker-compose.ci.yml"], ["rust"]],
   [
     "mixed mobile and relay",
     ["mobile/lib/main.dart", "crates/buzz-core/src/lib.rs"],

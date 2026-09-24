@@ -1,6 +1,6 @@
 # CI pulls the published image; only minio-image.yml builds it.
 # MINIO_CI_IMAGE lets the publisher smoke-test an unpublished image or an
-# operator reproduce a run with its recorded sha-<commit> tag/digest.
+# operator reproduce a run with its recorded run-specific tag/digest.
 services:
   minio:
     image: ${MINIO_CI_IMAGE:-ghcr.io/block/buzz-minio:latest}
