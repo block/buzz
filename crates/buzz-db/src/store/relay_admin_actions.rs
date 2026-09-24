@@ -465,7 +465,7 @@ pub async fn execute_ban_with_marker(
             SELECT 1 FROM relay_admin_actions
             WHERE id = $1
               AND action_lease_token = $2
-              AND action_lease_expires_at > now()
+              AND action_lease_expires_at > clock_timestamp()
               AND state = 'enforcing'
         )
         "#,
@@ -553,7 +553,7 @@ pub async fn execute_timeout_with_marker(
             SELECT 1 FROM relay_admin_actions
             WHERE id = $1
               AND action_lease_token = $2
-              AND action_lease_expires_at > now()
+              AND action_lease_expires_at > clock_timestamp()
               AND state = 'enforcing'
         )
         "#,
@@ -653,7 +653,7 @@ pub async fn execute_kick_with_marker(
             SELECT 1 FROM relay_admin_actions
             WHERE id = $1
               AND action_lease_token = $2
-              AND action_lease_expires_at > now()
+              AND action_lease_expires_at > clock_timestamp()
               AND state = 'enforcing'
         )
         "#,
@@ -743,7 +743,7 @@ pub async fn execute_delete_with_marker(
             SELECT 1 FROM relay_admin_actions
             WHERE id = $1
               AND action_lease_token = $2
-              AND action_lease_expires_at > now()
+              AND action_lease_expires_at > clock_timestamp()
               AND state = 'enforcing'
         )
         "#,
@@ -3139,12 +3139,15 @@ mod postgres_tests {
         assert_eq!(counts(&pool, cid, &root).await, (1, 2));
     }
 
-    /// Regression: lease live at transaction entry, expires while the event write blocks
-    /// (simulated by a per-row trigger that sleeps 1 s; the lease expires after 500 ms,
-    /// so 1 s is *longer* than 500 ms). Before the `clock_timestamp()` + row-lock fix
-    /// the final marker fence committed despite the expired lease. The trigger is
-    /// installed only in this isolated test database and is dropped with the database
-    /// on teardown.
+    /// Regression: lease live at transaction entry, expires while the event write blocks.
+    /// The target event row is locked externally; the worker blocks at the `UPDATE events`
+    /// domain write (after it has already acquired the action-row lock). The test confirms
+    /// the worker is observably blocked while the lease is live, waits for DB-clock expiry,
+    /// releases the event row unchanged, and asserts the worker rejects.
+    ///
+    /// This proves the final wall-clock CAS fires after the domain write, which is a
+    /// different wait point than the action-row test below. A slow setup fails the
+    /// observation precondition rather than passing through early rejection.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn admin_delete_with_lease_expiring_during_write_changes_nothing() {
@@ -3153,48 +3156,107 @@ mod postgres_tests {
         let cid = CommunityId::from_uuid(community_id);
         let [root, reply, nested] = make_thread(&pool, cid).await;
 
-        // Install a trigger that delays every UPDATE on events by 1 second.
-        // The lease expires after 500 ms; 1 s > 500 ms, so the trigger runs past expiry.
-        sqlx::raw_sql(
-            "CREATE FUNCTION _test_delay_event_update() RETURNS trigger LANGUAGE plpgsql AS \
-             $$ BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$; \
-             CREATE TRIGGER _test_delay_event_update \
-             BEFORE UPDATE ON events FOR EACH ROW EXECUTE FUNCTION _test_delay_event_update();",
-        )
-        .execute(&pool)
-        .await
-        .expect("install delay trigger");
-
-        let lease_until = Utc::now() + chrono::Duration::milliseconds(500);
+        // 3-second lease: enough headroom for setup; will be expired before unlock.
+        let lease_until = Utc::now() + chrono::Duration::seconds(3);
         let (action_id, token) = enforcing_action(&pool, community_id, lease_until).await;
 
-        // Precondition: setup must complete before the lease expires. A slow environment
-        // should fail here rather than pass the wrong code path (early rejection).
-        let live_at_entry: bool = sqlx::query_scalar(
+        // Lock the target event row without changing it. The worker acquires the
+        // action-row lock first (pre-entry + FOR UPDATE), then blocks here at the
+        // UPDATE events domain write before reaching the final marker CAS.
+        let mut locker = pool.begin().await.expect("locker tx");
+        let locker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *locker)
+            .await
+            .expect("locker pid");
+        sqlx::query("SELECT id FROM events WHERE community_id = $1 AND id = $2 FOR UPDATE")
+            .bind(community_id)
+            .bind(&nested)
+            .fetch_one(&mut *locker)
+            .await
+            .expect("lock event row");
+
+        let worker_pool = pool.clone();
+        let nr = nested.clone();
+        let pr = reply.clone();
+        let rr = root.clone();
+        let worker = tokio::spawn(async move {
+            execute_delete_with_marker(
+                &worker_pool,
+                action_id,
+                token,
+                cid,
+                &nr,
+                Some(&pr),
+                Some(&rr),
+            )
+            .await
+        });
+
+        // Wait until the worker is blocked on the event-row lock (domain write).
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (\
+                       SELECT 1 FROM pg_stat_activity \
+                       WHERE datname = current_database() \
+                         AND wait_event_type = 'Lock' \
+                         AND (query LIKE '%UPDATE events%' OR query LIKE '%events%FOR UPDATE%') \
+                         AND $1 = ANY(pg_blocking_pids(pid))\
+                     )",
+                )
+                .bind(locker_pid)
+                .fetch_one(&pool)
+                .await
+                .expect("observe worker blocked at event write");
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker must block on the event-row write within 10 s");
+
+        // Precondition: lease must still be live while the worker is blocked at the
+        // domain write. Slow setup fails here rather than passing through early rejection.
+        let live_when_blocked: bool = sqlx::query_scalar(
             "SELECT action_lease_expires_at > clock_timestamp() FROM relay_admin_actions WHERE id = $1",
         )
         .bind(action_id)
         .fetch_one(&pool)
         .await
-        .expect("live-at-entry check");
+        .expect("live_when_blocked");
         assert!(
-            live_at_entry,
-            "setup consumed the lease before entry — precondition failed, not a test failure"
+            live_when_blocked,
+            "lease must be live when worker is blocked at the event write — precondition failed, not a fence failure"
         );
 
-        let committed = execute_delete_with_marker(
-            &pool,
-            action_id,
-            token,
-            cid,
-            &nested,
-            Some(&reply),
-            Some(&root),
+        // Wait until the lease is definitely expired according to the DB clock.
+        sqlx::query(
+            "SELECT pg_sleep(GREATEST(EXTRACT(EPOCH FROM action_lease_expires_at - clock_timestamp()), 0)::double precision + 0.05) \
+             FROM relay_admin_actions WHERE id = $1",
         )
+        .bind(action_id)
+        .execute(&pool)
         .await
-        .expect("execute delete");
+        .expect("wait through expiry");
 
-        assert!(!committed, "lease expired mid-write must not commit");
+        let expired: bool = sqlx::query_scalar(
+            "SELECT action_lease_expires_at <= clock_timestamp() FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .expect("expired_before_unlock");
+        assert!(
+            expired,
+            "lease must be expired before releasing the event-row lock"
+        );
+
+        // Release the event row without writing a new version.
+        locker.rollback().await.expect("release event-row lock");
+
+        let committed = worker.await.expect("worker join").expect("worker result");
 
         let deleted: bool = sqlx::query_scalar(
             "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
@@ -3204,6 +3266,7 @@ mod postgres_tests {
         .fetch_one(&pool)
         .await
         .expect("event row");
+        assert!(!committed, "lease expired mid-write must not commit");
         assert!(
             !deleted,
             "event must not be deleted when lease expires mid-write"
@@ -3231,8 +3294,9 @@ mod postgres_tests {
     /// transaction holds the row and releases it unchanged after the lease expires,
     /// the final marker UPDATE would commit without the lock-first shape.
     ///
-    /// This test locks the action row externally, confirms the worker is blocked
-    /// at the marker UPDATE while the lease is still live, waits for DB-clock
+    /// This test locks the action row externally. The worker blocks at the
+    /// `SELECT … FOR UPDATE` that acquires the action-row lock. The test confirms
+    /// the worker is observably blocked while the lease is live, waits for DB-clock
     /// expiry, releases the lock unchanged, and asserts the worker rejects.
     #[tokio::test]
     #[ignore = "requires Postgres"]
@@ -3288,7 +3352,7 @@ mod postgres_tests {
                        SELECT 1 FROM pg_stat_activity \
                        WHERE datname = current_database() \
                          AND wait_event_type = 'Lock' \
-                         AND query LIKE '%relay_admin_actions%FOR UPDATE%' \
+                         AND (query LIKE '%relay_admin_actions%FOR UPDATE%' OR query LIKE '%SET step_marker%') \
                          AND $1 = ANY(pg_blocking_pids(pid))\
                      )",
                 )
