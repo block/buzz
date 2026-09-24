@@ -565,6 +565,31 @@ test("owners remain admitted by allowlist policy without listing themselves", ()
   );
 });
 
+test("relayAgentCanRespondInChannel: the live roster beats a not-yet-polled channelIds", () => {
+  // The agent was invited to "fresh", but the relay-agents query last ran
+  // before that and still reports only "general". The roster is live.
+  const agent = {
+    pubkey: PUB_A,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+
+  assert.equal(
+    relayAgentCanRespondInChannel(agent, "fresh", CURRENT_PUBKEY),
+    false,
+  );
+  assert.equal(
+    relayAgentCanRespondInChannel(
+      agent,
+      "fresh",
+      CURRENT_PUBKEY,
+      new Set([PUB_A]),
+    ),
+    true,
+  );
+});
+
 test("owned discovery does not require a shared channel, but sending does", () => {
   for (const respondTo of ["owner-only", "allowlist", "anyone"]) {
     const agent = {
@@ -635,5 +660,47 @@ test("DM ownership is independent of local configuration and still requires memb
       phase: "prepare",
     }),
     new Set([PUB_A, PUB_B]),
+  );
+});
+
+test("relayAgentCanRespondInChannel: membership does not bypass an allowlist", () => {
+  const agent = {
+    pubkey: PUB_A,
+    respondTo: "allowlist",
+    respondToAllowlist: [OTHER_OWNER_PUBKEY],
+    channelIds: ["general"],
+  };
+
+  assert.equal(
+    relayAgentCanRespondInChannel(
+      agent,
+      "fresh",
+      CURRENT_PUBKEY,
+      new Set([PUB_A]),
+    ),
+    false,
+  );
+});
+
+test("getMentionableAgentPubkeys: channel scope accepts a member the agents poll has not caught up to", () => {
+  const agent = {
+    pubkey: PUB_A,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+
+  assert.deepEqual(
+    [
+      ...getMentionableAgentPubkeys({
+        channelMemberPubkeys: new Set([PUB_A]),
+        currentPubkey: CURRENT_PUBKEY,
+        eligibilityScope: { type: "channel", channelId: "fresh" },
+        managedAgentPubkeys: [],
+        relayAgents: [agent],
+        sharedChannelIds: new Set(["fresh"]),
+      }),
+    ],
+    [PUB_A],
   );
 });

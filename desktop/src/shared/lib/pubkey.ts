@@ -18,6 +18,17 @@ export const UNAVAILABLE_KEY_LABEL = "Unavailable";
 const HEX_64_REGEX = /^[0-9a-f]{64}$/;
 
 /**
+ * Set of normalised pubkeys from anything carrying one — members, agents,
+ * profiles. Membership tests against a raw list are the usual place a
+ * case difference turns into a silent miss.
+ */
+export function normalizePubkeySet(
+  items: readonly { pubkey: string }[] | undefined,
+): Set<string> {
+  return new Set((items ?? []).map((item) => normalizePubkey(item.pubkey)));
+}
+
+/**
  * The ONE canonical compact display form for a hex string: `abcd1234…wxyz`.
  *
  * A truncated pubkey is a recognition aid, never an identity proof — vanity

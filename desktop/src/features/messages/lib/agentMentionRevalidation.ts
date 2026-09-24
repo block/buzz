@@ -30,6 +30,7 @@ type DirectoryResult<T> = {
 export async function revalidateAgentMentionPubkeys({
   pubkeys,
   agentPubkeys,
+  channelMemberPubkeys,
   currentPubkey,
   eligibilityScope,
   sharedChannelIds,
@@ -40,6 +41,7 @@ export async function revalidateAgentMentionPubkeys({
   phase?: "prepare" | "publish";
   pubkeys: readonly string[];
   agentPubkeys: ReadonlySet<string>;
+  channelMemberPubkeys?: ReadonlySet<string>;
   currentPubkey: string | null;
   eligibilityScope: AgentEligibilityScope;
   sharedChannelIds: ReadonlySet<string>;
@@ -66,6 +68,7 @@ export async function revalidateAgentMentionPubkeys({
     ),
   );
   const mentionablePubkeys = getMentionableAgentPubkeys({
+    channelMemberPubkeys,
     currentPubkey,
     eligibilityScope,
     phase,
@@ -95,8 +98,29 @@ export async function revalidateAgentMentionPubkeys({
   return [...pubkeys];
 }
 
+/**
+ * Whether a channel roster may stand in for `channelIds` under this scope.
+ *
+ * The roster describes exactly one channel. Publication can retarget the scope
+ * at a different one — a new DM acquires its channel late — and asserting this
+ * roster's membership against that channel would admit an agent that is not in
+ * it. Only the channel the roster actually describes counts.
+ */
+export function rosterAppliesToScope(
+  scope: AgentEligibilityScope,
+  rosterChannelId: string | null | undefined,
+) {
+  return (
+    rosterChannelId != null &&
+    "channelId" in scope &&
+    scope.channelId === rosterChannelId
+  );
+}
+
 export function useAgentMentionRevalidation({
   agentPubkeys,
+  channelMemberPubkeys,
+  channelMemberChannelId,
   getSelectedAgentPubkeys,
   currentPubkey,
   eligibilityScope,
@@ -104,6 +128,8 @@ export function useAgentMentionRevalidation({
   refetchManagedAgents,
 }: {
   agentPubkeys: ReadonlySet<string>;
+  channelMemberPubkeys?: ReadonlySet<string>;
+  channelMemberChannelId?: string | null;
   getSelectedAgentPubkeys: () => ReadonlySet<string>;
   currentPubkey: string | null;
   eligibilityScope: AgentEligibilityScope;
@@ -132,6 +158,12 @@ export function useAgentMentionRevalidation({
           ...(options.intendedAgentPubkeys ?? []).map(normalizePubkey),
         ]),
         phase: options.phase,
+        channelMemberPubkeys: rosterAppliesToScope(
+          scope,
+          channelMemberChannelId,
+        )
+          ? channelMemberPubkeys
+          : undefined,
         currentPubkey,
         eligibilityScope: scope,
         sharedChannelIds,
@@ -145,6 +177,8 @@ export function useAgentMentionRevalidation({
     },
     [
       agentPubkeys,
+      channelMemberPubkeys,
+      channelMemberChannelId,
       currentPubkey,
       eligibilityScope,
       getSelectedAgentPubkeys,
