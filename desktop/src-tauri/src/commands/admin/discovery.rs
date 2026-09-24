@@ -159,6 +159,19 @@ pub(super) async fn resolve_host_addrs(
     Ok(addrs)
 }
 
+/// Deadline for the whole discovery request, body included. Discovery runs on
+/// console mount, so a stalled relay must not hold it open.
+const DISCOVERY_TIMEOUT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(500)
+} else {
+    std::time::Duration::from_secs(10)
+};
+
+/// Body cap for `/info`, success or error. Real NIP-11 documents are a few KiB
+/// (name, description, limitations, fees); 64 KiB leaves ample headroom while
+/// refusing an unbounded buffer from a hostile relay.
+const DISCOVERY_BODY_CAP: u64 = 65_536;
+
 /// Fetch the relay's NIP-11 document and extract a validated admin origin
 /// together with its same-host binding flag.
 ///
@@ -186,21 +199,33 @@ where
     R: Fn(String, u16) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<std::net::IpAddr>, String>>,
 {
-    use crate::relay::{classify_request_error, parse_json_response, relay_error_message};
+    use crate::relay::classify_request_error;
 
     let url = format!("{}/info", relay_http_base.trim_end_matches('/'));
+    // The app-wide client has no request deadline, and `/info` is served by an
+    // untrusted relay: bound this request's total time (headers and body).
     let response = client
         .get(url)
         .header("Accept", "application/nostr+json")
+        .timeout(DISCOVERY_TIMEOUT)
         .send()
         .await
         .map_err(|error| classify_request_error(&error))?;
 
-    if !response.status().is_success() {
-        return Err(relay_error_message(response).await);
+    let status = response.status();
+    let body = super::read_bounded(response, DISCOVERY_BODY_CAP).await?;
+    if !status.is_success() {
+        let message = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("message")?.as_str().map(str::to_owned));
+        return Err(match message {
+            Some(message) => format!("relay returned {status}: {message}"),
+            None => format!("relay returned {status}"),
+        });
     }
 
-    let info = parse_json_response::<AdminApiInfo>(response).await?;
+    let info: AdminApiInfo = serde_json::from_slice(&body)
+        .map_err(|e| format!("invalid NIP-11 document from relay: {e}"))?;
     let Some(origin) = admin_origin_from_nip11(&info) else {
         return Ok(None);
     };
@@ -446,5 +471,99 @@ mod tests {
                 .contains("accept: application/nostr+json"),
             "discovery must send the NIP-11 Accept header"
         );
+    }
+    // ── Discovery bounds: size cap and deadline ────────────────────────────
+
+    /// Serve one connection: write `head`, then `body` chunks, then optionally
+    /// hold the socket open without finishing.
+    fn serve_raw(head: String, body: Vec<Vec<u8>>, stall: bool) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(head.as_bytes());
+                for chunk in body {
+                    let _ = stream.write_all(&chunk);
+                }
+                let _ = stream.flush();
+                if stall {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+            }
+        });
+        addr
+    }
+
+    fn chunk(data: &[u8]) -> Vec<u8> {
+        let mut out = format!("{:x}\r\n", data.len()).into_bytes();
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\r\n");
+        out
+    }
+
+    async fn discover(
+        addr: std::net::SocketAddr,
+    ) -> Result<Option<super::super::DiscoveredAdminOrigin>, String> {
+        discover_admin_origin_at(&reqwest::Client::new(), &format!("http://{addr}")).await
+    }
+
+    #[tokio::test]
+    async fn discover_rejects_an_oversized_body_with_a_known_length() {
+        let body = vec![b' '; DISCOVERY_BODY_CAP as usize + 1];
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let err = discover(serve_raw(head, vec![body], false))
+            .await
+            .unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn discover_rejects_an_oversized_chunked_body() {
+        // No Content-Length: the cap must hold while streaming.
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_string();
+        let piece = vec![b' '; 16_384];
+        let mut body: Vec<Vec<u8>> = (0..5).map(|_| chunk(&piece)).collect();
+        body.push(b"0\r\n\r\n".to_vec());
+        let err = discover(serve_raw(head, body, false)).await.unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn discover_gives_up_on_a_stalled_body() {
+        // Headers arrive, the body never finishes: the request deadline fires.
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: 100\r\n\r\n".to_string();
+        let started = std::time::Instant::now();
+        let result = discover(serve_raw(head, vec![b"{".to_vec()], true)).await;
+        assert!(result.is_err(), "{result:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "discovery must not wait past its deadline: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_reads_a_normal_nip11_document() {
+        let body = br#"{"name":"Buzz Relay","supported_nips":[1,11],"admin_api":"https://admin.example.com"}"#;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let addr = serve_raw(head, vec![body.to_vec()], false);
+        let found = discover_admin_origin_at_with(
+            &reqwest::Client::new(),
+            &format!("http://{addr}"),
+            |_host, _port| Box::pin(async { Ok(vec!["93.184.216.34".parse().unwrap()]) }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.origin, "https://admin.example.com");
     }
 }
