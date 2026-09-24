@@ -132,17 +132,59 @@ pub(crate) async fn insert_mentions_in_transaction(
 
 /// Start a tenant-local event-write transaction and take the shared community
 /// deletion lock before any serving mutation.
-pub(crate) async fn begin_community_event_write_transaction(
+async fn begin_community_event_write_transaction_with_metric_population(
     pool: &PgPool,
     community: CommunityId,
     operation: observability::WriterOperation,
+    metric_population: CommunityEventWriteMetricPopulation,
 ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-    let connection = observability::acquire_writer_with_legacy_metrics(pool, operation).await?;
+    let connection = match metric_population {
+        CommunityEventWriteMetricPopulation::TypedOnly => {
+            observability::acquire_writer(pool, operation).await?
+        }
+        CommunityEventWriteMetricPopulation::LegacyCompatibility => {
+            observability::acquire_writer_with_legacy_metrics(pool, operation).await?
+        }
+    };
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
     deletion::DeletionStore::new(pool.clone())
         .guard_transaction(&mut tx, community)
         .await?;
     Ok(tx)
+}
+
+#[derive(Clone, Copy)]
+enum CommunityEventWriteMetricPopulation {
+    TypedOnly,
+    LegacyCompatibility,
+}
+
+pub(crate) async fn begin_community_event_write_transaction(
+    pool: &PgPool,
+    community: CommunityId,
+    operation: observability::WriterOperation,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+    begin_community_event_write_transaction_with_metric_population(
+        pool,
+        community,
+        operation,
+        CommunityEventWriteMetricPopulation::TypedOnly,
+    )
+    .await
+}
+
+pub(crate) async fn begin_community_event_write_transaction_with_legacy_metrics(
+    pool: &PgPool,
+    community: CommunityId,
+    operation: observability::WriterOperation,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+    begin_community_event_write_transaction_with_metric_population(
+        pool,
+        community,
+        operation,
+        CommunityEventWriteMetricPopulation::LegacyCompatibility,
+    )
+    .await
 }
 
 /// Database handle. Clone is cheap (Arc-backed pool).
@@ -1267,7 +1309,7 @@ impl Db {
         &self,
         community: CommunityId,
     ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-        begin_community_event_write_transaction(
+        begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
             community,
             observability::WriterOperation::EventWrite,

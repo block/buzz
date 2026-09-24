@@ -391,7 +391,7 @@ impl Db {
             channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
         );
 
-        let mut tx = crate::begin_community_event_write_transaction(
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
             community_id,
             observability::WriterOperation::EventWrite,
@@ -560,7 +560,7 @@ impl Db {
         d_tag: &str,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
-        let mut tx = crate::begin_community_event_write_transaction(
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
             community_id,
             observability::WriterOperation::EventWrite,

@@ -642,6 +642,11 @@ fn insert_mentions_docs_describe_syntactic_scope_and_db_backstop() {
 
 #[test]
 fn event_write_paths_include_tenant_local_chokepoint_calls() {
+    fn has_any_tenant_local_chokepoint(source: &str) -> bool {
+        source.contains(COMMUNITY_CHOKEPOINT_MARKER)
+            || source.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER)
+    }
+
     let event = include_str!("../src/store/event.rs");
     let insert_event = event
         .split_once("pub async fn insert_event(\n")
@@ -651,7 +656,7 @@ fn event_write_paths_include_tenant_local_chokepoint_calls() {
         .expect("pool insert must precede transaction-seam insert")
         .0;
     assert!(
-        insert_event.contains("begin_community_event_write_transaction"),
+        has_any_tenant_local_chokepoint(insert_event),
         "pool-level event inserts must include a tenant-local event-write chokepoint call"
     );
     let insert_with_thread_meta = event
@@ -662,7 +667,7 @@ fn event_write_paths_include_tenant_local_chokepoint_calls() {
         .expect("pool thread-metadata insert must precede Db wrappers")
         .0;
     assert!(
-        insert_with_thread_meta.contains("begin_community_event_write_transaction"),
+        has_any_tenant_local_chokepoint(insert_with_thread_meta),
         "thread-metadata event inserts must include a tenant-local chokepoint call"
     );
 
@@ -675,7 +680,7 @@ fn event_write_paths_include_tenant_local_chokepoint_calls() {
         .expect("addressable replacement must precede parameterized transaction seam")
         .0;
     assert!(
-        replace_addressable.contains("begin_community_event_write_transaction"),
+        has_any_tenant_local_chokepoint(replace_addressable),
         "addressable replacements must include a tenant-local chokepoint call"
     );
     let replace_parameterized = replaceable
@@ -686,7 +691,7 @@ fn event_write_paths_include_tenant_local_chokepoint_calls() {
         .expect("parameterized replacement must precede tests")
         .0;
     assert!(
-        replace_parameterized.contains("begin_community_event_write_transaction"),
+        has_any_tenant_local_chokepoint(replace_parameterized),
         "parameterized replacements must include a tenant-local chokepoint call"
     );
 
@@ -699,7 +704,7 @@ fn event_write_paths_include_tenant_local_chokepoint_calls() {
         .expect("snapshot lock path must precede member add path")
         .0;
     assert!(
-        snapshot_lock.contains("begin_community_event_write_transaction"),
+        has_any_tenant_local_chokepoint(snapshot_lock),
         "snapshot publication locks must include a tenant-local chokepoint call"
     );
 
@@ -712,7 +717,7 @@ fn event_write_paths_include_tenant_local_chokepoint_calls() {
         .expect("membership publish path must precede tests")
         .0;
     assert!(
-        publish_snapshot.contains("begin_community_event_write_transaction"),
+        has_any_tenant_local_chokepoint(publish_snapshot),
         "NIP-43 membership publication must include a tenant-local chokepoint call"
     );
 
@@ -725,7 +730,7 @@ fn event_write_paths_include_tenant_local_chokepoint_calls() {
         .expect("accept_lease_event must precede constraint outcome mapping")
         .0;
     assert!(
-        accept_lease.contains("begin_community_event_write_transaction"),
+        has_any_tenant_local_chokepoint(accept_lease),
         "push lease source-event writes must include a tenant-local chokepoint call"
     );
 
@@ -738,8 +743,128 @@ fn event_write_paths_include_tenant_local_chokepoint_calls() {
         .expect("reaction insert must precede reaction soft-delete")
         .0;
     assert!(
-        insert_reaction.contains("begin_community_event_write_transaction"),
+        has_any_tenant_local_chokepoint(insert_reaction),
         "live kind:7 reaction inserts must include a tenant-local chokepoint call"
+    );
+}
+
+#[test]
+fn legacy_compatibility_metrics_remain_pinned_to_the_preexisting_event_write_entrypoints() {
+    let runtime = include_str!("../src/runtime/mod.rs");
+    let typed_helper = runtime
+        .split_once("pub(crate) async fn begin_community_event_write_transaction(\n")
+        .expect("runtime must expose the typed tenant-local chokepoint")
+        .1
+        .split_once(
+            "pub(crate) async fn begin_community_event_write_transaction_with_legacy_metrics(\n",
+        )
+        .expect("typed chokepoint must precede the legacy compatibility wrapper")
+        .0;
+    assert!(
+        typed_helper.contains("CommunityEventWriteMetricPopulation::TypedOnly"),
+        "the default tenant-local chokepoint must stay typed-only"
+    );
+    assert!(
+        !typed_helper.contains("CommunityEventWriteMetricPopulation::LegacyCompatibility"),
+        "the default tenant-local chokepoint must not emit legacy compatibility metrics"
+    );
+
+    let legacy_db_wrapper = runtime
+        .split_once("pub async fn begin_community_write_transaction(\n")
+        .expect("Db must expose the legacy community write entrypoint")
+        .1
+        .split_once("/// Begin an event-write transaction that takes the shared replica-floor")
+        .expect("legacy Db wrapper must precede the replica-floor entrypoint")
+        .0;
+    assert!(
+        legacy_db_wrapper.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER),
+        "Db::begin_community_write_transaction must preserve the legacy compatibility population"
+    );
+
+    let replaceable = include_str!("../src/store/replaceable.rs");
+    for (label, start, end) in [
+        (
+            "replace_addressable_event",
+            "pub async fn replace_addressable_event(\n",
+            "/// Atomically replace a NIP-33 parameterized replaceable event.",
+        ),
+        (
+            "replace_parameterized_event",
+            "pub async fn replace_parameterized_event(\n",
+            "}\n\n#[cfg(test)]",
+        ),
+    ] {
+        let seam = replaceable
+            .split_once(start)
+            .unwrap_or_else(|| panic!("replaceable store must expose {label}"))
+            .1
+            .split_once(end)
+            .unwrap_or_else(|| panic!("{label} must precede its next production seam"))
+            .0;
+        assert!(
+            seam.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER),
+            "{label} must preserve the legacy compatibility population"
+        );
+    }
+
+    let relay_members = include_str!("../src/store/relay_members.rs");
+    let publish_snapshot = relay_members
+        .split_once("pub async fn publish_nip43_membership_locked(\n")
+        .expect("relay_members must expose publish_nip43_membership_locked")
+        .1
+        .split_once("}\n\n#[cfg(test)]")
+        .expect("membership publish path must precede tests")
+        .0;
+    assert!(
+        publish_snapshot.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER),
+        "NIP-43 membership publication must preserve the legacy compatibility population"
+    );
+
+    let push = include_str!("../src/store/push.rs");
+    let accept_lease = push
+        .split_once("pub async fn accept_lease_event(\n")
+        .expect("push store must expose accept_lease_event")
+        .1
+        .split_once("fn constraint_acceptance_outcome")
+        .expect("accept_lease_event must precede constraint outcome mapping")
+        .0;
+    assert!(
+        accept_lease.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER),
+        "push lease acceptance must preserve the legacy compatibility population"
+    );
+
+    let event = include_str!("../src/store/event.rs");
+    let insert_event = event
+        .split_once("pub async fn insert_event(\n")
+        .expect("event store must expose pool-level insert_event")
+        .1
+        .split_once("/// Insert a Nostr event in a caller-owned PostgreSQL transaction.")
+        .expect("pool insert must precede transaction-seam insert")
+        .0;
+    assert!(
+        insert_event.contains(COMMUNITY_CHOKEPOINT_MARKER),
+        "typed-only event inserts must stay on the typed tenant-local chokepoint"
+    );
+    assert!(
+        !insert_event.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER),
+        "typed-only event inserts must not emit legacy compatibility metrics"
+    );
+
+    let reaction = include_str!("../src/store/reaction.rs");
+    let insert_reaction = reaction
+        .split_once("pub async fn insert_reaction_event_with_thread_metadata(\n")
+        .expect("reaction store must expose insert_reaction_event_with_thread_metadata")
+        .1
+        .split_once("/// Soft-delete a reaction by setting")
+        .expect("reaction insert must precede reaction soft-delete")
+        .0;
+    assert!(
+        insert_reaction.contains(COMMUNITY_CHOKEPOINT_MARKER),
+        "typed-only reaction inserts must stay on the typed tenant-local chokepoint"
+    );
+    assert!(
+        !insert_reaction.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER),
+        "typed-only reaction inserts must not emit legacy compatibility metrics"
     );
 }
 
@@ -767,6 +892,13 @@ const GUARDED_TABLE_WRITE_MARKERS: [&str; 9] = [
 ];
 
 const COMMUNITY_CHOKEPOINT_MARKER: &str = "begin_community_event_write_transaction(";
+const COMMUNITY_CHOKEPOINT_LEGACY_MARKER: &str =
+    "begin_community_event_write_transaction_with_legacy_metrics(";
+
+fn has_any_tenant_local_chokepoint(source: &str) -> bool {
+    source.contains(COMMUNITY_CHOKEPOINT_MARKER)
+        || source.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER)
+}
 
 const GUARDED_TX_SIGNATURE_MARKERS: [&str; 4] = [
     "&mut sqlx::Transaction<",
@@ -863,9 +995,7 @@ fn adapter_constructor_is_chokepoint_pinned(production_source: &str, method_head
                 .find(|function_source| {
                     function_header(function_source).starts_with(adapter_constructor)
                 })
-                .is_some_and(|constructor_source| {
-                    constructor_source.contains(COMMUNITY_CHOKEPOINT_MARKER)
-                });
+                .is_some_and(has_any_tenant_local_chokepoint);
         }
     }
 
@@ -878,7 +1008,7 @@ fn function_has_syntactic_guarded_write_route(
 ) -> bool {
     let header = function_header(function_source);
 
-    function_source.contains(COMMUNITY_CHOKEPOINT_MARKER)
+    has_any_tenant_local_chokepoint(function_source)
         || function_accepts_guarded_transaction_or_connection(function_source)
         || (function_uses_guarded_tx_adapter_state(function_source)
             && adapter_constructor_is_chokepoint_pinned(production_source, header))

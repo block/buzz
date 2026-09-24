@@ -242,7 +242,7 @@ pub async fn accept_lease_event(
     max_active_leases: i64,
 ) -> Result<AcceptLeaseOutcome> {
     let author = event.pubkey.as_bytes();
-    let mut tx = crate::begin_community_event_write_transaction(
+    let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
         pool,
         community,
         crate::observability::WriterOperation::EventWrite,

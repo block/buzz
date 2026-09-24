@@ -1181,7 +1181,7 @@ impl Db {
             None,
         );
 
-        let mut tx = crate::begin_community_event_write_transaction(
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
             community_id,
             observability::WriterOperation::EventWrite,
