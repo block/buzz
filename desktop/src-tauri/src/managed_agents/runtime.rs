@@ -648,17 +648,25 @@ pub fn spawn_agent_child(
     let effective_provider = effective_cfg.provider.value;
 
     // Hula OpenClaw workspace: opted-in agents require a grant, get MCP
-    // attached, and receive standing skill-pack instructions. Opted-out agents
-    // stay local (no forced MCP, no prompt pack).
-    if record.use_openclaw_workspace {
+    // attached, standing skill-pack instructions, and host-injected remote
+    // CLAUDE.md (soft-fail if gateway lacks /project-instructions yet).
+    // Opted-out agents stay local (no forced MCP, no prompt pack).
+    let openclaw_grant = if record.use_openclaw_workspace {
         let grant = super::openclaw_workspace_mcp::load_grant()?;
         let Some(grant) = grant else {
             return Err(super::openclaw_workspace_mcp::missing_grant_error());
         };
         super::openclaw_workspace_mcp::ensure_mcp_for_agent(record, &grant)?;
-    }
+        Some(grant)
+    } else {
+        None
+    };
     let effective_prompt =
-        super::openclaw_workspace_mcp::maybe_inject_standing_instructions(record, effective_prompt);
+        super::openclaw_workspace_mcp::maybe_inject_openclaw_workspace_prompt(
+            record,
+            openclaw_grant.as_ref(),
+            effective_prompt,
+        );
 
     if let Some(prompt) = &effective_prompt {
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);

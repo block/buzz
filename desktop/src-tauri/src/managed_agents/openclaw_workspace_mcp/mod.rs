@@ -27,16 +27,25 @@ const GRANT_KEY: &str = "openclaw-workspace-mcp-grant";
 pub const OPENCLAW_WORKSPACE_STANDING_INSTRUCTIONS: &str = "\
 ## OpenClaw workspace (Hula)
 
-Project files for this agent live on the **OpenClaw remote workspace** via the \
-`openclaw-workspace` MCP server. Do **not** assume a local Mac checkout of Hula \
-(or any laptop path) is the project filesystem. Use MCP filesystem tools on \
-`openclaw-workspace` as the only project FS.
+Treat the OpenClaw remote Hula root (`Hula/` under the workspace) as the **only** project root. Access it exclusively via the `openclaw-workspace` MCP server (filesystem tools on that server). Never `cd` to, open, or treat as project root `~/Documents/Hula`, `/Users/.../Hula`, or any other local Mac Hula checkout.
 
-**Primary skills source:** before domain work, call `skills_list` then \
-`skills_get` on `openclaw-workspace`. Do not treat local `~/.claude/skills` as \
-the source of truth — the skill pack is under the OpenClaw workspace \
-(`SKILL_ROOTS`).
+At session start, **before planning**: MCP-read `Hula/CLAUDE.md` (fall back to `CLAUDE.md` at the workspace root) and follow it.
+
+**Primary skills source:** call MCP tools `skills_list` then `skills_get` on `openclaw-workspace` (exact gateway tool names). Do not treat local `~/.claude/skills` as the source of truth — the skill pack is under the OpenClaw workspace (`SKILL_ROOTS`).
+
+If a skill reports a Mac cwd under `/Users` or `~/Documents/Hula`, treat that as failure and recover by re-targeting through `openclaw-workspace` MCP.
 ";
+
+/// Candidate paths (workspace-relative) for remote project instructions.
+/// Gateway `/project-instructions` resolves these; Desktop standing text names them.
+#[allow(dead_code)] // referenced by standing copy + unit tests; not read at inject time
+pub const HULA_CLAUDE_MD_PATHS: &[&str] = &["Hula/CLAUDE.md", "CLAUDE.md"];
+
+/// Cap host-injected CLAUDE.md body size (chars) so spawn stays bounded.
+pub const MAX_CLAUDE_MD_CHARS: usize = 100_000;
+
+/// Marker for the host-injected remote CLAUDE.md block (idempotency).
+pub const HULA_CLAUDE_MD_INJECT_MARKER: &str = "OpenClaw Hula CLAUDE.md (host-injected";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -135,6 +144,141 @@ pub fn maybe_inject_standing_instructions(
         }
         None => Some(block.to_string()),
     }
+}
+
+/// Strip trailing `/mcp` (and slash) from the grant MCP URL → `{base}/project-instructions`.
+fn project_instructions_url(mcp_url: &str) -> String {
+    let trimmed = mcp_url.trim().trim_end_matches('/');
+    let base = if let Some(rest) = trimmed.strip_suffix("/mcp") {
+        rest.trim_end_matches('/')
+    } else {
+        trimmed
+    };
+    format!("{base}/project-instructions")
+}
+
+/// GET remote CLAUDE.md / project instructions for the OpenClaw workspace grant.
+/// Soft-fails (Ok(None) + eprintln) on network/HTTP errors so spawn still works
+/// if the gateway has not yet been upgraded with `/project-instructions`.
+pub fn fetch_project_instructions(
+    grant: &OpenClawWorkspaceGrant,
+) -> Result<Option<String>, String> {
+    let url = project_instructions_url(&grant.url);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("openclaw project-instructions client: {e}"))?;
+
+    let mut req = client
+        .get(&url)
+        .header(reqwest::header::ACCEPT, "text/markdown, text/plain, */*")
+        .header(reqwest::header::AUTHORIZATION, grant.authorization.as_str());
+
+    if let Some(headers) = &grant.headers {
+        for (key, value) in headers {
+            if key.eq_ignore_ascii_case("authorization") {
+                continue;
+            }
+            req = req.header(key.as_str(), value.as_str());
+        }
+    }
+
+    let response = match req.send() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "buzz-desktop: openclaw project-instructions fetch failed ({url}): {e}"
+            );
+            return Ok(None);
+        }
+    };
+
+    let status = response.status();
+    if status.as_u16() == 404 {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        eprintln!(
+            "buzz-desktop: openclaw project-instructions HTTP {} ({url})",
+            status.as_u16()
+        );
+        return Ok(None);
+    }
+
+    let text = match response.text() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "buzz-desktop: openclaw project-instructions body read failed ({url}): {e}"
+            );
+            return Ok(None);
+        }
+    };
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let truncated: String = if trimmed.chars().count() > MAX_CLAUDE_MD_CHARS {
+        let cut: String = trimmed.chars().take(MAX_CLAUDE_MD_CHARS).collect();
+        format!("{cut}\n\n… [truncated to {MAX_CLAUDE_MD_CHARS} chars]")
+    } else {
+        trimmed.to_string()
+    };
+    Ok(Some(truncated))
+}
+
+/// Wrap fetched remote CLAUDE.md for host injection (testable without network).
+pub fn format_host_injected_claude_md(body: &str) -> String {
+    format!(
+        "## OpenClaw Hula CLAUDE.md (host-injected from remote workspace)\n\n{}",
+        body.trim()
+    )
+}
+
+/// Merge an optional host-fetched CLAUDE.md block into a prompt (idempotent).
+pub fn merge_host_injected_claude_md(
+    effective_prompt: Option<String>,
+    claude_md: Option<&str>,
+) -> Option<String> {
+    let Some(body) = claude_md.map(str::trim).filter(|s| !s.is_empty()) else {
+        return effective_prompt;
+    };
+    let block = format_host_injected_claude_md(body);
+    match effective_prompt {
+        Some(existing) if existing.trim().is_empty() => Some(block),
+        Some(existing) => {
+            if existing.contains(HULA_CLAUDE_MD_INJECT_MARKER) {
+                Some(existing)
+            } else {
+                // Prepend so project instructions sit ahead of standing skill notes.
+                Some(format!("{block}\n\n{existing}"))
+            }
+        }
+        None => Some(block),
+    }
+}
+
+/// Standing instructions + optional host-fetched remote CLAUDE.md for opted-in agents.
+/// When `grant` is `Some`, attempts a soft-fail fetch of `/project-instructions`.
+pub fn maybe_inject_openclaw_workspace_prompt(
+    record: &ManagedAgentRecord,
+    grant: Option<&OpenClawWorkspaceGrant>,
+    effective_prompt: Option<String>,
+) -> Option<String> {
+    if !record.use_openclaw_workspace {
+        return effective_prompt;
+    }
+    let with_standing = maybe_inject_standing_instructions(record, effective_prompt);
+    let fetched = grant.and_then(|g| match fetch_project_instructions(g) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("buzz-desktop: openclaw project-instructions error: {e}");
+            None
+        }
+    });
+    merge_host_injected_claude_md(with_standing, fetched.as_deref())
 }
 
 /// Ensure MCP is present for one opted-in Claude agent when a grant exists.
@@ -544,5 +688,71 @@ mod tests {
         let once = maybe_inject_standing_instructions(&rec, Some("base".into())).unwrap();
         let twice = maybe_inject_standing_instructions(&rec, Some(once.clone())).unwrap();
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn standing_requires_remote_hula_and_skills_tools() {
+        let text = OPENCLAW_WORKSPACE_STANDING_INSTRUCTIONS;
+        assert!(text.contains("Hula/CLAUDE.md"));
+        assert!(text.contains("skills_list"));
+        assert!(text.contains("skills_get"));
+        assert!(text.contains("openclaw-workspace"));
+        assert!(text.contains("~/Documents/Hula") || text.contains("/Users/.../Hula"));
+        // Forbids treating local Mac checkout as project root.
+        assert!(text.to_lowercase().contains("never") || text.contains("Do **not**") || text.contains("only"));
+        assert!(text.contains("Never `cd`") || text.contains("Never cd") || text.contains("never `cd`") || text.contains("Never `cd` to"));
+    }
+
+    #[test]
+    fn project_instructions_url_strips_mcp() {
+        // Aligns with openclaw-workspace-gateway PR #8:
+        // GET {base}/project-instructions after stripping trailing /mcp.
+        assert_eq!(
+            project_instructions_url("https://workspace.hulapreview.com/mcp"),
+            "https://workspace.hulapreview.com/project-instructions"
+        );
+        assert_eq!(
+            project_instructions_url("https://gw.example/v1/mcp"),
+            "https://gw.example/v1/project-instructions"
+        );
+        assert_eq!(
+            project_instructions_url("https://gw.example/v1/mcp/"),
+            "https://gw.example/v1/project-instructions"
+        );
+        assert_eq!(
+            project_instructions_url("https://gw.example/v1/other"),
+            "https://gw.example/v1/other/project-instructions"
+        );
+    }
+
+    #[test]
+    fn host_inject_merges_fetched_body_idempotent() {
+        let rec = bare_record(true);
+        let standing = maybe_inject_standing_instructions(&rec, Some("persona".into())).unwrap();
+        let once = merge_host_injected_claude_md(Some(standing.clone()), Some("# Rules\nBe kind."));
+        let once = once.unwrap();
+        assert!(once.contains("OpenClaw Hula CLAUDE.md (host-injected"));
+        assert!(once.contains("# Rules"));
+        assert!(once.contains("Be kind."));
+        assert!(once.contains("OpenClaw workspace (Hula)"));
+        // CLAUDE.md precedes standing block content from standing merge.
+        assert!(once.find("host-injected").unwrap() < once.find("OpenClaw workspace (Hula)").unwrap());
+        let twice = merge_host_injected_claude_md(Some(once.clone()), Some("# Rules\nBe kind."));
+        assert_eq!(Some(once), twice);
+    }
+
+    #[test]
+    fn combiner_skips_when_flag_off() {
+        let rec = bare_record(false);
+        assert_eq!(
+            maybe_inject_openclaw_workspace_prompt(&rec, None, Some("hello".into())),
+            Some("hello".into())
+        );
+    }
+
+    #[test]
+    fn hula_claude_md_paths_prefer_hula_subdir() {
+        assert_eq!(HULA_CLAUDE_MD_PATHS[0], "Hula/CLAUDE.md");
+        assert!(HULA_CLAUDE_MD_PATHS.contains(&"CLAUDE.md"));
     }
 }
