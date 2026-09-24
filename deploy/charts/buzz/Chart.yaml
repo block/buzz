@@ -25,6 +25,8 @@ annotations:
   artifacthub.io/changes: |
     - kind: added
       description: Optional typed deletion-drain operator CronJob using durable database leases.
+    - kind: changed
+      description: Storage-accounting Pods derive tags.datadoghq.com/version from the deployed image identity instead of an operator-supplied label.
   artifacthub.io/license: Apache-2.0
 
 # Optional eval-only subcharts. Production deploys disable both and point

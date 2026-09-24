@@ -77,6 +77,21 @@ app.kubernetes.io/component: relay
 {{- end -}}
 
 {{/*
+Kubernetes-label-safe rendering of "buzz.imageRevision", used for Datadog
+unified-service-tagging's version tag on chart-managed Pods.
+
+The revision is either an image tag or a "sha256:<64 hex>" digest. A label
+value may not contain ":" and is capped at 63 characters, so the digest
+algorithm prefix is stripped and the result bounded. The label is therefore a
+prefix-comparable form of the exact revision the same Pod reports in
+BUZZ_STORAGE_SNAPSHOT_CODE_SHA — one identity, derived twice, never a second
+value an operator has to keep in sync.
+*/}}
+{{- define "buzz.imageVersionLabel" -}}
+{{- include "buzz.imageRevision" . | trimPrefix "sha256:" | trunc 63 | trimSuffix "-" | trimSuffix "." | trimSuffix "_" -}}
+{{- end -}}
+
+{{/*
 Name of the chart-managed Secret holding relay-identity material and any
 chart-composed connection strings.
 */}}

@@ -229,7 +229,10 @@
         "failedJobsHistoryLimit": { "type": "integer", "minimum": 0 },
         "relayMode": { "type": "string", "enum": ["inline", "external", "off"] },
         "serviceAccountName": { "type": "string" },
-        "podLabels": { "type": "object" },
+        "podLabels": {
+          "type": "object",
+          "description": "Extra Pod labels. The chart owns tags.datadoghq.com/version and derives it from the deployed image identity, so a value supplied here for that one key is ignored."
+        },
         "podAnnotations": { "type": "object" },
         "resources": { "type": "object" }
       }

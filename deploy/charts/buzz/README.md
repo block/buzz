@@ -460,6 +460,45 @@ volumes, and each init container must define an appropriate security context
 and resources. Empty `relay.command` and `relay.args` arrays preserve the image
 defaults; non-empty values override its entrypoint and arguments respectively.
 
+## Storage accounting worker
+
+`storageAccounting.enabled=true` adds a CronJob that runs
+`buzz-admin storage-snapshot` against the relay's S3 bucket and writes a
+durable snapshot row, keeping the expensive object walk off the relay Pods.
+
+### Snapshot identity contract
+
+Every snapshot row records the code that produced it in `code_sha`, taken from
+the `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` environment variable the chart derives
+from the deployed image identity (`image.digest` when set, otherwise
+`image.tag`, otherwise `Chart.AppVersion`).
+
+The Pod's Datadog version tag is derived from that **same** image identity, so
+the version a snapshot reports to telemetry can never disagree with the version
+recorded in the database:
+
+```yaml
+storageAccounting:
+  enabled: true
+  podLabels:
+    tags.datadoghq.com/env: production
+    tags.datadoghq.com/service: buzz-storage-accounting
+    # tags.datadoghq.com/version: NOT set here — the chart owns it.
+```
+
+Precedence is explicit: `tags.datadoghq.com/version` is chart-owned and always
+renders from the image identity, so a value supplied under
+`storageAccounting.podLabels` for that one key is ignored. Every other label —
+including `tags.datadoghq.com/env` and `tags.datadoghq.com/service`, which
+describe the deployment rather than the image — passes through unchanged.
+Remove any wrapper-maintained `tags.datadoghq.com/version` pin when upgrading;
+leaving it in place is harmless but dead.
+
+Because a label value may not contain `:` and is capped at 63 characters, a
+digest pin renders as the digest hex without its `sha256:` prefix, truncated to
+63 characters — a unique prefix of the full digest that the same Pod reports in
+`BUZZ_STORAGE_SNAPSHOT_CODE_SHA`. See `docs/deployment-identity.md`.
+
 ## Device pairing relay
 
 The chart can run Buzz's stateless pairing WebSocket relay as an independent

@@ -85,3 +85,19 @@ image:
 
 When `image.digest` is set, the chart renders `repository@digest` and ignores
 `image.tag`. Existing tag-only values remain backwards compatible.
+
+## Derived deployment labels
+
+The storage-accounting CronJob has no runtime `/_status` surface to interrogate,
+so the chart stamps its Pods with the deployed image identity instead of asking
+an operator to restate it. `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` (persisted as
+`code_sha` on every snapshot row) and the Pod's `tags.datadoghq.com/version`
+label are both derived from `image.digest` — or `image.tag`, or
+`Chart.AppVersion` — so a snapshot's telemetry version and its recorded version
+cannot drift apart.
+
+Kubernetes label values may not contain `:` and are capped at 63 characters, so
+the label carries the digest hex without its `sha256:` prefix, truncated to 63
+characters. The environment variable keeps the exact revision. Any
+`tags.datadoghq.com/version` supplied through `storageAccounting.podLabels` is
+ignored; see the chart README's "Storage accounting worker" section.

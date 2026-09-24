@@ -44,6 +44,7 @@ tests:
         podLabels:
           tags.datadoghq.com/env: production
           tags.datadoghq.com/service: buzz-storage-accounting
+          # Stale operator pin: the chart owns this key and overrides it.
           tags.datadoghq.com/version: test-sha
     asserts:
       - hasDocuments:
@@ -93,9 +94,11 @@ tests:
           path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/env"]
           value: production
         template: templates/storage-accounting-cronjob.yaml
+      # Image identity wins over the operator-supplied pin; default image.tag
+      # falls back to Chart.AppVersion, the same value as the env var below.
       - equal:
           path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
-          value: test-sha
+          value: 0.1.0
         template: templates/storage-accounting-cronjob.yaml
       - equal:
           path: spec.jobTemplate.spec.template.spec.containers[0].args
@@ -164,4 +167,103 @@ tests:
       - equal:
           path: metadata.name
           value: storage-accounting-fullname-that-storage-accounting
+        template: templates/storage-accounting-cronjob.yaml
+  # ── Datadog version tag is chart-owned, derived from image identity ────────
+  # Regression: a wrapper chart pinned tags.datadoghq.com/version independently
+  # of image.tag/image.digest, so the storage-accounting Pod reported one
+  # version to Datadog while BUZZ_STORAGE_SNAPSHOT_CODE_SHA recorded another.
+  - it: overrides a stale operator-pinned Datadog version label with the image tag
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: 1.2.3-rc.4
+      storageAccounting:
+        enabled: true
+        podLabels:
+          tags.datadoghq.com/env: staging
+          tags.datadoghq.com/service: buzz-storage-accounting
+          tags.datadoghq.com/version: stale-operator-sha
+          team: platform
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: 1.2.3-rc.4
+        template: templates/storage-accounting-cronjob.yaml
+      # The telemetry tag and the recorded snapshot identity cannot disagree.
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
+            value: 1.2.3-rc.4
+        template: templates/storage-accounting-cronjob.yaml
+      # Every other operator label still passes through.
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/env"]
+          value: staging
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/service"]
+          value: buzz-storage-accounting
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["team"]
+          value: platform
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["app.kubernetes.io/component"]
+          value: storage-accounting
+        template: templates/storage-accounting-cronjob.yaml
+  - it: stamps the version label with no operator podLabels at all
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: 2.0.0
+      storageAccounting:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: 2.0.0
+        template: templates/storage-accounting-cronjob.yaml
+  - it: renders a label-safe version from a pinned image digest
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: ignored-when-digest-set
+      image.digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+      storageAccounting:
+        enabled: true
+        podLabels:
+          tags.datadoghq.com/version: stale-operator-sha
+    asserts:
+      # 63 chars, no "sha256:" prefix — a label value the API server accepts,
+      # still a unique prefix of the digest recorded in the env var below.
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "111111111111111111111111111111111111111111111111111111111111111"
+        template: templates/storage-accounting-cronjob.yaml
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          pattern: ^[a-z0-9A-Z]([-_.a-zA-Z0-9]{0,61}[a-zA-Z0-9])?$
+        template: templates/storage-accounting-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
+            value: sha256:1111111111111111111111111111111111111111111111111111111111111111
         template: templates/storage-accounting-cronjob.yaml

@@ -20,9 +20,14 @@ spec:
           labels:
             {{- include "buzz.selectorLabels" . | nindent 12 }}
             app.kubernetes.io/component: storage-accounting
-            {{- with .Values.storageAccounting.podLabels }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
+            {{- /* The Datadog version tag names the binary that wrote the
+                   snapshot rows, so the chart derives it from the same image
+                   identity as BUZZ_STORAGE_SNAPSHOT_CODE_SHA below rather than
+                   letting an operator pin a second value that silently drifts.
+                   Chart-owned key wins; every other podLabels entry (env,
+                   service, operator labels) passes through untouched. */}}
+            {{- $labels := merge (dict "tags.datadoghq.com/version" (include "buzz.imageVersionLabel" .)) .Values.storageAccounting.podLabels }}
+            {{- toYaml $labels | nindent 12 }}
           annotations:
             {{- toYaml .Values.storageAccounting.podAnnotations | nindent 12 }}
         spec:
