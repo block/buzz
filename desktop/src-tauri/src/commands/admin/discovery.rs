@@ -510,42 +510,52 @@ mod tests {
         discover_admin_origin_at(&reqwest::Client::new(), &format!("http://{addr}")).await
     }
 
+    /// The bounds must hold before the status branch, so success and error
+    /// bodies are both covered.
+    const BOUNDED_STATUSES: [&str; 2] = ["200 OK", "500 Internal Server Error"];
+
     #[tokio::test]
     async fn discover_rejects_an_oversized_body_with_a_known_length() {
-        let body = vec![b' '; DISCOVERY_BODY_CAP as usize + 1];
-        let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        let err = discover(serve_raw(head, vec![body], false))
-            .await
-            .unwrap_err();
-        assert!(err.contains("too large"), "{err}");
+        for status in BOUNDED_STATUSES {
+            let body = vec![b' '; DISCOVERY_BODY_CAP as usize + 1];
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let err = discover(serve_raw(head, vec![body], false))
+                .await
+                .unwrap_err();
+            assert!(err.contains("too large"), "{status}: {err}");
+        }
     }
 
     #[tokio::test]
     async fn discover_rejects_an_oversized_chunked_body() {
         // No Content-Length: the cap must hold while streaming.
-        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_string();
-        let piece = vec![b' '; 16_384];
-        let mut body: Vec<Vec<u8>> = (0..5).map(|_| chunk(&piece)).collect();
-        body.push(b"0\r\n\r\n".to_vec());
-        let err = discover(serve_raw(head, body, false)).await.unwrap_err();
-        assert!(err.contains("too large"), "{err}");
+        for status in BOUNDED_STATUSES {
+            let head = format!("HTTP/1.1 {status}\r\nContent-Type: application/nostr+json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+            let piece = vec![b' '; 16_384];
+            let mut body: Vec<Vec<u8>> = (0..5).map(|_| chunk(&piece)).collect();
+            body.push(b"0\r\n\r\n".to_vec());
+            let err = discover(serve_raw(head, body, false)).await.unwrap_err();
+            assert!(err.contains("too large"), "{status}: {err}");
+        }
     }
 
     #[tokio::test]
     async fn discover_gives_up_on_a_stalled_body() {
         // Headers arrive, the body never finishes: the request deadline fires.
-        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: 100\r\n\r\n".to_string();
-        let started = std::time::Instant::now();
-        let result = discover(serve_raw(head, vec![b"{".to_vec()], true)).await;
-        assert!(result.is_err(), "{result:?}");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(3),
-            "discovery must not wait past its deadline: {:?}",
-            started.elapsed()
-        );
+        for status in BOUNDED_STATUSES {
+            let head = format!("HTTP/1.1 {status}\r\nContent-Type: application/nostr+json\r\nContent-Length: 100\r\n\r\n");
+            let started = std::time::Instant::now();
+            let result = discover(serve_raw(head, vec![b"{".to_vec()], true)).await;
+            assert!(result.is_err(), "{status}: {result:?}");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "{status}: discovery must not wait past its deadline: {:?}",
+                started.elapsed()
+            );
+        }
     }
 
     #[tokio::test]
