@@ -7,6 +7,8 @@ import {
   resolveIdleFocusDrawerLeftPx,
   shouldEnableIdleFocusDrawerEscape,
   shouldPrioritizeIdleAuxiliary,
+  shouldRenderThreadBesideAgentSession,
+  shouldSettleTimelineForSplitAuxiliary,
   shouldUseFocusIdleDrawer,
 } from "./ChannelPane.helpers.ts";
 
@@ -147,4 +149,67 @@ test("fullscreen-expanded idle drawer yields Escape to chrome collapse", () => {
   assert.equal(shouldEnableIdleFocusDrawerEscape(true), false);
   assert.equal(shouldEnableIdleFocusDrawerEscape(false), true);
   assert.equal(shouldEnableIdleFocusDrawerEscape(undefined), true);
+});
+
+test("thread stays beside Activity in split layouts so live replies remain visible", () => {
+  assert.equal(
+    shouldRenderThreadBesideAgentSession({
+      hasAgentSession: true,
+      hasThreadSurface: true,
+      isSinglePanelView: false,
+      useFocusThreadDrawer: false,
+      useSplitAuxiliaryPane: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRenderThreadBesideAgentSession({
+      hasAgentSession: true,
+      hasThreadSurface: true,
+      isSinglePanelView: true,
+      useFocusThreadDrawer: false,
+      useSplitAuxiliaryPane: false,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRenderThreadBesideAgentSession({
+      hasAgentSession: true,
+      hasThreadSurface: true,
+      isSinglePanelView: false,
+      useFocusThreadDrawer: true,
+      useSplitAuxiliaryPane: true,
+    }),
+    false,
+  );
+});
+
+test("opening Activity settles the channel timeline like opening a thread panel", () => {
+  assert.equal(
+    shouldSettleTimelineForSplitAuxiliary({
+      hasAgentSession: true,
+      hasThreadPanel: false,
+      useFocusThreadDrawer: false,
+      useSplitAuxiliaryPane: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSettleTimelineForSplitAuxiliary({
+      hasAgentSession: false,
+      hasThreadPanel: true,
+      useFocusThreadDrawer: false,
+      useSplitAuxiliaryPane: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSettleTimelineForSplitAuxiliary({
+      hasAgentSession: true,
+      hasThreadPanel: false,
+      useFocusThreadDrawer: false,
+      useSplitAuxiliaryPane: false,
+    }),
+    false,
+  );
 });

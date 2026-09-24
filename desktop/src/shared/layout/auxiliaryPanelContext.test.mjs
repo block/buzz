@@ -289,3 +289,30 @@ test("AuxiliaryPanel resize handle uses a generic namespace", () => {
   assert.match(html, /group\/auxiliary-panel-resize/);
   assert.doesNotMatch(html, /profile-resize/);
 });
+
+test("AuxiliaryPanelHeader opaque surface paints solid background", () => {
+  const html = render(
+    React.createElement(
+      AuxiliaryPanel,
+      {
+        header: React.createElement(
+          AuxiliaryPanelHeader,
+          { surface: "opaque", transparent: false },
+          React.createElement(
+            AuxiliaryPanelHeaderGroup,
+            null,
+            "Captain Activity",
+          ),
+        ),
+        layout: "split",
+        onClose: () => {},
+        transparentChrome: false,
+        widthPx: 420,
+      },
+      "Panel",
+    ),
+  );
+
+  assert.match(html, /bg-background(?!\/)/);
+  assert.doesNotMatch(html, /bg-transparent/);
+});

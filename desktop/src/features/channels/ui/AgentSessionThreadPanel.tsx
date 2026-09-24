@@ -95,7 +95,6 @@ export function AgentSessionThreadPanel({
   onBack,
   onClose,
   widthPx,
-  transparentChrome = false,
 }: AgentSessionThreadPanelProps) {
   const isLive = agent.status === "running" || agent.status === "deployed";
   const isOverlay = useIsThreadPanelOverlay();
@@ -495,13 +494,18 @@ export function AgentSessionThreadPanel({
       layout={layout}
       onClose={onClose}
       testId="agent-session-thread-panel"
-      transparentChrome={transparentChrome}
+      // RightAuxiliaryPane uses isolate+z-31 above the shared header blur, so
+      // transparentChrome would let Activity transcript scroll through the title
+      // row. Always paint a solid header that matches app chrome.
+      transparentChrome={false}
       widthPx={widthPx}
       header={
         <AuxiliaryPanelHeader
           backdrop={layout !== "split" && !isOverlay}
           backdropSurface="soft"
           inset={layout !== "split" ? "wide" : "default"}
+          surface="opaque"
+          transparent={false}
         >
           {agentHeaderContent}
         </AuxiliaryPanelHeader>

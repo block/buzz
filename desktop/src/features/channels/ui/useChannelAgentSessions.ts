@@ -242,7 +242,10 @@ export function useChannelAgentSessions({
           }),
         );
       }
-      setOpenThreadHeadId(null);
+      // Keep the thread mounted beside Activity so live replies stay visible
+      // in the main column (ChannelPane prefers Activity on the right). Clearing
+      // the thread hid replies until dismiss restored it — especially in OS
+      // channel/thread companions after the #111 split lift.
       setExpandedThreadReplyIds(new Set());
       setThreadScrollTargetId(null);
       setThreadReplyTargetId(null);
@@ -265,7 +268,6 @@ export function useChannelAgentSessions({
       setExpandedThreadReplyIds,
       setOpenAgentSessionChannelId,
       setOpenAgentSessionPubkey,
-      setOpenThreadHeadId,
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     ],

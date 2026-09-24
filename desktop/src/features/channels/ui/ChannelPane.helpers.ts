@@ -95,6 +95,55 @@ export function shouldPrioritizeIdleAuxiliary(
   return overrideThread && hasIdleAuxiliary;
 }
 
+/**
+ * Activity + an open thread in a split layout: keep the thread in the main
+ * column so live replies stay visible while the session panel is on the right.
+ * Focus-mode drawers keep the prior replace behavior (thread yields the slot).
+ */
+export function shouldRenderThreadBesideAgentSession({
+  hasAgentSession,
+  hasThreadSurface,
+  isSinglePanelView,
+  useFocusThreadDrawer,
+  useSplitAuxiliaryPane,
+}: {
+  hasAgentSession: boolean;
+  hasThreadSurface: boolean;
+  isSinglePanelView: boolean;
+  useFocusThreadDrawer: boolean;
+  useSplitAuxiliaryPane: boolean;
+}): boolean {
+  return (
+    hasAgentSession &&
+    hasThreadSurface &&
+    useSplitAuxiliaryPane &&
+    !isSinglePanelView &&
+    !useFocusThreadDrawer
+  );
+}
+
+/**
+ * Re-settle the channel timeline when a split auxiliary opens so layout shrink
+ * does not leave the reader "away from bottom" and freeze live arrivals.
+ */
+export function shouldSettleTimelineForSplitAuxiliary({
+  hasAgentSession,
+  hasThreadPanel,
+  useFocusThreadDrawer,
+  useSplitAuxiliaryPane,
+}: {
+  hasAgentSession: boolean;
+  hasThreadPanel: boolean;
+  useFocusThreadDrawer: boolean;
+  useSplitAuxiliaryPane: boolean;
+}): boolean {
+  return (
+    useSplitAuxiliaryPane &&
+    !useFocusThreadDrawer &&
+    (hasThreadPanel || hasAgentSession)
+  );
+}
+
 export function isWelcomeSetupSystemMessage(message: TimelineMessage) {
   if (message.kind !== KIND_SYSTEM_MESSAGE) {
     return false;

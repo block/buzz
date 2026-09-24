@@ -52,7 +52,7 @@ type AuxiliaryPanelHeaderTitleBlockProps = {
 };
 type AuxiliaryPanelTitleProps = Omit<React.ComponentProps<"h2">, "className">;
 type AuxiliaryPanelTitleContentProps = React.ComponentProps<"h2">;
-type AuxiliaryPanelSurface = "default" | "soft" | "transparent";
+type AuxiliaryPanelSurface = "default" | "opaque" | "soft" | "transparent";
 
 const AUXILIARY_PANEL_HEADER_HEIGHT_CLASS = "pt-13";
 export const AUXILIARY_PANEL_DEFAULT_SURFACE_CLASS =
@@ -76,6 +76,12 @@ export function getAuxiliaryPanelMode(
 function getAuxiliaryPanelSurfaceClass(surface: AuxiliaryPanelSurface) {
   if (surface === "transparent") {
     return "bg-transparent";
+  }
+
+  if (surface === "opaque") {
+    // Solid fill for panes that sit above the shared channel header blur
+    // (RightAuxiliaryPane isolate+z-31): glass/transparent lets scroll text bleed.
+    return "bg-background";
   }
 
   if (surface === "soft") {
