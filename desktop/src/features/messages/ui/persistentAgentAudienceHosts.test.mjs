@@ -7,16 +7,15 @@ async function source(relativePath) {
 }
 
 test("only thread conversation hosts opt into persistent audiences", async () => {
-  const [channelPane, threadPanel, newMessage, inboxDetail] = await Promise.all(
-    [
-      source("../../channels/ui/ChannelPane.tsx"),
+  const [channelComposer, threadPanel, newMessage, inboxDetail] =
+    await Promise.all([
+      source("../../channels/ui/ChannelMainComposerDock.tsx"),
       source("./MessageThreadPanel.tsx"),
       source("./NewMessageScreen.tsx"),
       source("../../home/ui/InboxDetailPane.tsx"),
-    ],
-  );
+    ]);
 
-  assert.doesNotMatch(channelPane, /audienceContext=/);
+  assert.doesNotMatch(channelComposer, /audienceContext=/);
   assert.doesNotMatch(newMessage, /audienceContext=/);
   assert.match(
     threadPanel,

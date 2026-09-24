@@ -16,7 +16,11 @@ const CONTENT_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 const AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
 
 type WireCursor = { created_at: number; id: string };
-type BoundsPayload = { has_more: boolean; next_cursor: WireCursor | null };
+type BoundsPayload = {
+  has_more: boolean;
+  next_cursor: WireCursor | null;
+  thread_replies_in_channel?: boolean;
+};
 type SummaryPayload = {
   reply_count: number;
   descendant_count: number;
@@ -126,5 +130,12 @@ export function parseChannelWindowResponse(
 
   // Summaries/bounds are metadata, never durable raw timeline events.
   const aux = events.filter((event) => AUX_KINDS.has(event.kind));
-  return { startCursor, rows, aux, nextCursor, hasMore: bounds.has_more };
+  return {
+    startCursor,
+    threadRepliesInChannel: bounds.thread_replies_in_channel === true,
+    rows,
+    aux,
+    nextCursor,
+    hasMore: bounds.has_more,
+  };
 }

@@ -12,7 +12,7 @@ Channel and Thread Windows
 
 This NIP defines two relay-computed, cursor-paged views served as ordinary signed Nostr events through extended NIP-01 filters:
 
-- **channel mode** pages a channel's top-level timeline;
+- **channel mode** pages a channel's timeline. By default, it returns top-level rows; a relay MAY apply a community-level policy that projects thread replies into the same channel window as flat chronological rows.
 - **thread mode** pages one root's descendants newest-first.
 
 Both modes use stable keyset order and explicit relay-signed exhaustion bounds. A channel-mode request may also include the aux closure and thread-summary overlays:
@@ -39,6 +39,8 @@ This NIP does not change ingest, storage, or fan-out. Rows returned in a window 
 
 This NIP does not define around-target retrieval or cross-page snapshot isolation. It defines protocol compatibility and fallback rules, but the Buzz thread-mode implementation ships no client opt-in or fallback implementation. Thread mode starts at the newest reply and continues toward older replies.
 
+The channel-mode thread-reply projection policy, when enabled, is a read/display projection over stored reply events. It is not a duplicate ingest or fan-out mechanism.
+
 This NIP does not require WebSocket REQ support. A relay MAY serve window filters only on an HTTP query surface and ignore the extension fields on REQ (see §Degradation).
 
 ## Terminology
@@ -48,6 +50,7 @@ This document uses MUST, MUST NOT, SHOULD, MAY, and RECOMMENDED as defined in RF
 - **relay identity**: The keypair whose pubkey the relay advertises (e.g. NIP-11 `self`). All overlay events are signed with it.
 - **row**: A stored, signed event returned as part of the page proper (usually client-authored; Buzz also stores relay-signed events carrying actor provenance). Rows are the only events that count against `limit`.
 - **top-level**: An event that opens a thread rather than replying into one — defined by wire tags in §Channel-mode Top-level Classification.
+- **projected thread reply**: A reply event that remains stored only as a thread reply, but is also returned as a flat row in the channel window because the channel's community has enabled thread-reply projection.
 - **overlay**: A relay-signed event (`kind:39005`, `kind:39006`, or `kind:39007`) synthesized at query time. Overlays are metadata *about* rows: never a row, never a cursor input, never durable history.
 - **composite cursor**: The pair `(created_at, id)` identifying a position in the total order. `created_at` is unix seconds; `id` is a 64-character lowercase hex event id.
 - **scan position**: The composite cursor of the last event the relay's query *retained*, whether or not that event was ultimately delivered as a row (see §Channel-mode Relay Processing Algorithm step 3). The cursor tracks where the scan stopped, not what the client received.
@@ -79,6 +82,12 @@ Cursor grammar: `until` MUST be a non-negative integer of unix seconds represent
 
 Offset/page-number pagination MUST NOT be honored on the window path.
 
+### Community Row Mode
+
+The request does not choose whether thread replies are projected into the channel window. That choice is a community-level relay policy. Buzz exposes it as the community profile field `thread_replies_in_channel`, which may be changed only by community owners/admins and defaults to `false` for existing communities.
+
+A served window response MUST echo the policy used for that page in the `kind:39006` bounds content as boolean `thread_replies_in_channel`. The echoed value is part of the window mode: a cursor obtained while it is `false` MUST NOT be reused to continue a window after the value becomes `true`, or vice versa. Clients that observe a mode change while appending older pages MUST discard or refetch the affected window chain rather than mixing pages fetched under different row predicates.
+
 ## Channel-mode Top-level Classification
 
 The row set must be reproducible from wire data alone, so the reply/top-level distinction is defined by tags, not by any relay's storage schema.
@@ -90,7 +99,9 @@ From that predicate:
 - **depth** 0 = not a reply. A reply's depth is its parent's depth + 1, following `reply` markers up the ancestry (relays MAY cap depth; Buzz rejects beyond 100). A reply MUST target a parent in the same channel; its `root` marker, when present, MUST agree with the parent's ancestry.
 - **broadcast**: a reply is *broadcast to the channel* iff it carries the exact tag `["broadcast", "1"]`. Broadcasting is an author's opt-in to surface a depth-1 reply on the channel timeline as well as in its thread.
 
-An event is **top-level** — eligible to be a window row — iff its depth is 0, or its depth is 1 and it is broadcast.
+In the default community row mode, an event is **top-level** — eligible to be a window row — iff its depth is 0, or its depth is 1 and it is broadcast.
+
+When `thread_replies_in_channel` is enabled for the community, all non-deleted events in the target channel that match the request's row kind filter are eligible window rows, including direct and nested thread replies. A projected thread reply MUST appear at its own position in the total channel-window order, as a peer row, not nested or grouped under its root. The `["broadcast", "1"]` tag does not create a second row in projection mode; it is only the default-mode opt-in that admits a depth-1 reply to the top-level row set.
 
 Storage fallback (fail-open): a relay that indexes this classification at ingest may hold events stored before the index existed, whose depth is unknown. Such events MUST be treated as top-level rather than vanishing from every window. This is a compatibility rule for pre-index data, not a third protocol state — an interoperating implementation classifying from tags alone has no unknown case.
 
@@ -98,7 +109,7 @@ Storage fallback (fail-open): a relay that indexes this classification at ingest
 
 For a valid window filter on an accessible channel (§Channel-mode Access Scoping) the relay MUST:
 
-1. **Select rows.** From the target channel, take events that are top-level (§Channel-mode Top-level Classification), not deleted, and matching `kinds` if present, in the total order `created_at DESC, id ASC` (`id` compared bytewise). With a cursor `(ts, id)`, retain only events where `created_at < ts OR (created_at = ts AND id > id)`.
+1. **Select rows.** Determine the community row mode before applying the row budget. If `thread_replies_in_channel` is false, take events that are top-level (§Channel-mode Top-level Classification), not deleted, and matching `kinds` if present. If it is true, take all non-deleted events in the target channel that match `kinds` if present, including replies at any depth. In both modes, order rows by `created_at DESC, id ASC` (`id` compared bytewise). With a cursor `(ts, id)`, retain only events where `created_at < ts OR (created_at = ts AND id > id)`.
 2. **Probe exhaustion.** Evaluate the query with an internal budget of `limit + 1` rows *after all predicates*. If `limit + 1` rows match, `has_more = true` and the sentinel row is discarded — it MUST NOT appear on the wire, in overlays, or in the aux closure. Otherwise `has_more = false`.
 3. **Derive the next cursor.** If `has_more`, `next_cursor` is the **scan position**: the composite cursor of the last retained candidate, captured *before* any serving-time reconstruction or filtering of individual events. Otherwise `next_cursor = null`. The invariant `next_cursor = null ⇔ has_more = false` MUST hold. Because it is a scan position, `next_cursor` MAY reference an event that does not appear in the response (e.g. one skipped by the relay as unreconstructable); it is authoritative regardless, and deriving it from delivered rows instead would stall pagination on every skipped event.
 4. **Append the aux closure** (if `include_aux` and at least one row): two hops of events referencing the rows by `e` tag. Hop 1: reactions (`kind:7`), deletions (`kind:5`, `kind:9005`), and edits (Buzz `kind:40003`) whose `e` tag is a row id. Hop 2: deletions whose `e` tag is a hop-1 event id (a delete-of-a-reaction). Each event appears at most once; access-scoped events the requester cannot read are omitted. Relays MAY cap each hop (Buzz: 1000 events per hop).
@@ -154,12 +165,13 @@ Exactly one per served window response. The **only** authority on exhaustion. Ta
     ["d", "<channel-id>:<request-cursor-or-head>"],
     ["h", "<channel-id>"]
   ],
-  "content": "{\"has_more\":true,\"next_cursor\":{\"created_at\":1751499000,\"id\":\"<64-hex id>\"}}"
+  "content": "{\"has_more\":true,\"next_cursor\":{\"created_at\":1751499000,\"id\":\"<64-hex id>\"},\"thread_replies_in_channel\":false}"
 }
 ```
 
 - `d`-tag suffix (canonical serialization): the literal string `head` for a head request, else `<created_at>:<event_id>` — decimal unix seconds, colon, full 64-character lowercase hex id — identifying the *request* cursor this page answered. Clients MUST verify the suffix equals the cursor they sent and discard the overlay (and the page) on mismatch; this binds each bounds overlay to its request and makes concurrent-page responses unambiguous.
 - `next_cursor` — the composite cursor to echo as `until` + `before_id` for the next page, or `null` iff `has_more` is `false`.
+- `thread_replies_in_channel` — boolean community row mode used to compute the page. Missing or `false` means the default top-level row predicate. `true` means thread replies were eligible rows before limit/probe/cursor evaluation. Clients MUST treat a change in this value as a window-mode change and refetch rather than mixing pages from both modes.
 - Reserved: an `oldest_retained` content field may be added (retention gap signaling) without a wire break. Clients MUST ignore unknown content fields.
 
 ## Channel-mode Client Behavior
@@ -170,6 +182,7 @@ Exactly one per served window response. The **only** authority on exhaustion. Ta
 4. **Immutability**: fetched pages are immutable history chained cursor→cursor. New live events MUST NOT be spliced into fetched pages; deliver them through a separate live subscription (`since: now`) and merge at render time. On reconnect, refetch the head page and re-arm the live subscription; deeper pages need no repair.
 5. **Bounds integrity**: a window response missing its `kind:39006`, or carrying more than one, or carrying one whose `d`-tag binding does not echo the request cursor, whose content is not parseable JSON, or whose content violates `has_more = true ⇔ next_cursor ≠ null`, is not a usable page — the client MUST discard it (and MAY retry) rather than guess at exhaustion. Clients SHOULD additionally reject overlays that violate the exact tag cardinality of §Channel-mode Overlay Event Formats or whose content fields have the wrong runtime types (hardening against a malformed or hostile serializer). Cryptographic verification is governed by §Overlay Trust.
 6. **Overlays are metadata**: never render a `39005`/`39006` as a message, never feed one into cursor math, and key cached summaries by their `d` tag (latest wins).
+7. **Projection presentation**: when `thread_replies_in_channel` is true, a reply row SHOULD be rendered as a normal chronological channel row with lightweight context linking it back to the root/original thread. Reply actions from such a row SHOULD target the original thread/reply. Opening the side thread view remains a client affordance, but clients MUST NOT publish duplicate channel events merely to represent the projection.
 
 ## Legacy Oldest-first Threads
 
@@ -366,11 +379,13 @@ A channel-mode client with neither an authenticated transport nor a verifiable r
 
 ## Implementation Gotchas
 
-- The `limit + 1` probe MUST run after *all* predicates: access, deletion and `kinds` in both modes; top-level classification in channel mode only; root, channel and depth restrictions in thread mode. A probe over a superset produces false `has_more = true` on the last page.
+- The `limit + 1` probe MUST run after *all* predicates: access, deletion, and `kinds` in both modes; row mode and top-level classification in channel mode; root, channel and depth restrictions in thread mode. A probe over a superset produces false `has_more = true` on the last page.
+- The community `thread_replies_in_channel` policy is part of the row predicate and MUST be applied before `limit + 1`, cursor derivation, aux closure, and summaries. Mixing pages fetched under different values can skip or duplicate rows.
 - The cursor comparison uses `id > $id` (bytewise ascending) because the total order is `created_at DESC, id ASC`. Getting the id inequality backwards drops or duplicates same-second rows — precisely the bug the composite cursor removes.
 - `next_cursor` is the last retained *scan candidate*, not the last delivered row: capture the scan position before per-event reconstruction so a skipped event cannot stall pagination. Clients echo it verbatim and never derive or validate it against the rows they received.
 - **Channel mode only:** events ingested before the relay computed thread metadata have no depth; they MUST be treated as top-level rather than vanishing from channel windows. Thread mode instead requires metadata at depths 1..`depth_limit`.
 - The `d` tag on `39006` differs per request cursor by design: concurrent pages of one channel coexist in a replaceable-event cache instead of clobbering each other. The per-channel-singleton alternative would make page N overwrite page N+1's bounds.
+- Broadcast and projection are distinct. In default mode, broadcast admits only a depth-1 reply to the channel row set. In projection mode, all replies are already eligible rows and a broadcast tag MUST NOT produce an additional duplicate row.
 
 ## Relation to Other NIPs
 

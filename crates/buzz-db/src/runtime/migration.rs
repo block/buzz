@@ -703,12 +703,17 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 49);
+        assert_eq!(migrations.len(), 50);
         assert_eq!(migrations[48].version, 49);
         assert!(migrations[48]
             .sql
             .as_str()
             .contains("idx_thread_metadata_window"));
+        assert_eq!(migrations[49].version, 50);
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("thread_replies_in_channel"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -752,6 +757,7 @@ mod postgres_tests {
             .as_str()
             .contains("ALTER TABLE communities ADD COLUMN icon"));
         assert!(!migrations[0].sql.as_str().contains("icon"));
+
         // Same additive-migration rule for the e-tag containment GIN index
         // (channel-window aux closure): its own version, never folded into 0001.
         assert_eq!(migrations[3].version, 4);
@@ -1288,6 +1294,11 @@ mod postgres_tests {
         // The restored exclusion function must NOT list any NIP-FI relation.
         assert!(!ledger_removal.contains("'authorization_operation_receipts'"));
         assert!(!ledger_removal.contains("'identity_bindings'"));
+        assert_eq!(migrations[44].version, 45);
+        assert!(migrations[44]
+            .sql
+            .as_str()
+            .contains("push_gateway_installations_active_profile_token"));
         assert_eq!(migrations[45].version, 46);
         assert!(migrations[45]
             .sql
@@ -1298,6 +1309,18 @@ mod postgres_tests {
             desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
             "schema.sql exclusion list must match the pre-0041 body after ledger removal"
         );
+
+        // Same additive-migration rule for projected thread replies in the
+        // channel timeline: its own version, never folded into 0001.
+        assert_eq!(migrations[49].version, 50);
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("thread_replies_in_channel"));
+        assert!(!migrations[0]
+            .sql
+            .as_str()
+            .contains("thread_replies_in_channel"));
     }
 
     #[test]
