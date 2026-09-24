@@ -95,25 +95,6 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
 void main() {
   group('ReactionRow', () {
-    testWidgets(
-      'heart reactions prefer a color font without recoloring counts',
-      (tester) async {
-        await _pumpRow(tester, reactions: [_reaction(emoji: '❤️', count: 5)]);
-        final heart = tester.widget<Text>(find.text('❤️'));
-        final count = tester.widget<Text>(find.text('5'));
-        expect(heart.style?.fontFamily, 'Apple Color Emoji');
-        expect(heart.style?.fontFamilyFallback, [
-          'Noto Color Emoji',
-          'Segoe UI Emoji',
-        ]);
-        expect(count.style?.fontFamily, 'Inter');
-        expect(
-          tester.getSize(find.byKey(const ValueKey('reaction-pill-❤️'))).height,
-          28,
-        );
-      },
-    );
-
     testWidgets('shows the count even at one, matching desktop', (
       tester,
     ) async {

@@ -31,13 +31,7 @@ class NativeEmojiGlyph extends StatelessWidget {
       maxLines: 1,
       softWrap: false,
       textScaler: TextScaler.noScaling,
-      // Inter contains a monochrome heart, so emoji fonts must take priority.
-      style: TextStyle(
-        fontFamily: 'Apple Color Emoji',
-        fontFamilyFallback: const ['Noto Color Emoji', 'Segoe UI Emoji'],
-        fontSize: size,
-        height: 1,
-      ),
+      style: TextStyle(fontSize: size, height: 1),
     );
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       glyph = Transform.translate(offset: const Offset(0, -1), child: glyph);
