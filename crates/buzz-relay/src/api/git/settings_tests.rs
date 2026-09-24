@@ -336,7 +336,7 @@ mod external_infra {
     }
 
     #[tokio::test]
-    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    #[ignore = "requires isolated Postgres, Redis and S3-compatible object storage"]
     async fn default_branch_route_permissions_and_protocol() {
         let f = Fixture::new().await;
         let before = f.snapshot().await;
@@ -514,7 +514,7 @@ mod external_infra {
     }
 
     #[tokio::test]
-    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    #[ignore = "requires isolated Postgres, Redis and S3-compatible object storage"]
     async fn default_branch_delegation_and_revocation() {
         let f = Fixture::new().await;
         let agent = Keys::generate();
@@ -614,7 +614,7 @@ mod external_infra {
     }
 
     #[tokio::test]
-    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    #[ignore = "requires isolated Postgres, Redis and S3-compatible object storage"]
     async fn default_branch_push_races_and_fresh_clone() {
         let f = Fixture::new().await;
         let a = f.snapshot().await;
@@ -844,7 +844,7 @@ mod external_infra {
     }
 
     #[tokio::test]
-    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    #[ignore = "requires isolated Postgres, Redis and S3-compatible object storage"]
     async fn default_branch_replay_outage_and_deletion_fail_closed() {
         let mut f = Fixture::new().await;
         let before = f.snapshot().await.digest;

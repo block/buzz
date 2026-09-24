@@ -60,7 +60,7 @@ pub struct MediaConfig {
     ///
     /// Must match the region of `s3_endpoint` for real AWS S3, otherwise
     /// requests are signed with the wrong credential scope and AWS rejects
-    /// them. Defaults to "us-east-1" to preserve MinIO/local behavior, where
+    /// them. Defaults to "us-east-1" to preserve local S3-compatible behavior, where
     /// the value is not meaningfully checked.
     #[serde(default = "default_s3_region")]
     pub s3_region: String,
