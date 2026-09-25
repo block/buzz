@@ -242,3 +242,65 @@ test("actions-disabled-auth: canMutate=false keeps Review and every field off", 
     await unmount();
   }
 });
+
+test("actions-review-race: a late second Review never replaces the submitted intent", async () => {
+  // Mutation: drop the in-flight guard at the top of handleReview → RED
+  // (the second Review re-freezes with a new requestId and Retry sends it).
+  const relays = [];
+  setIpcHandler(
+    "get_relay_ws_url",
+    () =>
+      new Promise((resolve) => relays.push(() => resolve(TEST_RELAY_WS_URL))),
+  );
+  const ids = [];
+  const replies = [
+    () => mutationReject("network down", null),
+    () =>
+      Promise.resolve({ actionId: "a1", state: "succeeded", replayed: true }),
+  ];
+  setIpcHandler("admin_direct_action", ({ intent }) => {
+    ids.push(intent.requestId);
+    return replies[ids.length - 1]();
+  });
+  const { container: c, unmount } = await mountActions();
+  try {
+    await fillTimeout(c);
+    await act(async () => {
+      fireEvent.click(q(c, "direct-review-btn"));
+      fireEvent.click(q(c, "direct-review-btn"));
+    });
+    const pending = relays.splice(0);
+    await act(async () => pending[0]());
+    await settle();
+    await click(c, "direct-confirm-btn");
+    await act(async () => {
+      for (const resolve of pending.slice(1)) resolve();
+    });
+    await settle();
+    await click(c, "direct-confirm-btn");
+    assert.equal(ids.length, 2);
+    assert.equal(ids[0], ids[1], "retry must replay the submitted requestId");
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-audience: the reason's recipients are disclosed and the frozen reason is shown", async () => {
+  // Mutation: remove the direct-reason-audience line or the confirm reason → RED.
+  const { container: c, unmount } = await mountActions();
+  try {
+    const audience = () => q(c, "direct-reason-audience").textContent;
+    assert.equal(audience(), "Sent verbatim to the affected user.");
+    await click(c, "direct-action-delete");
+    assert.equal(
+      audience(),
+      "Sent verbatim to the affected user and posted publicly in the room.",
+    );
+    await fillTimeout(c);
+    await click(c, "direct-review-btn");
+    assert.equal(audience(), "Sent verbatim to the affected user.");
+    assert.equal(q(c, "direct-confirm-reason").textContent, "Reason: spam");
+  } finally {
+    await unmount();
+  }
+});
