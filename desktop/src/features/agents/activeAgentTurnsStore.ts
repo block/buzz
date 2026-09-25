@@ -63,10 +63,8 @@ type ActiveTurn = {
 export type ActiveTurnSummary = {
   channelId: string;
   anchorAt: number;
-  /** Distinct active thread roots; legacy frames use their turn ID. */
+  /** Distinct known roots; absent on working signals from outside this store. */
   threadCount?: number;
-  /** True when the observer identifies at least one thread-scoped turn. */
-  hasThreadScope?: boolean;
 };
 
 /** One channel with active agent work, aggregated across agents. */
@@ -232,22 +230,22 @@ function recordActivity(
   agentPubkey: string,
   turnId: string | null,
   threadRootEventId: string | null,
-): boolean {
-  if (!turnId) return false;
+): { refreshed: boolean; changed: boolean } {
+  if (!turnId) return { refreshed: false, changed: false };
   const key = normalizePubkey(agentPubkey);
   const agentTurns = activeTurnsByAgent.get(key);
-  if (!agentTurns) return false;
+  if (!agentTurns) return { refreshed: false, changed: false };
   const turn = agentTurns.get(turnId);
   if (turn) {
     turn.lastActivityAt = Date.now();
     if (threadRootEventId && turn.threadRootEventId !== threadRootEventId) {
       turn.threadRootEventId = threadRootEventId;
       invalidateCache(key);
-      notifyListeners();
+      return { refreshed: true, changed: true };
     }
-    return true;
+    return { refreshed: true, changed: false };
   }
-  return false;
+  return { refreshed: false, changed: false };
 }
 
 /**
@@ -284,7 +282,7 @@ function resurrectTurn(agentPubkey: string, event: ObserverEvent): boolean {
     event.channelId,
     event.turnId,
     safeStartedAt,
-    threadRootFromEvent(event),
+    event.kind === "turn_liveness" ? threadRootFromEvent(event) : null,
   );
   return true;
 }
@@ -458,18 +456,20 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
       return;
     case "acp_read":
     case "acp_write":
-    // turn_liveness keeps a quiet-but-alive turn from being pruned; same
-    // refresh-only path as stream activity — no surfaced summary change on its
-    // own, so it only notifies when the offset above actually moved. If the
-    // turn was pruned out from under a still-running host (a transient drop
-    // raced the pause, or the lone-crash residual self-healed), resurrect it.
+    // turn_liveness keeps a quiet-but-alive turn from being pruned and can
+    // supply a thread root missing from the start frame. If the turn was
+    // pruned out from under a still-running host, resurrect it.
     case "turn_liveness": {
-      const refreshed = recordActivity(
+      const { refreshed, changed } = recordActivity(
         agentPubkey,
         event.turnId ?? null,
-        threadRootFromEvent(event),
+        event.kind === "turn_liveness" ? threadRootFromEvent(event) : null,
       );
       if (!refreshed && resurrectTurn(agentPubkey, event)) {
+        notifyListeners();
+        return;
+      }
+      if (changed) {
         notifyListeners();
         return;
       }
@@ -546,29 +546,30 @@ export function getActiveTurnsForAgent(
   // derived here (startedAt + offset) so the latest skew estimate applies.
   const earliestByChannel = new Map<
     string,
-    { startedAt: number; threadRoots: Set<string>; hasThreadScope: boolean }
+    { startedAt: number; threadRoots: Set<string>; rootsKnown: boolean }
   >();
   for (const turn of agentTurns.values()) {
     const prior = earliestByChannel.get(turn.channelId);
     if (!prior) {
       earliestByChannel.set(turn.channelId, {
         startedAt: turn.startedAt,
-        threadRoots: new Set([turn.threadRootEventId ?? turn.turnId]),
-        hasThreadScope: turn.threadRootEventId !== null,
+        threadRoots: new Set(
+          turn.threadRootEventId ? [turn.threadRootEventId] : [],
+        ),
+        rootsKnown: turn.threadRootEventId !== null,
       });
     } else {
       prior.startedAt = Math.min(prior.startedAt, turn.startedAt);
-      prior.threadRoots.add(turn.threadRootEventId ?? turn.turnId);
-      prior.hasThreadScope ||= turn.threadRootEventId !== null;
+      if (turn.threadRootEventId) prior.threadRoots.add(turn.threadRootEventId);
+      else prior.rootsKnown = false;
     }
   }
 
   const result = [...earliestByChannel.entries()]
-    .map(([channelId, { startedAt, threadRoots, hasThreadScope }]) => ({
+    .map(([channelId, { startedAt, threadRoots, rootsKnown }]) => ({
       channelId,
       anchorAt: startedAt + offset,
-      threadCount: threadRoots.size,
-      hasThreadScope,
+      threadCount: rootsKnown ? threadRoots.size : 0,
     }))
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
   cachedTurnSummaries.set(key, result);

@@ -6949,6 +6949,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_prompt_task_observes_thread_root_only_for_thread_scope() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel_id = Uuid::new_v4();
+        let root = "a".repeat(64);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 8192];
+                let _ = socket.read(&mut buf).await;
+                let body = "not-json";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        for (scope, expected_root) in [
+            (thread_scope(channel_id, &root), Some(root.as_str())),
+            (conv(channel_id), None),
+        ] {
+            let acp = AcpClient::spawn("bash", &["-c".into(), "exec sleep 30".into()], &[], false)
+                .await
+                .expect("spawn test ACP process");
+            let mut agent = OwnedAgent {
+                index: 0,
+                acp,
+                state: SessionState::default(),
+                model_capabilities: None,
+                desired_model: None,
+                model_overridden: false,
+                desired_model_request_id: None,
+                desired_model_pending_ack: false,
+                startup_effort: None,
+                agent_name: "observer-test-agent".into(),
+                goose_system_prompt_supported: None,
+                protocol_version: 1,
+            };
+            let observer = observer::ObserverHandle::in_process();
+            agent.acp.set_observer(Some(observer.clone()), 0);
+            let batch = FlushBatch {
+                channel_id,
+                scope,
+                events: vec![],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            };
+            let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+            let mut ctx = make_prompt_context_no_owner();
+            ctx.channel_info = ChannelInfoResolver::new(
+                HashMap::from([(
+                    channel_id,
+                    crate::relay::ChannelInfo {
+                        name: "test-channel".into(),
+                        channel_type: "stream".into(),
+                        description: None,
+                    },
+                )]),
+                RestClient {
+                    http: reqwest::Client::new(),
+                    base_url: base_url.clone(),
+                    keys: ctx.agent_keys.clone(),
+                    auth_tag_json: None,
+                },
+            );
+            run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::new(ctx),
+                result_tx,
+                None,
+                "observer-test-turn".into(),
+            )
+            .await;
+            let mut result = result_rx.recv().await.expect("prompt result");
+            assert!(matches!(
+                result.outcome,
+                PromptOutcome::ProjectContextIndeterminate(_)
+            ));
+            let starts: Vec<_> = observer
+                .snapshot()
+                .into_iter()
+                .filter(|event| event.kind == "turn_started")
+                .collect();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(
+                starts[0].payload["threadRootEventId"].as_str(),
+                expected_root,
+                "run_prompt_task must derive the observer root from its session scope"
+            );
+            result.agent.acp.shutdown().await;
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn run_prompt_task_commits_standing_context_only_after_acp_success() {
         let capture = std::env::temp_dir().join(format!(
             "buzz-acp-standing-lifecycle-{}.ndjson",

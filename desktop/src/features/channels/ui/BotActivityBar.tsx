@@ -20,8 +20,7 @@ import {
 import { Shimmer } from "@/shared/ui/Shimmer";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name"> &
-  Partial<Pick<ManagedAgent, "sessionPolicy">>;
+export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
 
 type BotActivityBarProps = {
   agents: BotActivityAgent[];
@@ -67,11 +66,7 @@ export function BotActivityComposerAction({
   const activeChannelTurns = activeTurns.find(
     (turn) => turn.channelId === channelId,
   );
-  const activeThreadCount =
-    singleWorkingAgent?.sessionPolicy === "thread" ||
-    activeChannelTurns?.hasThreadScope
-      ? (activeChannelTurns?.threadCount ?? 0)
-      : 0;
+  const activeThreadCount = activeChannelTurns?.threadCount ?? 0;
   const transcript = useAgentTranscript(
     Boolean(singleWorkingAgent),
     singleWorkingAgent?.pubkey,
@@ -162,21 +157,22 @@ export function BotActivityComposerAction({
   const agentAvatarUrl = (agent: BotActivityAgent) =>
     profiles?.[agent.pubkey.toLowerCase()]?.avatarUrl ?? null;
   const selectedPubkey = openAgentSessionPubkey?.toLowerCase() ?? null;
+  const threadCountLabel =
+    activeThreadCount > 1
+      ? `${workingAgents[0]?.name ?? "Agent"} is working on ${activeThreadCount} threads now`
+      : null;
   const triggerLabel =
     workingAgents.length === 1
-      ? activeThreadCount > 1
-        ? `${workingAgents[0]?.name ?? "Agent"} is working on ${activeThreadCount} threads now`
-        : `${workingAgents[0]?.name ?? "Agent"} is working`
+      ? (threadCountLabel ?? `${workingAgents[0]?.name ?? "Agent"} is working`)
       : `${workingAgents.length} agents working`;
   const isInline = variant === "inline";
   const visibleStatusLabel =
     workingAgents.length === 1
-      ? activeThreadCount > 1
-        ? `${workingAgents[0]?.name ?? "Agent"} is working on ${activeThreadCount} threads now`
-        : `${workingAgents[0]?.name ?? "Agent"}: ${
-            activityHeadlines[headlineIndex % activityHeadlines.length] ??
-            "Working"
-          }`
+      ? (threadCountLabel ??
+        `${workingAgents[0]?.name ?? "Agent"}: ${
+          activityHeadlines[headlineIndex % activityHeadlines.length] ??
+          "Working"
+        }`)
       : `${workingAgents[0]?.name ?? "Agent"} +${workingAgents.length - 1}`;
 
   return (

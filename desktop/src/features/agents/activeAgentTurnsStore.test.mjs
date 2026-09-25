@@ -85,17 +85,28 @@ describe("activeAgentTurnsStore", () => {
       makeEvent({ seq: 1, turnId: "t1", payload: null }),
       makeEvent({
         seq: 2,
-        kind: "turn_liveness",
-        turnId: "t1",
-        payload: { threadRootEventId: "root-a" },
+        turnId: "t2",
+        payload: { threadRootEventId: "root-b" },
       }),
+    ]);
+    assert.equal(getActiveTurnsForAgent(AGENT)[0].threadCount, 0);
+
+    let notifications = 0;
+    const unsubscribe = subscribeActiveAgentTurns(() => {
+      notifications += 1;
+    });
+    syncAgentTurnsFromEvents(AGENT, [
       makeEvent({
         seq: 3,
-        turnId: "t2",
+        kind: "turn_liveness",
+        turnId: "t1",
+        timestamp: "2024-01-01T00:00:01Z",
         payload: { threadRootEventId: "root-a" },
       }),
     ]);
-    assert.equal(getActiveTurnsForAgent(AGENT)[0].threadCount, 1);
+    unsubscribe();
+    assert.equal(getActiveTurnsForAgent(AGENT)[0].threadCount, 2);
+    assert.equal(notifications, 1, "root and clock updates notify together");
   });
 
   describe("seq filtering", () => {

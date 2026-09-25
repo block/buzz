@@ -54,7 +54,7 @@ function turnEvent(seq, turnId, kind, root) {
   };
 }
 
-async function mountBar(sessionPolicy, showChannelThreadCount = true) {
+async function mountBar(showChannelThreadCount = true) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -62,7 +62,7 @@ async function mountBar(sessionPolicy, showChannelThreadCount = true) {
   await act(async () => {
     root.render(
       React.createElement(BotActivityComposerAction, {
-        agents: [{ pubkey: AGENT, name: "Caddie", sessionPolicy }],
+        agents: [{ pubkey: AGENT, name: "Caddie" }],
         channelId: "channel-1",
         onOpenAgentSession: () => {},
         openAgentSessionPubkey: null,
@@ -75,12 +75,12 @@ async function mountBar(sessionPolicy, showChannelThreadCount = true) {
   return container;
 }
 
-test("thread-policy composer shows thread count only while multiple roots are active", async () => {
+test("composer shows thread count only while multiple known roots are active", async () => {
   resetActiveAgentTurnsStore();
   syncAgentTurnsFromEvents(AGENT, [
     turnEvent(1, "turn-a", "turn_started", "root-a"),
   ]);
-  const container = await mountBar("thread");
+  const container = await mountBar();
   assert.match(container.textContent, /Caddie: Working/);
 
   await act(async () => {
@@ -98,24 +98,30 @@ test("thread-policy composer shows thread count only while multiple roots are ac
   assert.match(container.textContent, /Caddie: Working/);
 });
 
-test("channel-policy composer keeps its current label with multiple turns", async () => {
+test("composer keeps its current label when active turns lack thread roots", async () => {
   resetActiveAgentTurnsStore();
   syncAgentTurnsFromEvents(AGENT, [
     turnEvent(1, "turn-a", "turn_started", null),
     turnEvent(2, "turn-b", "turn_started", null),
   ]);
-  const container = await mountBar("channel");
+  const container = await mountBar();
   assert.match(container.textContent, /Caddie: Working/);
   assert.doesNotMatch(container.textContent, /threads now/);
 });
 
-test("observer thread roots work when the agent has no local policy metadata", async () => {
+test("composer waits for every active root before showing a count", async () => {
   resetActiveAgentTurnsStore();
   syncAgentTurnsFromEvents(AGENT, [
     turnEvent(1, "turn-a", "turn_started", "root-a"),
-    turnEvent(2, "turn-b", "turn_started", "root-b"),
+    turnEvent(2, "turn-b", "turn_started", null),
   ]);
-  const container = await mountBar(undefined);
+  const container = await mountBar();
+  assert.match(container.textContent, /Caddie: Working/);
+  await act(async () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      turnEvent(3, "turn-b", "turn_liveness", "root-b"),
+    ]);
+  });
   assert.match(container.textContent, /Caddie is working on 2 threads now/);
 });
 
@@ -125,7 +131,7 @@ test("thread reply composer does not show a channel-wide thread count", async ()
     turnEvent(1, "turn-a", "turn_started", "root-a"),
     turnEvent(2, "turn-b", "turn_started", "root-b"),
   ]);
-  const container = await mountBar("thread", false);
+  const container = await mountBar(false);
   assert.match(container.textContent, /Caddie: Working/);
   assert.doesNotMatch(container.textContent, /threads now/);
 });
