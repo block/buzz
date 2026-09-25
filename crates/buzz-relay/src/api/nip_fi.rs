@@ -845,12 +845,15 @@ mod route_integration_tests {
     }
 
     fn test_issuer_policy() -> buzz_auth::IssuerPolicy {
+        issuer_policy(TEST_ISS)
+    }
+
+    fn issuer_policy(iss: &str) -> buzz_auth::IssuerPolicy {
         use buzz_auth::{FreshnessClass, IssuerPolicy, JwksSourceContract, TokenClass};
-        let contract =
-            JwksSourceContract::new(format!("{TEST_ISS}/.well-known/jwks.json"), 300, 86400)
-                .expect("valid JWKS contract");
+        let contract = JwksSourceContract::new(format!("{iss}/.well-known/jwks.json"), 300, 86400)
+            .expect("valid JWKS contract");
         IssuerPolicy::new(
-            TEST_ISS.to_owned(),
+            iss.to_owned(),
             vec![TEST_AUD.to_owned()],
             TokenClass::DedicatedNipFi,
             FreshnessClass::OfflineJwt,
@@ -864,12 +867,15 @@ mod route_integration_tests {
     }
 
     fn test_jwks_config() -> buzz_auth::IssuerJwksConfig {
+        jwks_config(TEST_ISS)
+    }
+
+    fn jwks_config(iss: &str) -> buzz_auth::IssuerJwksConfig {
         use buzz_auth::{IssuerJwksConfig, JwksSourceContract};
-        let contract =
-            JwksSourceContract::new(format!("{TEST_ISS}/.well-known/jwks.json"), 300, 86400)
-                .expect("valid JWKS contract");
+        let contract = JwksSourceContract::new(format!("{iss}/.well-known/jwks.json"), 300, 86400)
+            .expect("valid JWKS contract");
         IssuerJwksConfig {
-            issuer: TEST_ISS.to_owned(),
+            issuer: iss.to_owned(),
             contract,
         }
     }
@@ -903,10 +909,16 @@ mod route_integration_tests {
     }
 
     async fn build_test_state(capacity: usize) -> Arc<crate::state::AppState> {
+        Arc::new(build_test_app_state(capacity, crate::config::Config::hermetic_for_test()).await)
+    }
+
+    async fn build_test_app_state(
+        capacity: usize,
+        config: crate::config::Config,
+    ) -> crate::state::AppState {
         // Build a minimal AppState with NIP-FI S4 components wired.
         // Uses lazy/invalid DB+Redis — only nip_fi fields and conn_manager matter.
         use crate::state::AppState;
-        let config = crate::config::Config::hermetic_for_test();
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
@@ -972,7 +984,7 @@ mod route_integration_tests {
 
         state.nip_fi_deny_map = Some(Arc::clone(&deny_map));
         state.nip_fi_command_verifier = Some(verifier);
-        Arc::new(state)
+        state
     }
 
     fn target_hex() -> String {
@@ -2040,10 +2052,14 @@ mod route_integration_tests {
     /// Used by the startup-oracle test to verify the assertion verifier against
     /// its own JWKS source after installer warmup.
     fn mint_assertion_token(key_hex: &str) -> String {
+        mint_assertion_token_for(TEST_ISS, key_hex)
+    }
+
+    fn mint_assertion_token_for(iss: &str, key_hex: &str) -> String {
         use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
-            "iss": TEST_ISS,
+            "iss": iss,
             "aud": TEST_AUD,
             "sub": TEST_SUB,
             "iat": now,
@@ -2261,5 +2277,237 @@ mod route_integration_tests {
             &state,
             buzz_auth::CrossPodMergeResult::ShardPoisoned,
         );
+    }
+
+    // ── HTTP admission reads the shared deny map ─────────────────────────────
+    //
+    // Deny entries are written only through `POST /api/nip-fi/disconnect`; HTTP
+    // admission (`admit_nip_fi_http_on_state`) and WS admission must both see
+    // them through `AppState::nip_fi_deny_map`.  [FI-TRACE-DENY-SET]
+
+    /// `build_test_app_state` in `Enforce` mode with an assertion verifier that
+    /// trusts issuer A (`TEST_ISS`) and issuer B (`OTHER_ISS`), both signed by
+    /// the test key.  The command API and deny map know only issuer A.
+    async fn http_enforce_state() -> Arc<crate::state::AppState> {
+        let mut config = crate::config::Config::hermetic_for_test();
+        config.require_relay_membership = false;
+        config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.registry.insert(issuer_policy(TEST_ISS));
+        config.nip_fi.registry.insert(issuer_policy(OTHER_ISS));
+        let mut state = build_test_app_state(1000, config).await;
+
+        let key_source = Arc::new(
+            ProductionJwksSource::new(
+                vec![jwks_config(TEST_ISS), jwks_config(OTHER_ISS)],
+                buzz_auth::HttpJwksFetcher::new(),
+            )
+            .expect("key source"),
+        );
+        key_source
+            .seed_snapshot_for_test(TEST_ISS, test_jwks())
+            .await;
+        key_source
+            .seed_snapshot_for_test(OTHER_ISS, test_jwks())
+            .await;
+        state.nip_fi_verifier = Some(Arc::new(buzz_auth::FederatedAssertionVerifier::new(
+            state.config.nip_fi.registry.clone(),
+            key_source,
+        )));
+        Arc::new(state)
+    }
+
+    /// Deny `key` under issuer A through the real disconnect route.
+    async fn deny_via_route(
+        state: &Arc<crate::state::AppState>,
+        key: &nostr::PublicKey,
+        until_offset_secs: i64,
+    ) {
+        let token = mint_token(&key.to_hex(), until_offset_secs, serde_json::json!({}));
+        let resp = do_request(
+            Arc::clone(state),
+            "POST",
+            vec![
+                ("Content-Type", "application/json".into()),
+                (CLIENT_ATTACHED_HEADER, format!("Bearer {token}")),
+            ],
+            Some(serde_json::json!({"pubkey": key.to_hex()})),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "disconnect route must succeed"
+        );
+    }
+
+    /// HTTP admission for an `(iss, key)` assertion paired with a NIP-98 proof
+    /// for `key`.  `Ok(())` = admitted; `Err` = the denial response.
+    fn http_admit(
+        state: &crate::state::AppState,
+        iss: &str,
+        key: &nostr::PublicKey,
+    ) -> Result<(), axum::response::Response> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CLIENT_ATTACHED_HEADER,
+            format!("Bearer {}", mint_assertion_token_for(iss, &key.to_hex()))
+                .parse()
+                .expect("header value"),
+        );
+        crate::nip_fi_http::admit_nip_fi_http_on_state(state, &headers, || {
+            Ok(crate::nip_fi_http::Nip98Proof::new(*key, ()))
+        })
+        .map(|_| ())
+    }
+
+    async fn assert_fixed_authorization_denied(resp: axum::response::Response, why: &str) {
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{why}");
+        assert_eq!(
+            resp.headers()
+                .get("Content-Type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+            "{why}"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"authorization denied\n", "{why}");
+    }
+
+    #[tokio::test]
+    async fn http_admission_denies_key_denied_via_route() {
+        let state = http_enforce_state().await;
+        let key = nostr::Keys::generate().public_key();
+        assert!(
+            http_admit(&state, TEST_ISS, &key).is_ok(),
+            "control: (iss-A, k) is admitted before any deny"
+        );
+
+        deny_via_route(&state, &key, 300).await;
+
+        let resp = http_admit(&state, TEST_ISS, &key)
+            .expect_err("(iss-A, k) must be denied at HTTP ingress after the route denies it");
+        assert_fixed_authorization_denied(resp, "(iss-A, k) HTTP denial").await;
+    }
+
+    #[tokio::test]
+    async fn http_admission_deny_is_issuer_scoped() {
+        let state = http_enforce_state().await;
+        let key = nostr::Keys::generate().public_key();
+        deny_via_route(&state, &key, 300).await;
+
+        assert!(
+            http_admit(&state, TEST_ISS, &key).is_err(),
+            "control: (iss-A, k) is denied"
+        );
+        assert!(
+            http_admit(&state, OTHER_ISS, &key).is_ok(),
+            "a deny for (iss-A, k) must not block (iss-B, k)"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_admission_readmits_after_deny_until_passes() {
+        let state = http_enforce_state().await;
+        let key = nostr::Keys::generate().public_key();
+        // `until` is whole seconds from `now`: +3 leaves at least 2s of window.
+        deny_via_route(&state, &key, 3).await;
+        assert!(
+            http_admit(&state, TEST_ISS, &key).is_err(),
+            "(iss-A, k) is denied inside the window"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+
+        assert!(
+            http_admit(&state, TEST_ISS, &key).is_ok(),
+            "(iss-A, k) must be admitted again once `until` has passed"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_route_deny_is_enforced_by_ws_and_http_admission() {
+        use crate::router::build_router;
+        let state = http_enforce_state().await;
+        let key = nostr::Keys::generate().public_key();
+        deny_via_route(&state, &key, 300).await;
+
+        let ws_request = Request::get("/")
+            .header(axum::http::header::HOST, "relay.example")
+            .header("Upgrade", "websocket")
+            .header("Connection", "Upgrade")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header(
+                CLIENT_ATTACHED_HEADER,
+                format!("Bearer {}", mint_assertion_token(&key.to_hex())),
+            )
+            .body(Body::empty())
+            .expect("request");
+        let ws_resp = build_router(Arc::clone(&state))
+            .oneshot(ws_request)
+            .await
+            .expect("router response");
+        assert_fixed_authorization_denied(ws_resp, "WS admission sees the route's deny").await;
+
+        let http_resp =
+            http_admit(&state, TEST_ISS, &key).expect_err("HTTP admission sees the same deny");
+        assert_fixed_authorization_denied(http_resp, "HTTP admission sees the route's deny").await;
+    }
+
+    #[tokio::test]
+    async fn off_mode_http_admission_ignores_route_deny_entries() {
+        // Off mode: the command route still records the entry, but HTTP
+        // admission never consults the deny map — the NIP-98 closure result is
+        // returned unchanged, byte for byte.
+        let state = build_test_state(1000).await;
+        assert!(matches!(
+            state.config.nip_fi.mode,
+            buzz_auth::NipFiMode::Off
+        ));
+        let key = nostr::Keys::generate().public_key();
+        deny_via_route(&state, &key, 300).await;
+        assert!(
+            state
+                .nip_fi_deny_map
+                .as_deref()
+                .expect("deny map present")
+                .is_denied(TEST_ISS, &key, chrono::Utc::now()),
+            "control: the route recorded the deny entry"
+        );
+
+        let admitted =
+            crate::nip_fi_http::admit_nip_fi_http_on_state(&state, &HeaderMap::new(), || {
+                Ok(crate::nip_fi_http::Nip98Proof::new(key, 7u8))
+            })
+            .expect("Off mode admits on NIP-98 success regardless of deny entries");
+        assert_eq!(admitted.proven_pubkey(), &key);
+        assert!(admitted.assertion().is_none());
+        assert_eq!(*admitted.extra(), 7);
+
+        let legacy = || {
+            Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"error":"legacy"}"#))
+                .expect("legacy response")
+        };
+        let resp = crate::nip_fi_http::admit_nip_fi_http_on_state::<(), _>(
+            &state,
+            &HeaderMap::new(),
+            || Err(legacy()),
+        )
+        .expect_err("Off mode propagates the NIP-98 failure");
+        let expected = legacy();
+        assert_eq!(resp.status(), expected.status());
+        assert_eq!(resp.headers(), expected.headers());
+        let got = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let want = axum::body::to_bytes(expected.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(got, want, "Off-mode legacy response must be byte-identical");
     }
 }
