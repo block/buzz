@@ -8,9 +8,9 @@ import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../channels/channel_identity_names_provider.dart';
 import '../channels/message_content.dart';
 import '../../shared/profile/user_cache_provider.dart';
-import '../../shared/utils/string_utils.dart';
 import '../profile/user_profile_sheet.dart';
 import '../../shared/profile/user_profile.dart';
 import 'forum_models.dart';
@@ -54,7 +54,7 @@ class ForumPostCard extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? shortPubkey(post.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, post.channelId, pk);
     final isAgent =
         ref.watch(agentMentionPubkeysProvider(post.channelId)).contains(pk) ||
         profile?.ownerPubkey != null;
@@ -89,6 +89,11 @@ class ForumPostCard extends HookConsumerWidget {
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      post.channelId,
+      post.mentionPubkeys,
+    );
     final preview = post.content.length > 200
         ? '${post.content.substring(0, 200)}...'
         : post.content;
@@ -115,7 +120,11 @@ class ForumPostCard extends HookConsumerWidget {
               children: [
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: () => showUserProfileSheet(context, post.pubkey),
+                  onTap: () => showUserProfileSheet(
+                    context,
+                    post.pubkey,
+                    channelId: post.channelId,
+                  ),
                   child: _PostAvatar(
                     profile: profile,
                     pubkey: post.pubkey,
@@ -126,7 +135,11 @@ class ForumPostCard extends HookConsumerWidget {
                 Expanded(
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onTap: () => showUserProfileSheet(context, post.pubkey),
+                    onTap: () => showUserProfileSheet(
+                      context,
+                      post.pubkey,
+                      channelId: post.channelId,
+                    ),
                     child: Text(
                       displayName,
                       maxLines: 1,
@@ -180,6 +193,7 @@ class ForumPostCard extends HookConsumerWidget {
                   child: MessageContent(
                     content: preview,
                     mentionNames: mentionNames,
+                    mentionLabels: mentionLabels,
                     agentMentionPubkeys: agentMentionPubkeys,
                     tags: post.tags,
                     baseStyle: messageBodyTextStyle.copyWith(

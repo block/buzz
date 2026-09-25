@@ -35,7 +35,7 @@ class _MentionSuggestions extends StatelessWidget {
           separatorBuilder: (_, _) => const SizedBox.shrink(),
           itemBuilder: (context, index) {
             final candidate = suggestions[index];
-            final name = candidate.label;
+            final name = candidate.pickerLabel;
             final avatarUrl =
                 candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
 

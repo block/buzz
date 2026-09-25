@@ -70,6 +70,7 @@ Future<ProviderContainer> _pumpRow(
       ],
       child: ReactionRow(
         messageId: messageId,
+        channelId: 'channel',
         reactions: reactions,
         onToggle: onToggle ?? (_) {},
         showAddButton: showAddButton,
@@ -321,6 +322,7 @@ void main() {
               home: Scaffold(
                 body: ReactionRow(
                   messageId: _messageId,
+                  channelId: 'channel',
                   reactions: [_reaction(reactedByCurrentUser: true)],
                   onToggle: (_) {},
                 ),
@@ -367,6 +369,7 @@ void main() {
               home: Scaffold(
                 body: ReactionRow(
                   messageId: _messageId,
+                  channelId: 'channel',
                   reactions: [_reaction()],
                   onToggle: (_) {},
                 ),
