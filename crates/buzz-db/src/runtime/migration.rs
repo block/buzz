@@ -2769,4 +2769,36 @@ mod postgres_tests {
             .await
             .expect("deletion catalog validates after migration 0044");
     }
+
+    /// Migration 0050's `relay_admin_actions_direct_shape` rejects a direct
+    /// timeout carrying only one of duration and expiry. Asserted on the
+    /// migrated schema: pgschema does not reproduce multi-column CHECKs, so
+    /// the schema.sql-bootstrapped test template cannot prove it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0050_rejects_half_filled_direct_timeout() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(50, &pool)
+            .await
+            .expect("apply migrations 1-50");
+        for (secs, until) in [(Some(60i64), None), (None, Some(chrono::Utc::now()))] {
+            let err = sqlx::query(
+                "INSERT INTO relay_admin_actions (report_community_id, request_id, actor_pubkey, \
+                 actor_role, action, timeout_secs, timeout_until, enforcement_target_pubkey) \
+                 VALUES (gen_random_uuid(), gen_random_uuid(), $1, 'operator', 'timeout', $2, $3, $1)",
+            )
+            .bind([9u8; 32].as_slice())
+            .bind(secs)
+            .bind(until)
+            .execute(&pool)
+            .await
+            .expect_err("half-filled timeout must violate the CHECK");
+            assert!(
+                err.to_string().contains("relay_admin_actions_direct_shape"),
+                "{err}"
+            );
+        }
+    }
 }
