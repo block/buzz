@@ -441,16 +441,25 @@ async fn actor_owns_any_owner_agent(
     Ok(false)
 }
 
+/// Whether a channel role may delegate privileged metadata authority to one of
+/// its managed agents.
+fn role_delegates_privileged_metadata(role: &str) -> bool {
+    role == "owner" || role == "admin"
+}
+
 /// Returns `true` if `actor_bytes` is an agent whose owning human is an active
-/// owner member. This grants an owner's managed agent the same metadata
-/// authority only when the agent is itself an active channel member.
-async fn actor_is_owned_by_channel_owner(
+/// owner/admin member. This grants an owner's or admin's managed agent the same
+/// metadata authority only when the agent is itself an active channel member.
+async fn actor_is_owned_by_elevated_member(
     state: &Arc<AppState>,
     community_id: buzz_core::CommunityId,
     members: &[buzz_db::channel::MemberRecord],
     actor_bytes: &[u8],
 ) -> anyhow::Result<bool> {
-    for member in members.iter().filter(|member| member.role == "owner") {
+    for member in members
+        .iter()
+        .filter(|member| role_delegates_privileged_metadata(&member.role))
+    {
         if state
             .db
             .is_agent_owner(community_id, actor_bytes, &member.pubkey)
@@ -695,11 +704,11 @@ pub async fn validate_admin_event(
                     actor_owns_any_owner_agent(state, tenant.community(), &members, &actor_bytes)
                         .await?
                 };
-                let actor_is_owned_by_channel_owner =
+                let actor_is_owned_by_elevated_member =
                     if actor_role.is_none() || actor_owns_owner_agent {
                         false
                     } else {
-                        actor_is_owned_by_channel_owner(
+                        actor_is_owned_by_elevated_member(
                             state,
                             tenant.community(),
                             &members,
@@ -710,7 +719,7 @@ pub async fn validate_admin_event(
                 if channel_authz::can_edit_privileged_metadata(
                     actor_role,
                     actor_owns_owner_agent,
-                    actor_is_owned_by_channel_owner,
+                    actor_is_owned_by_elevated_member,
                 ) {
                     Ok(())
                 } else {
@@ -3819,6 +3828,14 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privileged_metadata_delegation_accepts_owner_and_admin_roles() {
+        assert!(role_delegates_privileged_metadata("owner"));
+        assert!(role_delegates_privileged_metadata("admin"));
+        assert!(!role_delegates_privileged_metadata("member"));
+        assert!(!role_delegates_privileged_metadata("bot"));
+    }
 
     #[test]
     fn workflow_deletion_retry_matches_authorized_dispatch() {

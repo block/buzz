@@ -77,11 +77,11 @@ pub fn is_sole_owner(members: &[MemberRecord], pubkey: &[u8]) -> bool {
 pub fn can_edit_privileged_metadata(
     actor_role: Option<&str>,
     actor_owns_owner_agent: bool,
-    actor_is_owned_by_channel_owner: bool,
+    actor_is_owned_by_elevated_member: bool,
 ) -> bool {
     matches!(actor_role, Some("owner" | "admin"))
         || actor_owns_owner_agent
-        || (actor_role.is_some() && actor_is_owned_by_channel_owner)
+        || (actor_role.is_some() && actor_is_owned_by_elevated_member)
 }
 
 /// Decide whether `actor` may remove themselves from the channel.
