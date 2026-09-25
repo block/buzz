@@ -25,6 +25,46 @@ and runtime evidence answer different questions.
 
 ---
 
+## Before opening a PR
+
+Open work in progress as a draft PR. Mark it ready for review only when this
+checklist holds for the current change. Scale it to what changed:
+documentation-only changes need content, link, and diff checks plus human
+confirmation, not app runs.
+
+1. **Agent review ran** under [Reviewing](#reviewing), and its recommended
+   blockers were fixed or explicitly declined by the human author. Optional
+   suggestions do not gate readiness.
+2. **An agent exercised the changed behavior.** Client changes: the affected flow
+   in the app, using the native app or a device when the behavior needs it
+   (browser or headless Playwright counts only for what it can exercise). Relay
+   changes: a local relay, exercising the changed events or endpoints. CLI or
+   tooling changes: the affected command or workflow.
+3. **A human then tested it themselves**: in the app, against the local relay
+   (through the app or `curl`), or by running the changed command. Agent testing
+   does not substitute. Agents give the human exact steps and what working looks
+   like, then wait for explicit confirmation. Never mark this step done yourself.
+4. **Add `buzz-review-completed` to the PR description** once steps 1–3 hold. It
+   attests the checklist, and automated reviewers may skip review because of it.
+   If later edits change behavior, remove it and return the PR to draft until the
+   affected steps are redone.
+
+## Reviewing
+
+- Before reviewing, read [VISION.md](VISION.md), the `VISION_*.md` docs for the affected surface, and the PR's stated goal and linked
+  issue. Review the change against what it is trying to do.
+- Judge minimalism, elegance, and correctness, aiming for 9/10 on each. A score
+  below 9 names the concrete defect and the fix.
+- Recommend blocking only for concrete correctness, security, or agreed-contract
+  defects with a realistic failure scenario: state the defect, how it fails, and
+  the fix. Label everything else (nits, wording, speculative hardening,
+  out-of-scope improvements) as optional.
+- Put all findings in the first review. Later reviews check prior blockers and
+  defects the fixes introduced; reopen other areas only on new evidence of a
+  material defect.
+- Agents post reviews as comments, never Request Changes. Humans decide which
+  findings must be fixed.
+
 ## Ecosystem
 
 Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
