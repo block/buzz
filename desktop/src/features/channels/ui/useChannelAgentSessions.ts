@@ -20,6 +20,7 @@ import {
 import type { PanelValueSetter } from "./useChannelPanelHistoryState";
 
 export type ChannelAgentSessionAgent = Pick<ManagedAgent, "pubkey" | "name"> & {
+  sessionPolicy?: ManagedAgent["sessionPolicy"];
   status: ManagedAgent["status"] | "unknown";
   agentSource: "managed" | "member-bot" | "relay";
   canInterruptTurn: boolean;
@@ -86,6 +87,7 @@ export function buildChannelAgentSessionCandidates({
       name: agent.name,
       status: agent.status,
       agentSource: "managed",
+      sessionPolicy: agent.sessionPolicy,
       canInterruptTurn: true,
       channelIds: existing?.channelIds,
       channels: existing?.channels,

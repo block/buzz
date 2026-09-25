@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Loader2 } from "lucide-react";
 
+import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
 import {
   getActivityHeadline,
@@ -19,7 +20,8 @@ import {
 import { Shimmer } from "@/shared/ui/Shimmer";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
+export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name"> &
+  Partial<Pick<ManagedAgent, "sessionPolicy">>;
 
 type BotActivityBarProps = {
   agents: BotActivityAgent[];
@@ -27,6 +29,7 @@ type BotActivityBarProps = {
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   openAgentSessionPubkey: string | null;
   profiles?: UserProfileLookup;
+  showChannelThreadCount?: boolean;
   workingBotPubkeys: string[];
   variant?: "toolbar" | "inline";
 };
@@ -40,6 +43,7 @@ export function BotActivityComposerAction({
   onOpenAgentSession,
   openAgentSessionPubkey,
   profiles,
+  showChannelThreadCount = false,
   workingBotPubkeys,
   variant = "toolbar",
 }: BotActivityBarProps) {
@@ -57,6 +61,17 @@ export function BotActivityComposerAction({
   }, [agents, workingBotPubkeys]);
   const singleWorkingAgent =
     workingAgents.length === 1 ? (workingAgents[0] ?? null) : null;
+  const activeTurns = useActiveAgentTurns(
+    showChannelThreadCount ? singleWorkingAgent?.pubkey : null,
+  );
+  const activeChannelTurns = activeTurns.find(
+    (turn) => turn.channelId === channelId,
+  );
+  const activeThreadCount =
+    singleWorkingAgent?.sessionPolicy === "thread" ||
+    activeChannelTurns?.hasThreadScope
+      ? (activeChannelTurns?.threadCount ?? 0)
+      : 0;
   const transcript = useAgentTranscript(
     Boolean(singleWorkingAgent),
     singleWorkingAgent?.pubkey,
@@ -149,15 +164,19 @@ export function BotActivityComposerAction({
   const selectedPubkey = openAgentSessionPubkey?.toLowerCase() ?? null;
   const triggerLabel =
     workingAgents.length === 1
-      ? `${workingAgents[0]?.name ?? "Agent"} is working`
+      ? activeThreadCount > 1
+        ? `${workingAgents[0]?.name ?? "Agent"} is working on ${activeThreadCount} threads now`
+        : `${workingAgents[0]?.name ?? "Agent"} is working`
       : `${workingAgents.length} agents working`;
   const isInline = variant === "inline";
   const visibleStatusLabel =
     workingAgents.length === 1
-      ? `${workingAgents[0]?.name ?? "Agent"}: ${
-          activityHeadlines[headlineIndex % activityHeadlines.length] ??
-          "Working"
-        }`
+      ? activeThreadCount > 1
+        ? `${workingAgents[0]?.name ?? "Agent"} is working on ${activeThreadCount} threads now`
+        : `${workingAgents[0]?.name ?? "Agent"}: ${
+            activityHeadlines[headlineIndex % activityHeadlines.length] ??
+            "Working"
+          }`
       : `${workingAgents[0]?.name ?? "Agent"} +${workingAgents.length - 1}`;
 
   return (
