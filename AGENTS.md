@@ -53,6 +53,7 @@ confirmation, not app runs.
 
 - Before reviewing, read [VISION.md](VISION.md), the `VISION_*.md` docs for the affected surface, and the PR's stated goal and linked
   issue. Review the change against what it is trying to do.
+- Check the change against the [Review-Proven Rules](#review-proven-rules): the defects reviewers here find most often.
 - Judge minimalism, elegance, and correctness, aiming for 9/10 on each. A score
   below 9 names the concrete defect and the fix.
 - Recommend blocking only for concrete correctness, security, or agreed-contract
@@ -205,8 +206,8 @@ the same clusters and measured how often authors actually fix each class
 once flagged: test-seam binding and unbounded-resource findings were fixed
 **100%** of the time, swallowed-error findings **90%**, stale-state races
 **70%** — these are not style opinions, they are defects authors agree
-with on sight. Apply the rules **before writing code**; each cites the
-PRs where reviewers litigated it.
+with on sight. Authors apply them **before writing code**, and reviewers check
+against them; each cites the PRs where reviewers litigated it.
 
 1. **Every caught failure must leave a durable retry record or propagate.**
    Never catch-log-and-return-success (opt-out revocation permanently
