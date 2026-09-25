@@ -54,10 +54,15 @@ pub struct Config {
 }
 
 // Registered NIP-PL v1 App Attest audiences are protocol constants, not routing URLs.
+/// Fixed NIP-PL v1 App Attest audience for installation enrollment.
 pub const ENROLL_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations";
+/// Fixed NIP-PL v1 App Attest audience for creating a delegation.
 pub const DELEGATE_AUDIENCE: &str = "https://push.buzz.xyz/v1/delegations";
+/// Fixed NIP-PL v1 App Attest audience for rotating an installation endpoint.
 pub const ROTATE_ENDPOINT_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations/endpoint";
+/// Fixed NIP-PL v1 App Attest audience for revoking a delegation.
 pub const REVOKE_DELEGATION_AUDIENCE: &str = "https://push.buzz.xyz/v1/delegations/revoke";
+/// Fixed NIP-PL v1 App Attest audience for revoking an installation.
 pub const REVOKE_INSTALLATION_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations/revoke";
 
 #[derive(Debug, Error)]
