@@ -70,6 +70,20 @@ pub fn is_sole_owner(members: &[MemberRecord], pubkey: &[u8]) -> bool {
     sole && owners.next().is_none()
 }
 
+/// Decide whether an actor may change privileged channel metadata.
+///
+/// The booleans are resolved by the caller from the channel roster and the
+/// immutable agent-owner mapping.
+pub fn can_edit_privileged_metadata(
+    actor_role: Option<&str>,
+    actor_owns_owner_agent: bool,
+    actor_is_owned_by_elevated_member: bool,
+) -> bool {
+    matches!(actor_role, Some("owner" | "admin"))
+        || actor_owns_owner_agent
+        || actor_is_owned_by_elevated_member
+}
+
 /// Decide whether `actor` may remove themselves from the channel.
 ///
 /// Shared by kind:9001 self-removal and kind:9022 leave — they enforced
@@ -638,6 +652,11 @@ mod tests {
                 "roster {entries:?} actor {actor}"
             );
         }
+    }
+
+    #[test]
+    fn owner_agent_may_edit_privileged_metadata_for_its_human_owner() {
+        assert!(can_edit_privileged_metadata(None, false, true));
     }
 
     /// The wire contract: these strings reach NIP-29 clients verbatim, and the

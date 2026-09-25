@@ -441,6 +441,27 @@ async fn actor_owns_any_owner_agent(
     Ok(false)
 }
 
+/// Returns `true` if `actor_bytes` is an agent whose owning human is an active
+/// owner member. This grants an owner's managed agent the same metadata
+/// authority without requiring the agent itself to be added to the channel.
+async fn actor_is_owned_by_channel_owner(
+    state: &Arc<AppState>,
+    community_id: buzz_core::CommunityId,
+    members: &[buzz_db::channel::MemberRecord],
+    actor_bytes: &[u8],
+) -> anyhow::Result<bool> {
+    for member in members.iter().filter(|member| member.role == "owner") {
+        if state
+            .db
+            .is_agent_owner(community_id, actor_bytes, &member.pubkey)
+            .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Validate an admin kind event BEFORE storage.
 pub async fn validate_admin_event(
     tenant: &TenantContext,
@@ -664,27 +685,38 @@ pub async fn validate_admin_event(
             });
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
-                let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-                match actor_member {
-                    Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                    _ => {
-                        // Allow the owning human of any active owner-role agent in the
-                        // channel, even when the human is not a channel member —
-                        // diverges from kind:9001 intentionally.
-                        if actor_owns_any_owner_agent(
+                let actor_role = members
+                    .iter()
+                    .find(|member| member.pubkey == actor_bytes)
+                    .map(|member| member.role.as_str());
+                let actor_owns_owner_agent = if matches!(actor_role, Some("owner" | "admin")) {
+                    false
+                } else {
+                    actor_owns_any_owner_agent(state, tenant.community(), &members, &actor_bytes)
+                        .await?
+                };
+                let actor_is_owned_by_channel_owner =
+                    if actor_role.is_some() || actor_owns_owner_agent {
+                        false
+                    } else {
+                        actor_is_owned_by_channel_owner(
                             state,
                             tenant.community(),
                             &members,
                             &actor_bytes,
                         )
                         .await?
-                        {
-                            return Ok(());
-                        }
-                        Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl changes"
-                        ))
-                    }
+                    };
+                if channel_authz::can_edit_privileged_metadata(
+                    actor_role,
+                    actor_owns_owner_agent,
+                    actor_is_owned_by_channel_owner,
+                ) {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "actor not authorized for name/about/archived/visibility/ttl changes"
+                    ))
                 }
             } else {
                 // topic/purpose: any member
