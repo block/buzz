@@ -37,6 +37,11 @@ for (const gate of gates) {
   ) {
     // These workflow conditions use only booleans, string equality and grouping.
     // Evaluate the actual expression after substituting its GitHub context values.
+    assert.match(
+      condition,
+      /\balways\(\)/,
+      "Required wrapper must override GitHub implicit success()",
+    );
     const expression = condition
       .replace(/always\(\)/g, "true")
       .replace(
