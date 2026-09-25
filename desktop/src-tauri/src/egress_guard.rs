@@ -14,6 +14,7 @@
 //! | 6 | `submit_engram_event` (team snapshot) | `commands/team_snapshot.rs` |
 //! | 7 | `submit_engram_event` (persona import) | `commands/personas/snapshot/import.rs` |
 //! | 8 | native websocket send loop (all webview relay WS) | `native_websocket.rs` |
+//! | 9 | `send_admin_mutation` (all admin API JSON bodies) | `commands/admin/helpers.rs` |
 //!
 //! The inventory-completeness test in `egress_guard_tests.rs` asserts that
 //! every `/events` URL-construction site in the tree calls this guard, so a

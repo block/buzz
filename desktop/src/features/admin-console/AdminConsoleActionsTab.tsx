@@ -3,7 +3,9 @@
  *
  * Review freezes the whole intent (origin, relay, signer, community, verb,
  * target, reason, duration, requestId). Confirm and every retry resend that
- * frozen intent, so the relay dedupes on the same requestId; the native layer
+ * frozen intent, so the relay dedupes on the same requestId. Review and
+ * Confirm share one in-flight lock, so a late Review can never replace an
+ * intent that is frozen or being sent. The native layer
  * mints a fresh NIP-98 signature per attempt and refuses the send if the
  * active relay or signer moved. The panel remounts this tab on an identity or
  * origin change, which drops any frozen intent.
@@ -23,6 +25,7 @@ import {
   adminErrorMessage,
   preserveRequestIdOnError,
 } from "./AdminConsolePanelHelpers";
+import { reasonAudienceCopy } from "./AdminConsoleReportsTab";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -86,20 +89,31 @@ export function ActionsTab({
   const inFlight = useRef(false);
 
   const handleReview = async () => {
+    if (frozen || inFlight.current) return;
     const invalid = validate(action, host, target, secs);
     setError(invalid);
     if (invalid) return;
-    setFrozen({
-      origin,
-      expectedRelay: await getRelayWsUrl(),
-      expectedPubkey: pubkey,
-      communityHost: host.trim(),
-      action,
-      target: target.trim(),
-      requestId: crypto.randomUUID(),
-      reason: reason.trim() || undefined,
-      expirationSecs: action === "timeout" ? Number(secs) : undefined,
-    });
+    inFlight.current = true;
+    setSubmitting(true);
+    try {
+      const expectedRelay = await getRelayWsUrl();
+      setFrozen({
+        origin,
+        expectedRelay,
+        expectedPubkey: pubkey,
+        communityHost: host.trim(),
+        action,
+        target: target.trim(),
+        requestId: crypto.randomUUID(),
+        reason: reason.trim() || undefined,
+        expirationSecs: action === "timeout" ? Number(secs) : undefined,
+      });
+    } catch (e) {
+      setError(adminErrorMessage(e));
+    } finally {
+      inFlight.current = false;
+      setSubmitting(false);
+    }
   };
 
   const handleConfirm = async () => {
@@ -128,7 +142,7 @@ export function ActionsTab({
     }
   };
 
-  const locked = frozen !== null || !canMutate;
+  const locked = frozen !== null || submitting || !canMutate;
   const targetHint =
     action === "delete" ? "Event id (hex)" : "Member pubkey (hex)";
   const input = (
@@ -172,6 +186,12 @@ export function ActionsTab({
       {action === "timeout" &&
         input("duration", secs, setSecs, "Duration (seconds)", "", "number")}
       {input("reason", reason, setReason, "Reason (optional)")}
+      <p
+        className="text-xs text-muted-foreground"
+        data-testid="direct-reason-audience"
+      >
+        {reasonAudienceCopy(frozen?.action ?? action)}
+      </p>
       {error && (
         <p className="text-xs text-destructive" data-testid="direct-error">
           {error}
@@ -186,6 +206,9 @@ export function ActionsTab({
             {ACTION_LABELS[frozen.action]} <code>{frozen.target}</code> in{" "}
             <code>{frozen.communityHost}</code>
             {frozen.expirationSecs ? ` for ${frozen.expirationSecs}s` : ""}?
+          </p>
+          <p data-testid="direct-confirm-reason">
+            Reason: {frozen.reason ?? "(none)"}
           </p>
           <div className="flex gap-1.5">
             <Button
@@ -216,7 +239,7 @@ export function ActionsTab({
       ) : (
         <Button
           data-testid="direct-review-btn"
-          disabled={!canMutate}
+          disabled={!canMutate || submitting}
           onClick={() => void handleReview()}
           size="sm"
           type="button"

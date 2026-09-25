@@ -953,10 +953,28 @@ pub async fn admin_direct_action(
     intent: AdminDirectIntent,
     state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<serde_json::Value, AdminMutationError> {
-    let signer = state.signing_keys()?.public_key().to_hex();
-    let relay_base = crate::relay::relay_api_base_url_with_override(&state);
-    let (url, body) = direct_action_request(&intent, &relay_base, &signer)?;
-    let bytes = post_admin_json(&url, &body, SUCCESS_JSON_CAP, &state).await?;
+    let keys = state.signing_keys()?;
+    send_direct_action(&intent, keys, &state).await
+}
+
+/// Validate `intent` against the `keys` snapshot and sign every request with
+/// that same snapshot, so an identity swapped in after the snapshot can never
+/// sign an action confirmed under the previous one.
+async fn send_direct_action(
+    intent: &AdminDirectIntent,
+    keys: nostr::Keys,
+    state: &crate::app_state::AppState,
+) -> Result<serde_json::Value, AdminMutationError> {
+    let relay_base = crate::relay::relay_api_base_url_with_override(state);
+    let (url, body) = direct_action_request(intent, &relay_base, &keys.public_key().to_hex())?;
+    let bytes = helpers::send_admin_mutation(
+        &keys,
+        reqwest::Method::POST,
+        &url,
+        Some(&body),
+        SUCCESS_JSON_CAP,
+    )
+    .await?;
     serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON from relay: {e}").into())
 }
 

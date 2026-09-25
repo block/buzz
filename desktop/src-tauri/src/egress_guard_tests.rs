@@ -293,9 +293,11 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     // Stub-relay route in the tombstone-flush gate tests; production flush
     // publishes through the guarded boundary-1 funnel.
     ("src/commands/teams/pending/tests/gate.rs", 1, 0),
-    // Admin API `POST /api/admin/v1/events/{id}/delete` path (route + its path
-    // test) and the native delete test: the body is `{requestId, reason}` only,
-    // never a signed event, so there is no key-backup payload to guard.
+    // Admin API mutations: every JSON body passes the guard in
+    // `helpers::send_admin_mutation` (injection tests in admin `mod_tests.rs`).
+    // The `/events/{id}/delete` route + its path test and the native delete
+    // test only construct URLs that flow into that guarded boundary.
+    ("src/commands/admin/helpers.rs", 0, 1),
     ("src/commands/admin/routes.rs", 2, 0),
     ("src/commands/admin/mod_tests.rs", 1, 0),
 ];
@@ -462,6 +464,8 @@ fn ncryptsec_handling_is_confined_to_allowlisted_files() {
         "src/commands/team_snapshot/tests.rs",
         "src/commands/personas/snapshot/import.rs",
         "src/native_websocket.rs",
+        "src/commands/admin/helpers.rs",
+        "src/commands/admin/mod_tests.rs",
     ];
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

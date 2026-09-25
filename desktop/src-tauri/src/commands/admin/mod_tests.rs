@@ -1468,3 +1468,104 @@ fn direct_action_rejects_bad_host_target_and_duration() {
         );
     }
 }
+
+/// AppState signing as `keys` on relay.example.com, plus a direct intent
+/// confirmed under `keys` that targets the loopback admin origin at `addr`.
+fn direct_state_and_intent(
+    keys: &nostr::Keys,
+    addr: std::net::SocketAddr,
+    reason: &str,
+) -> (crate::app_state::AppState, AdminDirectIntent) {
+    let state = crate::app_state::build_app_state();
+    *state.keys.lock().unwrap() = keys.clone();
+    *state.relay_url_override.lock().unwrap() = Some("wss://relay.example.com".to_string());
+    let mut intent = intent(DirectAction::Ban, None);
+    intent.origin = format!("http://127.0.0.1:{}", addr.port());
+    intent.expected_pubkey = keys.public_key().to_hex();
+    intent.reason = Some(reason.to_string());
+    (state, intent)
+}
+
+/// Mutation evidence: removing the guard call in `send_admin_mutation` lets
+/// both key-backup reasons reach the listener and flips the count RED.
+#[tokio::test]
+async fn direct_action_refuses_key_backup_reason_before_any_request() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&hits);
+    let addr = serve_sequence_inspect(
+        vec![(
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            r#"{"state":"applied"}"#,
+        )],
+        Some(Arc::new(move |_, _| {
+            seen.fetch_add(1, Ordering::SeqCst);
+        })),
+    )
+    .await;
+    let keys = nostr::Keys::generate();
+    for reason in ["see ncryptsec1qgg9947", "see NCRYPTSEC1QGG9947"] {
+        let (state, intent) = direct_state_and_intent(&keys, addr, reason);
+        let err = send_direct_action(&intent, keys.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("key-backup"), "{err:?}");
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "a key backup reached the relay"
+    );
+    let (state, intent) = direct_state_and_intent(&keys, addr, "spam");
+    send_direct_action(&intent, keys.clone(), &state)
+        .await
+        .expect("an ordinary reason still sends");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+/// The identity is swapped to B after the snapshot is taken; the first send
+/// and the 401 retry must both still be signed by the confirmed key A.
+///
+/// Mutation evidence: signing with a re-read `state.signing_keys()` inside
+/// `send_direct_action` (the pre-fix shape) signs as B and flips this RED.
+#[tokio::test]
+async fn direct_action_signs_only_with_the_validated_snapshot() {
+    use std::sync::Mutex;
+    let auths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let rec = Arc::clone(&auths);
+    let addr = serve_sequence_inspect(
+        vec![
+            ("401 Unauthorized", "WWW-Authenticate: Nostr\r\n", ""),
+            (
+                "200 OK",
+                "Content-Type: application/json\r\n",
+                r#"{"state":"applied"}"#,
+            ),
+        ],
+        Some(Arc::new(move |_, bytes: &[u8]| {
+            let text = String::from_utf8_lossy(bytes);
+            let auth = text
+                .lines()
+                .find_map(|l| {
+                    l.strip_prefix("authorization: ")
+                        .or(l.strip_prefix("Authorization: "))
+                })
+                .expect("NIP-98 header present");
+            let pubkey = decode_nip98_event(auth.trim())["pubkey"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            rec.lock().unwrap().push(pubkey);
+        })),
+    )
+    .await;
+    let a = nostr::Keys::generate();
+    let (state, intent) = direct_state_and_intent(&a, addr, "spam");
+    let snapshot = state.signing_keys().unwrap();
+    *state.keys.lock().unwrap() = nostr::Keys::generate(); // identity import of B
+    send_direct_action(&intent, snapshot, &state)
+        .await
+        .expect("A-confirmed action sends as A");
+    assert_eq!(*auths.lock().unwrap(), vec![a.public_key().to_hex(); 2]);
+}
