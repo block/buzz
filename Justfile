@@ -462,26 +462,34 @@ test-unit:
         # non-postgres_tests cases only "pass" without a database by waiting out
         # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
         # unit job either.
-        cargo nextest run -p buzz-relay --lib \
-            -E 'test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^audio::join::tests::/) + test(/^audio::handler::tests::/) + test(/^nip_fi_gate::tests::/) + test(/^nip_fi_session::tests::/)'
+        # The third clause adds the NIP-FI HTTP ingress and its router/config
+        # neighbours: nip_fi_http, nip_fi_config, router, api::parse_query_tests,
+        # and the Git transport off_mode_precedence_tests. All are infra-free
+        # and finish in well under a second with no DATABASE_URL, so none wait
+        # out the sqlx acquire timeout. `--bin buzz-relay` adds main.rs's
+        # `tests::` module (JWKS refresh cadence) and `composition_tests::`
+        # (JWKS source + refresh-loop composition), which `--lib` cannot reach
+        # because they live in the binary target; the nested
+        # `tests::postgres_tests::` stays in the PostgreSQL lane.
+        cargo nextest run -p buzz-relay --lib --bin buzz-relay \
+            -E 'test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + test(/^audio::join::tests::/) + test(/^audio::handler::tests::/) + test(/^nip_fi_gate::tests::/) + test(/^nip_fi_session::tests::/) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/) + test(/^env_filter_tests::/)) - test(/^tests::postgres_tests::/))'
         # Note on audio::join::tests scope: the full suite is infra-free (no DB,
         # no Redis). The infra-free audio/FI regression witnesses — bootstrap
         # ordering barrier, CommitConfirmed arm, pending-close invisibility,
         # abnormal-stream-close fanout, and never-ready-sink writer witnesses —
         # are all selected by audio::join::tests and audio::handler::tests.
         # DB-backed audio join tests use #[ignore] and run in the postgres lane.
-        # NIP-FI (S3) relay witnesses: the wholly-new nip_fi_config and
-        # nip_fi_upgrade modules, the auth metrics contract module, plus the
-        # exact NIP-FI tests added, or whose assertions changed, in mixed
-        # modules (audio::room, connection, handlers::*, router, state). They
-        # ran in NO lane before, the same gap as above. Mixed modules are listed
-        # by exact name so main's unselected tests (several wait out the ~30s
-        # sqlx acquire timeout) stay out; the NIP-FI stub-pool helpers use a
-        # 100ms acquire timeout, which shortens that fallthrough but does not
-        # remove it. NIP-FI tests that need Postgres live in postgres_tests and
+        # NIP-FI (S3) relay witnesses: the wholly-new nip_fi_upgrade module,
+        # the auth metrics contract module, plus the exact NIP-FI tests added,
+        # or whose assertions changed, in mixed modules (audio::room,
+        # connection, handlers::*, state). nip_fi_config and router are
+        # selected whole by the command above. Mixed modules are listed by exact
+        # name so main's unselected tests (several wait out the ~30s sqlx
+        # acquire timeout) stay out. NIP-FI tests that need Postgres live in
+        # postgres_tests and
         # run in the PostgreSQL lane. Keep scripts/run-tests.sh in step.
         cargo nextest run -p buzz-relay --lib -E '
-                test(/^nip_fi_(config|upgrade)::/)
+                test(/^nip_fi_upgrade::/)
                 + test(/^metrics::contract_tests::/)
                 + test(=audio::room::tests::roster_revisions_are_ordered_and_snapshot_is_authoritative)
                 + test(=connection::tests::auth_lifecycle_reconciles_every_terminal_and_never_leaks_gauge)
@@ -506,24 +514,7 @@ test-unit:
                 + test(=handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path)
                 + test(=handlers::event::tests::p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack)
                 + test(=handlers::req::tests::p1a_huddle_liveness_req_barrier_expiry_blocks_query_and_emission)
-                + test(=router::tests::b4_connection_upgrade_only_no_upgrade_header_not_gated)
-                + test(=router::tests::b4_upgrade_only_no_connection_header_not_gated)
-                + test(=router::tests::nip_fi_enforce_audio_denies_missing_assertion_401)
-                + test(=router::tests::nip_fi_enforce_audio_denies_token_when_no_verifier_503)
-                + test(=router::tests::nip_fi_enforce_nip11_content_negotiation_serves_200_not_401)
-                + test(=router::tests::nip_fi_enforce_plain_get_not_gated_401_or_503)
-                + test(=router::tests::nip_fi_enforce_root_denies_missing_assertion_401)
-                + test(=router::tests::nip_fi_enforce_root_denies_token_when_no_verifier_503)
-                + test(=router::tests::nip_fi_enforce_ws_upgrade_with_html_accept_is_gated_401)
-                + test(=router::tests::nip_fi_off_audio_ignores_malformed_header)
-                + test(=router::tests::nip_fi_off_audio_passes_without_header)
-                + test(=router::tests::nip_fi_off_root_ignores_malformed_header)
-                + test(=router::tests::nip_fi_off_root_passes_without_header)
                 + test(=state::tests::f3_cancellation_during_check_terminates_socket_without_waiting_for_check)'
-        # buzz-relay binary tests (JWKS refresh cadence and supervisor recovery,
-        # env-filter and identity config). All are infra-free; the one
-        # Postgres-backed case is #[ignore]d.
-        cargo nextest run -p buzz-relay --bin buzz-relay
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.

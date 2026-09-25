@@ -37,4 +37,9 @@ pub use jwks::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use jwks::ToggleJwksFetcher;
 pub use startup::{validate_nip_fi_config, NipFiMode, NipFiStartupError};
-pub use verifier::{AssertionKeySet, FederatedAssertionVerifier, IssuerKeySource, VerifierError};
+pub use verifier::{
+    AssertionKeySet, FederatedAssertionVerifier, IssuerKeySource, VerifierError, VerifyAssertion,
+};
+
+#[cfg(any(test, feature = "test-utils"))]
+pub use verifier::StaticIssuerKeySource;

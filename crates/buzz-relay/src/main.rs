@@ -530,91 +530,46 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 
     // NIP-FI JWKS warm + background refresh.
     //
-    // Per [FI-TRACE-DEPENDENCY-FAIL-CLOSED]: a JWKS warm fetch failure at
-    // startup must NOT abort the process — relay availability cannot be
-    // hostage to IdP availability. The relay starts and denies admissions
-    // with `authorization_unavailable` (503) until a snapshot lands. The
-    // background refresh loop owns recovery.
+    // Per [FI-TRACE-DEPENDENCY-FAIL-CLOSED]: a JWKS warm failure at startup
+    // MUST NOT abort the relay. The relay starts and every FI ingress (HTTP and
+    // WebSocket upgrade) denies with `authorization_unavailable` (503) until a
+    // snapshot lands. The supervised background loop owns recovery, seeded
+    // from each issuer's warm result.
     //
-    // The state holds `nip_fi_jwks_source` (shared via `Arc`) alongside
-    // `nip_fi_verifier` (which holds a clone of the same `Arc`). Warming the
-    // source delivers snapshots to the verifier at every upgrade check.
-    //
-    // The refresh task is owned: a `CancellationToken` + `JoinHandle` let
-    // the process cancel it cleanly on shutdown instead of leaking the task.
+    // The refresh task is owned: a `CancellationToken` + `JoinHandle` let the
+    // process cancel it cleanly on shutdown instead of leaking the task.
     let jwks_refresh_cancel = CancellationToken::new();
-    let jwks_refresh_handle: Option<tokio::task::JoinHandle<()>>;
-    if let Some(jwks_source) = state.nip_fi_jwks_source.clone() {
+    let jwks_refresh_handle = if let Some(jwks_source) = state.nip_fi_jwks_source.clone() {
         let jwks_configs = state.config.nip_fi.jwks_configs.clone();
         info!(
             issuer_count = jwks_configs.len(),
             "NIP-FI: warming JWKS snapshots"
         );
-
-        // Startup warm: call `get_snapshot` for each issuer concurrently and
-        // record the result so the background loop can initialize each issuer's
-        // warm state from the actual startup outcome rather than always starting
-        // cold. Concurrent warming prevents a single slow issuer from blocking
-        // the relay from accepting traffic for all other issuers.
-        let warm_futures: Vec<_> = jwks_configs
+        let issuer_ids: Vec<String> = jwks_configs.iter().map(|c| c.issuer.clone()).collect();
+        let warmed = warm_nip_fi_jwks_snapshots(&jwks_source, &issuer_ids).await;
+        let issuers = jwks_configs
             .iter()
-            .map(|cfg| {
-                let source = Arc::clone(&jwks_source);
-                let issuer = cfg.issuer.clone();
-                async move {
-                    let warmed = match source.get_snapshot(&issuer).await {
-                        Some(_) => {
-                            info!(issuer = %issuer, "NIP-FI: JWKS snapshot warmed");
-                            true
-                        }
-                        None => {
-                            warn!(
-                                issuer = %issuer,
-                                "NIP-FI: JWKS warm failed — admissions will deny with 503 \
-                                 until a snapshot lands; background refresh will retry"
-                            );
-                            false
-                        }
-                    };
-                    (issuer, warmed)
-                }
+            .zip(warmed)
+            .map(|(c, warmed)| {
+                (
+                    c.issuer.clone(),
+                    c.contract.refresh_interval_seconds(),
+                    warmed,
+                )
             })
             .collect();
-        let warm_results = futures_util::future::join_all(warm_futures).await;
-        let mut startup_warm: std::collections::HashMap<String, bool> =
-            std::collections::HashMap::new();
-        for (issuer, warmed) in warm_results {
-            startup_warm.insert(issuer, warmed);
-        }
-
-        // Background refresh loop: per-issuer independent cadence/backoff; supervised so
-        // an unexpected panic restarts rather than silently disabling refresh.
-        // A panic kills only the inner task; the supervisor restarts it with
-        // backoff, keeping the relay alive (denying with 503) while recovering.
-        // The outer cancellation token terminates the supervisor cleanly.
-        //
-        // Each issuer tracks its own `next_attempt_at` (a tokio Instant) so a
-        // warm issuer on a short interval never causes a cold issuer to ignore
-        // its own backoff — only issuers whose deadline is due are refreshed on
-        // any given tick. Warm state is initialized from the startup results so
-        // a successfully-warmed issuer starts on its normal cadence, not cold backoff.
-        //
-        // Cold-start backoff ceiling: 300 seconds (`(v * 2).min(300)`).
-        let refresh_source = Arc::clone(&jwks_source);
-        let refresh_cancel = jwks_refresh_cancel.clone();
-        // One-line seam: the outer spawn drives exactly `run_jwks_refresh_supervisor`,
-        // which owns the restart loop and spawns `run_jwks_refresh_inner_task` per
-        // iteration. The witness test drives this same function — replacing it with
-        // a no-op leaves the witness red.
-        jwks_refresh_handle = Some(tokio::spawn(run_jwks_refresh_supervisor(
-            refresh_source,
-            jwks_configs.clone(),
-            startup_warm.clone(),
-            refresh_cancel,
-        )));
+        Some(tokio::spawn(run_jwks_refresh_supervisor(
+            issuers,
+            move |issuer: &str| {
+                let src = Arc::clone(&jwks_source);
+                let iss = issuer.to_owned();
+                async move { src.get_snapshot(&iss).await.is_some() }
+            },
+            jwks_refresh_cancel.clone(),
+        )))
     } else {
-        jwks_refresh_handle = None;
-    }
+        None
+    };
 
     // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
     // kill switch is off — nothing is bound, published, or spawned, so the
@@ -1329,275 +1284,64 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Compute the per-issuer retry cadence after a failed JWKS refresh attempt.
+/// Cadence state after a failed JWKS refresh (no live snapshot exists).
 ///
-/// Returns `(new_warmed, new_backoff_secs, retry_secs)`.
+/// Recovery is urgent once the relay is failing closed, so the issuer drops
+/// to the cold fast-retry cadence regardless of prior warm state: a previously
+/// warm issuer resets to 5 s; an already-cold issuer doubles its backoff,
+/// capped at 300 s.
 ///
-/// Determine the new cadence state after a failed JWKS refresh (`get_snapshot`
-/// returned `None` — no usable snapshot exists).
-///
-/// Production only ever calls this from the `None` arm of `get_snapshot`.
-/// When the snapshot is dead, recovery is urgent: the issuer drops to cold
-/// fast-retry cadence (5 s initial, doubling on each subsequent failure)
-/// regardless of prior warm state.
-///
-/// ## Returns `(new_warmed, new_backoff_secs, retry_secs)`
-///
-/// - `new_warmed`: always `false` — the relay is failing closed.
-/// - `new_backoff_secs`: the backoff value to store for the next cold failure.
-/// - `retry_secs`: how many seconds until the next attempt.
-///
-/// ## Mutation oracle
-///
-/// Old code: `if !warmed { double backoff }` else `retry_secs = interval_secs`.
-/// Old code leaves `warmed = true` and uses the slow warm interval (e.g. 300 s)
-/// when the snapshot dies, so `retry_secs = 300`. The
-/// `hard_dead_warm_issuer_resets_to_fast_cadence` test expects `retry_secs ≤ 5`
-/// and panics with old code.
+/// Returns `(new_warmed, new_backoff_secs, retry_secs)`; `new_warmed` is
+/// always `false`.
 fn jwks_next_retry_after_failed_refresh(
     was_warmed: bool,
     current_backoff_secs: u64,
 ) -> (bool, u64, u64) {
-    // Snapshot is dead — recover urgently via cold fast-retry cadence.
     if was_warmed {
-        // Previously warm but now dead: reset to initial cold backoff (5 s).
-        (false, 5u64, 5u64)
+        (false, 5, 5)
     } else {
-        // Already cold: double the backoff, capped at 300 s.
         let new_backoff = (current_backoff_secs * 2).min(300);
         (false, new_backoff, new_backoff)
     }
 }
 
-/// One refresh tick for a single JWKS issuer.
-///
-/// Calls `source.get_snapshot(issuer)`. On success (`Some`) the issuer is
-/// marked warm and scheduled `interval_secs` in the future. On failure
-/// (`None`) [`jwks_next_retry_after_failed_refresh`] determines the new
-/// cadence: a previously warm issuer resets to the 5-second fast-retry
-/// cadence, a cold issuer doubles its backoff.
-///
-/// This function owns the mutable per-issuer state (the tuple fields) and
-/// returns `next_attempt_at` so the supervisor can sleep until the earliest
-/// deadline across all issuers. Extracting this unit allows controlled-clock
-/// tests to drive the full warm → hard-dead → fast-retry → recovery cycle
-/// against the real state-transition logic used by the supervisor.
-///
-/// ## Production seam
-///
-/// The supervisor's inner loop calls this function for each issuer whose
-/// `next_attempt_at` has arrived. Removing or short-circuiting this call
-/// from the supervisor leaves the `warmed`, `backoff_secs`, and
-/// `next_attempt_at` fields unmutated — tests that verify those fields
-/// through the supervisor will go red.
-async fn run_jwks_refresh_step<S>(
-    source: &S,
-    issuer: &str,
-    interval_secs: u64,
-    warmed: &mut bool,
-    backoff_secs: &mut u64,
-    next_attempt_at: &mut tokio::time::Instant,
+/// Supervisor for [`nip_fi_jwks_refresh_loop`]: restarts the loop with
+/// exponential backoff (1 s → 60 s) if it panics, so a single bad refresh
+/// cannot permanently disable JWKS recovery. Each restart re-seeds the loop
+/// from `issuers`. Clean cancellation terminates both the loop and this
+/// supervisor.
+async fn run_jwks_refresh_supervisor<F, Fut>(
+    // `(issuer_id, interval_seconds, warmed_at_startup)`, one per issuer.
+    issuers: Vec<(String, u64, bool)>,
+    fetch: F,
+    cancel: CancellationToken,
 ) where
-    S: JwksRefreshSource + ?Sized,
+    F: FnMut(&str) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = bool> + Send + 'static,
 {
-    let now = tokio::time::Instant::now();
-    if source.snapshot_available(issuer).await {
-        tracing::debug!(issuer = %issuer, "NIP-FI: JWKS snapshot refreshed");
-        *warmed = true;
-        *next_attempt_at = now + std::time::Duration::from_secs(interval_secs);
-    } else {
-        tracing::warn!(issuer = %issuer, "NIP-FI: JWKS refresh failed — will retry");
-        let (new_warmed, new_backoff, retry_secs) =
-            jwks_next_retry_after_failed_refresh(*warmed, *backoff_secs);
-        *warmed = new_warmed;
-        *backoff_secs = new_backoff;
-        *next_attempt_at = now + std::time::Duration::from_secs(retry_secs);
-    }
-}
-
-/// The inner JWKS refresh scheduling loop — runs per-issuer due-selection,
-/// sleeps until the earliest deadline, and calls [`run_jwks_refresh_step`] for
-/// each issuer whose deadline has arrived.
-///
-/// Extracted from the supervisor's `inner_task` so it can be driven directly
-/// in tests with paused Tokio time and a controllable source. The supervisor
-/// spawns exactly this function in production; removing that call site breaks
-/// the scheduling loop and leaves every per-issuer `next_attempt_at` unmutated.
-///
-/// ## Type layout for `state`
-///
-/// Each entry is `(issuer, interval_secs, backoff_secs, warmed, next_attempt_at)`.
-/// The caller (the supervisor) builds this vec from `jwks_configs` before
-/// spawning the inner task. Mutability is owned by this function for the
-/// duration of the loop.
-///
-/// ## Cancellation
-///
-/// The loop selects on `cancel.cancelled()` before each sleep. A clean
-/// cancellation returns immediately; the supervisor interprets `Ok(())` as a
-/// clean exit and does not restart.
-async fn run_jwks_refresh_loop<S>(
-    source: Arc<S>,
-    mut state: Vec<(String, u64, u64, bool, tokio::time::Instant)>,
-    cancel: tokio_util::sync::CancellationToken,
-) where
-    S: JwksRefreshSource + Send + Sync + ?Sized,
-{
+    let mut restart_backoff_secs: u64 = 1;
     loop {
-        // Sleep until the earliest per-issuer next_attempt_at so no issuer is
-        // woken earlier than needed and a cold issuer's own backoff governs its
-        // retry cadence.
-        let earliest = state
-            .iter()
-            .map(|(_, _, _, _, t)| *t)
-            .min()
-            .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(300));
-
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                tracing::debug!("NIP-FI: JWKS refresh loop cancelled");
-                return;
-            }
-            _ = tokio::time::sleep_until(earliest) => {}
-        }
-
-        let now = tokio::time::Instant::now();
-        for (issuer, interval_secs, backoff_secs, warmed, next_attempt_at) in &mut state {
-            // Skip issuers whose own deadline has not arrived.
-            if now < *next_attempt_at {
-                continue;
-            }
-            run_jwks_refresh_step(
-                source.as_ref(),
-                issuer,
-                *interval_secs,
-                warmed,
-                backoff_secs,
-                next_attempt_at,
-            )
-            .await;
-        }
-    }
-}
-
-/// Supervisor for the JWKS refresh worker: restarts [`run_jwks_refresh_inner_task`]
-/// with exponential backoff if it exits unexpectedly (panic or abort). Clean
-/// cancellation terminates both the inner task and this supervisor.
-///
-/// Extracted as a named function so the production spawn is a one-line seam and
-/// the witness test can drive this exact unit — meaning the test fails if
-/// [`run_jwks_refresh_inner_task`] is removed from this function.
-async fn run_jwks_refresh_supervisor<S>(
-    source: Arc<S>,
-    configs: Vec<buzz_auth::IssuerJwksConfig>,
-    startup_warm: HashMap<String, bool>,
-    cancel: tokio_util::sync::CancellationToken,
-) where
-    S: JwksRefreshSource + Send + Sync + 'static + ?Sized,
-{
-    let mut supervisor_backoff_secs: u64 = 1;
-    loop {
-        let inner_source = Arc::clone(&source);
-        let inner_cancel = cancel.clone();
-        let inner_task = tokio::spawn(run_jwks_refresh_inner_task(
-            inner_source,
-            configs.clone(),
-            startup_warm.clone(),
-            inner_cancel,
+        let worker = tokio::spawn(nip_fi_jwks_refresh_loop(
+            issuers.clone(),
+            fetch.clone(),
+            cancel.clone(),
         ));
-
-        match inner_task.await {
-            Ok(()) => {
-                // Clean return — cancellation fired; supervisor exits too.
-                return;
-            }
+        match worker.await {
+            Ok(()) => return,
             Err(join_err) => {
-                // Unexpected exit (panic or abort). Log, back off, restart.
                 tracing::error!(
                     error = %join_err,
-                    retry_secs = supervisor_backoff_secs,
+                    retry_secs = restart_backoff_secs,
                     "NIP-FI: JWKS refresh worker exited unexpectedly — restarting"
                 );
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(
-                        supervisor_backoff_secs,
-                    )) => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(restart_backoff_secs)) => {}
                 }
-                // Supervisor backoff: 1s → 2s → 4s → … → 60s ceiling.
-                supervisor_backoff_secs = (supervisor_backoff_secs * 2).min(60);
+                restart_backoff_secs = (restart_backoff_secs * 2).min(60);
             }
         }
-    }
-}
-
-/// The body of the supervisor's inner task: builds per-issuer state from
-/// `configs` and `startup_warm`, then drives [`run_jwks_refresh_loop`] to
-/// completion or cancellation.
-///
-/// Extracted as a named function so [`run_jwks_refresh_supervisor`] can spawn
-/// exactly this unit — making "remove the inner task invocation" a mutation that
-/// fails both production and the witness test (which drives the supervisor).
-///
-/// Tuple layout: `(issuer, interval_secs, backoff_secs, warmed, next_attempt_at)`.
-async fn run_jwks_refresh_inner_task<S>(
-    source: Arc<S>,
-    configs: Vec<buzz_auth::IssuerJwksConfig>,
-    startup_warm: HashMap<String, bool>,
-    cancel: tokio_util::sync::CancellationToken,
-) where
-    S: JwksRefreshSource + Send + Sync + ?Sized,
-{
-    let now = tokio::time::Instant::now();
-    let per_issuer_state: Vec<(String, u64, u64, bool, tokio::time::Instant)> = configs
-        .iter()
-        .map(|c| {
-            let interval = c.contract.refresh_interval_seconds();
-            let warmed = *startup_warm.get(&c.issuer).unwrap_or(&false);
-            // Warm issuers schedule their first refresh at +interval;
-            // cold issuers start with a short initial backoff of 5s.
-            let initial_delay = if warmed { interval } else { 5u64 };
-            (
-                c.issuer.clone(),
-                interval,
-                5u64, // initial cold backoff
-                warmed,
-                now + std::time::Duration::from_secs(initial_delay),
-            )
-        })
-        .collect();
-    run_jwks_refresh_loop(source, per_issuer_state, cancel).await;
-}
-
-/// Seam trait used to drive [`run_jwks_refresh_step`] and
-/// [`run_jwks_refresh_loop`] in tests without spawning a real HTTP server.
-/// Returns `true` when a live snapshot is available, `false` when not — the
-/// supervisor cares only about availability, never about key material. The
-/// production implementation maps `ProductionJwksSource::get_snapshot(…).is_some()`.
-///
-/// Using a boolean outcome (rather than `Option<AssertionKeySet>`) keeps
-/// `AssertionKeySet` construction crate-private in buzz-auth: a relay-side
-/// mock never needs to build a real key set, so no public test constructor
-/// (`empty_for_test()`) is required.
-#[async_trait::async_trait]
-trait JwksRefreshSource: Send + Sync {
-    /// Returns `true` if a live snapshot is available for `issuer` after this
-    /// refresh attempt, `false` if the source is unavailable or the fetch
-    /// failed.
-    async fn snapshot_available(&self, issuer: &str) -> bool;
-}
-
-#[async_trait::async_trait]
-impl<F> JwksRefreshSource for buzz_auth::ProductionJwksSource<F>
-where
-    F: buzz_auth::JwksFetcher + Send + Sync + 'static,
-{
-    async fn snapshot_available(&self, issuer: &str) -> bool {
-        buzz_auth::ProductionJwksSource::get_snapshot(self, issuer)
-            .await
-            .is_some()
     }
 }
 
@@ -1644,6 +1388,129 @@ mod env_filter_tests {
             otel_env_filter(Some("buzz_relay=debug")).to_string(),
             "buzz_relay=debug"
         );
+    }
+}
+
+/// Warm NIP-FI JWKS snapshots for all configured issuers at startup.
+///
+/// Calls `source.get_snapshot(issuer)` for every configured issuer
+/// concurrently, so one slow IdP cannot delay the others, and returns each
+/// issuer's outcome (`true` = warmed) in `issuer_ids` order. On failure the
+/// relay still starts and FI ingress denies with 503 until the background
+/// loop delivers a snapshot.
+///
+/// Raw `iss` values are never logged (NIP-FI.md:777-779); only the
+/// `issuer_index` diagnostic code appears in log output.
+///
+/// Extracted from `run_relay_main` for unit-testability.
+/// [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
+async fn warm_nip_fi_jwks_snapshots<F: buzz_auth::JwksFetcher>(
+    source: &buzz_auth::ProductionJwksSource<F>,
+    issuer_ids: &[String],
+) -> Vec<bool> {
+    futures_util::future::join_all(
+        issuer_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, issuer)| async move {
+                let warmed = source.get_snapshot(issuer).await.is_some();
+                // issuer_index is a non-identifying diagnostic code.
+                // Raw `iss` is excluded from logs per NIP-FI.md:777-779.
+                if warmed {
+                    info!(issuer_index = idx, "NIP-FI: JWKS snapshot warmed");
+                } else {
+                    warn!(
+                        issuer_index = idx,
+                        "NIP-FI: JWKS warm failed — FI ingress will deny 503 until \
+                 a snapshot lands; background refresh will retry"
+                    );
+                }
+                warmed
+            }),
+    )
+    .await
+}
+
+/// Background JWKS refresh loop for NIP-FI issuers.
+///
+/// Each issuer keeps its own `next_attempt_at`; the loop sleeps until the
+/// earliest one and fetches every issuer that is due. The first attempt is
+/// seeded from the startup warm result: one interval out for a warm issuer,
+/// the 5 s fast retry for a cold one.
+///
+/// After a fetch, the next attempt is scheduled from the post-fetch instant
+/// (pre-fetch scheduling would drift the interval backward by the fetch
+/// latency on every cycle):
+/// - success (`true`, a live snapshot exists): one full `interval_secs`;
+/// - failure (`false`, no live snapshot — the relay is failing closed): the
+///   fast cadence from [`jwks_next_retry_after_failed_refresh`].
+///
+/// Hard-deadline enforcement lives in the JWKS source itself; this loop only
+/// decides when to try again.
+///
+/// Extracted from `run_relay_main` for unit-testability.  [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
+async fn nip_fi_jwks_refresh_loop<F, Fut>(
+    // `(issuer_id, interval_seconds, warmed_at_startup)`, one per issuer.
+    issuers: Vec<(String, u64, bool)>,
+    // Async fetch callback: `issuer → true (live snapshot) / false (none)`.
+    mut fetch: F,
+    cancel: CancellationToken,
+) where
+    F: FnMut(&str) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let start = tokio::time::Instant::now();
+    // `(issuer, interval_secs, backoff_secs, warmed, next_attempt_at)`
+    let mut schedule: Vec<(String, u64, u64, bool, tokio::time::Instant)> = issuers
+        .into_iter()
+        .map(|(issuer, interval, warmed)| {
+            let first = if warmed { interval } else { 5 };
+            (
+                issuer,
+                interval,
+                5,
+                warmed,
+                start + std::time::Duration::from_secs(first),
+            )
+        })
+        .collect();
+
+    loop {
+        let next = schedule
+            .iter()
+            .map(|(_, _, _, _, next_attempt_at)| *next_attempt_at)
+            .min()
+            .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(300));
+        tokio::select! {
+            _ = tokio::time::sleep_until(next) => {}
+            _ = cancel.cancelled() => break,
+        }
+        let now = tokio::time::Instant::now();
+        for (idx, (issuer, interval, backoff, warmed, next_attempt_at)) in
+            schedule.iter_mut().enumerate()
+        {
+            if now < *next_attempt_at {
+                continue;
+            }
+            let delay_secs = if fetch(issuer).await {
+                *warmed = true;
+                *interval
+            } else {
+                let (new_warmed, new_backoff, retry_secs) =
+                    jwks_next_retry_after_failed_refresh(*warmed, *backoff);
+                *warmed = new_warmed;
+                *backoff = new_backoff;
+                // issuer_index is a non-identifying diagnostic code.
+                // Raw `iss` is excluded from logs per NIP-FI.md:777-779.
+                warn!(
+                    issuer_index = idx,
+                    retry_secs, "NIP-FI: background JWKS refresh returned no snapshot"
+                );
+                retry_secs
+            };
+            *next_attempt_at =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(delay_secs);
+        }
     }
 }
 
@@ -2489,9 +2356,10 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, connect_audit_pool, dropped_in_memory_keys, idle_timeout_secs,
-        jwks_next_retry_after_failed_refresh, refresh_legacy_active_gauge_recency,
-        relay_keypair_from_config, run_jwks_refresh_supervisor, run_periodic_until_cancelled,
-        EmissionScope, InMemoryMetricKey, JwksRefreshSource,
+        jwks_next_retry_after_failed_refresh, nip_fi_jwks_refresh_loop,
+        refresh_legacy_active_gauge_recency, relay_keypair_from_config,
+        run_jwks_refresh_supervisor, run_periodic_until_cancelled, EmissionScope,
+        InMemoryMetricKey,
     };
     use buzz_db::DbConfig;
     use metrics::GaugeFn;
@@ -2706,51 +2574,57 @@ mod tests {
 
     // ── F1: JWKS hard-dead recovery cadence ──────────────────────────────────
     //
-    // After a warmed snapshot passes its hard deadline and `get_snapshot`
-    // returns `None` (the relay is now failing closed), the next retry MUST
-    // use fast cold-backoff cadence — not the slow warm refresh interval.
+    // Once a snapshot is gone the relay fails closed (503 on every FI ingress),
+    // so recovery must use the fast cold cadence, never the slow warm interval.
     //
-    // Without the fix, the old code checked `if !warmed { double backoff }`
-    // and used `interval_secs` for warm issuers, so a hard-dead warm issuer
-    // would wait a full refresh interval (e.g. 300 s) before retrying.
-    //
-    // ## Unit mutation oracle
-    //
-    // Revert `jwks_next_retry_after_failed_refresh` to the old behavior
-    // (always use `was_warmed` for cadence, ignore snapshot state):
-    //   - `hard_dead_warm_issuer_resets_to_fast_cadence` → `retry_secs = 300`
-    //     but assertion expects `retry_secs <= 5` → panics.
-    //   - `cold_issuer_doubles_backoff` and `backoff_capped_at_300` unaffected.
-    //
-    // ## Production-seam coverage
-    //
-    // These unit tests call `jwks_next_retry_after_failed_refresh` directly.
-    // The production-seam test `f1_supervisor_loop_drives_recovery_and_restores_admission`
-    // drives `run_jwks_refresh_supervisor` — the exact function the production spawn calls —
-    // through the full warm → hard-dead → fast-retry → recovery cycle using a
-    // real `ProductionJwksSource<ToggleJwksFetcher>`, and asserts that
-    // `IssuerKeySource::key_set` returns `Some` after recovery.
+    // Mutation oracle: schedule a failed refresh one full interval out (the old
+    // `*last = now` behaviour) → `hard_dead_warm_issuer_resets_to_fast_cadence`
+    // sees the retry at T=120 instead of T=65, and `f1_…` sees a 300 s gap.
 
-    #[test]
-    fn hard_dead_warm_issuer_resets_to_fast_cadence() {
-        // A previously warm issuer (warmed=true) whose snapshot just died
-        // must reset to cold fast-retry cadence.
-        // Old code: `retry_secs = interval_secs` (e.g. 300). New code: 5 s.
-        let (new_warmed, new_backoff, retry_secs) =
-            jwks_next_retry_after_failed_refresh(true, 5u64);
-        assert!(
-            !new_warmed,
-            "F1: warmed must be reset to false when snapshot is dead; old code leaves it true"
-        );
+    /// A warm issuer whose refresh finds no live snapshot (hard deadline
+    /// passed) must retry at the 5 s fast cadence, not after another interval.
+    #[tokio::test(start_paused = true)]
+    async fn hard_dead_warm_issuer_resets_to_fast_cadence() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let count_for_fetch = Arc::clone(&fetch_count);
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+        let task = tokio::spawn(nip_fi_jwks_refresh_loop(
+            vec![("issuer-dead".to_string(), 60, true)],
+            move |_| {
+                let c = Arc::clone(&count_for_fetch);
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    false
+                }
+            },
+            cancel_task,
+        ));
+        tokio::task::yield_now().await;
+
+        // Warm issuer: first refresh one interval out (T=60); it finds nothing.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
         assert_eq!(
-            retry_secs, 5,
-            "F1: retry_secs must be 5 s (fast cadence) after hard death; \
-             old code returns interval_secs (e.g. 300) — mutation turns this red"
+            fetch_count.load(Ordering::SeqCst),
+            1,
+            "warm issuer refreshes at T=60"
         );
+
+        // Hard-dead → 5 s fast retry at T=65, not T=120.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
         assert_eq!(
-            new_backoff, 5,
-            "F1: backoff_secs must be reset to 5 s after hard death"
+            fetch_count.load(Ordering::SeqCst),
+            2,
+            "F1: a warm issuer with no live snapshot must retry after 5 s (T=65); \
+             scheduling the retry a full interval out leaves it waiting until T=120"
         );
+
+        cancel.cancel();
+        task.await.expect("refresh loop task");
     }
 
     #[test]
@@ -2773,82 +2647,37 @@ mod tests {
     // ── F1 production-seam test ───────────────────────────────────────────────
     //
     // Drives `run_jwks_refresh_supervisor` — the exact function the production
-    // spawn calls — through the warm → hard-dead → fast-retry → recovery cycle,
-    // then proves that the verifier's admission gate sees the recovered snapshot.
+    // spawn calls — over a real `ProductionJwksSource<ToggleJwksFetcher>` with
+    // the production fetch shape (`get_snapshot(..).is_some()`), through:
+    // worker panic → supervisor restart → hard-dead tick → 5 s fast retry →
+    // recovery. It then proves admission is restored via
+    // `IssuerKeySource::key_set`, the exact lock-free read
+    // `FederatedAssertionVerifier` performs per token (`None` → 503).
     //
-    // ## What this test proves
+    // Paused Tokio time auto-advances to the next timer whenever the test
+    // blocks, and `ToggleJwksFetcher::fetch_done` fires after every real fetch,
+    // so each `notified()` resolves exactly when the loop's own due-selection
+    // ran a fetch.
     //
-    // 1. `run_jwks_refresh_supervisor` builds per-issuer state (via its call to
-    //    `run_jwks_refresh_inner_task`) and owns the sleep/due-selection
-    //    scheduling via `run_jwks_refresh_loop`. With paused Tokio time the loop
-    //    only wakes when auto-advance crosses `next_attempt_at` — so each step
-    //    fires because the function's own due-selection allowed it, not because
-    //    the test hand-invoked it.
-    //
-    // 2. After the supervisor drives a recovery, `IssuerKeySource::key_set`
-    //    returns `Some(...)` for the recovered issuer. `key_set` is the exact
-    //    method `FederatedAssertionVerifier` calls on each token verification;
-    //    `Some` means the verifier proceeds to token parsing rather than
-    //    returning `AuthorizationUnavailable` (503). This is the equivalent
-    //    admission assertion — building a full `FederatedAssertionVerifier`
-    //    + signed JWT would re-test buzz-auth's own verified paths, not the
-    //    relay scheduler behavior this witness exists for.
-    //
-    // The source is a real `ProductionJwksSource<ToggleJwksFetcher>` shared
-    // between the supervisor (as `JwksRefreshSource`) and the verifier (as
-    // `IssuerKeySource`). This is the same composition the production supervisor
-    // uses; the source's internal snapshot cache is the shared state that
-    // connects the refresh loop to the admission gate.
-    //
-    // ## Deterministic handshake and timing oracle
-    //
-    // `ToggleJwksFetcher::fetch_done` fires `notify_one()` after every fetch
-    // attempt. The test awaits `fetch_done.notified()` for each attempt:
-    // Tokio's `start_paused` auto-advances time to fire the next scheduled
-    // sleep when all tasks are blocked on timers — so each `notified().await`
-    // resolves exactly when the loop's due-selection wakes the spawned task.
-    //
-    // The timing oracle for mutation 2: measure the Tokio clock time between
-    // attempt 1 and attempt 2. With correct 5-s fast-retry cadence, the gap is
-    // ≤ 10 s. With the mutated 300-s cadence, the gap is 300 s. Asserting
-    // `elapsed ≤ 10 s` fails deterministically under the 300-s mutation without
-    // relying on scheduler preference — it reads the Tokio clock after
-    // auto-advance, not wall-clock time.
-    //
-    // ## Mutation oracle
-    //
-    // 1. Remove the `run_jwks_refresh_inner_task` call from
-    //    `run_jwks_refresh_supervisor` (or stub it to a no-op): the source cache
-    //    is never updated → `key_set` stays `None` after recovery → the
-    //    `assert!(key_set.is_some())` panics.
-    //
-    // 2. Revert `jwks_next_retry_after_failed_refresh` for the warm→dead case
-    //    to stay on warm interval (300 s) instead of resetting to 5 s: the
-    //    loop schedules the retry at +300 s → Tokio auto-advances 300 s to fire
-    //    attempt 2 → `tokio::time::Instant::now()` after `notified2` is 300 s
-    //    after `notified1` → `assert!(elapsed_secs ≤ 10)` panics.
-    //
-    // 3. Stub `ToggleJwksFetcher::fetch_jwks` to always return `Err` (so
-    //    `snapshot_available` always returns `false`): cache is never warmed
-    //    after toggle → `key_set` stays `None` → `assert!(key_set.is_some())`
-    //    panics.
+    // Mutation oracle:
+    // 1. Replace the supervisor's restart loop with a single bare spawn: the
+    //    injected panic kills refresh for good → no fetch ever runs → the
+    //    first `notified()` times out.
+    // 2. Schedule a failed refresh a full interval out: the gap between
+    //    attempts is 300 s → `elapsed_secs <= 10` fails.
+    // 3. Stub the fetch to always fail: the cache never warms → `key_set`
+    //    stays `None`.
     #[tokio::test(start_paused = true)]
     async fn f1_supervisor_loop_drives_recovery_and_restores_admission() {
         use buzz_auth::{
             IssuerJwksConfig, IssuerKeySource, JwksSourceContract, ProductionJwksSource,
             ToggleJwksFetcher,
         };
-        use std::collections::HashMap;
-        use std::sync::Arc;
-        use tokio_util::sync::CancellationToken;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         const ISSUER: &str = "https://idp.loop-test.example";
-        const INTERVAL: u64 = 300; // normal warm refresh interval
+        const INTERVAL: u64 = 300;
 
-        // ── Build a real ProductionJwksSource backed by ToggleJwksFetcher ─────
-        // The fetcher starts unavailable so the first loop tick is a hard-dead
-        // failure. `toggle` flips availability; `fetch_done` is notified after
-        // every fetch attempt so the test can await each iteration deterministically.
         let fetcher = ToggleJwksFetcher::new(false);
         let toggle = Arc::clone(&fetcher.available);
         let fetch_done = Arc::clone(&fetcher.fetch_done);
@@ -2861,114 +2690,1088 @@ mod tests {
             )
             .expect("valid test contract"),
         };
-        let source = Arc::new(
-            ProductionJwksSource::new(vec![config.clone()], fetcher).expect("non-empty config"),
-        );
-
-        // ── Pre-condition: no snapshot → key_set returns None (503 territory) ─
-        // IssuerKeySource::key_set is the exact method FederatedAssertionVerifier
-        // calls on each token verification. None → verifier returns
-        // AuthorizationUnavailable (503).
+        let source =
+            Arc::new(ProductionJwksSource::new(vec![config], fetcher).expect("non-empty config"));
         assert!(
             IssuerKeySource::key_set(source.as_ref(), ISSUER).is_none(),
             "F1: key_set must be None before recovery (fetcher unavailable)"
         );
 
-        // ── Build startup_warm: issuer was warm, simulating a previously healthy
-        //    issuer whose snapshot just expired. The supervisor uses startup_warm
-        //    to seed the per-issuer warm state, so the first refresh attempt is
-        //    scheduled at now+INTERVAL (300 s) — the normal warm cadence.
-        let mut startup_warm = HashMap::new();
-        startup_warm.insert(ISSUER.to_string(), true);
-
+        // The issuer was warm at startup, so the first refresh is due at +300 s.
+        // That first refresh panics (a worker bug), which only the supervisor
+        // survives.
+        let panicked = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-
-        // ── Spawn run_jwks_refresh_supervisor — the exact function the production
-        //    spawn calls. It owns the restart loop and invokes
-        //    run_jwks_refresh_inner_task, which builds per-issuer state and drives
-        //    the scheduling loop.
-        //
-        // Mutation 1 oracle: remove the run_jwks_refresh_inner_task call from
-        // run_jwks_refresh_supervisor (or stub it to a no-op) → cache never
-        // updates → key_set stays None after recovery → assert!(key_set.is_some()) panics.
-        let task_source = Arc::clone(&source) as Arc<dyn JwksRefreshSource + Send + Sync>;
-        let task_cancel = cancel.clone();
-        let configs = vec![config];
+        let fetch_source = Arc::clone(&source);
         let supervisor_task = tokio::spawn(run_jwks_refresh_supervisor(
-            task_source,
-            configs,
-            startup_warm,
-            task_cancel,
+            vec![(ISSUER.to_string(), INTERVAL, true)],
+            move |issuer: &str| {
+                let src = Arc::clone(&fetch_source);
+                let iss = issuer.to_owned();
+                let panicked = Arc::clone(&panicked);
+                async move {
+                    if !panicked.swap(true, Ordering::SeqCst) {
+                        panic!("F1: injected refresh-worker panic");
+                    }
+                    src.get_snapshot(&iss).await.is_some()
+                }
+            },
+            cancel.clone(),
         ));
 
-        // ── Wait for attempt 1: the hard-dead tick ────────────────────────────
-        // `run_jwks_refresh_supervisor` starts the inner task sleeping at now+300s
-        // (warm cadence). `notified().await` relies on `start_paused` auto-advance:
-        // when the test blocks on a non-timer future, Tokio auto-advances time to
-        // fire the next pending timer — here, to the task's sleep_until(now+300s).
-        // The task wakes, runs snapshot_available (fetcher=false) → hard-dead →
-        // resets cadence to 5 s → fires `notify_one` → notified() resolves.
-        //
-        // Mutation 1 failure mode: no fetches ever run → notify_one is never
-        // called → the 1000-s timeout is the only pending timer → Tokio
-        // auto-advances to it → timeout fires → test panics deterministically.
-        tokio::time::timeout(std::time::Duration::from_secs(1000), fetch_done.notified())
+        // Attempt 1 (after the restart): hard-dead tick, fetcher unavailable.
+        tokio::time::timeout(Duration::from_secs(1000), fetch_done.notified())
             .await
             .expect(
-                "F1: attempt 1 must fire within 1000 virtual seconds; \
-                 mutation 1: removing run_jwks_refresh_inner_task from \
-                 run_jwks_refresh_supervisor prevents any fetch → no notify_one → timeout",
+                "F1: a fetch must run after the injected panic; a bare spawn \
+                 without the supervisor's restart never refreshes again",
             );
         let clock_after_attempt1 = tokio::time::Instant::now();
-
-        // Verify attempt 1 left the cache empty (hard-dead with unavailable fetcher).
         assert!(
             IssuerKeySource::key_set(source.as_ref(), ISSUER).is_none(),
-            "F1: key_set must still be None after the first failed tick"
+            "F1: key_set must still be None after the failed tick"
         );
 
-        // ── Toggle the fetcher on; wait for attempt 2: the recovery tick ──────
-        // The hard-dead path scheduled the next retry at +5 s. With toggle=true,
-        // `notified().await` auto-advances again to fire that 5-s sleep, runs
-        // snapshot_available (fetcher=true) → warms cache → fires `notify_one`.
-        //
-        // Mutation 2 timing oracle: after `notified2` resolves, the Tokio clock
-        // is exactly at the retry deadline. With 5-s cadence: clock_after_attempt2
-        // ≈ clock_after_attempt1 + 5s (≤ 10s gap). With the 300-s mutation:
-        // the gap is 300s → assert!(elapsed_secs ≤ 10) panics.
-        toggle.store(true, std::sync::atomic::Ordering::SeqCst);
-        tokio::time::timeout(std::time::Duration::from_secs(1000), fetch_done.notified())
+        // Attempt 2: fast retry with the fetcher back up.
+        toggle.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(1000), fetch_done.notified())
             .await
             .expect("F1: attempt 2 must fire within 1000 virtual seconds");
-        let clock_after_attempt2 = tokio::time::Instant::now();
-
-        let elapsed_secs = (clock_after_attempt2 - clock_after_attempt1).as_secs();
+        let elapsed_secs = (tokio::time::Instant::now() - clock_after_attempt1).as_secs();
         assert!(
             elapsed_secs <= 10,
-            "F1: attempt 2 must fire within 10 s of attempt 1 (fast-retry cadence = 5 s); \
-             mutation 2: reverting jwks_next_retry_after_failed_refresh to 300-s cadence causes \
-             Tokio to auto-advance 300 s between attempts — elapsed={elapsed_secs}s, expected ≤10s"
+            "F1: attempt 2 must follow attempt 1 at the 5 s fast cadence; elapsed={elapsed_secs}s"
         );
 
-        // ── Post-condition: supervisor drove recovery; key_set now returns Some ─
-        // IssuerKeySource::key_set reads the snapshot cache populated by
-        // run_jwks_refresh_supervisor → run_jwks_refresh_inner_task via
-        // ProductionJwksSource::get_snapshot. Some(…) here means a real
-        // FederatedAssertionVerifier would proceed to token parsing rather than
-        // returning AuthorizationUnavailable (503).
-        //
-        // Mutation 3 oracle: stub ToggleJwksFetcher::fetch_jwks to always return Err
-        // → snapshot_available always false → cache never warms after toggle → key_set stays None → panics.
-        let key_set = IssuerKeySource::key_set(source.as_ref(), ISSUER);
         assert!(
-            key_set.is_some(),
-            "F1: after supervisor-driven recovery key_set must return Some (admission restored); \
-             mutation 1: removing run_jwks_refresh_inner_task from run_jwks_refresh_supervisor → cache never updates → None; \
-             mutation 2: reverting cadence to 300 s → elapsed oracle (above) catches it first; \
-             mutation 3: ToggleJwksFetcher::fetch_jwks always Err → cache never warms → None"
+            IssuerKeySource::key_set(source.as_ref(), ISSUER).is_some(),
+            "F1: after supervisor-driven recovery key_set must return Some (admission restored)"
         );
 
         cancel.cancel();
-        let _ = supervisor_task.await;
+        supervisor_task
+            .await
+            .expect("supervisor exits cleanly on cancel");
+    }
+
+    // ── F4: JWKS refresh-interval anchoring ───────────────────────────────────
+    //
+    // The fix: `*last = tokio::time::Instant::now()` is called AFTER the fetch
+    // awaits, not before (where `now` was captured pre-fetch).  Under nonzero
+    // fetch latency, scheduling from pre-fetch would drift the interval backward
+    // on every cycle.
+    //
+    // Test matrix:
+    //   A. Nonzero fetch latency: a 10s fetch inside a 60s interval → the next
+    //      refresh is scheduled 60s after the fetch completes (70s from start),
+    //      not 60s after the pre-fetch `now` (which would be ≈60s from start).
+    //   B. Fetch failure still advances `last`, preventing a tight-loop.
+    //      The loop continues; the third cycle fires at the correct deadline.
+    //   C. Hard deadline with early-cache: when interval=60 and hard_deadline=90s,
+    //      the loop fires at T=60; at T=70 (post-fetch) last=70, next due at
+    //      T=130. The `hard_deadline` is enforced by `ProductionJwksSource`, NOT
+    //      by the timer loop — the loop only tracks refresh cadence.
+    //   D. The production adapter's `.is_some()` contract: "a live snapshot
+    //      exists" (not "the last fetch succeeded"). After a failed refresh the
+    //      previously-cached snapshot may still be live; `src.get_snapshot().is_some()`
+    //      returns true in that case.  The timer loop treats the boolean as an
+    //      opaque "notify" / "warn" signal, not as a freshness oracle.
+    //
+    // Falsifying mutation: change `*last = tokio::time::Instant::now()` to
+    // `*last = now` (where `now` is the pre-await snapshot).  Test A fails
+    // because the second refresh fires at T≈60s rather than T≈70s.
+
+    /// Nonzero fetch latency: second refresh must be anchored to post-fetch instant.
+    #[tokio::test(start_paused = true)]
+    async fn jwks_refresh_interval_anchored_to_post_fetch_instant() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let second_fetch_instant: Arc<std::sync::Mutex<Option<tokio::time::Instant>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
+        let count_clone = Arc::clone(&fetch_count);
+        let instant_clone = Arc::clone(&second_fetch_instant);
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+
+        // 10s simulated fetch latency, 60s interval.
+        let fetch_latency = Duration::from_secs(10);
+        let interval_secs = 60u64;
+
+        let task = tokio::spawn(async move {
+            nip_fi_jwks_refresh_loop(
+                vec![("issuer-a".to_string(), interval_secs, true)],
+                move |_issuer| {
+                    let n = count_clone.fetch_add(1, Ordering::SeqCst);
+                    let instant_ref = Arc::clone(&instant_clone);
+                    let latency = fetch_latency;
+                    Box::pin(async move {
+                        // Simulate nonzero fetch latency.
+                        tokio::time::sleep(latency).await;
+                        if n == 1 {
+                            // Record when the second fetch completes.
+                            *instant_ref.lock().unwrap() = Some(tokio::time::Instant::now());
+                        }
+                        true // success
+                    })
+                },
+                cancel_task,
+            )
+            .await;
+        });
+
+        // Time T=0: loop starts with last=now.
+        tokio::task::yield_now().await;
+
+        // Advance to T=60s: first refresh becomes due.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+
+        // Advance through the 10s fetch latency to T=70s.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+
+        // At T=70 the first fetch completes; last is now ~70s.
+        // A second refresh is due 60s later, at T=130.  Verify it does NOT fire at T=120.
+        tokio::time::advance(Duration::from_secs(59)).await; // T=129
+        tokio::task::yield_now().await;
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            1,
+            "second refresh must NOT fire before post-fetch last + interval_secs; \
+             at T=129 only one fetch should have completed. \
+             Falsifying mutation: use pre-fetch `now` for `last` update → second fetch fires at T≈120"
+        );
+
+        // Advance to T=131: second refresh is now overdue (post-fetch last + 60 ≤ 131).
+        tokio::time::advance(Duration::from_secs(2)).await; // T=131
+        tokio::task::yield_now().await;
+        // Sleep through the 10s fetch latency.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            2,
+            "second refresh must have fired by T=141 (post-fetch last ~70 + 60 + 10 fetch latency)"
+        );
+
+        cancel.cancel();
+        task.await.expect("refresh loop task");
+    }
+
+    /// Success waits a full interval; failure (no live snapshot) retries at
+    /// the fast cadence — 5 s after a warm issuer dies, then doubling.
+    #[tokio::test(start_paused = true)]
+    async fn jwks_refresh_success_waits_interval_failure_uses_fast_backoff() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let count_for_fetch = Arc::clone(&fetch_count);
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+
+        // Outcomes by attempt: ok, fail, fail, ok, …
+        let task = tokio::spawn(async move {
+            nip_fi_jwks_refresh_loop(
+                vec![("issuer-b".to_string(), 60, true)],
+                move |_| {
+                    let c = Arc::clone(&count_for_fetch);
+                    Box::pin(async move {
+                        let n = c.fetch_add(1, Ordering::SeqCst);
+                        !matches!(n, 1 | 2)
+                    })
+                },
+                cancel_task,
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+
+        let mut t = 0u64;
+        let mut expect_at = |target: u64, count: usize, why: &'static str| {
+            let step = target - t;
+            t = target;
+            let fetch_count = Arc::clone(&fetch_count);
+            async move {
+                tokio::time::advance(Duration::from_secs(step)).await;
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    fetch_count.load(Ordering::SeqCst),
+                    count,
+                    "T={target}: {why}"
+                );
+            }
+        };
+        expect_at(60, 1, "warm issuer's first refresh (ok) after one interval").await;
+        expect_at(119, 1, "success waits a full interval").await;
+        expect_at(120, 2, "second refresh (fails) one interval after success").await;
+        expect_at(124, 2, "no retry before the 5 s fast cadence").await;
+        expect_at(125, 3, "warm→dead retries after 5 s, not a full interval").await;
+        expect_at(134, 3, "cold backoff doubles to 10 s").await;
+        expect_at(135, 4, "cold retry (ok) at +10 s").await;
+        expect_at(194, 4, "recovered issuer waits a full interval again").await;
+        expect_at(195, 5, "next refresh one interval after recovery").await;
+
+        cancel.cancel();
+        task.await.expect("refresh loop task");
+    }
+
+    // ── Test C: hard-deadline is enforced by ProductionJwksSource, not the timer ──
+    //
+    // The timer loop is cadence-only: it fires at `last + interval_secs`.
+    // The `hard_deadline` in `ProductionJwksSource` is a separate contract that
+    // the timer loop does not enforce directly.  This test proves the timer loop
+    // fires at T=60 (interval) and then again at approximately T=130
+    // (post-fetch last ~70 + interval 60), with no spurious fires in between.
+    //
+    // A "cache-returns-early" fetch is simulated by the fetch returning `true`
+    // (a live snapshot is available).  This is the `.is_some()` contract: the
+    // production adapter returns `true` when a snapshot exists, which may be a
+    // cached snapshot even after a transient failure — NOT "fetch succeeded".
+    //
+    // Falsifying mutation (timer): advancing the interval check to use
+    // `last + hard_deadline_secs` instead of `last + interval_secs` would
+    // cause the first fire to happen at T=90 instead of T=60; the T=60 assert
+    // would fire.  This confirms the timer does not conflate hard_deadline with
+    // interval.
+    #[tokio::test(start_paused = true)]
+    async fn jwks_refresh_interval_is_cadence_only_not_hard_deadline() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&fetch_count);
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+
+        // interval=60s, simulating a hard_deadline of 90s at the source level.
+        // The timer loop receives only (issuer, interval=60) — it knows nothing
+        // about hard_deadline.  The hard_deadline enforcement belongs to
+        // ProductionJwksSource, not here.
+        let task = tokio::spawn(async move {
+            nip_fi_jwks_refresh_loop(
+                vec![("issuer-c".to_string(), 60, true)],
+                move |_| {
+                    let c = Arc::clone(&count_clone);
+                    Box::pin(async move {
+                        c.fetch_add(1, Ordering::SeqCst);
+                        // Returns true = "a live snapshot exists" (cache-hit).
+                        // This is the production .is_some() contract.
+                        true
+                    })
+                },
+                cancel_task,
+            )
+            .await;
+        });
+
+        tokio::task::yield_now().await;
+
+        // First fire at T=60 (interval).
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            1,
+            "first refresh fires at T=60 (interval boundary). \
+             Falsifying mutation: if the loop used hard_deadline instead of interval → fires at T=90"
+        );
+
+        // No spurious fire at T=89 (before the hard-deadline would matter).
+        tokio::time::advance(Duration::from_secs(29)).await; // T=89
+        tokio::task::yield_now().await;
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            1,
+            "no spurious fire at T=89; next scheduled fire is at T=60+60=120 (cadence only)"
+        );
+
+        // Next fire at T=120 (post-fetch last=60 + interval=60).
+        tokio::time::advance(Duration::from_secs(31)).await; // T=120
+        tokio::task::yield_now().await;
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            2,
+            "second refresh fires at T=120; cadence-only scheduling confirmed"
+        );
+
+        cancel.cancel();
+        task.await.expect("refresh loop task");
+    }
+}
+
+// ── F5: Composition — production timer + ProductionJwksSource ─────────────────
+//
+// Tests that `nip_fi_jwks_refresh_loop` and `ProductionJwksSource` compose
+// correctly across four scenarios that individual tests cannot cover separately:
+//
+// 1. **Nonzero fetch latency**: a 10s simulated fetch inside a 60s interval;
+//    the second refresh is anchored to post-fetch instant (T≈130, not T≈120).
+// 2. **Not-due cache hit**: at T=59 (one second before the interval) the source
+//    returns the cached snapshot immediately without fetching; fetch_count stays
+//    at 1.  The timer loop's boolean return (`is_some()`) correctly reflects a
+//    live snapshot from the cache.
+// 3. **Failure does not extend snapshot freshness**: after a failed refresh
+//    the source's hard_deadline is unchanged (no new snapshot was committed);
+//    the previous snapshot remains valid until its original deadline.
+// 4. **Hard-deadline cleared by source**: the source clears an expired snapshot
+//    on the next `get_snapshot()` call; the timer loop then fires a second
+//    fetch and the source commits the fresh snapshot.
+//
+// ProductionJwksSource uses a controlled clock (`new_with_clock`) so tests
+// advance time without wall-clock sleeps.  The timer loop uses tokio's paused
+// clock for its own `sleep_until`.
+//
+// Falsifying mutations:
+//   - Remove clock injection → test times out (wall time, unpaused).
+//   - Remove `*last = Instant::now()` post-fetch → second refresh fires at T≈120
+//     (before T=130 assertion) — test A fails.
+//   - Return `true` from the failure path → false positive on the failure test.
+//
+// These tests are in `mod composition_tests` to isolate their `use` declarations.
+#[cfg(test)]
+mod composition_tests {
+    use buzz_auth::{
+        IssuerJwksConfig, JwksFetchError, JwksSourceContract, ProductionJwksSource,
+        ScriptedJwksFetcher,
+    };
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    use super::nip_fi_jwks_refresh_loop;
+    use super::warm_nip_fi_jwks_snapshots;
+
+    fn test_jwks(kid: &str) -> String {
+        format!(
+            r#"{{"keys":[{{"kty":"EC","crv":"P-256","x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0","use":"sig","alg":"ES256","kid":"{kid}"}}]}}"#
+        )
+    }
+
+    fn make_source_config(issuer: &str, refresh: u64, hard_deadline: u64) -> IssuerJwksConfig {
+        IssuerJwksConfig {
+            issuer: issuer.to_owned(),
+            contract: JwksSourceContract::new(
+                format!("https://{issuer}/.well-known/jwks.json"),
+                refresh,
+                hard_deadline,
+            )
+            .expect("valid test contract"),
+        }
+    }
+
+    // ── Composition A: nonzero fetch latency, not-due cache hit ─────────────
+    //
+    // Scenario:
+    //   T=0: source has no snapshot.  Timer fires at T=60, fetch takes 10s.
+    //   T=59: cache NOT due (age < refresh=60) — source returns None (not yet
+    //         populated) but the timer's boolean treats None as "no snapshot".
+    //         Actually we advance to T=70 to pass the first fetch, then test
+    //         the not-due case at T=129 (post-fetch last ≈70, next due ≈130).
+    //   T=129: cache is NOT due (age = 129-70 = 59 < 60); timer has not re-fired.
+    //   T=131: cache is due; second fetch fires and completes at T=141.
+    //
+    // The not-due case proves `ProductionJwksSource.get_snapshot()` returns the
+    // cached snapshot without fetching when `age < refresh_interval`.  After the
+    // first fetch at T=70, the timer advances `last` to T=70; the next sleep
+    // waits until T=70+60=130.  So at T=129 the timer has not re-fired:
+    // `callback_start_count` stays at 1 and `fetch_count` stays at 1.
+    // The test proves fetch_count stays at 1 at T=129 and advances to 2 by T=141.
+    #[tokio::test(start_paused = true)]
+    async fn composition_nonzero_latency_and_not_due_cache_hit() {
+        const ISSUER: &str = "comp-a.issuer.test";
+        const REFRESH: u64 = 60;
+        const HARD_DEADLINE: u64 = 90;
+        const FETCH_LATENCY_SECS: u64 = 10;
+
+        // Controlled clock for the source: starts at T0.
+        let t0_secs = chrono::Utc::now().timestamp();
+        let clock_secs = Arc::new(std::sync::atomic::AtomicI64::new(t0_secs));
+        let clock2 = Arc::clone(&clock_secs);
+        let clock3 = Arc::clone(&clock_secs); // for the task closure
+        let now_fn: Arc<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync> =
+            Arc::new(move || {
+                chrono::DateTime::from_timestamp(clock2.load(Ordering::SeqCst), 0)
+                    .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+            });
+
+        // Two responses: first succeeds (populates cache), second succeeds.
+        let fetcher = ScriptedJwksFetcher::new([Ok(test_jwks("key-a1")), Ok(test_jwks("key-a2"))]);
+        let fetcher_count = Arc::clone(&fetcher.call_count);
+
+        // Track how many times the timer callback is *entered* (not just how many
+        // fetches complete).  This distinguishes the pre-fetch-last timing mutation:
+        // restoring `last = now` before the fetch would cause the second callback to
+        // fire at T≈120 (not T≈130), because pre-fetch `last=T60` yields
+        // next_due = T60+60=T120; post-fetch `last=T70` yields next_due = T70+60=T130.
+        // At T=129 the second callback has already entered under the mutation →
+        // callback_start_count == 2.
+        let callback_start_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_start_count_task = Arc::clone(&callback_start_count);
+
+        let source = Arc::new(
+            ProductionJwksSource::new_with_clock(
+                vec![make_source_config(ISSUER, REFRESH, HARD_DEADLINE)],
+                fetcher,
+                Arc::clone(&now_fn),
+            )
+            .expect("valid source"),
+        );
+
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+        let source_task = Arc::clone(&source);
+
+        let task = tokio::spawn(async move {
+            nip_fi_jwks_refresh_loop(
+                vec![(ISSUER.to_owned(), REFRESH, true)],
+                move |issuer| {
+                    let s = Arc::clone(&source_task);
+                    let issuer = issuer.to_owned();
+                    let clock_ref = Arc::clone(&clock3);
+                    let start_ctr = Arc::clone(&callback_start_count_task);
+                    Box::pin(async move {
+                        // Record callback entry before any fetch work.
+                        start_ctr.fetch_add(1, Ordering::SeqCst);
+                        // Simulate nonzero fetch latency by advancing tokio time
+                        // and the source clock by FETCH_LATENCY_SECS.
+                        // The source clock advances so `fetched_at` is set correctly.
+                        tokio::time::sleep(Duration::from_secs(FETCH_LATENCY_SECS)).await;
+                        clock_ref.fetch_add(FETCH_LATENCY_SECS as i64, Ordering::SeqCst);
+                        s.get_snapshot(&issuer).await.is_some()
+                    })
+                },
+                cancel_task,
+            )
+            .await;
+        });
+
+        // T=0: loop starts.
+        tokio::task::yield_now().await;
+
+        // Advance to T=60: first refresh due.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        clock_secs.store(t0_secs + 60, Ordering::SeqCst);
+        tokio::task::yield_now().await;
+
+        // Advance through 10s fetch latency to T=70.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+
+        // At T=70: first fetch completed; post-fetch last ≈70; next due ≈130.
+        // cache has a snapshot with fetched_at ≈70.
+        assert_eq!(
+            fetcher_count.load(Ordering::SeqCst),
+            1,
+            "composition A: exactly one fetch at T=70"
+        );
+
+        // T=129: NOT due (age = 129-70 = 59 < 60). No second fetch.
+        tokio::time::advance(Duration::from_secs(59)).await; // T=129
+        clock_secs.store(t0_secs + 129, Ordering::SeqCst);
+        tokio::task::yield_now().await;
+
+        // T=129: assert both timing and cache-hit claims.
+        assert_eq!(
+            callback_start_count.load(Ordering::SeqCst),
+            1,
+            "composition A: timer callback must NOT have been entered a second time at T=129. \
+             Falsifying mutation: restore pre-fetch `last = now` in the refresh loop → \
+             second callback fires at T≈120 (not T≈130: pre-fetch `last=T60` yields \
+             next_due = T60+60=T120; post-fetch `last=T70` yields next_due = T70+60=T130; \
+             the mutation makes the callback enter at T≈120, before T=129) → \
+             callback_start_count == 2 at T=129."
+        );
+        assert_eq!(
+            fetcher_count.load(Ordering::SeqCst),
+            1,
+            "composition A: cache not-due at T=129 — no second fetch.              Falsifying mutation: remove the not-due short-circuit from get_snapshot →              second fetcher call at T=129 → count == 2."
+        );
+
+        // Verify the source serves the cached snapshot without fetching.
+        // get_snapshot advances the source clock by 0 (no latency here).
+        let snap = source.get_snapshot(ISSUER).await;
+        assert!(
+            snap.is_some(),
+            "composition A: cached snapshot must be live at T=129 (hard_deadline is T≈160)"
+        );
+        assert_eq!(
+            fetcher_count.load(Ordering::SeqCst),
+            1,
+            "composition A: get_snapshot at T=129 must NOT trigger a new fetch"
+        );
+
+        // T=131: second refresh is due (post-fetch last ≈70 + 60 = 130 ≤ 131).
+        tokio::time::advance(Duration::from_secs(2)).await; // T=131
+        clock_secs.store(t0_secs + 131, Ordering::SeqCst);
+        tokio::task::yield_now().await;
+
+        // Advance through 10s fetch latency.
+        tokio::time::advance(Duration::from_secs(10)).await; // T=141
+        clock_secs.store(t0_secs + 141, Ordering::SeqCst);
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            fetcher_count.load(Ordering::SeqCst),
+            2,
+            "composition A: second fetch by T=141 (post-fetch last ≈70 + interval 60 + fetch 10)"
+        );
+
+        cancel.cancel();
+        task.await.expect("refresh loop task");
+    }
+
+    // ── Composition B: fetch failure does not extend snapshot freshness ──────
+    //
+    // A successful first fetch populates the snapshot (hard_deadline = T0+90).
+    // Verified claims (Claims 1-2 via direct source; Claim 3 via timer callback;
+    // Claim 4 via direct source recovery):
+    //
+    //   1. After a failed refresh at T=61, the previous snapshot is still served
+    //      (it is before its hard_deadline: T0+61 < T0+90).
+    //   2. The generation is unchanged (no new snapshot committed on failure).
+    //   3. At T=122 (past hard_deadline T0+90), the timer callback returns false
+    //      (source returns None — snapshot cleared, continuing failure cannot revive it).
+    //      Confirmed via both the timer callback signal and a direct source call.
+    //   4. After a successful fetch at T=123, the snapshot is recovered — Some.
+    //
+    // Clock design: both layers share a single Tokio paused clock.
+    //   - `nip_fi_jwks_refresh_loop` uses `tokio::time::sleep_until`.
+    //   - `ProductionJwksSource` uses a `now_fn` bridged to the same paused clock
+    //     via `t0_instant` / `t0_utc` offsets — advancing Tokio time drives both.
+    //
+    // Response queue (5 total):
+    //   response[0]: ok  — warm at T=0 (direct call)
+    //   response[1]: fail — stale at T=61 (direct call, snapshot still live)
+    //   response[2]: fail — timer callback due T=121, observes T=122 (source T=122 > deadline T=90
+    //                        → snapshot cleared → fetch → None → callback returns false)
+    //   response[3]: fail — direct call at T=122 (confirms still None; Claim 3 source)
+    //   response[4]: ok  — direct call at T=123 (recovery; Claim 4)
+    //
+    // Sequence:
+    //   T=0:   warm (response[0]). Timer NOT yet spawned (Claims 1-2 use direct calls).
+    //   T=61:  direct call → stale fail (response[1]) → live snapshot → Claims 1+2.
+    //   T=61:  spawn timer. Timer `last = T=61`. First callback due at T=61+60=T=121.
+    //   T=122: advance Tokio past the T=121 due time; callback observes T=122. Source: T=122 > deadline=90
+    //          → snapshot cleared → fetch response[2]=fail → None → callback returns
+    //          false → warn! emitted. callback_count=1.
+    //   Wait for callback_count >= 1, then cancel.
+    //   T=122: direct call (response[3]=fail) → None. Claim 3 confirmed.
+    //   T=123: direct call (response[4]=ok) → Some. Claim 4 confirmed.
+    //
+    // Falsifying mutation: "store snapshot on failure with extended deadline"
+    // sets deadline to T0+61+90=T0+151. At observed T=122:
+    //   - now=T0+122 >= deadline=T0+151 is FALSE → snapshot live, NOT cleared.
+    //   - age_secs = T0+122 - T0+61 = 61 >= 60 → stale → fetch response[2]=fail.
+    //   - Snapshot NOT cleared → fetch fails → but old snapshot kept (live) → Some.
+    //   - Callback returns TRUE (not false) → callback_returned_false stays false
+    //   - assertion fires: callback_returned_false must be true.
+    //   At T=122 direct call: same logic → Some → Claim 3 (is_none()) assertion fires.
+    #[tokio::test(start_paused = true)]
+    async fn composition_failure_does_not_extend_snapshot_freshness() {
+        const ISSUER: &str = "comp-b.issuer.test";
+        const REFRESH: u64 = 60;
+        const HARD_DEADLINE: u64 = 90;
+
+        // Bridge the source clock to the Tokio paused clock so both layers see
+        // identical time when tokio::time::advance() is called.
+        let t0_instant = tokio::time::Instant::now();
+        let t0_utc = chrono::Utc::now(); // stable: paused runtime
+        let t0_instant_b = t0_instant;
+        let t0_utc_b = t0_utc;
+        let now_fn: Arc<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync> =
+            Arc::new(move || {
+                let elapsed_secs = tokio::time::Instant::now()
+                    .duration_since(t0_instant_b)
+                    .as_secs() as i64;
+                t0_utc_b
+                    + chrono::Duration::try_seconds(elapsed_secs)
+                        .unwrap_or(chrono::Duration::zero())
+            });
+
+        // Five responses: [ok, fail, fail, fail, ok] — see sequence above.
+        let fetcher = ScriptedJwksFetcher::new([
+            Ok(test_jwks("key-b1")),
+            Err(JwksFetchError::NetworkError),
+            Err(JwksFetchError::NetworkError),
+            Err(JwksFetchError::NetworkError),
+            Ok(test_jwks("key-b2")),
+        ]);
+        let fetcher_count = Arc::clone(&fetcher.call_count);
+
+        let source = Arc::new(
+            ProductionJwksSource::new_with_clock(
+                vec![make_source_config(ISSUER, REFRESH, HARD_DEADLINE)],
+                fetcher,
+                Arc::clone(&now_fn),
+            )
+            .expect("valid source"),
+        );
+
+        // ── T=0: warm the cache ─────────────────────────────────────────────
+        // Direct call: source sees T=0, no snapshot → fetch response[0]=ok → Some.
+        let snap_before = source.get_snapshot(ISSUER).await.expect("initial snapshot");
+        let generation_before = snap_before.generation();
+        assert_eq!(
+            fetcher_count.load(Ordering::SeqCst),
+            1,
+            "composition B: one fetch for initial warm (response[0]=ok)"
+        );
+
+        // ── T=61: stale direct call (Claims 1+2) ───────────────────────────
+        // Age = 61 >= 60 → stale → fetch response[1]=fail.
+        // Snapshot still live (T=61 < hard_deadline=T=90) → Some returned.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+
+        let snap_after_fail = source.get_snapshot(ISSUER).await;
+
+        // Claim 1: failed refresh at T=61 still returns the previous live snapshot.
+        assert!(
+            snap_after_fail.is_some(),
+            "composition B: failed refresh at T=61 MUST still serve the cached snapshot \
+             (T=61 < hard_deadline T=90). \
+             Falsifying mutation: clear snapshot on failure → None at T=61."
+        );
+        assert_eq!(
+            fetcher_count.load(Ordering::SeqCst),
+            2,
+            "composition B: second fetch attempted (response[1]=fail)"
+        );
+
+        // Claim 2: generation unchanged (no new snapshot committed on failure).
+        let generation_after_fail = snap_after_fail.unwrap().generation();
+        assert_eq!(
+            generation_before, generation_after_fail,
+            "composition B: fetch failure MUST NOT advance the snapshot generation — \
+             the cached snapshot is unchanged. \
+             Falsifying mutation: commit a new snapshot on failure → generation changes."
+        );
+
+        // ── T=61: spawn timer loop ──────────────────────────────────────────
+        // Spawned at T=61; timer records `last = T=61`. First callback due at T=121.
+        //
+        // The timer callback calls source.get_snapshot() and returns its is_some().
+        // At T=121 (past hard_deadline T=90) it must return false (snapshot absent).
+        let callback_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_count_task = Arc::clone(&callback_count);
+        let callback_returned_false = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_returned_false_task = Arc::clone(&callback_returned_false);
+
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+        let source_task = Arc::clone(&source);
+
+        let task = tokio::spawn(async move {
+            nip_fi_jwks_refresh_loop(
+                vec![(ISSUER.to_owned(), REFRESH, true)],
+                move |iss| {
+                    let s = Arc::clone(&source_task);
+                    let iss = iss.to_owned();
+                    let ctr = Arc::clone(&callback_count_task);
+                    let flag = Arc::clone(&callback_returned_false_task);
+                    Box::pin(async move {
+                        let result = s.get_snapshot(&iss).await.is_some();
+                        if !result {
+                            flag.store(true, Ordering::SeqCst);
+                        }
+                        ctr.fetch_add(1, Ordering::SeqCst);
+                        result
+                    })
+                },
+                cancel_task,
+            )
+            .await;
+        });
+
+        // Yield once so the spawned task initializes and records `last = T=61`.
+        tokio::task::yield_now().await;
+
+        // ── Advance to T=122 ────────────────────────────────────────────────
+        // Timer is due at T=121 (last=T=61, next=T=61+60=T=121 ≤ T=122), but
+        // `tokio::time::advance` jumps to T=122 before the task runs, so the
+        // callback observes T=122 > hard_deadline=T=90 → snapshot cleared →
+        // fetch response[2]=fail → None. Callback returns false.
+        // callback_returned_false=true. callback_count=1.
+        //
+        // Falsifying mutation: extend deadline to T=61+90=T=151 on failure.
+        // At T=122: T=122 < T=151 → snapshot NOT cleared; age_secs=122-61=61 >= 60
+        // → stale → fetch response[2]=fail → snapshot not cleared (still live) → Some.
+        // Callback returns true → callback_returned_false stays false → assertion fires.
+        tokio::time::advance(Duration::from_secs(61)).await; // T=61 → T=122
+                                                             // Bounded yield: let the spawned timer task run its callback (observed at T=122).
+                                                             // At most 10_000 yields; if the callback never fires this diagnostic fails
+                                                             // rather than hanging forever.  A virtual tokio::time::timeout would also
+                                                             // create a fake timer that never fires while the clock is paused — hence
+                                                             // the explicit iteration bound.
+        for i in 0..10_000usize {
+            if callback_count.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            if i == 9_999 {
+                panic!(
+                    "composition B: callback_count never reached 1 after 10_000 yields. \
+                     The spawned refresh loop task may have panicked or stalled."
+                );
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // Claim 3 via timer: callback_returned_false proves the timer observed None.
+        assert!(
+            callback_returned_false.load(Ordering::SeqCst),
+            "composition B: timer callback at T=122 MUST return false (source returns None \
+             when snapshot is past hard_deadline=T=90 and fetch keeps failing). \
+             Falsifying mutation: extend deadline on failure (T=61+90=T=151) → \
+             snapshot still live at T=122 → callback returns true → this assertion fires."
+        );
+
+        cancel.cancel();
+        task.await.expect("refresh loop task");
+
+        // ── Claim 3 via direct source call ──────────────────────────────────
+        // T=122: past hard_deadline=T=90 → snapshot cleared → fetch response[3]=fail → None.
+        // Confirms the source still returns None after the timer observed expiry.
+        let snap_at_expiry = source.get_snapshot(ISSUER).await;
+        assert!(
+            snap_at_expiry.is_none(),
+            "composition B: at T=122 (past hard_deadline T=90), get_snapshot MUST return None. \
+             Snapshot must be cleared and continuing fetch failure cannot revive it. \
+             Falsifying mutation: extend deadline on failure → snapshot live at T=122 → Some."
+        );
+        assert_eq!(
+            fetcher_count.load(Ordering::SeqCst),
+            4, // warm(1) + stale-fail(2) + timer-expiry(3) + direct-expiry(4)
+            "composition B: fourth fetch at T=122 (direct expiry verification, response[3]=fail)"
+        );
+
+        // ── Claim 4: recovery ────────────────────────────────────────────────
+        // Advance to T=123 (still past hard_deadline=T=90, snapshot absent).
+        // get_snapshot forces a fetch → response[4]=ok → Some.
+        tokio::time::advance(Duration::from_secs(1)).await; // T=122 → T=123
+        tokio::task::yield_now().await;
+        let snap_after_recovery = source.get_snapshot(ISSUER).await;
+        assert!(
+            snap_after_recovery.is_some(),
+            "composition B: recovery fetch at T=123 MUST return a new snapshot \
+             (response[4]=ok). \
+             Falsifying mutation: make get_snapshot always return Some (never trigger a fetch) \
+             → response[4]=ok never consumed → generation unchanged → assert_ne!(generation) \
+             below fires."
+        );
+        assert_eq!(
+            fetcher_count.load(Ordering::SeqCst),
+            5,
+            "composition B: fifth fetch at T=123 (recovery, response[4]=ok)"
+        );
+        let generation_after_recovery = snap_after_recovery.unwrap().generation();
+        // New JWKS content "key-b2" ≠ "key-b1" → generation must have advanced.
+        assert_ne!(
+            generation_before, generation_after_recovery,
+            "composition B: recovery fetch with different JWKS MUST advance the generation. \
+             Falsifying mutation: never commit a new snapshot → generation unchanged."
+        );
+    }
+
+    // ── Composition C: privacy — issuer URL must not appear in log output ────
+    //
+    // `ProductionJwksSource` logs `warn!(error = %err, ...)` on fetch failure
+    // and the timer loop logs `warn!(issuer_index = idx, ...)` on no-snapshot.
+    // The startup warm writers log `info!(issuer_index = idx, ...)` on success
+    // and `warn!(issuer_index = idx, ...)` on failure.
+    // None of these paths must echo the raw issuer URL or JWKS URI.
+    //
+    // This test drives four paths:
+    //   1. `warm_nip_fi_jwks_snapshots()` success → startup `info!` (no URI).
+    //   2. `warm_nip_fi_jwks_snapshots()` failure → startup `warn!` (no URI).
+    //   3. `ProductionJwksSource::get_snapshot()` fetch fail →
+    //      library `warn!(error = %err, "nip-fi jwks fetch failed...")` (no URI).
+    //   4. `nip_fi_jwks_refresh_loop` no-snapshot →
+    //      `warn!(issuer_index = idx, "NIP-FI: background JWKS refresh returned no snapshot")`
+    //      (no URI). Requires source clock past hard_deadline so get_snapshot
+    //      returns None (snapshot cleared) and the callback returns false.
+    //
+    // Falsifying mutation (timer path): add `issuer_uri = config.contract.jwks_uri()`
+    // to any warn! → sentinel appears in captured output → assertion fires.
+    //
+    // Clock design: both layers share a single paused Tokio clock.
+    //   - `nip_fi_jwks_refresh_loop` uses `tokio::time::sleep_until` and
+    //     `tokio::time::Instant::now()` — controlled by `start_paused` runtime.
+    //   - `ProductionJwksSource` uses an injected `now_fn` — bridged to the
+    //     same paused Tokio clock via `t0_instant` / `t0_utc` offsets so both
+    //     layers observe the same time when Tokio time is advanced.
+    //
+    // Sequence (all times are Tokio-paused clock offsets from T=0):
+    //   T=0:  spawn timer loop; yield so it records `last = Instant::now() = T0`.
+    //         First callback due at T=60.
+    //   T=0:  warm (paths 1+2) consumes responses[0]=ok, [1]=fail.
+    //         Snapshot for issuer_ok: fetched_at=T0, hard_deadline=T90.
+    //         All subsequent fetcher calls return NetworkError (queue exhausted).
+    //   T=61: advance Tokio → timer due at T=60 runs at T=61 (still live: T61 < T90,
+    //         stale age=61 → fetch → NetworkError → live snapshot returned; post-fetch
+    //         last=T61).
+    //         Path 3 direct call at T=61: same result → fetch-fail warn! ✓.
+    //   T=121 (T=61+60): advance Tokio → timer fires at T=121 (second fire:
+    //         last=T61, next_due=T121). Source clock at T=121: now=T121 > deadline=T90
+    //         → snapshot cleared → fetch fails → None → callback returns false →
+    //         path-4 warn! ✓. Wait for callback count >= 2 then cancel.
+    //
+    // Falsifying mutation (path 4): bridge now_fn to a fixed clock at T=61 →
+    // at timer-fire T=121, source sees T=61 < T=90 → snapshot live → callback
+    // returns true → no warn! → path-4 assertion fails.
+    //
+    // Uses `#[test]` + manual runtime so `with_default` wraps all async execution.
+    #[test]
+    fn composition_log_does_not_leak_issuer_url() {
+        use std::io::Write;
+
+        // Sentinel must be lowercase: JwksSourceContract::new() canonicalizes
+        // the URI and lowercases the host component. An uppercase sentinel would
+        // never match the canonicalized output even when the URI leaks.
+        const SENTINEL: &str = "sentinel-issuer-url-9f4e2b1a";
+        const REFRESH: u64 = 60;
+        const HARD_DEADLINE: u64 = 90;
+
+        // Two issuers: one warm-success, one warm-fail.
+        let issuer_ok = format!("https://{SENTINEL}.ok.example.invalid");
+        let issuer_fail = format!("https://{SENTINEL}.fail.example.invalid");
+        let jwks_uri_ok = format!("https://{SENTINEL}.cdn-ok.example.invalid/jwks.json");
+        let jwks_uri_fail = format!("https://{SENTINEL}.cdn-fail.example.invalid/jwks.json");
+
+        // Capture log output.
+        let buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        #[derive(Clone)]
+        struct MakeCapturing(Arc<std::sync::Mutex<Vec<u8>>>);
+        struct CapturingWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for CapturingWriter {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for MakeCapturing {
+            type Writer = CapturingWriter;
+            fn make_writer(&'a self) -> CapturingWriter {
+                CapturingWriter(Arc::clone(&self.0))
+            }
+        }
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(MakeCapturing(Arc::clone(&buf)))
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .expect("runtime");
+
+            rt.block_on(async {
+                // Anchor the source clock to Tokio's paused time.
+                // Both layers (timer loop + source) share this clock:
+                // advancing Tokio time drives the source clock identically.
+                let t0_instant = tokio::time::Instant::now();
+                let t0_utc = chrono::Utc::now(); // stable: paused runtime
+                let t0_instant_c = t0_instant;
+                let t0_utc_c = t0_utc;
+                let now_fn: Arc<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync> =
+                    Arc::new(move || {
+                        let elapsed_secs = tokio::time::Instant::now()
+                            .duration_since(t0_instant_c)
+                            .as_secs() as i64;
+                        t0_utc_c
+                            + chrono::Duration::try_seconds(elapsed_secs)
+                                .unwrap_or(chrono::Duration::zero())
+                    });
+
+                // Queue: [warm-ok, warm-fail]; all subsequent calls → NetworkError.
+                let fetcher = ScriptedJwksFetcher::new([
+                    Ok(r#"{"keys":[{"kty":"EC","crv":"P-256","x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0","use":"sig","alg":"ES256","kid":"k1"}]}"#.to_string()),
+                    Err(JwksFetchError::NetworkError),
+                ]);
+
+                let source = Arc::new(
+                    ProductionJwksSource::new_with_clock(
+                        vec![
+                            IssuerJwksConfig {
+                                issuer: issuer_ok.clone(),
+                                contract: JwksSourceContract::new(
+                                    jwks_uri_ok.clone(),
+                                    REFRESH,
+                                    HARD_DEADLINE,
+                                )
+                                .expect("valid test contract"),
+                            },
+                            IssuerJwksConfig {
+                                issuer: issuer_fail.clone(),
+                                contract: JwksSourceContract::new(
+                                    jwks_uri_fail.clone(),
+                                    REFRESH,
+                                    HARD_DEADLINE,
+                                )
+                                .expect("valid test contract"),
+                            },
+                        ],
+                        fetcher,
+                        Arc::clone(&now_fn),
+                    )
+                    .expect("valid source"),
+                );
+
+                // Count callback completions so we know when path 4 has fired.
+                // Callback 1 (at T=61): snapshot live → true (no warn!).
+                // Callback 2 (at T=121): snapshot past deadline → false → path-4 warn!.
+                let callback_count =
+                    Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let callback_count_task = Arc::clone(&callback_count);
+
+                // Spawn timer loop at T=0. `last = Instant::now() = T0`.
+                // First callback due at T=60 (runs at T=61); second at T=121 (post-fetch
+                // last=T61).
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel_task = cancel.clone();
+                let source_task = Arc::clone(&source);
+                let issuer_task = issuer_ok.clone();
+                let task = tokio::spawn(async move {
+                    nip_fi_jwks_refresh_loop(
+                        vec![(issuer_task.clone(), REFRESH, true)],
+                        move |iss| {
+                            let s = Arc::clone(&source_task);
+                            let iss = iss.to_owned();
+                            let ctr = Arc::clone(&callback_count_task);
+                            Box::pin(async move {
+                                let result = s.get_snapshot(&iss).await.is_some();
+                                ctr.fetch_add(1, Ordering::SeqCst);
+                                result
+                            })
+                        },
+                        cancel_task,
+                    )
+                    .await;
+                });
+
+                // Yield once: spawned task initializes, records `last = T0`.
+                tokio::task::yield_now().await;
+
+                // Paths 1+2: startup warm writers.
+                // Consumes responses[0]=ok (issuer_ok) and [1]=fail (issuer_fail).
+                // Emits:  info!(issuer_index=0, "NIP-FI: JWKS snapshot warmed")
+                //         warn!(issuer_index=1, "NIP-FI: JWKS warm failed…")
+                // After warm: issuer_ok snapshot has fetched_at=T0, hard_deadline=T0+90.
+                // Queue exhausted; all subsequent fetcher calls → NetworkError.
+                let issuer_ids = vec![issuer_ok.clone(), issuer_fail.clone()];
+                warm_nip_fi_jwks_snapshots(&*source, &issuer_ids).await;
+
+                // Path 3: library fetch-fail warn!.
+                // Advance to T=61 (past refresh interval=60, before hard_deadline=90).
+                // During the advance, the timer fires at T=60 but resolves at T=61:
+                //   source clock=T61, age=61 >= 60 → stale → fetch → NetworkError
+                //   → fetch-fail warn! [path 3 precursor] → live snapshot returned
+                //   → callback 1 returns true (no path-4 warn!); last=T61.
+                // Then path 3 direct call at T=61 also produces fetch-fail warn! ✓.
+                tokio::time::advance(std::time::Duration::from_secs(61)).await;
+                // Bounded yield: allow the T=60 timer callback to run.
+                for i in 0..10_000usize {
+                    if callback_count.load(Ordering::SeqCst) >= 1 {
+                        break;
+                    }
+                    if i == 9_999 {
+                        panic!(
+                            "privacy C: callback_count never reached 1 after 10_000 yields at T=61. \
+                             The spawned privacy timer task may have panicked or stalled."
+                        );
+                    }
+                    tokio::task::yield_now().await;
+                }
+                // Path 3: direct call; produces `warn!(error = %err, "nip-fi jwks fetch failed…")`.
+                let _ = source.get_snapshot(&issuer_ok).await;
+
+                // Path 4: timer loop no-snapshot warn!.
+                // Advance from T=61 to T=121 (60 more seconds).
+                // Timer fires at T=121 (post-fetch last=T61, next_due=T61+60=T121).
+                // Source clock via now_fn = T=121 >= hard_deadline=T=90:
+                //   → snapshot cleared
+                //   → fetch fails (NetworkError) → None
+                //   → callback 2 returns false
+                //   → `warn!(issuer_index=idx, "NIP-FI: background JWKS refresh
+                //       returned no snapshot")` ✓.
+                //
+                // Falsifying mutation: bridge now_fn to a fixed clock at T=61 →
+                // at T=121 source sees T=61 < T=90 → snapshot live → callback true
+                // → no warn! → path-4 assertion fires.
+                tokio::time::advance(std::time::Duration::from_secs(60)).await;
+                // Bounded yield: wait for callback 2 (count >= 2) to confirm path-4 has run.
+                for i in 0..10_000usize {
+                    if callback_count.load(Ordering::SeqCst) >= 2 {
+                        break;
+                    }
+                    if i == 9_999 {
+                        panic!(
+                            "privacy C: callback_count never reached 2 after 10_000 yields at T=121. \
+                             The spawned privacy timer task may have panicked or stalled."
+                        );
+                    }
+                    tokio::task::yield_now().await;
+                }
+                cancel.cancel();
+                let _ = task.await;
+            });
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap_or_default();
+
+        // Assert startup warm-success was captured (path 1).
+        assert!(
+            captured.contains("JWKS snapshot warmed"),
+            "Expected info! 'NIP-FI: JWKS snapshot warmed' from startup warm success path. \
+             Captured (first 500 chars):\n{}",
+            &captured[..captured.len().min(500)]
+        );
+        // Assert startup warm-fail was captured (path 2).
+        assert!(
+            captured.contains("JWKS warm failed"),
+            "Expected warn! 'NIP-FI: JWKS warm failed' from startup warm failure path. \
+             Captured (first 500 chars):\n{}",
+            &captured[..captured.len().min(500)]
+        );
+        // Assert library fetch-fail warn! was captured (path 3).
+        // Fired by the T=60 timer callback and/or the T=61 direct call — either path
+        // produces `warn!(error = %err, "nip-fi jwks fetch failed…")`.
+        assert!(
+            captured.contains("nip-fi jwks fetch failed"),
+            "Expected warn! 'nip-fi jwks fetch failed' from ProductionJwksSource. \
+             The log capture infrastructure may be broken. \
+             Captured (first 500 chars):\n{}",
+            &captured[..captured.len().min(500)]
+        );
+        // Assert timer background warn! was captured (path 4).
+        // Fired by callback 2 at Tokio T=121: source clock T=121 > deadline T=90
+        // → get_snapshot returns None → callback returns false → warn! emitted.
+        //
+        // Falsifying mutation: bridge now_fn to a fixed T=61 clock →
+        // source at T=121 still sees T=61 < T=90 → snapshot live → callback true
+        // → no warn! → this assertion fails.
+        assert!(
+            captured.contains("background JWKS refresh returned no snapshot"),
+            "Expected timer warn! 'NIP-FI: background JWKS refresh returned no snapshot'. \
+             Fired when callback 2 (Tokio T=121) finds source clock T=121 > hard_deadline T=90. \
+             Captured (first 500 chars):\n{}",
+            &captured[..captured.len().min(500)]
+        );
+        // Assert no sentinel in any log output.
+        assert!(
+            !captured.contains(SENTINEL),
+            "NIP-FI logs MUST NOT contain the raw issuer URL or JWKS URI. \
+             Sentinel '{SENTINEL}' found in captured output. \
+             Falsifying mutation: add issuer_uri to any warn! call → sentinel appears.\n\
+             Captured (first 500 chars):\n{}",
+            &captured[..captured.len().min(500)]
+        );
     }
 }

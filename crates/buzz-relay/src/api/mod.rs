@@ -32,6 +32,28 @@ pub(crate) fn not_found(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     api_error(StatusCode::NOT_FOUND, msg)
 }
 
+/// Parse a raw query string into `T` after NIP-FI/NIP-98 admission has
+/// already succeeded.
+///
+/// - Absent or empty query → `Ok(T::default())` (no params is valid).
+/// - Non-empty but malformed → `Err(400 bad request)`.
+///
+/// **Do not use `.ok().unwrap_or_default()` here.**  That pattern silently
+/// discards malformed input and changes query semantics — for example,
+/// `?status=open&limit=abc` would drop the valid `status=` field together
+/// with the bad `limit=`, broadening the query to all statuses.  Post-
+/// admission a parse failure is the caller's error, not an auth failure.
+/// [FI-TRACE-HTTP-INGRESS]
+pub(crate) fn parse_query_or_400<T: serde::de::DeserializeOwned + Default>(
+    raw: Option<&str>,
+) -> Result<T, (StatusCode, Json<serde_json::Value>)> {
+    match raw {
+        None | Some("") => Ok(T::default()),
+        Some(q) => serde_urlencoded::from_str(q)
+            .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid query: {e}"))),
+    }
+}
+
 /// Relay membership enforcement — single gate for all authenticated entry points.
 ///
 /// Moved here from the deleted `relay_members` module. Called by `media.rs`, `bridge.rs`,
@@ -381,5 +403,74 @@ pub mod relay_members {
 
             assert_eq!(result, None);
         }
+    }
+}
+
+// ── parse_query_or_400 regression tests ──────────────────────────────────────
+
+#[cfg(test)]
+mod parse_query_tests {
+    use super::parse_query_or_400;
+    use serde::Deserialize;
+
+    /// Mirror of `ModerationReadQuery` — independent so this module compiles
+    /// without pulling in handler dependencies.
+    #[derive(Debug, Deserialize, Default, PartialEq)]
+    struct QueryFixture {
+        status: Option<String>,
+        limit: Option<i64>,
+    }
+
+    /// Absent query → Default.  No params is always valid.
+    #[test]
+    fn absent_query_gives_default() {
+        let result: Result<QueryFixture, _> = parse_query_or_400(None);
+        assert_eq!(result.unwrap(), QueryFixture::default());
+    }
+
+    /// Empty string → Default.  Same as absent.
+    #[test]
+    fn empty_query_gives_default() {
+        let result: Result<QueryFixture, _> = parse_query_or_400(Some(""));
+        assert_eq!(result.unwrap(), QueryFixture::default());
+    }
+
+    /// Well-formed query → parsed correctly.
+    #[test]
+    fn valid_query_parses_correctly() {
+        let result: Result<QueryFixture, _> = parse_query_or_400(Some("status=open&limit=50"));
+        let q = result.unwrap();
+        assert_eq!(q.status.as_deref(), Some("open"));
+        assert_eq!(q.limit, Some(50));
+    }
+
+    /// Malformed limit → 400 error, NOT default.
+    ///
+    /// Regression for the `.ok().unwrap_or_default()` bug: the old code would
+    /// silently discard ALL fields on any parse error, so `status=open&limit=abc`
+    /// would return `QueryFixture::default()` (status=None) instead of 400.
+    /// That made malformed input yield a BROADER query than intended.
+    #[test]
+    fn malformed_limit_is_400_not_default() {
+        let result: Result<QueryFixture, _> = parse_query_or_400(Some("status=open&limit=abc"));
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.0,
+            axum::http::StatusCode::BAD_REQUEST,
+            "malformed ?limit= must return 400, not silently default \
+             (old bug: .ok().unwrap_or_default() would drop status= too)"
+        );
+    }
+
+    /// Malformed standalone limit → 400 error, NOT default.
+    #[test]
+    fn malformed_standalone_limit_is_400_not_default() {
+        let result: Result<QueryFixture, _> = parse_query_or_400(Some("limit=abc"));
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.0,
+            axum::http::StatusCode::BAD_REQUEST,
+            "malformed ?limit=abc must return 400, not silently default to the cap"
+        );
     }
 }

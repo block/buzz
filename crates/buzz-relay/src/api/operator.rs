@@ -79,14 +79,7 @@ async fn authorize_operator_request(
         pubkey,
         event_id_bytes,
         ..
-    } = bridge::verify_bridge_auth_with_options(
-        headers,
-        method,
-        &url,
-        body,
-        true, // operator endpoints always require NIP-98; no X-Pubkey dev fallback
-        body.is_some(),
-    )?;
+    } = bridge::verify_nip98_exempt_operator(headers, method, &url, body)?;
     check_operator_replay(state, event_id_bytes).await?;
 
     let pubkey_hex = pubkey.to_hex();

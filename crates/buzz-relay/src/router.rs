@@ -24,8 +24,237 @@ use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
+use crate::nip_fi_http::http_denial;
 use crate::readiness::{self, ReadinessEvaluation, ReadinessReason};
 use crate::state::AppState;
+
+// ── NIP-FI fail-closed assertion guard ───────────────────────────────────────
+//
+// ## Purpose
+//
+// This middleware is the crypto backstop for NIP-FI route classification.
+// It runs *over the entire merged router*: in Enforce or DenyProtected mode,
+// any request whose path does not start with a prefix in
+// `NIP_FI_EXEMPT_PREFIXES` must carry the
+// `Nostr-Federated-Identity: Bearer …` assertion header with a
+// cryptographically valid signature — or it is denied before reaching the
+// handler.
+//
+// The handler-level admission authority is `admit_nip_fi_http_on_state` in
+// `nip_fi_http.rs`.  Protected handlers call it with a NIP-98 extraction
+// closure and it delegates to `admit_nip_fi_http`, which runs NIP-98
+// extraction → assertion verify → pairing → deny-map (Enforce) and alone
+// constructs a `NipFiAdmission`.  The private constructor does not force a
+// handler to make the call.
+//
+// What is guaranteed: in Enforce, this guard rejects a missing or invalid
+// assertion on every non-exempt route; in DenyProtected it returns 503
+// without verifying; in Off it is transparent.  Key pairing
+// (`asserted_key == proven_pubkey`) and the deny map run only in handlers
+// that call `admit_nip_fi_http_on_state`.  In Enforce, a handler that omits
+// the call and does its own NIP-98 is still subject to the assertion guard,
+// but a request with a valid assertion passes without pairing or a deny check.
+//
+// ## Adding a new route
+//
+// * **Protected (NIP-98-authenticated):** call `admit_nip_fi_http_on_state`
+//   with a NIP-98 extraction closure.  No action needed here.
+//
+// * **Public / exempt (no NIP-FI requirement):** add the path or prefix to
+//   `NIP_FI_EXEMPT_PREFIXES` below.  Failure to do so will deny the route in
+//   Enforce mode, which is intentional: the default is DENY; public status is
+//   explicit.
+//
+// ## Relationship to Off mode
+//
+// When `NipFiMode::Off` the guard is fully transparent — no request is
+// touched.  [FI-INV-15]
+//
+// ## What this guard checks (and does NOT check)
+//
+// The guard performs the full offline assertion verification (transport
+// extraction + JWT signature + issuer + expiry + claims).  This means:
+//
+//   • Absent header                         → 401 MissingEvidence
+//   • Junk / non-Bearer value               → 403 EvidenceRejected
+//   • Repeated / comma-combined fields      → 403 EvidenceRejected
+//   • Structurally malformed / bad sig      → 403 EvidenceRejected
+//   • Unknown issuer / expired / bad claims → 403 EvidenceRejected
+//   • No verifier yet (startup race)        → 503 AuthorizationUnavailable
+//   • Cryptographically valid assertion     → forward to handler
+//
+// The guard does NOT check key pairing or deny-map: those require the NIP-98
+// `proven_pubkey` from each handler's closure, which is not available in
+// middleware.  `admit_nip_fi_http_on_state` performs the full sequence.
+//
+// [FI-TRACE-AUTHORITY-UNIFORM] Both the guard and `admit_nip_fi_http_on_state`
+// delegate to `nip_fi_http.rs`; the guard fires first.
+
+/// Path prefixes that are exempt from NIP-FI assertion enforcement.
+///
+/// Every route in this relay is NIP-FI-protected by default.  Routes that
+/// should NOT require the `Nostr-Federated-Identity` header in Enforce mode
+/// MUST appear in this list; omission means the guard denies the route.
+///
+/// **Matching rules:**
+/// - Entries ending with `/` match any path with that prefix (subtree match).
+/// - All other entries match exactly (the request path must equal the entry
+///   or start with the entry followed by `/`, `?`, or `#`).
+///
+/// When adding a new public or pre-auth route, add its path or prefix here
+/// and include the NIP-FI classification comment in `build_router`.
+const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
+    // WebSocket upgrade + NIP-11 relay info (public; WS-NIP-FI governs WS)
+    "/",
+    // NIP-11 relay info — exact path
+    "/info",
+    // NIP-05 — exact path
+    "/.well-known/nostr.json",
+    // K8s / health probes (no auth) — exact paths
+    "/health",
+    "/_liveness",
+    "/_readiness",
+    // Pre-membership enrollment door — identity not yet issued
+    "/api/invites/claim",
+    // Pre-membership policy gate — no NIP-98 principal yet
+    "/api/invites/accept-policy",
+    // Public policy documents — exact path + subtree
+    "/api/join-policy",
+    // Webhook trigger — secret-header auth; subtree for /hooks/{id}
+    "/hooks/",
+    // Huddle audio WebSocket — WS-NIP-FI governs WebSocket; subtree
+    "/huddle/",
+    // Testbed-only mesh probe — no auth; subtree
+    "/_mesh/",
+    // Operator admin plane — keypair-in-config auth; subtree
+    "/operator/",
+    // Admin SPA backend — operator-credential gated; subtree
+    "/api/admin/",
+    // Static assets served by the SPA fallback; subtree
+    "/assets/",
+    "/favicon.svg",
+    // Invite landing page (SPA) — subtree
+    "/invite/",
+    // Git web GUI (SPA) — exact + subtree
+    "/repos",
+    // Internal HMAC/localhost control-plane endpoint for the pre-receive hook.
+    // Already protected by `require_localhost` middleware + signed operation
+    // payload; does not carry a NIP-FI assertion.  Listed by exact path —
+    // sub-paths (if any) are equally harmless since no routes exist there.
+    "/internal/git/policy",
+];
+
+/// Middleware: full offline assertion guard for NIP-FI protected paths.
+///
+/// Fires before any handler.  In Enforce mode, if the request path is not
+/// covered by [`NIP_FI_EXEMPT_PREFIXES`] the guard performs the full offline
+/// NIP-FI assertion verification (transport extraction + JWT signature +
+/// issuer + expiry + claims) via the relay's `FederatedAssertionVerifier`:
+///
+/// - Absent header               → 401 `authentication required\n`
+/// - Junk / non-Bearer value     → 403 `evidence rejected\n`
+/// - Repeated / comma-combined   → 403 `evidence rejected\n`
+/// - Bad signature / claims      → 403 `evidence rejected\n`
+/// - No verifier (startup race)  → 503 `authorization unavailable\n`
+/// - Cryptographically valid     → forward to handler
+///
+/// A "forgotten gate" handler — one that omits its own
+/// `admit_nip_fi_http_on_state` call — cannot admit with an invalidly signed
+/// assertion because the guard rejects it here before the handler fires.
+/// Only a cryptographically verified assertion reaches the handler; the
+/// handler then performs the key pairing and deny-map checks via
+/// `admit_nip_fi_http_on_state`.
+///
+/// In Off mode the middleware is fully transparent.
+async fn nip_fi_assertion_guard(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: middleware::Next,
+) -> axum::response::Response {
+    use crate::nip_fi_http::extract_bearer_token;
+    use buzz_auth::NipFiMode;
+
+    // Off mode: fully transparent. [FI-INV-15]
+    if matches!(state.config.nip_fi.mode, NipFiMode::Off) {
+        return next.run(request).await;
+    }
+
+    let path = request.uri().path();
+
+    // Exempt paths bypass the assertion-token check.
+    let exempt = NIP_FI_EXEMPT_PREFIXES.iter().any(|pattern| {
+        if *pattern == "/" {
+            // Exact root match only.
+            return path == "/";
+        }
+        if pattern.ends_with('/') {
+            // Subtree match: path must start with this prefix.
+            return path.starts_with(pattern);
+        }
+        // Exact-or-subtree match: path equals the pattern, or path starts
+        // with the pattern followed by a path separator or query character.
+        // This prevents "/info" from matching "/info-extra".
+        if path == *pattern {
+            return true;
+        }
+        if let Some(rest) = path.strip_prefix(pattern) {
+            return rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#');
+        }
+        false
+    });
+
+    if exempt {
+        return next.run(request).await;
+    }
+
+    // Admin SPA document routes are exempt when the request is on the admin
+    // host.  The admin SPA serves its own documents at bare paths (`/reports`,
+    // `/reports/<id>`, `/feedback`) — the browser navigates there directly.
+    // These paths carry no NIP-FI-protected tenant data; the actual data calls
+    // go to `/api/admin/v1/...` (already exempt via the `/api/admin/` prefix).
+    //
+    // The exemption is host-qualified: `/reports` on a tenant host is NOT
+    // exempt and stays protected.  Off mode is already handled above.
+    // [FI-TRACE-AUTHORITY-UNIFORM]
+    if is_admin_spa_path(path) && api::admin::is_admin_host(&state, request.headers()) {
+        return next.run(request).await;
+    }
+
+    // Non-exempt path in Enforce or DenyProtected mode.
+    //
+    // DenyProtected: unconditional 503 regardless of assertion presence.
+    // (`admit_nip_fi_http_on_state` also does this; the guard is the backstop.)
+    if matches!(state.config.nip_fi.mode, NipFiMode::DenyProtected) {
+        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+    }
+
+    // Enforce mode: full offline assertion verification.
+    //
+    // Step 1 — transport: extract the Bearer token.  Rejects absent, junk,
+    // repeated, comma-combined, empty, and whitespace-containing values.
+    // [FI-TRACE-TRANSPORT-CLOSED]
+    let token = match extract_bearer_token(request.headers()) {
+        Ok(t) => t,
+        Err(class) => return http_denial(class),
+    };
+
+    // Step 2 — cryptographic: verify signature, issuer, expiry, and claims.
+    // A forgotten-gate handler that omits `admit_nip_fi_http_on_state` can
+    // only be reached with a cryptographically valid assertion.  Key pairing
+    // and deny-map are performed by `admit_nip_fi_http_on_state` in the
+    // handler, not here.  [FI-TRACE-AUTHORITY-UNIFORM]
+    let verifier = match state.nip_fi_verifier.as_deref() {
+        Some(v) => v,
+        None => {
+            // Verifier not yet constructed (startup race); fail closed.
+            return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+        }
+    };
+    match verifier.verify_assertion(token) {
+        Ok(_) => next.run(request).await,
+        Err(e) => http_denial(e.denial_class()),
+    }
+}
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
 ///
@@ -202,6 +431,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     }
 
     merged
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            nip_fi_assertion_guard,
+        ))
         .layer(middleware::from_fn(track_metrics))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
@@ -1263,6 +1496,19 @@ mod tests {
         std::fs::write(dir.join("favicon.svg"), "<svg/>").expect("favicon");
     }
 
+    /// Write a distinct admin bundle with a unique sentinel so tests can
+    /// assert the exact expected bytes and distinguish admin from public HTML.
+    fn write_admin_bundle(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("assets")).expect("assets dir");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html data-bundle=\"admin\"></html>",
+        )
+        .expect("admin index.html");
+        std::fs::write(dir.join("assets/app.js"), "export {};").expect("bundle asset");
+        std::fs::write(dir.join("favicon.svg"), "<svg/>").expect("favicon");
+    }
+
     async fn spa_response(
         state: Arc<AppState>,
         host: &str,
@@ -2064,5 +2310,657 @@ mod tests {
                 "F6: response body must be NIP-11 JSON with `supported_nips` field; got {body}"
             );
         }
+    }
+
+    // ── nip_fi_assertion_guard: fail-closed classification tests ─────────────
+    //
+    // ## What these tests prove
+    //
+    // `nip_fi_assertion_guard` is the crypto backstop for NIP-FI route
+    // classification.  These unit tests directly verify the exempt-prefix
+    // matching logic that determines whether a request is guarded or not.
+    //
+    // The key property: a non-exempt path with no assertion header must be
+    // denied in Enforce mode, even if the handler does NOT call
+    // `admit_nip_fi_http_on_state`.  This is the belt — a handler that omits
+    // its gate cannot bypass the missing/invalid-assertion rejection.
+    // Key pairing and the deny map are NOT covered by this guard: they run
+    // only in handlers that call `admit_nip_fi_http_on_state`.
+    //
+    // ## Dummy-route failure-mode demonstration (for code review)
+    //
+    // To confirm the failure mode is dead:
+    //   1. In `build_router` add a handler with no NIP-FI gate:
+    //      `.route("/dummy-unclassified", get(|| async { "hello" }))`
+    //      (Do NOT add "/dummy-unclassified" to NIP_FI_EXEMPT_PREFIXES.)
+    //   2. Deploy with NIP-FI in Enforce mode.
+    //   3. Send `GET /dummy-unclassified` with valid NIP-98 but no assertion.
+    //   4. Response: 401 `authentication required\n` from the guard.
+    //   5. Revert the dummy route.
+    //
+    // This is the mechanism the tests below exercise at the unit level.
+
+    /// Returns true when `path` is exempt per `NIP_FI_EXEMPT_PREFIXES`.
+    /// Mirrors the matching logic in `nip_fi_assertion_guard`.
+    fn is_exempt(path: &str) -> bool {
+        NIP_FI_EXEMPT_PREFIXES.iter().any(|pattern| {
+            if *pattern == "/" {
+                return path == "/";
+            }
+            if pattern.ends_with('/') {
+                return path.starts_with(pattern);
+            }
+            if path == *pattern {
+                return true;
+            }
+            if let Some(rest) = path.strip_prefix(pattern) {
+                return rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#');
+            }
+            false
+        })
+    }
+
+    // Exempt paths — guard must pass these through in Enforce mode.
+    #[test]
+    fn exempt_paths_are_recognized() {
+        // Root exact match
+        assert!(is_exempt("/"), "/ must be exempt (WS + NIP-11)");
+        assert!(!is_exempt("/events"), "POST /events must NOT be exempt");
+        // Exact-match entries must not bleed into adjacent paths
+        assert!(
+            !is_exempt("/info-extra"),
+            "/info-extra must NOT match /info"
+        );
+        assert!(!is_exempt("/healthz"), "/healthz must NOT match /health");
+
+        // Probes
+        assert!(is_exempt("/health"));
+        assert!(is_exempt("/_liveness"));
+        assert!(is_exempt("/_readiness"));
+
+        // Pre-membership
+        assert!(is_exempt("/api/invites/claim"));
+        assert!(is_exempt("/api/invites/accept-policy"));
+
+        // Public docs
+        assert!(is_exempt("/api/join-policy"));
+        assert!(is_exempt("/api/join-policy/terms"));
+        assert!(is_exempt("/api/join-policy/privacy"));
+
+        // Webhook (prefix)
+        assert!(is_exempt("/hooks/abc123"));
+        assert!(!is_exempt("/hooksnot"), "/hooksnot must not match /hooks/");
+
+        // Operator / admin subtrees
+        assert!(is_exempt("/operator/communities"));
+        assert!(is_exempt("/api/admin/v1/something"));
+
+        // SPA / assets
+        assert!(is_exempt("/assets/main.js"));
+        assert!(is_exempt("/invite/abc"));
+        assert!(is_exempt("/repos"));
+        assert!(is_exempt("/repos/owner/name"));
+    }
+
+    // Protected paths — guard must deny these in Enforce mode.
+    #[test]
+    fn protected_paths_are_not_exempt() {
+        assert!(!is_exempt("/events"), "POST /events must be protected");
+        assert!(!is_exempt("/query"), "POST /query must be protected");
+        assert!(!is_exempt("/count"), "POST /count must be protected");
+        assert!(
+            !is_exempt("/gifs/search"),
+            "POST /gifs/search must be protected"
+        );
+        assert!(
+            !is_exempt("/gifs/share"),
+            "POST /gifs/share must be protected"
+        );
+        assert!(
+            !is_exempt("/workflows/abc/runs"),
+            "GET /workflows must be protected"
+        );
+        assert!(
+            !is_exempt("/moderation/reports"),
+            "GET /moderation/reports must be protected"
+        );
+        assert!(
+            !is_exempt("/moderation/audit"),
+            "GET /moderation/audit must be protected"
+        );
+        assert!(
+            !is_exempt("/moderation/restricted"),
+            "GET /moderation/restricted must be protected"
+        );
+        assert!(
+            !is_exempt("/api/invites"),
+            "POST /api/invites (mint) must be protected"
+        );
+        assert!(!is_exempt("/upload"), "PUT /upload must be protected");
+        assert!(
+            !is_exempt("/media/upload"),
+            "PUT /media/upload must be protected"
+        );
+        assert!(
+            !is_exempt("/media/deadbeef.bin"),
+            "GET /media/{{sha}} must be protected"
+        );
+    }
+
+    // Regression: a newly added unclassified path must NOT be exempt by default.
+    // If a developer adds a route and forgets to add it to NIP_FI_EXEMPT_PREFIXES,
+    // `is_exempt` returns false → the guard denies in Enforce mode.
+    // This test proves that the default is DENY, not ADMIT.
+    #[test]
+    fn unclassified_path_is_not_exempt_by_default() {
+        // A path that looks plausibly authenticated but was just added:
+        assert!(
+            !is_exempt("/api/new-feature/data"),
+            "newly added unclassified path must default to NOT exempt; \
+             if this fails, NIP_FI_EXEMPT_PREFIXES has an overly broad entry"
+        );
+        assert!(
+            !is_exempt("/api/invites/new-endpoint"),
+            "a new invite sub-path must not be exempt just because /api/invites/ exists; \
+             only /api/invites/claim and /api/invites/accept-policy are explicitly exempt"
+        );
+    }
+
+    // ── F6: admin SPA document paths are NOT broadly exempt ─────────────────
+    //
+    // Admin SPA document routes (`/reports`, `/reports/<id>`, `/feedback`) are
+    // served by the SPA fallback on the admin host.  They are NOT in
+    // `NIP_FI_EXEMPT_PREFIXES` — the broad exempt list would make `/reports`
+    // exempt on tenant hosts too, which is unintentional.  Instead, the guard
+    // exempts them conditionally via a host-qualified `is_admin_spa_path` +
+    // `is_admin_host` check (see `nip_fi_assertion_guard`).
+    //
+    // This test proves two things:
+    // 1. `is_admin_spa_path` recognises the admin document routes.
+    // 2. These paths are NOT broadly exempt (no entry in NIP_FI_EXEMPT_PREFIXES)
+    //    so tenant hosts remain protected.
+    //
+    // Mutation evidence: adding "/reports" to NIP_FI_EXEMPT_PREFIXES makes
+    // `is_exempt("/reports")` return true and the assertion below panics.
+    #[test]
+    fn admin_spa_paths_are_not_broadly_exempt_but_are_admin_spa_paths() {
+        // /reports and /feedback ARE admin SPA document paths.
+        assert!(
+            is_admin_spa_path("/reports"),
+            "/reports must be an admin SPA path (for host-qualified exemption)"
+        );
+        assert!(
+            is_admin_spa_path("/reports/abc-123"),
+            "/reports/<id> must be an admin SPA path"
+        );
+        assert!(
+            is_admin_spa_path("/feedback"),
+            "/feedback must be an admin SPA path"
+        );
+        assert!(
+            is_admin_spa_path("/feedback/abc"),
+            "/feedback/<id> must be an admin SPA path"
+        );
+
+        // But they are NOT in NIP_FI_EXEMPT_PREFIXES (not broadly exempt).
+        // The guard exempts them only when the request is on the admin host.
+        assert!(
+            !is_exempt("/reports"),
+            "/reports must NOT be broadly exempt; exemption is host-qualified in the guard"
+        );
+        assert!(
+            !is_exempt("/reports/abc-123"),
+            "/reports/<id> must NOT be broadly exempt"
+        );
+        assert!(
+            !is_exempt("/feedback"),
+            "/feedback must NOT be broadly exempt"
+        );
+        assert!(
+            !is_exempt("/feedback/abc"),
+            "/feedback/<id> must NOT be broadly exempt"
+        );
+    }
+
+    // ── F6: build_router guard navigation — host-qualified admin exemption ───
+    //
+    // Proves that the `is_admin_spa_path(path) && is_admin_host(...)` check in
+    // `nip_fi_assertion_guard` (router.rs:215-217) does exactly what it says:
+    //
+    //   • `/reports` on the admin host → HTML (guard exempts it, SPA fallback serves it)
+    //   • `/reports` on a tenant host → 503 (guard NOT exempted; DenyProtected denies it)
+    //
+    // Falsifying mutation: remove the `is_admin_spa_path(path) && ...` branch at
+    // router.rs:215-217.  The admin-host request then reaches the DenyProtected
+    // branch and returns 503 — the assertion below panics instead of returning
+    // HTML.  The path-classification tests (`admin_spa_paths_are_not_broadly_exempt_*`)
+    // would still pass because they only test the helper functions, not the guard.
+    //
+    // DenyProtected is used here because it denies unconditionally without
+    // needing a verifier, making the test self-contained and infrastructure-free.
+    #[tokio::test]
+    async fn build_router_admin_spa_path_exempt_on_admin_host_denied_on_tenant_host() {
+        use buzz_auth::NipFiMode;
+
+        let admin_dir = tempfile::tempdir().expect("admin bundle dir");
+        let web_dir = tempfile::tempdir().expect("public bundle dir");
+        write_bundle(admin_dir.path());
+        write_bundle(web_dir.path());
+
+        // Build a DenyProtected-mode state using the same SPA helper, but with
+        // the NIP-FI mode overridden after config construction.
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.web_dir = Some(web_dir.path().to_path_buf());
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example".to_string(),
+            auth: crate::config::AdminAuth::Disabled,
+            web_dir: Some(admin_dir.path().to_path_buf()),
+        });
+        config.nip_fi.mode = NipFiMode::DenyProtected;
+
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        let state = Arc::new(state);
+
+        // Admin host: /reports must be exempted (guard lets it through → SPA serves HTML).
+        let admin_response = spa_response(state.clone(), "admin.example", "/reports").await;
+        assert_ne!(
+            admin_response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "/reports on the admin host must NOT be denied 503 in DenyProtected mode; \
+             the host-qualified admin SPA exemption in nip_fi_assertion_guard must fire. \
+             Falsifying mutation: remove `is_admin_spa_path(path) && is_admin_host(...)` at router.rs:215-217"
+        );
+        // The SPA fallback serves the index document.
+        assert_eq!(
+            admin_response.status(),
+            axum::http::StatusCode::OK,
+            "/reports on the admin host must be served as an SPA document"
+        );
+
+        // Tenant host: /reports is NOT exempt (guard denies it with 503 DenyProtected).
+        let tenant_response = spa_response(state.clone(), "tenant.example", "/reports").await;
+        assert_eq!(
+            tenant_response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "/reports on a tenant host must be denied 503 in DenyProtected mode; \
+             the guard exemption must NOT fire for non-admin hosts. \
+             Falsifying mutation: remove the is_admin_host check — tenant host would \
+             then match is_admin_spa_path and bypass the guard"
+        );
+    }
+
+    // ── F6 (extended): complete admin SPA matrix ─────────────────────────────
+    //
+    // Proves that the `is_admin_spa_path(path) && is_admin_host(...)` exemption
+    // covers all admin document routes (`/reports`, `/reports/<id>`, `/feedback`)
+    // in both Enforce and DenyProtected modes, and that none of these are
+    // accidentally exempted on tenant hosts.
+    //
+    // The existing `build_router_admin_spa_path_exempt_on_admin_host_denied_on_tenant_host`
+    // test covers `/reports` in DenyProtected.  This test fills the matrix.
+    //
+    // Falsifying mutation (coverage of all paths): replacing `is_admin_spa_path`
+    // with a hardcoded `/reports`-only check would cause the `/reports/<id>` and
+    // `/feedback` rows to return 503 on the admin host → assertions fire.
+    #[tokio::test]
+    async fn build_router_admin_spa_full_matrix() {
+        use buzz_auth::NipFiMode;
+
+        // Helper: build a state with a given mode.
+        // Returns (state, _admin_dir, _web_dir) — callers must keep the TempDirs
+        // alive for the lifetime of the test; they are dropped at end of scope.
+        async fn state_with_mode(
+            mode: NipFiMode,
+            admin_dir: &std::path::Path,
+            web_dir: &std::path::Path,
+        ) -> Arc<AppState> {
+            write_admin_bundle(admin_dir);
+            write_bundle(web_dir);
+
+            let mut config = crate::config::Config::from_env().expect("default config loads");
+            config.require_relay_membership = false;
+            config.redis_url = "redis://127.0.0.1:1".to_string();
+            config.web_dir = Some(web_dir.to_path_buf());
+            config.admin = Some(crate::config::AdminConfig {
+                host: "admin.matrix.example".to_string(),
+                auth: crate::config::AdminAuth::Disabled,
+                web_dir: Some(admin_dir.to_path_buf()),
+            });
+            config.nip_fi.mode = mode;
+
+            let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub manager"),
+            );
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _audit_shutdown) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            Arc::new(state)
+        }
+
+        // Admin SPA paths to test.
+        let admin_paths = ["/reports", "/reports/abc-123-id", "/feedback"];
+
+        // ── DenyProtected matrix ──────────────────────────────────────────────
+        //
+        // Admin host + DenyProtected: guard exempts admin SPA paths → 200 HTML.
+        // Tenant host + DenyProtected: guard NOT exempted → 503 + exact body.
+        let deny_admin_dir = tempfile::tempdir().expect("deny admin bundle dir");
+        let deny_web_dir = tempfile::tempdir().expect("deny public bundle dir");
+        let deny_state = state_with_mode(
+            NipFiMode::DenyProtected,
+            deny_admin_dir.path(),
+            deny_web_dir.path(),
+        )
+        .await;
+        for path in &admin_paths {
+            let admin_resp = spa_response(deny_state.clone(), "admin.matrix.example", path).await;
+            let admin_status = admin_resp.status();
+            let admin_ct = admin_resp
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            let admin_body = axum::body::to_bytes(admin_resp.into_body(), 8192)
+                .await
+                .unwrap_or_default();
+            assert_eq!(
+                admin_status,
+                axum::http::StatusCode::OK,
+                "DenyProtected: {path} on admin host must be 200 (SPA exemption). \
+                 Falsifying mutation: remove is_admin_spa_path || restrict to /reports only → 503"
+            );
+            assert_eq!(
+                admin_body.as_ref(),
+                b"<!doctype html><html data-bundle=\"admin\"></html>",
+                "DenyProtected: {path} on admin host 200 must serve the exact admin HTML body; \
+                 distinct content distinguishes admin bundle from public bundle."
+            );
+            assert_eq!(
+                admin_ct, "text/html; charset=utf-8",
+                "DenyProtected: {path} on admin host 200 Content-Type must be \
+                 'text/html; charset=utf-8'; got '{admin_ct}'"
+            );
+
+            let tenant_resp = spa_response(deny_state.clone(), "tenant.matrix.example", path).await;
+            let tenant_status = tenant_resp.status();
+            let tenant_resp_headers = tenant_resp.headers().clone();
+            let tenant_body = axum::body::to_bytes(tenant_resp.into_body(), 8192)
+                .await
+                .unwrap_or_default();
+            assert_eq!(
+                tenant_status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "DenyProtected: {path} on tenant host must be 503. \
+                 Exemption must not apply to non-admin hosts."
+            );
+            assert_eq!(
+                tenant_body.as_ref(),
+                b"authorization unavailable\n",
+                "DenyProtected: {path} on tenant host 503 must have exact body \
+                 'authorization unavailable\\n' (AuthorizationUnavailable contract)."
+            );
+            let tenant_ct = tenant_resp_headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                tenant_ct, "text/plain; charset=utf-8",
+                "DenyProtected: {path} on tenant host 503 Content-Type must be \
+                 'text/plain; charset=utf-8'; got '{tenant_ct}'"
+            );
+            assert!(
+                tenant_resp_headers.get("www-authenticate").is_none(),
+                "DenyProtected: {path} on tenant host 503 MUST NOT carry WWW-Authenticate \
+                 (DenyProtected unconditionally denies; challenge absent)"
+            );
+        }
+
+        // ── Enforce matrix ────────────────────────────────────────────────────
+        //
+        // Admin host + Enforce + no verifier (None) → NIP-FI admission guard
+        // fires for non-exempt paths.  Admin SPA paths are host-qualified exempt
+        // → 200 HTML.  Tenant host → 401 (missing assertion, no verifier configured)
+        // with exact body "authentication required\n" and WWW-Authenticate: Nostr.
+        //
+        // Important: asserting only `!= 200` for the tenant case is insufficient —
+        // the fallthrough public 404 path also returns non-200.  Exact 401 + header
+        // + body distinguishes the NIP-FI guard from a public 404 fallback.
+        let enforce_admin_dir = tempfile::tempdir().expect("enforce admin bundle dir");
+        let enforce_web_dir = tempfile::tempdir().expect("enforce public bundle dir");
+        let enforce_state = state_with_mode(
+            NipFiMode::Enforce,
+            enforce_admin_dir.path(),
+            enforce_web_dir.path(),
+        )
+        .await;
+        for path in &admin_paths {
+            let admin_resp =
+                spa_response(enforce_state.clone(), "admin.matrix.example", path).await;
+            let admin_status = admin_resp.status();
+            let admin_ct = admin_resp
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            let admin_body = axum::body::to_bytes(admin_resp.into_body(), 8192)
+                .await
+                .unwrap_or_default();
+            assert_eq!(
+                admin_status,
+                axum::http::StatusCode::OK,
+                "Enforce: {path} on admin host must be 200 (SPA exemption active in Enforce too). \
+                 Falsifying mutation: remove is_admin_spa_path exemption from Enforce branch → non-200"
+            );
+            assert_eq!(
+                admin_body.as_ref(),
+                b"<!doctype html><html data-bundle=\"admin\"></html>",
+                "Enforce: {path} on admin host 200 must serve the exact admin HTML body."
+            );
+            assert_eq!(
+                admin_ct, "text/html; charset=utf-8",
+                "Enforce: {path} on admin host 200 Content-Type must be \
+                 'text/html; charset=utf-8'; got '{admin_ct}'"
+            );
+
+            let tenant_resp =
+                spa_response(enforce_state.clone(), "tenant.matrix.example", path).await;
+            let tenant_status = tenant_resp.status();
+            let tenant_headers = tenant_resp.headers().clone();
+            let tenant_body = axum::body::to_bytes(tenant_resp.into_body(), 8192)
+                .await
+                .unwrap_or_default();
+            // Must be 401, not just != 200.  A 404 fallback would also satisfy != 200
+            // but would indicate the NIP-FI guard was bypassed.
+            assert_eq!(
+                tenant_status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Enforce: {path} on tenant host must be 401 MissingEvidence (not 200, not 404). \
+                 The NIP-FI guard must fire and produce an exact denial, not fall through to \
+                 the public 404 route. \
+                 Falsifying mutation: remove the guard call → 404 → assertion fires."
+            );
+            assert_eq!(
+                tenant_body.as_ref(),
+                b"authentication required\n",
+                "Enforce: {path} on tenant host 401 must have exact body \
+                 'authentication required\\n' (MissingEvidence contract)."
+            );
+            let www_auth = tenant_headers
+                .get("WWW-Authenticate")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                www_auth,
+                "Nostr",
+                "Enforce: {path} on tenant host 401 must have WWW-Authenticate: Nostr header. \
+                 Falsifying mutation: remove challenge from MissingEvidence denial → assertion fires."
+            );
+            let tenant_ct = tenant_headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                tenant_ct, "text/plain; charset=utf-8",
+                "Enforce: {path} on tenant host 401 Content-Type must be \
+                 'text/plain; charset=utf-8'; got '{tenant_ct}'"
+            );
+        }
+    }
+
+    // ── T1-IMP1: adversarial guard — junk/non-Bearer assertion is denied ──────
+    //
+    // Before this fix the guard called `headers.contains_key(CLIENT_ATTACHED_HEADER)`,
+    // so `Nostr-Federated-Identity: junk` would pass because the header is
+    // present.  After the fix the guard performs full offline assertion
+    // verification (transport extraction + JWT signature + issuer + expiry):
+    //
+    //   • Junk / non-Bearer value      → transport extraction fails → 403
+    //   • Empty Bearer token           → transport extraction fails → 403
+    //   • Structurally valid token     → transport extraction passes → crypto verify → 403 if bad sig
+    //
+    // This test proves the transport-extraction cases.  The crypto-verification
+    // case (structurally valid but bad signature) is proven by the production-
+    // router test `nip_fi_guard_rejects_crypto_invalid_assertion_before_handler_fires`
+    // in bridge.rs, which has a falsifying mutation: removing
+    // `verifier.verify_assertion(token)` from the guard turns the expected
+    // 403 into 401 (handler's NIP-98 auth fires instead).
+    #[test]
+    fn guard_rejects_junk_assertion_not_just_absent_header() {
+        use crate::nip_fi_http::extract_bearer_token;
+        use axum::http::HeaderMap;
+        use buzz_auth::CLIENT_ATTACHED_HEADER;
+
+        // Case 1: bare junk value (not Bearer-prefixed).
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CLIENT_ATTACHED_HEADER,
+            "junk".parse().expect("valid header value"),
+        );
+        assert!(
+            extract_bearer_token(&headers).is_err(),
+            "guard calls extract_bearer_token: bare 'junk' must be rejected (EvidenceRejected)"
+        );
+
+        // Case 2: valid-looking Bearer prefix but empty token.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CLIENT_ATTACHED_HEADER,
+            "Bearer ".parse().expect("valid header value"),
+        );
+        assert!(
+            extract_bearer_token(&headers).is_err(),
+            "guard calls extract_bearer_token: 'Bearer ' with empty token must be rejected"
+        );
+
+        // Case 3: structurally valid compact JWS (three Base64url-separated dots)
+        // passes transport extraction.  The guard then calls
+        // `verifier.verify_assertion()` which would reject it as
+        // InvalidSignatureOrClaims → EvidenceRejected (403) in the full guard.
+        // This test only exercises transport extraction; the full-guard crypto
+        // falsifier is in bridge.rs::nip_fi_guard_rejects_crypto_invalid_assertion_before_handler_fires.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CLIENT_ATTACHED_HEADER,
+            "Bearer a.b.c".parse().expect("valid header value"),
+        );
+        assert!(
+            extract_bearer_token(&headers).is_ok(),
+            "structurally-valid compact JWS passes transport extraction; \
+             guard then proceeds to crypto verification"
+        );
+    }
+
+    // ── T1-IMP2 exemption classification ─────────────────────────────────────
+    //
+    // `/internal/git/policy` must be exempt so the pre-receive hook callback
+    // reaches its own `require_localhost` + HMAC authorization layer in active
+    // NIP-FI mode.  Only the exact path and sub-paths are exempt — the broader
+    // `/internal/` subtree is NOT exempted (no catch-all entry exists).
+    //
+    // Matching semantics: a non-`/`-ending pattern matches exact OR sub-paths
+    // (path equals pattern, or path starts with `pattern/`).  This is safe
+    // because no routes exist under `/internal/git/policy/*` — any sub-path
+    // passes through the guard to Axum, which returns 404.
+    //
+    // Falsifying mutation: remove the "/internal/git/policy" entry from
+    // NIP_FI_EXEMPT_PREFIXES.  `is_exempt("/internal/git/policy")` returns
+    // false, and the guard would return 401 in Enforce mode (every git push
+    // would be rejected by the hook callback failing).
+    #[test]
+    fn internal_git_policy_is_exempt_but_internal_subtree_is_not() {
+        assert!(
+            is_exempt("/internal/git/policy"),
+            "/internal/git/policy must be exempt: pre-receive hook calls it without \
+             a NIP-FI assertion; blocking it breaks git push in Enforce/DenyProtected mode"
+        );
+        // No catch-all /internal/ entry exists — only the specific path is
+        // listed, so unrelated /internal/* paths are not exempt.
+        assert!(
+            !is_exempt("/internal/"),
+            "the /internal/ subtree must NOT be broadly exempt; \
+             only the specific hook-callback path is exempted"
+        );
+        assert!(
+            !is_exempt("/internal/other"),
+            "/internal/other must NOT be exempt (no /internal/ subtree entry)"
+        );
     }
 }

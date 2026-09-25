@@ -191,6 +191,9 @@ run_unit_tests() {
   run_test_step "buzz-relay NIP-FI config tests" \
     cargo test -p buzz-relay --lib nip_fi_config:: -- --nocapture
 
+  run_test_step "buzz-relay router tests" \
+    cargo test -p buzz-relay --lib router::tests:: -- --nocapture
+
   run_test_step "buzz-relay NIP-FI upgrade tests" \
     cargo test -p buzz-relay --lib nip_fi_upgrade:: -- --nocapture
 
@@ -221,19 +224,6 @@ run_unit_tests() {
     handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path
     handlers::event::tests::p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack
     handlers::req::tests::p1a_huddle_liveness_req_barrier_expiry_blocks_query_and_emission
-    router::tests::b4_connection_upgrade_only_no_upgrade_header_not_gated
-    router::tests::b4_upgrade_only_no_connection_header_not_gated
-    router::tests::nip_fi_enforce_audio_denies_missing_assertion_401
-    router::tests::nip_fi_enforce_audio_denies_token_when_no_verifier_503
-    router::tests::nip_fi_enforce_nip11_content_negotiation_serves_200_not_401
-    router::tests::nip_fi_enforce_plain_get_not_gated_401_or_503
-    router::tests::nip_fi_enforce_root_denies_missing_assertion_401
-    router::tests::nip_fi_enforce_root_denies_token_when_no_verifier_503
-    router::tests::nip_fi_enforce_ws_upgrade_with_html_accept_is_gated_401
-    router::tests::nip_fi_off_audio_ignores_malformed_header
-    router::tests::nip_fi_off_audio_passes_without_header
-    router::tests::nip_fi_off_root_ignores_malformed_header
-    router::tests::nip_fi_off_root_passes_without_header
     state::tests::f3_cancellation_during_check_terminates_socket_without_waiting_for_check
   )
   local name

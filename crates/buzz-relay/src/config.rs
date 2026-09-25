@@ -371,9 +371,9 @@ pub struct Config {
     /// NIP-FI federated-identity enforcement configuration.
     ///
     /// Present when `BUZZ_NIP_FI_MODE` is `enforce` or `deny_protected`; in
-    /// those modes the relay validates assertions at WebSocket upgrade and
-    /// enforces per-connection session lifetime. `Off` mode (the default)
-    /// leaves all identity enforcement to NIP-42 alone.
+    /// those modes the relay validates assertions at HTTP ingress and (via S3)
+    /// at WebSocket upgrade. `Off` mode (the default) leaves all identity
+    /// enforcement to NIP-42 alone.
     pub nip_fi: crate::nip_fi_config::NipFiRelayConfig,
 }
 

@@ -816,14 +816,21 @@ pub struct AppState {
     /// [`AppState::mesh`].
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
 
-    /// NIP-FI federated-identity assertion verifier.
+    /// NIP-FI federated-identity assertion verifier, shared across all HTTP
+    /// ingress and WebSocket upgrade checks.
     ///
     /// `None` when `config.nip_fi.mode` is `Off`. When present, the verifier
-    /// is shared across all connections and is the single authority for
-    /// assertion validation at WebSocket upgrade. The backing `ProductionJwksSource`
-    /// is also shared and performs bounded periodic JWKS refresh internally.
-    pub nip_fi_verifier:
-        Option<Arc<buzz_auth::FederatedAssertionVerifier<Arc<buzz_auth::ProductionJwksSource>>>>,
+    /// is the single offline authority for assertion validation on every
+    /// protected HTTP surface and WebSocket upgrade. The backing `ProductionJwksSource` is also
+    /// shared and performs bounded periodic JWKS refresh internally.
+    ///
+    /// The field uses `dyn VerifyAssertion` (type erasure) so that
+    /// integration tests can inject a `StaticIssuerKeySource`-backed verifier
+    /// without requiring a live JWKS fetch.  Production code always stores a
+    /// `FederatedAssertionVerifier<Arc<ProductionJwksSource>>` here; the type
+    /// erased form costs one vtable dispatch per request, which is negligible
+    /// relative to the JWT crypto.
+    pub nip_fi_verifier: Option<Arc<dyn buzz_auth::VerifyAssertion>>,
 
     /// The shared JWKS source backing `nip_fi_verifier`, exposed so `main.rs`
     /// can warm it at startup and drive the background refresh loop.
@@ -1426,25 +1433,17 @@ impl AuditShutdownHandle {
 
 /// Construct the NIP-FI assertion verifier + JWKS source from `config.nip_fi`.
 ///
-/// Returns `(None, None)` when the mode is `Off`. In `Enforce` or
-/// `DenyProtected` mode, constructs a `ProductionJwksSource` (shared via `Arc`)
-/// and a `FederatedAssertionVerifier` over a clone of that `Arc`. Both are
-/// returned so `main.rs` can warm and periodically refresh the source while the
-/// relay uses the verifier for every WebSocket upgrade check.
-///
-/// Named return type for [`build_nip_fi_components`].
-///
-/// Using a type alias avoids the `clippy::type_complexity` lint and names
-/// the NIP-FI component pair as a first-class concept.
+/// Returns `(None, None)` when the mode is `Off` or `DenyProtected` (the
+/// verifier is never consulted there; admission always returns 503). In
+/// `Enforce` mode, constructs a `ProductionJwksSource` (shared via `Arc`)
+/// and a `FederatedAssertionVerifier` over a clone of that `Arc`.
+/// The source starts empty; HTTP admission returns `authorization_unavailable`
+/// (503) until the startup warm in `main.rs` succeeds. [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
 type NipFiComponents = (
-    Option<Arc<buzz_auth::FederatedAssertionVerifier<Arc<buzz_auth::ProductionJwksSource>>>>,
+    Option<Arc<dyn buzz_auth::VerifyAssertion>>,
     Option<Arc<buzz_auth::ProductionJwksSource>>,
 );
 
-/// The source starts empty; admission returns `authorization_unavailable`
-/// (503) until the startup warm in `main.rs` succeeds for at least one issuer.
-/// This is intentional: config validity must not be hostage to IdP availability
-/// at boot. [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
 fn build_nip_fi_components(config: &crate::config::Config) -> NipFiComponents {
     use buzz_auth::{FederatedAssertionVerifier, HttpJwksFetcher, NipFiMode, ProductionJwksSource};
 
@@ -1452,9 +1451,7 @@ fn build_nip_fi_components(config: &crate::config::Config) -> NipFiComponents {
         config.nip_fi.mode,
         NipFiMode::Off | NipFiMode::DenyProtected
     ) {
-        // Off and DenyProtected carry no JWKS config; no verifier needed.
-        // DenyProtected always returns 503 at the gate — the verifier is never
-        // consulted — so constructing one would be both wasteful and noisy.
+        // Off: no enforcement. DenyProtected: verifier never consulted (always 503).
         return (None, None);
     }
 
@@ -1463,18 +1460,15 @@ fn build_nip_fi_components(config: &crate::config::Config) -> NipFiComponents {
         {
             Some(s) => Arc::new(s),
             None => {
-                // Configs were validated at startup; None here means the issuer
-                // list was empty, which validate_nip_fi_config would have caught.
-                // Treat as unrecoverable mis-state.
                 tracing::error!(
                     "nip-fi: ProductionJwksSource construction returned None despite \
-                 passing startup validation — enforcement unavailable"
+                     passing startup validation — HTTP enforcement unavailable"
                 );
                 return (None, None);
             }
         };
 
-    let verifier = Arc::new(FederatedAssertionVerifier::new(
+    let verifier: Arc<dyn buzz_auth::VerifyAssertion> = Arc::new(FederatedAssertionVerifier::new(
         config.nip_fi.registry.clone(),
         Arc::clone(&source),
     ));
