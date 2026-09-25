@@ -59,6 +59,7 @@ url = { workspace = true }
 sha2 = { workspace = true }
 base64 = "0.22"
 hex = { workspace = true }
+buzz-git-identity = { path = "../buzz-git-identity" }
 
 # Logging
 tracing = { workspace = true }

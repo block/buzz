@@ -54,6 +54,11 @@ fn nest_agents_template_separates_commit_attribution_claims() {
     assert!(AGENTS_MD.contains("inspect every outgoing commit against the actual upstream or base"));
     assert!(AGENTS_MD.contains("An agent-owned repository may use the agent as author"));
     assert!(!AGENTS_MD.contains("every commit MUST include a `Signed-off-by`"));
+    // Managed-runtime delta: describes the default agent identity and the
+    // `user` opt-out without reintroducing mandatory human-trailer policy.
+    assert!(AGENTS_MD.contains("### Managed runtime default"));
+    assert!(AGENTS_MD.contains("`BUZZ_GIT_IDENTITY` unset or `agent`"));
+    assert!(AGENTS_MD.contains("The operator can opt out per-agent with `BUZZ_GIT_IDENTITY=user`"));
 }
 
 #[test]

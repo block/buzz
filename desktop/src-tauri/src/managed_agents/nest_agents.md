@@ -57,6 +57,12 @@ Git authorship, co-authorship, DCO sign-off, and cryptographic signing are separ
 
 A repository may require an accountable human as author and the implementing agent as co-author. An agent-owned repository may use the agent as author and require no human trailer. In both cases, repository-local policy controls.
 
+### Managed runtime default
+
+By default (`BUZZ_GIT_IDENTITY` unset or `agent`), the Buzz runtime makes your agent nostr identity the effective committer: `git config user.email` resolves to `<pubkey>@<relay-host>`, `user.name` to your display name (or npub), and commits are signed with your agent key (NIP-GS). That comes from the runtime's `GIT_CONFIG_*` block, which beats repo and global config. Do not set `user.*` config, `-c user.*`, `--author`, or a separate signing key. The managed `git` also refuses those overrides and verifies pushes, but only when it resolves first on `PATH`: a shell whose startup files reorder `PATH`, or a call to git by absolute path, skips it. This is the identity to treat as the author above; add human `Co-authored-by`/`Signed-off-by` trailers when repository policy requires them.
+
+The operator can opt out per-agent with `BUZZ_GIT_IDENTITY=user`. In `user` mode the runtime installs no attribution machinery and no identity or signing settings — no managed `git`, no injected identity, no signing enforcement — so Git uses the operator's ordinary configuration and fallback environment, which may still supply both. In both modes the spawned environment loses `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`, `GIT_CONFIG_PARAMETERS` and `NOSTR_PRIVATE_KEY`. `user` mode also drops inherited `GIT_CONFIG_*` entries for `user.name`, `user.email`, `user.signingkey`, `gpg.format`, `gpg.x509.program`, `commit.gpgSign`, `tag.gpgSign`, `author.name`, `author.email`, `committer.name`, `committer.email`, `include.path` and `includeIf.*.path`, replaces an inherited `nostr.keyfile` with the current relay-auth keyfile, and at launch removes every inherited `PATH` entry whose `.git-identity` marker can be inspected (a Buzz wrapper directory). Relay git authentication works in both modes.
+
 <!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->
 ## Active Agents
 

@@ -14,7 +14,7 @@ fn dispatch() -> Result<(), String> {
         .to_ascii_lowercase();
 
     match cmd.as_str() {
-        "buzz-acp" | "git-credential-nostr" | "git-sign-nostr" => {
+        "buzz-acp" | "git" | "git-credential-nostr" | "git-sign-nostr" => {
             buzz_acp::run().map_err(|e| e.to_string())
         }
         "buzz-agent" => buzz_agent::run().map_err(|e| e.to_string()),

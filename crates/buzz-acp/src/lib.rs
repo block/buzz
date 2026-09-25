@@ -2460,6 +2460,7 @@ pub fn run() -> Result<()> {
     {
         Some("git-credential-nostr") => std::process::exit(git_credential_nostr::run()),
         Some("git-sign-nostr") => std::process::exit(git_sign_nostr::run()),
+        Some("git") => std::process::exit(buzz_git_identity::git_wrapper::run()),
         _ => {}
     }
     config::propagate_legacy_env_vars();
@@ -9219,21 +9220,155 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
+    fn user_mode_mcp_block_drops_inherited_identity_and_signing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let inherited = [
+            ("user.name", "Inherited Agent"),
+            ("USER.EMAIL", "inherited@example.invalid"),
+            ("user.signingKey", "inherited-key"),
+            ("GPG.Format", "openpgp"),
+            ("GPG.x509.PROGRAM", "inherited-signer"),
+            ("commit.gpgsign", "true"),
+            ("TAG.GPGSIGN", "true"),
+            ("Include.Path", "/tmp/identity.inc"),
+            ("INCLUDEIF.gitdir:/.PATH", "/tmp/identity.inc"),
+            ("Author.Name", "Inherited Author"),
+            ("Author.Email", "author@example.invalid"),
+            ("COMMITTER.name", "Inherited Committer"),
+            ("committer.EMAIL", "committer@example.invalid"),
+            ("gpg.X509.program", "distinct-subsection"),
+            ("core.abbrev", "12"),
+        ];
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::write(parent.path().join(".git-identity"), "").unwrap();
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(parent.path().to_path_buf())
+                    .chain(std::env::split_paths(&original_path)),
+            )
+            .unwrap(),
+        );
+        std::env::set_var("BUZZ_GIT_IDENTITY", "user");
+        std::env::set_var("GIT_CONFIG_COUNT", inherited.len().to_string());
+        for (i, (key, value)) in inherited.iter().enumerate() {
+            std::env::set_var(format!("GIT_CONFIG_KEY_{i}"), key);
+            std::env::set_var(format!("GIT_CONFIG_VALUE_{i}"), value);
+        }
+        let mut config = test_config();
+        let git = git::GitEnvironment::install(
+            &config.keys,
+            &config.relay_url,
+            &std::env::current_exe().unwrap(),
+        );
+        std::env::set_var("PATH", &original_path);
+        std::env::remove_var("BUZZ_GIT_IDENTITY");
+        std::env::remove_var("GIT_CONFIG_COUNT");
+        for i in 0..inherited.len() {
+            std::env::remove_var(format!("GIT_CONFIG_KEY_{i}"));
+            std::env::remove_var(format!("GIT_CONFIG_VALUE_{i}"));
+        }
+        let git = git.unwrap();
+        config.persona_env_vars.extend(git.env.iter().cloned());
+        let servers = build_mcp_servers(&config);
+        let env = &servers[0].env;
+        let value_of = |name: &str| {
+            env.iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.value.clone())
+        };
+        let count: usize = value_of("GIT_CONFIG_COUNT").unwrap().parse().unwrap();
+        let entries: Vec<(String, String)> = (0..count)
+            .map(|i| {
+                (
+                    value_of(&format!("GIT_CONFIG_KEY_{i}")).unwrap(),
+                    value_of(&format!("GIT_CONFIG_VALUE_{i}")).unwrap(),
+                )
+            })
+            .collect();
+        for (key, _) in &inherited[..13] {
+            assert!(
+                !entries.iter().any(|(forwarded, _)| forwarded == key),
+                "{key} leaked: {entries:?}"
+            );
+        }
+        for survivor in [
+            ("gpg.X509.program", "distinct-subsection"),
+            ("core.abbrev", "12"),
+        ] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|(key, value)| (key.as_str(), value.as_str()) == survivor),
+                "{survivor:?} must survive unchanged: {entries:?}"
+            );
+        }
+        assert!(
+            entries.iter().any(|(key, _)| key == "nostr.keyfile"),
+            "{entries:?}"
+        );
+        let path = value_of("PATH").unwrap();
+        assert!(
+            !std::env::split_paths(&path).any(|entry| entry == parent.path()),
+            "parent install dir forwarded: {path}"
+        );
+    }
+
+    #[test]
     fn session_new_mcp_server_has_required_fields() {
+        use nostr::ToBech32;
         let config = test_config();
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         let server = &servers[0];
         assert_eq!(server.name, "test-mcp-server");
 
-        let names: Vec<&str> = server.env.iter().map(|e| e.name.as_str()).collect();
+        let get_value = |name: &str| -> Option<&str> {
+            server
+                .env
+                .iter()
+                .find(|e| e.name == name)
+                .map(|e| e.value.as_str())
+        };
+
+        // BUZZ_RELAY_URL must carry the canonical relay URL from config.
+        let relay_url = get_value("BUZZ_RELAY_URL");
         assert!(
-            names.contains(&"BUZZ_RELAY_URL"),
-            "missing BUZZ_RELAY_URL; got {names:?}"
+            relay_url.is_some(),
+            "missing BUZZ_RELAY_URL; env={:?}",
+            server
+                .env
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>()
         );
+        assert_eq!(
+            relay_url.unwrap(),
+            config.relay_url,
+            "BUZZ_RELAY_URL value must equal config.relay_url"
+        );
+
+        // BUZZ_PRIVATE_KEY must carry the bech32 nsec for config.keys.
+        let private_key = get_value("BUZZ_PRIVATE_KEY");
         assert!(
-            names.contains(&"BUZZ_PRIVATE_KEY"),
-            "missing BUZZ_PRIVATE_KEY; got {names:?}"
+            private_key.is_some(),
+            "missing BUZZ_PRIVATE_KEY; env={:?}",
+            server
+                .env
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        let expected_nsec = config
+            .keys
+            .secret_key()
+            .to_bech32()
+            .expect("secret key bech32 must not fail");
+        assert_eq!(
+            private_key.unwrap(),
+            expected_nsec,
+            "BUZZ_PRIVATE_KEY value must be the bech32 nsec of config.keys"
         );
     }
 

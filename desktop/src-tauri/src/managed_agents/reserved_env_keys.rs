@@ -82,7 +82,28 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {
-    RESERVED_ENV_KEYS
-        .iter()
-        .any(|reserved| reserved.eq_ignore_ascii_case(key))
+    is_reserved_git_config_key(key)
+        || RESERVED_ENV_KEYS
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(key))
+}
+
+/// The complete `GIT_CONFIG*` env family — `GIT_CONFIG` plus every
+/// `GIT_CONFIG_*` var (`GIT_CONFIG_COUNT`, the indexed `GIT_CONFIG_KEY_<n>` /
+/// `GIT_CONFIG_VALUE_<n>` pairs, `GIT_CONFIG_GLOBAL` / `_SYSTEM` / `_NOSYSTEM`,
+/// `GIT_CONFIG_PARAMETERS`) — is reserved.
+///
+/// Buzz stages git config through these indexed vars: custom harnesses get
+/// only the relay credential helper (`runtime.rs`), while built-in harnesses
+/// get it plus the agent identity/signing config from `buzz-acp`'s
+/// `GitEnvironment`. A user override is layered onto
+/// the spawn command *after* the credential helper, so a single
+/// `GIT_CONFIG_COUNT=0` (or any index collision) silently orphans it, and other
+/// family members can redirect git's config resolution entirely. It is a
+/// prefix rule because the indexed keys are unbounded; matching the exact
+/// `GIT_CONFIG` name and the `GIT_CONFIG_` prefix covers the whole family
+/// without catching unrelated names like `GIT_CONFIGURATION`.
+fn is_reserved_git_config_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper == "GIT_CONFIG" || upper.starts_with("GIT_CONFIG_")
 }

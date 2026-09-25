@@ -43,6 +43,8 @@ git verify-commit HEAD
 git verify-tag probe
 git show -s --format='%an%n%ae%n%cn%n%ce' HEAD > ../identity
 printf 'capability[]=authtype\nprotocol=https\nhost=relay.invalid\npath=git/test/repo\nwwwauth[]=Nostr method="GET"\n\n' | git credential fill > ../credential-result
+printf '%s' "${BUZZ_PRIVATE_KEY}" > ../buzz_private_key
+printf '%s' "${BUZZ_RELAY_URL}" > ../buzz_relay_url
 printf 'done' > ../done
 # Stay alive until the harness is terminated during ACP initialization.
 exec sleep 60
@@ -168,6 +170,20 @@ exec sleep 60
         .tags
         .iter()
         .any(|tag| tag.as_slice() == ["u", "https://relay.invalid/git/test/repo"]));
+    // BUZZ_PRIVATE_KEY must carry the --private-key secret (hex) verbatim.
+    let buzz_private_key = std::fs::read_to_string(workspace.join("buzz_private_key")).unwrap();
+    assert_eq!(
+        buzz_private_key.trim(),
+        keys.secret_key().to_secret_hex(),
+        "BUZZ_PRIVATE_KEY must equal the --private-key argument"
+    );
+    // BUZZ_RELAY_URL must equal the --relay-url argument verbatim.
+    let buzz_relay_url = std::fs::read_to_string(workspace.join("buzz_relay_url")).unwrap();
+    assert_eq!(
+        buzz_relay_url.trim(),
+        "wss://relay.invalid",
+        "BUZZ_RELAY_URL must equal the --relay-url argument"
+    );
     for file in ["keyfile", "signer", "credential"] {
         let path = std::fs::read_to_string(workspace.join(file)).unwrap();
         assert!(

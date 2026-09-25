@@ -952,6 +952,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "buzz-core",
+ "buzz-git-identity",
  "buzz-persona",
  "buzz-sdk",
  "chrono",
@@ -1264,6 +1265,15 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "buzz-git-identity"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
