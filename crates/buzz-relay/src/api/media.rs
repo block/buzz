@@ -137,6 +137,87 @@ fn acquire_upload_permit(
     })
 }
 
+/// Deny banned principals on every Blossom media request.
+///
+/// Media runs outside the WebSocket authentication path, so a valid Blossom
+/// auth event and relay membership are not enough — neither reflects a
+/// community ban, and banning never removes the `relay_members` row. Re-read
+/// the durable ban per request, as the Git transport does.
+///
+/// Cascades to the proven NIP-OA owner, matching the NIP-42 gate in
+/// `handlers::auth`: a banned human must not keep upload or read access
+/// through an agent key.
+async fn deny_banned_media_principal(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+    auth_tag: Option<&str>,
+    signed_auth_created_at: Option<u64>,
+) -> Result<(), MediaError> {
+    let agent = media_restriction_state(db, community, pubkey).await?;
+
+    let owner = if agent.banned {
+        None
+    } else {
+        crate::api::relay_members::extract_nip_oa_owner(
+            pubkey.as_bytes(),
+            auth_tag,
+            signed_auth_created_at,
+        )
+    };
+    let owner_state = match owner {
+        Some(owner) => Some(media_restriction_state(db, community, &owner).await?),
+        None => None,
+    };
+
+    enforce_media_ban_cascade(&agent, owner_state.as_ref()).inspect_err(|_| {
+        tracing::warn!(
+            pubkey = %pubkey.to_hex(),
+            owner = ?owner.map(|owner| owner.to_hex()),
+            "media: community ban denied request"
+        );
+    })
+}
+
+/// One restriction read, failing closed with 503: a restriction-store outage
+/// must not be reported as a permission decision.
+async fn media_restriction_state(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+) -> Result<buzz_db::moderation::RestrictionState, MediaError> {
+    db.moderation_restriction_state(community, pubkey.as_bytes())
+        .await
+        .map_err(|error| {
+            tracing::warn!(pubkey = %pubkey.to_hex(), error = %error, "media: ban lookup failed closed");
+            MediaError::ServiceUnavailable
+        })
+}
+
+fn enforce_media_ban(
+    restriction: &buzz_db::moderation::RestrictionState,
+) -> Result<(), MediaError> {
+    if restriction.banned {
+        Err(MediaError::Banned)
+    } else {
+        Ok(())
+    }
+}
+
+/// Either principal's ban denies the request; `None` owner means no attested
+/// owner to inherit from. A timeout is a message write-block only and does not
+/// touch media access.
+fn enforce_media_ban_cascade(
+    agent: &buzz_db::moderation::RestrictionState,
+    owner: Option<&buzz_db::moderation::RestrictionState>,
+) -> Result<(), MediaError> {
+    enforce_media_ban(agent)?;
+    match owner {
+        Some(owner) => enforce_media_ban(owner),
+        None => Ok(()),
+    }
+}
+
 impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
     type Rejection = MediaError;
 
@@ -218,6 +299,16 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         )
         .await
         .map_err(|_| MediaError::RelayMembershipRequired)?;
+
+        // 6. Community ban gate. Membership alone does not reflect a ban.
+        deny_banned_media_principal(
+            &state.db,
+            tenant.community(),
+            &auth_event.pubkey,
+            auth_tag,
+            Some(auth_event.created_at.as_secs()),
+        )
+        .await?;
 
         if upload_rate_limited(state, tenant.community(), &auth_event.pubkey) {
             metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
@@ -545,6 +636,15 @@ async fn authenticate_media_read(
     )
     .await
     .map_err(|_| MediaError::RelayMembershipRequired)?;
+
+    deny_banned_media_principal(
+        &state.db,
+        tenant.community(),
+        &auth_event.pubkey,
+        auth_tag,
+        Some(auth_event.created_at.as_secs()),
+    )
+    .await?;
 
     Ok(MediaReadAuth { tenant })
 }
@@ -1130,6 +1230,50 @@ mod tests {
         assert!(should_stream_as_video(bytes));
     }
 
+    fn restriction(banned: bool) -> buzz_db::moderation::RestrictionState {
+        buzz_db::moderation::RestrictionState {
+            banned,
+            muted_until: None,
+        }
+    }
+
+    #[test]
+    fn durable_ban_denies_media_even_with_otherwise_valid_auth() {
+        assert!(matches!(
+            enforce_media_ban_cascade(&restriction(true), None),
+            Err(MediaError::Banned)
+        ));
+    }
+
+    #[test]
+    fn timeout_without_ban_does_not_revoke_media_access() {
+        let timed_out = buzz_db::moderation::RestrictionState {
+            banned: false,
+            muted_until: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        };
+        assert!(enforce_media_ban_cascade(&timed_out, None).is_ok());
+        assert!(enforce_media_ban_cascade(&restriction(false), None).is_ok());
+    }
+
+    #[test]
+    fn banned_owner_denies_media_for_an_otherwise_clear_agent() {
+        assert!(matches!(
+            enforce_media_ban_cascade(&restriction(false), Some(&restriction(true))),
+            Err(MediaError::Banned)
+        ));
+        assert!(enforce_media_ban_cascade(&restriction(false), Some(&restriction(false))).is_ok());
+    }
+
+    #[test]
+    fn banned_agent_denies_media_whatever_the_owner_state() {
+        for owner in [None, Some(restriction(false)), Some(restriction(true))] {
+            assert!(matches!(
+                enforce_media_ban_cascade(&restriction(true), owner.as_ref()),
+                Err(MediaError::Banned)
+            ));
+        }
+    }
+
     async fn test_state() -> Arc<AppState> {
         let mut config = crate::config::Config::from_env().expect("default config loads");
         config.require_relay_membership = false;
@@ -1175,7 +1319,10 @@ mod tests {
     }
 
     async fn media_get_auth_router() -> axum::Router {
-        let state = test_state().await;
+        media_get_auth_router_with(test_state().await)
+    }
+
+    fn media_get_auth_router_with(state: Arc<AppState>) -> axum::Router {
         axum::Router::new()
             .route(
                 "/media/{sha256_ext}",
@@ -1537,5 +1684,58 @@ mod tests {
     #[test]
     fn test_parse_byte_range_zero_start() {
         assert_eq!(parse_byte_range("bytes=0-0", 1000), Some((0, 0)));
+    }
+
+    /// Postgres-backed wiring regression: the ban gate sits on the shared
+    /// GET/HEAD read path *after* Blossom auth and *before* the sidecar gate.
+    mod postgres_tests {
+        use super::*;
+
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL"]
+        async fn banned_member_is_denied_media_reads_with_otherwise_valid_auth() {
+            let state = test_state().await;
+            let community = state
+                .db
+                .ensure_configured_community("relay.example")
+                .await
+                .expect("relay.example community")
+                .id;
+            let keys = Keys::generate();
+            let actor = Keys::generate().public_key().to_bytes();
+            state
+                .db
+                .ban_community_member(
+                    community,
+                    &keys.public_key().to_bytes(),
+                    &actor,
+                    Some("test"),
+                    None,
+                )
+                .await
+                .expect("ban member");
+
+            for method in ["GET", "HEAD"] {
+                let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
+                let response = media_get_auth_router_with(Arc::clone(&state))
+                    .oneshot(media_request(method, Some(auth)))
+                    .await
+                    .expect("response");
+
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method}");
+            }
+
+            let unbanned = Keys::generate();
+            let auth = media_get_auth_header(&unbanned, media_get_tags_for("relay.example", None));
+            let response = media_get_auth_router_with(state)
+                .oneshot(media_request("GET", Some(auth)))
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "a clear principal still reaches the sidecar gate"
+            );
+        }
     }
 }

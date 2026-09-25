@@ -54,6 +54,8 @@ pub enum MediaError {
     InsufficientScope,
     #[error("relay membership required")]
     RelayMembershipRequired,
+    #[error("blocked: banned from this community")]
+    Banned,
     #[error("community writes are fenced")]
     CommunityWriteFenced,
     #[error("media service temporarily unavailable")]
@@ -144,7 +146,7 @@ impl IntoResponse for MediaError {
                 )
             }
             Self::InsufficientScope => (StatusCode::FORBIDDEN, self.to_string()),
-            Self::RelayMembershipRequired | Self::CommunityWriteFenced => {
+            Self::RelayMembershipRequired | Self::Banned | Self::CommunityWriteFenced => {
                 (StatusCode::FORBIDDEN, self.to_string())
             }
             Self::ServiceUnavailable => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
@@ -184,6 +186,10 @@ mod tests {
         }
         assert_eq!(
             MediaError::CommunityWriteFenced.into_response().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            MediaError::Banned.into_response().status(),
             StatusCode::FORBIDDEN
         );
     }
