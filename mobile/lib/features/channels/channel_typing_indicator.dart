@@ -3,16 +3,21 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
-import '../../shared/utils/string_utils.dart';
 import '../../shared/profile/user_cache_provider.dart';
+import 'channel_identity_names_provider.dart';
 import 'channel_typing_provider.dart';
 import 'small_avatar.dart';
 
 /// Composer-adjacent status for people currently typing in a channel or thread.
 class ChannelTypingIndicator extends ConsumerWidget {
+  final String channelId;
   final List<TypingEntry> entries;
 
-  const ChannelTypingIndicator({super.key, required this.entries});
+  const ChannelTypingIndicator({
+    super.key,
+    required this.channelId,
+    required this.entries,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -26,12 +31,19 @@ class ChannelTypingIndicator extends ConsumerWidget {
     final userCache = {
       for (final entry in profiles.entries) entry.key: ?entry.value,
     };
-    final names = entries.map((entry) {
-      final profile =
-          profiles[entry.pubkey.toLowerCase()] ??
-          ref.read(userCacheProvider.notifier).get(entry.pubkey.toLowerCase());
-      return profile?.label ?? shortPubkey(entry.pubkey);
-    }).toList();
+    for (final pubkey in normalizedPubkeys) {
+      if (profiles[pubkey] == null) {
+        ref.read(userCacheProvider.notifier).get(pubkey);
+      }
+    }
+    final labels = watchChannelIdentityLabels(
+      ref,
+      channelId,
+      normalizedPubkeys,
+    );
+    final names = [
+      for (final entry in entries) labels[entry.pubkey.toLowerCase()]!,
+    ];
     final text = switch (names.length) {
       1 => '${names[0]} is typing…',
       2 => '${names[0]} and ${names[1]} are typing…',
