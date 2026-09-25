@@ -564,6 +564,17 @@ export async function createChannelManagedAgents(
     try {
       const result = await createChannelManagedAgent(channelId, input, context);
       successes.push(result);
+      const existingIndex = managedAgents.findIndex(
+        (agent) =>
+          normalizePubkey(agent.pubkey) ===
+          normalizePubkey(result.agent.pubkey),
+      );
+      if (existingIndex >= 0) {
+        managedAgents[existingIndex] = result.agent;
+      } else {
+        managedAgents.push(result.agent);
+      }
+      channelMemberPubkeys.add(normalizePubkey(result.agent.pubkey));
     } catch (error) {
       failures.push({
         kind: input.personaId ? "persona" : "generic",
