@@ -1252,7 +1252,7 @@ CREATE TABLE community_deletion_requests (
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
     retry_stage TEXT CHECK (retry_stage IS NULL OR retry_stage IN (
-        'approved', 'fenced', 'drained', 'bindings_removed',
+        'submitted', 'approved', 'fenced', 'drained', 'bindings_removed',
         'postgres_purged', 'cache_purged', 'logically_verified'
     )),
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1300,12 +1300,19 @@ CREATE INDEX community_deletion_requests_runnable
                     'postgres_purged', 'cache_purged', 'logically_verified');
 CREATE INDEX community_deletion_requests_lease
     ON community_deletion_requests (lease_until) WHERE lease_owner IS NOT NULL;
+CREATE INDEX community_deletion_requests_owner_preparable
+    ON community_deletion_requests (next_attempt_at, created_at)
+    WHERE request_origin = 'owner'
+      AND stage = 'submitted'
+      AND blocked_at IS NULL;
 
 CREATE TABLE community_deletion_approvals (
     request_id UUID PRIMARY KEY,
     community_id UUID NOT NULL,
     inventory_digest BYTEA NOT NULL CHECK (length(inventory_digest) = 32),
     approved_by TEXT NOT NULL,
+    approval_origin TEXT NOT NULL DEFAULT 'operator'
+        CHECK (approval_origin IN ('operator', 'owner_automatic')),
     note TEXT,
     approved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     FOREIGN KEY (request_id, community_id, inventory_digest)

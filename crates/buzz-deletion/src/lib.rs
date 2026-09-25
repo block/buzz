@@ -290,7 +290,7 @@ pub enum Command {
         #[arg(long)]
         executor_id: Option<String>,
     },
-    /// Drain the currently runnable deletion queue, then exit.
+    /// Drain runnable work, preparing authenticated owner submissions when idle.
     Drain {
         /// Executor identity (defaults to hostname/pid).
         #[arg(long)]
@@ -450,7 +450,7 @@ async fn run_with_services(command: Command, services: Services) -> Result<i32> 
                 .store
                 .submit(&host, &requested_by, reason.as_deref())
                 .await?;
-            let inventory = build_inventory(&services, &request).await?;
+            let inventory = build_inventory(&services, &request, None).await?;
             let request = services
                 .store
                 .freeze_inventory(request.id, &inventory)
@@ -683,12 +683,13 @@ fn validate_storage_ownership(request: &DeletionRequest, manifest: &StorageManif
 async fn build_inventory(
     services: &Services,
     request: &DeletionRequest,
+    heartbeat_lost: Option<&CancellationToken>,
 ) -> Result<FrozenInventory> {
     let schema = services
         .store
         .inventory_schema(request.community_id)
         .await?;
-    let storage = enumerate_tenant_prefixes(services, request, None, None).await?;
+    let storage = enumerate_tenant_prefixes(services, request, heartbeat_lost, None).await?;
     Ok(FrozenInventory { schema, storage })
 }
 
@@ -977,7 +978,15 @@ async fn run_loop(
                     .await?
             }
         };
-        let Some(claim) = claim else {
+        let claim = if claim.is_none() && mode == LoopMode::Drain && request_id.is_none() {
+            services
+                .store
+                .claim_next_owner_submission(&executor_id, DEFAULT_LEASE_DURATION)
+                .await?
+        } else {
+            claim
+        };
+        let Some(mut claim) = claim else {
             if mode == LoopMode::Run && !ran {
                 anyhow::bail!(
                     "deletion request is not runnable, is blocked, or is leased by another executor"
@@ -986,11 +995,206 @@ async fn run_loop(
             return Ok(0);
         };
         ran = true;
+        if claim.request.stage == DeletionStage::Submitted {
+            let preparation_request = claim.request.clone();
+            let preparation_services = &services;
+            match prepare_owner_claim_with(
+                &services,
+                mode,
+                claim,
+                &shutdown,
+                HEARTBEAT_INTERVAL,
+                |heartbeat_lost| async move {
+                    build_inventory(
+                        preparation_services,
+                        &preparation_request,
+                        Some(&heartbeat_lost),
+                    )
+                    .await
+                },
+            )
+            .await?
+            {
+                OwnerPreparationOutcome::Prepared(prepared) => claim = *prepared,
+                OwnerPreparationOutcome::Stopped => return Ok(0),
+                OwnerPreparationOutcome::Failed(output) => {
+                    print_json(&output)?;
+                    return Ok(1);
+                }
+            }
+        }
         let output = execute_claim(&services, mode, claim, &shutdown).await?;
         print_json(&output)?;
         let failed = output.last_error.is_some() || output.blocked_reason.is_some();
         if mode == LoopMode::Run || shutdown.is_cancelled() || failed {
             return Ok(i32::from(failed));
+        }
+    }
+}
+
+enum OwnerPreparationOutcome {
+    Prepared(Box<ClaimedDeletion>),
+    Stopped,
+    Failed(RunOutput),
+}
+
+async fn record_owner_preparation_failure(
+    services: &Services,
+    token: &LeaseToken,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let message = format!("{error:#}");
+    let result = if is_permanent_error(error) {
+        services
+            .store
+            .block_owner_preparation(token, "inventory", &message)
+            .await
+    } else {
+        services
+            .store
+            .record_owner_preparation_retry(token, "inventory", &message, RETRY_DELAY)
+            .await
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if buzz_db::deletion::is_stale_deletion_lease(&error) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn prepare_owner_claim_with<F, Fut>(
+    services: &Services,
+    mode: LoopMode,
+    claim: ClaimedDeletion,
+    shutdown: &CancellationToken,
+    heartbeat_period: Duration,
+    build: F,
+) -> Result<OwnerPreparationOutcome>
+where
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: Future<Output = Result<FrozenInventory>>,
+{
+    let token = claim.lease.clone();
+    if let Err(error) = services
+        .store
+        .heartbeat_owner_submission(&token, mode.as_str(), DEFAULT_LEASE_DURATION, false)
+        .await
+    {
+        if buzz_db::deletion::is_stale_deletion_lease(&error) {
+            let request = services.store.get(token.request_id).await?;
+            return Ok(OwnerPreparationOutcome::Failed(run_output(request)));
+        }
+        return Err(error.into());
+    }
+
+    let heartbeat_services = services.clone();
+    let heartbeat_token = token.clone();
+    let heartbeat_mode = mode.as_str();
+    let heartbeat_shutdown = CancellationToken::new();
+    let heartbeat_cancel = heartbeat_shutdown.clone();
+    let heartbeat_error = CancellationToken::new();
+    let heartbeat_error_signal = heartbeat_error.clone();
+    let heartbeat = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(heartbeat_period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = heartbeat_cancel.cancelled() => return,
+                _ = interval.tick() => {
+                    if heartbeat_services
+                        .store
+                        .heartbeat_owner_submission(
+                            &heartbeat_token,
+                            heartbeat_mode,
+                            DEFAULT_LEASE_DURATION,
+                            false,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        heartbeat_error_signal.cancel();
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
+    enum PreparationStage {
+        Prepared(Box<DeletionRequest>),
+        Stopped,
+        Failed(anyhow::Error),
+    }
+    let preparation = async {
+        let inventory = build(heartbeat_error.clone()).await?;
+        services
+            .store
+            .complete_owner_preparation(&token, &inventory)
+            .await
+            .map_err(Into::into)
+    };
+    let stage = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => PreparationStage::Stopped,
+        _ = heartbeat_error.cancelled() => PreparationStage::Failed(DeletionLeaseLost.into()),
+        result = preparation => match result {
+            Ok(request) => PreparationStage::Prepared(Box::new(request)),
+            Err(error) => PreparationStage::Failed(error),
+        },
+    };
+    heartbeat_shutdown.cancel();
+    let stage = match heartbeat.await {
+        Ok(()) => stage,
+        Err(error) => PreparationStage::Failed(anyhow::anyhow!(
+            "owner deletion preparation heartbeat task failed: {error}"
+        )),
+    };
+
+    match stage {
+        PreparationStage::Prepared(request) => Ok(OwnerPreparationOutcome::Prepared(Box::new(
+            ClaimedDeletion {
+                request: *request,
+                lease: token,
+            },
+        ))),
+        PreparationStage::Stopped => {
+            let _ = services
+                .store
+                .heartbeat_owner_submission(&token, mode.as_str(), DEFAULT_LEASE_DURATION, true)
+                .await;
+            services
+                .store
+                .stop_executor(Some(&token), &token.owner)
+                .await?;
+            Ok(OwnerPreparationOutcome::Stopped)
+        }
+        PreparationStage::Failed(error) => {
+            let request = services.store.get(token.request_id).await?;
+            if request.stage == DeletionStage::Approved
+                && request.lease_owner.as_deref() == Some(token.owner.as_str())
+                && request.lease_generation == token.generation
+                && services
+                    .store
+                    .verify_execution_token(&token, DeletionStage::Approved)
+                    .await
+                    .is_ok()
+            {
+                return Ok(OwnerPreparationOutcome::Prepared(Box::new(
+                    ClaimedDeletion {
+                        request,
+                        lease: token,
+                    },
+                )));
+            }
+            if request.lease_owner.as_deref() != Some(token.owner.as_str())
+                || request.lease_generation != token.generation
+            {
+                return Ok(OwnerPreparationOutcome::Failed(run_output(request)));
+            }
+            record_owner_preparation_failure(services, &token, &error).await?;
+            let request = services.store.get(token.request_id).await?;
+            Ok(OwnerPreparationOutcome::Failed(run_output(request)))
         }
     }
 }
@@ -1723,6 +1927,242 @@ mod postgres_tests {
                 .expect("construct unused Redis pool"),
         };
         (db, services, claim)
+    }
+
+    async fn claimed_owner_preparation(
+        prefix: &str,
+    ) -> (Db, Services, ClaimedDeletion, FrozenInventory) {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("BUZZ_TEST_DATABASE_URL or DATABASE_URL is required");
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect owner preparation test DB");
+        let db = Db::from_pool(pool);
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            db.migrate().await.expect("migrate deletion engine test DB");
+        }
+        let store = db.deletion_store();
+        let host = format!("{prefix}-{}.example", Uuid::new_v4().simple());
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let buzz_db::CreateCommunityWithOwnerResult::Created(community) = db
+            .create_community_with_owner(&host, &owner)
+            .await
+            .expect("create owner preparation community")
+        else {
+            panic!("expected fresh owner preparation community")
+        };
+        db.archive_community_owned_by(&host, &owner, "protected.example")
+            .await
+            .expect("archive owner preparation community")
+            .expect("owned community");
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        store
+            .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+            .await
+            .expect("admit owner request");
+        let claim = store
+            .claim_next_owner_submission("test-preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner request")
+            .expect("owner request is preparable");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community.id)
+                .await
+                .expect("inventory owner schema"),
+            storage: empty_storage_manifest(community.id),
+        };
+        let services = Services {
+            store,
+            media: Arc::new(
+                MediaStorage::new(&buzz_media::MediaConfig {
+                    s3_endpoint: "http://127.0.0.1:1".to_string(),
+                    s3_access_key: "unused".to_string(),
+                    s3_secret_key: "unused".to_string(),
+                    s3_bucket: "unused".to_string(),
+                    s3_region: "us-east-1".to_string(),
+                    s3_addressing_style: buzz_media::S3AddressingStyle::Path,
+                    max_image_bytes: 1,
+                    max_gif_bytes: 1,
+                    max_video_bytes: 1,
+                    max_file_bytes: 1,
+                    public_base_url: "http://localhost/media".to_string(),
+                    upload_records_enabled: false,
+                    upload_ip_header: None,
+                    upload_port_header: None,
+                })
+                .expect("construct unused media service"),
+            ),
+            redis: deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("construct unused Redis pool"),
+        };
+        (db, services, claim, inventory)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn drain_owner_preparation_approves_for_existing_execution_only() {
+        let (db, services, claim, inventory) =
+            claimed_owner_preparation("owner-preparation-success").await;
+        let operator_host = format!("manual-{}.example", Uuid::new_v4().simple());
+        db.ensure_configured_community(&operator_host)
+            .await
+            .expect("create manual community");
+        let manual = services
+            .store
+            .submit(&operator_host, "manual-operator", None)
+            .await
+            .expect("submit manual request");
+
+        let outcome = prepare_owner_claim_with(
+            &services,
+            LoopMode::Drain,
+            claim,
+            &CancellationToken::new(),
+            HEARTBEAT_INTERVAL,
+            |_| async move { Ok(inventory) },
+        )
+        .await
+        .expect("prepare owner claim");
+        let OwnerPreparationOutcome::Prepared(prepared) = outcome else {
+            panic!("owner preparation should produce an approved execution claim")
+        };
+        assert_eq!(prepared.request.stage, DeletionStage::Approved);
+        services
+            .store
+            .verify_execution_token(&prepared.lease, DeletionStage::Approved)
+            .await
+            .expect("prepared claim enters unchanged execution boundary");
+        assert_eq!(
+            services
+                .store
+                .get(manual.id)
+                .await
+                .expect("manual request")
+                .stage,
+            DeletionStage::Submitted
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn drain_owner_preparation_persists_transient_and_permanent_failures() {
+        let (_, services, claim, _) = claimed_owner_preparation("owner-preparation-failure").await;
+        let request_id = claim.request.id;
+        let outcome = prepare_owner_claim_with(
+            &services,
+            LoopMode::Drain,
+            claim,
+            &CancellationToken::new(),
+            HEARTBEAT_INTERVAL,
+            |_| async { Err(transient("temporary inventory failure")) },
+        )
+        .await
+        .expect("record transient preparation failure");
+        assert!(matches!(outcome, OwnerPreparationOutcome::Failed(_)));
+        let retried = services
+            .store
+            .get(request_id)
+            .await
+            .expect("retried request");
+        assert_eq!(retried.retry_stage, Some(DeletionStage::Submitted));
+        assert_eq!(retried.retry_count, 1);
+
+        let (_, blocked_services, claim, _) =
+            claimed_owner_preparation("owner-preparation-permanent").await;
+        let blocked_request_id = claim.request.id;
+        let outcome = prepare_owner_claim_with(
+            &blocked_services,
+            LoopMode::Drain,
+            claim,
+            &CancellationToken::new(),
+            HEARTBEAT_INTERVAL,
+            |_| async { Err(permanent("unsafe inventory taxonomy")) },
+        )
+        .await
+        .expect("record permanent preparation failure");
+        assert!(matches!(outcome, OwnerPreparationOutcome::Failed(_)));
+        assert!(blocked_services
+            .store
+            .get(blocked_request_id)
+            .await
+            .expect("blocked request")
+            .blocked_reason
+            .is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn drain_owner_preparation_rejects_stale_lease_before_inventory() {
+        let (_, services, claim, inventory) =
+            claimed_owner_preparation("owner-preparation-stale").await;
+        services
+            .store
+            .stop_executor(Some(&claim.lease), &claim.lease.owner)
+            .await
+            .expect("release preparation lease");
+        let built = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&built);
+        let outcome = prepare_owner_claim_with(
+            &services,
+            LoopMode::Drain,
+            claim,
+            &CancellationToken::new(),
+            HEARTBEAT_INTERVAL,
+            move |_| async move {
+                observed.store(true, Ordering::SeqCst);
+                Ok(inventory)
+            },
+        )
+        .await
+        .expect("stale preparation converges without mutation");
+        assert!(matches!(outcome, OwnerPreparationOutcome::Failed(_)));
+        assert!(!built.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn drain_owner_preparation_cancels_inventory_after_lease_loss() {
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (_, services, claim, _) = claimed_owner_preparation("owner-preparation-cancel").await;
+        let token = claim.lease.clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&dropped);
+        let shutdown = CancellationToken::new();
+        let preparation = prepare_owner_claim_with(
+            &services,
+            LoopMode::Drain,
+            claim,
+            &shutdown,
+            Duration::from_millis(10),
+            move |_| async move {
+                let _drop_signal = DropSignal(observed);
+                std::future::pending::<Result<FrozenInventory>>().await
+            },
+        );
+        let revoke = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            services
+                .store
+                .stop_executor(Some(&token), &token.owner)
+                .await
+                .expect("revoke preparation lease");
+        };
+        let (outcome, ()) = tokio::join!(preparation, revoke);
+        assert!(matches!(
+            outcome.expect("lease loss is typed control flow"),
+            OwnerPreparationOutcome::Failed(_)
+        ));
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {

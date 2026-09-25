@@ -5,9 +5,12 @@ Buzz executes whole-community deletion through the typed, one-shot
 that command as a Kubernetes CronJob; it does not call relay HTTP and it does
 not add another queue or retry service.
 
-Postgres remains the handoff and source of truth. A run claims only requests
-that the deletion store considers runnable, heartbeats the existing lease, and
-resumes from durable checkpoints. `concurrencyPolicy: Forbid` prevents scheduled
+Postgres remains the handoff and source of truth. A run gives already-approved
+work priority. When none is ready, it may claim an authenticated owner-origin
+request at `submitted`, build the existing bounded inventory, and atomically
+freeze that inventory with a digest-bound `owner_automatic` approval. The same
+lease then enters the unchanged executor and resumes from durable checkpoints.
+Operator-origin requests never auto-progress. `concurrencyPolicy: Forbid` prevents scheduled
 pod overlap, `backoffLimit: 0` prevents Kubernetes Job retries, and the deletion
 store remains authoritative when a pod exits, reaches its deadline, or is
 replaced.
@@ -68,9 +71,11 @@ reports their objects with the `null` version id.
 
 ## Runbook
 
-1. Confirm database migrations are current and the deletion request has crossed
-   the explicit inventory and approval boundary with
-   `buzz-admin deletions inspect <request-id>`.
+1. Confirm database migrations are current. For operator-origin requests,
+   confirm explicit inventory and operator approval with
+   `buzz-admin deletions inspect <request-id>`. For owner-origin requests,
+   expect the drain to record `approval_origin: owner_automatic`; `approved_by`
+   is the immutable mediating operator, not the owner.
 2. Confirm the selected Secret contains the required keys and the S3 principal
    has version-list and exact-version delete permissions.
 3. Enable the CronJob and inspect its rendered command and environment before
@@ -93,6 +98,10 @@ reports their objects with the `null` version id.
 7. If a run fails or times out, fix the recorded dependency or permission
    failure. Do not add Kubernetes retries: the next scheduled drain consults the
    durable retry/checkpoint state and resumes only when the store allows it.
+7. Use `buzz-admin deletions abort` as privileged recovery while a request is
+   still at `submitted` or `inventoried` when safe preparation cannot continue.
+   Abort preserves the archived community and immutable request evidence. An
+   operator may also `unblock` a remediated preparation failure.
 
 ## Deadlines, termination, and the retry budget
 
@@ -129,12 +138,13 @@ killed process. Expect up to roughly a lease duration of delay before the
 request is runnable again; do not raise the grace period expecting a clean
 handoff.
 
-The current owner self-serve relay admission records an owner-origin request at
-`submitted` and intentionally performs no inventory or approval synchronously.
-The deletion engine rejects `submitted` and `inventoried` requests at its
-explicit approval boundary. Automating the privileged inventory/approval step
-is therefore a separate control-plane slice; enabling this CronJob alone does
-not make a newly accepted owner request destructive.
+Owner self-serve relay admission still records only a `submitted` row and does
+no inventory, approval, S3 work, or execution synchronously. A successful drain
+has no human approval step or cooling-off period: authenticated owner intent is
+prepared automatically under privileged policy and becomes immediately
+eligible for execution. Transient preparation failures use the existing retry
+schedule; permanent or exhausted failures block durably. Owner-facing
+admission has no cancellation endpoint.
 
 The chart has no existing PrometheusRule or provider-neutral CronJob alert
 integration. Operators must alert on failed/missed Jobs and long-running active
