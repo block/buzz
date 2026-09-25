@@ -77,11 +77,11 @@ pub fn is_sole_owner(members: &[MemberRecord], pubkey: &[u8]) -> bool {
 pub fn can_edit_privileged_metadata(
     actor_role: Option<&str>,
     actor_owns_owner_agent: bool,
-    actor_is_owned_by_elevated_member: bool,
+    actor_is_owned_by_channel_owner: bool,
 ) -> bool {
     matches!(actor_role, Some("owner" | "admin"))
         || actor_owns_owner_agent
-        || actor_is_owned_by_elevated_member
+        || (actor_role.is_some() && actor_is_owned_by_channel_owner)
 }
 
 /// Decide whether `actor` may remove themselves from the channel.
@@ -655,8 +655,9 @@ mod tests {
     }
 
     #[test]
-    fn owner_agent_may_edit_privileged_metadata_for_its_human_owner() {
-        assert!(can_edit_privileged_metadata(None, false, true));
+    fn owner_agent_metadata_authority_requires_channel_membership() {
+        assert!(can_edit_privileged_metadata(Some("bot"), false, true));
+        assert!(!can_edit_privileged_metadata(None, false, true));
     }
 
     /// The wire contract: these strings reach NIP-29 clients verbatim, and the

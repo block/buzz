@@ -443,7 +443,7 @@ async fn actor_owns_any_owner_agent(
 
 /// Returns `true` if `actor_bytes` is an agent whose owning human is an active
 /// owner member. This grants an owner's managed agent the same metadata
-/// authority without requiring the agent itself to be added to the channel.
+/// authority only when the agent is itself an active channel member.
 async fn actor_is_owned_by_channel_owner(
     state: &Arc<AppState>,
     community_id: buzz_core::CommunityId,
@@ -696,7 +696,7 @@ pub async fn validate_admin_event(
                         .await?
                 };
                 let actor_is_owned_by_channel_owner =
-                    if actor_role.is_some() || actor_owns_owner_agent {
+                    if actor_role.is_none() || actor_owns_owner_agent {
                         false
                     } else {
                         actor_is_owned_by_channel_owner(
