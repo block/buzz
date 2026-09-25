@@ -5,6 +5,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -175,6 +176,23 @@ Future<void> _sendNativeAttachmentPopoverCall(
 /// Shared mock prefs for the compose bar's draft store. Initialized in
 /// [main].
 late SharedPreferences _testPrefs;
+
+double _paintedGlyphHeight(WidgetTester tester, String text) {
+  final richText = find.byWidgetPredicate(
+    (widget) => widget is RichText && widget.text.toPlainText().contains(text),
+    description: 'RichText containing "$text"',
+  );
+  final paragraph = tester.renderObject<RenderParagraph>(richText.last);
+  final plainText = paragraph.text.toPlainText();
+  final start = plainText.indexOf(text);
+  final box = paragraph
+      .getBoxesForSelection(
+        TextSelection(baseOffset: start, extentOffset: start + text.length),
+      )
+      .first
+      .toRect();
+  return MatrixUtils.transformRect(paragraph.getTransformTo(null), box).height;
+}
 
 Widget _buildComposeBar({
   required MediaUploadService uploadService,
@@ -4124,6 +4142,41 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
+    });
+
+    testWidgets('scales composer agent mentions once with accessible text', (
+      tester,
+    ) async {
+      final signer = nostr.Keys.generate();
+      final agentPubkey = 'c' * 64;
+      Widget build(double scale) => _buildComposeBar(
+        uploadService: _testUploadService(signer.nsec),
+        currentPubkey: signer.public,
+        relayAgents: [_testAgent(agentPubkey)],
+        channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+        textScaler: TextScaler.linear(scale),
+        onSend:
+            (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
+      );
+
+      await _testPrefs.clear();
+      await tester.pumpWidget(build(1));
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      final normalHeight = _paintedGlyphHeight(tester, 'Helper Bot');
+
+      await tester.pumpWidget(build(2));
+      await tester.pumpAndSettle();
+      final accessibleHeight = _paintedGlyphHeight(tester, 'Helper Bot');
+
+      expect(accessibleHeight / normalHeight, closeTo(2, 0.05));
     });
 
     testWidgets('adds a selected non-member agent as a bot before sending', (

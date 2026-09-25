@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -29,6 +29,7 @@ Widget _testable(
   Widget child, {
   List<Override> overrides = const [],
   bool disableAnimations = false,
+  TextScaler? textScaler,
   VideoPreviewFrameLoader? videoPreviewFrameLoader,
 }) {
   return ProviderScope(
@@ -42,9 +43,10 @@ Widget _testable(
       theme: AppTheme.light(),
       home: Builder(
         builder: (context) => MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(disableAnimations: disableAnimations),
+          data: MediaQuery.of(context).copyWith(
+            disableAnimations: disableAnimations,
+            textScaler: textScaler ?? MediaQuery.textScalerOf(context),
+          ),
           // The app states its code style here, above the navigator.
           child: AppMarkdownTheme(child: Scaffold(body: child)),
         ),
@@ -274,6 +276,20 @@ Finder _findRich(String text) {
     (widget) => widget is RichText && widget.text.toPlainText().contains(text),
     description: 'RichText containing "$text"',
   );
+}
+
+double _paintedGlyphHeight(WidgetTester tester, String text) {
+  final richText = _findRich(text);
+  final paragraph = tester.renderObject<RenderParagraph>(richText.last);
+  final plainText = paragraph.text.toPlainText();
+  final start = plainText.indexOf(text);
+  final box = paragraph
+      .getBoxesForSelection(
+        TextSelection(baseOffset: start, extentOffset: start + text.length),
+      )
+      .first
+      .toRect();
+  return MatrixUtils.transformRect(paragraph.getTransformTo(null), box).height;
 }
 
 /// Checks that the given text appears as bold (fontWeight >= w600) in some
@@ -2530,6 +2546,29 @@ Photos
     });
 
     group('@mentions', () {
+      testWidgets('scales mention labels once with accessible text', (
+        tester,
+      ) async {
+        Future<double> measure(double scale) async {
+          await tester.pumpWidget(
+            _testable(
+              const MessageContent(
+                content: 'Hello @Alice',
+                mentionNames: {'pk1': 'Alice'},
+              ),
+              textScaler: TextScaler.linear(scale),
+            ),
+          );
+          await tester.pump();
+          return _paintedGlyphHeight(tester, 'Alice');
+        }
+
+        final normalHeight = await measure(1);
+        final accessibleHeight = await measure(2);
+
+        expect(accessibleHeight / normalHeight, closeTo(2, 0.05));
+      });
+
       testWidgets('renders @mention with highlight', (tester) async {
         await tester.pumpWidget(
           _testable(
