@@ -33,6 +33,11 @@ pub mod mesh_boot;
 pub mod metrics;
 /// NIP-11 relay information document.
 pub mod nip11;
+/// NIP-FI relay configuration: mode, issuer registry, JWKS warm/refresh.
+pub mod nip_fi_config;
+/// NIP-FI HTTP ingress enforcement: assertion extraction, verification,
+/// key-pairing check, and deny-map gate for every protected HTTP surface.
+pub(crate) mod nip_fi_http;
 /// NIP-01 client/relay message parsing.
 pub mod protocol;
 /// Durable NIP-PL matcher and delivery worker.
