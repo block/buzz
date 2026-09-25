@@ -14,9 +14,9 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/compose_bar.dart';
+import '../channels/channel_identity_names_provider.dart';
 import '../channels/message_content.dart';
 import '../../shared/profile/user_cache_provider.dart';
-import '../../shared/utils/string_utils.dart';
 import '../../shared/profile/user_profile.dart';
 import '../profile/user_profile_sheet.dart';
 import 'forum_models.dart';
@@ -333,7 +333,7 @@ class _OriginalPost extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? shortPubkey(post.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, post.channelId, pk);
 
     final userCache = ref.watch(userCacheProvider);
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
@@ -348,6 +348,11 @@ class _OriginalPost extends ConsumerWidget {
       profileMentionNames: _buildMentionNames(post.mentionPubkeys, userCache),
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
+    );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      post.channelId,
+      post.mentionPubkeys,
     );
 
     return Padding(
@@ -403,6 +408,7 @@ class _OriginalPost extends ConsumerWidget {
           MessageContent(
             content: post.content,
             mentionNames: mentionNames,
+            mentionLabels: mentionLabels,
             agentMentionPubkeys: agentMentionPubkeys,
             tags: post.tags,
             baseStyle: messageBodyTextStyle.copyWith(
@@ -435,7 +441,7 @@ class _ReplyRow extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? shortPubkey(reply.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, channelId, pk);
 
     final userCache = ref.watch(userCacheProvider);
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
@@ -450,6 +456,11 @@ class _ReplyRow extends ConsumerWidget {
       profileMentionNames: _buildMentionNames(reply.mentionPubkeys, userCache),
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
+    );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      channelId,
+      reply.mentionPubkeys,
     );
 
     return Padding(
@@ -524,6 +535,7 @@ class _ReplyRow extends ConsumerWidget {
             child: MessageContent(
               content: reply.content,
               mentionNames: mentionNames,
+              mentionLabels: mentionLabels,
               agentMentionPubkeys: agentMentionPubkeys,
               tags: reply.tags,
               baseStyle: messageBodyTextStyle.copyWith(

@@ -18,6 +18,7 @@ import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'android_ime_lift.dart';
+import 'channel_identity_names_provider.dart';
 import 'channel_link_navigation.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
@@ -913,7 +914,11 @@ class ThreadDetailPage extends HookConsumerWidget {
                 ),
               ),
               if (!isMember || isArchived)
-                _ThreadTypingIndicator(entries: threadTyping, animated: false),
+                _ThreadTypingIndicator(
+                  channelId: channelId,
+                  entries: threadTyping,
+                  animated: false,
+                ),
             ],
           ),
           if (threadViewportVisible)
@@ -936,7 +941,10 @@ class ThreadDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      _ThreadTypingIndicator(entries: threadTyping),
+                      _ThreadTypingIndicator(
+                        channelId: channelId,
+                        entries: threadTyping,
+                      ),
                       ComposeBar(
                         channelId: channelId,
                         focusNode: composerFocusNode,

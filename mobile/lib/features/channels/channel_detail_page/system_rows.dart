@@ -41,12 +41,13 @@ class _SystemMessageRow extends HookConsumerWidget {
         groupedMembership != null ||
         (messageStyleActor != null && messageStyleActor.isNotEmpty);
 
+    final identityNames = ref.watch(channelIdentityNamesProvider(channelId));
     String resolveLabel(String? pubkey) {
       if (pubkey == null) return 'Someone';
-      final profile =
-          userCache[pubkey.toLowerCase()] ??
-          ref.read(userCacheProvider.notifier).get(pubkey.toLowerCase());
-      return profile?.label ?? shortPubkey(pubkey);
+      if (userCache[pubkey.toLowerCase()] == null) {
+        ref.read(userCacheProvider.notifier).get(pubkey.toLowerCase());
+      }
+      return identityNames.labelFor(pubkey);
     }
 
     final reactions = groupedMessages == null
@@ -184,6 +185,7 @@ class _SystemMessageRow extends HookConsumerWidget {
                   ),
                   child: ReactionRow(
                     messageId: message.id,
+                    channelId: channelId,
                     reactions: reactions,
                     onToggle: groupedMessages == null
                         ? (emoji) => toggleReaction(ref, message, emoji)

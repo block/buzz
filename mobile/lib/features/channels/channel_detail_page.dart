@@ -14,6 +14,7 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import '../../shared/animated_avatar.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/huddle/huddle.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -38,6 +39,7 @@ import '../forum/forum_posts_view.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
+import 'channel_identity_names_provider.dart';
 import 'channel_link_navigation.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
@@ -789,7 +791,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                   alignment: Alignment.bottomCenter,
                   child: typingEntries.isEmpty
                       ? const SizedBox.shrink()
-                      : ChannelTypingIndicator(entries: typingEntries),
+                      : ChannelTypingIndicator(
+                          channelId: resolvedChannel.id,
+                          entries: typingEntries,
+                        ),
                 ),
                 if (!resolvedChannel.isDm)
                   _ReadOnlyNotice(channel: resolvedChannel),
@@ -817,7 +822,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                         alignment: Alignment.bottomCenter,
                         child: typingEntries.isEmpty
                             ? const SizedBox.shrink()
-                            : ChannelTypingIndicator(entries: typingEntries),
+                            : ChannelTypingIndicator(
+                                channelId: resolvedChannel.id,
+                                entries: typingEntries,
+                              ),
                       ),
                       ComposeBar(
                         channelId: channel.id,

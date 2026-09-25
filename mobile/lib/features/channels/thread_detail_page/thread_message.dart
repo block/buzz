@@ -39,7 +39,7 @@ class _ThreadMessage extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? shortPubkey(message.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, channelId, pk);
     final isAgent =
         ref.watch(agentMentionPubkeysProvider(channelId)).contains(pk) ||
         profile?.ownerPubkey != null;
@@ -73,6 +73,11 @@ class _ThreadMessage extends HookConsumerWidget {
       profileMentionNames: mentionNames,
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
+    );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      channelId,
+      message.mentionPubkeys,
     );
 
     void openMessageActions(MessageLongPressDetails details) {
@@ -229,6 +234,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                 MessageContent(
                                   content: message.content,
                                   mentionNames: resolvedMentionNames,
+                                  mentionLabels: mentionLabels,
                                   agentMentionPubkeys: agentMentionPubkeys,
                                   channelNames: channelNames,
                                   tags: message.tags,
@@ -295,6 +301,7 @@ class _ThreadMessage extends HookConsumerWidget {
                       ),
                       child: ReactionRow(
                         messageId: message.id,
+                        channelId: channelId,
                         reactions: message.reactions,
                         onToggle: (emoji) =>
                             toggleReaction(ref, message, emoji),

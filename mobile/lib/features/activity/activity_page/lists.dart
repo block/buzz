@@ -77,7 +77,7 @@ class _RemindersList extends ConsumerWidget {
 
 /// Drafts surface for the Drafts filter — locally saved unsent composer
 /// text that reopens the target composer.
-class _DraftsList extends StatelessWidget {
+class _DraftsList extends ConsumerWidget {
   final List<ComposeDraft> drafts;
   final ScrollController scrollController;
   final Map<String, Channel> channelById;
@@ -95,7 +95,8 @@ class _DraftsList extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final names = ref.watch(identityNameSourcesProvider);
     if (drafts.isEmpty) {
       return const _EmptySurface(
         icon: LucideIcons.filePen,
@@ -114,7 +115,11 @@ class _DraftsList extends StatelessWidget {
         final destination = channel == null
             ? 'Unavailable channel'
             : channel.isDm
-            ? resolveDmChannelDisplayLabel(channel, currentPubkey: myPubkey)
+            ? resolveDmChannelDisplayLabel(
+                channel,
+                currentPubkey: myPubkey,
+                names: names,
+              )
             : '#${channel.name}';
         return ListTile(
           key: ValueKey('draft-row-${draft.key}'),

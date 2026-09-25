@@ -48,7 +48,7 @@ class _MessageBubble extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? shortPubkey(message.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, currentChannelId, pk);
     final isAgent =
         ref.watch(agentMentionPubkeysProvider(currentChannelId)).contains(pk) ||
         profile?.ownerPubkey != null;
@@ -93,6 +93,11 @@ class _MessageBubble extends HookConsumerWidget {
       profileMentionNames: mentionNames,
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
+    );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      currentChannelId,
+      normalizedMentionPubkeys,
     );
 
     void openMessageActions(MessageLongPressDetails details) {
@@ -234,6 +239,7 @@ class _MessageBubble extends HookConsumerWidget {
                               MessageContent(
                                 content: message.content,
                                 mentionNames: resolvedMentionNames,
+                                mentionLabels: mentionLabels,
                                 agentMentionPubkeys: agentMentionPubkeys,
                                 channelNames: channelNames,
                                 tags: message.tags,
@@ -300,6 +306,7 @@ class _MessageBubble extends HookConsumerWidget {
                     ),
                     child: ReactionRow(
                       messageId: message.id,
+                      channelId: currentChannelId,
                       reactions: message.reactions,
                       onToggle: (emoji) => toggleReaction(ref, message, emoji),
                       showAddButton: isMember && !isArchived,
