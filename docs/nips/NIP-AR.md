@@ -10,8 +10,6 @@ Defines `kind:45010` for editable records called **artifacts**. Each artifact ha
 
 The relay manages identity, access, and revisions. Clients define the content types, such as `buzz.task` or `buzz.project`.
 
-Artifacts supersede NIP-34 `kind:1621` issues and NIP-MP `kind:30621` projects as Buzz's task and project records. Those events are not artifact revisions, and this NIP's rules do not apply to them. A record MUST NOT have two independently writable representations; any conversion keeps one authoritative record. NIP-34 repositories, refs, and patches keep their own identities and access rules. Channel artifacts are unrelated to NIP-94 file metadata (build outputs).
-
 ## Event format
 
 Each event contains a complete snapshot. For example, a task created directly in a channel (standard signing fields omitted):
