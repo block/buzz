@@ -391,6 +391,29 @@ storageAccounting:
       cpu: "1"
       memory: 20Gi
 
+# Typed, one-shot operator jobs. The chart intentionally exposes no generic
+# command or environment registry: each job has a reviewed executable and
+# least-privilege environment contract.
+operatorJobs:
+  deletionDrain:
+    enabled: false
+    schedule: "*/5 * * * *"
+    activeDeadlineSeconds: 3600
+    successfulJobsHistoryLimit: 1
+    failedJobsHistoryLimit: 3
+    terminationGracePeriodSeconds: 30
+    serviceAccountName: ""       # defaults to the main Buzz service account
+    podLabels: {}
+    podAnnotations:
+      sidecar.istio.io/inject: "false"
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
 # In-cluster MinIO for the quickstart profile only. Production deploys leave
 # this disabled and use s3.* (or secrets.existingSecret) against managed S3.
 minio:

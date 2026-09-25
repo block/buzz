@@ -1,0 +1,214 @@
+suite: typed deletion drain operator job
+templates:
+  - templates/deletion-drain-cronjob.yaml
+tests:
+  - it: renders no deletion executor by default
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.accessKey: test
+      s3.secretKey: test
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the bounded typed drain command with isolated pod controls
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.region: us-west-2
+      s3.addressingStyle: virtual
+      s3.accessKey: test
+      s3.secretKey: test
+      operatorJobs.deletionDrain:
+        enabled: true
+        schedule: "*/7 * * * *"
+        activeDeadlineSeconds: 900
+        successfulJobsHistoryLimit: 2
+        failedJobsHistoryLimit: 4
+        terminationGracePeriodSeconds: 45
+        serviceAccountName: buzz-deletion-drain
+        podLabels:
+          tags.datadoghq.com/service: buzz-deletion-drain
+        podAnnotations:
+          sidecar.istio.io/inject: "false"
+          example.com/operator-job: deletion-drain
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isAPIVersion:
+          of: batch/v1
+      - isKind:
+          of: CronJob
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-buzz-deletion-drain
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: deletion-drain
+      - equal:
+          path: spec.schedule
+          value: "*/7 * * * *"
+      - equal:
+          path: spec.concurrencyPolicy
+          value: Forbid
+      - equal:
+          path: spec.successfulJobsHistoryLimit
+          value: 2
+      - equal:
+          path: spec.failedJobsHistoryLimit
+          value: 4
+      - equal:
+          path: spec.jobTemplate.spec.activeDeadlineSeconds
+          value: 900
+      - equal:
+          path: spec.jobTemplate.spec.backoffLimit
+          value: 0
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.restartPolicy
+          value: Never
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.terminationGracePeriodSeconds
+          value: 45
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.serviceAccountName
+          value: buzz-deletion-drain
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.enableServiceLinks
+          value: false
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/service"]
+          value: buzz-deletion-drain
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.annotations["example.com/operator-job"]
+          value: deletion-drain
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].command
+          value: ["/usr/local/bin/buzz-admin"]
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args
+          value: ["deletions", "drain"]
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.requests.cpu
+          value: 250m
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.limits.memory
+          value: 1Gi
+
+  - it: exposes only database redis and deletion S3 configuration
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      secrets.existingSecret: buzz-operator-secrets
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.region: us-west-2
+      s3.addressingStyle: virtual
+      operatorJobs.deletionDrain.enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          count: 8
+      - notExists:
+          path: spec.jobTemplate.spec.template.spec.containers[0].envFrom
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: buzz-operator-secrets
+                key: DATABASE_URL
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: buzz-operator-secrets
+                key: REDIS_URL
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_ENDPOINT
+            value: https://s3.example.com
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_BUCKET
+            value: buzz-media-example
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_REGION
+            value: us-west-2
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_ADDRESSING_STYLE
+            value: virtual
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: buzz-operator-secrets
+                key: BUZZ_S3_ACCESS_KEY
+                optional: true
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: buzz-operator-secrets
+                key: BUZZ_S3_SECRET_KEY
+                optional: true
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_RELAY_PRIVATE_KEY
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_GIT_HOOK_HMAC_SECRET
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RELAY_URL
+
+  - it: rejects enablement without a Redis source
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      s3.endpoint: https://s3.example.com
+      s3.accessKey: test
+      s3.secretKey: test
+      operatorJobs.deletionDrain.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "operatorJobs.deletionDrain requires Redis"

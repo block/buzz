@@ -18,6 +18,13 @@ surface at template time regardless of which manifest helm renders first.
   {{- end -}}
 {{- end -}}
 
+{{/* The deletion executor always uses Redis for tenant-scoped invalidation. */}}
+{{- if .Values.operatorJobs.deletionDrain.enabled -}}
+  {{- if and (not .Values.redis.enabled) (not .Values.externalRedis.url) (not .Values.secrets.existingSecret) -}}
+    {{- fail "operatorJobs.deletionDrain requires Redis. Enable redis.enabled=true, set externalRedis.url, or provide secrets.existingSecret with key REDIS_URL." -}}
+  {{- end -}}
+{{- end -}}
+
 {{/* Multiple replicas do NOT require ReadWriteMany git storage.
 
      Git ref/object state is object-store-backed: every read and write hydrates
