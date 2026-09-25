@@ -227,7 +227,11 @@ pub enum Command {
         /// Canonical community host. Defaults to RELAY_URL's authority.
         #[arg(long)]
         host: Option<String>,
-        /// Operator identity recorded on the request.
+        /// Identity recorded on the request.
+        ///
+        /// Also the convergence key for an existing `submitted` request: to
+        /// take over an owner-origin request, pass its owner pubkey. The
+        /// operator's own pubkey conflicts with it instead of converging.
         #[arg(long)]
         requested_by: String,
         /// Optional reason for the request.

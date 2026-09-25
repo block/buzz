@@ -343,6 +343,13 @@ pub async fn unarchive_community(
 /// The request UUID is the correlation/idempotency key. Acceptance is a fast
 /// PostgreSQL-only transaction and returns `202`; inventory, approval,
 /// quiescing, object-store access, and executor work remain asynchronous.
+///
+/// Owner consent is asserted by the operator, not proven to the relay. The
+/// operator authenticates the owner and collects the acknowledgement upstream;
+/// this request carries only the operator's NIP-98 signature. Authorization is
+/// therefore operator authority plus "the asserted pubkey is still the owner".
+/// `owner_pubkey` and `acknowledgement_version` are recorded as provenance for
+/// that upstream ceremony, not verified as cryptographic owner consent.
 pub async fn delete_community(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

@@ -748,6 +748,12 @@ impl DeletionStore {
     }
 
     /// Persist a request. Only active non-tombstone communities may be submitted.
+    ///
+    /// `requested_by` is recorded on a new row and is also the convergence key
+    /// when a `submitted` request already exists. Owner provenance pins an
+    /// owner-origin request's `requested_by` to its `owner_pubkey`, so taking
+    /// one over manually means passing that owner pubkey; the operator's own
+    /// pubkey conflicts with the existing request instead of converging.
     pub async fn submit(
         &self,
         community_host: &str,
@@ -799,6 +805,12 @@ impl DeletionStore {
     /// correlation/idempotency identity. Replays return the existing request at
     /// its current stage. This operation only persists intent; it never
     /// inventories, approves, quiesces, or executes deletion.
+    ///
+    /// The owner's consent arrives as the calling operator's assertion: the
+    /// operator authenticated the owner and collected the acknowledgement
+    /// upstream. This layer records that provenance and checks that
+    /// `owner_pubkey` is still the community's owner; it never verifies an
+    /// owner-signed attestation.
     pub async fn admit_owner_request(
         &self,
         normalized_community_host: &str,

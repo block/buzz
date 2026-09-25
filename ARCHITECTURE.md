@@ -26,6 +26,24 @@ management lists suppress the archived row. Replaying the same UUID converges
 to its current stage; a different UUID conflicts with the existing one-active-
 request invariant until that request is aborted.
 
+Owner consent on this path is asserted, not proven. The mediating operator
+authenticates the owner and collects the deletion acknowledgement out of band,
+upstream of the relay; the request itself carries only the operator's NIP-98
+signature. The relay verifies operator authority and that the asserted pubkey
+is still the community's owner, then records the owner pubkey, mediating
+operator pubkey, and acknowledgement version as durable provenance for that
+upstream ceremony. No owner-signed attestation is required or checked, and
+owners have no self-service cancellation. Recovery is a privileged abort,
+which stays open across the reversible `submitted`, `inventoried`, `approved`,
+and `fenced` stages — releasing the request fence while leaving the community
+archived — and closes from `drained` onward, once tenant state is destroyed.
+
+Manual operator handoff converges on an admitted owner request only when
+`buzz-admin deletions submit --requested-by` repeats the owner pubkey recorded
+on the row. Owner provenance pins `requested_by` to `owner_pubkey`, so passing
+the operator's own pubkey does not converge — it conflicts with the existing
+one-active-request invariant instead.
+
 Ownership is mutable only while a community is active. Archiving freezes the
 current owner. Normal transfer and deployment-root legacy convergence take the
 same community-row lock as owner-deletion admission, then reject archived,
