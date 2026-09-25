@@ -465,8 +465,16 @@ test-unit:
         # non-postgres_tests cases only "pass" without a database by waiting out
         # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
         # unit job either.
-        cargo nextest run -p buzz-relay --lib \
-            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/)'
+        # The third clause adds the NIP-FI HTTP ingress and its router/config
+        # neighbours: nip_fi_http, nip_fi_config, router, api::parse_query_tests,
+        # and the Git transport off_mode_precedence_tests. All are infra-free
+        # and finish in well under a second with no DATABASE_URL, so none wait
+        # out the sqlx acquire timeout. `--bin buzz-relay` adds main.rs's
+        # `tests::` module (JWKS refresh cadence, relay composition), which
+        # `--lib` cannot reach because it lives in the binary target; its
+        # nested `tests::postgres_tests::` stays in the PostgreSQL lane.
+        cargo nextest run -p buzz-relay --lib --bin buzz-relay \
+            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + (kind(bin) & test(/^tests::/) - test(/^tests::postgres_tests::/))'
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.

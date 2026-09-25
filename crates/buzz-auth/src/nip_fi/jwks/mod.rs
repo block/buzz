@@ -34,7 +34,7 @@ use jsonwebtoken::jwk::JwkSet;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tracing::warn;
 use url::Url;
 
@@ -251,12 +251,46 @@ struct CachedSnapshot {
     content_digest: [u8; 32],
 }
 
+/// Per-issuer cache slot. The published snapshot lives outside the refresh
+/// mutex so the sync [`IssuerKeySource::key_set`] read path never contends
+/// with other readers or an in-flight refresh. Only `get_snapshot` writes
+/// `published`, and only while holding `refresh`, so writers stay serialized.
+struct IssuerSlot {
+    refresh: Mutex<IssuerState>,
+    /// Held only for a clone or an assignment — never across an await.
+    published: std::sync::RwLock<Option<CachedSnapshot>>,
+}
+
+impl IssuerSlot {
+    fn new() -> Self {
+        Self {
+            refresh: Mutex::new(IssuerState::new()),
+            published: std::sync::RwLock::new(None),
+        }
+    }
+
+    fn read_published(&self) -> std::sync::RwLockReadGuard<'_, Option<CachedSnapshot>> {
+        self.published.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write_published(&self) -> std::sync::RwLockWriteGuard<'_, Option<CachedSnapshot>> {
+        self.published.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Clones the published key set iff it is still before its hard deadline.
+    fn live_key_set(&self, now: DateTime<Utc>) -> Option<AssertionKeySet> {
+        self.read_published()
+            .as_ref()
+            .filter(|c| now < c.hard_deadline)
+            .map(|c| c.key_set.clone())
+    }
+}
+
 struct IssuerState {
-    snapshot: Option<CachedSnapshot>,
     /// Advances only when `content_digest` changes; never wraps (saturating).
     generation_counter: u64,
     /// Owned permit for in-flight refresh. Held across the complete fetch +
-    /// state commit; dropped automatically if the caller future is cancelled.
+    /// snapshot commit; dropped automatically if the caller future is cancelled.
     /// `try_lock_owned()` succeeds iff no refresh is in progress.
     refresh_permit: Arc<tokio::sync::Mutex<()>>,
 }
@@ -264,7 +298,6 @@ struct IssuerState {
 impl IssuerState {
     fn new() -> Self {
         Self {
-            snapshot: None,
             generation_counter: 0,
             refresh_permit: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -499,7 +532,7 @@ fn parse_and_bound_jwks(body: &str) -> Result<JwkSet, JwksFetchError> {
 ///
 /// Must be constructed at startup after
 /// [`super::startup::validate_nip_fi_config`] passes. Shared across async
-/// tasks via the inner `Arc<RwLock<…>>`.
+/// tasks by wrapping the source in an `Arc`.
 ///
 /// ## Security
 ///
@@ -508,7 +541,7 @@ fn parse_and_bound_jwks(body: &str) -> Result<JwkSet, JwksFetchError> {
 /// - Errors are logged with a stable code; no key material appears in logs.
 pub struct ProductionJwksSource<F = HttpJwksFetcher> {
     configs: HashMap<String, IssuerJwksConfig>,
-    states: Arc<RwLock<HashMap<String, Mutex<IssuerState>>>>,
+    states: HashMap<String, IssuerSlot>,
     fetcher: Arc<F>,
     /// Clock used for `hard_deadline` computation and expiry checks. Always
     /// `Arc::new(Utc::now)` in production; tests supply a controlled clock.
@@ -533,12 +566,12 @@ impl<F: JwksFetcher> ProductionJwksSource<F> {
                 return None;
             }
             let issuer = c.issuer.clone();
-            state_map.insert(issuer.clone(), Mutex::new(IssuerState::new()));
+            state_map.insert(issuer.clone(), IssuerSlot::new());
             config_map.insert(issuer, c);
         }
         Some(Self {
             configs: config_map,
-            states: Arc::new(RwLock::new(state_map)),
+            states: state_map,
             fetcher: Arc::new(fetcher),
             now_fn: Arc::new(Utc::now),
         })
@@ -562,12 +595,12 @@ impl<F: JwksFetcher> ProductionJwksSource<F> {
                 return None;
             }
             let issuer = c.issuer.clone();
-            state_map.insert(issuer.clone(), Mutex::new(IssuerState::new()));
+            state_map.insert(issuer.clone(), IssuerSlot::new());
             config_map.insert(issuer, c);
         }
         Some(Self {
             configs: config_map,
-            states: Arc::new(RwLock::new(state_map)),
+            states: state_map,
             fetcher: Arc::new(fetcher),
             now_fn,
         })
@@ -638,29 +671,30 @@ impl<F: JwksFetcher> ProductionJwksSource<F> {
     /// cancelled while DNS, HTTP, or streaming is pending, the guard drops and
     /// the permit is released, so the next caller can start a new fetch.
     pub async fn get_snapshot(&self, issuer: &str) -> Option<AssertionKeySet> {
-        let states = self.states.read().await;
-        let state_mutex = states.get(issuer)?;
-        let mut state = state_mutex.lock().await;
+        let slot = self.states.get(issuer)?;
+        let config = self.configs.get(issuer)?;
+        let state = slot.refresh.lock().await;
 
         let now = (self.now_fn)();
-        let config = self.configs.get(issuer)?;
-
-        if let Some(ref cached) = state.snapshot {
-            if now >= cached.hard_deadline {
-                state.snapshot = None;
+        let (needs_refresh, prev_digest) = {
+            let mut published = slot.write_published();
+            if published.as_ref().is_some_and(|c| now >= c.hard_deadline) {
+                *published = None;
             }
-        }
-
-        let needs_refresh = match state.snapshot {
-            None => true,
-            Some(ref cached) => {
-                let age_secs = (now - cached.fetched_at).num_seconds().max(0) as u64;
-                age_secs >= config.contract.refresh_interval_seconds()
+            match published.as_ref() {
+                None => (true, None),
+                Some(cached) => {
+                    let age_secs = (now - cached.fetched_at).num_seconds().max(0) as u64;
+                    (
+                        age_secs >= config.contract.refresh_interval_seconds(),
+                        Some(cached.content_digest),
+                    )
+                }
             }
         };
 
         if !needs_refresh {
-            return state.snapshot.as_ref().map(|c| c.key_set.clone());
+            return slot.live_key_set(now);
         }
 
         // Try to acquire the per-issuer refresh permit. Failure means another
@@ -668,36 +702,23 @@ impl<F: JwksFetcher> ProductionJwksSource<F> {
         // starting a second fetch.
         let permit = match Arc::clone(&state.refresh_permit).try_lock_owned() {
             Ok(g) => g,
-            Err(_) => return state.snapshot.as_ref().map(|c| c.key_set.clone()),
+            Err(_) => return slot.live_key_set(now),
         };
 
-        let prev_digest = state.snapshot.as_ref().map(|c| c.content_digest);
         let prev_generation = state.generation_counter;
         drop(state);
-        drop(states);
 
         let fresh = self.fetch_fresh(issuer, prev_digest, prev_generation).await;
 
         // Re-acquire state to commit and release the permit atomically.
-        let states = self.states.read().await;
-        if let Some(state_mutex) = states.get(issuer) {
-            let mut st = state_mutex.lock().await;
-            if let Some((ref cached, new_generation)) = fresh {
-                st.generation_counter = new_generation;
-                st.snapshot = Some(cached.clone());
-            }
-            // Drop the permit only after the state commit is visible.
-            drop(permit);
-            let now2 = (self.now_fn)();
-            return st
-                .snapshot
-                .as_ref()
-                .filter(|c| now2 < c.hard_deadline)
-                .map(|c| c.key_set.clone());
+        let mut state = slot.refresh.lock().await;
+        if let Some((cached, new_generation)) = fresh {
+            state.generation_counter = new_generation;
+            *slot.write_published() = Some(cached);
         }
-
+        // Drop the permit only after the snapshot commit is visible.
         drop(permit);
-        None
+        slot.live_key_set((self.now_fn)())
     }
 }
 
@@ -707,19 +728,11 @@ impl<F: JwksFetcher> IssuerKeySource for ProductionJwksSource<F> {
     /// Called per-request by the verifier after the cache has been warmed via
     /// [`get_snapshot`][Self::get_snapshot].
     ///
-    /// Uses `try_read`/`try_lock` — safe to call from any async context.
-    /// Fails closed (returns `None`) when the lock is momentarily held by an
-    /// in-flight refresh, rather than blocking or panicking. [FI-INV-14]
+    /// Reads the published snapshot without touching the refresh mutex, so
+    /// concurrent readers and an in-flight refresh never make it fail. Fails
+    /// closed (returns `None`) only when no snapshot is live. [FI-INV-14]
     fn key_set(&self, issuer: &str) -> Option<AssertionKeySet> {
-        let states = self.states.try_read().ok()?;
-        let state_mutex = states.get(issuer)?;
-        let state = state_mutex.try_lock().ok()?;
-        let now = (self.now_fn)();
-        state
-            .snapshot
-            .as_ref()
-            .filter(|c| now < c.hard_deadline)
-            .map(|c| c.key_set.clone())
+        self.states.get(issuer)?.live_key_set((self.now_fn)())
     }
 }
 
