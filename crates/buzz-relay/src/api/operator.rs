@@ -790,6 +790,40 @@ mod postgres_tests {
             .expect("response")
     }
 
+    /// Send a delete-community request with a caller-controlled `Authorization`
+    /// header so signature-binding failures can be exercised directly.
+    async fn raw_owner_delete(
+        state: Arc<AppState>,
+        auth: Option<String>,
+        extra_header: Option<(&str, String)>,
+        body: String,
+    ) -> axum::response::Response {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/operator/communities/delete")
+            .header(header::HOST, INGRESS_HOST)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(auth) = auth {
+            request = request.header(header::AUTHORIZATION, auth);
+        }
+        if let Some((name, value)) = extra_header {
+            request = request.header(name, value);
+        }
+        build_router(state)
+            .oneshot(request.body(Body::from(body)).expect("request"))
+            .await
+            .expect("response")
+    }
+
+    /// The endpoint must not have persisted intent under `request_id`.
+    async fn assert_no_persisted_request(state: &AppState, request_id: Uuid, case: &str) {
+        let found = state.db.deletion_store().get(request_id).await;
+        assert!(
+            matches!(found, Err(buzz_db::DbError::NotFound(_))),
+            "{case}: rejected request must not persist deletion intent"
+        );
+    }
+
     async fn provision_community(
         state: Arc<AppState>,
         operator: &Keys,
@@ -961,7 +995,14 @@ mod postgres_tests {
         .await;
         assert_eq!(protected.status(), StatusCode::CONFLICT);
 
-        let malformed = signed_operator_request(
+        // Each malformed case keeps every unrelated field valid so it reaches
+        // the guard under test instead of tripping an earlier one, and none of
+        // them may leave durable intent behind.
+        let valid_owner = owner.public_key().to_hex();
+        let reachable_host = format!("community-{}.example", Uuid::new_v4().simple());
+
+        let bad_host_id = Uuid::new_v4();
+        let bad_host = signed_operator_request(
             Arc::clone(&state),
             &operator,
             "POST",
@@ -969,7 +1010,95 @@ mod postgres_tests {
             Some(
                 serde_json::json!({
                     "host": "https://not-an-authority.example/path",
+                    "owner_pubkey": valid_owner,
+                    "request_id": bad_host_id,
+                    "acknowledgement_version": 1,
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(bad_host.status(), StatusCode::BAD_REQUEST);
+        assert_no_persisted_request(&state, bad_host_id, "unnormalizable host").await;
+
+        let bad_pubkey_id = Uuid::new_v4();
+        let bad_pubkey = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(
+                serde_json::json!({
+                    "host": reachable_host,
                     "owner_pubkey": "not-a-pubkey",
+                    "request_id": bad_pubkey_id,
+                    "acknowledgement_version": 1,
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(bad_pubkey.status(), StatusCode::BAD_REQUEST);
+        let bad_pubkey_error = read_json(bad_pubkey).await;
+        assert!(
+            bad_pubkey_error
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .contains("owner_pubkey"),
+            "invalid owner_pubkey must reach the pubkey guard: {bad_pubkey_error:?}"
+        );
+        assert_no_persisted_request(&state, bad_pubkey_id, "invalid owner_pubkey").await;
+
+        let bad_version_id = Uuid::new_v4();
+        let bad_version = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(
+                serde_json::json!({
+                    "host": reachable_host,
+                    "owner_pubkey": valid_owner,
+                    "request_id": bad_version_id,
+                    "acknowledgement_version": 2,
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(bad_version.status(), StatusCode::BAD_REQUEST);
+        assert_no_persisted_request(&state, bad_version_id, "unsupported acknowledgement").await;
+
+        let unknown_host_id = Uuid::new_v4();
+        let unknown_host = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(
+                serde_json::json!({
+                    "host": reachable_host,
+                    "owner_pubkey": valid_owner,
+                    "request_id": unknown_host_id,
+                    "acknowledgement_version": 1,
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(unknown_host.status(), StatusCode::NOT_FOUND);
+        assert_no_persisted_request(&state, unknown_host_id, "unprovisioned host").await;
+
+        let bad_uuid = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(
+                serde_json::json!({
+                    "host": reachable_host,
+                    "owner_pubkey": valid_owner,
                     "request_id": "not-a-uuid",
                     "acknowledgement_version": 1,
                 })
@@ -977,7 +1106,7 @@ mod postgres_tests {
             ),
         )
         .await;
-        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(bad_uuid.status(), StatusCode::BAD_REQUEST);
 
         let host = format!("community-{}.example", Uuid::new_v4().simple());
         assert_eq!(
