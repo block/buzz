@@ -416,6 +416,8 @@ class ChannelSectionsManager {
         _lastRemoteEventId = event.id;
         _store = incoming;
         _persist();
+        // A pending debounce stays armed: its republish re-converges an OK
+        // that later wins the cursor after this head replaced the store.
       }
     } catch (_) {
       // Decryption failure or parse error — keep existing state.
@@ -511,7 +513,9 @@ class ChannelSectionsManager {
     }
   }
 
+  /// A retired manager never writes the prefs key its successor now owns.
   void _persist() {
+    if (_disposed) return;
     _storage.write(pubkey, _store);
   }
 
