@@ -444,18 +444,11 @@ test-unit:
         # and a red one could ship green (exactly how a broken admin test slipped
         # past every gate once). Scoped to api::admin, not the whole buzz-relay
         # --lib, because api::media has non-ignored tests that require Postgres.
-        # Two api::admin tests are excluded: both exercise a read-route DB
-        # fallthrough and pass without a database only by waiting out the sqlx
-        # acquire timeout (~30s each), so they do not belong in the infra-free
-        # unit job. nip98_mode_unrostered_signer_does_not_consume_a_replay_slot
-        # asserts a unique replay-guard invariant, so it is wired into the
-        # Postgres-backed Backend Integration job (see ci.yml "Admin API
-        # unrostered-signer replay invariant"). disabled_mode_allows_
-        # unauthenticated_requests_on_the_admin_host has no unique invariant:
-        # disabled-mode unauthenticated success is covered by
-        # disabled_mode_regression_pin_unauthenticated_request_is_served on the
-        # DB-free /probe route, and its Host/Origin gating is covered here by
-        # disabled_mode_still_requires_the_correct_host / _a_matching_origin.
+        # DB-backed api::admin tests are #[ignore]d and run in the PostgreSQL
+        # lane; the non-ignored ones reject before touching the database. Any
+        # new non-ignored test here must stay DB-free: without a database, a
+        # DB fallthrough only "passes" by waiting out the ~30s sqlx acquire
+        # timeout.
         # The second clause adds the relay's pure authorization-decision tests:
         # the NIP-29 channel membership grid (handlers::channel_authz), the
         # moderation capability grid (handlers::moderation_authz), and the pure
@@ -470,7 +463,7 @@ test-unit:
         # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
         # unit job either.
         cargo nextest run -p buzz-relay --lib \
-            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/)'
+            -E 'test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/)'
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
