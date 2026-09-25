@@ -1277,7 +1277,9 @@ mod tests {
                     republish_interval,
                 );
 
-                sample_started.notified().await;
+                tokio::time::timeout(Duration::from_secs(5), sample_started.notified())
+                    .await
+                    .expect("dependency sampler must start its first sample within 5 seconds");
                 for _ in 0..3 {
                     tokio::time::advance(republish_interval).await;
                     tokio::task::yield_now().await;
