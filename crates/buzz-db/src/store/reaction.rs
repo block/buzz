@@ -221,6 +221,13 @@ pub async fn insert_reaction_event_with_thread_metadata(
         return Ok(ReactionEventInsertOutcome::Duplicate);
     }
 
+    crate::event::acquire_canvas_event_write_lock_if_needed(
+        &mut tx,
+        community_id,
+        reaction_event,
+        channel_id,
+    )
+    .await?;
     let (stored_event, was_inserted) = insert_event_with_thread_metadata_tx(
         &mut tx,
         community_id,

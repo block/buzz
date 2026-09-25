@@ -1346,6 +1346,8 @@ impl Db {
         self.deletion_store()
             .guard_transaction_with_serving_lease(&mut tx, lease)
             .await?;
+        event::acquire_canvas_event_write_lock_if_needed(&mut tx, community_id, event, channel_id)
+            .await?;
         let result = event::insert_event_with_thread_metadata_tx(
             &mut tx,
             community_id,

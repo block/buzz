@@ -918,34 +918,6 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     Ok(cnt)
 }
 
-/// Soft-delete an event by setting `deleted_at = NOW()`.
-///
-/// Returns `Ok(true)` if the event was deleted, `Ok(false)` if already deleted
-/// or not found. Callers are responsible for decrementing thread reply counts
-/// when the deleted event is a thread reply.
-pub async fn soft_delete_event(
-    pool: &PgPool,
-    community_id: CommunityId,
-    event_id: &[u8],
-) -> Result<bool> {
-    let mut tx = crate::begin_community_event_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
-    let result = sqlx::query(
-        "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
-    )
-    .bind(community_id.as_uuid())
-    .bind(event_id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-
-    Ok(result.rows_affected() > 0)
-}
 /// Soft-delete the live row for an addressable coordinate
 /// `(kind, pubkey, d_tag)` — the NIP-33 replacement key — provided it is not
 /// newer than the deletion request.
@@ -1548,6 +1520,35 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     ))
 }
 
+pub(crate) async fn acquire_canvas_event_write_lock_if_needed(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<()> {
+    use crate::store::replaceable::event_replacement_lock_key;
+
+    if event_kind_i32(event) != KIND_CANVAS as i32 {
+        return Ok(());
+    }
+
+    let Some(channel_id) = channel_id else {
+        return Ok(());
+    };
+
+    let lock_key = event_replacement_lock_key(
+        community_id,
+        KIND_CANVAS as i32,
+        &[],
+        Some(channel_id.as_bytes().as_slice()),
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// Atomically insert an event and its optional thread metadata.
 ///
 /// `insert_event` and `insert_thread_metadata` calls could leave reply counters
@@ -1569,29 +1570,13 @@ pub async fn insert_event_with_thread_metadata(
     channel_id: Option<Uuid>,
     thread_meta: Option<ThreadMetadataParams<'_>>,
 ) -> Result<(StoredEvent, bool)> {
-    use crate::store::replaceable::event_replacement_lock_key;
-
     let mut tx = crate::begin_community_event_write_transaction(
         pool,
         community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-
-    if event_kind_i32(event) == KIND_CANVAS as i32 {
-        if let Some(ch) = channel_id {
-            let lock_key = event_replacement_lock_key(
-                community_id,
-                KIND_CANVAS as i32,
-                &[],
-                Some(ch.as_bytes().as_slice()),
-            );
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(lock_key)
-                .execute(&mut *tx)
-                .await?;
-        }
-    }
+    acquire_canvas_event_write_lock_if_needed(&mut tx, community_id, event, channel_id).await?;
     let result =
         insert_event_with_thread_metadata_tx(&mut tx, community_id, event, channel_id, thread_meta)
             .await?;
@@ -1663,24 +1648,17 @@ pub async fn insert_channel_head_checked(
     channel_id: Uuid,
     precondition: ChannelHeadPrecondition<'_>,
 ) -> Result<(StoredEvent, ChannelHeadWriteStatus)> {
-    use crate::store::replaceable::event_replacement_lock_key;
-
     let kind_i32 = buzz_core::kind::event_kind_i32(event);
     let received_at = Utc::now();
     let incoming_id = event.id.as_bytes();
 
-    let mut tx = pool.begin().await?;
-
-    // Serialize check+insert per (community, kind, channel).
-    let lock_key = event_replacement_lock_key(
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
         community_id,
-        kind_i32,
-        &[],
-        Some(channel_id.as_bytes().as_slice()),
-    );
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(lock_key)
-        .execute(&mut *tx)
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    acquire_canvas_event_write_lock_if_needed(&mut tx, community_id, event, Some(channel_id))
         .await?;
 
     let head: Option<(Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
@@ -2268,6 +2246,13 @@ impl Db {
             &self.pool,
             community_id,
             crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        crate::event::acquire_canvas_event_write_lock_if_needed(
+            &mut tx,
+            community_id,
+            event,
+            channel_id,
         )
         .await?;
         let result = crate::event::insert_event_with_thread_metadata_tx(
@@ -4171,29 +4156,29 @@ mod postgres_tests {
         );
     }
 
-    /// Serialization coverage: an untagged kind-40100 unconditional append must
-    /// acquire the same `(community, kind, channel)` advisory key as a tagged
-    /// write so the two cannot interleave on the head read.
+    /// Serialization coverage: the relay-facing
+    /// `Db::insert_event_with_thread_metadata` path for an untagged
+    /// kind-40100 append must acquire the same `(community, kind, channel)`
+    /// advisory key as tagged writes so the two cannot interleave on the head
+    /// read.
     ///
-    /// Proof: an external connection holds the advisory key; the untagged write
-    /// task is spawned. Since the write acquires the same key, it blocks while
-    /// the holder has it — `JoinHandle::is_finished()` returns false. After the
-    /// holder releases, the task completes and the row is committed.
+    /// Proof: an external connection holds the advisory key; the `Db` write
+    /// task is spawned. Since the production `Db` method acquires the same
+    /// key, a waiter appears in `pg_locks` while the holder still owns it.
+    /// After the holder releases, the task completes and the row is committed.
     ///
-    /// Mutation oracle: removing the `pg_advisory_xact_lock` block from
-    /// `insert_event_with_thread_metadata` for kind-40100 lets the write proceed
-    /// without acquiring the key. The task completes immediately (no block), so
-    /// `is_finished()` returns true while the holder still has the key —
-    /// `assert!(!write_task.is_finished())` fails.
+    /// Mutation oracle: removing the centralized canvas-lock acquisition from
+    /// the admitted transaction path leaves no waiter on this key, so
+    /// `wait_for_advisory_waiters` times out and the test fails.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn channel_head_untagged_canvas_append_serializes_on_advisory_key() {
+    async fn db_untagged_canvas_append_serializes_on_advisory_key() {
         let pool = setup_pool().await;
+        let db = crate::Db::from_pool(pool.clone());
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
         let lock_key = canvas_lock_key(community, channel);
 
-        // Hold the exact advisory key on a dedicated connection.
         let mut holder = pool.begin().await.expect("holder tx");
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
@@ -4201,30 +4186,15 @@ mod postgres_tests {
             .await
             .expect("holder acquires key");
 
-        // Spawn the untagged write — it should block at pg_advisory_xact_lock.
         let event = make_canvas_event_at("# Untagged", 1000);
-        let pool_write = pool.clone();
         let write_task = tokio::spawn(async move {
-            insert_event_with_thread_metadata(&pool_write, community, &event, Some(channel), None)
+            db.insert_event_with_thread_metadata(community, &event, Some(channel), None)
                 .await
         });
 
-        // Give the write task time to open its transaction and reach the lock.
-        // The runtime drives the task until it blocks (advisory-lock wait suspends
-        // the async task back to the executor).
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // The write task must NOT have finished while the holder has the key.
-        assert!(
-            !write_task.is_finished(),
-            "untagged canvas write must block on the advisory key while holder has it; \
-             the task finished immediately, meaning the lock was not acquired"
-        );
-
-        // Release the holder — the blocked write can now acquire the key.
+        wait_for_advisory_waiters(&pool, lock_key, 1, std::time::Duration::from_secs(5)).await;
         holder.rollback().await.expect("release holder");
 
-        // The write must now complete successfully.
         let (stored, was_inserted) = write_task
             .await
             .expect("join write task")
