@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { truncatePubkey } from "@/shared/lib/pubkey.ts";
+import { truncateNpub, truncatePubkey } from "@/shared/lib/pubkey.ts";
 
 import {
   buildChannelMemberMentionCandidate,
@@ -238,10 +238,10 @@ test("resolveMentionMemberDisplayName keeps member, kind 0, and managed-agent na
   );
 });
 
-test("resolveMentionMemberDisplayName falls back to the truncated pubkey", () => {
+test("resolveMentionMemberDisplayName falls back to the truncated npub", () => {
   assert.equal(
     resolveMentionMemberDisplayName({ pubkey: ADA_PUBKEY }),
-    truncatePubkey(ADA_PUBKEY),
+    truncateNpub(ADA_PUBKEY),
   );
 });
 
@@ -269,7 +269,7 @@ test("buildChannelMemberMentionCandidate labels a catalog bot and unnamed member
       role: "member",
     },
   });
-  assert.equal(unnamed.displayName, truncatePubkey(ADA_PUBKEY));
+  assert.equal(unnamed.displayName, truncateNpub(ADA_PUBKEY));
   assert.equal(unnamed.isMember, true);
   assert.equal(unnamed.isAgent, false);
 
