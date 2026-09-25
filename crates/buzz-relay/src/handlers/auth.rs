@@ -72,6 +72,16 @@ fn ban_denial(outcome: BanOutcome) -> Option<(&'static str, &'static str, AuthOu
     }
 }
 
+/// NIP-FI class for a failed NIP-42 proof: a bad proof is client evidence
+/// (`evidence rejected`); only a relay-internal verifier failure is
+/// `authorization unavailable`.
+fn nip42_denial_class(error: &buzz_auth::AuthError) -> buzz_auth::DenialClass {
+    match error {
+        buzz_auth::AuthError::Internal(_) => buzz_auth::DenialClass::AuthorizationUnavailable,
+        _ => buzz_auth::DenialClass::EvidenceRejected,
+    }
+}
+
 /// NIP-FI post-upgrade AUTH denial: queue the canonical Root NOTICE for
 /// `class` on the terminal channel, then close. Callers invoke this only when
 /// `conn.nip_fi_assertion` is present, so every FI denial is uniform in frame
@@ -460,17 +470,8 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             if !conn.reject_auth(AuthOutcome::Invalid) {
                 return;
             }
-            // With an FI assertion: a bad proof is client evidence
-            // (`evidence rejected`); only a relay-internal verifier failure
-            // is `authorization unavailable`.
             if conn.nip_fi_assertion.is_some() {
-                let class = match e {
-                    buzz_auth::AuthError::Internal(_) => {
-                        buzz_auth::DenialClass::AuthorizationUnavailable
-                    }
-                    _ => buzz_auth::DenialClass::EvidenceRejected,
-                };
-                deny_nip_fi_auth(&conn, class);
+                deny_nip_fi_auth(&conn, nip42_denial_class(&e));
                 return;
             }
             conn.send(RelayMessage::ok(
@@ -486,7 +487,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
 mod tests {
     use super::{
         ban_denial, classify_allowlist, classify_relay_membership, extract_auth_tag_json,
-        handle_auth, BanOutcome, PolicyCheck,
+        handle_auth, nip42_denial_class, BanOutcome, PolicyCheck,
     };
     use crate::api::relay_members::MembershipDecision;
     use crate::connection::{tests::test_conn_with_auth, AuthState};
@@ -994,6 +995,25 @@ mod tests {
     }
 
     /// NIP-42 `Err` arm: an invalid proof under FI is `evidence rejected`.
+    /// A relay-internal verifier failure is `authorization unavailable`;
+    /// every client-evidence NIP-42 failure is `evidence rejected`.
+    #[test]
+    fn nip42_denial_class_separates_internal_failure_from_bad_evidence() {
+        use buzz_auth::{AuthError, DenialClass};
+        assert_eq!(
+            nip42_denial_class(&AuthError::Internal("spawn_blocking panicked".into())),
+            DenialClass::AuthorizationUnavailable
+        );
+        for evidence in [
+            AuthError::InvalidSignature,
+            AuthError::ChallengeMismatch,
+            AuthError::RelayUrlMismatch,
+            AuthError::EventExpired,
+        ] {
+            assert_eq!(nip42_denial_class(&evidence), DenialClass::EvidenceRejected);
+        }
+    }
+
     #[tokio::test]
     async fn fi_invalid_nip42_proof_emits_terminal_evidence_rejected() {
         let state = auth_test_state().await;
@@ -1424,6 +1444,64 @@ mod tests {
                 } else {
                     harness.assert_off_mode_ok("restricted: not a relay member");
                 }
+            }
+        }
+
+        /// Carl's coverage gap: a matching-key FI connection whose pubkey is
+        /// banned gets the terminal `authorization denied` NOTICE and the
+        /// socket closes; off mode keeps `OK false` on ctrl, then closes.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn fi_ban_denial_emits_terminal_authorization_denied() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("PostgreSQL must be available");
+            let state = state_with_pool(pool, |_| {}).await;
+            for with_fi in [true, false] {
+                let mut harness = AuthHarness::new(with_fi);
+                let community = *harness.conn.tenant.community().as_uuid();
+                sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                    .bind(community)
+                    .bind(format!("fi-ban-{}.example", community.simple()))
+                    .execute(state.db.pool())
+                    .await
+                    .expect("insert community");
+                sqlx::query(
+                    "INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey) \
+                     VALUES ($1, $2, TRUE, $3)",
+                )
+                .bind(community)
+                .bind(harness.key.public_key().to_bytes().to_vec())
+                .bind(Keys::generate().public_key().to_bytes().to_vec())
+                .execute(state.db.pool())
+                .await
+                .expect("ban key");
+                harness.run(harness.auth_event(), state.clone()).await;
+                if with_fi {
+                    harness.assert_fi_terminal(buzz_auth::DenialClass::AuthorizationDenied);
+                    continue;
+                }
+                let frame = match harness.ctrl_rx.try_recv().expect("off-mode OK on ctrl") {
+                    WsMessage::Text(text) => {
+                        serde_json::from_str::<serde_json::Value>(&text).unwrap()
+                    }
+                    other => panic!("expected text frame, got {other:?}"),
+                };
+                assert_eq!(frame[0], "OK");
+                assert_eq!(frame[2], false);
+                assert_eq!(frame[3], "blocked: you are banned from this community");
+                assert!(
+                    harness.terminal_rx.try_recv().is_err(),
+                    "off mode never uses terminal"
+                );
+                assert!(
+                    harness.send_rx.try_recv().is_err(),
+                    "no OK on the data channel"
+                );
+                assert!(
+                    harness.conn.cancel.is_cancelled(),
+                    "a ban closes the socket"
+                );
             }
         }
 
