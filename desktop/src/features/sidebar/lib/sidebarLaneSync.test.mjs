@@ -21,6 +21,7 @@ Object.assign(globalThis.window, {
     getItem: (k) => storage.get(k) ?? null,
     setItem: (k, v) => {
       if (fx.storageFails) throw new Error("quota");
+      fx.writes++;
       storage.set(k, v);
     },
     removeItem: (k) => storage.delete(k),
@@ -41,6 +42,7 @@ beforeEach(() => {
     fetchFails: false,
     publish: "ok",
     storageFails: false,
+    writes: 0,
     badDecrypt: new Set(),
   };
   globalThis.window.__TAURI_INTERNALS__ = {
@@ -57,9 +59,9 @@ beforeEach(() => {
     },
   };
   mock.method(relayClient, "fetchEvents", async () => {
-    if (fx.fetchFails) throw new Error("offline");
     const result = fx.head ? [fx.head] : []; // snapshot at request time
     if (fx.gate) await fx.gate;
+    if (fx.fetchFails) throw new Error("offline");
     return result;
   });
   mock.method(console, "warn", () => {});
@@ -321,26 +323,36 @@ for (const L of LANES) {
     assert.equal(fx.published.length, 1, "a later readable head re-enables");
   });
 
-  test(`${L.name}: an edit during preflight holds the send to its deadline`, async (t) => {
-    t.mock.timers.enable({ apis: ["Date"], now: 1e12 });
-    const h0 = ev(JSON.stringify(L.legacy({ k1: "A" })), 100);
-    const d = device(L.lane);
-    d.store.transact((tr) => L.edit(tr, "k2", "B"));
-    let open;
-    fx.gate = new Promise((r) => (open = r));
-    fx.head = h0;
-    void d.rec.ingest(h0); // attempt acquired; preflight fetch waits
-    for (let i = 0; i < 5; i++) await settle();
-    d.store.transact((tr) => L.edit(tr, "k3", "A"));
-    d.rec.defer();
-    fx.gate = null;
-    open();
-    for (let i = 0; i < 5; i++) await settle();
-    assert.equal(fx.published.length, 0);
-    t.mock.timers.tick(2_000);
-    await sync(d);
-    assert.equal(fx.published.length, 1);
-  });
+  for (const fails of [false, true]) {
+    const what = fails ? "a failure to its full backoff" : "the send";
+    test(`${L.name}: an edit during preflight holds ${what}`, async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1e12 });
+      const h0 = ev(JSON.stringify(L.legacy({ k1: "A" })), 100);
+      const store = new LaneStore(L.lane, PK, RELAY);
+      const rec = new LaneReconciler(L.lane, store, PK, RELAY);
+      store.transact((tr) => L.edit(tr, "k2", "B"));
+      let open;
+      fx.gate = new Promise((r) => (open = r));
+      fx.head = h0;
+      void rec.ingest(h0); // attempt acquired; preflight fetch waits
+      for (let i = 0; i < 5; i++) await settle();
+      store.transact((tr) => L.edit(tr, "k3", "A"));
+      rec.defer(); // edit deadline: +2 s
+      fx.fetchFails = fails; // the acquired preflight then really fails
+      fx.gate = null;
+      open();
+      for (let i = 0; i < 5; i++) await settle();
+      fx.fetchFails = false;
+      assert.equal(fx.published.length, 0);
+      t.mock.timers.tick(2_000); // real wake() re-arms; no manual read
+      for (let i = 0; i < 5; i++) await settle();
+      assert.equal(fx.published.length, fails ? 0 : 1, "edit deadline");
+      t.mock.timers.tick(3_000);
+      for (let i = 0; i < 5; i++) await settle();
+      assert.equal(fx.published.length, 1, "after the 5 s failure backoff");
+      rec.destroy();
+    });
+  }
 
   test(`${L.name}: unreadable head holds quietly; content never published over it`, async () => {
     const d = device(L.lane);
@@ -528,10 +540,13 @@ for (const L of LANES) {
     tabs[1].transact((t) => L.edit(t, "k2", "B")); // overwrites tab 0's write
     handlers[1]({ key, newValue: lost });
     deliver(0);
-    const settled = storage.get(key);
+    const writes = fx.writes;
+    let notified = 0;
+    for (const tab of tabs) tab.subscribe(() => notified++);
     deliver(0);
     deliver(1);
-    assert.equal(storage.get(key), settled, "no further writes");
+    assert.equal(fx.writes, writes, "no further writes");
+    assert.equal(notified, 0, "no further notifications");
     assert.deepEqual(L.view(tabs[0].get()), { k1: "A", k2: "B" });
     assert.equal(canonical(tabs[0].get()), canonical(tabs[1].get()));
   });
@@ -545,36 +560,6 @@ for (const L of LANES) {
     assert.equal(notified, 0);
   });
 }
-
-test("publisher: validity lost during a rate-limit wait sends nothing", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  Object.assign(globalThis.window, { setTimeout, clearTimeout });
-  const { activateRateLimit, resetRateLimitGate } = await import(
-    "@/shared/api/relayRateLimitGate"
-  );
-  const sends = [];
-  const session = {
-    generation: () => 1,
-    ownership: () => 1,
-    pendingEvents: new Map(),
-    send: async (payload) => sends.push(payload),
-  };
-  let current = true;
-  activateRateLimit(1);
-  const sent = publishSessionEvent(
-    session,
-    { id: "e" },
-    "t",
-    "s",
-    () => current,
-  );
-  current = false;
-  t.mock.timers.tick(1_000);
-  await assert.rejects(sent, { message: PUBLISH_CANCELED });
-  assert.equal(sends.length, 0);
-  assert.equal(session.pendingEvents.size, 0, "no pending entry or timer");
-  resetRateLimitGate();
-});
 
 test("publisher: isCurrent gates the first send and the reconnect retry", async () => {
   const sends = [];

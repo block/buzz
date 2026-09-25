@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { PUBLISH_CANCELED } from "@/shared/api/relayEventPublisher";
 import {
   nip44DecryptFromSelf,
   nip44EncryptToSelf,
@@ -193,7 +194,7 @@ export class LaneReconciler {
   private async runAttempt(): Promise<void> {
     const token = {};
     this.attempt = token;
-    let outcome: "settled" | "acked" | "failed" = "failed";
+    let outcome: "settled" | "acked" | "held" | "failed" = "failed";
     const held = () => Date.now() < this.notBefore;
     let head = this.head;
     let tree: Tree = this.store.get();
@@ -201,7 +202,10 @@ export class LaneReconciler {
       await this.read(); // preflight: merge the current head first
       head = this.head;
       tree = this.store.get();
-      if (held()) return; // a deadline arrived during preflight
+      if (held()) {
+        outcome = "held"; // a deadline arrived during preflight
+        return;
+      }
       const doc = encodeDoc(this.lane, tree);
       const empty = head.status === "empty" && isEmptyTree(tree);
       if (head.status !== "empty" && head.status !== "decoded") {
@@ -222,12 +226,18 @@ export class LaneReconciler {
         this.store.get() !== tree ||
         this.head.id !== head.id ||
         this.head.status !== head.status;
+      // A deliberate deadline cancel keeps the deadline; stale drops back off.
+      const drop = () => {
+        if (!dropped()) return false;
+        if (held()) outcome = "held";
+        return true;
+      };
       const content = await nip44EncryptToSelf(JSON.stringify(doc));
       if (new TextEncoder().encode(content).length > MAX_CIPHERTEXT_BYTES) {
         outcome = "settled";
         return;
       }
-      if (dropped()) return;
+      if (drop()) return;
       const event = await signRelayEvent({
         kind: KIND_CHANNEL_SECTIONS,
         content,
@@ -237,7 +247,7 @@ export class LaneReconciler {
           ["t", this.lane.dTag], // relay discoverability; not used in our filters
         ],
       });
-      if (dropped()) return;
+      if (drop()) return;
       try {
         await relayClient.publishEvent(
           event,
@@ -246,8 +256,12 @@ export class LaneReconciler {
           () => !dropped(), // checked again right before each socket send
         );
       } catch (error) {
-        if (!String((error as Error)?.message).startsWith("duplicate:"))
-          throw error;
+        const message = String((error as Error)?.message);
+        if (message === PUBLISH_CANCELED && held()) {
+          outcome = "held";
+          return;
+        }
+        if (!message.startsWith("duplicate:")) throw error;
       }
       outcome = "acked";
       this.lastHead = Math.max(this.lastHead, event.created_at);
@@ -263,10 +277,10 @@ export class LaneReconciler {
       if (this.attempt === token) this.attempt = null;
       const recheck = this.recheck;
       this.recheck = false;
-      // An ACK proves nothing about the head; verify with a read. Failures
-      // (including stale drops) retry behind the backoff, never immediately.
+      // An ACK proves nothing about the head; verify with a read. Real
+      // failures and stale drops retry behind the backoff, never immediately.
       if (outcome === "acked") this.wake();
-      else if (outcome === "failed" && held())
+      else if (outcome === "held")
         this.wake(this.notBefore - Date.now()); // deadline kept; no retry now
       else if (outcome === "failed") this.backoff();
       else if (recheck && (this.head !== head || this.store.get() !== tree)) {
