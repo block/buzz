@@ -15,9 +15,8 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
   /// to reconcile membership changes without downloading the global directory.
   Future<void> _subscribeLive(
     List<Channel> channels,
-    _ChannelRefreshFence fence, {
-    required bool explicit,
-  }) {
+    _ChannelRefreshFence fence,
+  ) {
     final channelIds = {
       for (final channel in channels)
         if (channel.isMember && !channel.isArchived) channel.id,
@@ -39,7 +38,6 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
         subscriptionVersion,
         channels,
         fence,
-        explicit,
       ),
     );
     _liveSubscriptionQueue = sync
@@ -63,7 +61,6 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     int subscriptionVersion,
     List<Channel> channels,
     _ChannelRefreshFence fence,
-    bool explicit,
   ) async {
     if (!_lifecycleRef.mounted) return;
     fence.ensureCurrent();
@@ -163,14 +160,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     }
 
     fence.ensureCurrent();
-    unawaited(
-      _catchUpUnreadEvents(
-        channels,
-        fence,
-        subscriptionVersion,
-        explicit: explicit,
-      ),
-    );
+    unawaited(_catchUpUnreadEvents(channels, fence, subscriptionVersion));
 
     _backstopTimer?.cancel();
     _backstopTimer = Timer.periodic(

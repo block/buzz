@@ -226,18 +226,12 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Fetch historical events matching [filter]. Sends REQ, collects events
   /// until EOSE, then resolves. One-shot subscription.
-  ///
-  /// [stopWith] is consulted at the actual send, after any rate-limit wait:
-  /// a non-null result is thrown instead of registering or sending, so an
-  /// operation declared terminal while this call waited never goes out.
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async {
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     if (_disposed) throw StateError('Relay session is disposed');
-    if (stopWith?.call() case final error?) throw error;
     final subId = _nextSubId('h');
     final completer = Completer<List<NostrEvent>>();
 

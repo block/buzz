@@ -691,7 +691,6 @@ class _ProfileRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async => [profile, ...published];
 
   @override
@@ -727,7 +726,6 @@ class _ControlledProfileRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async => [...await fetch(), ...published];
 
   @override
@@ -754,7 +752,6 @@ class _LosingProfileRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async => [competing ?? initial];
 
   @override

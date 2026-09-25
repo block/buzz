@@ -40,7 +40,6 @@ class _DeadlineWsSession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async {
     historyCount++;
     // WebSocket CLOSED: Exception("error: query timed out")
@@ -67,7 +66,6 @@ class _OrdinaryErrorSession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async {
     queryCount++;
     throw RelayException(500, '{"error":"internal server error"}');

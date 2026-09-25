@@ -6,7 +6,6 @@ export 'media_upload.dart';
 export 'nostr_filters.dart';
 export 'nostr_models.dart';
 export 'relay_closed_policy.dart';
-export 'relay_deadline_registry.dart';
 export 'relay_client.dart';
 export 'relay_provider.dart';
 export 'relay_rate_limit_gate.dart';

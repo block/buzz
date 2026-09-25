@@ -228,11 +228,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   Future<List<NostrEvent>> _fetchNewestHistory(
     RelaySessionNotifier session,
   ) async {
-    final windowKey = newestWindowKey;
-    // Rebuilds (reconnects) are automatic: a deadline stays terminal until
-    // [retryAfterDeadline] clears it on an explicit reopen.
-    if (_deadlines.terminalError(windowKey) case final error?) throw error;
-    final attempt = _deadlines.attempt(windowKey);
     try {
       _initialWindowQueryInFlight = true;
       final pageVersion = ++_threadQuerySerial;
@@ -253,45 +248,17 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
       // Legacy history would re-run the timed-out work another way.
-      if (_deadlines.record(windowKey, error, attempt: attempt)) rethrow;
+      if (isRelayDeadlineError(error)) rethrow;
       debugPrint(
         '[ChannelMessagesNotifier] channel window unavailable for $channelId, falling back to WS history: $error',
       );
       _usingChannelWindow = false;
-    }
-    // Another attempt (e.g. after a reconnect) may have hit the deadline
-    // while this one waited: the fallback is a new send, so re-check.
-    if (_deadlines.terminalError(windowKey) case final error?) throw error;
-    try {
       final history = await session.fetchHistory(
         NostrFilters.messages(channelId),
-        stopWith: () => _deadlines.terminalError(windowKey),
       );
       history.sort(compareChannelTimelineEventsChronologically);
       return history;
-    } catch (error) {
-      // The fallback is the same operation: its deadline is terminal too.
-      _deadlines.record(windowKey, error, attempt: attempt);
-      rethrow;
     }
-  }
-
-  /// Deadline-registry identity of the newest-window query.
-  String get newestWindowKey => relayRequestKey([_channelWindowFilter(null)]);
-
-  /// Explicitly retries a newest-window query that settled on a relay
-  /// deadline; the channel page calls this when the user reopens it.
-  void retryAfterDeadline() {
-    _deadlines.clearPrefix(_olderPageKeyPrefix);
-    if (_deadlines.isTerminal(newestWindowKey)) retry();
-  }
-
-  /// Explicit retry of a failed load (the error state's Retry): clears any
-  /// deadline record and reloads, whatever the failure was.
-  void retry() {
-    _deadlines.clearPrefix(_olderPageKeyPrefix);
-    _deadlines.clear(newestWindowKey);
-    ref.invalidateSelf();
   }
 
   Future<ChannelWindowPage> _fetchWindowPage(
@@ -413,33 +380,22 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (thread.parentId == null) return;
 
     final rootId = thread.rootId;
-    if (rootId != null) _invalidateThreadQuery(rootId);
+    if (rootId != null) {
+      ref.invalidate(
+        threadRepliesProvider(
+          ThreadRepliesArgs(channelId: channelId, rootId: rootId),
+        ),
+      );
+    }
     final parentId = thread.parentId;
     if (parentId != null && parentId != rootId) {
-      _invalidateThreadQuery(parentId);
+      ref.invalidate(
+        threadRepliesProvider(
+          ThreadRepliesArgs(channelId: channelId, rootId: parentId),
+        ),
+      );
     }
   }
-
-  /// A live reply must not replay a scan settled on a relay deadline. The
-  /// open thread still shows the reply through the channel's live events.
-  void _invalidateThreadQuery(String rootId) {
-    if (_deadlines.isTerminal(_threadScanKey(rootId))) return;
-    ref.invalidate(
-      threadRepliesProvider(
-        ThreadRepliesArgs(channelId: channelId, rootId: rootId),
-      ),
-    );
-  }
-
-  /// Older pages are keyed by their exact request, cursor included, so a
-  /// different position is new work; reopening clears them all.
-  String get _olderPageKeyPrefix => 'older:$channelId:';
-
-  RelayDeadlineRegistry get _deadlines =>
-      ref.read(relayDeadlineRegistryProvider);
-
-  String _threadScanKey(String rootId) =>
-      threadScanKey(ThreadRepliesArgs(channelId: channelId, rootId: rootId));
 
   bool _mergeWindowEventIntoStore(NostrEvent event, {int? summaryVersion}) {
     final isTimelineRow = EventKind.channelTimelineContentKinds.contains(
@@ -712,7 +668,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     final evidenceVersion = queryVersion ?? ++_threadQuerySerial;
     _setThreadQueryVersion(rootId, evidenceVersion);
     _overflowFloors.remove(rootId);
-    _deadlines.clear(_threadScanKey(rootId));
     _clearDeletionUncertainty(rootId, evidenceVersion);
     final resultIds = replies.map((event) => event.id).toSet();
     final missing = queriedIds.difference(resultIds)
@@ -974,12 +929,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         _reachedOldest = true;
         return false;
       }
-      // Position/layout listeners call this automatically; a page that hit
-      // the deadline waits for an explicit reopen.
-      final key =
-          _olderPageKeyPrefix + relayRequestKey([_channelWindowFilter(cursor)]);
-      if (_deadlines.isTerminal(key)) return false;
-      final attempt = _deadlines.attempt(key);
       try {
         final pageVersion = ++_threadQuerySerial;
         final page = await _fetchWindowPage(session, cursor);
@@ -994,7 +943,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         state = AsyncData(flattened);
         return page.rows.isNotEmpty || page.aux.isNotEmpty;
       } catch (error) {
-        _deadlines.record(key, error, attempt: attempt);
         debugPrint(
           '[ChannelMessagesNotifier] failed to fetch older channel window page for $channelId: $error',
         );
@@ -1005,20 +953,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     final currentEvents = state.value;
     if (currentEvents == null || currentEvents.isEmpty) return false;
     final oldest = currentEvents.first.createdAt;
-    final filter = NostrFilters.messages(channelId, limit: 100, until: oldest);
-    final key = _olderPageKeyPrefix + relayRequestKey([filter]);
-    if (_deadlines.isTerminal(key)) return false;
-    final attempt = _deadlines.attempt(key);
-    final List<NostrEvent> older;
-    try {
-      older = await session.fetchHistory(
-        filter,
-        stopWith: () => _deadlines.terminalError(key),
-      );
-    } catch (error) {
-      _deadlines.record(key, error, attempt: attempt);
-      rethrow;
-    }
+    final older = await session.fetchHistory(
+      NostrFilters.messages(channelId, limit: 100, until: oldest),
+    );
     if (older.isEmpty) {
       _reachedOldest = true;
       return false;

@@ -10216,9 +10216,7 @@ void main() {
       ),
       ('ordinary error', Exception('bridge down') as Object),
     ]) {
-      testWidgets('Retry after a $name clears the record and loads once', (
-        tester,
-      ) async {
+      testWidgets('Retry after a $name loads once', (tester) async {
         final notifier = _RetryCountingMessagesNotifier(
           () => AsyncError(error, StackTrace.current),
         );
@@ -10226,16 +10224,11 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.text('Failed to load messages'), findsOneWidget);
         expect(notifier.loads, 1);
-        // Automatic rebuilds of a deadline never reload.
-        notifier.rebuild();
-        await tester.pumpAndSettle();
-        expect(notifier.loads, error is RelayException ? 1 : 2);
         final before = notifier.loads;
         notifier.nextResult = () => const AsyncData([]);
         await tester.tap(retry);
         await tester.pumpAndSettle();
         expect(notifier.loads, before + 1);
-        expect(notifier.windowTerminal, isFalse);
         expect(retry, findsNothing);
       });
     }
@@ -11029,147 +11022,14 @@ void main() {
         expect(attempts(), 1);
       });
 
-      testWidgets('reopening the thread is the explicit reset', (tester) async {
-        final other = _textMsg(
-          id: 'other',
-          pubkey: 'alice',
-          content: 'Other root',
-          createdAt: 900,
-        );
-        final timeline = formatTimeline([other, root, mid]);
-        // One scope throughout; the head (and a rebuild counter) change.
-        final shown = ValueNotifier(('root', 0));
-        addTearDown(shown.dispose);
-        // Counts loader calls the fake permits: like the production provider,
-        // a build whose scan is terminal throws the stored deadline first.
-        var loads = 0;
-        RelayDeadlineRegistry? registry;
-        final key = threadScanKey(
-          const ThreadRepliesArgs(channelId: _channelId, rootId: 'root'),
-        );
-        await tester.pumpWidget(
-          _buildTestable(
-            messages: [other, root, mid],
-            disableRetries: true,
-            threadReplyLoaders: {
-              'root': () {
-                if (registry?.terminalError(key) case final error?) {
-                  return Future.error(error);
-                }
-                loads++;
-                return Future.value(const <NostrEvent>[]);
-              },
-            },
-            home: ValueListenableBuilder(
-              valueListenable: shown,
-              builder: (_, value, _) => ThreadDetailPage(
-                key: ValueKey(value.$1),
-                threadHead: timeline.firstWhere((m) => m.id == value.$1),
-                allMessages: timeline,
-                channelId: _testChannel.id,
-                currentPubkey: 'me',
-                isMember: true,
-                isArchived: false,
-              ),
-            ),
-          ),
-        );
-        await tester.pumpAndSettle();
-        final deadlines = ProviderScope.containerOf(
-          tester.element(find.byType(ThreadDetailPage)),
-        ).read(relayDeadlineRegistryProvider);
-        registry = deadlines;
-        deadlines.record(
-          key,
-          RelayException(503, '{"error":"query timed out"}'),
-        );
-        final opened = loads;
-        // A rebuild of the open page is not a reopen.
-        shown.value = ('root', 1);
-        await tester.pumpAndSettle();
-        expect(deadlines.isTerminal(key), isTrue);
-        expect(loads, opened);
-        // Opening another thread, then this one again, is.
-        shown.value = ('other', 2);
-        await tester.pumpAndSettle();
-        expect(deadlines.isTerminal(key), isTrue);
-        shown.value = ('root', 3);
-        await tester.pumpAndSettle();
-        expect(deadlines.isTerminal(key), isFalse);
-        expect(loads, opened + 1);
-      });
-
-      testWidgets('a reopen disposed before its microtask resets nothing', (
-        tester,
-      ) async {
-        final other = _textMsg(
-          id: 'other',
-          pubkey: 'alice',
-          content: 'Other root',
-          createdAt: 900,
-        );
-        final timeline = formatTimeline([other, root, mid]);
-        final shown = ValueNotifier('other');
-        addTearDown(shown.dispose);
-        final key = threadScanKey(
-          const ThreadRepliesArgs(channelId: _channelId, rootId: 'root'),
-        );
-        await tester.pumpWidget(
-          _buildTestable(
-            messages: [other, root, mid],
-            disableRetries: true,
-            threadReplyLoaders: {
-              'root': () => Future.value(const <NostrEvent>[]),
-            },
-            home: ValueListenableBuilder(
-              valueListenable: shown,
-              builder: (_, value, _) => ThreadDetailPage(
-                key: ValueKey(value),
-                threadHead: timeline.firstWhere((m) => m.id == value),
-                allMessages: timeline,
-                channelId: _testChannel.id,
-                currentPubkey: 'me',
-                isMember: true,
-                isArchived: false,
-              ),
-            ),
-          ),
-        );
-        await tester.pumpAndSettle();
-        final deadlines = ProviderScope.containerOf(
-          tester.element(find.byType(ThreadDetailPage)),
-        ).read(relayDeadlineRegistryProvider);
-        deadlines.record(
-          key,
-          RelayException(503, '{"error":"query timed out"}'),
-        );
-        // Open the thread and replace it again synchronously, before the
-        // open's microtask runs: the disposed page must not reset the scan.
-        final owner = tester.binding.buildOwner!;
-        final rootElement = tester.binding.rootElement!;
-        shown.value = 'root';
-        owner.buildScope(rootElement);
-        expect(find.byKey(const ValueKey('root')), findsOneWidget);
-        shown.value = 'other';
-        owner.buildScope(rootElement);
-        owner.finalizeTree();
-        await tester.pumpAndSettle();
-        expect(find.byKey(const ValueKey('other')), findsOneWidget);
-        expect(deadlines.isTerminal(key), isTrue);
-      });
-
       for (final provisional in [false, true]) {
         testWidgets(
           'Retry ${provisional ? 'beside provisional replies' : 'in the empty state'} '
-          'clears the scan record and loads once',
+          'loads once',
           (tester) async {
             // The empty variant has no reply at all, cached or provisional.
             final seed = provisional ? [root, mid] : [root];
             final timeline = formatTimeline(seed);
-            final key = threadScanKey(
-              const ThreadRepliesArgs(channelId: _channelId, rootId: 'root'),
-            );
-            RelayDeadlineRegistry? registry;
             var fail = true;
             var loads = 0;
             final messages = _FakeMessagesNotifier(seed);
@@ -11180,18 +11040,11 @@ void main() {
                 disableRetries: true,
                 threadReplyLoaders: {
                   'root': () {
-                    // Like the provider: a terminal scan rethrows unsent.
-                    if (registry?.terminalError(key) case final error?) {
-                      return Future.error(error);
-                    }
                     loads++;
                     if (!fail) return Future.value(const <NostrEvent>[]);
-                    final error = RelayException(
-                      503,
-                      '{"error":"query timed out"}',
+                    return Future.error(
+                      RelayException(503, '{"error":"query timed out"}'),
                     );
-                    registry?.record(key, error);
-                    return Future.error(error);
                   },
                 },
                 home: ThreadDetailPage(
@@ -11203,14 +11056,6 @@ void main() {
                   isArchived: false,
                 ),
               ),
-            );
-            final RelayDeadlineRegistry deadlines = ProviderScope.containerOf(
-              tester.element(find.byType(ThreadDetailPage)),
-            ).read(relayDeadlineRegistryProvider);
-            registry = deadlines;
-            deadlines.record(
-              key,
-              RelayException(503, '{"error":"query timed out"}'),
             );
             await tester.pumpAndSettle();
             final retry = find.byKey(const ValueKey('thread-replies-retry'));
@@ -11227,7 +11072,6 @@ void main() {
             } else {
               expect(find.text('Couldn’t load replies'), findsOneWidget);
             }
-            expect(deadlines.isTerminal(key), isTrue);
             expect(retry, findsOneWidget);
             final target = tester.getSize(retry);
             expect(
@@ -11243,7 +11087,6 @@ void main() {
             await tester.tap(retry);
             await tester.pumpAndSettle();
             expect(loads, before + 1);
-            expect(deadlines.isTerminal(key), isFalse);
             expect(retry, findsNothing);
           },
         );
@@ -15082,39 +14925,19 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   }
 }
 
-/// Real [ChannelMessagesNotifier.retry] over a counting loader: a build whose
-/// newest-window key is terminal rethrows the stored error without loading,
-/// like the production provider; otherwise it counts a load.
+/// Counts loads; each settles after mount, like the real network load.
 class _RetryCountingMessagesNotifier extends ChannelMessagesNotifier {
   _RetryCountingMessagesNotifier(this.nextResult) : super(_channelId);
 
-  /// Result of the next permitted load; errors are recorded as the
-  /// provider does.
   AsyncValue<List<NostrEvent>> Function() nextResult;
   int loads = 0;
 
-  /// An automatic rebuild, as reconnects and lifecycle refreshes cause.
-  void rebuild() => ref.invalidateSelf();
-
-  bool get windowTerminal =>
-      ref.read(relayDeadlineRegistryProvider).isTerminal(newestWindowKey);
-
   @override
   AsyncValue<List<NostrEvent>> build() {
-    final deadlines = ref.read(relayDeadlineRegistryProvider);
-    if (deadlines.terminalError(newestWindowKey) case final error?) {
-      return AsyncError(error, StackTrace.current);
-    }
     loads++;
     final result = nextResult();
     if (result is AsyncLoading) return result;
-    // Settles after mount, like the real network load.
-    Future(() {
-      if (result case AsyncError(:final error)) {
-        deadlines.record(newestWindowKey, error);
-      }
-      state = result;
-    });
+    Future(() => state = result);
     return const AsyncLoading();
   }
 }
@@ -15175,7 +14998,6 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async => [];
 
   @override
@@ -15229,7 +15051,6 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async {
     if (filter.kinds.length == 1 && filter.kinds.single == 0) {
       return profileRefresh ?? const [];
@@ -15355,7 +15176,6 @@ class _ProfileSubscriptionRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async => const [];
 
   @override
@@ -15387,7 +15207,6 @@ class _HuddleReactionRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async => const [];
 
   @override

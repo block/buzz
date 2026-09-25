@@ -1666,202 +1666,81 @@ void main() {
     });
   });
 
-  group('deadline-terminal channel batches', () {
+  group('deadline-unavailable channel batches', () {
     Object deadline() => RelayException(503, '{"error":"query timed out"}');
     bool isUnread(List<NostrFilter> batch) =>
         batch.isNotEmpty && batch.every((filter) => filter.since != null);
-
-    // Drives the real 60s backstop timer, reconnect and foreground resume.
-    void lifecycle(
-      FakeAsync async,
-      ProviderContainer container,
-      _FakeRelaySession session,
-    ) {
-      for (var i = 0; i < 3; i++) {
-        async.elapse(const Duration(seconds: 61));
-        async.flushMicrotasks();
-      }
-      session.setStatus(SessionStatus.reconnecting);
-      async.flushMicrotasks();
-      session.setStatus(SessionStatus.connected);
-      async.elapse(const Duration(seconds: 1));
-      final appLifecycle =
-          container.read(appLifecycleProvider.notifier)
-              as _FakeAppLifecycleNotifier;
-      appLifecycle.set(AppLifecycleState.paused);
-      async.flushMicrotasks();
-      appLifecycle.set(AppLifecycleState.resumed);
-      async.elapse(const Duration(seconds: 1));
-    }
-
-    for (final (name, error, replays) in [
-      ('deadline', deadline(), false),
-      ('ordinary failure', Exception('bridge down') as Object, true),
-    ]) {
-      test('unread catch-up after a $name replays: $replays', () {
-        fakeAsync((async) {
-          final session = _FakeRelaySession(
-            memberships: [_membership(_channelA, myPk)],
-            metadata: [_meta(id: _channelA, name: 'general')],
-          )..unreadBatchError = error;
-          final container = _buildContainer(session: session);
-          container.listen(channelsProvider, (_, _) {});
-          async.elapse(const Duration(seconds: 1));
-          int unread() => session.queryBatches.where(isUnread).length;
-          expect(unread(), 1);
-          lifecycle(async, container, session);
-          if (replays) {
-            expect(unread(), greaterThan(1));
-          } else {
-            expect(unread(), 1);
-            // Live coverage and membership recovery keep running.
-            expect(session.activeChannels, {_channelA});
-            expect(container.read(channelsProvider).value, hasLength(1));
-            // A changed membership is a new request and runs.
-            session.memberships = [
-              _membership(_channelA, myPk),
-              _membership(_channelB, myPk),
-            ];
-            session.metadata = [
-              _meta(id: _channelA, name: 'general'),
-              _meta(id: _channelB, name: 'random'),
-            ];
-            async.elapse(const Duration(seconds: 61));
-            expect(unread(), 2);
-            // Explicit refresh re-runs the terminal request.
-            session.memberships = [_membership(_channelA, myPk)];
-            async.elapse(const Duration(seconds: 61));
-            final beforeExplicit = unread();
-            unawaited(container.read(channelsProvider.notifier).refresh());
-            async.elapse(const Duration(seconds: 1));
-            expect(unread(), beforeExplicit + 1);
-          }
-          container.dispose();
-        });
-      });
-    }
-
-    test('a latest-message deadline keeps timestamps and is not replayed', () {
-      fakeAsync((async) {
-        final session = _FakeRelaySession(
-          memberships: [_membership(_channelA, myPk)],
-          metadata: [_meta(id: _channelA, name: 'general')],
-          recentMessages: const [
-            NostrEvent(
-              id: 'm1',
-              pubkey: 'alice',
-              createdAt: 30,
-              kind: EventKind.streamMessageV2,
-              tags: [
-                ['h', _channelA],
-              ],
-              content: 'hi',
-              sig: 'sig',
-            ),
+    NostrEvent message(String id, int createdAt, {bool mention = false}) =>
+        NostrEvent(
+          id: id,
+          pubkey: 'alice',
+          createdAt: createdAt,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            const ['h', _channelA],
+            if (mention) const ['p', myPk],
           ],
+          content: 'hi',
+          sig: 'sig',
         );
-        final container = _buildContainer(session: session);
-        container.listen(channelsProvider, (_, _) {});
-        async.elapse(const Duration(seconds: 1));
-        int latest() => session.queryBatches
-            .where((batch) => batch.isNotEmpty && !isUnread(batch))
-            .length;
-        expect(latest(), 1);
-        session.latestBatchError = deadline();
-        unawaited(container.read(channelsProvider.notifier).refresh());
-        async.elapse(const Duration(seconds: 1));
-        expect(latest(), 2);
-        expect(
-          container.read(channelsProvider).value!.single.lastMessageAt,
-          DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
-        );
-        lifecycle(async, container, session);
-        expect(latest(), 2);
-        expect(
-          container.read(channelsProvider).value!.single.lastMessageAt,
-          isNotNull,
-        );
-        container.dispose();
-      });
+
+    test('a latest-message deadline keeps known timestamps', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [message('m1', 30)],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _settle();
+      session.latestBatchError = deadline();
+      await container.read(channelsProvider.notifier).refresh();
+      await _settle();
+      expect(
+        container.read(channelsProvider).value!.single.lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+      );
+      expect(session.messageHistoryCount, 0);
     });
 
     test(
       'a cold-start latest-message deadline is filled by unread catch-up',
-      () {
-        fakeAsync((async) {
-          final session = _FakeRelaySession(
-            memberships: [_membership(_channelA, myPk)],
-            metadata: [_meta(id: _channelA, name: 'general')],
-            recentMessages: const [
-              NostrEvent(
-                id: 'mention',
-                pubkey: 'alice',
-                createdAt: 30,
-                kind: EventKind.streamMessageV2,
-                tags: [
-                  ['h', _channelA],
-                  ['p', myPk],
-                ],
-                content: 'hi',
-                sig: 'sig',
-              ),
-            ],
-          )..latestBatchError = deadline();
-          final container = _buildContainer(session: session);
-          container.listen(channelsProvider, (_, _) {});
-          async.elapse(const Duration(seconds: 1));
-          int latest() => session.queryBatches
-              .where((batch) => batch.isNotEmpty && !isUnread(batch))
-              .length;
-          void expectCaughtUp() {
-            final notifier = container.read(channelsProvider.notifier);
-            expect(notifier.latestObservedByChannel[_channelA], 30);
-            expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, [
-              'mention',
-            ]);
-            expect(
-              container.read(channelsProvider).value!.single.lastMessageAt,
-              DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
-            );
-          }
-
-          expect(latest(), 1);
-          expect(session.queryBatches.where(isUnread), hasLength(1));
-          expectCaughtUp();
-          lifecycle(async, container, session);
-          // No automatic path re-sends the batch or its websocket fallback.
-          expect(latest(), 1);
-          expect(session.messageHistoryCount, 0);
-          expectCaughtUp();
-          container.dispose();
-        });
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [message('mention', 30, mention: true)],
+        )..latestBatchError = deadline();
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        await container.read(channelsProvider.future);
+        await _waitUntil(() => session.queryBatches.any(isUnread));
+        await _settle();
+        final notifier = container.read(channelsProvider.notifier);
+        expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, [
+          'mention',
+        ]);
+        expect(
+          container.read(channelsProvider).value!.single.lastMessageAt,
+          DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+        );
+        expect(session.messageHistoryCount, 0);
       },
     );
 
     test('unread catch-up never moves lastMessageAt backward', () async {
-      NostrEvent mention(String id, int createdAt) => NostrEvent(
-        id: id,
-        pubkey: 'alice',
-        createdAt: createdAt,
-        kind: EventKind.streamMessageV2,
-        tags: const [
-          ['h', _channelA],
-          ['p', myPk],
-        ],
-        content: 'hi',
-        sig: 'sig',
-      );
       final session = _FakeRelaySession(
         memberships: [_membership(_channelA, myPk)],
         metadata: [_meta(id: _channelA, name: 'general')],
-        recentMessages: [mention('older', 30)],
+        recentMessages: [message('older', 30, mention: true)],
       )..pauseNextUnreadCatchUpQuery();
       final container = _buildContainer(session: session);
       addTearDown(container.dispose);
       await container.read(channelsProvider.future);
       await session.nextUnreadCatchUpQueryStarted;
       // A newer live event lands while the catch-up is in flight.
-      session.emit(mention('newer', 60));
+      session.emit(message('newer', 60, mention: true));
       session.resumePausedUnreadCatchUpQuery();
       await _settle();
       expect(
@@ -1877,240 +1756,41 @@ void main() {
       );
     });
 
-    // HTTP fails ordinarily, then the per-filter websocket fallback times out:
-    // the same operation, so it is just as terminal.
-    for (final (name, wsError, replays) in [
-      ('deadline', deadline(), false),
-      ('ordinary error', Exception('ws reset') as Object, true),
-    ]) {
-      test('a websocket fallback $name replays: $replays', () {
-        fakeAsync((async) {
-          final session = _FakeRelaySession(
-            memberships: [_membership(_channelA, myPk)],
-            metadata: [_meta(id: _channelA, name: 'general')],
-            recentMessages: const [
-              NostrEvent(
-                id: 'm1',
-                pubkey: 'alice',
-                createdAt: 30,
-                kind: EventKind.streamMessageV2,
-                tags: [
-                  ['h', _channelA],
-                ],
-                content: 'hi',
-                sig: 'sig',
-              ),
-            ],
-          );
-          final container = _buildContainer(session: session);
-          container.listen(channelsProvider, (_, _) {});
-          async.elapse(const Duration(seconds: 1));
-          final lastMessageAt = container
-              .read(channelsProvider)
-              .value!
-              .single
-              .lastMessageAt;
-          expect(lastMessageAt, isNotNull);
-          session
-            ..messageBatchError = Exception('bridge down')
-            ..messageHistoryError = wsError;
-          unawaited(container.read(channelsProvider.notifier).refresh());
-          async.elapse(const Duration(seconds: 1));
-          final attempts = session.messageHistoryCount;
-          expect(attempts, greaterThan(0));
-          if (!replays) {
-            // Unavailable, not empty: known timestamps survive.
-            expect(
-              container.read(channelsProvider).value!.single.lastMessageAt,
-              lastMessageAt,
-            );
-          }
-          lifecycle(async, container, session);
-          if (replays) {
-            expect(session.messageHistoryCount, greaterThan(attempts));
-          } else {
-            expect(session.messageHistoryCount, attempts);
-            // An explicit refresh re-runs it.
-            unawaited(container.read(channelsProvider.notifier).refresh());
-            async.elapse(const Duration(seconds: 1));
-            expect(session.messageHistoryCount, greaterThan(attempts));
-          }
-          container.dispose();
-        });
-      });
-    }
-
-    for (final peerDeadline in [true, false]) {
-      test(
-        'a parked batch after a peer '
-        '${peerDeadline ? 'deadline sends no fallback' : 'success still falls back'}',
-        () async {
-          final session = _FakeRelaySession(
-            memberships: [_membership(_channelA, myPk)],
-            metadata: [_meta(id: _channelA, name: 'general')],
-          );
-          final container = _buildContainer(session: session);
-          addTearDown(container.dispose);
-          await container.read(channelsProvider.future);
-          await _settle();
-          final fallbacksBefore = session.messageHistoryCount;
-          // Attempt A: a reconnect refresh parks its unread batch in flight.
-          session.pauseNextUnreadCatchUpQuery();
-          session.setStatus(SessionStatus.reconnecting);
-          session.setStatus(SessionStatus.connected);
-          await session.nextUnreadCatchUpQueryStarted;
-          // Attempt B: an overlapping lifecycle refresh (resume) for the same
-          // unread batch.
-          if (peerDeadline) session.unreadBatchError = deadline();
-          final lifecycle =
-              container.read(appLifecycleProvider.notifier)
-                  as _FakeAppLifecycleNotifier;
-          lifecycle.set(AppLifecycleState.paused);
-          lifecycle.set(AppLifecycleState.resumed);
-          await _settle();
-          session.unreadBatchError = null;
-          // A then fails ordinarily.
-          session.failClaimedUnreadCatchUpQuery = true;
-          session.resumePausedUnreadCatchUpQuery();
-          await _settle();
-          if (peerDeadline) {
-            expect(session.messageHistoryCount, fallbacksBefore);
-            // Explicit refresh re-runs it.
-            final batches = session.queryBatches.length;
-            await container.read(channelsProvider.notifier).refresh();
-            await _settle();
-            expect(session.queryBatches.length, greaterThan(batches));
-          } else {
-            expect(session.messageHistoryCount, greaterThan(fallbacksBefore));
-          }
-        },
+    // HTTP fails ordinarily, then a per-filter websocket fallback times out:
+    // the batch is unavailable and no later chunk is sent.
+    test('a websocket fallback deadline makes the batch unavailable', () async {
+      final ids = [for (var i = 0; i < 6; i++) 'chunk-channel-$i'];
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          for (final id in ids) _membership(id, myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          for (final id in ids) _meta(id: id, name: id),
+        ],
+        recentMessages: [message('m1', 30)],
       );
-    }
-
-    for (final peerDeadline in [true, false]) {
-      test(
-        'a multi-chunk fallback after a peer deadline between chunks '
-        '${peerDeadline ? 'sends no later chunk' : 'sends every chunk'}',
-        () async {
-          final ids = [for (var i = 0; i < 6; i++) 'chunk-channel-$i'];
-          final session = _FakeRelaySession(
-            memberships: [for (final id in ids) _membership(id, myPk)],
-            metadata: [for (final id in ids) _meta(id: id, name: id)],
-          );
-          final container = _buildContainer(session: session);
-          addTearDown(container.dispose);
-          await container.read(channelsProvider.future);
-          await _settle();
-          // Attempt A: HTTP fails ordinarily; its first fallback chunk parks.
-          final gate = session.fallbackGate = Completer<void>();
-          session.messageBatchError = Exception('bridge down');
-          session.setStatus(SessionStatus.reconnecting);
-          session.setStatus(SessionStatus.connected);
-          await _settle();
-          final firstChunks = session.messageHistoryCount;
-          expect(firstChunks, greaterThan(0));
-          expect(firstChunks % 4, 0, reason: 'only whole first chunks sent');
-          // Attempt B: an overlapping resume refresh for the same batches.
-          session.messageBatchError = peerDeadline ? deadline() : null;
-          final lifecycle =
-              container.read(appLifecycleProvider.notifier)
-                  as _FakeAppLifecycleNotifier;
-          lifecycle.set(AppLifecycleState.paused);
-          lifecycle.set(AppLifecycleState.resumed);
-          await _settle();
-          expect(session.messageHistoryCount, firstChunks);
-          session
-            ..messageBatchError = null
-            ..fallbackGate = null;
-          gate.complete();
-          await _settle();
-          if (peerDeadline) {
-            expect(session.messageHistoryCount, firstChunks);
-          } else {
-            expect(session.messageHistoryCount, greaterThan(firstChunks));
-          }
-        },
-      );
-    }
-
-    for (final peerDeadline in [true, false]) {
-      test(
-        'a rate-limit-parked batch fallback after a peer '
-        '${peerDeadline ? 'deadline sends nothing' : 'success still sends'}',
-        () async {
-          final session = _FakeRelaySession(
-            memberships: [_membership(_channelA, myPk)],
-            metadata: [_meta(id: _channelA, name: 'general')],
-          );
-          final container = _buildContainer(session: session);
-          addTearDown(container.dispose);
-          await container.read(channelsProvider.future);
-          await _settle();
-          final before = session.messageHistoryCount;
-          // A: HTTP fails ordinarily; its fallback parks at the gate.
-          final gate = session.parkBeforeSend = Completer<void>();
-          session.messageBatchError = Exception('rate limited');
-          session.setStatus(SessionStatus.reconnecting);
-          session.setStatus(SessionStatus.connected);
-          await _settle();
-          expect(session.messageHistoryCount, before);
-          // B: an overlapping resume refresh for the same batches.
-          session.messageBatchError = peerDeadline ? deadline() : null;
-          final lifecycle =
-              container.read(appLifecycleProvider.notifier)
-                  as _FakeAppLifecycleNotifier;
-          lifecycle.set(AppLifecycleState.paused);
-          lifecycle.set(AppLifecycleState.resumed);
-          await _settle();
-          session
-            ..messageBatchError = null
-            ..parkBeforeSend = null;
-          gate.complete();
-          await _settle();
-          expect(
-            session.messageHistoryCount,
-            peerDeadline ? before : greaterThan(before),
-          );
-        },
-      );
-    }
-
-    test('reordering unchanged channels keeps a batch terminal', () {
-      fakeAsync((async) {
-        final session = _FakeRelaySession(
-          memberships: [
-            _membership(_channelA, myPk),
-            _membership(_channelB, myPk),
-          ],
-          metadata: [
-            _meta(id: _channelA, name: 'alpha'),
-            _meta(id: _channelB, name: 'beta'),
-          ],
-        )..messageBatchError = deadline();
-        final container = _buildContainer(session: session);
-        container.listen(channelsProvider, (_, _) {});
-        async.elapse(const Duration(seconds: 1));
-        int batches() => session.queryBatches.where((b) => b.isNotEmpty).length;
-        final settled = batches();
-        expect(settled, greaterThan(0));
-        // Rename across the other channel and reverse metadata order: same
-        // queries, different construction order.
-        session.metadata = [
-          _meta(id: _channelB, name: 'beta'),
-          _meta(id: _channelA, name: 'zeta'),
-        ];
-        lifecycle(async, container, session);
-        expect(container.read(channelsProvider).value!.map((c) => c.name), [
-          'beta',
-          'zeta',
-        ]);
-        expect(batches(), settled);
-        // Control: a changed membership is new work and runs.
-        session.memberships = [_membership(_channelA, myPk)];
-        async.elapse(const Duration(seconds: 61));
-        expect(batches(), greaterThan(settled));
-        container.dispose();
-      });
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _settle();
+      general() => container
+          .read(channelsProvider)
+          .value!
+          .firstWhere((channel) => channel.id == _channelA);
+      final lastMessageAt = general().lastMessageAt;
+      expect(lastMessageAt, isNotNull);
+      session
+        ..messageBatchError = Exception('bridge down')
+        ..messageHistoryError = deadline();
+      await container.read(channelsProvider.notifier).refresh();
+      await _settle();
+      // Unavailable, not empty: known timestamps survive.
+      expect(general().lastMessageAt, lastMessageAt);
+      // Each batch stops after its first chunk of four filters.
+      expect(session.messageHistoryCount % 4, 0);
+      expect(session.messageHistoryCount, lessThan(2 * ids.length));
     });
   });
 
@@ -2744,17 +2424,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrFilter> historyFilters = [];
   final List<List<NostrFilter>> queryBatches = [];
   Object? messageBatchError;
-  Object? unreadBatchError;
   Object? latestBatchError;
   Object? messageHistoryError;
   int messageHistoryCount = 0;
 
-  /// Parks per-filter websocket fallbacks of message batches while set.
-  Completer<void>? fallbackGate;
-
-  /// Parks per-filter fallbacks *before* they count as sent, then honours
-  /// `stopWith` like the production send boundary.
-  Completer<void>? parkBeforeSend;
   final List<NostrFilter> directoryQueryFilters = [];
   final List<NostrFilter> membershipQueryFilters = [];
   final List<NostrFilter> subscribeFilters = [];
@@ -2963,7 +2636,6 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async {
     historyFilters.add(filter);
     if (filter.kinds.contains(39002) && filter.tags['#d'] != null) {
@@ -3032,15 +2704,8 @@ class _FakeRelaySession extends RelaySessionNotifier {
       return metadata.where((e) => ids.contains(e.getTagValue('d'))).toList();
     }
     // Per-filter websocket fallback of a message batch.
-    if (parkBeforeSend case final gate?) {
-      // Models the production rate-limit wait: [stopWith] is evaluated
-      // after it, at the actual send.
-      await gate.future;
-      if (stopWith?.call() case final error?) throw error;
-    }
     messageHistoryCount++;
     if (messageHistoryError case final error?) throw error;
-    if (fallbackGate case final gate?) await gate.future;
     return const [];
   }
 
@@ -3125,10 +2790,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     // request time so a parked response reflects the scope that asked for it.
     final isUnreadCatchUp =
         filters.isNotEmpty && filters.every((filter) => filter.since != null);
-    if ((isUnreadCatchUp ? unreadBatchError : latestBatchError)
-        case final error?) {
-      throw error;
-    }
+    if (!isUnreadCatchUp && latestBatchError != null) throw latestBatchError!;
     final messageSnapshot = List.of(recentMessages);
     if (isUnreadCatchUp) {
       // Claim the parked slot so the refresh that follows the switch can run
@@ -3223,6 +2885,4 @@ class _FakeRelaySession extends RelaySessionNotifier {
 class _FakeAppLifecycleNotifier extends AppLifecycleNotifier {
   @override
   AppLifecycleState build() => AppLifecycleState.resumed;
-
-  void set(AppLifecycleState next) => state = next;
 }

@@ -310,7 +310,6 @@ class _ThemeRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async => historyFuture ?? [remoteEvent(theme: 'buzz', id: 'initial')];
 
   @override

@@ -770,7 +770,6 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async {
     historyQueryCount++;
     return const [];
@@ -803,7 +802,6 @@ class _ConnectionAwareRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async {
     historyQueryCount++;
     return [
@@ -863,7 +861,6 @@ class _DirectoryFakeRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async {
     return const [];
   }

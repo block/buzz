@@ -12,7 +12,6 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final filtersSeen = <NostrFilter>[];
   List<NostrEvent> replies = const [];
   Completer<List<NostrEvent>>? nextQueryGate;
-  Object? queryError;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -28,7 +27,6 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }) async {
     queryCount++;
     filtersSeen.addAll(filters);
-    if (queryError case final error?) throw error;
     final gate = nextQueryGate;
     if (gate != null) {
       nextQueryGate = null;
@@ -57,51 +55,6 @@ NostrEvent _reply(String id, int createdAt) => NostrEvent(
 
 void main() {
   const args = ThreadRepliesArgs(channelId: 'chan', rootId: 'root');
-
-  group('reconnect after a settled error', () {
-    Future<(_FakeRelaySession, ProviderContainer)> settle(Object error) async {
-      final session = _FakeRelaySession()..queryError = error;
-      final container = ProviderContainer(
-        overrides: [relaySessionProvider.overrideWith(() => session)],
-        // Isolate the reconnect owner from Riverpod's own error retry.
-        retry: (_, _) => null,
-      );
-      addTearDown(container.dispose);
-      container.listen(threadRepliesProvider(args), (_, _) {});
-      await container
-          .read(threadRepliesProvider(args).future)
-          .then<void>((_) {}, onError: (_) {});
-      expect(session.queryCount, 1);
-      session.setStatus(SessionStatus.disconnected);
-      session.setStatus(SessionStatus.connected);
-      await Future<void>.delayed(Duration.zero);
-      return (session, container);
-    }
-
-    test('does not replay a relay deadline', () async {
-      final (session, container) = await settle(
-        RelayException(503, '{"error":"query timed out"}'),
-      );
-      expect(session.queryCount, 1);
-      // A plain rebuild (Riverpod retry, invalidation) honors the deadline.
-      container.invalidate(threadRepliesProvider(args));
-      await Future<void>.delayed(Duration.zero);
-      expect(session.queryCount, 1);
-      // Reopening the thread is the explicit retry.
-      retryThreadRepliesAfterDeadline(
-        container.read(relayDeadlineRegistryProvider),
-        args,
-        () => container.invalidate(threadRepliesProvider(args)),
-      );
-      await Future<void>.delayed(Duration.zero);
-      expect(session.queryCount, 2);
-    });
-
-    test('still refreshes after an ordinary failure', () async {
-      final (session, _) = await settle(Exception('socket reset'));
-      expect(session.queryCount, greaterThan(1));
-    });
-  });
 
   test('complete scan includes a legal 80-deep reply chain', () async {
     final session = _FakeRelaySession()

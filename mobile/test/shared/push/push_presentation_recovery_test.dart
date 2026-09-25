@@ -611,7 +611,6 @@ class _Session extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-    Object? Function()? stopWith,
   }) async {
     if (filter.kinds.contains(0)) profileFetches++;
     if (filter.kinds.contains(39002) && filter.tags['#d'] != null) {

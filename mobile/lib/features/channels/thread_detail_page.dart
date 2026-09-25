@@ -118,20 +118,6 @@ class ThreadDetailPage extends HookConsumerWidget {
       channelId: channelId,
       rootId: queryRootId,
     );
-    // Opening the thread is the explicit retry for a scan a relay deadline
-    // made terminal; automatic rebuilds never replay it.
-    useEffect(() {
-      var cancelled = false;
-      Future.microtask(() {
-        if (cancelled || !context.mounted) return;
-        retryThreadRepliesAfterDeadline(
-          ref.read(relayDeadlineRegistryProvider),
-          repliesArgs,
-          () => ref.invalidate(threadRepliesProvider(repliesArgs)),
-        );
-      });
-      return () => cancelled = true;
-    }, [channelId, queryRootId]);
     final relayReplyState = ref.watch(threadRepliesProvider(repliesArgs));
     final repliesState = ref.watch(threadRepliesWithLocalProvider(repliesArgs));
     final relayRepliesAvailable = relayReplyState.value != null;
@@ -914,11 +900,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                   bottomInset: timelineBottomInset,
                   replies: replies,
                   relayReplyState: relayReplyState,
-                  onRetryReplies: () => retryThreadReplies(
-                    ref.read(relayDeadlineRegistryProvider),
-                    repliesArgs,
-                    () => ref.invalidate(threadRepliesProvider(repliesArgs)),
-                  ),
+                  onRetryReplies: () =>
+                      ref.invalidate(threadRepliesProvider(repliesArgs)),
                   localSendAnimations: localSendAnimations,
                   trackActiveScrollPosition: trackActiveScrollPosition,
                   headIsDeleted: liveDeletionHidesHead,

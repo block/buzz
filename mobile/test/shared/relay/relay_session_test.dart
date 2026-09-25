@@ -1380,54 +1380,6 @@ void main() {
     await second;
   });
 
-  for (final terminal in [true, false]) {
-    test(
-      'a gated history REQ '
-      '${terminal ? 'whose key turns terminal is never sent' : 'is sent on release'}',
-      () async {
-        final gateTimers = <_ManualTimer>[];
-        final gate = RelayRateLimitGate(
-          timerFactory: (duration, callback) {
-            final timer = _ManualTimer(duration, callback);
-            gateTimers.add(timer);
-            return timer;
-          },
-        );
-        final socket = _RecordingRelaySocket();
-        final session = RelaySessionNotifier(rateLimitGate: gate);
-        session.debugAttachSocketForTest(socket);
-        final first = session.fetchHistory(_channelFilter);
-        session.debugHandleMessage([
-          'CLOSED',
-          'h-1',
-          'rate-limited: quota exceeded; retry in 4s',
-        ]);
-        await expectLater(first, throwsException);
-
-        final deadlines = RelayDeadlineRegistry();
-        final deadline = RelayException(503, '{"error":"query timed out"}');
-        final parked = session.fetchHistory(
-          _channelFilter,
-          stopWith: () => deadlines.terminalError('k'),
-        );
-        await Future<void>.delayed(Duration.zero);
-        expect(_reqs(socket), hasLength(1));
-        // A peer attempt terminalizes the key while this one waits.
-        if (terminal) deadlines.record('k', deadline);
-        gateTimers.single.fire();
-        if (terminal) {
-          await expectLater(parked, throwsA(same(deadline)));
-          expect(_reqs(socket), hasLength(1));
-        } else {
-          await Future<void>.delayed(Duration.zero);
-          expect(_reqs(socket), hasLength(2));
-          session.debugHandleMessage(['EOSE', 'h-2']);
-          await parked;
-        }
-      },
-    );
-  }
-
   test(
     'visible channel owners restore and ignore out-of-order release',
     () async {
