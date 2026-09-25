@@ -349,6 +349,12 @@ impl NipFiRelayConfig {
 #[cfg(test)]
 pub(crate) static NIP_FI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Threads that reached `Config::for_test()`'s `NIP_FI_ENV_LOCK` acquisition;
+/// lets the lock witness observe arrival instead of inferring it from time.
+#[cfg(test)]
+pub(crate) static FOR_TEST_LOCK_WAITERS: std::sync::Mutex<Vec<std::thread::ThreadId>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,7 +397,22 @@ mod tests {
         std::env::remove_var("BUZZ_NIP_FI_ISSUERS");
 
         let reader = std::thread::spawn(|| crate::config::Config::for_test().nip_fi.mode);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let reader_id = reader.thread().id();
+        while !super::FOR_TEST_LOCK_WAITERS
+            .lock()
+            .unwrap()
+            .contains(&reader_id)
+        {
+            std::thread::yield_now();
+        }
+        // The reader is at the lock. Give an unlocked reader ample turns to
+        // read the invalid environment and panic before judging exclusion.
+        for _ in 0..10_000 {
+            if reader.is_finished() {
+                break;
+            }
+            std::thread::yield_now();
+        }
         assert!(
             !reader.is_finished(),
             "fixture read must block while the invalid FI environment is locked"

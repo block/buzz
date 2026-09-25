@@ -1294,6 +1294,10 @@ impl Config {
     /// [FI-TRACE-ENV-RACE]
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
+        crate::nip_fi_config::FOR_TEST_LOCK_WAITERS
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
         let _fi_guard = crate::nip_fi_config::NIP_FI_ENV_LOCK.lock().unwrap();
         Self::from_env().expect("default config must load for test fixture")
     }
