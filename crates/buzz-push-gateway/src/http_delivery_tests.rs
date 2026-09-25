@@ -9,7 +9,6 @@ use crate::{
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
     app_attest::AppAttestVerifier,
     authority::{AuthorityStore, Delegation, MemoryAuthorityStore, NewInstallation},
-    config::GatewayUrls,
     grant::{GrantKey, GrantKeyring},
     http::ProfileRuntime,
     model::{AppProfile, EndpointGrant},
@@ -22,7 +21,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -109,9 +108,6 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
             ),
             transport: Arc::new(TestTransport(sends.clone())),
         }),
-        gateway_urls: Arc::new(
-            GatewayUrls::from_origin("https://push.example".parse().unwrap()).unwrap(),
-        ),
         max_grant_lifetime_seconds: 600,
         max_installation_lifetime_seconds: 600,
         endpoint_quota_window_seconds: 60,
@@ -156,129 +152,219 @@ fn request(url: &str, proto: Option<&str>, auth: String, body: Vec<u8>) -> Reque
 }
 
 #[tokio::test]
-async fn direct_and_forwarded_requests_deliver_using_request_url() {
-    for (url, proto) in [(DIRECT_URL, None), (FORWARDED_URL, Some("https"))] {
+async fn delivery_binds_path_not_origin_or_forwarding_headers() {
+    for signed_url in [
+        DIRECT_URL,
+        FORWARDED_URL,
+        "https://other.example:8443/v1/deliveries/apns",
+    ] {
         let (app, keys, body, sends) = fixture().await;
-        let auth = signed_header(&keys, url, "POST", &body);
-        let response = app.oneshot(request(url, proto, auth, body)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "{url}");
+        let auth = signed_header(&keys, signed_url, "POST", &body);
+        let mut request = request(DIRECT_URL, Some("invalid,https"), auth, body);
+        request.headers_mut().remove("host");
+        request
+            .headers_mut()
+            .append("x-forwarded-proto", "http".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("x-forwarded-host", "unrelated.example".parse().unwrap());
+        request.headers_mut().insert(
+            "forwarded",
+            "proto=ftp;host=unrelated.example".parse().unwrap(),
+        );
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
         assert_eq!(sends.load(Ordering::SeqCst), 1);
     }
 }
 
 #[tokio::test]
-async fn absolute_request_authority_is_supported() {
-    let (app, keys, body, sends) = fixture().await;
-    let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
-    let request = Request::post(DIRECT_URL)
-        .header("authorization", auth)
-        .body(Body::from(body))
-        .unwrap();
-    assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
-    assert_eq!(sends.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn signature_is_bound_to_received_url_method_and_body() {
-    for (signed_url, method, changed_body) in [
-        (FORWARDED_URL, "POST", false),
-        (
-            "http://other.example:8080/v1/deliveries/apns",
-            "POST",
-            false,
-        ),
-        ("http://push.example:8081/v1/deliveries/apns", "POST", false),
-        (
-            "https://push.example:8080/v1/deliveries/apns",
-            "POST",
-            false,
-        ),
-        ("http://push.example:8080/v1/other", "POST", false),
+async fn signature_is_bound_to_delivery_path_method_and_body() {
+    for (url, method, change_body) in [
+        ("https://push.example/v1/other", "POST", false),
+        ("https://push.example/v1/deliveries/apns/", "POST", false),
+        ("https://push.example/v1/deliveries/%61pns", "POST", false),
         (DIRECT_URL, "GET", false),
         (DIRECT_URL, "POST", true),
     ] {
         let (app, keys, mut body, sends) = fixture().await;
-        let auth = signed_header(&keys, signed_url, method, &body);
-        if changed_body {
+        let auth = signed_header(&keys, url, method, &body);
+        if change_body {
             body.push(b' ');
         }
-        let response = app
-            .oneshot(request(DIRECT_URL, None, auth, body))
-            .await
-            .unwrap();
         assert_eq!(
-            response.status(),
+            app.oneshot(request(DIRECT_URL, None, auth, body))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::UNAUTHORIZED,
-            "{signed_url} {method} {changed_body}"
+            "{url} {method}"
         );
         assert_eq!(sends.load(Ordering::SeqCst), 0);
     }
 }
 
 #[tokio::test]
-async fn query_is_part_of_received_url() {
-    let with_query = format!("{DIRECT_URL}?mode=one");
-    for signed_url in [DIRECT_URL, with_query.as_str()] {
+async fn signed_url_modifiers_and_non_http_schemes_are_rejected() {
+    for url in [
+        "https://push.example/v1/deliveries/apns?mode=one",
+        "https://push.example/v1/deliveries/apns?",
+        "https://push.example/v1/deliveries/apns#fragment",
+        "https://push.example/v1/deliveries/apns#",
+        "https://user@push.example/v1/deliveries/apns",
+        "ftp://push.example/v1/deliveries/apns",
+    ] {
         let (app, keys, body, sends) = fixture().await;
-        let auth = signed_header(&keys, signed_url, "POST", &body);
-        let response = app
-            .oneshot(request(&with_query, None, auth, body))
-            .await
-            .unwrap();
-        let matching = signed_url == with_query;
+        let auth = signed_header(&keys, url, "POST", &body);
         assert_eq!(
-            response.status(),
-            if matching {
-                StatusCode::OK
-            } else {
-                StatusCode::UNAUTHORIZED
-            }
+            app.oneshot(request(DIRECT_URL, None, auth, body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED,
+            "{url}"
         );
-        assert_eq!(sends.load(Ordering::SeqCst), usize::from(matching));
-    }
-}
-
-#[tokio::test]
-async fn invalid_forwarded_scheme_is_rejected() {
-    for proto in ["ftp", "https,http", ""] {
-        let (app, keys, body, sends) = fixture().await;
-        let auth = signed_header(&keys, FORWARDED_URL, "POST", &body);
-        let response = app
-            .oneshot(request(FORWARDED_URL, Some(proto), auth, body))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(sends.load(Ordering::SeqCst), 0);
     }
 }
 
 #[tokio::test]
-async fn repeated_forwarded_scheme_is_rejected() {
+async fn request_queries_are_rejected() {
     let (app, keys, body, sends) = fixture().await;
-    let auth = signed_header(&keys, FORWARDED_URL, "POST", &body);
-    let mut request = request(FORWARDED_URL, Some("https"), auth, body);
-    request
-        .headers_mut()
-        .append("x-forwarded-proto", "https".parse().unwrap());
+    let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
     assert_eq!(
-        app.oneshot(request).await.unwrap().status(),
+        app.oneshot(request(&format!("{DIRECT_URL}?mode=one"), None, auth, body))
+            .await
+            .unwrap()
+            .status(),
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(sends.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn alternate_forwarded_headers_do_not_replace_request_authority() {
+async fn router_rejects_other_methods_and_paths() {
+    for (method, path, expected) in [
+        (
+            "GET",
+            crate::http::DELIVERY_PATH,
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        ("POST", "/v1/other", StatusCode::NOT_FOUND),
+    ] {
+        let (app, keys, body, sends) = fixture().await;
+        let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", auth)
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(app.oneshot(request).await.unwrap().status(), expected);
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn verifier_retains_kind_timestamp_and_payload_requirements() {
+    for (kind, timestamp, payload) in [
+        (Kind::TextNote, Timestamp::now(), true),
+        (
+            Kind::HttpAuth,
+            Timestamp::from(Timestamp::now().as_secs() - 120),
+            true,
+        ),
+        (
+            Kind::HttpAuth,
+            Timestamp::from(Timestamp::now().as_secs() + 120),
+            true,
+        ),
+        (Kind::HttpAuth, Timestamp::now(), false),
+    ] {
+        let (app, keys, body, sends) = fixture().await;
+        let hash = hex::encode(Sha256::digest(&body));
+        let mut tags = vec![
+            Tag::parse(["u", DIRECT_URL]).unwrap(),
+            Tag::parse(["method", "POST"]).unwrap(),
+        ];
+        if payload {
+            tags.push(Tag::parse(["payload", &hash]).unwrap());
+        }
+        let event = EventBuilder::new(kind, "")
+            .tags(tags)
+            .custom_created_at(timestamp)
+            .sign_with_keys(&keys)
+            .unwrap();
+        let auth = format!(
+            "Nostr {}",
+            STANDARD.encode(serde_json::to_vec(&event).unwrap())
+        );
+        assert_eq!(
+            app.oneshot(request(DIRECT_URL, None, auth, body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn invalid_event_id_and_signature_are_rejected() {
+    for field in ["id", "sig"] {
+        let (app, keys, body, sends) = fixture().await;
+        let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
+        let mut event: serde_json::Value = serde_json::from_slice(
+            &STANDARD
+                .decode(auth.strip_prefix("Nostr ").unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let size = event[field].as_str().unwrap().len();
+        event[field] = "0".repeat(size).into();
+        let auth = format!(
+            "Nostr {}",
+            STANDARD.encode(serde_json::to_vec(&event).unwrap())
+        );
+        assert_eq!(
+            app.oneshot(request(DIRECT_URL, None, auth, body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn grant_signer_and_replay_checks_remain_enforced() {
     let (app, keys, body, sends) = fixture().await;
-    let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
-    let mut request = request(DIRECT_URL, None, auth, body);
-    request
-        .headers_mut()
-        .insert("x-forwarded-host", "other.example".parse().unwrap());
-    request.headers_mut().insert(
-        "forwarded",
-        "proto=https;host=other.example".parse().unwrap(),
+    let wrong_signer = signed_header(&Keys::generate(), DIRECT_URL, "POST", &body);
+    assert_eq!(
+        app.clone()
+            .oneshot(request(DIRECT_URL, None, wrong_signer, body.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
     );
-    assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(sends.load(Ordering::SeqCst), 0);
+    let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
+    assert_eq!(
+        app.clone()
+            .oneshot(request(DIRECT_URL, None, auth.clone(), body.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.oneshot(request(DIRECT_URL, None, auth, body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
     assert_eq!(sends.load(Ordering::SeqCst), 1);
 }

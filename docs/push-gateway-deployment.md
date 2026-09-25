@@ -4,7 +4,7 @@
 
 ## Network and health
 
-- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the configured `BUZZ_PUSH_GATEWAY_ORIGIN` to this port.
+- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the deployment hostname to this port; the binary needs no public-origin setting.
 - Private health listener: `BUZZ_PUSH_HEALTH_ADDR` (default `0.0.0.0:8081`). Probe `/_liveness` and `/_readiness`; do not expose this port publicly. The chart has no pod-ingress allowance for 8081; Kubernetes node/kubelet-origin probe traffic is exempt from NetworkPolicy. Add a narrowly selected monitoring source only if the target CNI requires pod-origin health scraping.
 - Readiness fails when PostgreSQL authority is unavailable. Graceful shutdown stops accepting new requests before draining in-flight APNs calls.
 
@@ -13,7 +13,6 @@
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the six gateway tables, not DDL. |
-| `BUZZ_PUSH_GATEWAY_ORIGIN` | Exact externally reachable HTTPS origin. No credentials, port, path, query, or fragment. The gateway derives its transport routes from it; NIP-PL v1 App Attest audiences remain the registered `https://push.buzz.xyz/v1/...` constants. |
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
@@ -274,7 +273,9 @@ the environment's GitOps values; the chart then renders
 `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
 `values-production.yaml` remains an intentionally invalid production-input
 contract: deployment CI must inject the verified image digest, the provisioned
-dogfood Apple application identifier, `gatewayOrigin`, and the actual PostgreSQL network. In an
+dogfood Apple application identifier and the actual PostgreSQL network. Set
+`gatewayOrigin` only when enabling the chart’s optional HTTPRoute; it supplies
+the routing hostname and is not passed to the gateway binary. In an
 environment with an existing ingress or service mesh route, keep
 `httpRoute.enabled=false`. If this chart owns a Gateway API route, enable it and
 inject an environment-owned `parentRef`; schema validation rejects an enabled
@@ -325,14 +326,10 @@ helm pull oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
 
 ### Delivery URL at the gateway
 
-The gateway verifies NIP-98 against the incoming HTTP(S) request URL, including
-its port, path and query, rather than its configured public origin. A forwarding
-proxy must preserve Host and overwrite `X-Forwarded-Proto` with the original
-request scheme. A single `http` or `https` value is accepted; absent that header
-the request URI scheme, or `http` for an origin-form request, applies.
-The URI authority (when present) or Host supplies the authority.
-`Forwarded` and `X-Forwarded-Host` are not used.
-
-Only trusted forwarding proxies should supply `X-Forwarded-Proto`; direct callers
-omit it. No mobile App Attest audiences, grant checks, or relay activation
-settings change.
+The gateway verifies the signed method and delivery path using the NIP-98 event
+format, rather than matching the full incoming HTTP(S) request URL. The signed
+method must be `POST`; the signed URL path must be `/v1/deliveries/apns`, without
+query, fragment or credentials. Incoming request queries are rejected.
+Host and forwarding headers do not participate in delivery authentication.
+Event signatures, body hashes, timestamps, grant checks and replay protection
+remain enforced. No mobile App Attest audiences or relay activation settings change.

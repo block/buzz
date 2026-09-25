@@ -18,8 +18,7 @@ migration:
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {cpu: 250m, memory: 128Mi}
-# Exact externally reachable HTTPS origin. The gateway derives transport routes
-# from this value; NIP-PL v1 App Attest audiences remain registered constants.
+# Routing origin used only when httpRoute.enabled=true. Not passed to the binary.
 gatewayOrigin: ""
 maxGrantLifetimeSeconds: 2592000
 profiles:

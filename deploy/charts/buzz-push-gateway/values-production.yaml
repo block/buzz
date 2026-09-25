@@ -3,6 +3,7 @@
 image:
   tag: ""
   digest: ""
+# Optional routing input, required only when httpRoute.enabled=true.
 gatewayOrigin: ""
 profiles:
   dogfood:
