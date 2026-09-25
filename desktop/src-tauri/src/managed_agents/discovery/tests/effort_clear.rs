@@ -31,7 +31,10 @@ fn apply_agent_command_update_inherit_sentinel_clears_pin_runtime_and_column() {
         record.effort_level, None,
         "the effort column must be cleared"
     );
-    assert_eq!(record_agent_command(&record, &personas), "goose");
+    assert_eq!(
+        record_agent_command(&record, &personas),
+        known_acp_runtime("goose").unwrap().commands[0]
+    );
 }
 
 #[test]

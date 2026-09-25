@@ -4,7 +4,7 @@ import { installMockBridge } from "../helpers/bridge";
 import { passThroughBackupStep } from "../helpers/onboarding";
 
 function runtime(
-  id: "buzz-agent" | "claude" | "codex" | "goose" | "goose-bundled",
+  id: "buzz-agent" | "claude" | "codex" | "goose",
   availability: string,
   authStatus: Record<string, unknown>,
   overrides: Record<string, unknown> = {},
@@ -102,13 +102,12 @@ test("setup filters the bundled harnesses by connection method", async ({
     {
       acpRuntimesCatalog: [
         runtime("buzz-agent", "available", { status: "not_applicable" }),
-        runtime("goose", "available", { status: "not_applicable" }),
         runtime(
-          "goose-bundled",
+          "goose",
           "available",
           { status: "not_applicable" },
           {
-            label: "Goose (bundled)",
+            label: "Goose",
             command: "goose-acp",
             requires_external_cli: false,
             provider_env_var: "GOOSE_PROVIDER",
@@ -193,7 +192,7 @@ test("setup filters the bundled harnesses by connection method", async ({
   await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
   await expect(
     page.getByTestId("onboarding-runtime-goose-bundled"),
-  ).toContainText("Goose (bundled)");
+  ).toHaveCount(0);
   await expect(page.getByTestId("onboarding-runtime-buzz-agent")).toBeVisible();
   await waitForAnimations(page);
   await page.getByTestId("onboarding-page-2").screenshot({
@@ -1243,11 +1242,11 @@ test("bundled Goose preserves its defaults after model discovery", async ({
       acpRuntimesCatalog: [
         runtime("buzz-agent", "available", { status: "not_applicable" }),
         runtime(
-          "goose-bundled",
+          "goose",
           "available",
           { status: "not_applicable" },
           {
-            label: "Goose (bundled)",
+            label: "Goose",
             command: "goose-acp",
             requires_external_cli: false,
             provider_env_var: "GOOSE_PROVIDER",
@@ -1279,7 +1278,7 @@ test("bundled Goose preserves its defaults after model discovery", async ({
   await page.goto("/");
   await navigateToSetupPage(page, "api");
   await page.getByTestId("onboarding-use-different-harness").click();
-  await page.getByTestId("onboarding-runtime-details-goose-bundled").click();
+  await page.getByTestId("onboarding-runtime-details-goose").click();
   await expect(page.getByTestId("global-agent-provider")).toContainText(
     "Databricks",
   );

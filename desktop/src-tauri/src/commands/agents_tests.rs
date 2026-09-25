@@ -565,6 +565,9 @@ fn deploy_payload_for_policy(
 
 /// The shared provider fixture is the contract arbiter: it must be the exact
 /// richest deploy request produced by the real desktop serializers.
+/// Bundled-Goose builds reject this external-Goose deployment; that guard is
+/// covered by `remote_goose_requires_an_external_runtime_build`.
+#[cfg(not(all(feature = "bundled-goose", target_os = "macos")))]
 #[test]
 fn deploy_payload_matches_the_shared_full_launch_fixture() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(

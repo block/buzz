@@ -201,11 +201,7 @@ export function isMissingRequiredDropdownField(
 }
 
 export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
-  return (
-    runtimeId === "buzz-agent" ||
-    runtimeId === "goose" ||
-    runtimeId === "goose-bundled"
-  );
+  return runtimeId === "buzz-agent" || runtimeId === "goose";
 }
 
 /** Clears values whose meaning or support changes with the selected harness. */
@@ -559,7 +555,6 @@ function runtimePreferenceSortRank(runtimeId: string) {
     case "buzz-agent":
       return 0;
     case "goose":
-    case "goose-bundled":
       return 1;
     default:
       return 2;

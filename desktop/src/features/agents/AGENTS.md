@@ -411,11 +411,13 @@ treat a config-behavior diff without a matching AGENTS.md diff (or an explicit
 
 ## Bundled Goose pilot
 
-The internal macOS `bundled-goose` Cargo feature adds `goose-bundled` / "Goose
-(bundled)" to the Rust catalog. It runs the pinned `goose-acp` sidecar directly;
-`goose` remains the external CLI with its `acp` argument. Buzz Agent remains the
-default. Do not alias or migrate existing Goose records to the bundled runtime.
-Bundled provider/model defaults belong to that runtime's catalog metadata and
+The internal macOS `bundled-goose` Cargo feature changes the existing `goose`
+catalog entry to run the pinned `goose-acp` sidecar directly. There is one Goose
+entry with its existing icon. Builds without the feature use external `goose acp`.
+Buzz Agent remains the default. Existing Goose runtime selections use the bundled
+executable on their next local launch. Saved unpublished `goose-bundled` pilot
+selections deserialize to `goose` in definitions, records, and global defaults.
+Bundled provider/model defaults belong to the runtime's catalog metadata and
 are below explicit structured and user environment settings. File configuration
-and credentials follow Goose's existing configuration paths. The pilot is local
-only; remote images do not yet contain this executable.
+and credentials follow Goose's existing configuration paths. The bundled runtime
+is local only; remote images do not yet contain this executable.

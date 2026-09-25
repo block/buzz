@@ -13,7 +13,6 @@ const SUBSCRIPTION_RUNTIME_IDS = new Set([
 const API_RUNTIME_IDS = new Set([
   "buzz-agent",
   "goose",
-  "goose-bundled",
   "omp",
   "grok",
   "opencode",
@@ -60,7 +59,7 @@ export function orderRuntimesForConnectionMethod(
   const priority = (runtime: AcpRuntimeCatalogEntry) => {
     if (method !== "api") return 0;
     if (runtime.id === "buzz-agent") return 0;
-    if (runtime.id === "goose" || runtime.id === "goose-bundled") return 1;
+    if (runtime.id === "goose") return 1;
     return 2;
   };
 

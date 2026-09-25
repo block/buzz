@@ -441,7 +441,7 @@ fn collect_missing_requirements(
 
     match rt.id {
         "buzz-agent" => buzz_agent_requirements(effective),
-        "goose" | "goose-bundled" => {
+        "goose" => {
             // Read the file config once at the call site so the inner fn is
             // pure and unit-testable by injection.
             let file_cfg = read_goose_file_config();

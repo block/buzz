@@ -69,6 +69,7 @@ pub struct GlobalAgentConfig {
 
     /// Preferred ACP runtime for definitions without an explicit runtime.
     #[serde(default)]
+    #[serde(deserialize_with = "super::types::deserialize_runtime_id")]
     pub preferred_runtime: Option<String>,
 }
 

@@ -1,3 +1,6 @@
+mod runtime_id;
+pub(crate) use runtime_id::deserialize_runtime_id;
+
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Child};
 
@@ -26,6 +29,7 @@ pub struct AgentDefinition {
     /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
     /// Buzz spawns. When deploying from this persona, this runtime is pre-selected in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_runtime_id")]
     pub runtime: Option<String>,
     /// Opaque, harness-specific model identifier string. Format depends on the runtime and its LLM
     /// provider (e.g., 'goose-claude-4-6-opus' for Databricks, 'claude-opus-4-7' for Anthropic
@@ -412,6 +416,7 @@ pub struct ManagedAgentRecord {
     /// `"runtime": null` in the store (key present, e.g. hand-edited) is
     /// honored: materialization skips it and it deserializes to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_runtime_id")]
     pub runtime: Option<String>,
     /// Pool of short thematic names for clones of this agent. Absorbed from
     /// `AgentDefinition.name_pool`; feeds clone naming.

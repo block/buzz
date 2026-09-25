@@ -58,11 +58,7 @@ export function resolveAgentReadiness(
     };
   }
 
-  if (
-    preferredRuntime.id !== "buzz-agent" &&
-    preferredRuntime.id !== "goose" &&
-    preferredRuntime.id !== "goose-bundled"
-  ) {
+  if (preferredRuntime.id !== "buzz-agent" && preferredRuntime.id !== "goose") {
     return { ready: false };
   }
 

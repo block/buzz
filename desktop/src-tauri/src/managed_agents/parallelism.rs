@@ -246,7 +246,10 @@ mod tests {
         let cmd =
             crate::managed_agents::record_agent_command(&record, std::slice::from_ref(&persona));
         assert_eq!(
-            cmd, "goose",
+            cmd,
+            crate::managed_agents::known_acp_runtime("goose")
+                .unwrap()
+                .commands[0],
             "live persona must win over stale agent_command"
         );
         assert_eq!(super::effective_parallelism(&cmd, record.parallelism), 10);

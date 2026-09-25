@@ -4,7 +4,6 @@ export const ONBOARDING_RUNTIME_ORDER = [
   "claude",
   "codex",
   "goose",
-  "goose-bundled",
   "buzz-agent",
   "cursor",
   "devin",

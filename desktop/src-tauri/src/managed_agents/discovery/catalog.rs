@@ -10,15 +10,13 @@ use super::runtime_metadata::{
 use super::{BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL};
 
 pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
+    #[cfg(not(all(feature = "bundled-goose", target_os = "macos")))]
     GOOSE_RUNTIME,
     #[cfg(all(feature = "bundled-goose", target_os = "macos"))]
     KnownAcpRuntime {
-        id: "goose-bundled",
-        label: "Goose (bundled)",
         commands: &["goose-acp"],
         underlying_cli: None,
         cli_install_commands: &[],
-        cli_install_commands_windows: &[],
         cli_install_hint: "Ships with the internal Buzz macOS app.",
         default_env: BUNDLED_GOOSE_DEFAULT_ENV,
         ..GOOSE_RUNTIME

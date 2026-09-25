@@ -160,7 +160,7 @@ pub async fn get_runtime_file_config(
     runtime_id: String,
 ) -> Result<Option<RuntimeFileConfigSubset>, String> {
     tokio::task::spawn_blocking(move || match runtime_id.as_str() {
-        "goose" | "goose-bundled" => {
+        "goose" => {
             let cfg = read_goose_file_config()?;
             let satisfied_env_keys = cfg
                 .extra

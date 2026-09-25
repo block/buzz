@@ -1,9 +1,11 @@
 # Bundled Goose macOS pilot
 
 Internal macOS builds may enable the desktop `bundled-goose` Cargo feature.
-This adds **Goose (bundled)** (`goose-bundled`) alongside the existing **Goose**
-CLI runtime. Buzz Agent remains the default. No saved agent or persona is
-migrated. The pilot supports local agents only.
+This makes the single **Goose** (`goose`) runtime use the pinned executable
+included with Buzz. Buzz Agent remains the default. Existing Goose agents use
+the bundled executable on their next launch; builds without this feature keep
+using the external Goose CLI. The bundled runtime supports local agents only.
+Saved `goose-bundled` pilot selections load as `goose`.
 
 ## Build and package
 
@@ -32,7 +34,7 @@ select a Buzz desktop tag containing this support.
 For source-tree UI development, build the sidecar and start Tauri with
 `--features bundled-goose`. The development resolver finds the staged artifact;
 installed apps use the executable beside Buzz, never an external PATH match.
-`goose-acp` takes no `acp` subcommand. External Goose continues to use `goose acp`.
+`goose-acp` takes no `acp` subcommand. Builds without bundling continue to use `goose acp`.
 Both use Goose's existing configuration and credential locations; incompatible
 extensions in an existing Goose config can still cause startup errors.
 
@@ -40,7 +42,8 @@ extensions in an existing Goose config can still cause startup errors.
 
 - Run `just ci` and Tauri tests with `--features bundled-goose`.
 - Test first launch with no Goose CLI installed and with an existing external
-  Goose. Both entries must be distinct and Buzz Agent must stay the default.
+  Goose. Exactly one Goose entry with its icon must appear, and Buzz Agent must stay
+  the default. Existing Goose selections must launch the bundled executable.
 - Verify Databricks OAuth, model discovery, explicit provider/model/effort
   changes, and restart using the exact packaged artifact.
 - Mention the agent through a real relay, perform shell/file work, and verify
@@ -63,4 +66,4 @@ extensions in an existing Goose config can still cause startup errors.
 The pilot does not resolve upstream empty-final-response warnings after a
 successful Buzz publication, shell process-tree cancellation, or unbounded
 shell capture. Track these against the pinned build when collecting feedback;
-shipping this option is not a default migration or a parity claim.
+bundling Goose does not switch the Buzz Agent default or establish feature parity.

@@ -321,6 +321,11 @@ pub fn try_record_agent_command(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
+        "goose"
+            if command == "goose" && cfg!(all(feature = "bundled-goose", target_os = "macos")) =>
+        {
+            Some(Vec::new())
+        }
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" | "goose-acp" => Some(Vec::new()),
@@ -445,7 +450,9 @@ fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String
 /// The cache eliminates redundant login-shell spawns when multiple agents share
 /// the same binaries (e.g. `npx`, `uvx`).
 pub fn resolve_command(command: &str) -> Option<PathBuf> {
-    if cfg!(all(feature = "bundled-goose", target_os = "macos")) && command == "goose-acp" {
+    if cfg!(all(feature = "bundled-goose", target_os = "macos"))
+        && matches!(command, "goose" | "goose-acp")
+    {
         return resolve_bundled_goose();
     }
 
@@ -486,7 +493,9 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
 /// freeze the cheap path exists to avoid. `resolve_command` (the forced path)
 /// is the sole prober and cache populator.
 pub fn resolve_command_cached(command: &str) -> Option<PathBuf> {
-    if cfg!(all(feature = "bundled-goose", target_os = "macos")) && command == "goose-acp" {
+    if cfg!(all(feature = "bundled-goose", target_os = "macos"))
+        && matches!(command, "goose" | "goose-acp")
+    {
         return resolve_bundled_goose();
     }
 
