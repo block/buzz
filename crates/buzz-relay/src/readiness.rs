@@ -531,9 +531,23 @@ impl DependencyDiagnostics {
             .then(|| self.sample_completion_epoch_seconds.load(Ordering::Acquire))
     }
 
+    /// Re-emits the stored epoch, then checks it is still the stored one.
+    ///
+    /// A sample can complete and publish a newer epoch while this write is in
+    /// flight, and the metrics facade exposes only a bare `set`, so nothing
+    /// downstream rejects the older value once it lands last. Verifying after
+    /// the write — rather than before it — is what closes that window: a
+    /// republish that lost the race re-emits the newer epoch instead of
+    /// leaving the exported series moved backwards. Another pass costs another
+    /// completed sample, so this ends as soon as no completion is racing it.
     fn republish_dependency_sample_completion(&self) {
-        if let Some(epoch_seconds) = self.latest_sample_completion_epoch_seconds() {
+        let mut published = None;
+        while let Some(epoch_seconds) = self.latest_sample_completion_epoch_seconds() {
+            if published == Some(epoch_seconds) {
+                break;
+            }
             publish_dependency_sample_completion_metric(epoch_seconds);
+            published = Some(epoch_seconds);
         }
     }
 }
@@ -1242,6 +1256,229 @@ mod tests {
                 publisher.await.expect("completion publisher task");
             });
         });
+    }
+
+    /// How long a park step waits before it is a failure rather than a hang.
+    const PARK_SIGNAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// A completion-epoch gauge write that can be stopped at the recorder
+    /// boundary — the last instruction of a publish, after the writer has
+    /// already read the epoch it is publishing.
+    ///
+    /// Arming names one epoch value and fires once, so the sampler's own write
+    /// passes straight through and only the republish under test parks.
+    struct PublishPark {
+        armed_for: Mutex<Option<u64>>,
+        parked_tx: std::sync::mpsc::SyncSender<()>,
+        parked_rx: Mutex<std::sync::mpsc::Receiver<()>>,
+        release_tx: std::sync::mpsc::SyncSender<()>,
+        release_rx: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl PublishPark {
+        fn new() -> Self {
+            let (parked_tx, parked_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            Self {
+                armed_for: Mutex::new(None),
+                parked_tx,
+                parked_rx: Mutex::new(parked_rx),
+                release_tx,
+                release_rx: Mutex::new(release_rx),
+            }
+        }
+
+        fn arm(&self, epoch_seconds: u64) {
+            *self.armed_for.lock().expect("park state") = Some(epoch_seconds);
+        }
+
+        fn park_if_armed(&self, epoch_seconds: u64) {
+            {
+                let mut armed = self.armed_for.lock().expect("park state");
+                if *armed != Some(epoch_seconds) {
+                    return;
+                }
+                *armed = None;
+            }
+            self.parked_tx.send(()).expect("announce the parked write");
+            self.release_rx
+                .lock()
+                .expect("release channel")
+                .recv_timeout(PARK_SIGNAL_TIMEOUT)
+                .expect("the parked write must be released");
+        }
+
+        fn wait_until_parked(&self) {
+            self.parked_rx
+                .lock()
+                .expect("park channel")
+                .recv_timeout(PARK_SIGNAL_TIMEOUT)
+                .expect("the armed write must reach the recorder");
+        }
+
+        fn release(&self) {
+            self.release_tx.send(()).expect("release the parked write");
+        }
+    }
+
+    /// Delegates to the real Prometheus recorder, with the completion-epoch
+    /// gauge routed through [`PublishPark`].
+    struct ParkingRecorder {
+        inner: metrics_exporter_prometheus::PrometheusRecorder,
+        park: Arc<PublishPark>,
+    }
+
+    struct ParkingGauge {
+        inner: metrics::Gauge,
+        park: Arc<PublishPark>,
+    }
+
+    impl metrics::GaugeFn for ParkingGauge {
+        fn increment(&self, value: f64) {
+            self.inner.increment(value);
+        }
+
+        fn decrement(&self, value: f64) {
+            self.inner.decrement(value);
+        }
+
+        fn set(&self, value: f64) {
+            self.park.park_if_armed(value as u64);
+            self.inner.set(value);
+        }
+    }
+
+    impl metrics::Recorder for ParkingRecorder {
+        fn describe_counter(
+            &self,
+            key: metrics::KeyName,
+            unit: Option<metrics::Unit>,
+            description: metrics::SharedString,
+        ) {
+            self.inner.describe_counter(key, unit, description);
+        }
+
+        fn describe_gauge(
+            &self,
+            key: metrics::KeyName,
+            unit: Option<metrics::Unit>,
+            description: metrics::SharedString,
+        ) {
+            self.inner.describe_gauge(key, unit, description);
+        }
+
+        fn describe_histogram(
+            &self,
+            key: metrics::KeyName,
+            unit: Option<metrics::Unit>,
+            description: metrics::SharedString,
+        ) {
+            self.inner.describe_histogram(key, unit, description);
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            self.inner.register_counter(key, metadata)
+        }
+
+        fn register_gauge(
+            &self,
+            key: &metrics::Key,
+            metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Gauge {
+            let gauge = self.inner.register_gauge(key, metadata);
+            if key.name() == "buzz_readiness_dependency_sample_completed_timestamp_seconds" {
+                metrics::Gauge::from_arc(Arc::new(ParkingGauge {
+                    inner: gauge,
+                    park: Arc::clone(&self.park),
+                }))
+            } else {
+                gauge
+            }
+        }
+
+        fn register_histogram(
+            &self,
+            key: &metrics::Key,
+            metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            self.inner.register_histogram(key, metadata)
+        }
+    }
+
+    /// Two tasks write this gauge — the sampler, which owns the epoch, and the
+    /// idle-refresh publisher, which may only re-emit it — and the metrics
+    /// facade offers a bare `set` with no compare-and-set to lean on. So a
+    /// republish that read the stored epoch before a sample completed can still
+    /// be inside its own write when the newer epoch lands, and plain last-write
+    /// -wins would leave the exported series moved backwards until the next
+    /// republish tick.
+    ///
+    /// This parks the republish at the recorder, the last point in its write,
+    /// completes a newer sample behind it — which must not be blocked by the
+    /// parked republish — and only then releases it. The scrape must report the
+    /// newer completion. Times are injected so the two epochs are exact and the
+    /// interleaving does not depend on the wall clock.
+    #[test]
+    fn a_republish_racing_a_completion_cannot_move_the_exported_epoch_backwards() {
+        const EARLIER_EPOCH_SECONDS: u64 = 1_700_000_000;
+        const LATER_EPOCH_SECONDS: u64 = 1_700_000_030;
+
+        let (prometheus, handle) = crate::metrics::readiness_test_recorder();
+        let park = Arc::new(PublishPark::new());
+        let recorder = Arc::new(ParkingRecorder {
+            inner: prometheus,
+            park: Arc::clone(&park),
+        });
+        let diagnostics = Arc::new(ready_diagnostics());
+
+        metrics::with_local_recorder(recorder.as_ref(), || {
+            diagnostics.record_dependency_sample_completion(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(EARLIER_EPOCH_SECONDS),
+            );
+        });
+        assert_eq!(
+            sample_completion_metric_value_from_scrape(&handle.render()),
+            Some(EARLIER_EPOCH_SECONDS),
+            "the first completion owns the epoch"
+        );
+
+        park.arm(EARLIER_EPOCH_SECONDS);
+        let republisher = std::thread::spawn({
+            let recorder = Arc::clone(&recorder);
+            let diagnostics = Arc::clone(&diagnostics);
+            move || {
+                metrics::with_local_recorder(recorder.as_ref(), || {
+                    diagnostics.republish_dependency_sample_completion();
+                });
+            }
+        });
+
+        park.wait_until_parked();
+
+        metrics::with_local_recorder(recorder.as_ref(), || {
+            diagnostics.record_dependency_sample_completion(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(LATER_EPOCH_SECONDS),
+            );
+        });
+        assert_eq!(
+            sample_completion_metric_value_from_scrape(&handle.render()),
+            Some(LATER_EPOCH_SECONDS),
+            "a completed sample must publish its epoch while a republish is still in flight"
+        );
+
+        park.release();
+        republisher.join().expect("republish thread");
+
+        assert_eq!(
+            sample_completion_metric_value_from_scrape(&handle.render()),
+            Some(LATER_EPOCH_SECONDS),
+            "a republish that lost the race must not re-export the epoch it read \
+             before the newer sample completed"
+        );
     }
 
     #[test]
