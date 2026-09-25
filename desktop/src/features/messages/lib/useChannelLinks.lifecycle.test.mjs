@@ -46,7 +46,11 @@ function enterEvent() {
 for (const [name, text, cursor] of [
   ["replacing the loaded edit", "Edited, not deleted", 19],
   ["clearing the loaded edit", "", 0],
-  ["moving before the channel reference", "Welcome to #general", 0],
+  [
+    "receiving an update with the cursor before the reference",
+    "Welcome to #general",
+    0,
+  ],
 ]) {
   test(`${name} releases Enter before the debounce expires`, async (t) => {
     const { act, renderHook } = await import("@testing-library/react");
