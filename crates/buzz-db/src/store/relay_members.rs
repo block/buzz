@@ -422,6 +422,7 @@ async fn lock_owner_mutation_admission(
     proposed_owner: &str,
     mode: OwnerMutationMode,
 ) -> Result<OwnerMutationAdmission> {
+    crate::deletion::lock_community_deletion_shared(tx, community).await?;
     let target = sqlx::query(
         "SELECT archived_at, deletion_state, deleted_at FROM communities \
          WHERE id = $1 FOR UPDATE",

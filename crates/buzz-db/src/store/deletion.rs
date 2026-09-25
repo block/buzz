@@ -2874,7 +2874,7 @@ async fn lock_community_deletion(
     Ok(())
 }
 
-async fn lock_community_deletion_shared(
+pub(crate) async fn lock_community_deletion_shared(
     tx: &mut Transaction<'_, Postgres>,
     community: CommunityId,
 ) -> Result<()> {
@@ -4018,6 +4018,111 @@ mod postgres_tests {
             .expect("release admission fixture serialization");
     }
 
+    struct OwnerConvergenceGate {
+        connection: sqlx::pool::PoolConnection<Postgres>,
+        trigger_name: String,
+        function_name: String,
+        first_key: i32,
+        second_key: i32,
+    }
+
+    async fn install_owner_convergence_gate(
+        db: &Db,
+        community: CommunityId,
+        owner: &str,
+    ) -> OwnerConvergenceGate {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let trigger_name = format!("a_owner_convergence_gate_{suffix}");
+        let function_name = format!("owner_convergence_gate_fn_{suffix}");
+        let gate_id = Uuid::new_v4();
+        let first_key = (gate_id.as_u128() as u32 & 0x7fff_ffff) as i32;
+        let second_key = ((gate_id.as_u128() >> 32) as u32 & 0x7fff_ffff) as i32;
+        let mut connection = db.pool.acquire().await.expect("acquire gate connection");
+        sqlx::query("SELECT pg_advisory_lock($1, $2)")
+            .bind(first_key)
+            .bind(second_key)
+            .execute(&mut *connection)
+            .await
+            .expect("hold owner convergence gate");
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE FUNCTION {function_name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               IF NEW.community_id = '{}'::uuid AND NEW.pubkey = '{}' THEN \
+                 PERFORM pg_advisory_xact_lock({first_key}, {second_key}); \
+               END IF; \
+               RETURN NEW; \
+             END $$",
+            community.as_uuid(),
+            owner
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("install owner convergence gate function");
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE TRIGGER {trigger_name} BEFORE INSERT ON relay_members \
+             FOR EACH ROW EXECUTE FUNCTION {function_name}()"
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("install owner convergence gate trigger");
+        OwnerConvergenceGate {
+            connection,
+            trigger_name,
+            function_name,
+            first_key,
+            second_key,
+        }
+    }
+
+    async fn wait_for_owner_convergence_gate(db: &Db, gate: &OwnerConvergenceGate) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND classid = $1::oid AND objid = $2::oid \
+                       AND objsubid = 2 AND NOT granted)",
+                )
+                .bind(gate.first_key)
+                .bind(gate.second_key)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect owner convergence gate");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner convergence reached gated member update");
+    }
+
+    async fn release_owner_convergence_gate(gate: &mut OwnerConvergenceGate) {
+        sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+            .bind(gate.first_key)
+            .bind(gate.second_key)
+            .execute(&mut *gate.connection)
+            .await
+            .expect("release owner convergence gate");
+    }
+
+    async fn remove_owner_convergence_gate(db: &Db, gate: OwnerConvergenceGate) {
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP TRIGGER {} ON relay_members",
+            gate.trigger_name
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("remove owner convergence gate trigger");
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP FUNCTION {}()",
+            gate.function_name
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("remove owner convergence gate function");
+    }
+
     async fn contender_db(application_name: &str) -> Db {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
@@ -4201,6 +4306,101 @@ mod postgres_tests {
             ProvisionOwnerResult::DeletionPending
         );
         assert_eq!(membership_roles(&db, community).await, before);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn same_owner_convergence_serializes_with_abort_without_deadlock() {
+        let mut deadlocks = Vec::new();
+        for stage in [DeletionStage::Submitted, DeletionStage::Inventoried] {
+            let (db, store) = store().await;
+            let (host, owner, community) = archived_owned_community(&db).await;
+            let OwnerDeletionAdmission::Accepted(request) = store
+                .admit_owner_request(
+                    &host,
+                    &owner,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    1,
+                    Uuid::new_v4(),
+                )
+                .await
+                .expect("admit owner deletion")
+            else {
+                panic!("expected accepted owner deletion")
+            };
+            if stage == DeletionStage::Inventoried {
+                let inventory = FrozenInventory {
+                    schema: store
+                        .inventory_schema(community)
+                        .await
+                        .expect("inventory schema"),
+                    storage: empty_storage_manifest(community),
+                };
+                let inventoried = store
+                    .freeze_inventory(request.id, &inventory)
+                    .await
+                    .expect("freeze inventory");
+                assert_eq!(inventoried.stage, DeletionStage::Inventoried);
+            }
+
+            let mut gate = install_owner_convergence_gate(&db, community, &owner).await;
+            let convergence_db =
+                contender_db(&format!("owner-convergence-{}", Uuid::new_v4().simple())).await;
+            let converging = tokio::spawn({
+                let owner = owner.clone();
+                async move { convergence_db.provision_owner(community, &owner).await }
+            });
+            wait_for_owner_convergence_gate(&db, &gate).await;
+
+            let abort_application = format!("owner-abort-{}", Uuid::new_v4().simple());
+            let abort_store = contender_db(&abort_application).await.deletion_store();
+            let aborting = tokio::spawn(async move {
+                abort_store
+                    .abort(request.id, "operator", "same-owner convergence race")
+                    .await
+            });
+            wait_for_contender_lock(&db, &abort_application).await;
+            release_owner_convergence_gate(&mut gate).await;
+
+            let (convergence_join, abort_join) = tokio::join!(
+                tokio::time::timeout(Duration::from_secs(5), converging),
+                tokio::time::timeout(Duration::from_secs(5), aborting),
+            );
+            remove_owner_convergence_gate(&db, gate).await;
+            let convergence_result = convergence_join
+                .expect("same-owner convergence must not hang")
+                .expect("join same-owner convergence");
+            let abort_result = abort_join
+                .expect("abort must not hang")
+                .expect("join abort");
+            if matches!(
+                &convergence_result,
+                Err(DbError::Sqlx(sqlx::Error::Database(error)))
+                    if error.code().as_deref() == Some("40P01")
+            ) || matches!(
+                &abort_result,
+                Err(DbError::Sqlx(sqlx::Error::Database(error)))
+                    if error.code().as_deref() == Some("40P01")
+            ) {
+                deadlocks.push(format!(
+                    "{stage}: convergence={convergence_result:?}, abort={abort_result:?}"
+                ));
+                continue;
+            }
+            assert_eq!(
+                convergence_result.expect("same-owner convergence"),
+                ProvisionOwnerResult::Applied
+            );
+            assert_eq!(
+                abort_result.expect("abort request").stage,
+                DeletionStage::Aborted
+            );
+        }
+        assert!(
+            deadlocks.is_empty(),
+            "same-owner convergence and abort must serialize without 40P01:\n{}",
+            deadlocks.join("\n")
+        );
     }
 
     #[tokio::test]
