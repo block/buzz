@@ -2023,7 +2023,7 @@ mod route_integration_tests {
         let key = nostr::Keys::generate();
         let token = mint_assertion_token(&key.public_key().to_hex());
         let verifier = state.nip_fi_verifier.as_deref().unwrap();
-        let result = verifier.verify(&token);
+        let result = verifier.verify_assertion(&token);
         assert!(
             result.is_ok(),
             "nip_fi_verifier.verify must succeed after installer warmup on the shared source; \

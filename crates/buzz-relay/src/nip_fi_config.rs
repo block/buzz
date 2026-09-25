@@ -350,7 +350,11 @@ fn parse_algorithm(s: &str) -> Result<JwtAlgorithm, String> {
         "PS384" => Ok(JwtAlgorithm::PS384),
         "PS512" => Ok(JwtAlgorithm::PS512),
         "EdDSA" => Ok(JwtAlgorithm::EdDSA),
-        other => Err(format!("unknown or non-asymmetric algorithm {other:?}")),
+        other => Err(format!(
+            "unknown or non-asymmetric algorithm (got {} chars); \
+             supported: ES256 ES384 RS256 RS384 RS512 PS256 PS384 PS512 EdDSA",
+            other.len()
+        )),
     }
 }
 
@@ -695,6 +699,207 @@ mod tests {
         assert!(
             !debug_msg.contains(SENTINEL),
             "Debug output must NOT contain the sensitive sentinel: {debug_msg}"
+        );
+    }
+
+    /// A complete, valid Enforce issuer entry. Tests derive negative fixtures
+    /// from it by removing exactly one field.
+    fn valid_enforce_issuer() -> serde_json::Value {
+        serde_json::json!({
+            "issuer": "https://issuer.test",
+            "audiences": ["https://relay.test"],
+            "token_class": "nip-fi+jwt",
+            "algorithms": ["ES256"],
+            "skew_seconds": 30,
+            "maximum_assertion_age_seconds": 3600,
+            "jwks_uri": "https://issuer.test/.well-known/jwks.json",
+            "jwks_refresh_interval_seconds": 300,
+            "jwks_hard_deadline_seconds": 3600,
+            "maximum_command_age_seconds": 30,
+            "authorized_principals": ["admin@issuer.test"]
+        })
+    }
+
+    #[test]
+    fn enforce_without_assertion_age_fails_closed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+
+        // Success control: the complete fixture is accepted.
+        let valid = valid_enforce_issuer();
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            serde_json::json!([valid]).to_string(),
+        );
+        NipFiRelayConfig::from_env().expect("complete Enforce issuer config must be accepted");
+
+        // Same fixture minus only the per-issuer age bound.
+        let mut missing_age = valid_enforce_issuer();
+        missing_age
+            .as_object_mut()
+            .unwrap()
+            .remove("maximum_assertion_age_seconds");
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            serde_json::json!([missing_age]).to_string(),
+        );
+        let err = NipFiRelayConfig::from_env()
+            .expect_err("Enforce issuer without maximum_assertion_age_seconds must fail closed");
+        // The parser deliberately reports only the error position (never the
+        // serde message) so config values cannot leak; with the control above
+        // passing, the one-field difference is what produced this rejection.
+        // It must be the deserialization rejection, not a later policy-build
+        // failure (which a defaulted age would hit instead).
+        let msg = err.to_string();
+        assert!(
+            msg.contains("BUZZ_NIP_FI_ISSUERS could not be parsed"),
+            "missing maximum_assertion_age_seconds must be rejected at deserialization: {msg}"
+        );
+    }
+
+    // ── R5 privacy sentinel tests ─────────────────────────────────────────────
+    //
+    // These tests prove that parse errors on BUZZ_NIP_FI_ISSUERS do NOT echo
+    // raw issuer config values (URLs, audience strings, issuer identifiers) in
+    // the error messages.  [NIP-FI.md:777-779]
+    //
+    // The test input embeds a unique sentinel string that should never appear in
+    // any error message.  Failing this invariant would mean serde_json or another
+    // parser is leaking operator-supplied field values into error text.
+    //
+    // Falsifying mutation for all tests: replace the position-only message in `from_env()`
+    // or the `other.len()` wrapping in `parse_algorithm()` with a raw `{e}` or
+    // `{s}` interpolation.  The sentinel strings would appear in the error
+    // message and the assertion fires.
+
+    /// Malformed issuer JSON: wrong-typed field must not leak the sentinel value.
+    ///
+    /// We use a valid JSON array with `skew_seconds` as a string (where the
+    /// deserializer expects a number).  Raw serde would echo the actual string
+    /// value in a type-error message like `expected u64, got string "SENTINEL..."`.
+    /// The test asserts the sentinel does NOT appear — proving the code strips or
+    /// classifies the error rather than forwarding serde's message.
+    ///
+    /// This is stronger than using outright-malformed JSON, which serde never
+    /// echoes in the first place.  A non-discriminating malformed-JSON sentinel
+    /// passes even if the code leaks values from valid-but-wrong-typed fields.
+    #[test]
+    fn malformed_issuer_json_error_does_not_leak_raw_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        // A sentinel that serde would echo in a type-mismatch error if not suppressed.
+        const SENTINEL: &str = "SENTINEL_SKEW_VALUE_abc123xyz";
+        // Valid array with `skew_seconds` as a string — deserializer expects u64.
+        // Raw serde error would be something like:
+        //   "invalid type: string \"SENTINEL_SKEW_VALUE_abc123xyz\", expected u64"
+        let issuers_json = serde_json::json!([{
+            "issuer": "https://issuer.test",
+            "audiences": ["https://relay.test"],
+            "token_class": "nip-fi+jwt",
+            "algorithms": ["ES256"],
+            "skew_seconds": SENTINEL,   // wrong type: serde echoes this value
+            "maximum_assertion_age_seconds": 3600,
+            "jwks_uri": "https://issuer.test/.well-known/jwks.json",
+            "jwks_refresh_interval_seconds": 300,
+            "jwks_hard_deadline_seconds": 3600
+        }])
+        .to_string();
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_ISSUERS", &issuers_json);
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+
+        let err = NipFiRelayConfig::from_env().expect_err("wrong-typed field must fail");
+        let msg = err.to_string();
+
+        assert!(
+            !msg.contains(SENTINEL),
+            "parse error MUST NOT echo the raw field value (privacy sentinel leaked): {msg}"
+        );
+        // The error must still be non-empty and identify the config variable.
+        assert!(
+            msg.contains("BUZZ_NIP_FI_ISSUERS"),
+            "error must name the config variable: {msg}"
+        );
+    }
+
+    /// Invalid algorithm string error must not echo the raw value.
+    #[test]
+    fn invalid_algorithm_error_does_not_leak_raw_value() {
+        // parse_algorithm is private; we test it indirectly by passing a full
+        // issuer config with a sentinel algorithm name.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        const SENTINEL_ALG: &str = "SENTINEL_ALGORITHM_HS256_SECRET";
+        let issuers_json = serde_json::json!([{
+            "issuer": "https://issuer.test",
+            "audiences": ["https://relay.test"],
+            "token_class": "nip-fi+jwt",
+            "algorithms": [SENTINEL_ALG],
+            "skew_seconds": 30,
+            "maximum_assertion_age_seconds": 3600,
+            "jwks_uri": "https://issuer.test/.well-known/jwks.json",
+            "jwks_refresh_interval_seconds": 300,
+            "jwks_hard_deadline_seconds": 3600
+        }])
+        .to_string();
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_ISSUERS", &issuers_json);
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+
+        let err = NipFiRelayConfig::from_env().expect_err("unknown algorithm must fail");
+        let msg = err.to_string();
+
+        assert!(
+            !msg.contains(SENTINEL_ALG),
+            "algorithm error MUST NOT echo the raw algorithm value: {msg}"
+        );
+        // The error must indicate what went wrong (non-empty, contains hint).
+        assert!(!msg.is_empty(), "error must be non-empty");
+    }
+
+    /// Policy-build rejection error must not leak the issuer URL.
+    #[test]
+    fn policy_build_rejection_error_does_not_leak_issuer_url() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        const SENTINEL_ISSUER: &str = "https://sentinel-issuer-secret.example";
+        // An issuer config with an empty audiences list → IssuerPolicy::new fails.
+        let issuers_json = serde_json::json!([{
+            "issuer": SENTINEL_ISSUER,
+            "audiences": [],  // empty → IssuerPolicy::new must fail
+            "token_class": "nip-fi+jwt",
+            "algorithms": ["ES256"],
+            "skew_seconds": 30,
+            "maximum_assertion_age_seconds": 3600,
+            "jwks_uri": "https://sentinel-issuer-secret.example/.well-known/jwks.json",
+            "jwks_refresh_interval_seconds": 300,
+            "jwks_hard_deadline_seconds": 3600
+        }])
+        .to_string();
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_ISSUERS", &issuers_json);
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+
+        let err = NipFiRelayConfig::from_env()
+            .expect_err("empty audiences must cause a policy build failure");
+        let msg = err.to_string();
+
+        // The error must not leak the sentinel issuer URL.
+        assert!(
+            !msg.contains(SENTINEL_ISSUER),
+            "policy-build error MUST NOT echo the raw issuer URL: {msg}"
+        );
+        // The error must be non-empty and mention the issuer index.
+        assert!(
+            msg.contains("index"),
+            "error must reference the issuer by index, not URL: {msg}"
         );
     }
 }

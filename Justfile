@@ -414,6 +414,10 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
+        # Feature-flag crate coverage: run once with LaunchDarkly enabled.
+        # This includes all default tests plus the cfg(feature="launchdarkly")
+        # tests, avoiding duplicate default-only execution in the unit lane.
+        cargo nextest run -p buzz-feature-flags --features launchdarkly
         # buzz-agent: two infra-free concerns run together by executing the
         # whole crate (lib + integration tests), because nothing in CI runs
         # `cargo test --workspace`, so without this stanza neither the crate's
@@ -440,18 +444,11 @@ test-unit:
         # and a red one could ship green (exactly how a broken admin test slipped
         # past every gate once). Scoped to api::admin, not the whole buzz-relay
         # --lib, because api::media has non-ignored tests that require Postgres.
-        # Two api::admin tests are excluded: both exercise a read-route DB
-        # fallthrough and pass without a database only by waiting out the sqlx
-        # acquire timeout (~30s each), so they do not belong in the infra-free
-        # unit job. nip98_mode_unrostered_signer_does_not_consume_a_replay_slot
-        # asserts a unique replay-guard invariant, so it is wired into the
-        # Postgres-backed Backend Integration job (see ci.yml "Admin API
-        # unrostered-signer replay invariant"). disabled_mode_allows_
-        # unauthenticated_requests_on_the_admin_host has no unique invariant:
-        # disabled-mode unauthenticated success is covered by
-        # disabled_mode_regression_pin_unauthenticated_request_is_served on the
-        # DB-free /probe route, and its Host/Origin gating is covered here by
-        # disabled_mode_still_requires_the_correct_host / _a_matching_origin.
+        # DB-backed api::admin tests are #[ignore]d and run in the PostgreSQL
+        # lane; the non-ignored ones reject before touching the database. Any
+        # new non-ignored test here must stay DB-free: without a database, a
+        # DB fallthrough only "passes" by waiting out the ~30s sqlx acquire
+        # timeout.
         # The second clause adds the relay's pure authorization-decision tests:
         # the NIP-29 channel membership grid (handlers::channel_authz), the
         # moderation capability grid (handlers::moderation_authz), and the pure
@@ -465,8 +462,17 @@ test-unit:
         # non-postgres_tests cases only "pass" without a database by waiting out
         # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
         # unit job either.
-        cargo nextest run -p buzz-relay --lib \
-            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/)'
+        # The third clause adds the NIP-FI HTTP ingress and its router/config
+        # neighbours: nip_fi_http, nip_fi_config, router, api::parse_query_tests,
+        # and the Git transport off_mode_precedence_tests. All are infra-free
+        # and finish in well under a second with no DATABASE_URL, so none wait
+        # out the sqlx acquire timeout. `--bin buzz-relay` adds main.rs's
+        # `tests::` module (JWKS refresh cadence) and `composition_tests::`
+        # (JWKS source + refresh-loop composition), which `--lib` cannot reach
+        # because they live in the binary target; the nested
+        # `tests::postgres_tests::` stays in the PostgreSQL lane.
+        cargo nextest run -p buzz-relay --lib --bin buzz-relay \
+            -E 'test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/)) - test(/^tests::postgres_tests::/))'
         # NIP-FI (S3/S4) relay witnesses: the wholly-new nip_fi_* and
         # api::nip_fi modules, plus the exact NIP-FI tests added to mixed
         # modules (state, connection, audio::handler, router, handlers::*,
@@ -815,7 +821,7 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
         chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
     cd {{desktop_dir}}
-    export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
+    export BUZZ_RELAY_URL="wss://buzz.test.blockstaging.build"
     source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.

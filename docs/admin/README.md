@@ -254,6 +254,19 @@ a startup warning — and adopt `nip98` (populate `RELAY_OPERATOR_PUBKEYS`) or
 replace it with `BUZZ_ADMIN_AUTH=disabled`. Behavior is identical; the old
 variable is no longer recognised.
 
+**Member restriction routes now take `communityHost`, not `communityId`:**
+`GET /members/restrictions` and `DELETE /members/:pubkey/ban|timeout` name the
+community by the relay host the client connected to, so the relay resolves
+its own tenant (see [Member restriction routes](#member-restriction-routes-operator-and-moderator)).
+There is no compatibility shim:
+
+- Roll the relay with this change **before** any desktop build that uses it.
+  A new desktop against an old relay cannot list or lift restrictions.
+- Scripts that call these routes with `communityId` must switch to
+  `communityHost`.
+- Rolling the relay back to a `communityId` build breaks the desktop
+  Admin → Staffing → Restrictions UI until the relay is rolled forward again.
+
 Relays without `BUZZ_ADMIN_HOST` are completely unaffected, except that a
 lingering `BUZZ_ADMIN_TOKEN` now logs a startup warning and must be removed.
 
@@ -319,6 +332,26 @@ a read-only badge because the server rejects mutations.
   mutation point) — treat as "refresh detail".
 - `PATCH /api/admin/v1/feedback/:id`
   Body: `{"status": "new|reviewed|archived"}`
+
+### Member restriction routes (Operator and Moderator)
+
+All three name the community by `communityHost`: the relay's own host
+authority (host, plus port when non-default), which the relay resolves to its
+tenant through the same binder that scopes live connections. The caller's
+local community ids are never accepted. A host the relay serves no community
+for returns `400` with error `unknown_community_host`, never an empty result.
+
+- `GET /api/admin/v1/members/restrictions?communityHost=<host>[&limit=<1-200>][&cursor=<token>]`
+  Lists active bans and timeouts, newest first. Response:
+  `{"items": [...], "nextCursor": "<token>" | null}`. `limit` defaults to 200;
+  pass the prior page's `nextCursor` as `cursor` to continue. `400` on a missing
+  or unknown host, an out-of-range `limit`, or a malformed `cursor`.
+- `DELETE /api/admin/v1/members/:pubkey/ban?communityHost=<host>`
+  Lifts an active ban. `204` on success, `409` if no active ban exists.
+  Mutation: requires `nip98` mode.
+- `DELETE /api/admin/v1/members/:pubkey/timeout?communityHost=<host>`
+  Clears an active timeout. `204` on success, `409` if no active timeout exists.
+  Mutation: requires `nip98` mode.
 
 ### Staffing routes (Operator only)
 

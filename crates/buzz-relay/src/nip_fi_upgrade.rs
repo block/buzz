@@ -13,8 +13,7 @@
 use axum::body::Body;
 use axum::http::{HeaderMap, Response, StatusCode};
 use buzz_auth::{
-    DenialClass, FederatedAssertionVerifier, IssuerKeySource, NipFiMode, VerifiedAssertion,
-    CLIENT_ATTACHED_HEADER,
+    DenialClass, NipFiMode, VerifiedAssertion, VerifyAssertion, CLIENT_ATTACHED_HEADER,
 };
 
 /// Outcome of NIP-FI assertion validation at upgrade time.
@@ -41,9 +40,9 @@ pub(crate) enum NipFiUpgradeOutcome {
 /// be valid but authorization is temporarily unavailable — so "authorization
 /// denied" would be false. "authorization unavailable, retry after repair" is
 /// the accurate and correct signal. [FI-TRACE-DENIAL-ORACLE]
-pub(crate) fn check_nip_fi_at_upgrade<S: IssuerKeySource>(
+pub(crate) fn check_nip_fi_at_upgrade(
     headers: &HeaderMap,
-    verifier: Option<&FederatedAssertionVerifier<S>>,
+    verifier: Option<&dyn VerifyAssertion>,
     mode: NipFiMode,
 ) -> NipFiUpgradeOutcome {
     if matches!(mode, NipFiMode::Off) {
@@ -70,7 +69,7 @@ pub(crate) fn check_nip_fi_at_upgrade<S: IssuerKeySource>(
         }
     };
 
-    match verifier.verify(token) {
+    match verifier.verify_assertion(token) {
         Ok(assertion) => NipFiUpgradeOutcome::Admitted(assertion),
         Err(err) => {
             tracing::debug!(code = err.code(), "nip-fi assertion denied at upgrade");
@@ -404,11 +403,7 @@ mod tests {
             CLIENT_ATTACHED_HEADER,
             axum::http::HeaderValue::from_static("Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"),
         );
-        let outcome = check_nip_fi_at_upgrade(
-            &h,
-            None::<&buzz_auth::FederatedAssertionVerifier<buzz_auth::ProductionJwksSource>>,
-            buzz_auth::NipFiMode::Enforce,
-        );
+        let outcome = check_nip_fi_at_upgrade(&h, None, buzz_auth::NipFiMode::Enforce);
         match outcome {
             NipFiUpgradeOutcome::Denied(resp) => {
                 assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
@@ -422,11 +417,7 @@ mod tests {
     #[test]
     fn enforce_missing_header_returns_401_exact_bytes() {
         let headers = HeaderMap::new();
-        let outcome = check_nip_fi_at_upgrade(
-            &headers,
-            None::<&buzz_auth::FederatedAssertionVerifier<buzz_auth::ProductionJwksSource>>,
-            buzz_auth::NipFiMode::Enforce,
-        );
+        let outcome = check_nip_fi_at_upgrade(&headers, None, buzz_auth::NipFiMode::Enforce);
         // Missing header → MissingEvidence; but None verifier fires first.
         // Correct behavior: extract_bearer_token is called before verifier check,
         // so missing header → 401 (MissingEvidence) before reaching the None verifier path.
@@ -450,11 +441,7 @@ mod tests {
     #[test]
     fn off_mode_returns_not_required() {
         let headers = HeaderMap::new(); // no assertion header
-        let outcome = check_nip_fi_at_upgrade(
-            &headers,
-            None::<&buzz_auth::FederatedAssertionVerifier<buzz_auth::ProductionJwksSource>>,
-            buzz_auth::NipFiMode::Off,
-        );
+        let outcome = check_nip_fi_at_upgrade(&headers, None, buzz_auth::NipFiMode::Off);
         assert!(
             matches!(outcome, NipFiUpgradeOutcome::NotRequired),
             "Off mode must not require assertion — OSS default must not regress"
@@ -476,11 +463,7 @@ mod tests {
     #[test]
     fn deny_protected_returns_503_authorization_unavailable() {
         let headers = HeaderMap::new();
-        let outcome = check_nip_fi_at_upgrade(
-            &headers,
-            None::<&buzz_auth::FederatedAssertionVerifier<buzz_auth::ProductionJwksSource>>,
-            buzz_auth::NipFiMode::DenyProtected,
-        );
+        let outcome = check_nip_fi_at_upgrade(&headers, None, buzz_auth::NipFiMode::DenyProtected);
         match outcome {
             NipFiUpgradeOutcome::Denied(resp) => {
                 assert_eq!(
