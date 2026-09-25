@@ -327,6 +327,7 @@ impl NipFiRelayConfig {
 fn parse_mode() -> Result<NipFiMode, ConfigError> {
     match std::env::var("BUZZ_NIP_FI_MODE")
         .unwrap_or_default()
+        .trim()
         .to_ascii_lowercase()
         .as_str()
     {
@@ -408,8 +409,9 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
 
 fn parse_u64_bounded(var: &str, min: u64, max: u64) -> Result<Option<u64>, ConfigError> {
     match std::env::var(var) {
+        Ok(raw) if raw.trim().is_empty() => Ok(None),
         Ok(val) => {
-            let n: u64 = val.parse().map_err(|_| {
+            let n: u64 = val.trim().parse().map_err(|_| {
                 ConfigError::InvalidValue(format!("{var} must be a positive integer; got {val:?}"))
             })?;
             if n < min || n > max {
@@ -532,6 +534,37 @@ mod tests {
             msg.contains("authorized_principals"),
             "error names the missing field: {msg}"
         );
+    }
+
+    #[test]
+    fn padded_mode_and_lifetime_are_trimmed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", " enforce ");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", " 3600 ");
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            r#"[{
+                "issuer": "https://idp.example.com",
+                "audiences": ["https://relay.example.com"],
+                "token_class": "nip-fi+jwt",
+                "algorithms": ["ES256"],
+                "maximum_assertion_age_seconds": 3600,
+                "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+                "jwks_refresh_interval_seconds": 300,
+                "jwks_hard_deadline_seconds": 86400,
+                "maximum_command_age_seconds": 30,
+                "authorized_principals": ["admin@idp.example.com"]
+            }]"#,
+        );
+        let cfg = NipFiRelayConfig::from_env().expect("padded values must be accepted");
+        assert!(matches!(cfg.mode, NipFiMode::Enforce));
+        assert_eq!(cfg.max_connection_lifetime_secs, 3600);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", " off ");
+        let cfg = NipFiRelayConfig::from_env().expect("padded off must be accepted");
+        assert!(matches!(cfg.mode, NipFiMode::Off));
     }
 
     #[test]

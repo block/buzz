@@ -95,11 +95,15 @@ impl HttpDenyMap for buzz_auth::NipFiDenyMap {
 
 /// The deny map for a relay that has no `nip_fi_deny_map`.
 ///
-/// The map is absent only when no command-capable issuer is configured (mode
-/// `Off`, or before startup installs the command components).  Deny entries
-/// are written solely into that map — by the admin disconnect endpoint and the
-/// cross-pod consumer, both of which are disabled without it — so no entry can
-/// exist and admitting is exact, not fail-open.
+/// A serving `Enforce` relay always has the map: validated config requires a
+/// command-capable issuer for every enforce issuer, and startup installs the
+/// map (with the command verifier) before the router is built, aborting on
+/// failure.  `Off` bypasses the map and `DenyProtected` rejects before it is
+/// consulted, so `None` is reached only in `Off`, before install, or in
+/// hand-built test states.  Deny entries are written solely into that map, by
+/// the admin disconnect endpoint and the cross-pod consumer; startup installs
+/// the map and the command verifier together, so no writer exists without it.
+/// No entry can exist, and admitting is exact, not fail-open.
 struct NoDenyMapConfigured;
 impl sealed::Sealed for NoDenyMapConfigured {}
 impl HttpDenyMap for NoDenyMapConfigured {

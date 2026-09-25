@@ -132,7 +132,9 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
     "/api/admin/",
     // NIP-FI admin disconnect — authenticated by its own command JWT
     // (`nip-fi-command+jwt` in the same header), which the assertion verifier
-    // would reject; exact path
+    // would reject.  No trailing slash, so the matcher exempts the exact path
+    // and its subtree (not `/api/nip-fi/disconnect-extra`); sub-paths are
+    // harmless since no routes exist beneath it.
     "/api/nip-fi/disconnect",
     // Static assets served by the SPA fallback; subtree
     "/assets/",

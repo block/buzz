@@ -46,8 +46,8 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 
 use buzz_auth::{
-    CommandError, CommandIssuerPolicy, CommandVerifier, IssuerCapacity, NipFiDenyMap, NipFiMode,
-    ProductionJwksSource, CLIENT_ATTACHED_HEADER,
+    CommandError, CommandIssuerPolicy, CommandVerifier, IssuerCapacity, JwksFetcher, NipFiDenyMap,
+    NipFiMode, ProductionJwksSource, CLIENT_ATTACHED_HEADER,
 };
 
 use crate::state::AppState;
@@ -208,11 +208,11 @@ pub struct CommandIssuerEnvConfig {
 }
 
 /// The `NipFiDenyMap` + `CommandVerifier` pair built at startup.
-pub struct NipFiCommandComponents {
+pub struct NipFiCommandComponents<F: JwksFetcher = buzz_auth::HttpJwksFetcher> {
     /// The shared deny map consumed by WS admission and S5 HTTP admission.
     pub deny_map: Arc<NipFiDenyMap>,
     /// The command verifier for the `POST /api/nip-fi/disconnect` endpoint.
-    pub command_verifier: Arc<CommandVerifier<Arc<ProductionJwksSource>>>,
+    pub command_verifier: Arc<CommandVerifier<Arc<ProductionJwksSource<F>>>>,
 }
 
 /// Outcome of applying a cross-pod NIP-FI disconnect message.
@@ -372,12 +372,12 @@ pub fn apply_nip_fi_disconnect(
 /// not supported by this PR; every enforce issuer must carry command config).
 ///
 /// `issuer_command_configs` must be in the same order as `registry.all_policies()`.
-pub fn build_nip_fi_command_components(
+pub fn build_nip_fi_command_components<F: JwksFetcher>(
     mode: NipFiMode,
     registry: &buzz_auth::IssuerRegistry,
-    key_source: Arc<ProductionJwksSource>,
+    key_source: Arc<ProductionJwksSource<F>>,
     issuer_command_configs: &[(String, CommandIssuerEnvConfig)],
-) -> Result<Option<NipFiCommandComponents>, String> {
+) -> Result<Option<NipFiCommandComponents<F>>, String> {
     if matches!(mode, NipFiMode::Off) {
         return Ok(None);
     }
@@ -465,33 +465,28 @@ pub fn build_nip_fi_command_components(
 /// Result of a successful [`install_nip_fi_command_components`] call.
 #[derive(Debug)]
 pub struct NipFiCommandStartupReport {
-    /// Number of issuers whose JWKS snapshot was warmed before serving.
-    pub warmed_issuers: usize,
     /// Number of issuers wired into the command verifier.
     pub command_issuers: usize,
 }
 
-/// Install NIP-FI command components into `app_state`.
+/// Install NIP-FI command components into the two `AppState` slots.
 ///
 /// This is the single production startup seam that owns:
 /// - enforce-mode pre-flight check (returns `Err` for incomplete config)
-/// - JWKS warmup for every configured issuer
-/// - background JWKS refresh loop
 /// - `build_nip_fi_command_components` invocation
-/// - assignment of both `app_state.nip_fi_deny_map` and
-///   `app_state.nip_fi_command_verifier`
+/// - assignment of both `nip_fi_deny_map` and `nip_fi_command_verifier`
 ///
-/// `main.rs` constructs the concrete `ProductionJwksSource` and calls this
-/// function once; it no longer owns either assignment or the warmup loop.
-///
-/// Deleting either AppState field assignment or the warmup loop must red the
-/// `production_install_warms_and_populates_both_app_state_fields` oracle.
-pub async fn install_nip_fi_command_components(
-    app_state: &mut crate::state::AppState,
+/// It performs no JWKS I/O. `main.rs` owns the single warm + per-issuer
+/// refresh lifecycle for the shared `key_source`; the command verifier reads
+/// that cache lazily at verify time. `main.rs` passes
+/// `&mut app_state.nip_fi_deny_map` and `&mut app_state.nip_fi_command_verifier`;
+/// the slots are generic over the fetcher so tests can count fetches.
+pub fn install_nip_fi_command_components<F: JwksFetcher>(
+    deny_map_slot: &mut Option<Arc<NipFiDenyMap>>,
+    command_verifier_slot: &mut Option<Arc<CommandVerifier<Arc<ProductionJwksSource<F>>>>>,
     mode: NipFiMode,
     registry: &buzz_auth::IssuerRegistry,
-    key_source: Arc<ProductionJwksSource>,
-    jwks_configs: &[buzz_auth::IssuerJwksConfig],
+    key_source: Arc<ProductionJwksSource<F>>,
     command_configs: &[(String, CommandIssuerEnvConfig)],
 ) -> Result<NipFiCommandStartupReport, String> {
     // Pre-flight: enforce mode with no command configs is always an error.
@@ -501,64 +496,19 @@ pub async fn install_nip_fi_command_components(
         );
     }
 
-    // Warm each issuer's JWKS snapshot before serving.
-    let mut warmed_issuers: usize = 0;
-    for jwks_cfg in jwks_configs {
-        if let Some(snapshot) = key_source.get_snapshot(&jwks_cfg.issuer).await {
-            tracing::info!(
-                issuer_len = jwks_cfg.issuer.len(),
-                generation = snapshot.generation(),
-                "NIP-FI: JWKS warmed"
-            );
-            warmed_issuers += 1;
-        } else {
-            tracing::warn!(
-                issuer_len = jwks_cfg.issuer.len(),
-                "NIP-FI: JWKS warm-up failed — will retry inline"
-            );
-        }
-    }
-
-    // Spawn background refresh loop so snapshots stay fresh after startup.
-    {
-        let source_for_refresh = Arc::clone(&key_source);
-        let jwks_cfgs = jwks_configs.to_vec();
-        let shutting_down = Arc::clone(&app_state.shutting_down);
-        tokio::spawn(async move {
-            loop {
-                let min_interval_secs = jwks_cfgs
-                    .iter()
-                    .map(|c| c.contract.refresh_interval_seconds())
-                    .min()
-                    .unwrap_or(300);
-                tokio::time::sleep(std::time::Duration::from_secs(min_interval_secs)).await;
-                if shutting_down.load(std::sync::atomic::Ordering::Acquire) {
-                    break;
-                }
-                for cfg in &jwks_cfgs {
-                    source_for_refresh.get_snapshot(&cfg.issuer).await;
-                }
-            }
-        });
-    }
-
-    let components =
-        build_nip_fi_command_components(mode, registry, Arc::clone(&key_source), command_configs)?;
+    let components = build_nip_fi_command_components(mode, registry, key_source, command_configs)?;
 
     let command_issuers = if let Some(c) = components {
         let n = command_configs.len();
-        app_state.nip_fi_deny_map = Some(c.deny_map);
-        app_state.nip_fi_command_verifier = Some(c.command_verifier);
+        *deny_map_slot = Some(c.deny_map);
+        *command_verifier_slot = Some(c.command_verifier);
         tracing::info!("NIP-FI S4: command API enabled ({n} issuer(s))");
         n
     } else {
         0
     };
 
-    Ok(NipFiCommandStartupReport {
-        warmed_issuers,
-        command_issuers,
-    })
+    Ok(NipFiCommandStartupReport { command_issuers })
 }
 
 /// Validate a command issuer config entry without constructing a policy.
@@ -1781,11 +1731,10 @@ mod route_integration_tests {
         );
     }
 
-    // ── Test: blocker 4b — production_install_warms_and_populates_both_app_state_fields ─────
+    // ── Test: blocker 4b — production_install_populates_both_app_state_fields ─────
     //
     // Calls install_nip_fi_command_components() directly (the production seam that owns
-    // warmup + both AppState assignments). Proves:
-    // - warmed_issuers == 1 after a seeded get_snapshot
+    // both AppState assignments). Proves:
     // - command_issuers == 1
     // - both AppState fields are Some
     // - a valid signed command through the verifier creates a deny visible via the map
@@ -1793,11 +1742,10 @@ mod route_integration_tests {
     // Mandatory red mutations (proven by separate inline verification below):
     //  1. delete deny_map assignment → AppState.nip_fi_deny_map is None
     //  2. delete verifier assignment → AppState.nip_fi_command_verifier is None
-    //  3. delete/bypass warmup → warmed_issuers == 0
-    //  4. wire verifier to a different map → verify succeeds but state map denial fails
+    //  3. wire verifier to a different map → verify succeeds but state map denial fails
 
     #[tokio::test]
-    async fn production_install_warms_and_populates_both_app_state_fields() {
+    async fn production_install_populates_both_app_state_fields() {
         use super::install_nip_fi_command_components;
 
         // Build a minimal AppState — same construction as build_test_state but without
@@ -1860,21 +1808,15 @@ mod route_integration_tests {
         )];
 
         let report = install_nip_fi_command_components(
-            &mut state,
+            &mut state.nip_fi_deny_map,
+            &mut state.nip_fi_command_verifier,
             buzz_auth::NipFiMode::Enforce,
             &registry,
             Arc::clone(&key_source),
-            &jwks_configs,
             &cmd_configs,
         )
-        .await
         .expect("install must succeed for valid config");
 
-        // Warmup: one issuer was seeded and should have a snapshot.
-        assert_eq!(
-            report.warmed_issuers, 1,
-            "warmed_issuers must equal 1 (snapshot was seeded)"
-        );
         assert_eq!(report.command_issuers, 1, "command_issuers must equal 1");
 
         // Both AppState fields must be populated.
@@ -1902,18 +1844,60 @@ mod route_integration_tests {
             deny_map.is_denied(TEST_ISS, &target, chrono::Utc::now()),
             "deny entry must be visible via AppState.nip_fi_deny_map after verify"
         );
+    }
 
-        // Set the shutdown flag so the background refresh task eventually exits.
-        // This does not prove lifecycle — no task handle is awaited here.
-        state
-            .shutting_down
-            .store(true, std::sync::atomic::Ordering::Release);
+    // ── Single JWKS lifecycle owner witness ───────────────────────────────
+    //
+    // `main.rs` owns the only warm + per-issuer refresh of the shared JWKS
+    // source. The installer must build and install components without any
+    // fetch. Reintroducing a warm loop (or refresh spawn) inside the installer
+    // makes `call_count` non-zero and reds this test.
+    #[tokio::test]
+    async fn installer_performs_no_jwks_fetch() {
+        use super::install_nip_fi_command_components;
+
+        let fetcher = buzz_auth::ScriptedJwksFetcher::new([]);
+        let fetches = Arc::clone(&fetcher.call_count);
+        let key_source = Arc::new(
+            ProductionJwksSource::new(vec![test_jwks_config()], fetcher).expect("valid key source"),
+        );
+        let mut registry = IssuerRegistry::new();
+        registry.insert(test_issuer_policy());
+        let cmd_configs = vec![(
+            TEST_ISS.to_owned(),
+            CommandIssuerEnvConfig {
+                maximum_command_age_seconds: Some(30),
+                authorized_principals: Some(vec![TEST_SUB.to_owned()]),
+                deny_set_capacity: Some(100),
+            },
+        )];
+        let mut deny_map = None;
+        let mut command_verifier = None;
+
+        install_nip_fi_command_components(
+            &mut deny_map,
+            &mut command_verifier,
+            buzz_auth::NipFiMode::Enforce,
+            &registry,
+            key_source,
+            &cmd_configs,
+        )
+        .expect("install must succeed for valid config");
+        tokio::task::yield_now().await;
+
+        assert!(deny_map.is_some() && command_verifier.is_some());
+        assert_eq!(
+            fetches.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "installer must not fetch JWKS; main.rs is the single lifecycle owner"
+        );
     }
 
     // ── Startup-oracle: shared JWKS source wiring ──────────────────────────
     //
-    // Proves that `install_nip_fi_command_components` warms the EXACT Arc that
-    // `nip_fi_verifier` holds, so a valid assertion JWT succeeds after startup.
+    // Proves that the installer, given the state's own JWKS source (as
+    // `main.rs` passes it), wires the command verifier onto the EXACT Arc that
+    // `nip_fi_verifier` holds: once that source is warm, both verify.
     //
     // Construction path mirrors `main.rs` exactly:
     //   1. Build AppState with an Enforce config that has jwks_configs populated —
@@ -1922,14 +1906,13 @@ mod route_integration_tests {
     //   2. Seed the state's own `nip_fi_jwks_source` (no HTTP).
     //   3. Call `install_nip_fi_command_components` with
     //      `state.nip_fi_jwks_source.clone()` — the same Arc the verifier holds.
-    //   4. Assert `nip_fi_verifier.verify(assertion_jwt)` succeeds.
+    //   4. Assert both `nip_fi_verifier` and `nip_fi_command_verifier` verify.
     //
     // Mutation evidence:
-    //   Reintroduce a second, unseeded source and pass it to the installer (the
-    //   original bug) → the verifier's source stays cold → verify returns
-    //   `KeySourceUnavailable` → the is_ok() assertion panics.
+    //   Pass a second, unseeded source to the installer → the command
+    //   verifier's source stays cold → command verify fails.
     #[tokio::test]
-    async fn installer_warmup_makes_assertion_verifier_functional() {
+    async fn installer_shares_jwks_source_with_assertion_verifier() {
         use super::install_nip_fi_command_components;
         use crate::nip_fi_config::NipFiRelayConfig;
         use buzz_auth::NipFiMode;
@@ -1997,60 +1980,46 @@ mod route_integration_tests {
             "nip_fi_jwks_source must be Some for Enforce config"
         );
 
-        // Seed the state's own JWKS source — the exact Arc the verifier holds.
-        // This is the warmup step that main.rs achieves by passing this same Arc
-        // to install_nip_fi_command_components.
-        let state_source = state.nip_fi_jwks_source.as_ref().unwrap();
-        state_source
+        let shared_source = state.nip_fi_jwks_source.clone().unwrap();
+        install_nip_fi_command_components(
+            &mut state.nip_fi_deny_map,
+            &mut state.nip_fi_command_verifier,
+            NipFiMode::Enforce,
+            &registry,
+            Arc::clone(&shared_source),
+            &cmd_configs,
+        )
+        .expect("install must succeed for valid config");
+
+        // Warm the state's own source after install — the step main.rs's
+        // single lifecycle owner performs. Both verifiers must see it.
+        shared_source
             .seed_snapshot_for_test(TEST_ISS, test_jwks())
             .await;
 
-        // Clone the source Arc before the mutable borrow of state so the
-        // borrow checker sees both borrows as non-overlapping.  This clone is
-        // the same operation main.rs performs: it shares the EXACT underlying
-        // source, not a fresh one.
-        let shared_source = state.nip_fi_jwks_source.clone().unwrap();
-
-        // Call the installer with the state's own source (mirrors main.rs after
-        // the shared-source fix). The warmup loop confirms the seeded snapshot.
-        let report = install_nip_fi_command_components(
-            &mut state,
-            NipFiMode::Enforce,
-            &registry,
-            shared_source,
-            &jwks_configs,
-            &cmd_configs,
-        )
-        .await
-        .expect("install must succeed for valid config");
-        assert_eq!(
-            report.warmed_issuers, 1,
-            "installer must report 1 warmed issuer (snapshot was pre-seeded)"
-        );
-
-        // Assert that a valid assertion JWT now verifies successfully.
-        // This is the core oracle: the verifier reads key_set() from the same
-        // Arc that the installer warmed — if they were different Arcs, the
-        // verifier's source would be cold and this would return KeySourceUnavailable.
         let key = nostr::Keys::generate();
         let token = mint_assertion_token(&key.public_key().to_hex());
         let verifier = state.nip_fi_verifier.as_deref().unwrap();
         let result = verifier.verify_assertion(&token);
         assert!(
             result.is_ok(),
-            "nip_fi_verifier.verify must succeed after installer warmup on the shared source; \
-             got: {result:?}"
+            "assertion verifier must read the warmed shared source; got: {result:?}"
         );
 
-        state
-            .shutting_down
-            .store(true, std::sync::atomic::Ordering::Release);
+        let target = nostr::Keys::generate().public_key();
+        let command = mint_token(&target.to_hex(), 300, serde_json::json!({}));
+        let command_verifier = state.nip_fi_command_verifier.as_ref().unwrap();
+        let result = command_verifier.verify(&command, "POST", TEST_PATH, &target);
+        assert!(
+            result.is_ok(),
+            "command verifier must read the same warmed shared source; got: {result:?}"
+        );
     }
 
     /// Mint a valid ES256 `nip-fi+jwt` assertion for `nostr_pubkey = key_hex`,
     /// signed by the route-integration-test key pair.
     /// Used by the startup-oracle test to verify the assertion verifier against
-    /// its own JWKS source after installer warmup.
+    /// its own warmed JWKS source.
     fn mint_assertion_token(key_hex: &str) -> String {
         mint_assertion_token_for(TEST_ISS, key_hex)
     }
@@ -2342,6 +2311,8 @@ mod route_integration_tests {
 
     /// HTTP admission for an `(iss, key)` assertion paired with a NIP-98 proof
     /// for `key`.  `Ok(())` = admitted; `Err` = the denial response.
+    // Response<Body> is intentionally large (axum's design); see admit_nip_fi_http.
+    #[allow(clippy::result_large_err)]
     fn http_admit(
         state: &crate::state::AppState,
         iss: &str,
@@ -2457,6 +2428,8 @@ mod route_integration_tests {
     }
 
     #[tokio::test]
+    // Response<Body> is intentionally large (axum's design); see admit_nip_fi_http.
+    #[allow(clippy::result_large_err)]
     async fn off_mode_http_admission_ignores_route_deny_entries() {
         // Off mode: the command route still records the entry, but HTTP
         // admission never consults the deny map — the NIP-98 closure result is

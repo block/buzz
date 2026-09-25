@@ -533,24 +533,20 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         media_storage,
     );
     // NIP-FI S4: construct deny map + command verifier from startup config,
-    // before Arc::new so we can mutate app_state directly.
-    // Delegates to install_nip_fi_command_components which owns JWKS warmup,
-    // the refresh loop, build_nip_fi_command_components, and both state assignments.
+    // before Arc::new so we can mutate app_state directly. The installer does
+    // no JWKS I/O; the warm + refresh block below is the single key lifecycle
+    // owner for the shared source both verifiers read.
     {
         let nip_fi = &config.nip_fi;
         if let Some(key_source) = app_state.nip_fi_jwks_source.clone() {
-            // Share the exact Arc that nip_fi_verifier already holds so warmup
-            // and the background refresh loop populate the same snapshot cache
-            // that assertion verification reads synchronously via key_set().
             buzz_relay::api::nip_fi::install_nip_fi_command_components(
-                &mut app_state,
+                &mut app_state.nip_fi_deny_map,
+                &mut app_state.nip_fi_command_verifier,
                 nip_fi.mode,
                 &nip_fi.registry,
                 key_source,
-                &nip_fi.jwks_configs,
                 &nip_fi.command_configs,
             )
-            .await
             .map_err(|e| anyhow::anyhow!("NIP-FI startup failed: {e}"))?;
         } else if nip_fi.is_enforce() {
             return Err(anyhow::anyhow!(

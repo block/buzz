@@ -1291,9 +1291,9 @@ pub struct AppState {
 
     /// The shared JWKS key source backing `nip_fi_verifier`.
     ///
-    /// `main.rs` passes this same Arc to `install_nip_fi_command_components`,
-    /// which warms each issuer snapshot at startup and spawns the background
-    /// refresh loop. `FederatedAssertionVerifier::verify` reads the cache
+    /// `main.rs` warms each issuer snapshot on this Arc at startup and spawns
+    /// the per-issuer background refresh loop; it also passes the same Arc to
+    /// `install_nip_fi_command_components` so the command verifier shares it. `FederatedAssertionVerifier::verify` reads the cache
     /// synchronously via `key_set()` — it never fetches — so warmup must
     /// complete on this Arc before the relay begins serving WS upgrades.
     /// `None` iff `nip_fi_verifier` is `None`.
@@ -1493,9 +1493,8 @@ impl AppState {
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
             // NIP-FI assertion verifier and JWKS source — built from config above.
-            // main.rs passes nip_fi_jwks_source to install_nip_fi_command_components,
-            // which warms it and spawns the background refresh loop so key_set()
-            // returns a populated cache on every WS upgrade check.
+            // main.rs warms nip_fi_jwks_source and spawns the per-issuer refresh
+            // loop so key_set() returns a populated cache on every WS upgrade check.
             nip_fi_verifier,
             nip_fi_jwks_source,
             // NIP-FI deny map and command verifier are initialized lazily by
@@ -1925,7 +1924,7 @@ impl AuditShutdownHandle {
 /// `Enforce` mode, constructs a `ProductionJwksSource` (shared via `Arc`)
 /// and a `FederatedAssertionVerifier` over a clone of that `Arc`.
 /// The source starts empty; admission returns `authorization_unavailable`
-/// (503) until `install_nip_fi_command_components` warms it at startup.
+/// (503) until `main.rs` warms it at startup.
 /// [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
 type NipFiComponents = (
     Option<Arc<dyn buzz_auth::VerifyAssertion>>,
