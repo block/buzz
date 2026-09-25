@@ -1852,7 +1852,7 @@ mod route_integration_tests {
     // source. The installer must build and install components without any
     // fetch. Reintroducing a warm loop (or refresh spawn) inside the installer
     // makes `call_count` non-zero and reds this test.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn installer_performs_no_jwks_fetch() {
         use super::install_nip_fi_command_components;
 
@@ -1883,7 +1883,7 @@ mod route_integration_tests {
             &cmd_configs,
         )
         .expect("install must succeed for valid config");
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_secs(86_400)).await;
 
         assert!(deny_map.is_some() && command_verifier.is_some());
         assert_eq!(

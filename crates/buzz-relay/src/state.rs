@@ -1293,7 +1293,8 @@ pub struct AppState {
     ///
     /// `main.rs` warms each issuer snapshot on this Arc at startup and spawns
     /// the per-issuer background refresh loop; it also passes the same Arc to
-    /// `install_nip_fi_command_components` so the command verifier shares it. `FederatedAssertionVerifier::verify` reads the cache
+    /// `install_nip_fi_command_components` so the command verifier shares it.
+    /// `FederatedAssertionVerifier::verify` reads the cache
     /// synchronously via `key_set()` — it never fetches — so warmup must
     /// complete on this Arc before the relay begins serving WS upgrades.
     /// `None` iff `nip_fi_verifier` is `None`.
