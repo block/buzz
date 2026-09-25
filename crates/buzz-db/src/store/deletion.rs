@@ -2186,7 +2186,16 @@ impl DeletionStore {
         Ok(())
     }
 
-    /// Terminally abort an approved or fenced request before object deletion begins.
+    /// Terminally abort a request at the reversible pre-destruction boundary.
+    ///
+    /// `submitted`, `inventoried`, `approved`, and `fenced` are reversible:
+    /// nothing tenant-visible has been destroyed, so abort releases the durable
+    /// request fence over owner listing, unarchive, and owner rotation. Owner
+    /// admission deliberately has no owner-facing cancellation, so this
+    /// privileged path is the only recovery when preparation cannot continue.
+    /// Abort reverses deletion intent, not the owner's archive decision: the
+    /// community stays archived and the owner restores it explicitly.
+    /// Stages from `drained` onward have destroyed tenant state and stay closed.
     pub async fn abort(
         &self,
         request_id: Uuid,
@@ -2225,7 +2234,10 @@ impl DeletionStore {
         }
         if !matches!(
             request.stage,
-            DeletionStage::Approved | DeletionStage::Fenced
+            DeletionStage::Submitted
+                | DeletionStage::Inventoried
+                | DeletionStage::Approved
+                | DeletionStage::Fenced
         ) {
             return Err(DbError::DeletionSafety(format!(
                 "deletion {request_id} at stage {} cannot be aborted",
@@ -4241,6 +4253,130 @@ mod postgres_tests {
                 .all(|row| row.id != community),
             "accepted deletion requests must not remain actionable archived rows"
         );
+    }
+
+    /// Privileged recovery abort at the reversible pre-approval boundary.
+    ///
+    /// Owner admission has no owner-facing cancellation. When preparation
+    /// cannot safely continue, an operator aborts the request; that must
+    /// release the durable request fence over listing, unarchive, and owner
+    /// rotation without silently unarchiving the community behind the owner.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn privileged_abort_of_submitted_owner_request_releases_the_request_fence() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let new_owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        let OwnerDeletionAdmission::Accepted(request) = store
+            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .await
+            .expect("admit owner request")
+        else {
+            panic!("expected accepted request")
+        };
+        assert_eq!(request.stage, DeletionStage::Submitted);
+        assert_eq!(
+            db.transfer_ownership(community, &new_owner, &owner)
+                .await
+                .expect("fenced transfer"),
+            TransferResult::DeletionPending
+        );
+
+        let aborted = store
+            .abort(
+                request_id,
+                "recovery-operator",
+                "owner preparation cannot continue",
+            )
+            .await
+            .expect("privileged abort at the reversible submitted boundary");
+        assert_eq!(aborted.stage, DeletionStage::Aborted);
+        assert_eq!(aborted.aborted_by.as_deref(), Some("recovery-operator"));
+
+        // Abort reverses deletion intent, not the owner's archive decision.
+        let (deletion_state, archived_at): (String, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT deletion_state, archived_at FROM communities WHERE id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("community lifecycle after abort");
+        assert_eq!(deletion_state, "active");
+        assert!(
+            archived_at.is_some(),
+            "abort must not unarchive the community on the owner's behalf"
+        );
+
+        assert!(
+            db.list_communities_owned_by(&owner)
+                .await
+                .expect("owner list after abort")
+                .iter()
+                .any(|row| row.id == community),
+            "aborting the request must restore the owner's actionable archived row"
+        );
+        let UnarchiveCommunityResult::Unarchived(restored) = db
+            .unarchive_community_owned_by(&host, &owner)
+            .await
+            .expect("unarchive after abort")
+        else {
+            panic!("aborting the request must restore owner-authorized unarchive")
+        };
+        assert_eq!(restored.id, community);
+        assert_eq!(
+            db.transfer_ownership(community, &new_owner, &owner)
+                .await
+                .expect("transfer after abort"),
+            TransferResult::Transferred {
+                previous_owner: Some(owner.clone()),
+            }
+        );
+    }
+
+    /// The reversible boundary stops at `inventoried`. Once execution has
+    /// destroyed anything, abort must stay closed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn privileged_abort_spans_only_the_reversible_pre_destruction_boundary() {
+        let (db, store) = store().await;
+        let (request, _) = inventoried_request(&db, &store).await;
+        assert_eq!(request.stage, DeletionStage::Inventoried);
+        let aborted = store
+            .abort(request.id, "recovery-operator", "inventory needs recovery")
+            .await
+            .expect("privileged abort at the inventoried boundary");
+        assert_eq!(aborted.stage, DeletionStage::Aborted);
+
+        for irreversible in [
+            DeletionStage::Drained,
+            DeletionStage::BindingsRemoved,
+            DeletionStage::PostgresPurged,
+            DeletionStage::CachePurged,
+            DeletionStage::LogicallyVerified,
+            DeletionStage::RetentionPending,
+        ] {
+            let (later, _) = inventoried_request(&db, &store).await;
+            sqlx::query("UPDATE community_deletion_requests SET stage = $2 WHERE id = $1")
+                .bind(later.id)
+                .bind(irreversible.to_string())
+                .execute(&db.pool)
+                .await
+                .expect("advance stage");
+            let error = store
+                .abort(later.id, "recovery-operator", "too late")
+                .await
+                .expect_err("abort must stay closed after destruction begins");
+            assert!(
+                error.to_string().contains("cannot be aborted"),
+                "unexpected error at {irreversible}: {error}"
+            );
+            assert_eq!(
+                store.get(later.id).await.expect("unchanged request").stage,
+                irreversible,
+                "a refused abort must not move the request"
+            );
+        }
     }
 
     #[tokio::test]
