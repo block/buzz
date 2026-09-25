@@ -1781,7 +1781,8 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
 
 CREATE TABLE relay_admin_actions (
     id              UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
-    report_id       UUID NOT NULL,
+    -- NULL for a report-less direct action (migration 0050).
+    report_id       UUID,
     report_community_id UUID NOT NULL,
     -- Client-generated idempotency key (signed in NIP-98 request body).
     request_id      UUID NOT NULL,
@@ -1817,16 +1818,35 @@ CREATE TABLE relay_admin_actions (
     enforcement_target_pubkey BYTEA
         CHECK (enforcement_target_pubkey IS NULL OR length(enforcement_target_pubkey) = 32),
     enforcement_channel_id  UUID,
+    -- Direct actions (migration 0050): deleted event, and requested timeout
+    -- duration compared on idempotent retry.
+    enforcement_target_event_id BYTEA
+        CHECK (enforcement_target_event_id IS NULL OR length(enforcement_target_event_id) = 32),
+    timeout_secs    BIGINT CHECK (timeout_secs IS NULL OR timeout_secs > 0),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- Report-scoped idempotency: one action per (report, request_id).
     UNIQUE (report_community_id, report_id, request_id),
+    CONSTRAINT relay_admin_actions_direct_shape CHECK (
+        report_id IS NOT NULL
+        OR (action = 'ban' AND enforcement_target_pubkey IS NOT NULL
+            AND timeout_secs IS NULL AND timeout_until IS NULL)
+        OR (action = 'timeout' AND enforcement_target_pubkey IS NOT NULL
+            AND timeout_secs IS NOT NULL AND timeout_until IS NOT NULL)
+        OR (action = 'delete' AND enforcement_target_event_id IS NOT NULL
+            AND enforcement_target_pubkey IS NOT NULL
+            AND timeout_secs IS NULL AND timeout_until IS NULL)
+    ),
     FOREIGN KEY (report_community_id, report_id)
         REFERENCES moderation_reports (community_id, id)
 );
 
 CREATE INDEX idx_relay_admin_actions_report
     ON relay_admin_actions (report_community_id, report_id);
+-- Direct-action idempotency (migration 0050): one per (community, request_id).
+CREATE UNIQUE INDEX idx_relay_admin_actions_direct_request
+    ON relay_admin_actions (report_community_id, request_id)
+    WHERE report_id IS NULL;
 CREATE INDEX idx_relay_admin_actions_state
     ON relay_admin_actions (state)
     WHERE state IN ('pending', 'enforcing');

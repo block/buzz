@@ -95,11 +95,29 @@ pub(crate) async fn recover_one(state: &Arc<AppState>, claim: StrandedActionClai
 
     info!(
         action_id = %action_id,
-        report_id = %rec.report_id,
+        report_id = ?rec.report_id,
         state = %rec.state,
         step_marker = ?rec.step_marker,
         "Action recovery worker re-driving stranded action"
     );
+
+    let Some(report_id) = rec.report_id else {
+        // Direct action: every target field was persisted at acceptance.
+        match crate::handlers::report_resolution::drive_direct_action(
+            state,
+            &tenant,
+            rec,
+            Some(claim.lease_token),
+        )
+        .await
+        {
+            Ok(_) => info!(action_id = %action_id, "Action recovery worker: action converged"),
+            Err(e) => {
+                warn!(action_id = %action_id, "Action recovery worker: re-drive failed: {e:?}")
+            }
+        }
+        return;
+    };
 
     // Use the target context persisted at claim time for kick actions only.
     // Migration 0047 added enforcement_target_pubkey/enforcement_channel_id
@@ -130,7 +148,7 @@ pub(crate) async fn recover_one(state: &Arc<AppState>, claim: StrandedActionClai
         // Non-kick actions: always re-derive from the report.
         // Pre-migration kick rows: re-derive so the convergence gate can use the
         // result as a legacy-context fallback (see report_resolution.rs).
-        let report = match state.db.admin_get_report(rec.report_id).await {
+        let report = match state.db.admin_get_report(report_id).await {
             Ok(Some(r)) => r,
             Ok(None) => {
                 warn!(action_id = %action_id, "Action recovery: report not found");
@@ -159,7 +177,6 @@ pub(crate) async fn recover_one(state: &Arc<AppState>, claim: StrandedActionClai
     let action = rec.action.clone();
     let reason = rec.reason.clone();
     let actor_pubkey = rec.actor_pubkey.clone();
-    let report_id = rec.report_id;
 
     match crate::handlers::report_resolution::drive_enforcement_pub(
         state,
