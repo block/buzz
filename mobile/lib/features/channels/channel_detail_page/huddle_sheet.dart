@@ -41,6 +41,28 @@ final _huddleLogicalParticipantPubkeysProvider = Provider.autoDispose
       );
     });
 
+/// Contextual identity labels for one Huddle: its logical participants are
+/// the comparison context, and its bot members are agents.
+final _huddleIdentityNamesProvider = Provider.autoDispose
+    .family<IdentityNames, String>((ref, channelId) {
+      final sources = ref.watch(identityNameSourcesProvider);
+      final members =
+          ref.watch(channelMembersProvider(channelId)).value ??
+          const <ChannelMember>[];
+      final names = sources.scope(
+        ref.watch(_huddleLogicalParticipantPubkeysProvider(channelId)),
+        agentPubkeys: {
+          for (final member in members)
+            if (member.isBot) member.pubkey,
+        },
+        fallbackNames: {
+          for (final member in members) member.pubkey: ?member.displayName,
+        },
+      );
+      loadIdentityNameOwners(ref, sources, names.candidates);
+      return names;
+    });
+
 class _HuddleParticipantProfileUpdates extends Notifier<int> {
   _HuddleParticipantProfileUpdates(this.channelId);
 
@@ -573,6 +595,12 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     );
     final profiles = ref.watch(userCacheProvider);
     final directoryDisplayNames = ref.watch(agentDirectoryDisplayNamesProvider);
+    final huddleNames = ref.watch(
+      _huddleIdentityNamesProvider(invite.ephemeralChannelId),
+    );
+    final huddleLabels = {
+      for (final pubkey in remotePubkeys) pubkey: huddleNames.labelFor(pubkey),
+    };
     final huddleTypingEntries = ref.watch(
       channelTypingProvider(invite.ephemeralChannelId),
     );
@@ -679,6 +707,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                         : null,
                     profiles: profiles,
                     fallbackLabels: directoryDisplayNames,
+                    contextualLabels: huddleLabels,
                     remotePubkeys: remotePubkeys,
                     localPubkey: localPubkey,
                     activeSpeakerPubkeys: session.activeSpeakerPubkeys,

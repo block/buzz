@@ -23,6 +23,7 @@ import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/channel_identity_names_provider.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
 import '../channels/dm_channel_labels.dart';

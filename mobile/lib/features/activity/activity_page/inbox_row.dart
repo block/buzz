@@ -82,7 +82,15 @@ class _InboxRow extends HookConsumerWidget {
     final profile = profiles[senderPubkey];
     // The shared label contract: blank cached names (empty or whitespace-only
     // are relay-valid) fall back to the compact npub, never a blank sender.
-    final senderLabel = profile?.label ?? shortPubkey(item.item.pubkey);
+    // Rows compare names within their own channel, like the channel itself.
+    final channelId = channel?.id ?? item.item.channelId;
+    final contextualLabels = channelId == null
+        ? const <String, String>{}
+        : watchChannelIdentityLabels(ref, channelId, relevantPubkeys);
+    final senderLabel =
+        contextualLabels[senderPubkey] ??
+        profile?.label ??
+        shortPubkey(item.item.pubkey);
     final profileMentionNames = {
       for (final pubkey in mentionPubkeys)
         if (profiles[pubkey]?.displayName?.trim().isNotEmpty == true)
@@ -325,6 +333,7 @@ class _InboxRow extends HookConsumerWidget {
                                   MessageContent(
                                     content: item.item.displayContent,
                                     mentionNames: mentionNames,
+                                    mentionLabels: contextualLabels,
                                     agentMentionPubkeys: agentMentionPubkeys,
                                     tags: item.item.tags,
                                     maxLines: 2,

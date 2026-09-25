@@ -11,6 +11,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
     required this.speakerLevel,
     required this.preparingResponse,
     required this.onTap,
+    this.contextualLabel,
     this.isSelf = false,
     this.frameSize = _huddleAvatarFrameSize,
   });
@@ -18,6 +19,9 @@ class _HuddleCallAvatar extends HookConsumerWidget {
   final String pubkey;
   final UserProfile? profile;
   final String? fallbackLabel;
+
+  /// The huddle-scoped identity label, when resolved.
+  final String? contextualLabel;
   final bool active;
   final double speakerLevel;
   final bool preparingResponse;
@@ -122,6 +126,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
       pubkey: pubkey,
       profile: profile,
       fallbackLabel: fallbackLabel,
+      contextualLabel: contextualLabel,
       isSelf: isSelf,
     );
     final isAgent = profile?.isAgent == true || fallbackLabel != null;
@@ -265,8 +270,10 @@ String _huddleParticipantLabel({
   required UserProfile? profile,
   required String? fallbackLabel,
   required bool isSelf,
+  String? contextualLabel,
 }) {
   if (isSelf) return 'You';
+  if (contextualLabel != null) return contextualLabel;
   final profileName = profile?.displayName?.trim();
   final directoryName = fallbackLabel?.trim();
   return (profileName?.isNotEmpty == true ? profileName : null) ??
