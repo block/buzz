@@ -1616,8 +1616,9 @@ async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
         .expect_err("A1 must be rejected after expiry + rotation");
 }
 
-/// Fetcher whose first call parks until `release` is notified, so a test can
-/// hold a real `get_snapshot` refresh in flight deterministically.
+/// Fetcher whose calls after the initial warm-up park until `release` is
+/// notified, so a test can hold a real `get_snapshot` refresh in flight
+/// deterministically.
 struct GatedJwksFetcher {
     body: String,
     entered: Arc<tokio::sync::Notify>,
