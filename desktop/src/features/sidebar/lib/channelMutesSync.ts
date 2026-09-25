@@ -48,6 +48,9 @@ export class ChannelMuteSyncManager {
   private lastPublishedStore: ChannelMuteStore | null = null;
   /** The bootstrap first-copy seed; retired once any relay head is observed. */
   private seedStore: ChannelMuteStore | null = null;
+  /** Every decoded head, LWW-merged into each outgoing attempt. */
+  private remoteStore: ChannelMuteStore | null = null;
+  private remoteRev = 0;
   private destroyed = false;
 
   constructor(pubkey: string, relayUrl: string) {
@@ -73,6 +76,7 @@ export class ChannelMuteSyncManager {
       if (!result) {
         return { status: "failed", createdAt: event.created_at };
       }
+      this.remember(result.store);
       return {
         status: "found",
         data: result,
@@ -96,6 +100,16 @@ export class ChannelMuteSyncManager {
       this.pendingStore = null;
     }
     this.seedStore = null;
+  }
+
+  private remember(store: ChannelMuteStore): void {
+    const next = this.remoteStore
+      ? mergeStores(this.remoteStore, store)
+      : store;
+    // Only a changed winner invalidates in-flight attempts.
+    if (JSON.stringify(next) !== JSON.stringify(this.remoteStore))
+      this.remoteRev++;
+    this.remoteStore = next;
   }
 
   cancelPendingMutePublish(): void {
@@ -136,7 +150,8 @@ export class ChannelMuteSyncManager {
       this.recordRemoteHead(event.created_at);
       const remote = await decryptAndParse(event);
       if (!remote) return store;
-      return mergeStores(store, remote.store);
+      this.remember(remote.store);
+      return store;
     } catch {
       return store;
     }
@@ -163,13 +178,21 @@ export class ChannelMuteSyncManager {
   private async doPublish(store: ChannelMuteStore): Promise<void> {
     // A seed retired while acquired (preflight, crypto or socket wait) aborts.
     const seed = store === this.seedStore;
-    const stale = () => this.destroyed || (seed && this.seedStore !== store);
+    let rev = this.remoteRev; // a head decoded mid-attempt invalidates it
+    const stale = () =>
+      this.destroyed ||
+      (seed && this.seedStore !== store) ||
+      rev !== this.remoteRev;
     // Only the attempt that still owns `pendingStore` may clear it.
     const release = () => {
       if (this.pendingStore === store) this.pendingStore = null;
     };
     try {
-      const merged = await this.fetchOwnBlobBeforePublish(store);
+      const pre = await this.fetchOwnBlobBeforePublish(store);
+      const merged = this.remoteStore
+        ? mergeStores(pre, this.remoteStore)
+        : pre;
+      rev = this.remoteRev;
       // Guard: manager may have been destroyed while fetchOwnBlobBeforePublish
       // was awaited (community switch during in-flight fetch). If so, abort
       // before touching the relay.
@@ -208,6 +231,9 @@ export class ChannelMuteSyncManager {
       release();
     } catch (error) {
       console.warn("[channelMutesSync] publish failed:", error);
+    } finally {
+      const owned = !this.destroyed && this.pendingStore === store;
+      if (owned && rev !== this.remoteRev) this.publishMutes(store);
     }
   }
 
@@ -228,6 +254,7 @@ export class ChannelMuteSyncManager {
         this.recordRemoteHead(event.created_at);
         void decryptAndParse(event).then((result) => {
           if (result && !this.destroyed) {
+            this.remember(result.store);
             onUpdate(result);
           }
         });

@@ -39,7 +39,10 @@ async function harness() {
     }
     return head ? [head] : [];
   });
-  mock.method(relayClient, "subscribeLive", async () => async () => {});
+  mock.method(relayClient, "subscribeLive", async (_f, onEvent) => {
+    fx.live = onEvent;
+    return async () => {};
+  });
   mock.method(relayClient, "subscribeToReconnects", (fn) => {
     fx.reconnect = fn;
     return () => {};
@@ -170,7 +173,10 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
     ),
   });
   const headIds = () =>
-    Object.keys(JSON.parse(fx.heads[dTag].content).channels).sort();
+    Object.entries(JSON.parse(fx.heads[dTag].content).channels)
+      .filter(([, v]) => v[field])
+      .map(([id]) => id)
+      .sort();
   const visible = () =>
     document.dispatchEvent(new window.Event("visibilitychange"));
   const setup = async () => {
@@ -252,10 +258,20 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
   });
 
   const stages = ["absent", "failed", "found", "crypto", "socket"];
-  for (const stage of [...stages, "edit", "ack"]) {
+  const edits = ["edit", "edit-absent", "edit-failed", "edit2"];
+  const mid = ["edit-late", "edit-crypto", "edit-stale"]; // decoded mid-attempt
+  edits.push(...mid, "edit-conflict");
+  for (const stage of [...stages, ...edits, "ack"]) {
     const what =
       {
         edit: "a genuine edit survives the seed's retirement",
+        "edit-absent": "an edit whose preflight is absent keeps R",
+        "edit-failed": "an edit whose preflight fails keeps R",
+        edit2: "a second edit whose preflight fails keeps R",
+        "edit-late": "R decoded during a failing preflight is kept",
+        "edit-crypto": "R decoded during encryption requeues the edit",
+        "edit-stale": "an older copy decoded mid-attempt cancels nothing",
+        "edit-conflict": "R's future-dated false beats the edit's true",
         ack: "the seed's own ACK leaves a genuine edit pending",
       }[stage] ?? `an acquired seed yields to R (retired at ${stage})`;
     test(`${name}: startup recovery; ${what}`, async () => {
@@ -264,7 +280,10 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
         fx.storageKey(PK),
         JSON.stringify(payload(["s1"])),
       );
-      const R = ev(dTag, payload(["r1"], 2), 1e9 + 30); // future-dated
+      const off = { [field]: false, updatedAt: 3e12 }; // future-dated winner
+      const channels = payload(["r1"], 2e12).channels;
+      if (stage === "edit-conflict") channels.c9 = off;
+      const R = ev(dTag, { version: 1, channels }, 1e9 + 30); // future-dated
       if (stage !== "ack") fx.heads[dTag] = R;
       const calls = [];
       fx.onFetch = () => {
@@ -275,11 +294,35 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
       const { result } = renderHook(() => hook(PK, RELAY));
       await act(async () => calls[0].resolve([])); // bootstrap: absent, seeds S
       const held = deferred();
-      if (stage === "edit") {
+      if (mid.includes(stage)) {
+        const [late, early] = [stage === "edit-late", stage === "edit-stale"];
         act(() => result.current[verb]("c9"));
-        await act(async () => calls[1].resolve([R]));
+        if (early) await act(async () => calls[1].resolve([R]));
+        if (!late) fx.holdCrypto = held.promise;
+        await advance(2_000); // the edit's preflight waits
+        if (!late) await act(async () => calls[2].resolve([]));
+        const old = ev(dTag, payload(["r1"]), 1e9 + 10);
+        if (early)
+          await act(async () => fx.live(old)); // stale copy
+        else await act(async () => calls[1].resolve([R])); // decodes R
+        if (late) calls[2].reject(new Error("x"));
+        await act(async () => held.resolve());
+        fx.holdCrypto = null;
+        const sends = early ? 1 : 0; // only R's arrival voids the snapshot
+        if (!late) assert.equal(fx.attempts.length, sends, "fence");
+      } else if (edits.includes(stage)) {
+        const fail = (c) =>
+          stage === "edit-absent" ? c.resolve([]) : c.reject(new Error("x"));
+        act(() => result.current[verb]("c9"));
+        await act(async () => calls[1].resolve([R])); // recovery observes R
         await advance(2_000);
-        await act(async () => calls[2].resolve([R]));
+        const ok = stage === "edit" || stage === "edit2";
+        await act(async () => (ok ? calls[2].resolve([R]) : fail(calls[2])));
+        if (stage === "edit2") {
+          act(() => result.current[verb]("c8")); // second edit
+          await advance(2_000);
+          await act(async () => fail(calls.at(-1)));
+        }
       } else if (stage === "ack") {
         fx.holdPublish = held.promise;
         await advance(2_000); // S acquired
@@ -307,13 +350,28 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
       fx.onFetch = null;
       for (const c of calls) c.resolve([fx.heads[dTag]]);
       await advance(60_000);
-      const kept = { edit: ["c9", "r1", "s1"], ack: ["c9", "s1"] }[stage];
+      const kept = stage.startsWith("edit")
+        ? [...({ edit2: ["c8", "c9"], "edit-conflict": [] }[stage] ?? ["c9"])]
+            .concat("r1", "s1")
+            .sort()
+        : { ack: ["c9", "s1"] }[stage];
       shows(result, kept ?? ["r1", "s1"], "UI and cache");
+      const sent = fx.published.map((e) => JSON.parse(e.content).channels);
+      if (edits.includes(stage))
+        assert.ok(
+          sent.every((c) => c.r1),
+          "no R-less send",
+        );
       if (!kept) {
         assert.equal(fx.published.length, 0, "the seed never published");
         assert.equal(fx.heads[dTag], R, "R stays the relay head");
       }
       assert.deepEqual(headIds(), kept ?? ["r1"]);
+      const head = JSON.parse(fx.heads[dTag].content).channels;
+      if (edits.includes(stage)) {
+        assert.deepEqual(head.r1, { [field]: true, updatedAt: 2e12 });
+        if (stage === "edit-conflict") assert.deepEqual(head.c9, off);
+      }
       cleanup(); // a fresh reader consumes only the retained head
       window.localStorage.clear();
       const fresh = renderHook(() => hook(PK, RELAY));
