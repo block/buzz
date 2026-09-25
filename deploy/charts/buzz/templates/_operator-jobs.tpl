@@ -4,6 +4,11 @@
 {{- $root := .root -}}
 {{- if eq .type "deletionDrain" -}}
 {{- $job := $root.Values.operatorJobs.deletionDrain -}}
+{{- range $label := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component" -}}
+{{- if hasKey $job.podLabels $label -}}
+{{- fail (printf "operatorJobs.deletionDrain.podLabels may not set chart-owned label %q" $label) -}}
+{{- end -}}
+{{- end -}}
 apiVersion: batch/v1
 kind: CronJob
 metadata:

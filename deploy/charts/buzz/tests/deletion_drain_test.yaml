@@ -200,6 +200,24 @@ tests:
           content:
             name: RELAY_URL
 
+  - it: rejects chart-owned pod identity labels
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      operatorJobs.deletionDrain:
+        enabled: true
+        podLabels:
+          app.kubernetes.io/component: relay
+    asserts:
+      - failedTemplate:
+          errorPattern: 'operatorJobs.deletionDrain.podLabels may not set chart-owned label "app.kubernetes.io/component"'
+
   - it: rejects enablement without a Redis source
     set:
       relayUrl: wss://buzz.example.com
