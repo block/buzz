@@ -504,6 +504,8 @@ test-unit:
                 + test(=connection::tests::f3_root_outer_wrapper_delivers_denial_on_bootstrap_cancellation)
                 + test(=connection::tests::f3_root_pre_built_expired_gate_terminates_connection)
                 + test(=handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated)
+                + test(=handlers::auth::tests::fi_ban_check_error_emits_terminal_authorization_unavailable)
+                + test(=handlers::auth::tests::fi_invalid_nip42_proof_emits_terminal_evidence_rejected)
                 + test(=handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path)
                 + test(=handlers::event::tests::p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack)
                 + test(=handlers::req::tests::p1a_huddle_liveness_req_barrier_expiry_blocks_query_and_emission)

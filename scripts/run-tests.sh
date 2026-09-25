@@ -211,6 +211,8 @@ run_unit_tests() {
     connection::tests::f3_root_outer_wrapper_delivers_denial_on_bootstrap_cancellation
     connection::tests::f3_root_pre_built_expired_gate_terminates_connection
     handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated
+    handlers::auth::tests::fi_ban_check_error_emits_terminal_authorization_unavailable
+    handlers::auth::tests::fi_invalid_nip42_proof_emits_terminal_evidence_rejected
     handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path
     handlers::event::tests::p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack
     handlers::req::tests::p1a_huddle_liveness_req_barrier_expiry_blocks_query_and_emission

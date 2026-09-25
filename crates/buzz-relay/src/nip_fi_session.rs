@@ -142,13 +142,23 @@ pub(crate) async fn enforce_nip_fi_key_pairing(
 /// * Audio: `{"type":"restricted","message":"restricted: authorization denied"}`.
 pub(crate) fn authorization_denied_frame(route: NipFiWsRoute) -> WsMessage {
     use buzz_auth::DenialClass;
-    let text = DenialClass::AuthorizationDenied.nostr_text();
-    WsMessage::Text(match route {
-        NipFiWsRoute::Root => crate::protocol::RelayMessage::notice(text).into(),
-        NipFiWsRoute::Audio => serde_json::json!({"type": "restricted", "message": text})
+    match route {
+        NipFiWsRoute::Root => root_denial_frame(DenialClass::AuthorizationDenied),
+        NipFiWsRoute::Audio => WsMessage::Text(
+            serde_json::json!({
+                "type": "restricted",
+                "message": DenialClass::AuthorizationDenied.nostr_text()
+            })
             .to_string()
             .into(),
-    })
+        ),
+    }
+}
+
+/// Build the canonical post-establishment Root NOTICE for any NIP-FI denial
+/// class, e.g. `["NOTICE","restricted: authorization unavailable"]`.
+pub(crate) fn root_denial_frame(class: buzz_auth::DenialClass) -> WsMessage {
+    WsMessage::Text(crate::protocol::RelayMessage::notice(class.nostr_text()).into())
 }
 
 // ── Shared expiry task constructor ────────────────────────────────────────────

@@ -72,6 +72,17 @@ fn ban_denial(outcome: BanOutcome) -> Option<(&'static str, &'static str, AuthOu
     }
 }
 
+/// NIP-FI post-upgrade AUTH denial: queue the canonical Root NOTICE for
+/// `class` on the terminal channel, then close. Callers invoke this only when
+/// `conn.nip_fi_assertion` is present, so every FI denial is uniform in frame
+/// type, body, and close behaviour. [FI-TRACE-DENIAL-ORACLE]
+fn deny_nip_fi_auth(conn: &ConnectionState, class: buzz_auth::DenialClass) {
+    let _ = conn
+        .terminal_ctrl_tx
+        .try_send(crate::nip_fi_session::root_denial_frame(class));
+    conn.cancel.cancel();
+}
+
 /// Extract a NIP-OA `auth` tag from a verified AUTH event and serialize it as
 /// the JSON-array string that [`buzz_sdk::nip_oa::verify_auth_tag`] expects.
 ///
@@ -234,22 +245,20 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     // the send loop drains it ahead of the Close it emits on
                     // cancel. Then cancel to close the socket immediately.
                     //
-                    // Fix 4: when an FI assertion is present, NIP-FI §758-776
-                    // requires the denial to be byte-identical to every other
-                    // FI denial — the canonical NOTICE frame, not an OK false.
-                    // The specific ban/error reason must not distinguish itself.
-                    // [FI-TRACE-DENIAL-ORACLE]
+                    // With an FI assertion, NIP-FI requires the canonical
+                    // NOTICE instead: a ban is `authorization denied`, a failed
+                    // lookup is `authorization unavailable`.
                     if conn.nip_fi_assertion.is_some() {
-                        let _ = conn.terminal_ctrl_tx.try_send(
-                            crate::nip_fi_session::authorization_denied_frame(
-                                crate::nip_fi_session::NipFiWsRoute::Root,
-                            ),
-                        );
-                    } else {
-                        let _ = conn.ctrl_tx.try_send(WsMessage::Text(
-                            RelayMessage::ok(&event_id_hex, false, deny_reason).into(),
-                        ));
+                        let class = match outcome {
+                            BanOutcome::DbError => buzz_auth::DenialClass::AuthorizationUnavailable,
+                            _ => buzz_auth::DenialClass::AuthorizationDenied,
+                        };
+                        deny_nip_fi_auth(&conn, class);
+                        return;
                     }
+                    let _ = conn.ctrl_tx.try_send(WsMessage::Text(
+                        RelayMessage::ok(&event_id_hex, false, deny_reason).into(),
+                    ));
                     conn.cancel.cancel();
                     return;
                 }
@@ -282,12 +291,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                         // pairing-mismatch denials — allowlist status is not
                         // distinguishable. [FI-TRACE-DENIAL-ORACLE]
                         if conn.nip_fi_assertion.is_some() {
-                            let _ = conn.terminal_ctrl_tx.try_send(
-                                crate::nip_fi_session::authorization_denied_frame(
-                                    crate::nip_fi_session::NipFiWsRoute::Root,
-                                ),
-                            );
-                            conn.cancel.cancel();
+                            deny_nip_fi_auth(&conn, buzz_auth::DenialClass::AuthorizationDenied);
                         } else {
                             conn.send(RelayMessage::ok(
                                 &event_id_hex,
@@ -301,6 +305,13 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                         metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_check_error")
                             .increment(1);
                         if !conn.reject_auth(AuthOutcome::AllowlistCheckError) {
+                            return;
+                        }
+                        if conn.nip_fi_assertion.is_some() {
+                            deny_nip_fi_auth(
+                                &conn,
+                                buzz_auth::DenialClass::AuthorizationUnavailable,
+                            );
                             return;
                         }
                         conn.send(RelayMessage::ok(
@@ -335,21 +346,27 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     if !conn.reject_auth(AuthOutcome::NotRelayMember) {
                         return;
                     }
-                    // Fix 4: when an FI assertion is present, use the uniform
-                    // NIP-FI denial text so relay-membership status is not
-                    // distinguishable from a ban. [FI-TRACE-DENIAL-ORACLE]
-                    let deny_text = if conn.nip_fi_assertion.is_some() {
-                        "restricted: authorization denied"
-                    } else {
-                        "restricted: not a relay member"
-                    };
-                    conn.send(RelayMessage::ok(&event_id_hex, false, deny_text));
+                    // With an FI assertion, membership status must not be
+                    // distinguishable from a ban or allowlist denial.
+                    if conn.nip_fi_assertion.is_some() {
+                        deny_nip_fi_auth(&conn, buzz_auth::DenialClass::AuthorizationDenied);
+                        return;
+                    }
+                    conn.send(RelayMessage::ok(
+                        &event_id_hex,
+                        false,
+                        "restricted: not a relay member",
+                    ));
                     return;
                 }
                 PolicyCheck::DependencyError => {
                     metrics::counter!("buzz_auth_failures_total", "reason" => "relay_membership_check_error")
                         .increment(1);
                     if !conn.reject_auth(AuthOutcome::RelayMembershipCheckError) {
+                        return;
+                    }
+                    if conn.nip_fi_assertion.is_some() {
+                        deny_nip_fi_auth(&conn, buzz_auth::DenialClass::AuthorizationUnavailable);
                         return;
                     }
                     conn.send(RelayMessage::ok(
@@ -441,6 +458,19 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             warn!(conn_id = %conn_id, error = %e, "NIP-42 auth failed");
             metrics::counter!("buzz_auth_failures_total", "reason" => "nip42_invalid").increment(1);
             if !conn.reject_auth(AuthOutcome::Invalid) {
+                return;
+            }
+            // With an FI assertion: a bad proof is client evidence
+            // (`evidence rejected`); only a relay-internal verifier failure
+            // is `authorization unavailable`.
+            if conn.nip_fi_assertion.is_some() {
+                let class = match e {
+                    buzz_auth::AuthError::Internal(_) => {
+                        buzz_auth::DenialClass::AuthorizationUnavailable
+                    }
+                    _ => buzz_auth::DenialClass::EvidenceRejected,
+                };
+                deny_nip_fi_auth(&conn, class);
                 return;
             }
             conn.send(RelayMessage::ok(
@@ -801,6 +831,196 @@ mod tests {
         );
     }
 
+    // ── FI denial-invariant witnesses: shared harness ─────────────────────────
+    //
+    // Every post-upgrade AUTH denial with an FI assertion must queue exactly one
+    // canonical Root NOTICE on the terminal channel, put nothing on the data or
+    // ordinary ctrl channel, and cancel. Without an assertion, the legacy
+    // `OK false` reply must be unchanged. [FI-TRACE-DENIAL-ORACLE]
+
+    struct AuthHarness {
+        conn: std::sync::Arc<crate::connection::ConnectionState>,
+        key: Keys,
+        challenge: String,
+        send_rx: tokio::sync::mpsc::Receiver<WsMessage>,
+        ctrl_rx: tokio::sync::mpsc::Receiver<WsMessage>,
+        terminal_rx: tokio::sync::mpsc::Receiver<WsMessage>,
+    }
+
+    impl AuthHarness {
+        /// A pending connection whose FI assertion (if any) names `key`, so
+        /// pairing always passes and a later gate is the one that denies.
+        fn new(with_fi_assertion: bool) -> Self {
+            use tokio::sync::mpsc;
+            let key = Keys::generate();
+            let challenge = format!("fi-invariant-{}", uuid::Uuid::new_v4());
+            let (send_tx, send_rx) = mpsc::channel(8);
+            let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
+            let (terminal_ctrl_tx, terminal_rx) = mpsc::channel(1);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let assertion = with_fi_assertion.then(|| {
+                buzz_auth::VerifiedAssertion::for_test(
+                    Some(key.public_key()),
+                    vec![chrono::Utc::now() + chrono::Duration::hours(1)],
+                )
+            });
+            let conn = std::sync::Arc::new(crate::connection::ConnectionState {
+                conn_id: uuid::Uuid::new_v4(),
+                tenant: buzz_core::tenant::TenantContext::resolved(
+                    buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4()),
+                    "test.local".to_string(),
+                ),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(pending(&challenge)),
+                subscriptions: Default::default(),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
+                backpressure_count: Default::default(),
+                grace_limit: 3,
+                nip_fi_assertion: assertion,
+                session_deadline: None,
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel),
+            });
+            Self {
+                conn,
+                key,
+                challenge,
+                send_rx,
+                ctrl_rx,
+                terminal_rx,
+            }
+        }
+
+        fn auth_event(&self) -> nostr::Event {
+            EventBuilder::new(Kind::Authentication, "")
+                .tag(Tag::parse(["relay", "ws://test.local"]).unwrap())
+                .tag(Tag::parse(["challenge", &self.challenge]).unwrap())
+                .sign_with_keys(&self.key)
+                .unwrap()
+        }
+
+        async fn run(&self, event: nostr::Event, state: std::sync::Arc<crate::state::AppState>) {
+            handle_auth(event, std::sync::Arc::clone(&self.conn), state).await;
+        }
+
+        fn assert_fi_terminal(mut self, class: buzz_auth::DenialClass) {
+            assert_eq!(
+                self.terminal_rx.try_recv().expect("terminal denial frame"),
+                crate::nip_fi_session::root_denial_frame(class),
+            );
+            assert!(
+                self.terminal_rx.try_recv().is_err(),
+                "exactly one terminal frame"
+            );
+            assert!(
+                self.send_rx.try_recv().is_err(),
+                "no denial on the data channel"
+            );
+            assert!(
+                self.ctrl_rx.try_recv().is_err(),
+                "no denial on the ctrl channel"
+            );
+            assert!(
+                self.conn.cancel.is_cancelled(),
+                "FI denial must close the socket"
+            );
+            assert!(matches!(self.conn.auth_state_snapshot(), AuthState::Failed));
+        }
+
+        fn assert_off_mode_ok(mut self, reason: &str) {
+            let frame = match self
+                .send_rx
+                .try_recv()
+                .expect("off-mode OK on data channel")
+            {
+                WsMessage::Text(text) => serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                other => panic!("expected text frame, got {other:?}"),
+            };
+            assert_eq!(frame[0], "OK");
+            assert_eq!(frame[2], false);
+            assert_eq!(frame[3], reason);
+            assert!(
+                self.terminal_rx.try_recv().is_err(),
+                "off mode never uses terminal"
+            );
+            assert!(
+                !self.conn.cancel.is_cancelled(),
+                "off mode keeps the socket open"
+            );
+        }
+    }
+
+    async fn state_with_pool(
+        pool: sqlx::PgPool,
+        configure: impl FnOnce(&mut crate::config::Config),
+    ) -> std::sync::Arc<crate::state::AppState> {
+        use std::sync::Arc;
+        let mut config = crate::config::Config::for_test();
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        configure(&mut config);
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let db = buzz_db::Db::from_pool(pool);
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = crate::state::AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    /// NIP-42 `Err` arm: an invalid proof under FI is `evidence rejected`.
+    #[tokio::test]
+    async fn fi_invalid_nip42_proof_emits_terminal_evidence_rejected() {
+        let state = auth_test_state().await;
+        for with_fi in [true, false] {
+            let harness = AuthHarness::new(with_fi);
+            let mut event = harness.auth_event();
+            event.content.push('x'); // breaks the id/signature
+            harness.run(event, state.clone()).await;
+            if with_fi {
+                harness.assert_fi_terminal(buzz_auth::DenialClass::EvidenceRejected);
+            } else {
+                harness.assert_off_mode_ok("auth-required: verification failed");
+            }
+        }
+    }
+
+    /// Ban-lookup failure under FI is `authorization unavailable`, not denied.
+    /// (Off mode keeps the ctrl-channel OK + close, covered by
+    /// `handler_accounts_ban_check_database_error`.)
+    #[tokio::test]
+    async fn fi_ban_check_error_emits_terminal_authorization_unavailable() {
+        let state = auth_test_state().await; // unreachable DB: ban lookup errors
+        let harness = AuthHarness::new(true);
+        harness.run(harness.auth_event(), state).await;
+        harness.assert_fi_terminal(buzz_auth::DenialClass::AuthorizationUnavailable);
+    }
+
     // ── W1 (auth barrier): expiry fired mid-flight blocks AUTH commit ─────────
     //
     // This test requires a real PostgreSQL instance. It lives in `postgres_tests`
@@ -1134,6 +1354,111 @@ mod tests {
                 cancel.is_cancelled(),
                 "Fix 4a: FI allowlist denial must cancel the connection token"
             );
+        }
+        /// A pool whose `search_path` is a fresh schema holding only
+        /// `community_bans`: the ban gate succeeds, every later policy table
+        /// is missing, so the next lookup fails as a dependency error.
+        async fn ban_only_schema_pool() -> (sqlx::PgPool, sqlx::PgPool, String) {
+            use sqlx::postgres::PgConnectOptions;
+            let db_url = crate::test_support::database_url();
+            let admin = sqlx::PgPool::connect(&db_url)
+                .await
+                .expect("PostgreSQL must be available");
+            let schema = format!("fi_dep_{}", uuid::Uuid::new_v4().simple());
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "CREATE SCHEMA {schema}; \
+                 CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL);"
+            )))
+            .execute(&admin)
+            .await
+            .expect("create ban-only schema");
+            let options = db_url
+                .parse::<PgConnectOptions>()
+                .expect("database url")
+                .options([("search_path", schema.as_str())]);
+            let pool = sqlx::PgPool::connect_with(options)
+                .await
+                .expect("ban-only pool");
+            (admin, pool, schema)
+        }
+
+        async fn drop_schema(admin: &sqlx::PgPool, schema: &str) {
+            let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                .execute(admin)
+                .await;
+        }
+
+        /// Carl's P2: a matching-key non-member that passes the ban and
+        /// allowlist gates gets the terminal `authorization denied` NOTICE and
+        /// the socket closes; off mode keeps `OK false "not a relay member"`.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn fi_relay_membership_denial_emits_terminal_authorization_denied() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("PostgreSQL must be available");
+            let state = state_with_pool(pool, |c| {
+                c.require_relay_membership = true;
+                c.pubkey_allowlist_enabled = true;
+            })
+            .await;
+            for with_fi in [true, false] {
+                let harness = AuthHarness::new(with_fi);
+                let community = *harness.conn.tenant.community().as_uuid();
+                sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                    .bind(community)
+                    .bind(format!("fi-membership-{}.example", community.simple()))
+                    .execute(state.db.pool())
+                    .await
+                    .expect("insert community");
+                // Pass the allowlist so relay membership is the denying gate.
+                sqlx::query("INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, $2)")
+                    .bind(harness.conn.tenant.community().as_uuid())
+                    .bind(harness.key.public_key().to_bytes().to_vec())
+                    .execute(state.db.pool())
+                    .await
+                    .expect("allowlist key");
+                harness.run(harness.auth_event(), state.clone()).await;
+                if with_fi {
+                    harness.assert_fi_terminal(buzz_auth::DenialClass::AuthorizationDenied);
+                } else {
+                    harness.assert_off_mode_ok("restricted: not a relay member");
+                }
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn fi_allowlist_check_error_emits_terminal_authorization_unavailable() {
+            let (admin, pool, schema) = ban_only_schema_pool().await;
+            let state = state_with_pool(pool, |c| c.pubkey_allowlist_enabled = true).await;
+            for with_fi in [true, false] {
+                let harness = AuthHarness::new(with_fi);
+                harness.run(harness.auth_event(), state.clone()).await;
+                if with_fi {
+                    harness.assert_fi_terminal(buzz_auth::DenialClass::AuthorizationUnavailable);
+                } else {
+                    harness.assert_off_mode_ok("error: internal error checking allowlist");
+                }
+            }
+            drop_schema(&admin, &schema).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn fi_relay_membership_check_error_emits_terminal_authorization_unavailable() {
+            let (admin, pool, schema) = ban_only_schema_pool().await;
+            let state = state_with_pool(pool, |c| c.require_relay_membership = true).await;
+            for with_fi in [true, false] {
+                let harness = AuthHarness::new(with_fi);
+                harness.run(harness.auth_event(), state.clone()).await;
+                if with_fi {
+                    harness.assert_fi_terminal(buzz_auth::DenialClass::AuthorizationUnavailable);
+                } else {
+                    harness.assert_off_mode_ok("error: internal error checking relay membership");
+                }
+            }
+            drop_schema(&admin, &schema).await;
         }
     }
 
