@@ -48,7 +48,7 @@ export class ChannelStarSyncManager {
   private lastPublishedStore: ChannelStarStore | null = null;
   /** The bootstrap first-copy seed; retired once any relay head is observed. */
   private seedStore: ChannelStarStore | null = null;
-  /** Every decoded head, LWW-merged into each outgoing attempt. */
+  /** Decoded heads, LWW-merged within the 500-entry bound, for each attempt. */
   private remoteStore: ChannelStarStore | null = null;
   private remoteRev = 0;
   private destroyed = false;
@@ -107,8 +107,7 @@ export class ChannelStarSyncManager {
       ? mergeStores(this.remoteStore, store)
       : store;
     // Only a changed winner invalidates in-flight attempts.
-    if (JSON.stringify(next) !== JSON.stringify(this.remoteStore))
-      this.remoteRev++;
+    if (!this.sameEntries(this.remoteStore, next)) this.remoteRev++;
     this.remoteStore = next;
   }
 
@@ -157,13 +156,14 @@ export class ChannelStarSyncManager {
     }
   }
 
-  private isIdenticalToLastPublished(store: ChannelStarStore): boolean {
-    if (!this.lastPublishedStore) return false;
-    const lastKeys = Object.keys(this.lastPublishedStore.channels);
+  /** Same winners (IDs, `starred`, `updatedAt`), ignoring key order. */
+  private sameEntries(prev: ChannelStarStore | null, store: ChannelStarStore) {
+    if (!prev) return false;
+    const lastKeys = Object.keys(prev.channels);
     const currentKeys = Object.keys(store.channels);
     if (lastKeys.length !== currentKeys.length) return false;
     for (const key of currentKeys) {
-      const last = this.lastPublishedStore.channels[key];
+      const last = prev.channels[key];
       const current = store.channels[key];
       if (
         !last ||
@@ -178,7 +178,7 @@ export class ChannelStarSyncManager {
   private async doPublish(store: ChannelStarStore): Promise<void> {
     // A seed retired while acquired (preflight, crypto or socket wait) aborts.
     const seed = store === this.seedStore;
-    let rev = this.remoteRev; // a head decoded mid-attempt invalidates it
+    let rev = this.remoteRev; // a changed winner before dispatch voids it
     const stale = () =>
       this.destroyed ||
       (seed && this.seedStore !== store) ||
@@ -197,7 +197,7 @@ export class ChannelStarSyncManager {
       // was awaited (community switch during in-flight fetch). If so, abort
       // before touching the relay.
       if (stale()) return;
-      if (this.isIdenticalToLastPublished(merged)) {
+      if (this.sameEntries(this.lastPublishedStore, merged)) {
         release();
         return;
       }

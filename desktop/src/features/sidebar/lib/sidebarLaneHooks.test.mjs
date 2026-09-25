@@ -270,7 +270,7 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
         edit2: "a second edit whose preflight fails keeps R",
         "edit-late": "R decoded during a failing preflight is kept",
         "edit-crypto": "R decoded during encryption requeues the edit",
-        "edit-stale": "an older copy decoded mid-attempt cancels nothing",
+        "edit-stale": "an observation with no changed winner cancels nothing",
         "edit-conflict": "R's future-dated false beats the edit's true",
         ack: "the seed's own ACK leaves a genuine edit pending",
       }[stage] ?? `an acquired seed yields to R (retired at ${stage})`;
@@ -360,7 +360,7 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
       if (edits.includes(stage))
         assert.ok(
           sent.every((c) => c.r1),
-          "no R-less send",
+          "no send lacks r1 (presence only)",
         );
       if (!kept) {
         assert.equal(fx.published.length, 0, "the seed never published");
@@ -368,9 +368,11 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
       }
       assert.deepEqual(headIds(), kept ?? ["r1"]);
       const head = JSON.parse(fx.heads[dTag].content).channels;
-      if (edits.includes(stage)) {
-        assert.deepEqual(head.r1, { [field]: true, updatedAt: 2e12 });
-        if (stage === "edit-conflict") assert.deepEqual(head.c9, off);
+      const cache = window.localStorage.getItem(fx.storageKey(PK));
+      const both = [head, JSON.parse(cache).channels]; // relay and cache
+      for (const ch of edits.includes(stage) ? both : []) {
+        assert.deepEqual(ch.r1, { [field]: true, updatedAt: 2e12 });
+        if (stage === "edit-conflict") assert.deepEqual(ch.c9, off);
       }
       cleanup(); // a fresh reader consumes only the retained head
       window.localStorage.clear();
