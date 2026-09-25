@@ -175,6 +175,14 @@ impl KnownAcpRuntime {
             .collect()
     }
 
+    /// Process policy defaults only; provider/model fallbacks are resolved
+    /// below Goose's config file by the effective environment builder.
+    pub(crate) fn process_defaults(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.default_env.iter().copied().filter(|(key, _)| {
+            self.id != "goose" || !matches!(*key, "GOOSE_PROVIDER" | "GOOSE_MODEL")
+        })
+    }
+
     /// Return the CLI install commands for the current platform.
     ///
     /// On Windows, returns `cli_install_commands_windows` when non-empty,

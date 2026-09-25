@@ -27,7 +27,9 @@ configuration. Native developer tools and external MCP remain available.
 it to its Tauri release configuration, and enables `bundled-goose`. It supplies
 `BUZZ_BUILD_BUNDLED_GOOSE_PROVIDER` and `BUZZ_BUILD_BUNDLED_GOOSE_MODEL` together.
 These are defaults only for the bundled runtime; structured agent/persona/global
-selections and user environment values take precedence. OSS builds don't enable
+selections, user environment values, and existing Goose file settings take
+precedence. `GOOSE_PROVIDER` and `GOOSE_MODEL` environment overrides are
+honored in launch, settings display, and create-agent validation. OSS builds don't enable
 the feature or require the additional artifact. The internal pipeline must
 select a Buzz desktop tag containing this support.
 

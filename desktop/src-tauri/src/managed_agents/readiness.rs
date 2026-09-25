@@ -227,7 +227,6 @@ fn resolve_effective_agent_env_with_def(
         super::global_config::resolve_effective_model_provider(record, personas, global);
 
     if let Some(rt) = runtime {
-        env.extend(rt.configuration_defaults());
         for (key, value) in super::runtime::runtime_metadata_env_vars(
             rt.model_env_var,
             rt.provider_env_var,
@@ -266,6 +265,8 @@ fn resolve_effective_agent_env_with_def(
         &record.env_vars,
     );
     env.extend(user_env);
+
+    super::config_bridge::apply_bundled_goose_defaults(&mut env, runtime);
 
     // Single harness-agnostic effort authority (PR #4625): resolve effective
     // effort over the canonical column AND all env tiers, emit one destination

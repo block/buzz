@@ -36,3 +36,5 @@ pub(crate) fn all_known_effort_keys() -> impl Iterator<Item = &'static str> {
 pub(crate) fn read_goose_file_config() -> Option<RuntimeFileConfig> {
     goose::read_config_file()
 }
+
+pub(crate) use goose::apply_bundled_defaults as apply_bundled_goose_defaults;

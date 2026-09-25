@@ -1293,3 +1293,114 @@ test("bundled Goose preserves its defaults after model discovery", async ({
     "bundled-pilot-model",
   );
 });
+
+function bundledGooseRuntime() {
+  return runtime(
+    "goose",
+    "available",
+    { status: "not_applicable" },
+    {
+      command: "goose-acp",
+      requires_external_cli: false,
+      provider_env_var: "GOOSE_PROVIDER",
+      model_env_var: "GOOSE_MODEL",
+      definition_env: {
+        GOOSE_PROVIDER: "databricks_v2",
+        GOOSE_MODEL: "bundled-model",
+      },
+      can_auto_install: false,
+    },
+  );
+}
+
+for (const source of ["file", "environment"] as const) {
+  test(`bundled Goose honors ${source} choices above build defaults`, async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        acpRuntimesCatalog: [
+          runtime("buzz-agent", "available", { status: "not_applicable" }),
+          bundledGooseRuntime(),
+        ],
+        bakedBuildEnv: [],
+        globalAgentConfig: {
+          env_vars:
+            source === "environment"
+              ? {
+                  GOOSE_PROVIDER: "anthropic",
+                  GOOSE_MODEL: "env-model",
+                  ANTHROPIC_API_KEY: "test-key",
+                }
+              : {},
+          provider: source === "environment" ? "databricks_v2" : null,
+          model: source === "environment" ? "structured-model" : null,
+          preferred_runtime: "goose",
+        },
+        runtimeFileConfigs: {
+          goose: {
+            provider: "anthropic",
+            model: "file-model",
+            satisfiedEnvKeys: ["ANTHROPIC_API_KEY"],
+          },
+        },
+        discoverAgentModels: {
+          models: [{ id: "discovered-model", name: "Discovered Model" }],
+          supportsSwitching: true,
+        },
+      },
+      { skipCommunitySeed: true, skipOnboardingSeed: true },
+    );
+    await page.goto("/");
+    await navigateToSetupPage(page, "api");
+    await page.getByTestId("onboarding-use-different-harness").click();
+    await page.getByTestId("onboarding-runtime-details-goose").click();
+    await expect(page.getByTestId("global-agent-provider")).toContainText(
+      "Anthropic",
+    );
+    await page.getByTestId("global-agent-model").click();
+    await expect(
+      page.getByTestId("global-agent-model-option-discovered-model"),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("global-agent-model")).toContainText(
+      source === "file" ? "file-model" : "env-model",
+    );
+  });
+}
+
+test("create Goose with only bundled defaults", async ({ page }) => {
+  await installMockBridge(page, {
+    acpRuntimesCatalog: [bundledGooseRuntime()],
+    bakedBuildEnv: [
+      { key: "DATABRICKS_HOST", value: "https://example.com", masked: false },
+    ],
+    globalAgentConfig: {
+      env_vars: {},
+      provider: null,
+      model: null,
+      preferred_runtime: "goose",
+    },
+    runtimeFileConfigs: { goose: null },
+  });
+  await page.goto("/");
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  const dialog = page.getByTestId("persona-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Agent name").fill("Bundled Goose Test");
+  await expect(dialog.getByTestId("agent-ai-defaults-notice")).toContainText(
+    "bundled-model",
+  );
+  await expect(dialog.getByTestId("agent-ai-defaults-notice")).toContainText(
+    "Databricks",
+  );
+  const create = dialog.getByRole("button", {
+    name: "Add agent",
+    exact: true,
+  });
+  await expect(create).toBeEnabled();
+  await create.click();
+  await expect(dialog).not.toBeVisible();
+});

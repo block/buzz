@@ -443,6 +443,9 @@ Buzz Agent remains the default. Existing Goose runtime selections use the bundle
 executable on their next local launch. Saved unpublished `goose-bundled` pilot
 selections deserialize to `goose` in definitions, records, and global defaults.
 Bundled provider/model defaults belong to the runtime's catalog metadata and
-are below explicit structured and user environment settings. File configuration
-and credentials follow Goose's existing configuration paths. The bundled runtime
+are below explicit structured settings, user environment settings, and existing
+Goose file values. `GOOSE_PROVIDER` and `GOOSE_MODEL` environment overrides win
+over structured values, as at launch; global settings and create-agent validation
+use that same precedence. File configuration and credentials follow Goose's
+existing configuration paths. The bundled runtime
 is local only; remote images do not yet contain this executable.

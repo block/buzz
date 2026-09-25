@@ -654,7 +654,7 @@ pub fn spawn_agent_child(
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
     command.env("BUZZ_ACP_DEDUP", "queue");
     if let Some(meta) = runtime_meta {
-        for (key, value) in meta.default_env {
+        for (key, value) in meta.process_defaults() {
             if std::env::var(key).is_err() {
                 command.env(key, value);
             }

@@ -23,15 +23,6 @@ fn bundled_goose_is_the_only_goose_and_preserves_buzz_default() {
 
     let mut record = record_with(Some("goose"), None, None);
     assert_eq!(record_agent_command(&record, &[]), "goose-acp");
-    let default_env = crate::managed_agents::readiness::resolve_effective_agent_env(
-        &record,
-        &[],
-        Some(bundled),
-        &Default::default(),
-    );
-    for (key, value) in bundled.configuration_defaults() {
-        assert_eq!(default_env.env.get(&key), Some(&value));
-    }
     assert_eq!(
         KNOWN_ACP_RUNTIMES
             .iter()
@@ -79,16 +70,8 @@ fn bundled_goose_is_the_only_goose_and_preserves_buzz_default() {
 fn bundled_goose_display_defaults_match_launch_precedence() {
     use crate::managed_agents::config_bridge::{reader::read_config_surface, InheritedConfigTiers};
     let runtime = known_acp_runtime("goose").unwrap();
-    let mut record = record_with(Some("goose"), None, None);
     let tiers = InheritedConfigTiers::default();
-    let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
-    let defaults = runtime.configuration_defaults();
-    if let Some(model) = defaults.get("GOOSE_MODEL") {
-        assert_eq!(
-            surface.normalized.model.unwrap().value.as_ref(),
-            Some(model)
-        );
-    }
+    let mut record = record_with(Some("goose"), None, None);
     record.provider = Some("anthropic".into());
     record.model = Some("chosen-model".into());
     let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
@@ -142,4 +125,117 @@ fn goose_command_uses_the_bundled_resolver() {
     assert_eq!(resolve_command("goose"), resolve_bundled_goose());
     assert_eq!(resolve_command("goose-acp"), resolve_bundled_goose());
     assert_eq!(resolve_command_cached("goose"), resolve_bundled_goose());
+}
+
+#[test]
+fn bundled_goose_file_and_env_precedence() {
+    // Exercise the real disk reader, launch resolver and config surface in an
+    // isolated process, so neither the user's Goose config nor parallel tests
+    // can change the outcome.
+    const CHILD: &str = "BUZZ_TEST_GOOSE_PRECEDENCE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "managed_agents::discovery::bundled_goose_tests::bundled_goose_file_and_env_precedence", "--nocapture"])
+            .env(CHILD, "1")
+            .env("GOOSE_PATH_ROOT", root.path())
+            .env_remove("GOOSE_PROVIDER")
+            .env_remove("GOOSE_MODEL")
+            .status().unwrap();
+        assert!(status.success());
+        return;
+    }
+    use crate::managed_agents::config_bridge::{reader::read_config_surface, InheritedConfigTiers};
+    use crate::managed_agents::readiness::resolve_effective_agent_env;
+    let runtime = KnownAcpRuntime {
+        default_env: &[
+            ("GOOSE_MODE", "auto"),
+            ("GOOSE_PROVIDER", "databricks_v2"),
+            ("GOOSE_MODEL", "bundled-model"),
+        ],
+        ..*known_acp_runtime("goose").unwrap()
+    };
+    assert_eq!(
+        runtime.process_defaults().collect::<Vec<_>>(),
+        vec![("GOOSE_MODE", "auto")]
+    );
+    let mut record = record_with(Some("goose"), None, None);
+    let global = Default::default();
+    let tiers = InheritedConfigTiers::default();
+    let env = resolve_effective_agent_env(&record, &[], Some(&runtime), &global);
+    assert_eq!(env.env["GOOSE_PROVIDER"], "databricks_v2");
+    assert_eq!(env.env["GOOSE_MODEL"], "bundled-model");
+    let path = std::path::PathBuf::from(std::env::var_os("GOOSE_PATH_ROOT").unwrap())
+        .join("config/config.yaml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for (yaml, expected_provider, expected_model) in [
+        (
+            "GOOSE_PROVIDER: anthropic\nGOOSE_MODEL: file-model\n",
+            "anthropic",
+            "file-model",
+        ),
+        ("GOOSE_MODEL: file-model\n", "databricks_v2", "file-model"),
+        (
+            "GOOSE_PROVIDER: databricks_v2\n",
+            "databricks_v2",
+            "bundled-model",
+        ),
+    ] {
+        std::fs::write(&path, yaml).unwrap();
+        let env = resolve_effective_agent_env(&record, &[], Some(&runtime), &global);
+        if yaml.contains("GOOSE_PROVIDER:") {
+            assert!(!env.env.contains_key("GOOSE_PROVIDER"));
+        } else {
+            assert_eq!(env.env["GOOSE_PROVIDER"], expected_provider);
+        }
+        if yaml.contains("GOOSE_MODEL:") {
+            assert!(!env.env.contains_key("GOOSE_MODEL"));
+        } else {
+            assert_eq!(env.env["GOOSE_MODEL"], expected_model);
+        }
+        let surface = read_config_surface(&record, Some(&runtime), None, &tiers, None);
+        assert_eq!(
+            surface.normalized.provider.unwrap().value.as_deref(),
+            Some(expected_provider)
+        );
+        assert_eq!(
+            surface.normalized.model.unwrap().value.as_deref(),
+            Some(expected_model)
+        );
+    }
+    // Existing exported settings must remain inherited by the child.
+    std::fs::write(&path, "{}\n").unwrap();
+    std::env::set_var("GOOSE_PROVIDER", "exported-provider");
+    std::env::set_var("GOOSE_MODEL", "exported-model");
+    let env = resolve_effective_agent_env(&record, &[], Some(&runtime), &global);
+    assert!(!env.env.contains_key("GOOSE_PROVIDER"));
+    assert!(!env.env.contains_key("GOOSE_MODEL"));
+    std::env::remove_var("GOOSE_PROVIDER");
+    std::env::remove_var("GOOSE_MODEL");
+    std::fs::write(
+        &path,
+        "GOOSE_PROVIDER: anthropic\nGOOSE_MODEL: file-model\n",
+    )
+    .unwrap();
+
+    record.provider = Some("structured-provider".into());
+    record.model = Some("structured-model".into());
+    for (key, value) in [
+        ("GOOSE_PROVIDER", "env-provider"),
+        ("GOOSE_MODEL", "env-model"),
+    ] {
+        record.env_vars.insert(key.into(), value.into());
+    }
+    let env = resolve_effective_agent_env(&record, &[], Some(&runtime), &global);
+    assert_eq!(env.env["GOOSE_PROVIDER"], "env-provider");
+    assert_eq!(env.env["GOOSE_MODEL"], "env-model");
+    let surface = read_config_surface(&record, Some(&runtime), None, &tiers, None);
+    assert_eq!(
+        surface.normalized.provider.unwrap().value.as_deref(),
+        Some("env-provider")
+    );
+    assert_eq!(
+        surface.normalized.model.unwrap().value.as_deref(),
+        Some("env-model")
+    );
 }

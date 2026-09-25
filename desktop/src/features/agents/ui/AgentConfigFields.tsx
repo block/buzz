@@ -64,6 +64,8 @@ import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { CardMintKeyCue } from "./CardMintKeyCue";
 import { getGlobalAgentCredentialState } from "./globalAgentCredentialState";
 
+import { resolveGooseConfig } from "./gooseConfigDefaults";
+
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
   provider: null,
@@ -273,37 +275,45 @@ export function AgentConfigFields({
     ...numericDescriptors,
   ]);
   const bakedEnvMap = Object.fromEntries(bakedEnv.map((e) => [e.key, e.value]));
-  const bakedProvider = React.useMemo(
-    () =>
-      (selectedRuntime?.providerEnvVar
-        ? selectedRuntime.definitionEnv?.[selectedRuntime.providerEnvVar]
-        : undefined) ??
-      bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ??
-      null,
-    [bakedEnv, selectedRuntime],
-  );
   const selectedRuntimeId = selectedRuntime?.id ?? "";
+  const gooseDefaults = resolveGooseConfig({
+    env: config.env_vars,
+    file: runtimeFileConfig,
+    defaults: selectedRuntime?.definitionEnv,
+  });
+  const inheritedProvider =
+    selectedRuntimeId === "goose"
+      ? gooseDefaults.provider.value || null
+      : ((selectedRuntime?.providerEnvVar
+          ? selectedRuntime.definitionEnv?.[selectedRuntime.providerEnvVar]
+          : undefined) ??
+        bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ??
+        null);
   const providerFieldVisible = hasRenderableAgentConfigField(
     fieldModel,
     "provider",
   );
+  const gooseEnvProvider =
+    selectedRuntimeId === "goose"
+      ? config.env_vars.GOOSE_PROVIDER?.trim()
+      : undefined;
+  const gooseEnvModel =
+    selectedRuntimeId === "goose"
+      ? config.env_vars.GOOSE_MODEL?.trim()
+      : undefined;
   const effectiveProvider = providerFieldVisible
-    ? config.provider?.trim() || bakedProvider || ""
+    ? gooseEnvProvider || config.provider?.trim() || inheritedProvider || ""
     : "";
-  const fallbackModel = React.useMemo(() => {
-    const key = selectedRuntime?.modelEnvVar;
-    const providerKey = selectedRuntime?.providerEnvVar;
-    const defaults = selectedRuntime?.definitionEnv;
-    if (
-      key &&
-      providerKey &&
-      defaults?.[providerKey] === effectiveProvider &&
-      defaults[key]
-    ) {
-      return defaults[key];
-    }
-    return getGlobalModelFallback(bakedEnv, effectiveProvider, config.env_vars);
-  }, [bakedEnv, config.env_vars, effectiveProvider, selectedRuntime]);
+  const fallbackModel =
+    selectedRuntimeId === "goose"
+      ? gooseDefaults.model.value || null
+      : ((selectedRuntime?.modelEnvVar &&
+        selectedRuntime.providerEnvVar &&
+        selectedRuntime.definitionEnv?.[selectedRuntime.providerEnvVar] ===
+          effectiveProvider
+          ? selectedRuntime.definitionEnv?.[selectedRuntime.modelEnvVar]
+          : null) ??
+        getGlobalModelFallback(bakedEnv, effectiveProvider, config.env_vars));
   const modelField = fieldModel.fields.find(
     (field) => field.kind === "model" && field.render === "control",
   );
@@ -327,10 +337,12 @@ export function AgentConfigFields({
     [bakedEnv, allStructuredKeys],
   );
 
-  const providerValue = providerFieldVisible ? (config.provider ?? "") : "";
+  const providerValue = providerFieldVisible
+    ? gooseEnvProvider || config.provider || ""
+    : "";
   const providerForDiscovery =
     providerFieldVisible && !isCustomProvider
-      ? providerValue || bakedProvider || ""
+      ? providerValue || inheritedProvider || ""
       : "";
   const configuredProviderValue = isCustomProvider
     ? providerValue
@@ -556,7 +568,7 @@ export function AgentConfigFields({
     const nextProvider =
       value === AUTO_PROVIDER_DROPDOWN_VALUE || value === "" ? null : value;
     const nextApiKey = getProviderApiKeyEnvVar(
-      nextProvider ?? bakedProvider ?? "",
+      nextProvider ?? inheritedProvider ?? "",
     );
     const nextEnvVars = { ...config.env_vars };
     if (
@@ -629,18 +641,32 @@ export function AgentConfigFields({
     : providerValue || AUTO_PROVIDER_DROPDOWN_VALUE;
 
   const providerZeroLabel = React.useMemo(() => {
-    if (!bakedProvider) return null;
-    return getBakedProviderInheritLabel(bakedProvider, providerOptions);
-  }, [bakedProvider, providerOptions]);
+    if (!inheritedProvider) return null;
+    if (
+      selectedRuntimeId === "goose" &&
+      gooseDefaults.provider.source !== "build"
+    ) {
+      const label =
+        providerOptions.find((option) => option.id === inheritedProvider)
+          ?.label ?? inheritedProvider;
+      return `${label} (from ${gooseDefaults.provider.source === "file" ? "Goose config" : "environment"})`;
+    }
+    return getBakedProviderInheritLabel(inheritedProvider, providerOptions);
+  }, [
+    inheritedProvider,
+    providerOptions,
+    selectedRuntimeId,
+    gooseDefaults.provider.source,
+  ]);
   const compactProviderZeroLabel = React.useMemo(() => {
-    if (bakedProvider) {
+    if (inheritedProvider) {
       return (
-        providerOptions.find((option) => option.id === bakedProvider)?.label ??
-        bakedProvider
+        providerOptions.find((option) => option.id === inheritedProvider)
+          ?.label ?? inheritedProvider
       );
     }
     return "Select a provider";
-  }, [bakedProvider, providerOptions]);
+  }, [inheritedProvider, providerOptions]);
 
   const implicitEffortProvider =
     selectedRuntimeId === "claude"
@@ -729,7 +755,7 @@ export function AgentConfigFields({
       }
       placeholderClassName={placeholderClassName}
       placeholderValue={
-        !showProviderPlaceholderOption && !bakedProvider
+        !showProviderPlaceholderOption && !inheritedProvider
           ? AUTO_PROVIDER_DROPDOWN_VALUE
           : undefined
       }
@@ -823,7 +849,7 @@ export function AgentConfigFields({
             allowDefaultModel={fallbackModel !== null}
             defaultModelLabel={
               fallbackModel
-                ? `Default model (${resolveModelLabel(fallbackModel, undefined, effectiveProvider || undefined)})`
+                ? `${gooseEnvModel ? "Environment model" : "Default model"} (${resolveModelLabel(fallbackModel, undefined, effectiveProvider || undefined)})`
                 : undefined
             }
             disableSelectDuringDiscovery={disableModelSelectDuringDiscovery}
@@ -840,7 +866,9 @@ export function AgentConfigFields({
               fallbackModel === null &&
               !dependentFieldsDisabled
             }
-            model={dependentFieldsDisabled ? "" : (config.model ?? "")}
+            model={
+              dependentFieldsDisabled || gooseEnvModel ? "" : config.model || ""
+            }
             modelDiscoveryLoading={
               dependentFieldsDisabled ? false : modelDiscoveryLoading
             }

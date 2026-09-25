@@ -356,8 +356,8 @@ fn build_model_field(
 
     // Configured candidates in spawn order: record env > persona env > global env >
     // definition env > struct record > struct persona > struct global > file.
-    // The file entry is always last; everything before it is a "configured" candidate
-    // that gates whether ACP participates as a fallback (see any_configured below).
+    // File and bundled fallback follow all existing configured candidates.
+    // A file-backed model still allows ACP's live value to participate.
     let configured: &[(Option<&str>, ConfigOrigin)] = &[
         (rec_env, ConfigOrigin::BuzzExplicit),
         (pers_env, ConfigOrigin::PersonaDefault),
@@ -366,15 +366,14 @@ fn build_model_field(
         (struct_record, ConfigOrigin::BuzzExplicit),
         (struct_persona, ConfigOrigin::PersonaDefault),
         (struct_global, ConfigOrigin::GlobalDefault),
-        (runtime_default, ConfigOrigin::HarnessDefault),
         (file_model.as_deref(), ConfigOrigin::ConfigFile),
+        (runtime_default, ConfigOrigin::HarnessDefault),
     ];
-    // "Configured" = any non-file candidate. The file entry is always last, so
-    // slicing to len()-1 is equivalent to the old magic `[..6]` and stays correct
-    // if the array ever grows again.
-    let any_configured = configured[..configured.len() - 1]
+    let any_configured = configured
         .iter()
-        .any(|(v, _)| v.is_some());
+        .take_while(|(_, origin)| *origin != ConfigOrigin::ConfigFile)
+        .any(|(value, _)| value.is_some())
+        || (file_model.is_none() && runtime_default.is_some());
 
     // When model_overridden is true and ACP is present, ACP is the live winner.
     // The top configured candidate becomes the secondary (the overridden baseline).
@@ -526,8 +525,8 @@ fn build_provider_field(
             tiers.global_provider.as_deref(),
             ConfigOrigin::GlobalDefault,
         ),
-        (runtime_default, ConfigOrigin::HarnessDefault),
         (file_provider.as_deref(), ConfigOrigin::ConfigFile),
+        (runtime_default, ConfigOrigin::HarnessDefault),
     ];
 
     let (value, origin, overridden_value, overridden_origin) =
