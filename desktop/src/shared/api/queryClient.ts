@@ -26,7 +26,7 @@ export function createBuzzQueryClient() {
   return new QueryClient({
     defaultOptions: {
       queries: {
-        // One retry, except after a query deadline (client or relay): that
+        // One retry, except after the relay's `query timed out` answer: that
         // would re-run the same slow server-side query.
         retry: (failureCount, error) =>
           failureCount < 1 && !isQueryDeadlineError(error),

@@ -25,9 +25,22 @@ const defaultDeps: RenderScopedReactionDeps = {
 };
 
 const hydratedMessageIdsByChannel = new Map<string, Set<string>>();
+// Ids held claimed after a relay deadline, so automatic re-renders skip them
+// until the user reopens the channel.
+const deadlineClaimedIdsByChannel = new Map<string, Set<string>>();
 
 export function resetRenderScopedReactionHydration() {
   hydratedMessageIdsByChannel.clear();
+  deadlineClaimedIdsByChannel.clear();
+}
+
+export function releaseDeadlineClaimedReactionIds(channelId: string) {
+  const ids = deadlineClaimedIdsByChannel.get(channelId);
+  if (!ids) {
+    return;
+  }
+  deadlineClaimedIdsByChannel.delete(channelId);
+  releaseRenderScopedReactionIds(channelId, [...ids]);
 }
 
 function hydratedSetForChannel(channelId: string): Set<string> {
@@ -132,8 +145,16 @@ export async function hydrateRenderScopedReactions(input: {
     );
   } catch (error) {
     // Keep deadline-failed ids claimed: releasing them lets the next render
-    // re-send the same slow `#e` read. Other failures stay retryable.
-    if (!isQueryDeadlineError(error)) {
+    // re-send the same slow `#e` read. Reopening the channel releases them;
+    // other failures stay retryable immediately.
+    if (isQueryDeadlineError(error)) {
+      let held = deadlineClaimedIdsByChannel.get(input.channelId);
+      if (!held) {
+        held = new Set();
+        deadlineClaimedIdsByChannel.set(input.channelId, held);
+      }
+      for (const id of messageIds) held.add(id);
+    } else {
       releaseRenderScopedReactionIds(input.channelId, messageIds);
     }
     console.error(

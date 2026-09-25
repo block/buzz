@@ -1,7 +1,7 @@
 /**
  * Deadline-retry contract, exercised under the production QueryClient:
- * a read that hit a query deadline (client `request timed out` or relay
- * `query timed out`) is fetched once; an ordinary failure keeps its retries.
+ * a read that hit the relay's `query timed out` deadline is fetched once; an
+ * ordinary failure, including a client-side request timeout, keeps its retries.
  * Removing the predicate from `createBuzzQueryClient` or `useThreadReplies`
  * makes the deadline cases here fetch more than once.
  */
@@ -62,9 +62,9 @@ const { useThreadReplies, useThreadRepliesForRoots } = await import(
 
 const CASES = [
   {
-    name: "client deadline",
+    name: "client request timeout",
     message: "relay unreachable: request timed out",
-    deadline: true,
+    deadline: false,
   },
   {
     name: "relay deadline",

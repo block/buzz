@@ -5,6 +5,7 @@ import {
   claimUnhydratedRenderScopedReactionIds,
   collectRenderScopedReactionMessageIds,
   hydrateRenderScopedReactions,
+  releaseDeadlineClaimedReactionIds,
   releaseRenderScopedReactionIds,
   resetRenderScopedReactionHydration,
 } from "./renderScopedReactions.ts";
@@ -176,7 +177,7 @@ test("failed hydration releases ids so the next render can retry", async () => {
 });
 
 for (const message of [
-  "relay unreachable: request timed out",
+  "error: query timed out",
   "relay returned 503 Service Unavailable: query timed out",
 ]) {
   test(`deadline-failed hydration keeps ids claimed: ${message}`, async () => {
@@ -201,3 +202,62 @@ for (const message of [
     );
   });
 }
+
+test("partly failed deadline batch recovers its reactions on channel reopen", async () => {
+  const okId = hex("1");
+  const slowId = hex("2");
+  const reaction = event(hex("9"), 7, {
+    content: "✅",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", slowId],
+    ],
+  });
+  const queryClient = makeQueryClientStub([event(okId, 9), event(slowId, 9)]);
+  const failingChunk = {
+    // One chunk hits the relay deadline, failing the whole batch.
+    fetchReactionEventsForMessages: async (_channel, ids) => {
+      if (ids.includes(slowId)) throw new Error("error: query timed out");
+      return [];
+    },
+  };
+
+  await hydrateRenderScopedReactions({
+    channelId: CHANNEL_ID,
+    messageIds: [okId, slowId],
+    queryClient,
+    deps: failingChunk,
+  });
+  // Automatic re-render: still held.
+  await hydrateRenderScopedReactions({
+    channelId: CHANNEL_ID,
+    messageIds: [okId, slowId],
+    queryClient,
+    deps: { fetchReactionEventsForMessages: async () => [reaction] },
+  });
+  assert.equal(
+    queryClient.getQueryData(channelMessagesKey(CHANNEL_ID)).length,
+    2,
+  );
+
+  releaseDeadlineClaimedReactionIds(CHANNEL_ID);
+  let requested = [];
+  await hydrateRenderScopedReactions({
+    channelId: CHANNEL_ID,
+    messageIds: [okId, slowId],
+    queryClient,
+    deps: {
+      fetchReactionEventsForMessages: async (_channel, ids) => {
+        requested = ids;
+        return [reaction];
+      },
+    },
+  });
+
+  assert.deepEqual(requested, [okId, slowId]);
+  assert.ok(
+    queryClient
+      .getQueryData(channelMessagesKey(CHANNEL_ID))
+      .some((e) => e.id === reaction.id),
+  );
+});

@@ -56,17 +56,24 @@ test("isRelayUnreachableError: plain object returns false", () => {
   );
 });
 
-test("isQueryDeadlineError: client request timeout and relay statement deadline", () => {
-  assert.equal(
-    isQueryDeadlineError(new Error("relay unreachable: request timed out")),
-    true,
-  );
+test("isQueryDeadlineError: relay statement deadline, HTTP and WS forms", () => {
   assert.equal(
     isQueryDeadlineError(
-      "relay returned 503 Service Unavailable: query timed out",
+      new Error("relay returned 503 Service Unavailable: query timed out"),
     ),
     true,
   );
+  assert.equal(isQueryDeadlineError("error: query timed out"), true);
+});
+
+test("isQueryDeadlineError: client-side timeouts stay retryable", () => {
+  for (const message of [
+    "relay unreachable: request timed out",
+    "relay request timed out",
+    "relay request timed out or cancelled",
+  ]) {
+    assert.equal(isQueryDeadlineError(new Error(message)), false, message);
+  }
 });
 
 test("isQueryDeadlineError: other relay errors stay retryable", () => {
