@@ -4074,7 +4074,9 @@ mod tests {
             let other_sha = "b".repeat(64);
             let audio_proof = blossom_upload_auth_value(&keys, &host, &audio_sha);
             let other_proof = blossom_upload_auth_value(&keys, &host, &other_sha);
-            let cases: [(&str, (Option<&str>, &[u8]), &str); 4] = [
+            /// `X-SHA-256` header value and request body.
+            type HashRequest<'a> = (Option<&'a str>, &'a [u8]);
+            let cases: [(&str, HashRequest, &str); 4] = [
                 ("X-SHA-256 missing", (None, AUDIO_BODY), &audio_proof),
                 (
                     "X-SHA-256 malformed",
