@@ -995,14 +995,37 @@ pub async fn soft_delete_event_and_update_thread(
     parent_event_id: Option<&[u8]>,
     root_event_id: Option<&[u8]>,
 ) -> Result<bool> {
-    use crate::store::replaceable::event_replacement_lock_key;
-
     let connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    let deleted = soft_delete_event_and_update_thread_in_tx(
+        &mut tx,
+        community_id,
+        event_id,
+        parent_event_id,
+        root_event_id,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+/// Transaction-scoped body of [`soft_delete_event_and_update_thread`].
+///
+/// Callers that must fence the delete with their own writes (e.g. the admin
+/// action lease/marker) run this inside their transaction; the caller commits.
+pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
+    tx: &mut PgConnection,
+    community_id: CommunityId,
+    event_id: &[u8],
+    parent_event_id: Option<&[u8]>,
+    root_event_id: Option<&[u8]>,
+) -> Result<bool> {
+    use crate::store::replaceable::event_replacement_lock_key;
+
     // Derive the target event's kind and channel_id inside the transaction so
     // that the serialization decision cannot be bypassed by any caller.
     let target: Option<(i32, Option<Uuid>)> = sqlx::query_as(
@@ -1065,7 +1088,6 @@ pub async fn soft_delete_event_and_update_thread(
         }
     }
 
-    tx.commit().await?;
     Ok(deleted)
 }
 

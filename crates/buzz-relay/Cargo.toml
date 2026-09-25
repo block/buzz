@@ -86,13 +86,10 @@ async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
 dev = ["buzz-auth/dev"]
 
 [dev-dependencies]
-mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.76.0-rc9", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
-mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.76.0-rc9", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
-# Relay-driven mesh lifecycle smoke (examples/mesh_relay_lifecycle_smoke.rs):
-# the relay client for discovery notes and the exact ed25519 the mesh owner
-# keys use for binding verification.
-buzz-test-client = { path = "../buzz-test-client" }
-ed25519-dalek = "=3.0.0-rc.0"
+# The mesh-llm smoke harnesses moved to `crates/buzz-mesh-smoke`. A
+# dev-dependency feeds every target of its package, so keeping the mesh-llm
+# SDK here forced the entire mesh-llm/skippy/rmcp tree to compile before any
+# relay unit test could build — the Desktop E2E Relay 30m timeout.
 buzz-core = { workspace = true, features = ["test-utils"] }
 buzz-auth = { workspace = true, features = ["dev"] }
 reqwest = { workspace = true }

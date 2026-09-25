@@ -459,23 +459,41 @@ pub fn databricks_v2_known_models() -> &'static [String] {
     &manifest().databricks_v2_known_models
 }
 
-/// Curated display label for a Databricks endpoint id, or `None` when no exact
-/// record covers it. Exact raw-id hits preserve the resolver's current behavior.
-/// On an exact miss, aliases share a label only when stripping the manifest's
-/// existing family-token prefix from the query and record keys yields exactly one
-/// `databricks_v2` record; no or ambiguous stripped matches deliberately remain
-/// uncurated. This accessor is discovery-only, so `resolve()` retains its exact-
-/// record label contract.
-pub fn databricks_registry_label(raw_model_id: &str) -> Option<&'static str> {
+/// Display label for a Databricks endpoint id, or `None` to show the raw id.
+/// Precedence: exact record → unique alias (family-token-stripped query and
+/// record keys match exactly one `databricks_v2` record) → the generative label
+/// grammar. An ambiguous alias match stays `None` rather than generating. This
+/// accessor is display-only, so `resolve()` retains its exact-record label
+/// contract.
+pub fn databricks_registry_label(raw_model_id: &str) -> Option<String> {
     let m = manifest();
-    registry_label_for_databricks_records(raw_model_id, &m.exact_records, &m.label_family_tokens)
+    registry_label_for_databricks_records(
+        raw_model_id,
+        &m.exact_records,
+        &m.label_family_tokens,
+        true,
+    )
 }
 
-fn registry_label_for_databricks_records<'a>(
+/// Exact-record and unique-alias tiers only, so tests can assert which tier
+/// produced a label.
+#[cfg(test)]
+pub(crate) fn databricks_curated_label(raw_model_id: &str) -> Option<String> {
+    let m = manifest();
+    registry_label_for_databricks_records(
+        raw_model_id,
+        &m.exact_records,
+        &m.label_family_tokens,
+        false,
+    )
+}
+
+fn registry_label_for_databricks_records(
     raw_model_id: &str,
-    records: &'a [ExactRecord],
+    records: &[ExactRecord],
     family_tokens: &[String],
-) -> Option<&'a str> {
+    generate: bool,
+) -> Option<String> {
     if raw_model_id.trim().is_empty() {
         return None;
     }
@@ -483,13 +501,23 @@ fn registry_label_for_databricks_records<'a>(
     if let Some(rec) = records.iter().find(|rec| {
         rec.provider == "databricks_v2" && rec.raw_model_id.eq_ignore_ascii_case(raw_model_id)
     }) {
-        return Some(&rec.registry_label);
+        return Some(rec.registry_label.clone());
     }
 
+    let generated = || {
+        generate
+            .then(|| {
+                crate::databricks_label_grammar::generate_databricks_label(
+                    raw_model_id,
+                    family_tokens,
+                )
+            })
+            .flatten()
+    };
     let query_lower = raw_model_id.to_ascii_lowercase();
     let stripped_query = strip_catalog_prefix(&query_lower, family_tokens);
     if stripped_query == query_lower {
-        return None;
+        return generated();
     }
     let mut matching_record = None;
     for rec in records.iter().filter(|rec| rec.provider == "databricks_v2") {
@@ -500,7 +528,7 @@ fn registry_label_for_databricks_records<'a>(
             return None;
         }
     }
-    matching_record.map(|rec| rec.registry_label.as_str())
+    matching_record.map_or_else(generated, |rec| Some(rec.registry_label.clone()))
 }
 
 /// Semantic invariants that strict typed parsing cannot express. Structural
@@ -1085,7 +1113,7 @@ mod tests {
     fn test_databricks_registry_label_lookup() {
         // Exact raw id remains case-insensitive and unchanged.
         assert_eq!(
-            databricks_registry_label("DATABRICKS-GPT-5-5"),
+            databricks_registry_label("DATABRICKS-GPT-5-5").as_deref(),
             Some("GPT-5.5")
         );
         // Exact raw ids preserve their canonical labels.
@@ -1095,18 +1123,18 @@ mod tests {
             ("databricks-kimi-k3", "Kimi K3"),
         ] {
             assert_eq!(
-                databricks_registry_label(model),
+                databricks_registry_label(model).as_deref(),
                 Some(label),
                 "model={model}"
             );
         }
         // Aliases reuse the existing family-token stripper.
         assert_eq!(
-            databricks_registry_label("goose-gpt-5-6-sol"),
+            databricks_registry_label("goose-gpt-5-6-sol").as_deref(),
             Some("GPT-5.6 Sol")
         );
         assert_eq!(
-            databricks_registry_label("goose-claude-fable-5"),
+            databricks_registry_label("goose-claude-fable-5").as_deref(),
             Some("Claude Fable 5")
         );
         for (alias, label) in [
@@ -1119,7 +1147,7 @@ mod tests {
             ("goose-kimi-k3", "Kimi K3"),
         ] {
             assert_eq!(
-                databricks_registry_label(alias),
+                databricks_registry_label(alias).as_deref(),
                 Some(label),
                 "alias={alias}"
             );
@@ -1149,7 +1177,11 @@ mod tests {
             ("system.ai.glm-5-3-flash", "GLM-5.3 Flash"),
             ("system.ai.grok-4-6", "Grok 4.6"),
         ] {
-            assert_eq!(databricks_registry_label(fqn), Some(label), "fqn={fqn}");
+            assert_eq!(
+                databricks_registry_label(fqn).as_deref(),
+                Some(label),
+                "fqn={fqn}"
+            );
         }
         // Unknown ids, bare family ids, and blanks remain uncurated.
         assert_eq!(databricks_registry_label("custom-unlisted-endpoint"), None);
@@ -1182,7 +1214,7 @@ mod tests {
         let family_tokens = vec!["gpt-".to_string()];
 
         assert_eq!(
-            registry_label_for_databricks_records("goose-gpt-5-6", &records, &family_tokens),
+            registry_label_for_databricks_records("goose-gpt-5-6", &records, &family_tokens, true),
             None
         );
     }
