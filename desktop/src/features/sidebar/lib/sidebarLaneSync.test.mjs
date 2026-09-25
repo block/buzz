@@ -5,7 +5,7 @@ import { relayClient } from "@/shared/api/relayClient";
 import { SECTIONS_LANE, projectSections } from "./channelSectionsSync.ts";
 import { SORT_LANE, projectSort } from "./channelSortSync.ts";
 import {
-  PUBLISH_CANCELED,
+  PublishCanceledError,
   publishSessionEvent,
 } from "@/shared/api/relayEventPublisher";
 import { LaneReconciler } from "./sidebarLaneReconciler.ts";
@@ -67,8 +67,13 @@ beforeEach(() => {
   mock.method(console, "warn", () => {});
   mock.method(relayClient, "publishEvent", async (event, _t, _e, isCurrent) => {
     fx.beforeSend?.();
-    if (!isCurrent()) throw new Error(PUBLISH_CANCELED);
+    if (!isCurrent()) throw new PublishCanceledError();
     fx.published.push(event);
+    if (fx.publish === "cancelText") {
+      fx.publish = "ok";
+      fx.afterSend();
+      throw new Error(new PublishCanceledError().message); // a relay's text
+    }
     if (fx.publish === "timeout") throw new Error("Timed out");
     if (fx.publish === "reject") throw new Error("blocked: nope");
     if (fx.publish === "duplicate") throw new Error("duplicate: have it");
@@ -354,6 +359,25 @@ for (const L of LANES) {
     });
   }
 
+  test(`${L.name}: a relay rejection with the cancel text during a hold backs off`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1e12 });
+    const store = new LaneStore(L.lane, PK, RELAY);
+    const rec = new LaneReconciler(L.lane, store, PK, RELAY);
+    store.transact((tr) => L.edit(tr, "k1", "A"));
+    fx.publish = "cancelText";
+    fx.afterSend = () => rec.defer(); // an edit hold starts mid-send
+    await rec.read();
+    for (let i = 0; i < 5; i++) await settle();
+    assert.equal(fx.published.length, 1);
+    t.mock.timers.tick(2_000);
+    for (let i = 0; i < 5; i++) await settle();
+    assert.equal(fx.published.length, 1, "not re-armed as a hold");
+    t.mock.timers.tick(3_000);
+    for (let i = 0; i < 5; i++) await settle();
+    assert.equal(fx.published.length, 2, "retried after the 5 s backoff");
+    rec.destroy();
+  });
+
   test(`${L.name}: unreadable head holds quietly; content never published over it`, async () => {
     const d = device(L.lane);
     d.store.transact((t) => L.edit(t, "k1", "A"));
@@ -583,13 +607,13 @@ test("publisher: isCurrent gates the first send and the reconnect retry", async 
   const event = { id: "e1" };
   await assert.rejects(
     publishSessionEvent(session, event, "t", "s", () => current),
-    { message: PUBLISH_CANCELED },
+    PublishCanceledError,
   );
   assert.equal(sends.length, 1, "retry never sent");
   assert.equal(session.pendingEvents.size, 0);
   await assert.rejects(
     publishSessionEvent(session, event, "t", "s", () => false),
-    { message: PUBLISH_CANCELED },
+    PublishCanceledError,
   );
   assert.equal(sends.length, 1, "first send never sent");
 });

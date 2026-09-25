@@ -13,12 +13,18 @@ type PublishSession = {
   recoverSocketFailure: (error: unknown, fallback: string) => Error;
 };
 
-export const PUBLISH_CANCELED = "Relay publish canceled by its caller.";
+/** Typed so no relay rejection text can be mistaken for a caller's cancel. */
+export class PublishCanceledError extends Error {
+  constructor() {
+    super("Relay publish canceled by its caller.");
+    this.name = "PublishCanceledError";
+  }
+}
 
 /**
  * Publish once, with one reconnect retry, without crossing session ownership.
  * `isCurrent`, when given, is checked immediately before every socket send; a
- * false result rejects with `PUBLISH_CANCELED` and sends nothing.
+ * false result rejects with `PublishCanceledError` and sends nothing.
  */
 export async function publishSessionEvent(
   session: PublishSession,
@@ -32,7 +38,7 @@ export async function publishSessionEvent(
   if (publishOwnership !== session.ownership()) {
     throw new Error("Relay disconnected for community switch.");
   }
-  if (isCurrent?.() === false) throw new Error(PUBLISH_CANCELED);
+  if (isCurrent?.() === false) throw new PublishCanceledError();
   const publishGeneration = session.generation();
 
   return new Promise<RelayEvent>((resolve, reject) => {
@@ -76,7 +82,7 @@ export async function publishSessionEvent(
           if (isCurrent?.() === false) {
             window.clearTimeout(timeout);
             session.pendingEvents.delete(event.id);
-            reject(new Error(PUBLISH_CANCELED));
+            reject(new PublishCanceledError());
             return;
           }
           await session.send(["EVENT", event], retryGeneration);

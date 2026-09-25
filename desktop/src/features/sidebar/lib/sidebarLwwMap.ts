@@ -49,10 +49,13 @@ export const isEmptyTree = (node: Tree): boolean =>
     (child) => child === undefined || (!isReg(child) && isEmptyTree(child)),
   );
 
+/** A register imported from a meta-less local cache (stamp 1); any remote beats it. */
+const isCachePlaceholder = (reg: Reg) => reg[0] === 1 && reg[1] === LEGACY_DEV;
+
 /**
- * Merges `b` into `a`. With `onlyMissing`, `b` only fills leaves `a` lacks
- * (legacy import: omission never means deletion, and existing registers win).
- * Returns `a` itself when nothing changes.
+ * Merges `b` into `a`. With `onlyMissing`, `b` only fills leaves `a` lacks or
+ * holds as a cache placeholder (legacy import: omission never means deletion,
+ * and authored registers win). Returns `a` itself when nothing changes.
  */
 export function mergeTrees<T extends Tree>(a: T, b: T, onlyMissing = false): T {
   let out: Tree | null = null;
@@ -62,7 +65,8 @@ export function mergeTrees<T extends Tree>(a: T, b: T, onlyMissing = false): T {
     if (av === undefined) next = bv;
     else if (bv === undefined) continue;
     else if (isReg(av) && isReg(bv)) {
-      if (!onlyMissing && compareRegs(bv, av) > 0) next = bv;
+      if ((!onlyMissing || isCachePlaceholder(av)) && compareRegs(bv, av) > 0)
+        next = bv;
     } else if (!isReg(av) && !isReg(bv)) {
       next = mergeTrees(av, bv, onlyMissing);
     }

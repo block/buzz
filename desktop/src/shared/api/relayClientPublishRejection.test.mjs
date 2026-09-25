@@ -42,7 +42,7 @@ Date.now = () => fakeNow;
 
 const { RelayClient } = await import("./relayClientSession.ts");
 const { invokeTauri } = await import("./tauri.ts");
-const { PUBLISH_CANCELED } = await import("./relayEventPublisher.ts");
+const { PublishCanceledError } = await import("./relayEventPublisher.ts");
 const { activateRateLimit, isRateLimited, resetRateLimitGate } = await import(
   "./relayRateLimitGate.ts"
 );
@@ -369,7 +369,7 @@ test("isCurrent forwarded by publishEvent cancels a rate-limited send", async ()
   assert.equal(sendAttempts.length, 0, "waits behind the gate");
   current = false;
   resetRateLimitGate();
-  await assert.rejects(published, { message: PUBLISH_CANCELED });
+  await assert.rejects(published, PublishCanceledError);
   assert.equal(sendAttempts.length, 0, "nothing reached the native send");
   assert.equal(client.pendingEvents.size, 0);
   assert.equal(pendingTimers.size, 0, "no publication timeout armed");

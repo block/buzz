@@ -46,6 +46,8 @@ export class ChannelStarSyncManager {
   private lastRemoteCreatedAt: number;
   private pendingStore: ChannelStarStore | null = null;
   private lastPublishedStore: ChannelStarStore | null = null;
+  /** The bootstrap first-copy seed; retired once any relay head is observed. */
+  private seedStore: ChannelStarStore | null = null;
   private destroyed = false;
 
   constructor(pubkey: string, relayUrl: string) {
@@ -87,6 +89,13 @@ export class ChannelStarSyncManager {
       this.lastRemoteCreatedAt = createdAt;
     }
     advanceWatermark(this.pubkey, BLOB_TYPE, this.relayUrl, createdAt);
+    // A seed only fills a relay believed empty; any head supersedes it, even
+    // one whose payload a concurrent reader drops or cannot decrypt.
+    if (this.seedStore && this.pendingStore === this.seedStore) {
+      this.cancelPendingStarPublish();
+      this.pendingStore = null;
+    }
+    this.seedStore = null;
   }
 
   cancelPendingStarPublish(): void {
@@ -152,14 +161,21 @@ export class ChannelStarSyncManager {
   }
 
   private async doPublish(store: ChannelStarStore): Promise<void> {
+    // A seed retired while acquired (preflight, crypto or socket wait) aborts.
+    const seed = store === this.seedStore;
+    const stale = () => this.destroyed || (seed && this.seedStore !== store);
+    // Only the attempt that still owns `pendingStore` may clear it.
+    const release = () => {
+      if (this.pendingStore === store) this.pendingStore = null;
+    };
     try {
       const merged = await this.fetchOwnBlobBeforePublish(store);
       // Guard: manager may have been destroyed while fetchOwnBlobBeforePublish
       // was awaited (community switch during in-flight fetch). If so, abort
       // before touching the relay.
-      if (this.destroyed) return;
+      if (stale()) return;
       if (this.isIdenticalToLastPublished(merged)) {
-        this.pendingStore = null;
+        release();
         return;
       }
       const payload = {
@@ -180,15 +196,16 @@ export class ChannelStarSyncManager {
           ["t", D_TAG], // relay discoverability; not used in our filters
         ],
       });
-      if (this.destroyed) return;
+      if (stale()) return;
       await relayClient.publishEvent(
         event,
         "Timed out publishing channel stars.",
         "Failed to publish channel stars.",
+        () => !stale(),
       );
       this.recordRemoteHead(event.created_at);
       this.lastPublishedStore = merged;
-      this.pendingStore = null;
+      release();
     } catch (error) {
       console.warn("[channelStarsSync] publish failed:", error);
     }
@@ -229,7 +246,10 @@ export class ChannelStarSyncManager {
       lastHead: this.lastRemoteCreatedAt,
       localStore,
       isLocalNonEmpty: (s) => Object.keys(s.channels).length > 0,
-      publishFn: (s) => this.publishStars(s),
+      publishFn: (s) => {
+        this.seedStore = s;
+        this.publishStars(s);
+      },
     });
   }
 

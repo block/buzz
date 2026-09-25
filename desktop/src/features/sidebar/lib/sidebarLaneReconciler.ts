@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
-import { PUBLISH_CANCELED } from "@/shared/api/relayEventPublisher";
+import { PublishCanceledError } from "@/shared/api/relayEventPublisher";
 import {
   nip44DecryptFromSelf,
   nip44EncryptToSelf,
@@ -227,9 +227,12 @@ export class LaneReconciler {
         this.head.id !== head.id ||
         this.head.status !== head.status;
       // A deliberate deadline cancel keeps the deadline; stale drops back off.
+      // The cause is captured when the drop happens, not when it is consumed.
+      let heldDrop = false;
       const drop = () => {
         if (!dropped()) return false;
-        if (held()) outcome = "held";
+        heldDrop = held();
+        if (heldDrop) outcome = "held";
         return true;
       };
       const content = await nip44EncryptToSelf(JSON.stringify(doc));
@@ -253,15 +256,12 @@ export class LaneReconciler {
           event,
           `Timed out publishing ${this.lane.dTag}.`,
           `Failed to publish ${this.lane.dTag}.`,
-          () => !dropped(), // checked again right before each socket send
+          () => !drop(), // checked again right before each socket send
         );
       } catch (error) {
-        const message = String((error as Error)?.message);
-        if (message === PUBLISH_CANCELED && held()) {
-          outcome = "held";
-          return;
-        }
-        if (!message.startsWith("duplicate:")) throw error;
+        if (error instanceof PublishCanceledError && heldDrop) return;
+        if (!String((error as Error)?.message).startsWith("duplicate:"))
+          throw error;
       }
       outcome = "acked";
       this.lastHead = Math.max(this.lastHead, event.created_at);
