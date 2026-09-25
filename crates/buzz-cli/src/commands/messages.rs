@@ -598,6 +598,57 @@ fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(Stri
     matches
 }
 
+/// Build the imeta tag and the leading-newline body line for one uploaded
+/// `--file` attachment, mirroring the desktop composer's `buildImetaTags` and
+/// `formatImetaMediaLine`. Images and video render inline via `![image|video](url)`;
+/// any other type (e.g. PDF) becomes a `[filename](url)` link that the desktop
+/// upgrades to a file card, with the original filename carried in imeta.
+fn attachment_imeta_and_line(
+    file_path: &str,
+    desc: &crate::client::BlobDescriptor,
+) -> (Vec<String>, String) {
+    if desc.mime_type.starts_with("video/") {
+        let imeta = crate::client::build_imeta_tag(desc, None);
+        return (imeta, format!("\n![video]({})", desc.url));
+    }
+    if desc.mime_type.starts_with("image/") {
+        let imeta = crate::client::build_imeta_tag(desc, None);
+        return (imeta, format!("\n![image]({})", desc.url));
+    }
+    let filename = attachment_filename(file_path);
+    let imeta = crate::client::build_imeta_tag(desc, filename.as_deref());
+    let label = filename
+        .as_deref()
+        .or_else(|| desc.url.rsplit('/').next().filter(|tail| !tail.is_empty()))
+        .unwrap_or("file");
+    let escaped = escape_link_label(label);
+    (imeta, format!("\n[{escaped}]({})", desc.url))
+}
+
+/// The file's basename, if it satisfies the relay's imeta `filename` rules
+/// (1–255 bytes, no path separators or control characters). Otherwise `None`,
+/// so the attachment is still sent without a filename rather than rejected.
+fn attachment_filename(file_path: &str) -> Option<String> {
+    let name = std::path::Path::new(file_path).file_name()?.to_str()?;
+    let valid = !name.is_empty()
+        && name.len() <= 255
+        && !name.contains(['/', '\\'])
+        && !name.chars().any(char::is_control);
+    valid.then(|| name.to_string())
+}
+
+/// Escape markdown link-label metacharacters (`\`, `[`, `]`) with a backslash.
+fn escape_link_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    for c in label.chars() {
+        if matches!(c, '\\' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub struct SendMessageParams {
     pub channel_id: String,
     pub content: String,
@@ -655,14 +706,9 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        let (imeta, line) = attachment_imeta_and_line(file_path, &desc);
+        media_tags.push(imeta);
+        media_content.push_str(&line);
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -1084,11 +1130,12 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
-        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
-        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
+        attachment_filename, attachment_imeta_and_line, channel_id_from_event, cmd_get_thread,
+        cmd_send_message, escape_link_label, event_mention_pubkeys, find_root_from_tags,
+        format_events, match_profiles_by_name, merge_message_mentions, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
+        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
+        CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1887,5 +1934,101 @@ mod tests {
             emoji_tags.is_empty(),
             "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
         );
+    }
+
+    // ---- --file attachments (imeta + body line) ----
+
+    fn descriptor(url: &str, mime: &str) -> crate::client::BlobDescriptor {
+        crate::client::BlobDescriptor {
+            url: url.into(),
+            sha256: "aabbcc".into(),
+            size: 42,
+            mime_type: mime.into(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn pdf_attachment_is_a_named_link_with_filename_in_imeta() {
+        let desc = descriptor("https://relay.test/media/aabbcc.pdf", "application/pdf");
+        let (imeta, line) = attachment_imeta_and_line("/tmp/docs/name.pdf", &desc);
+        assert_eq!(line, "\n[name.pdf](https://relay.test/media/aabbcc.pdf)");
+        assert_eq!(imeta.last().map(String::as_str), Some("filename name.pdf"));
+        assert!(
+            imeta.contains(&"m application/pdf".to_string()),
+            "{imeta:?}"
+        );
+    }
+
+    #[test]
+    fn link_label_escapes_backslash_and_brackets() {
+        assert_eq!(escape_link_label(r"a]b[c\d.pdf"), r"a\]b\[c\\d.pdf");
+        assert_eq!(escape_link_label("plain.pdf"), "plain.pdf");
+    }
+
+    // `\` is a path separator on Windows, so this basename only exists on Unix.
+    #[cfg(unix)]
+    #[test]
+    fn pdf_attachment_with_relay_invalid_filename_falls_back_to_url_tail() {
+        let desc = descriptor("https://relay.test/media/aabbcc.pdf", "application/pdf");
+        let (imeta, line) = attachment_imeta_and_line(r"a]b[c\d.pdf", &desc);
+        // The relay rejects `\` in imeta filenames, so the name is dropped from
+        // imeta and the label falls back to the URL tail, as the desktop does.
+        assert_eq!(line, "\n[aabbcc.pdf](https://relay.test/media/aabbcc.pdf)");
+        assert!(
+            !imeta.iter().any(|f| f.starts_with("filename ")),
+            "{imeta:?}"
+        );
+    }
+
+    #[test]
+    fn pdf_attachment_label_escapes_brackets_in_valid_filename() {
+        let desc = descriptor("https://relay.test/media/aabbcc.pdf", "application/pdf");
+        let (imeta, line) = attachment_imeta_and_line("dir/Q3 [final].pdf", &desc);
+        assert_eq!(
+            line,
+            "\n[Q3 \\[final\\].pdf](https://relay.test/media/aabbcc.pdf)"
+        );
+        assert_eq!(
+            imeta.last().map(String::as_str),
+            Some("filename Q3 [final].pdf")
+        );
+    }
+
+    #[test]
+    fn image_and_video_attachments_are_unchanged() {
+        let img = descriptor("https://relay.test/media/aa.png", "image/png");
+        let (imeta, line) = attachment_imeta_and_line("shot.png", &img);
+        assert_eq!(line, "\n![image](https://relay.test/media/aa.png)");
+        assert!(
+            !imeta.iter().any(|f| f.starts_with("filename ")),
+            "{imeta:?}"
+        );
+
+        let vid = descriptor("https://relay.test/media/bb.mp4", "video/mp4");
+        let (imeta, line) = attachment_imeta_and_line("clip.mp4", &vid);
+        assert_eq!(line, "\n![video](https://relay.test/media/bb.mp4)");
+        assert!(
+            !imeta.iter().any(|f| f.starts_with("filename ")),
+            "{imeta:?}"
+        );
+    }
+
+    #[test]
+    fn attachment_filename_enforces_relay_rules() {
+        assert_eq!(
+            attachment_filename("/a/b/report.pdf").as_deref(),
+            Some("report.pdf")
+        );
+        assert_eq!(attachment_filename("line\nbreak.pdf"), None);
+        assert_eq!(
+            attachment_filename(&format!("{}.pdf", "x".repeat(252))),
+            None
+        );
+        assert!(attachment_filename(&format!("{}.pdf", "x".repeat(251))).is_some());
     }
 }

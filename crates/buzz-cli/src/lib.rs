@@ -428,7 +428,7 @@ pub enum MessagesCmd {
         /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,
-        /// Attach file(s) — uploads and includes as imeta tags
+        /// Attach file(s) — uploads and includes as imeta tags. Images (JPEG, PNG, GIF, WebP) and MP4 video render inline; PDFs render as a named file card
         #[arg(long = "file")]
         files: Vec<String>,
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.

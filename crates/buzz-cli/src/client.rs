@@ -37,7 +37,10 @@ pub struct BlobDescriptor {
 }
 
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
-pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
+///
+/// `filename` is the original file name shown on generic-file cards; it is
+/// emitted last, matching the desktop composer's `buildImetaTags` field order.
+pub fn build_imeta_tag(d: &BlobDescriptor, filename: Option<&str>) -> Vec<String> {
     let mut tag = vec![
         "imeta".to_string(),
         format!("url {}", d.url),
@@ -57,6 +60,9 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     if let Some(dur) = d.duration {
         tag.push(format!("duration {dur}"));
     }
+    if let Some(name) = filename {
+        tag.push(format!("filename {name}"));
+    }
     tag
 }
 
@@ -67,13 +73,41 @@ const ALLOWED_MIMES: &[&str] = &[
     "image/gif",
     "image/webp",
     "video/mp4",
+    "application/pdf",
 ];
 
-/// Maximum file size for image uploads (50 MB).
+/// Maximum file size for image and document uploads (50 MB). The relay's
+/// generic-file cap defaults to 100 MB, so the smaller image cap applies.
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Detect an upload's MIME type from its magic bytes and reject types or sizes
+/// the CLI does not send. Returns the detected MIME type.
+fn check_upload_mime_and_size(bytes: &[u8]) -> Result<String, CliError> {
+    let mime = infer::get(bytes)
+        .map(|t| t.mime_type().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    if !ALLOWED_MIMES.contains(&mime.as_str()) {
+        return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+    }
+
+    let max = if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else {
+        MAX_IMAGE_BYTES
+    };
+    if bytes.len() as u64 > max {
+        return Err(CliError::Usage(format!(
+            "file too large: {} bytes (max {})",
+            bytes.len(),
+            max
+        )));
+    }
+    Ok(mime)
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1220,28 +1254,8 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
-        // 2. Detect MIME from magic bytes
-        let mime = infer::get(&bytes)
-            .map(|t| t.mime_type().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
-        if bytes.len() as u64 > max {
-            return Err(CliError::Usage(format!(
-                "file too large: {} bytes (max {})",
-                bytes.len(),
-                max
-            )));
-        }
+        // 2–3. Detect MIME from magic bytes and enforce the type and size gates
+        let mime = check_upload_mime_and_size(&bytes)?;
 
         // 4. SHA-256
         let sha256 = hex::encode(Sha256::digest(&bytes));
@@ -2642,6 +2656,77 @@ mod tests {
         assert!(
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
+        );
+    }
+}
+
+#[cfg(test)]
+mod upload_attachment_tests {
+    use super::{build_imeta_tag, check_upload_mime_and_size, BlobDescriptor, MAX_IMAGE_BYTES};
+    use crate::error::CliError;
+
+    fn pdf_descriptor() -> BlobDescriptor {
+        BlobDescriptor {
+            url: "https://relay.test/media/aabbcc.pdf".into(),
+            sha256: "aabbcc".into(),
+            size: 1234,
+            mime_type: "application/pdf".into(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn imeta_tag_appends_filename_last_when_given() {
+        let tag = build_imeta_tag(&pdf_descriptor(), Some("Q3 budget.pdf"));
+        assert_eq!(
+            tag,
+            vec![
+                "imeta",
+                "url https://relay.test/media/aabbcc.pdf",
+                "m application/pdf",
+                "x aabbcc",
+                "size 1234",
+                "filename Q3 budget.pdf",
+            ]
+        );
+    }
+
+    #[test]
+    fn imeta_tag_omits_filename_when_absent() {
+        let tag = build_imeta_tag(&pdf_descriptor(), None);
+        assert!(!tag.iter().any(|f| f.starts_with("filename ")), "{tag:?}");
+    }
+
+    #[test]
+    fn upload_gate_accepts_pdf() {
+        let bytes = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n";
+        assert_eq!(
+            check_upload_mime_and_size(bytes).unwrap(),
+            "application/pdf"
+        );
+    }
+
+    #[test]
+    fn upload_gate_caps_pdf_at_image_limit() {
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        bytes.resize(MAX_IMAGE_BYTES as usize + 1, b' ');
+        let err = check_upload_mime_and_size(&bytes).unwrap_err();
+        assert!(
+            matches!(&err, CliError::Usage(msg) if msg.starts_with("file too large")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn upload_gate_still_rejects_unlisted_types() {
+        let err = check_upload_mime_and_size(b"PK\x03\x04 zip archive").unwrap_err();
+        assert!(
+            matches!(&err, CliError::Usage(msg) if msg == "unsupported file type: application/zip"),
+            "{err:?}"
         );
     }
 }
