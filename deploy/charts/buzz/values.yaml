@@ -128,6 +128,11 @@ relay:
   # accepts/owns the external multi-pod audio/SFU behavior.
   huddleAudioAvailable: null
   ephemeralTtlOverride: 0
+  # Two-phase rollout fence for `.ics` classification. Leave false while any
+  # relay pod runs a version that can unconditionally overwrite media sidecars;
+  # set true only after that rollout is fully drained. Calendar bytes are still
+  # strictly validated while false, but retain the legacy `.bin` classification.
+  calendarClassificationReady: false
   # Per-upload-event records (`_uploads/` moderation side channel). Off by
   # default. Operators hosting communities for other people may have legal
   # obligations (e.g. NCMEC reporting for US-serving providers) that require
