@@ -957,9 +957,6 @@ fn classify_closed(message: &str) -> ClosedClass {
         "unsupported:",
         "error: mixed search",
         "error: too many subscriptions",
-        // Server statement deadline: re-sending the same REQ re-runs the
-        // same slow query.
-        "error: query timed out",
     ]
     .iter()
     .any(|prefix| normalized.starts_with(prefix))

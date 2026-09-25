@@ -328,6 +328,32 @@ async fn a_closed_subscription_reopens_without_a_desired_set_change() {
     session.shutdown();
 }
 
+/// A statement deadline on a persistent subscription is transient (archive
+/// subs are `limit: 0` live tails), so it backs off and reopens rather than
+/// latching terminal. Finite requests still fail on it; see
+/// `native_relay_client_finite_tests.rs`.
+#[tokio::test]
+async fn a_deadline_closed_subscription_reopens_after_backoff() {
+    let (relay_url, mut frames, closed) = stub_relay().await;
+    let (session, _events) = start(relay_url, Keys::generate(), None).await;
+
+    session.set_subscriptions(vec![probe_subscription()]).await;
+    assert_eq!(next_req(&mut frames, "the initial REQ").await, PROBE_ID);
+    settle().await;
+
+    closed
+        .send(StubCommand::Closed(
+            PROBE_ID.into(),
+            "error: query timed out".into(),
+        ))
+        .await
+        .expect("stub relay accepts the closed command");
+
+    assert_eq!(next_req(&mut frames, "the reopened REQ").await, PROBE_ID);
+
+    session.shutdown();
+}
+
 /// A relay that rejects on policy must not be re-asked in a tight loop.
 #[tokio::test]
 async fn a_terminal_closed_is_not_retried_on_the_same_socket() {
@@ -679,10 +705,6 @@ fn closed_messages_classify_like_the_renderer_policy() {
     );
     assert_eq!(
         classify_closed("error: too many subscriptions"),
-        ClosedClass::Terminal
-    );
-    assert_eq!(
-        classify_closed("error: query timed out"),
         ClosedClass::Terminal
     );
     // Transient AUTH race, not a permanent rejection — the one prefix that
