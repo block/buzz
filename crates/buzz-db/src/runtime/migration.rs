@@ -703,12 +703,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 49);
-        assert_eq!(migrations[48].version, 49);
-        assert!(migrations[48]
+        assert_eq!(migrations.len(), 50);
+        assert_eq!(migrations[49].version, 50);
+        assert!(migrations[49]
             .sql
             .as_str()
-            .contains("idx_thread_metadata_window"));
+            .contains("idx_relay_admin_actions_direct_request"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
