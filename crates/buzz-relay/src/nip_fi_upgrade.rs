@@ -1,7 +1,7 @@
 //! NIP-FI assertion validation at WebSocket upgrade.
 //!
-//! This module owns the exact NIP-FI HTTP denial contract for upgrade denials
-//! and the header-parsing that feeds assertion validation.
+//! Header parsing and the HTTP denial contract are shared with HTTP ingress:
+//! both come from [`crate::nip_fi_http`], so the transports cannot drift.
 //!
 //! Per [NIP-FI.md](../../../docs/nips/NIP-FI.md) §Client-attached transport:
 //! - Exactly one `Nostr-Federated-Identity: Bearer <compact-JWS>` field.
@@ -11,10 +11,10 @@
 //!   contract is fixed (status, body, headers). [FI-TRACE-DENIAL-ORACLE]
 
 use axum::body::Body;
-use axum::http::{HeaderMap, Response, StatusCode};
-use buzz_auth::{
-    DenialClass, NipFiMode, VerifiedAssertion, VerifyAssertion, CLIENT_ATTACHED_HEADER,
-};
+use axum::http::{HeaderMap, Response};
+use buzz_auth::{DenialClass, NipFiMode, VerifiedAssertion, VerifyAssertion};
+
+use crate::nip_fi_http::{extract_bearer_token, http_denial};
 
 /// Outcome of NIP-FI assertion validation at upgrade time.
 pub(crate) enum NipFiUpgradeOutcome {
@@ -50,22 +50,20 @@ pub(crate) fn check_nip_fi_at_upgrade(
     }
 
     if matches!(mode, NipFiMode::DenyProtected) {
-        return NipFiUpgradeOutcome::Denied(denial_response(DenialClass::AuthorizationUnavailable));
+        return NipFiUpgradeOutcome::Denied(http_denial(DenialClass::AuthorizationUnavailable));
     }
 
     // Enforce mode: validate the assertion.
     let token = match extract_bearer_token(headers) {
         Ok(t) => t,
-        Err(class) => return NipFiUpgradeOutcome::Denied(denial_response(class)),
+        Err(class) => return NipFiUpgradeOutcome::Denied(http_denial(class)),
     };
 
     let verifier = match verifier {
         Some(v) => v,
         None => {
             // Verifier not yet constructed (startup race); fail closed.
-            return NipFiUpgradeOutcome::Denied(denial_response(
-                DenialClass::AuthorizationUnavailable,
-            ));
+            return NipFiUpgradeOutcome::Denied(http_denial(DenialClass::AuthorizationUnavailable));
         }
     };
 
@@ -73,78 +71,16 @@ pub(crate) fn check_nip_fi_at_upgrade(
         Ok(assertion) => NipFiUpgradeOutcome::Admitted(assertion),
         Err(err) => {
             tracing::debug!(code = err.code(), "nip-fi assertion denied at upgrade");
-            NipFiUpgradeOutcome::Denied(denial_response(err.denial_class()))
+            NipFiUpgradeOutcome::Denied(http_denial(err.denial_class()))
         }
     }
-}
-
-/// Extract the single `Bearer <token>` value from the NIP-FI header.
-///
-/// Rejects all forms the spec prohibits:
-/// - absent → `MissingEvidence`
-/// - repeated (multiple header values) → `EvidenceRejected`
-/// - comma-combined (`,` in a single value) → `EvidenceRejected`
-/// - empty after `Bearer ` stripping → `EvidenceRejected`
-/// - non-`Bearer ` prefix → `EvidenceRejected`
-/// - value containing whitespace after the scheme → `EvidenceRejected`
-///
-/// [FI-TRACE-TRANSPORT-CLOSED]
-fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, DenialClass> {
-    let mut values = headers.get_all(CLIENT_ATTACHED_HEADER).iter();
-    let first = match values.next() {
-        Some(v) => v,
-        None => return Err(DenialClass::MissingEvidence),
-    };
-    // Repeated header fields deny.
-    if values.next().is_some() {
-        return Err(DenialClass::EvidenceRejected);
-    }
-    let raw = first.to_str().map_err(|_| DenialClass::EvidenceRejected)?;
-    // Comma-combined values deny.
-    if raw.contains(',') {
-        return Err(DenialClass::EvidenceRejected);
-    }
-    // Must be `Bearer <token>` — exactly that prefix.
-    let token = raw
-        .strip_prefix("Bearer ")
-        .ok_or(DenialClass::EvidenceRejected)?;
-    // Empty value after stripping denies.
-    if token.is_empty() {
-        return Err(DenialClass::EvidenceRejected);
-    }
-    // Whitespace within the token denies (mixed-profile detection).
-    if token.contains(char::is_whitespace) {
-        return Err(DenialClass::EvidenceRejected);
-    }
-    Ok(token)
-}
-
-/// Build the exact NIP-FI HTTP denial response for a WebSocket upgrade request.
-///
-/// Per the NIP-FI rejection table: status + exact body + `Content-Type`.
-/// `MissingEvidence` additionally carries `WWW-Authenticate: Nostr`.
-/// No free text, request ID, or per-principal information. [FI-TRACE-DENIAL-ORACLE]
-pub(crate) fn denial_response(class: DenialClass) -> Response<Body> {
-    let status =
-        StatusCode::from_u16(class.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-
-    let mut builder = Response::builder()
-        .status(status)
-        .header("Content-Type", class.content_type());
-
-    if let Some(www_auth) = class.www_authenticate() {
-        builder = builder.header("WWW-Authenticate", www_auth);
-    }
-
-    builder
-        .body(Body::from(class.http_body()))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
+    use axum::http::{HeaderValue, StatusCode};
+    use buzz_auth::CLIENT_ATTACHED_HEADER;
 
     fn headers_with(value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -254,7 +190,7 @@ mod tests {
 
     #[test]
     fn missing_evidence_response_is_401_with_www_authenticate() {
-        let resp = denial_response(DenialClass::MissingEvidence);
+        let resp = http_denial(DenialClass::MissingEvidence);
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             resp.headers()
@@ -274,7 +210,7 @@ mod tests {
 
     #[test]
     fn evidence_rejected_response_is_403_exact_body() {
-        let resp = denial_response(DenialClass::EvidenceRejected);
+        let resp = http_denial(DenialClass::EvidenceRejected);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert!(
             resp.headers().get("WWW-Authenticate").is_none(),
@@ -285,14 +221,14 @@ mod tests {
 
     #[test]
     fn authorization_denied_response_is_403_exact_body() {
-        let resp = denial_response(DenialClass::AuthorizationDenied);
+        let resp = http_denial(DenialClass::AuthorizationDenied);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(body_bytes(resp), b"authorization denied\n");
     }
 
     #[test]
     fn authorization_unavailable_response_is_503_exact_body() {
-        let resp = denial_response(DenialClass::AuthorizationUnavailable);
+        let resp = http_denial(DenialClass::AuthorizationUnavailable);
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body_bytes(resp), b"authorization unavailable\n");
     }
@@ -360,7 +296,7 @@ mod tests {
         }
 
         // HTTP-level oracle: AuthorizationDenied → 403 exact bytes.
-        let resp_private = denial_response(DenialClass::AuthorizationDenied);
+        let resp_private = http_denial(DenialClass::AuthorizationDenied);
         assert_eq!(resp_private.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             body_bytes(resp_private),
@@ -370,8 +306,8 @@ mod tests {
 
         // Distinctness: public-evidence denial (EvidenceRejected) produces
         // different bytes from private-state denial (AuthorizationDenied).
-        let resp_evidence = denial_response(DenialClass::EvidenceRejected);
-        let resp_private2 = denial_response(DenialClass::AuthorizationDenied);
+        let resp_evidence = http_denial(DenialClass::EvidenceRejected);
+        let resp_private2 = http_denial(DenialClass::AuthorizationDenied);
         assert_ne!(
             body_bytes(resp_evidence),
             body_bytes(resp_private2),

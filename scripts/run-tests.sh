@@ -194,6 +194,15 @@ run_unit_tests() {
   run_test_step "buzz-relay router tests" \
     cargo test -p buzz-relay --lib router::tests:: -- --nocapture
 
+  run_test_step "buzz-relay NIP-FI HTTP ingress tests" \
+    cargo test -p buzz-relay --lib nip_fi_http::tests:: -- --nocapture
+
+  run_test_step "buzz-relay API query parsing tests" \
+    cargo test -p buzz-relay --lib api::parse_query_tests:: -- --nocapture
+
+  run_test_step "buzz-relay Git transport Off-mode precedence tests" \
+    cargo test -p buzz-relay --lib api::git::transport::off_mode_precedence_tests:: -- --nocapture
+
   run_test_step "buzz-relay NIP-FI upgrade tests" \
     cargo test -p buzz-relay --lib nip_fi_upgrade:: -- --nocapture
 

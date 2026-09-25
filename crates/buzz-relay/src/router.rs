@@ -589,11 +589,12 @@ async fn nip11_or_ws_handler(
     // accepts is also gated — no hand-rolled predicate can diverge from the
     // extractor's accepted shapes when `http2` is eventually enabled.
     //
-    // Zero DB cost invariant: both fire-points run before `bind_community`,
-    // so denied upgrades pay zero DB cost [FI-TRACE-TRANSPORT-CLOSED], and
-    // tests that assert 401/503 are not pre-empted by a 404 from an unseeded
-    // DB — the gate exercises its own seam without coupling to host-resolution
-    // fixture state.
+    // Zero DB cost invariant: the active HTTP/1.1 fire-point runs before
+    // `bind_community`, so denied h1 upgrades pay zero DB cost
+    // [FI-TRACE-TRANSPORT-CLOSED], and tests that assert 401/503 are not
+    // pre-empted by a 404 from an unseeded DB. The latent h2 fire-point inside
+    // `Ok(ws)` runs after `bind_community`; it is unreachable until `http2`
+    // is enabled.
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
@@ -639,8 +640,8 @@ async fn nip11_or_ws_handler(
     // unmapped host still gets the document (with host-scoped fields like
     // `icon` simply absent), so the doc cannot leak which hosts are mapped.
     //
-    // NIP-FI gate runs above (before bind_community) so denied upgrades pay
-    // zero DB cost and the gate seam is testable without a seeded-DB fixture.
+    // The active HTTP/1.1 NIP-FI gate runs above (before bind_community) so
+    // denied h1 upgrades pay zero DB cost; the latent h2 gate runs below.
     let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
         Ok(ctx) => ctx,
         Err(_) => {
@@ -2549,7 +2550,7 @@ mod tests {
 
         // Build a DenyProtected-mode state using the same SPA helper, but with
         // the NIP-FI mode overridden after config construction.
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.web_dir = Some(web_dir.path().to_path_buf());
@@ -2648,7 +2649,7 @@ mod tests {
             write_admin_bundle(admin_dir);
             write_bundle(web_dir);
 
-            let mut config = crate::config::Config::from_env().expect("default config loads");
+            let mut config = crate::config::Config::for_test();
             config.require_relay_membership = false;
             config.redis_url = "redis://127.0.0.1:1".to_string();
             config.web_dir = Some(web_dir.to_path_buf());

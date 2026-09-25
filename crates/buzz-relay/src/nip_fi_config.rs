@@ -379,6 +379,32 @@ mod tests {
         "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS",
     ];
 
+    /// Same-process witness (plain libtest, not nextest): a fixture's
+    /// `Config::for_test()` read waits while an FI writer holds the lock over
+    /// an invalid Enforce environment, then loads the restored environment.
+    /// [FI-TRACE-ENV-RACE]
+    #[test]
+    fn fixture_config_read_waits_for_fi_env_lock() {
+        let guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let env = EnvGuard::new(NIP_FI_VARS);
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::remove_var("BUZZ_NIP_FI_ISSUERS");
+
+        let reader = std::thread::spawn(|| crate::config::Config::for_test().nip_fi.mode);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !reader.is_finished(),
+            "fixture read must block while the invalid FI environment is locked"
+        );
+
+        drop(env);
+        drop(guard);
+        let mode = reader
+            .join()
+            .expect("fixture read must load the restored environment");
+        assert!(matches!(mode, NipFiMode::Off));
+    }
+
     #[test]
     fn off_mode_requires_no_other_config() {
         let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();

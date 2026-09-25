@@ -5815,7 +5815,7 @@ mod postgres_tests {
                 .await
                 .expect("pubsub manager"),
         );
-        let mut config = crate::config::Config::from_env().expect("relay config from env");
+        let mut config = crate::config::Config::for_test();
         config.database_url = db_url.clone();
         config.redis_url = FAKE_REDIS_URL.to_string();
         config.require_relay_membership = false;
@@ -6098,7 +6098,7 @@ mod postgres_tests {
                 .await
                 .expect("pubsub manager"),
         );
-        let mut config = crate::config::Config::from_env().expect("relay config from env");
+        let mut config = crate::config::Config::for_test();
         config.database_url = db_url.to_owned();
         config.redis_url = FAKE_REDIS_URL.to_string();
         config.require_relay_membership = false;

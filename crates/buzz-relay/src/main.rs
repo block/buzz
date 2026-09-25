@@ -1492,7 +1492,14 @@ async fn nip_fi_jwks_refresh_loop<F, Fut>(
             if now < *next_attempt_at {
                 continue;
             }
-            let delay_secs = if fetch(issuer).await {
+            // Shutdown must stay bounded: never start a fetch after cancel,
+            // and drop an in-flight fetch the moment cancel fires.
+            let fetched = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                ok = fetch(issuer) => ok,
+            };
+            let delay_secs = if fetched {
                 *warmed = true;
                 *interval
             } else {
@@ -1728,14 +1735,15 @@ async fn serve(
             .await
             .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
         uds_handle.abort();
-        hard_shutdown.abort();
         // Cancel and join the JWKS refresh task so it doesn't outlive the process.
+        // The hard-exit backstop stays armed until the join completes.
         jwks_refresh_cancel.cancel();
         if let Some(h) = jwks_refresh_handle {
             if let Err(e) = h.await {
                 tracing::warn!(error = %e, "NIP-FI: JWKS refresh supervisor join error on shutdown");
             }
         }
+        hard_shutdown.abort();
         return Ok(());
     }
 
@@ -1759,14 +1767,15 @@ async fn serve(
     let hard_shutdown = shutdown_handle
         .await
         .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
-    hard_shutdown.abort();
     // Cancel and join the JWKS refresh task so it doesn't outlive the process.
+    // The hard-exit backstop stays armed until the join completes.
     jwks_refresh_cancel.cancel();
     if let Some(h) = jwks_refresh_handle {
         if let Err(e) = h.await {
             tracing::warn!(error = %e, "NIP-FI: JWKS refresh supervisor join error on shutdown");
         }
     }
+    hard_shutdown.abort();
     Ok(())
 }
 
@@ -2916,6 +2925,66 @@ mod tests {
 
         cancel.cancel();
         task.await.expect("refresh loop task");
+    }
+
+    /// Shutdown is bounded: cancel drops an in-flight fetch and no further
+    /// due issuer is fetched, so the supervisor join cannot outlast the drain
+    /// backstop behind unreachable IdPs.
+    #[tokio::test(start_paused = true)]
+    async fn jwks_refresh_cancel_drops_in_flight_fetch_and_skips_remaining_issuers() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let first_started = Arc::new(AtomicBool::new(false));
+        let second_fetches = Arc::new(AtomicUsize::new(0));
+        let (started, second) = (Arc::clone(&first_started), Arc::clone(&second_fetches));
+        let cancel = CancellationToken::new();
+
+        // Both issuers are cold, so both come due together at T=5.
+        let supervisor = tokio::spawn(run_jwks_refresh_supervisor(
+            vec![
+                ("issuer-a".to_string(), 60, false),
+                ("issuer-b".to_string(), 60, false),
+            ],
+            move |issuer: &str| {
+                let is_first = issuer == "issuer-a";
+                let (started, second) = (Arc::clone(&started), Arc::clone(&second));
+                Box::pin(async move {
+                    if is_first {
+                        started.store(true, Ordering::SeqCst);
+                        std::future::pending::<bool>().await
+                    } else {
+                        second.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+            },
+            cancel.clone(),
+        ));
+
+        // Let the supervisor spawn the worker and seed its schedule at T=0.
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(5)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            first_started.load(Ordering::SeqCst),
+            "first issuer fetch is in flight"
+        );
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor must finish promptly after cancel")
+            .expect("supervisor task");
+        assert_eq!(
+            second_fetches.load(Ordering::SeqCst),
+            0,
+            "no issuer may be fetched after cancel"
+        );
     }
 
     // ── Test C: hard-deadline is enforced by ProductionJwksSource, not the timer ──

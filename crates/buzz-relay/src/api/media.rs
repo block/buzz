@@ -1713,7 +1713,7 @@ mod tests {
             };
             use jsonwebtoken::{jwk::JwkSet, Algorithm};
 
-            let mut config = crate::config::Config::from_env().ok()?;
+            let mut config = crate::config::Config::for_test();
             config.database_url = crate::test_support::database_url();
             config.redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -1800,7 +1800,7 @@ mod tests {
 
         /// Build an AppState with NIP-FI Off.
         async fn media_off_test_state() -> Option<Arc<AppState>> {
-            let mut config = crate::config::Config::from_env().ok()?;
+            let mut config = crate::config::Config::for_test();
             config.database_url = crate::test_support::database_url();
             config.redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
