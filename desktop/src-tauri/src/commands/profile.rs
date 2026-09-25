@@ -269,7 +269,7 @@ pub async fn search_users(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<SearchUsersResponse, String> {
-    let policy = crate::managed_agents::device_policy::active(&app)?;
+    let policy = crate::managed_agents::device_policy::for_discovery(&app);
     let relay_url = crate::relay::relay_api_base_url_with_override(&state);
     let keys = state.signing_keys()?;
     let response = search_users_unfiltered(

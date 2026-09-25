@@ -310,7 +310,7 @@ pub async fn list_relay_agents(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<Vec<RelayAgentInfo>, String> {
-    let policy = crate::managed_agents::device_policy::active(&app)?;
+    let policy = crate::managed_agents::device_policy::for_discovery(&app);
     let relay_url = crate::relay::relay_api_base_url_with_override(&state);
     let mut agents = list_relay_agents_for_state(&state).await?;
     agents.retain(|agent| {

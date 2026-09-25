@@ -27,6 +27,16 @@ pub(crate) fn active<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<DeviceAgen
     .cloned()
 }
 
+/// Keep discovery and recovery available when the device policy cannot load.
+/// The fallback has no discovery preferences and never permits local hosting.
+/// Execution guards still use `active` and preserve its original error.
+pub(crate) fn for_discovery<R: tauri::Runtime>(app: &AppHandle<R>) -> DeviceAgentPolicy {
+    active(app).unwrap_or_else(|_| DeviceAgentPolicy {
+        client_only: true,
+        ..Default::default()
+    })
+}
+
 /// Invalid policy disables automatic management while leaving chat available.
 pub(crate) fn is_client_only<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     active(app).map_or(true, |policy| policy.client_only)

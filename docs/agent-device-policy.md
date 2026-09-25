@@ -31,6 +31,9 @@ same-name profile with verified ownership on the active relay. An unavailable
 or incomplete relay lookup refuses the operation; offline presence does not
 free a name. This is not an atomic cross-device reservation: simultaneous
 creation by another unconfigured client still requires relay-side coordination.
+Persona renames also check the complete linked-instance cascade before saving;
+a rename cannot assign the new name to multiple public keys. Pool-named instances
+keep their own names and remain part of collision checks.
 Edits that keep the same name still enforce the protected-identity guards but
 do not require an online directory lookup; local credential, prompt and model
 configuration can therefore be saved while the relay is unavailable.
@@ -39,7 +42,11 @@ Unique-name mode keeps runnable definitions and team templates local, including
 their old pending backlog. Only lifecycle records for explicitly authored local
 identities are published: kind:30177, its deletion and its archive request. A
 durable key registry in the scoped retention database permits those operations
-to retry after deletion/restart without releasing unrelated queued events.
+to retry queued operations after deletion/restart without releasing unrelated
+queued events. This does not repair the existing direct-delete failure window
+between removing a local record and committing its tombstone/archive journal.
+Boot reconciliation deliberately excludes remote managed-agent heads: a missing
+local record is not evidence that an identity hosted on another device was deleted.
 Public agent profiles and ownership policies remain visible to the other client
 for channel invitations and mentions. Individual agent imports are supported;
 team imports and catalog publication require unrestricted hosting.
@@ -87,8 +94,10 @@ exact. When unique-name protection is disabled, Settings can clear discovery
 preferences without deleting agents.
 
 The active policy, including read errors, is fixed for the process lifetime.
-The native boundary refuses execution on a malformed/unreadable policy; Settings
-can reset it to client-only mode and apply that recovery after restart. A missing
+The native boundary refuses execution on a malformed/unreadable policy. People
+search, relay-agent discovery, and the persona list remain readable without
+preferred-identity filtering; local definitions are shown as inactive. Settings
+can reset the policy to client-only mode and apply that recovery after restart. A missing
 file preserves existing hosting behavior. The file is bounded to 64 KiB and
 written atomically with restricted permissions.
 

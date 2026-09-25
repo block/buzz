@@ -88,7 +88,7 @@ pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, Strin
         pending::project_active_persona_sharing(&app, &state, &mut personas);
         // Effective local availability only: never persist this projection or
         // publish it as a definition edit. Other devices keep their activation.
-        let policy = crate::managed_agents::device_policy::active(&app)?;
+        let policy = crate::managed_agents::device_policy::for_discovery(&app);
         for persona in &mut personas {
             if policy
                 .require_local_agent(&persona.display_name, None, Some(&persona.id))

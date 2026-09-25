@@ -106,3 +106,34 @@ async fn client_only_skips_actual_pending_flush_without_requesting_signing_keys(
         .is_err()
     );
 }
+
+#[test]
+fn invalid_policy_keeps_discovery_available_without_enabling_hosting() {
+    let app = app_with_policy(Err("policy unreadable".into()));
+    let policy = for_discovery(app.handle());
+    assert!(policy.allows_identity("https://relay.example", Some("owner"), "Scout", "remote"));
+    assert!(policy
+        .require_local_agent("Scout", Some("remote"), Some("persona"))
+        .is_err());
+    assert!(generate_agent_keys(app.handle(), "Notebook", None).is_err());
+    assert!(pauses_sync(app.handle()));
+}
+
+#[test]
+fn valid_policy_keeps_discovery_preferences() {
+    let policy = DeviceAgentPolicy {
+        unique_names: true,
+        preferred_agents: vec![model::PreferredAgent {
+            name: "Scout".into(),
+            pubkey: "preferred".into(),
+            owner_pubkey: "owner".into(),
+            relay_url: "https://relay.example".into(),
+            persona_id: None,
+        }],
+        ..Default::default()
+    };
+    let app = app_with_policy(Ok(policy));
+    let policy = for_discovery(app.handle());
+    assert!(!policy.allows_identity("https://relay.example", Some("owner"), "Scout", "old"));
+    assert!(policy.allows_identity("https://relay.example", Some("owner"), "Scout", "preferred"));
+}

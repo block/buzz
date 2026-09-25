@@ -54,6 +54,35 @@ fn propagate_persona_name_rename(
     renamed
 }
 
+// Match the propagation rule exactly, and reject the prospective collision
+// before any persona or agent writes. Pool-named instances are not exempted
+// from the directory lookup just because they share this persona.
+fn persona_rename_key<'a>(
+    records: &'a [ManagedAgentRecord],
+    persona_id: &str,
+    old_name: &str,
+    new_name: &str,
+    unique_names: bool,
+) -> Result<Option<&'a str>, String> {
+    let is_target = |record: &ManagedAgentRecord| {
+        record.persona_id.as_deref() == Some(persona_id) && record.name == old_name
+    };
+    let target = records.iter().find(|record| is_target(record));
+    if unique_names && old_name != new_name && target.is_some() {
+        let prospective_keys: std::collections::HashSet<_> = records
+            .iter()
+            .filter(|record| {
+                is_target(record) || record.name.trim().eq_ignore_ascii_case(new_name.trim())
+            })
+            .map(|record| record.pubkey.as_str())
+            .collect();
+        if prospective_keys.len() > 1 {
+            return Err("This rename would give multiple agent identities the same name. Rename the individual agents first, or choose a unique name.".into());
+        }
+    }
+    Ok(target.map(|record| record.pubkey.as_str()))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct LinkedProfileUpdate {
     /// Whether this update changed bytes in the managed-agent record.
@@ -168,8 +197,15 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
         .find(|persona| persona.id == input.id)
         .ok_or_else(|| format!("agent {} not found", input.id))?
         .display_name;
-    let existing_key = linked.first().map(|record| record.pubkey.as_str());
-    crate::managed_agents::device_policy::active(&app)?
+    let policy = crate::managed_agents::device_policy::active(&app)?;
+    let existing_key = persona_rename_key(
+        &linked,
+        &input.id,
+        &current_name,
+        input.display_name.trim(),
+        policy.unique_names,
+    )?;
+    policy
         .check_name_update(
             &current_name,
             &input.display_name,
@@ -206,6 +242,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 .lock()
                 .map_err(|error| error.to_string())?;
             crate::managed_agents::device_policy::require_persona(&app, &input.id)?;
+            let records = load_managed_agents(&app)?;
             let mut personas = load_personas(&app)?;
             pending::project_active_persona_sharing(&app, &state, &mut personas);
             let persona = personas
@@ -217,6 +254,15 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let avatar_changed = persona.avatar_url != avatar_url;
             let name_changed = persona.display_name != display_name;
             let old_display_name = persona.display_name.clone();
+            // Recheck the complete cascade under the store lock, before either
+            // file is saved. The earlier snapshot preceded an async lookup.
+            persona_rename_key(
+                &records,
+                &input.id,
+                &old_display_name,
+                &display_name,
+                crate::managed_agents::device_policy::active(&app)?.unique_names,
+            )?;
             // The kind:0 `about` is the authored description, so a
             // description edit changes what should be published.
             let old_about =
