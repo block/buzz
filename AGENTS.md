@@ -39,7 +39,8 @@ confirmation, not app runs.
    in the app, using the native app or a device when the behavior needs it
    (browser or headless Playwright counts only for what it can exercise). Relay
    changes: a local relay, exercising the changed events or endpoints. CLI or
-   tooling changes: the affected command or workflow.
+   tooling changes: the affected command or workflow. The human may skip this
+   step, for example for a small change or while iterating.
 3. **A human then tested it themselves**: in the app, against the local relay
    (through the app or `curl`), or by running the changed command. Agent testing
    does not substitute. Agents give the human exact steps and what working looks
