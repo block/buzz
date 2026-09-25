@@ -3,24 +3,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
 import {
   banMember,
-  type CommunityRestriction,
-  listAuditActions,
-  listReports,
   listRestrictions,
-  type ModerationAction,
-  type ModerationReport,
   type ReportType,
-  type ResolutionAction,
-  type ResolutionStatus,
-  resolveReport,
   submitReport,
   timeoutMember,
   unbanMember,
   untimeoutMember,
 } from "@/shared/api/moderation";
 
-export const moderationReportsQueryKey = ["moderationReports"] as const;
-export const moderationAuditQueryKey = ["moderationAudit"] as const;
 export const moderationRestrictionsQueryKey = [
   "moderationRestrictions",
 ] as const;
@@ -41,32 +31,7 @@ export function useRelaySelfQuery(enabled = true) {
   });
 }
 
-// --- Reads (mod-authz gated; consumed by the U2 queue/audit surfaces) ---
-
-export function useModerationReportsQuery(
-  options?: { status?: string; limit?: number },
-  enabled = true,
-) {
-  return useQuery({
-    enabled,
-    queryKey: [
-      ...moderationReportsQueryKey,
-      options?.status ?? null,
-      options?.limit ?? null,
-    ],
-    queryFn: () => listReports(options),
-    staleTime: 15_000,
-  });
-}
-
-export function useModerationAuditQuery(limit?: number, enabled = true) {
-  return useQuery({
-    enabled,
-    queryKey: [...moderationAuditQueryKey, limit ?? null],
-    queryFn: () => listAuditActions(limit),
-    staleTime: 15_000,
-  });
-}
+// --- Reads (mod-authz gated; consumed by the members-sidebar surfaces) ---
 
 export function useModerationRestrictionsQuery(enabled = true) {
   return useQuery({
@@ -80,19 +45,15 @@ export function useModerationRestrictionsQuery(enabled = true) {
 // --- Writes ---
 //
 // Moderation writes are relay-validated command events whose effects surface in
-// the queue/audit/restricted reads after processing, so mutations invalidate the
-// affected read queries on success rather than fabricating optimistic rows.
+// the restriction reads after processing, so mutations invalidate the affected
+// read queries on success rather than fabricating optimistic rows.
 
 function useInvalidateModerationReads() {
   const queryClient = useQueryClient();
   return () =>
-    Promise.all([
-      queryClient.invalidateQueries({ queryKey: moderationReportsQueryKey }),
-      queryClient.invalidateQueries({ queryKey: moderationAuditQueryKey }),
-      queryClient.invalidateQueries({
-        queryKey: moderationRestrictionsQueryKey,
-      }),
-    ]);
+    queryClient.invalidateQueries({
+      queryKey: moderationRestrictionsQueryKey,
+    });
 }
 
 /** Submit a NIP-56 report. Does not touch the mod-gated read caches. */
@@ -147,24 +108,4 @@ export function useUntimeoutMemberMutation() {
   });
 }
 
-export function useResolveReportMutation() {
-  const invalidate = useInvalidateModerationReads();
-  return useMutation({
-    mutationFn: (input: {
-      reportEventId: string;
-      status: ResolutionStatus;
-      action: ResolutionAction;
-      reason?: string;
-    }) => resolveReport(input),
-    onSuccess: invalidate,
-  });
-}
-
-export type {
-  CommunityRestriction,
-  ModerationAction,
-  ModerationReport,
-  ReportType,
-  ResolutionAction,
-  ResolutionStatus,
-};
+export type { ReportType };

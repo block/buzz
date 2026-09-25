@@ -52,6 +52,8 @@ pub mod replaceable;
 pub mod storage_accounting;
 /// Thread metadata persistence.
 pub mod thread;
+/// Strict newest-first thread windows and auxiliary scans.
+pub mod thread_window;
 /// Per-community usage rollup queries for Prometheus gauges.
 pub mod usage;
 /// User profile persistence.

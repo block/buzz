@@ -17,6 +17,7 @@ serde_json  = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
 hex         = { workspace = true }
+futures-util = { workspace = true }
 sha2        = { workspace = true }
 tracing     = { workspace = true }
 thiserror   = { workspace = true }

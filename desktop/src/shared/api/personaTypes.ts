@@ -14,6 +14,7 @@ export type AgentPersona = {
    */
   description: string | null;
   systemPrompt: string;
+  acpCommand: string; // ACP transport selected before deployment.
   /** Preferred ACP runtime ID (e.g. "goose", "claude"). */
   runtime: string | null;
   /** Opaque, harness-specific model identifier string. Buzz stores and passes through without interpretation. */
@@ -72,6 +73,7 @@ export type CreatePersonaInput = {
   /** Optional short, PUBLIC description (max 280 chars). Empty string clears. */
   description?: string | null;
   systemPrompt: string;
+  acpCommand?: string;
   runtime?: string;
   model?: string;
   provider?: string;
@@ -92,6 +94,7 @@ export type UpdatePersonaInput = {
   /** Optional short, PUBLIC description (max 280 chars). Empty string clears. */
   description?: string | null;
   systemPrompt: string;
+  acpCommand?: string;
   runtime?: string;
   model?: string;
   provider?: string;

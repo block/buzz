@@ -746,10 +746,9 @@ constitutes a **known gap** in this section's security guarantees.
 
 The strict verifier (exact cardinality, mandatory `server` tag, 60-second proof
 window, and 401/403 denial-class split) is implemented in `buzz-media/src/auth.rs`
-as `BlossomStrictness::Strict`.  It is engaged when NIP-FI active modes are
-configured; deployment requires the NIP-FI HTTP enforcement PR (#7264) to be
-merged first.  Until that PR lands the verifier runs in `Permissive` mode,
-which preserves pre-NIP-FI behavior [FI-INV-15].
+as `BlossomStrictness::Strict`.  The relay engages it in `enforce` mode; `off`
+runs the verifier in `Permissive` mode, which preserves pre-NIP-FI behavior
+[FI-INV-15], and `deny_protected` answers 503 before any proof check.
 
 The deny-map gap described above remains a **known gap** pending the S4
 issuer-scoped deny-map integration.

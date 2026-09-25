@@ -209,15 +209,6 @@ pub struct Config {
     /// are permitted regardless of auth method (API token, NIP-42).
     pub require_relay_membership: bool,
 
-    /// Test-only override for Blossom strictness.
-    ///
-    /// In production builds this field is absent — `blossom_strictness_from_state`
-    /// always returns `Permissive` until #7264 wires `config.nip_fi` into
-    /// `AppState`.  In test builds, set this to `Some(Strict)` to exercise Strict
-    /// response shapes without activating production enforcement.
-    #[cfg(test)]
-    pub test_blossom_strictness: Option<buzz_media::auth::BlossomStrictness>,
-
     /// Whether this deployment can serve huddle (voice) audio.
     ///
     /// Huddle audio frames are relayed peer-to-peer *within a single pod*
@@ -376,6 +367,14 @@ pub struct Config {
     /// Whether the configured web bundle serves Git browser routes in addition
     /// to the public invite landing page. Defaults to false.
     pub serve_git_web_gui: bool,
+
+    /// NIP-FI federated-identity enforcement configuration.
+    ///
+    /// Present when `BUZZ_NIP_FI_MODE` is `enforce` or `deny_protected`; in
+    /// those modes the relay validates assertions at HTTP ingress and (via S3)
+    /// at WebSocket upgrade. `Off` mode (the default) leaves all identity
+    /// enforcement to NIP-42 alone.
+    pub nip_fi: crate::nip_fi_config::NipFiRelayConfig,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -1274,8 +1273,7 @@ impl Config {
             admin,
             web_dir,
             serve_git_web_gui,
-            #[cfg(test)]
-            test_blossom_strictness: None,
+            nip_fi: crate::nip_fi_config::NipFiRelayConfig::from_env()?,
         })
     }
 }
