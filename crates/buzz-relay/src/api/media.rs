@@ -4206,6 +4206,14 @@ mod tests {
                     &format!("Enforce {context} non-member"),
                 );
             }
+            assert_exact_response(
+                &media_read(&rt, &state, "HEAD", &host, &read_proof, Some(&assertion)),
+                StatusCode::FORBIDDEN,
+                "text/plain; charset=utf-8",
+                None,
+                b"",
+                "Enforce HEAD non-member",
+            );
         }
 
         #[test]
@@ -4235,6 +4243,14 @@ mod tests {
                     &format!("Off {context} non-member"),
                 );
             }
+            assert_exact_response(
+                &media_read(&rt, &state, "HEAD", &host, &read_proof, None),
+                StatusCode::FORBIDDEN,
+                "application/json",
+                None,
+                b"",
+                "Off HEAD non-member",
+            );
         }
 
         /// Positive control: a relay member passes the gate under Enforce and
@@ -4258,8 +4274,15 @@ mod tests {
             .expect("add relay member");
             let assertion = signed_assertion(&keys.public_key().to_hex());
             let proof = blossom_get_auth_value(&keys, &host, &"a".repeat(64));
-            let (status, _, body) = media_read(&rt, &state, "GET", &host, &proof, Some(&assertion));
-            assert_eq!(status, StatusCode::NOT_FOUND, "member read; body {body:?}");
+            for method in ["GET", "HEAD"] {
+                let (status, _, body) =
+                    media_read(&rt, &state, method, &host, &proof, Some(&assertion));
+                assert_eq!(
+                    status,
+                    StatusCode::NOT_FOUND,
+                    "member {method}; body {body:?}"
+                );
+            }
         }
     }
 }
