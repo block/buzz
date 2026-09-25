@@ -1785,6 +1785,98 @@ void main() {
       });
     });
 
+    test(
+      'a cold-start latest-message deadline is filled by unread catch-up',
+      () {
+        fakeAsync((async) {
+          final session = _FakeRelaySession(
+            memberships: [_membership(_channelA, myPk)],
+            metadata: [_meta(id: _channelA, name: 'general')],
+            recentMessages: const [
+              NostrEvent(
+                id: 'mention',
+                pubkey: 'alice',
+                createdAt: 30,
+                kind: EventKind.streamMessageV2,
+                tags: [
+                  ['h', _channelA],
+                  ['p', myPk],
+                ],
+                content: 'hi',
+                sig: 'sig',
+              ),
+            ],
+          )..latestBatchError = deadline();
+          final container = _buildContainer(session: session);
+          container.listen(channelsProvider, (_, _) {});
+          async.elapse(const Duration(seconds: 1));
+          int latest() => session.queryBatches
+              .where((batch) => batch.isNotEmpty && !isUnread(batch))
+              .length;
+          void expectCaughtUp() {
+            final notifier = container.read(channelsProvider.notifier);
+            expect(notifier.latestObservedByChannel[_channelA], 30);
+            expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, [
+              'mention',
+            ]);
+            expect(
+              container.read(channelsProvider).value!.single.lastMessageAt,
+              DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+            );
+          }
+
+          expect(latest(), 1);
+          expect(session.queryBatches.where(isUnread), hasLength(1));
+          expectCaughtUp();
+          lifecycle(async, container, session);
+          // No automatic path re-sends the batch or its websocket fallback.
+          expect(latest(), 1);
+          expect(session.messageHistoryCount, 0);
+          expectCaughtUp();
+          container.dispose();
+        });
+      },
+    );
+
+    test('unread catch-up never moves lastMessageAt backward', () async {
+      NostrEvent mention(String id, int createdAt) => NostrEvent(
+        id: id,
+        pubkey: 'alice',
+        createdAt: createdAt,
+        kind: EventKind.streamMessageV2,
+        tags: const [
+          ['h', _channelA],
+          ['p', myPk],
+        ],
+        content: 'hi',
+        sig: 'sig',
+      );
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [mention('older', 30)],
+      )..pauseNextUnreadCatchUpQuery();
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await session.nextUnreadCatchUpQueryStarted;
+      // A newer live event lands while the catch-up is in flight.
+      session.emit(mention('newer', 60));
+      session.resumePausedUnreadCatchUpQuery();
+      await _settle();
+      expect(
+        container
+            .read(channelsProvider.notifier)
+            .observedUnreadEventsByChannel[_channelA]
+            ?.keys,
+        containsAll(['older', 'newer']),
+      );
+      expect(
+        container.read(channelsProvider).value!.single.lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(60 * 1000, isUtc: true),
+      );
+    });
+
     // HTTP fails ordinarily, then the per-filter websocket fallback times out:
     // the same operation, so it is just as terminal.
     for (final (name, wsError, replays) in [

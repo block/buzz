@@ -652,7 +652,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         }
       }
 
-      var recorded = false;
+      final recordedAtByChannel = <String, int>{};
       for (final event in events) {
         final channelId = event.channelId;
         if (channelId == null) continue;
@@ -673,20 +673,41 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           continue;
         }
         _recordUnreadEvent(channel, event, myPk);
-        recorded = true;
+        recordedAtByChannel[channelId] = max(
+          recordedAtByChannel[channelId] ?? 0,
+          event.createdAt,
+        );
       }
       // Republish only when this catch-up actually changed unread state. A
       // batch that recorded nothing has nothing to show, and a failed or
       // superseded batch must not repaint another refresh's list: the retired
       // check above already returned in that case, and no await separates it
       // from here, so a second check would be dead code.
-      if (recorded) {
-        state = state.whenData((channels) => List<Channel>.of(channels));
+      // Recorded events also advance `lastMessageAt`, as live events do: a
+      // deadline-unavailable latest-message batch leaves it unset.
+      if (recordedAtByChannel.isNotEmpty) {
+        state = state.whenData(
+          (channels) => [
+            for (final channel in channels)
+              _advanceLastMessageAt(channel, recordedAtByChannel[channel.id]),
+          ],
+        );
       }
     } catch (error) {
       if (!ref.mounted) return;
       debugPrint('[ChannelsNotifier] unread catch-up failed: $error');
     }
+  }
+
+  static Channel _advanceLastMessageAt(Channel channel, int? createdAt) {
+    if (createdAt == null) return channel;
+    final at = DateTime.fromMillisecondsSinceEpoch(
+      createdAt * 1000,
+      isUtc: true,
+    );
+    final current = channel.lastMessageAt;
+    if (current != null && !at.isAfter(current)) return channel;
+    return channel.copyWith(lastMessageAt: at);
   }
 
   void _handleLiveEvent(NostrEvent event) {

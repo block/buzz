@@ -2,9 +2,12 @@ import 'dart:async';
 
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/forum/forum_provider.dart';
+import 'package:buzz/main.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // ---------------------------------------------------------------------------
 // Fake sessions
@@ -76,6 +79,15 @@ class _OrdinaryErrorSession extends RelaySessionNotifier {
 // ---------------------------------------------------------------------------
 
 void main() {
+  test('the production root scope uses relayProviderRetry', () async {
+    SharedPreferences.setMockInitialValues({});
+    final scope = buildRootProviderScope(
+      prefs: await SharedPreferences.getInstance(),
+      child: const SizedBox(),
+    );
+    expect(scope.retry, same(relayProviderRetry));
+  });
+
   group('isRelayDeadlineError', () {
     test('matches HTTP 503 query timed out', () {
       expect(
