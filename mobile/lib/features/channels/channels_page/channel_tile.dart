@@ -65,9 +65,14 @@ class _ChannelTile extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    resolveDmChannelDisplayLabel(
-                      channel,
-                      currentPubkey: currentPubkey,
+                    ref.watch(
+                      identityNameSourcesProvider.select(
+                        (names) => resolveDmChannelDisplayLabel(
+                          channel,
+                          currentPubkey: currentPubkey,
+                          names: names,
+                        ),
+                      ),
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,

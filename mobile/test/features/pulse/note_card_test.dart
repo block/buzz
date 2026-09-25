@@ -1,3 +1,4 @@
+import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/pulse/note_card.dart';
@@ -18,6 +19,54 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 }
 
 void main() {
+  testWidgets('names the author and reply target within the timeline', (
+    tester,
+  ) async {
+    final first = 'a' * 64, second = 'b' * 64;
+    final users = {
+      first: UserProfile(pubkey: first, displayName: 'Scout'),
+      second: UserProfile(pubkey: second, displayName: 'Scout'),
+    };
+    final names = IdentityNameSources(profiles: users).scope([first, second]);
+    expect(names.labelFor(first), isNot('Scout'));
+    final note = UserNote(
+      id: 'note-1',
+      pubkey: first,
+      createdAt: DateTime.utc(2025, 9, 30, 12).millisecondsSinceEpoch ~/ 1000,
+      content: 'A reply',
+      tags: [
+        ['e', 'parent-note', '', 'reply'],
+        ['p', second],
+      ],
+    );
+    expect(note.replyParentAuthor, second);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: NoteCard(
+              note: note,
+              reaction: const PulseReactionState(
+                count: 0,
+                reactedByCurrentUser: false,
+              ),
+              names: names,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text(names.labelFor(first)), findsOneWidget);
+    expect(find.text('Replying to ${names.labelFor(second)}'), findsOneWidget);
+  });
+
   testWidgets('constrains timestamp with agent and follow metadata', (
     tester,
   ) async {

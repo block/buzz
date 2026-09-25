@@ -110,6 +110,11 @@ class ChannelDetailsPage extends HookConsumerWidget {
         '$memberCount ${memberCount == 1 ? 'member' : 'members'}';
     final previewMembers = members.take(_channelMemberPreviewLimit).toList();
     final userCache = ref.watch(userCacheProvider);
+    final memberLabels = watchChannelIdentityLabels(
+      ref,
+      resolvedChannel.id,
+      previewMembers.map((member) => member.pubkey),
+    );
     final currentSectionId = sectionState.isReady
         ? sectionState.store.assignments[resolvedChannel.id]
         : sectionId;
@@ -410,6 +415,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     onMemberTap: onMemberTap,
                     displayName:
                         userCache[member.pubkey.toLowerCase()]?.displayName,
+                    contextualLabel: memberLabels[member.pubkey.toLowerCase()],
                     avatarUrl:
                         userCache[member.pubkey.toLowerCase()]?.avatarUrl,
                   ),
@@ -643,6 +649,7 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
     required this.currentPubkey,
     required this.onMemberTap,
     required this.displayName,
+    required this.contextualLabel,
     required this.avatarUrl,
   });
 
@@ -650,22 +657,26 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
   final String? currentPubkey;
   final void Function(BuildContext context, String pubkey) onMemberTap;
   final String? displayName;
+
+  /// The channel's contextual label for this member, when resolved.
+  final String? contextualLabel;
   final String? avatarUrl;
 
   @override
   Widget build(BuildContext context) {
     final isSelf = member.pubkey.toLowerCase() == currentPubkey?.toLowerCase();
     final hasName = displayName?.trim().isNotEmpty == true;
-    final label = isSelf
+    final name = isSelf
         ? 'You'
         : hasName
         ? displayName!.trim()
         : member.labelFor(currentPubkey);
+    final label = isSelf ? name : contextualLabel ?? name;
     // Self/named initials come from the visible label; unnamed members stay
     // keyed to the hex public key so the compact-npub label doesn't render
     // `N` for everyone.
     final initial = isSelf || hasName
-        ? label[0].toUpperCase()
+        ? name[0].toUpperCase()
         : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
     final roleLabel = _channelMemberRoleLabel(member.role);
     final titleStyle = context.textTheme.bodyLarge;

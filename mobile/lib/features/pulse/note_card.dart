@@ -5,13 +5,15 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
 import '../../shared/profile/user_cache_provider.dart';
-import '../../shared/utils/string_utils.dart';
 import '../profile/user_profile_sheet.dart';
 import 'compose_note_page.dart';
 import 'pulse_actions.dart';
@@ -26,6 +28,10 @@ class NoteCard extends HookConsumerWidget {
   final VoidCallback? onReactionChanged;
   final ValueChanged<String>? onFollowChanged;
 
+  /// The surrounding collection's identity labels (for example the Pulse
+  /// timeline's authors). When absent, the note alone is the context.
+  final IdentityNames? names;
+
   const NoteCard({
     super.key,
     required this.note,
@@ -35,6 +41,7 @@ class NoteCard extends HookConsumerWidget {
     this.canFollow = false,
     this.onReactionChanged,
     this.onFollowChanged,
+    this.names,
   });
 
   @override
@@ -44,7 +51,15 @@ class NoteCard extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pubkey])) ??
         ref.read(userCacheProvider.notifier).get(pubkey);
-    final displayName = profile?.label ?? shortPubkey(pubkey);
+    final mentionPubkeys = mentionedPubkeysFromTags(note.tags);
+    final replyAuthor = note.replyParentAuthor?.toLowerCase();
+    final labels =
+        names ??
+        watchIdentityNames(ref, {pubkey, ?replyAuthor, ...mentionPubkeys});
+    final displayName = labels.labelFor(pubkey);
+    final mentionLabels = {
+      for (final key in mentionPubkeys) key: labels.labelFor(key),
+    };
     final effectiveUpvoted =
         pendingUpvote.value ?? reaction.reactedByCurrentUser;
     final effectiveCount = _effectiveCount(reaction, pendingUpvote.value);
@@ -65,7 +80,8 @@ class NoteCard extends HookConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           GestureDetector(
-            onTap: () => showUserProfileSheet(context, note.pubkey),
+            onTap: () =>
+                showUserProfileSheet(context, note.pubkey, names: labels),
             child: AvatarImage(
               imageUrl: profile?.avatarUrl,
               radius: 18,
@@ -92,7 +108,11 @@ class NoteCard extends HookConsumerWidget {
                   children: [
                     Expanded(
                       child: GestureDetector(
-                        onTap: () => showUserProfileSheet(context, note.pubkey),
+                        onTap: () => showUserProfileSheet(
+                          context,
+                          note.pubkey,
+                          names: labels,
+                        ),
                         child: Row(
                           children: [
                             Expanded(
@@ -155,7 +175,7 @@ class NoteCard extends HookConsumerWidget {
                 if (note.replyParentId != null) ...[
                   const SizedBox(height: 2),
                   Text(
-                    'Replying to ${_replyTargetLabel(note)}',
+                    'Replying to ${_replyTargetLabel(note, labels)}',
                     style: context.textTheme.labelSmall?.copyWith(
                       color: context.colors.onSurfaceVariant,
                     ),
@@ -164,6 +184,7 @@ class NoteCard extends HookConsumerWidget {
                 const SizedBox(height: Grid.half),
                 MessageContent(
                   content: note.content,
+                  mentionLabels: mentionLabels,
                   tags: note.tags,
                   baseStyle: messageBodyTextStyle.copyWith(
                     color: context.colors.onSurface,
@@ -199,7 +220,8 @@ class NoteCard extends HookConsumerWidget {
                       icon: LucideIcons.messageCircle,
                       onTap: () => Navigator.of(context).push(
                         MaterialPageRoute<void>(
-                          builder: (_) => ComposeNotePage(replyTo: note),
+                          builder: (_) =>
+                              ComposeNotePage(replyTo: note, names: labels),
                         ),
                       ),
                     ),
@@ -318,12 +340,12 @@ class _ActionButton extends StatelessWidget {
 String _shareUri(UserNote note) =>
     'nostr:${nostr.Nip19.encodeShareableIdentifiers(prefix: nostr.Nip19Prefix.nevent, data: note.id, author: note.pubkey, kind: 1)}';
 
-/// Compact label for a note's reply target: the parent author's public key
-/// (npub form) when known, otherwise the parent event id. Event ids are not
-/// public keys — they stay hex-truncated and out of the npub contract.
-String _replyTargetLabel(UserNote note) {
+/// Compact label for a note's reply target: the parent author's contextual
+/// label when known, otherwise the parent event id. Event ids are not public
+/// keys — they stay hex-truncated and out of the npub contract.
+String _replyTargetLabel(UserNote note, IdentityNames names) {
   final author = note.replyParentAuthor;
-  if (author != null) return shortPubkey(author);
+  if (author != null) return names.labelFor(author);
   final eventId = note.replyParentId!;
   return eventId.length <= 8 ? eventId : '${eventId.substring(0, 8)}…';
 }
