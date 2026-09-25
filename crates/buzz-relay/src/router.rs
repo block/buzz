@@ -1566,8 +1566,11 @@ mod tests {
             max_connection_lifetime_secs: 3600,
         };
 
-        // 100ms acquire timeout: a request that falls through to the stub
-        // pool still waits, but for 100ms instead of sqlx's 30s default.
+        // Unreachable database: port 1 refuses every connection, so each
+        // request that reaches `bind_community` fails the same way (generic
+        // 404) regardless of local database contents or host load. sqlx
+        // retries refused connects until the acquire timeout, so keep it short.
+        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
         let pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(std::time::Duration::from_millis(100))
             .connect_lazy(&config.database_url)
