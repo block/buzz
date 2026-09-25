@@ -87,6 +87,19 @@ pub enum AdminRoute {
     MemberTimeoutDelete {
         pubkey: HexPubkey,
     },
+    /// POST /members/{pubkey}/ban — communityHost in query.
+    MemberBan {
+        pubkey: HexPubkey,
+    },
+    /// POST /members/{pubkey}/timeout — communityHost in query.
+    MemberTimeout {
+        pubkey: HexPubkey,
+    },
+    /// POST /events/{id}/delete — communityHost in query. An event id has the
+    /// same 64 lowercase-hex grammar as a pubkey.
+    EventDelete {
+        id: HexPubkey,
+    },
 }
 
 /// A validated 64 lowercase-hex character pubkey for use as a URL path segment.
@@ -139,6 +152,11 @@ impl AdminRoute {
             AdminRoute::MemberTimeoutDelete { pubkey } => {
                 format!("/members/{}/timeout", pubkey.as_str())
             }
+            AdminRoute::MemberBan { pubkey } => format!("/members/{}/ban", pubkey.as_str()),
+            AdminRoute::MemberTimeout { pubkey } => {
+                format!("/members/{}/timeout", pubkey.as_str())
+            }
+            AdminRoute::EventDelete { id } => format!("/events/{}/delete", id.as_str()),
         }
     }
 }
@@ -441,6 +459,24 @@ mod tests {
         assert_eq!(
             AdminRoute::MemberTimeoutDelete { pubkey }.path(),
             format!("/members/{}/timeout", "cd".repeat(32))
+        );
+    }
+
+    #[test]
+    fn direct_action_paths() {
+        let hex = || HexPubkey::parse(&"ef".repeat(32)).unwrap();
+        let h = "ef".repeat(32);
+        assert_eq!(
+            AdminRoute::MemberBan { pubkey: hex() }.path(),
+            format!("/members/{h}/ban")
+        );
+        assert_eq!(
+            AdminRoute::MemberTimeout { pubkey: hex() }.path(),
+            format!("/members/{h}/timeout")
+        );
+        assert_eq!(
+            AdminRoute::EventDelete { id: hex() }.path(),
+            format!("/events/{h}/delete")
         );
     }
 }

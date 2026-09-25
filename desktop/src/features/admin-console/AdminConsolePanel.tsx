@@ -2,9 +2,9 @@
  * Main admin console panel — renders when probe state is `nip98Authorized` or
  * `disabled`.
  *
- * Shows three tabs: Reports (deployment-wide moderation reports), Feedback
- * (product feedback with optional image attachments), and Staffing (Operator-
- * only operator management).
+ * Shows four tabs: Reports (deployment-wide moderation reports), Feedback
+ * (product feedback with optional image attachments), Actions (direct ban,
+ * timeout, and delete), and Staffing (Operator-only operator management).
  *
  * All query/UI state is keyed by `(pubkey, origin)`. In-flight native requests
  * are fenced by an effect-local `active` flag that is set to `false` in the
@@ -23,12 +23,13 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { MessageSquare, ShieldAlert, Users } from "lucide-react";
+import { Gavel, MessageSquare, ShieldAlert, Users } from "lucide-react";
 import { cn } from "@/shared/lib/cn";
 import type { AdminPrincipalRole } from "./api";
 import { ReportsTab } from "./AdminConsoleReportsTab";
 import { FeedbackTab } from "./AdminConsoleFeedbackTab";
 import { StaffingTab } from "./AdminConsoleStaffingTab";
+import { ActionsTab } from "./AdminConsoleActionsTab";
 
 export {
   parseImetaAttachments,
@@ -37,7 +38,7 @@ export {
 
 // ── Tab bar ───────────────────────────────────────────────────────────────
 
-type Tab = "reports" | "feedback" | "staffing";
+type Tab = "reports" | "feedback" | "actions" | "staffing";
 
 function TabBar({
   activeTab,
@@ -55,6 +56,7 @@ function TabBar({
   }> = [
     { value: "reports", label: "Reports", Icon: ShieldAlert },
     { value: "feedback", label: "Feedback", Icon: MessageSquare },
+    { value: "actions", label: "Actions", Icon: Gavel },
     ...(showStaffing
       ? [{ value: "staffing" as const, label: "Staffing", Icon: Users }]
       : []),
@@ -140,6 +142,7 @@ export function AdminConsolePanel({
     const visibleTabs = new Set<Tab>([
       "reports",
       "feedback",
+      "actions",
       ...(isOperator ? (["staffing"] as Tab[]) : []),
     ]);
     if (!visibleTabs.has(activeTab)) {
@@ -173,6 +176,14 @@ export function AdminConsolePanel({
           origin={origin}
           pubkey={pubkey}
           generation={generation}
+        />
+      )}
+      {activeTab === "actions" && (
+        <ActionsTab
+          canMutate={canMutate}
+          key={`${pubkey}\n${origin}`}
+          origin={origin}
+          pubkey={pubkey}
         />
       )}
       {activeTab === "staffing" && isOperator && (

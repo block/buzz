@@ -88,6 +88,19 @@ export function adminErrorMessage(e: unknown): string {
   }
 }
 
+/** The relay error envelope's `code` (e.g. `target_is_staff`), or `null`. */
+export function adminErrorCode(e: unknown): string | null {
+  const raw = e instanceof Error ? e.message : String(e);
+  const jsonStart = raw.indexOf("{");
+  if (jsonStart === -1) return null;
+  try {
+    const code = JSON.parse(raw.slice(jsonStart))?.error?.code;
+    return typeof code === "string" ? code : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Extract the relay's HTTP status from a rejected admin mutation, or `null`.
  *

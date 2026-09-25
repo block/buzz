@@ -293,6 +293,11 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     // Stub-relay route in the tombstone-flush gate tests; production flush
     // publishes through the guarded boundary-1 funnel.
     ("src/commands/teams/pending/tests/gate.rs", 1, 0),
+    // Admin API `POST /api/admin/v1/events/{id}/delete` path (route + its path
+    // test) and the native delete test: the body is `{requestId, reason}` only,
+    // never a signed event, so there is no key-backup payload to guard.
+    ("src/commands/admin/routes.rs", 2, 0),
+    ("src/commands/admin/mod_tests.rs", 1, 0),
 ];
 
 // Needles are assembled at runtime so this scan file itself contains no
