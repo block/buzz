@@ -486,6 +486,17 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
               normalizedPubkey.contains(normalizedQuery);
         }).toList() ??
         const <DirectoryUser>[];
+    // Eligible recipients shown or chosen here are the comparison context.
+    final recipients = [...availableResults, ...selectedUsers.value];
+    final names = watchIdentityNames(
+      ref,
+      [for (final user in recipients) user.pubkey],
+      agentPubkeys: {
+        for (final user in recipients)
+          if (user.isAgent) user.pubkey,
+      },
+      fallbackNames: {for (final user in recipients) user.pubkey: user.label},
+    );
     final canSubmit = !isSubmitting.value && selectedUsers.value.isNotEmpty;
 
     Future<void> submit() async {
@@ -580,6 +591,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                                 for (final user in selectedUsers.value)
                                   _SelectedDmRecipientChip(
                                     user: user,
+                                    label: names.labelFor(user.pubkey),
                                     enabled: !isSubmitting.value,
                                     onDeleted: () {
                                       selectedUsers.value = [
@@ -748,7 +760,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                           isAgent: user.isAgent,
                         ),
                         title: Text(
-                          user.label,
+                          names.labelFor(user.pubkey),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -799,11 +811,13 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
 
 class _SelectedDmRecipientChip extends StatelessWidget {
   final DirectoryUser user;
+  final String label;
   final bool enabled;
   final VoidCallback onDeleted;
 
   const _SelectedDmRecipientChip({
     required this.user,
+    required this.label,
     required this.enabled,
     required this.onDeleted,
   });
@@ -825,7 +839,7 @@ class _SelectedDmRecipientChip extends StatelessWidget {
             button: true,
             enabled: enabled,
             excludeSemantics: true,
-            label: 'Remove ${user.label}',
+            label: 'Remove $label',
             child: InkWell(
               customBorder: const StadiumBorder(),
               onTap: enabled ? onDeleted : null,
@@ -853,7 +867,7 @@ class _SelectedDmRecipientChip extends StatelessWidget {
                     const SizedBox(width: Grid.xxs),
                     Flexible(
                       child: Text(
-                        user.label,
+                        label,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: context.textTheme.bodyLarge?.copyWith(

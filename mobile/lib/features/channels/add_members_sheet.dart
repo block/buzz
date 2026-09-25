@@ -8,6 +8,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import 'channel_management_provider.dart';
 
 /// Searchable multi-select used to add people or agents to a channel.
@@ -56,6 +57,19 @@ class AddChannelMembersSheet extends HookConsumerWidget {
             )
             .toList() ??
         const <DirectoryUser>[];
+    // Compare every shown choice with the channel's members, so a candidate
+    // who shares a member's name is told apart before being added.
+    final choices = [...availableUsers, ...selectedUsers.value];
+    final names = watchIdentityNames(
+      ref,
+      [...normalizedExisting, for (final user in choices) user.pubkey],
+      agentPubkeys: {
+        for (final user in choices)
+          if (user.isAgent) user.pubkey,
+      },
+      fallbackNames: {for (final user in choices) user.pubkey: user.label},
+    );
+    String labelFor(DirectoryUser user) => names.labelFor(user.pubkey);
 
     void toggleUser(DirectoryUser user) {
       if (isSubmitting.value) return;
@@ -145,7 +159,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                           key: ValueKey(
                             'add-channel-member-selected-${user.pubkey}',
                           ),
-                          label: Text(user.label),
+                          label: Text(labelFor(user)),
                           onDeleted: isSubmitting.value
                               ? null
                               : () => toggleUser(user),
@@ -181,8 +195,8 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                               button: true,
                               selected: selected,
                               label: selected
-                                  ? '${user.label}, selected'
-                                  : user.label,
+                                  ? '${labelFor(user)}, selected'
+                                  : labelFor(user),
                               child: ListTile(
                                 contentPadding: EdgeInsets.zero,
                                 leading: AvatarImage(
@@ -194,7 +208,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                                   isAgent: user.isAgent,
                                 ),
                                 title: Text(
-                                  user.label,
+                                  labelFor(user),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),

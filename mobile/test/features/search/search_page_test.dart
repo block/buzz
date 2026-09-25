@@ -653,6 +653,44 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('same-name people results get distinct labels', (tester) async {
+    final first = 'a' * 64, second = 'b' * 64;
+    final state = SearchState(
+      query: 'scout',
+      channelResults: const [],
+      userResults: [
+        DirectoryUser(pubkey: first, displayName: 'Scout'),
+        DirectoryUser(pubkey: second, displayName: 'Scout'),
+      ],
+      messageResults: const [],
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+          channelsProvider.overrideWith(() => _FakeChannelsNotifier()),
+          userCacheProvider.overrideWith(
+            () => _FakeUserCacheNotifier(
+              UserProfile(pubkey: first, displayName: 'Scout'),
+            ),
+          ),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    String title(String pubkey) => tester
+        .widget<Text>(find.byKey(ValueKey('search-person-title-$pubkey')))
+        .data!;
+    expect(title(first), isNot(title(second)));
+    expect(title(first), isNot('Scout'));
+  });
+
   testWidgets('uses compact content styles and keeps message time by author', (
     tester,
   ) async {

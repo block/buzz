@@ -9,8 +9,10 @@ import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:buzz/features/activity/reminders_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -23,6 +25,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -124,6 +127,7 @@ void main() {
     List<ComposeDraft> drafts = const [],
     List<Reminder> reminders = const [],
     Set<String> knownAgentPubkeys = const {},
+    List<Override> overrides = const [],
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -147,6 +151,7 @@ void main() {
           () => _FakeComposeDraftsNotifier(drafts),
         ),
         remindersProvider.overrideWith(() => _FakeRemindersNotifier(reminders)),
+        ...overrides,
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
@@ -575,6 +580,47 @@ void main() {
         findsOneWidget,
       );
     }
+  });
+
+  testWidgets('same-name senders get their channel\'s contextual label', (
+    tester,
+  ) async {
+    // Another ch1 member shares the sender's name, so the row must use the
+    // channel's disambiguated label rather than the bare profile name.
+    const sender =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    const twin =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+    final members = [
+      for (final pubkey in const [sender, twin])
+        ChannelMember(pubkey: pubkey, role: 'member', joinedAt: DateTime(2025)),
+    ];
+    final users = {
+      ...testUsers,
+      sender: const UserProfile(pubkey: sender, displayName: 'Scout'),
+      twin: const UserProfile(pubkey: twin, displayName: 'Scout'),
+    };
+    await tester.pumpWidget(
+      await buildTestable(
+        users: users,
+        overrides: [
+          channelMembersProvider('ch1').overrideWith((ref) async => members),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final expected = IdentityNameSources(
+      profiles: users,
+    ).scope(const [sender, twin]).labelFor(sender);
+    expect(expected, isNot('Scout'));
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('inbox-row-m1')),
+        matching: find.textContaining(expected),
+      ),
+      findsWidgets,
+    );
   });
 
   testWidgets('directory-known Activity authors use agent avatars', (
