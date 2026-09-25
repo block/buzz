@@ -22,11 +22,11 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      desktop: ${{ steps.filter.outputs.desktop }}
-      desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
-      web: ${{ steps.filter.outputs.web }}
-      mobile: ${{ steps.filter.outputs.mobile }}
+      rust: ${{ steps.selection.outputs.rust }}
+      desktop: ${{ steps.selection.outputs.desktop }}
+      desktop-rust: ${{ steps.selection.outputs.desktop-rust }}
+      web: ${{ steps.selection.outputs.web }}
+      mobile: ${{ steps.selection.outputs.mobile }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -88,8 +88,13 @@ jobs:
               - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
+      - name: Select runtime suites conservatively at the PR file-list limit
+        id: selection
+        env:
+          FILTER_OUTPUTS: ${{ toJSON(steps.filter.outputs) }}
+        run: node scripts/ci-runtime-selection.mjs
       - name: Validate PostgreSQL test discovery
-        if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
+        if: github.event_name == 'push' || steps.selection.outputs.rust == 'true'
         run: |
           scripts/test-postgres-test-discovery.sh
           scripts/test-postgres-test-wrapper.sh

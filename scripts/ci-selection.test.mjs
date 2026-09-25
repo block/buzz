@@ -118,6 +118,7 @@ async function select(paths, pullRequest = false) {
       JSON.stringify({
         pull_request: {
           number: 7809,
+          changed_files: paths.length,
           base: { sha: base },
           head: { sha: head },
         },
@@ -133,7 +134,9 @@ async function select(paths, pullRequest = false) {
       response.setHeader("Content-Type", "application/json");
       response.end(
         JSON.stringify(
-          paths.map((filename) => ({ filename, status: "added" })),
+          paths
+            .slice(0, 3000)
+            .map((filename) => ({ filename, status: "added" })),
         ),
       );
     });
@@ -170,12 +173,33 @@ async function select(paths, pullRequest = false) {
   } finally {
     if (server) await new Promise((resolve) => server.close(resolve));
   }
-  return Object.fromEntries(
+  const rawOutputs = Object.fromEntries(
     [
       ...readFileSync(output, "utf8").matchAll(
         /^(rust|desktop|desktop-rust|web|mobile)<<([^\n]+)\n(true|false)\n\2/gm,
       ),
     ].map(([, key, , value]) => [key, value]),
+  );
+  const selectedOutput = join(repo, "selected-output");
+  await promisify(execFile)(
+    process.execPath,
+    [new URL("./ci-runtime-selection.mjs", import.meta.url).pathname],
+    {
+      env: {
+        ...process.env,
+        FILTER_OUTPUTS: JSON.stringify(rawOutputs),
+        GITHUB_EVENT_NAME: pullRequest ? "pull_request" : "push",
+        GITHUB_EVENT_PATH: eventPath,
+        GITHUB_OUTPUT: selectedOutput,
+      },
+      timeout: 10000,
+    },
+  );
+  return Object.fromEntries(
+    readFileSync(selectedOutput, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => line.split("=")),
   );
 }
 const scenarios = [
@@ -285,5 +309,29 @@ for (const [name, paths, expected] of [
         .sort(),
       expected.sort(),
     );
+  });
+}
+
+test("workflow consumes guarded selection outputs", () => {
+  const outputs = workflow.match(/ {4}outputs:\n([\s\S]*?) {4}steps:/)[1];
+  for (const key of ["rust", "desktop", "desktop-rust", "web", "mobile"]) {
+    assert.ok(outputs.includes(`steps.selection.outputs.${key}`));
+  }
+  assert.match(
+    workflow,
+    /id: selection\n {8}env:\n {10}FILTER_OUTPUTS: \$\{\{ toJSON\(steps.filter.outputs\) \}\}\n {8}run: node scripts\/ci-runtime-selection.mjs/,
+  );
+});
+for (const count of [2999, 3000, 3001]) {
+  test(`PR file-list ceiling: ${count} changed files`, async () => {
+    const paths = Array.from(
+      { length: Math.min(count, 3000) },
+      (_, i) => `docs/file-${i}.md`,
+    );
+    if (count > 3000) paths.push("desktop/src/omitted-by-api.ts");
+    const outputs = await select(paths, true);
+    for (const value of Object.values(outputs)) {
+      assert.equal(value, count >= 3000 ? "true" : "false");
+    }
   });
 }
