@@ -7,6 +7,9 @@ cd "${SCRIPT_DIR}"
 COMPOSE_FILES=(-f compose.yml)
 if [[ "${BUZZ_COMPOSE_TLS:-false}" == "true" ]]; then
   COMPOSE_FILES+=(-f compose.caddy.yml)
+  if [[ "${BUZZ_COMPOSE_PAIRING:-true}" == "true" ]]; then
+    COMPOSE_FILES+=(-f compose.pair.yml)
+  fi
 fi
 if [[ "${BUZZ_COMPOSE_DEV:-false}" == "true" ]]; then
   COMPOSE_FILES+=(-f compose.dev.yml)
@@ -121,8 +124,10 @@ Commands:
   roster event. Do not use parallel adds (e.g. xargs -P).
 
 Environment switches:
-  BUZZ_COMPOSE_TLS=true   Include compose.caddy.yml for automatic HTTPS
-  BUZZ_COMPOSE_DEV=true   Include compose.dev.yml for local admin ports/tools
+  BUZZ_COMPOSE_TLS=true       Include compose.caddy.yml for automatic HTTPS
+  BUZZ_COMPOSE_DEV=true       Include compose.dev.yml for local admin ports/tools
+  BUZZ_COMPOSE_PAIRING=false  Disable the device-pairing sidecar
+                              (compose.pair.yml, included by default with TLS)
 MSG
     ;;
   *)
