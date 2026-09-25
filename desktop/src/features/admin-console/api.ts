@@ -696,3 +696,39 @@ export async function saveAdminAttachment(
     expectedSize,
   });
 }
+
+// ── Direct moderation actions ─────────────────────────────────────────────
+
+export type AdminDirectAction = "ban" | "timeout" | "delete";
+
+/** A direct action as confirmed; resent verbatim on every retry. */
+export type AdminDirectIntent = {
+  origin: string;
+  expectedRelay: string;
+  expectedPubkey: string;
+  communityHost: string;
+  action: AdminDirectAction;
+  /** Member pubkey (ban/timeout) or event id (delete), 64 lowercase hex. */
+  target: string;
+  requestId: string;
+  reason?: string;
+  expirationSecs?: number;
+};
+
+export type AdminDirectActionResult =
+  | { actionId: string; state: "succeeded"; replayed: boolean }
+  | { state: "pending" };
+
+/**
+ * Ban, time out, or delete without a report. The native command refuses the
+ * intent before sending if the active relay or signer changed since confirm.
+ *
+ * POST /api/admin/v1/{members/{pubkey}/ban|members/{pubkey}/timeout|events/{id}/delete}?communityHost=
+ */
+export async function directAdminAction(
+  intent: AdminDirectIntent,
+): Promise<AdminDirectActionResult> {
+  return invokeTauri<AdminDirectActionResult>("admin_direct_action", {
+    intent,
+  });
+}

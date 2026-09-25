@@ -896,6 +896,7 @@ pub fn run() {
             admin_list_restrictions,
             admin_lift_ban,
             admin_lift_timeout,
+            admin_direct_action,
             get_admin_origin,
             set_admin_origin,
             admin_discover_origin,

@@ -1387,3 +1387,84 @@ fn restrictions_url_rejects_a_caller_relay_that_no_longer_matches() {
         }
     }
 }
+
+// ── Direct moderation actions ─────────────────────────────────────────────
+
+const SIGNER: &str = "11111111111111111111111111111111111111111111111111111111111111aa";
+
+fn intent(action: DirectAction, expiration_secs: Option<u64>) -> AdminDirectIntent {
+    AdminDirectIntent {
+        origin: "https://admin.example.com".to_string(),
+        expected_relay: "wss://relay.example.com".to_string(),
+        expected_pubkey: SIGNER.to_string(),
+        community_host: "Team.Example.com".to_string(),
+        action,
+        target: "ab".repeat(32),
+        request_id: uuid::Uuid::nil(),
+        reason: Some("spam".to_string()),
+        expiration_secs,
+    }
+}
+
+const BASE: &str = "https://relay.example.com";
+
+#[test]
+fn direct_action_sends_the_typed_host_only_as_the_query() {
+    let (url, body) =
+        direct_action_request(&intent(DirectAction::Timeout, Some(60)), BASE, SIGNER).unwrap();
+    let t = "ab".repeat(32);
+    assert!(
+        url.ends_with(&format!(
+            "/api/admin/v1/members/{t}/timeout?communityHost=team.example.com"
+        )),
+        "{url}"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "requestId": uuid::Uuid::nil(),
+            "reason": "spam",
+            "expirationSecs": 60,
+        })
+    );
+    let (url, body) =
+        direct_action_request(&intent(DirectAction::Delete, None), BASE, SIGNER).unwrap();
+    assert!(url.contains(&format!("/events/{t}/delete?")), "{url}");
+    assert!(!String::from_utf8(body).unwrap().contains("expirationSecs"));
+}
+
+#[test]
+fn direct_action_refuses_a_changed_signer_or_relay() {
+    // Confirmed under SIGNER on relay.example.com; each mismatch fails pre-send.
+    let other = "22".repeat(32);
+    for (signer, base) in [
+        (other.as_str(), BASE),
+        (SIGNER, "https://relay-b.example.com"),
+    ] {
+        assert!(direct_action_request(&intent(DirectAction::Ban, None), base, signer).is_err());
+    }
+    let mut blank = intent(DirectAction::Ban, None);
+    blank.expected_pubkey = " ".to_string();
+    assert!(direct_action_request(&blank, BASE, SIGNER).is_err());
+}
+
+#[test]
+fn direct_action_rejects_bad_host_target_and_duration() {
+    let mut bad_host = intent(DirectAction::Ban, None);
+    bad_host.community_host = "https://team.example.com/x".to_string();
+    let mut bad_target = intent(DirectAction::Ban, None);
+    bad_target.target = "AB".repeat(32);
+    for bad in [
+        bad_host,
+        bad_target,
+        intent(DirectAction::Timeout, None),
+        intent(DirectAction::Timeout, Some(0)),
+        intent(DirectAction::Ban, Some(60)),
+    ] {
+        assert!(
+            direct_action_request(&bad, BASE, SIGNER).is_err(),
+            "{bad:?}"
+        );
+    }
+}
