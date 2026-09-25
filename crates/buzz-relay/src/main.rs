@@ -818,6 +818,24 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         info!("NIP-PL push disabled by BUZZ_PUSH_ENABLED");
     }
 
+    // Registration cleanup is independent of configured routes. Delivery is
+    // opt-in, while accepted events populate the outbox transactionally.
+    tokio::spawn(buzz_relay::operator_listener::run_reaper(Arc::clone(
+        &state,
+    )));
+    if !state.config.operator_listener_delivery_urls.is_empty() {
+        tokio::spawn(buzz_relay::operator_listener::run_delivery_worker(
+            Arc::clone(&state),
+        ));
+        info!(
+            listeners = state.config.operator_listener_delivery_urls.len(),
+            "operator-listener mention delivery worker started"
+        );
+    } else {
+        info!("operator-listener mention delivery disabled by BUZZ_OPERATOR_LISTENERS");
+    }
+    info!("operator-listener registration cleanup started");
+
     // Admin outbox delivery worker — drives `relay_admin_outbox` rows.
     // Uses DB-level leases (held_by / lease_expires_at) so multiple pods can
     // run the worker concurrently without double-delivery.

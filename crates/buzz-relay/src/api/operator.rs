@@ -54,6 +54,44 @@ struct TransferCommunityResponse {
 
 const OPERATOR_REPLAY_SCOPE: &str = "operator-management";
 
+#[derive(Debug, Deserialize)]
+struct ListenerPubkeysRequest {
+    pubkeys: Vec<String>,
+}
+
+fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json<Value>)> {
+    let request: ListenerPubkeysRequest = serde_json::from_slice(body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid operator-listener pubkeys JSON: {e}"),
+        )
+    })?;
+    if request.pubkeys.is_empty() || request.pubkeys.len() > 1_000 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "pubkeys must contain between 1 and 1000 entries",
+        ));
+    }
+    request
+        .pubkeys
+        .into_iter()
+        .map(|value| {
+            let normalized = validate_pubkey_hex(&value).ok_or_else(|| {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "pubkeys must contain 64-char hex public keys",
+                )
+            })?;
+            hex::decode(normalized).map_err(|_| {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "pubkeys must contain 64-char hex public keys",
+                )
+            })
+        })
+        .collect()
+}
+
 /// Shared deployment-global operator auth prelude. The canonical management
 /// origin and replay namespace are configuration, never tenant registry state
 /// or an inbound proxy `Host` header.
@@ -103,6 +141,86 @@ async fn authorize_operator_request(
     }
 
     Ok(pubkey)
+}
+
+/// Authenticate a deployment-global operator listener using its configured
+/// identity and a NIP-98 request signature.
+async fn authorize_operator_listener_request(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<nostr::PublicKey, (StatusCode, Json<Value>)> {
+    let origin = state
+        .config
+        .relay_operator_api_origin
+        .as_deref()
+        .ok_or_else(|| internal_error("operator API origin is not configured"))?;
+    let url = format!("{origin}{path}");
+    let bridge::VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        ..
+    } = bridge::verify_bridge_auth_with_options(headers, method, &url, Some(body), true, true)?;
+    check_operator_replay(state, event_id_bytes).await?;
+    if !state
+        .config
+        .operator_listener_delivery_urls
+        .contains_key(&pubkey.to_hex())
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "actor not authorized: not a configured operator listener",
+        ));
+    }
+    Ok(pubkey)
+}
+
+/// Register target pubkeys for the authenticated operator listener.
+pub async fn register_listener_pubkeys(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let listener = authorize_operator_listener_request(
+        &state,
+        &headers,
+        "POST",
+        "/operator/listener/pubkeys",
+        &body,
+    )
+    .await?;
+    let target_pubkeys = parse_listener_pubkeys(&body)?;
+    state
+        .db
+        .register_operator_listener_pubkeys(listener.as_bytes(), &target_pubkeys)
+        .await
+        .map_err(|e| internal_error(&format!("register operator-listener pubkeys: {e}")))?;
+    Ok(Json(serde_json::json!({})))
+}
+
+/// Remove target pubkeys for the authenticated operator listener.
+pub async fn remove_listener_pubkeys(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let listener = authorize_operator_listener_request(
+        &state,
+        &headers,
+        "DELETE",
+        "/operator/listener/pubkeys",
+        &body,
+    )
+    .await?;
+    let target_pubkeys = parse_listener_pubkeys(&body)?;
+    state
+        .db
+        .remove_operator_listener_pubkeys(listener.as_bytes(), &target_pubkeys)
+        .await
+        .map_err(|e| internal_error(&format!("remove operator-listener pubkeys: {e}")))?;
+    Ok(Json(serde_json::json!({})))
 }
 
 async fn check_operator_replay(
@@ -503,7 +621,10 @@ pub async fn community_availability(
 
 #[cfg(test)]
 mod postgres_tests {
-    use std::sync::Arc;
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
 
     use axum::{
         body::{to_bytes, Body},
@@ -534,6 +655,26 @@ mod postgres_tests {
             Box<dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>> + Send + 'a>,
         > {
             Box::pin(async { Ok(true) })
+        }
+    }
+
+    struct SeenOnceReplayGuard(Mutex<HashSet<[u8; 32]>>);
+
+    impl buzz_auth::Nip98ReplayGuard for SeenOnceReplayGuard {
+        fn try_mark_in_scope<'a>(
+            &'a self,
+            _scope: &'a str,
+            event_id: &'a nostr::EventId,
+            _ttl_secs: u64,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>> + Send + 'a>,
+        > {
+            let inserted = self
+                .0
+                .lock()
+                .expect("replay set")
+                .insert(*event_id.as_bytes());
+            Box::pin(async move { Ok(inserted) })
         }
     }
     const INGRESS_HOST: &str = "operator-ingress.example";
@@ -636,6 +777,16 @@ mod postgres_tests {
     ) -> axum::response::Response {
         let url = format!("http://{INGRESS_HOST}{path}");
         let auth = nip98_auth_header(keys, &url, method, body.as_deref().map(str::as_bytes));
+        operator_request_with_auth(state, method, path, body, auth).await
+    }
+
+    async fn operator_request_with_auth(
+        state: Arc<AppState>,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+        auth: String,
+    ) -> axum::response::Response {
         let mut request = Request::builder()
             .method(method)
             .uri(path)
@@ -775,6 +926,162 @@ mod postgres_tests {
                 .contains("missing payload tag"),
             "unexpected response: {json:?}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn listener_pubkey_routes_register_and_remove_only_for_authenticated_listener() {
+        let listener = Keys::generate();
+        let other_listener = Keys::generate();
+        let outsider = Keys::generate();
+        let Some(mut state) = operator_test_state(&[]).await else {
+            return;
+        };
+        Arc::get_mut(&mut state)
+            .expect("test state has a single owner")
+            .nip98_replay = Arc::new(SeenOnceReplayGuard(Mutex::new(HashSet::new())));
+        let config = Arc::make_mut(
+            &mut Arc::get_mut(&mut state)
+                .expect("test state has a single owner")
+                .config,
+        );
+        config.operator_listener_delivery_urls.insert(
+            listener.public_key().to_hex(),
+            url::Url::parse("http://listener.example/deliver").expect("listener URL"),
+        );
+        config.operator_listener_delivery_urls.insert(
+            other_listener.public_key().to_hex(),
+            url::Url::parse("http://other-listener.example/deliver").expect("listener URL"),
+        );
+
+        let targets = [Keys::generate(), Keys::generate()];
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to test DB");
+        let target_hex = targets
+            .iter()
+            .map(|target| target.public_key().to_hex())
+            .collect::<Vec<_>>();
+        let register_body = serde_json::json!({"pubkeys": target_hex}).to_string();
+        let response = signed_operator_request(
+            Arc::clone(&state),
+            &listener,
+            "POST",
+            "/operator/listener/pubkeys",
+            Some(register_body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let listener_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operator_listener_pubkeys WHERE listener_pubkey = $1",
+        )
+        .bind(listener.public_key().as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count registered listener targets");
+        let other_listener_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operator_listener_pubkeys WHERE listener_pubkey = $1",
+        )
+        .bind(other_listener.public_key().as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count other listener targets");
+        assert_eq!(listener_count, 2);
+        assert_eq!(other_listener_count, 0);
+
+        let body = serde_json::json!({"pubkeys": [target_hex[0]]}).to_string();
+        let missing_payload_auth = nip98_auth_header_without_payload(
+            &listener,
+            &format!("http://{INGRESS_HOST}/operator/listener/pubkeys"),
+            "DELETE",
+        );
+        let missing_payload = operator_request_with_auth(
+            Arc::clone(&state),
+            "DELETE",
+            "/operator/listener/pubkeys",
+            Some(body),
+            missing_payload_auth,
+        )
+        .await;
+        assert_eq!(missing_payload.status(), StatusCode::UNAUTHORIZED);
+
+        let unauthorized = signed_operator_request(
+            Arc::clone(&state),
+            &outsider,
+            "POST",
+            "/operator/listener/pubkeys",
+            Some(serde_json::json!({"pubkeys": [target_hex[0]]}).to_string()),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::FORBIDDEN);
+
+        let malformed = signed_operator_request(
+            Arc::clone(&state),
+            &listener,
+            "POST",
+            "/operator/listener/pubkeys",
+            Some(r#"{"pubkeys":["not-a-pubkey"]}"#.to_string()),
+        )
+        .await;
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+        let replay_body = serde_json::json!({"pubkeys": [target_hex[1]]}).to_string();
+        let replay_auth = nip98_auth_header(
+            &listener,
+            &format!("http://{INGRESS_HOST}/operator/listener/pubkeys"),
+            "DELETE",
+            Some(replay_body.as_bytes()),
+        );
+        let first_use = operator_request_with_auth(
+            Arc::clone(&state),
+            "DELETE",
+            "/operator/listener/pubkeys",
+            Some(replay_body.clone()),
+            replay_auth.clone(),
+        )
+        .await;
+        assert_eq!(first_use.status(), StatusCode::OK);
+        let replay = operator_request_with_auth(
+            Arc::clone(&state),
+            "DELETE",
+            "/operator/listener/pubkeys",
+            Some(replay_body),
+            replay_auth,
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+        let replay_error = read_json(replay).await;
+        assert!(replay_error["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("replay"));
+
+        let remove_body = serde_json::json!({"pubkeys": [target_hex[0]]}).to_string();
+        let removed = signed_operator_request(
+            Arc::clone(&state),
+            &listener,
+            "DELETE",
+            "/operator/listener/pubkeys",
+            Some(remove_body),
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::OK);
+        let remaining: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT target_pubkey FROM operator_listener_pubkeys WHERE listener_pubkey = $1",
+        )
+        .bind(listener.public_key().as_bytes().as_slice())
+        .fetch_all(&pool)
+        .await
+        .expect("read remaining listener targets");
+        assert!(remaining.is_empty());
+
+        sqlx::query("DELETE FROM operator_listener_pubkeys WHERE listener_pubkey = $1 OR listener_pubkey = $2")
+            .bind(listener.public_key().as_bytes().as_slice())
+            .bind(other_listener.public_key().as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .expect("clean up listener registrations");
     }
 
     #[tokio::test]

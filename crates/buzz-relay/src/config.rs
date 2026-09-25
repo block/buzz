@@ -1,11 +1,11 @@
 //! Relay configuration from environment variables.
 
-use std::net::SocketAddr;
 use std::time::Duration;
+use std::{collections::HashMap, net::SocketAddr};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Default maximum inbound WebSocket frame size in bytes.
 ///
@@ -272,6 +272,9 @@ pub struct Config {
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
+    /// Configured operator-listener identities and their HTTPS delivery URLs.
+    pub operator_listener_delivery_urls: HashMap<String, url::Url>,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -350,8 +353,10 @@ pub struct Config {
     /// Required while push is enabled. An explicitly empty setting is allowed
     /// only while push is disabled.
     pub push_gateway_delivery_url: Option<url::Url>,
-    /// Hard timeout for one gateway delivery request.
+    /// Hard timeout for one push gateway delivery request.
     pub push_gateway_timeout: Duration,
+    /// Hard timeout for one operator-listener delivery request.
+    pub operator_listener_timeout: Duration,
 
     /// Optional relay-hosted policy shown on join surfaces. Disabled when no
     /// documents or age attestation are configured.
@@ -468,6 +473,58 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
         ));
     }
     Ok(url)
+}
+
+fn parse_operator_listener_delivery_urls(
+    raw: &str,
+) -> Result<HashMap<String, url::Url>, ConfigError> {
+    let mut endpoints = HashMap::new();
+    let entries: Vec<&str> = raw
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if !raw.trim().is_empty() && entries.is_empty() {
+        return Err(ConfigError::InvalidValue(
+            "BUZZ_OPERATOR_LISTENERS must contain pubkey:delivery_url pairs".to_string(),
+        ));
+    }
+    for entry in entries {
+        let (pubkey, delivery_url) = entry.split_once(':').ok_or_else(|| {
+            ConfigError::InvalidValue(
+                "BUZZ_OPERATOR_LISTENERS entries must be pubkey:delivery_url pairs".to_string(),
+            )
+        })?;
+        let pubkey = pubkey.trim().to_ascii_lowercase();
+        if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS entry has an invalid pubkey: {pubkey:?}"
+            )));
+        }
+        let url = url::Url::parse(delivery_url.trim()).map_err(|e| {
+            ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS endpoint is not a valid URL: {e}"
+            ))
+        })?;
+        if url.scheme() != "https"
+            || url.host().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_OPERATOR_LISTENERS endpoints must be HTTPS URLs without credentials, query, or fragment"
+                    .to_string(),
+            ));
+        }
+        if endpoints.insert(pubkey.clone(), url).is_some() {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS contains duplicate pubkey: {pubkey}"
+            )));
+        }
+    }
+    Ok(endpoints)
 }
 
 fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
@@ -789,6 +846,32 @@ impl Config {
             );
         }
 
+        let operator_listener_delivery_urls = match std::env::var("BUZZ_OPERATOR_LISTENERS") {
+            Ok(raw) => match parse_operator_listener_delivery_urls(&raw) {
+                Ok(urls) => urls,
+                Err(parse_error) => {
+                    error!(
+                        error = %parse_error,
+                        "invalid BUZZ_OPERATOR_LISTENERS; operator-listener mention delivery is disabled"
+                    );
+                    HashMap::new()
+                }
+            },
+            Err(std::env::VarError::NotPresent) => HashMap::new(),
+            Err(error) => {
+                error!(
+                    error = %error,
+                    "BUZZ_OPERATOR_LISTENERS must be valid UTF-8; operator-listener mention delivery is disabled"
+                );
+                HashMap::new()
+            }
+        };
+        if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
+            error!(
+                "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
+            );
+        }
+
         let auth = buzz_auth::AuthConfig {
             rate_limits: rate_limit_config_from_env()?,
         };
@@ -1004,6 +1087,33 @@ impl Config {
             Err(_) => 2_000,
         };
         let push_gateway_timeout = Duration::from_millis(push_gateway_timeout_millis);
+        let operator_listener_timeout_millis = match std::env::var(
+            "BUZZ_OPERATOR_LISTENER_TIMEOUT_MS",
+        ) {
+            Ok(raw) => match raw
+                .parse::<u64>()
+                .ok()
+                .filter(|millis| (100..=10_000).contains(millis))
+            {
+                Some(millis) => millis,
+                None => {
+                    error!(
+                        value = %raw,
+                        "invalid BUZZ_OPERATOR_LISTENER_TIMEOUT_MS; using default 5000ms (expected integer in 100..=10000)"
+                    );
+                    5_000
+                }
+            },
+            Err(std::env::VarError::NotPresent) => 5_000,
+            Err(err) => {
+                error!(
+                    error = %err,
+                    "invalid BUZZ_OPERATOR_LISTENER_TIMEOUT_MS; using default 5000ms"
+                );
+                5_000
+            }
+        };
+        let operator_listener_timeout = Duration::from_millis(operator_listener_timeout_millis);
 
         const MAX_POLICY_MARKDOWN_BYTES: usize = 256 * 1024;
         let read_policy_markdown = |name: &str| -> Result<Option<String>, ConfigError> {
@@ -1240,6 +1350,7 @@ impl Config {
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
+            operator_listener_delivery_urls,
             allow_nip_oa_auth,
             klipy,
             media,
@@ -1261,6 +1372,7 @@ impl Config {
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
+            operator_listener_timeout,
             join_policy,
             admin,
             web_dir,
@@ -1421,14 +1533,8 @@ mod tests {
         config
     }
 
-    /// Like `config_with_admin_env`, but also captures the tracing output
-    /// emitted during `Config::from_env()` so a test can assert the startup
-    /// warning fired. The `BUZZ_ADMIN_TOKEN` warning is the sole behavioral
-    /// value of retaining the guards (the variable is otherwise inert), so it
-    /// must be regression-protected: deleting a warn block has to fail a test.
-    fn config_with_admin_env_capturing_logs(
-        values: &[(&str, Option<&str>)],
-    ) -> (Result<Config, ConfigError>, String) {
+    /// Capture the tracing output emitted during `Config::from_env()`.
+    fn capture_config_logs() -> (Result<Config, ConfigError>, String) {
         use std::sync::{Arc, Mutex};
 
         #[derive(Clone)]
@@ -1463,10 +1569,54 @@ mod tests {
             })
             .with_ansi(false)
             .finish();
-        let config =
-            tracing::subscriber::with_default(subscriber, || config_with_admin_env(values));
+        let config = tracing::subscriber::with_default(subscriber, Config::from_env);
         let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap_or_default();
         (config, captured)
+    }
+
+    /// Like `config_with_admin_env`, but also captures the tracing output
+    /// emitted during `Config::from_env()` so a test can assert the startup
+    /// warning fired. The `BUZZ_ADMIN_TOKEN` warning is the sole behavioral
+    /// value of retaining the guards (the variable is otherwise inert), so it
+    /// must be regression-protected: deleting a warn block has to fail a test.
+    fn config_with_admin_env_capturing_logs(
+        values: &[(&str, Option<&str>)],
+    ) -> (Result<Config, ConfigError>, String) {
+        const KEYS: [&str; 3] = ["BUZZ_ADMIN_HOST", "BUZZ_ADMIN_TOKEN", "BUZZ_ADMIN_AUTH"];
+        let previous: Vec<_> = KEYS
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+        for (key, value) in values {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let result = capture_config_logs();
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        result
+    }
+
+    fn config_with_operator_listeners_capturing_logs(
+        raw: &str,
+    ) -> (Result<Config, ConfigError>, String) {
+        let previous = std::env::var_os("BUZZ_OPERATOR_LISTENERS");
+        std::env::set_var("BUZZ_OPERATOR_LISTENERS", raw);
+        let result = capture_config_logs();
+        match previous {
+            Some(value) => std::env::set_var("BUZZ_OPERATOR_LISTENERS", value),
+            None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
+        }
+        result
     }
 
     /// Assert `captured` contains a WARN naming the removal of `BUZZ_ADMIN_TOKEN`
@@ -2271,6 +2421,52 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn operator_listener_routes_parse_and_normalize() {
+        let routes = parse_operator_listener_delivery_urls(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:https://one.example/mentions;bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:https://two.example/mentions",
+        )
+        .expect("valid operator-listener routes");
+        assert_eq!(routes.len(), 2);
+        assert!(
+            routes.contains_key("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert!(
+            routes.contains_key("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn operator_listener_routes_reject_unsafe_or_duplicate_entries() {
+        let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for raw in [
+            format!("{key}:http://listener.example/mentions"),
+            format!("{key}:https://user:pass@listener.example/mentions"),
+            format!("{key}:https://listener.example/mentions?token=secret"),
+            format!("{key}:https://listener.example/mentions;{key}:https://other.example"),
+        ] {
+            assert!(
+                parse_operator_listener_delivery_urls(&raw).is_err(),
+                "unsafe or duplicate route accepted: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_operator_listener_config_is_logged_and_disables_delivery() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let (result, logs) = config_with_operator_listeners_capturing_logs(";");
+        let config = result.expect("malformed listener config must not stop relay startup");
+
+        assert!(config.operator_listener_delivery_urls.is_empty());
+        assert!(logs.contains("ERROR"), "expected an ERROR line: {logs:?}");
+        assert!(logs.contains("BUZZ_OPERATOR_LISTENERS"), "logs: {logs:?}");
+        assert!(
+            logs.contains("operator-listener mention delivery is disabled"),
+            "logs: {logs:?}"
+        );
     }
 
     #[test]

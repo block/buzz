@@ -26,6 +26,8 @@ pub mod feed;
 pub mod git_repo;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
+/// Deployment-global operator-listener mention registrations and delivery queues.
+pub mod operator_listener;
 /// Monthly table partition management.
 pub mod partition;
 /// Buzz product-feedback sidecar persistence.
