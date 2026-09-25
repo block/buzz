@@ -33,7 +33,10 @@ async function harness() {
   mock.method(relayClient, "fetchEvents", async (filter) => {
     if (fx.onFetch) return fx.onFetch();
     const head = fx.heads[filter["#d"][0]];
-    if (fx.gate) await fx.gate;
+    if (fx.gate) {
+      fx.gated = (fx.gated ?? 0) + 1; // a fetch entered the gated preflight
+      await fx.gate;
+    }
     return head ? [head] : [];
   });
   mock.method(relayClient, "subscribeLive", async () => async () => {});
@@ -186,7 +189,8 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
   const shows = (result, ids, msg) => {
     const cached = JSON.parse(window.localStorage.getItem(fx.storageKey(PK)));
     assert.deepEqual([...result.current[idsKey]].sort(), ids, msg);
-    assert.deepEqual(Object.keys(cached.channels).sort(), ids, msg);
+    const on = Object.entries(cached.channels).filter(([, v]) => v[field]);
+    assert.deepEqual(on.map(([id]) => id).sort(), ids, msg);
   };
   // A later authoritative head still applies: recovery kept polling.
   const resumes = async ({ act, advance }, result, ids) => {
@@ -233,6 +237,7 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
     const gate = deferred();
     fx.gate = gate.promise;
     await advance(2_000); // A's repeat waits in preflight
+    assert.equal(fx.gated, 1, "A's repeat entered its gated preflight");
     act(() => result.current[verb]("c2")); // B
     fx.gate = null;
     await act(async () => gate.resolve()); // repeat of A exits as identical
