@@ -397,8 +397,7 @@ See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
 3. **`messages search` chooses its own supported kinds** — do not add a `--kinds` option; the current command does not accept one. This differs from raw relay filters, which still need explicit kinds.
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
-6. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
-7. **`pgschema` omits seed DML and some storage parameters** — Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
+6. **`pgschema` omits seed DML and some storage parameters** — Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
 
 ---
 
@@ -421,6 +420,7 @@ Surface-specific guidance lives beside the code. The root guide still applies.
 - Before changing `desktop/`, including PR screenshots and E2E screenshot specs, read [desktop/AGENTS.md](desktop/AGENTS.md).
 - Before changing `desktop/src/features/agents/`, also read [desktop/src/features/agents/AGENTS.md](desktop/src/features/agents/AGENTS.md).
 - Before changing `mobile/`, read [mobile/AGENTS.md](mobile/AGENTS.md).
+- Before posting PR screenshots for any surface, including mobile, read [PR Screenshots](desktop/AGENTS.md#pr-screenshots).
 
 ---
 
