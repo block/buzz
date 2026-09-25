@@ -1494,7 +1494,7 @@ LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS $$
         'community_deletion_requests', 'community_deletion_approvals',
         'community_deletion_checkpoints', 'community_serving_write_leases',
         'community_deletion_executor_heartbeats', 'product_feedback',
-        'rate_limit_violations'
+        'rate_limit_violations', 'storage_accounting_history'
     ]::TEXT[])
 $$;
 
@@ -1921,3 +1921,25 @@ CREATE TABLE storage_accounting_snapshots (
 
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('storage_accounting_snapshots', 'deployment-global completed media accounting handoff');
+
+-- ── Storage accounting history ──────────────────────────────────────────────
+-- Append-only per-community usage history appended by the accounting worker
+-- in the same transaction as each singleton snapshot replacement.
+-- community_id is provenance only (no FK): sidecar keys may reference
+-- communities this database no longer knows, and community deletion severs
+-- provenance instead of purging fleet accounting evidence.
+
+CREATE TABLE storage_accounting_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    completed_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+    community_id UUID,
+    logical_bytes BIGINT NOT NULL CHECK (logical_bytes >= 0),
+    logical_objects BIGINT NOT NULL CHECK (logical_objects >= 0),
+    code_sha TEXT NOT NULL CHECK (octet_length(code_sha) BETWEEN 1 AND 128)
+);
+
+CREATE INDEX idx_storage_accounting_history_community
+    ON storage_accounting_history (community_id, completed_at DESC);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('storage_accounting_history', 'deployment-global per-community storage accounting history; community_id is provenance only');

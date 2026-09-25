@@ -490,6 +490,7 @@ mod postgres_tests {
             "relay_admin_outbox",
             "relay_operator_audit",
             "storage_accounting_snapshots",
+            "storage_accounting_history",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -703,7 +704,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 49);
+        assert_eq!(migrations.len(), 50);
         assert_eq!(migrations[48].version, 49);
         assert!(migrations[48]
             .sql
@@ -1293,10 +1294,23 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE TABLE storage_accounting_snapshots"));
-        // schema.sql exclusion list must match the restored (pre-0041) body.
+        // Migration 0050 appends per-community accounting history and widens
+        // the write-fence exclusion list: history carries provenance-only
+        // community_id, so it must be excluded from tenant fencing/purging.
+        assert_eq!(migrations[49].version, 50);
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE storage_accounting_history"));
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE OR REPLACE FUNCTION community_write_fence_excluded_table"));
+        // schema.sql exclusion list must match the newest (post-0050) body.
         assert!(
-            desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
-            "schema.sql exclusion list must match the pre-0041 body after ledger removal"
+            desired_schema
+                .contains("'rate_limit_violations', 'storage_accounting_history'\n    ]::TEXT[])"),
+            "schema.sql exclusion list must match the post-0050 body"
         );
     }
 

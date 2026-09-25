@@ -1734,7 +1734,11 @@ impl DeletionStore {
             .await?;
 
         // Preserve deployment-global operator evidence while severing tenant provenance.
-        for table in ["product_feedback", "rate_limit_violations"] {
+        for table in [
+            "product_feedback",
+            "rate_limit_violations",
+            "storage_accounting_history",
+        ] {
             let sql = format!("UPDATE {table} SET community_id = NULL WHERE community_id = $1");
             let affected = sqlx::query(AssertSqlSafe(sql))
                 .bind(token.community_id.as_uuid())
