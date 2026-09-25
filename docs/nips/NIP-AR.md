@@ -39,12 +39,12 @@ The `assignee` and `project` tags and the payload are illustrative, not required
 | `d` | Stable artifact UUID. |
 | `h` | Home channel UUID. |
 | `type` | Namespaced content type. |
-| `title` | Nonblank display title, at most 512 UTF-8 bytes. |
+| `title` | Absent on `delete`; otherwise required, nonblank display title, at most 512 UTF-8 bytes. |
 | `op` | `create`, `update`, `move`, `delete`, or `restore`. |
 | `root` | Optional conversation anchor event ID within `h`. |
 | `prev` | Previous accepted revision ID; required except on creation. |
 
-Each listed tag has exactly two string elements and occurs once, except optional tags may be absent. UUIDs are lowercase, hyphenated, and non-nil; event IDs are 64 lowercase hex characters. Type names are dot-separated lowercase ASCII components, each starting with a letter and otherwise using letters, digits, `_`, or `-`, up to 128 bytes total. `buzz.*` is reserved for published Buzz client contracts.
+Each listed tag has exactly two string elements and occurs once, except optional tags may be absent and `title` MUST be absent on `delete`. UUIDs are lowercase, hyphenated, and non-nil; event IDs are 64 lowercase hex characters. Type names are dot-separated lowercase ASCII components, each starting with a letter and otherwise using letters, digits, `_`, or `-`, up to 128 bytes total. `buzz.*` is reserved for published Buzz client contracts.
 
 Relays MUST reject invalid envelopes, unsupported envelope versions, and events with more than 256 tags. Normal event-size and write quotas apply.
 
@@ -86,7 +86,7 @@ The relay MUST atomically advance the current revision and durably record both a
 
 Earlier revisions remain under their original channels' access rules; a move never lets the destination read revisions from the source. The destination can load current state without reading earlier revisions. Conversation messages stay where they are.
 
-Deletion is a soft delete: a revision with `op=delete` and empty content. It preserves the current `type`, `h`, `root`, and title, and contains only envelope tags and NIP-OA `auth` tags the relay has verified. It removes the artifact from current-state queries and active views. Its revisions stay readable under their channels' access rules until redacted or expired by retention, so a lookup by `d` returns the deletion. After deletion, only `restore` is accepted: it names the deletion in `prev`, keeps its `h`, and carries a complete snapshot that becomes the current state again. A deleted `d` stays reserved and is never reused for another artifact. Completing or archiving work is a content change, not deletion or channel archival.
+Deletion is a soft delete: a revision with `op=delete`, empty content, and no `title` tag. It preserves the current `type`, `h`, and `root`, and contains only envelope tags and NIP-OA `auth` tags the relay has verified. It removes the artifact from current-state queries and active views. Its revisions stay readable under their channels' access rules until redacted or expired by retention, so a lookup by `d` returns the deletion. After deletion, only `restore` is accepted: it names the deletion in `prev`, keeps its `h`, and carries a complete snapshot that becomes the current state again. A deleted `d` stays reserved and is never reused for another artifact. Completing or archiving work is a content change, not deletion or channel archival.
 
 ## Moderation and retention
 
