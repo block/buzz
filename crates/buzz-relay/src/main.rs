@@ -227,6 +227,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 
     let usage_interval_secs = usage_metrics_interval_secs();
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
+    let dependency_sample_completion_republish_interval =
+        buzz_relay::readiness::dependency_sample_completion_republish_interval(
+            usage_idle_timeout_secs,
+        );
     let (boot, ()) = boot.run_required(
         StartupPhase::MetricsBind,
         || relay_metrics::try_install(config.metrics_port, usage_idle_timeout_secs),
@@ -244,6 +248,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     info!(
         port = config.metrics_port,
         idle_timeout_secs = usage_idle_timeout_secs,
+        completion_republish_secs = dependency_sample_completion_republish_interval.as_secs(),
         "Prometheus metrics exporter started"
     );
 
@@ -455,7 +460,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
     };
-    let redis_health_pool = redis_pool.clone(); // cheap Arc clone — shared with readiness handler
+    let redis_health_pool = redis_pool.clone(); // cheap Arc clone — shared with AppState
+                                                // One-time bootstrap gate, deliberately before AppState and therefore before
+                                                // the health listener binds. Post-start Redis failures are dependency
+                                                // failures and must never move readiness; never having connected at all is
+                                                // a broken deployment, not a blip.
+    buzz_relay::state::verify_redis_command_path(&redis_health_pool).await?;
+    info!("Redis command path connected");
     let pubsub = Arc::new(
         PubSubManager::new(&config.redis_url, redis_pool)
             .await
@@ -1043,6 +1054,16 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         ));
     }
 
+    // Per-pod dependency diagnostics runtime: one seam starts the dependency
+    // sampler and its independent completion-epoch republisher together.
+    {
+        let diagnostics_state = Arc::clone(&state);
+        buzz_relay::readiness::start_dependency_sampler_and_completion_publisher(
+            diagnostics_state,
+            dependency_sample_completion_republish_interval,
+        );
+    }
+
     // Cross-pod connection-control consumer: receive disconnect commands from
     // Redis pub/sub (published by the pod that recorded a ban) and close any
     // matching local sockets. A member's live connections may land on any pod,
@@ -1216,6 +1237,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 
     serve(router, health_router, Arc::clone(&state)).await?;
     state.community_revalidator_cancel.cancel();
+    state.dependency_sampler_cancel.cancel();
+    state.dependency_completion_publisher_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
     // exit. Uses a CancellationToken so it works regardless of how many

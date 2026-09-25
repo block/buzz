@@ -198,6 +198,8 @@ jobs:
         with:
           name: desktop-e2e-relay
           path: target/ci
+      - name: Restore relay executable permission
+        run: chmod +x ./target/ci/buzz-relay
       - name: PostgreSQL-backed tests
         env:
           BUZZ_POSTGRES_ADMIN_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/postgres

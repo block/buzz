@@ -290,6 +290,7 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
     metrics::set_global_recorder(recorder)
         .map_err(|_error| MetricsInstallError::RecorderConflict)?;
     describe_readiness_metrics();
+    describe_community_admission_metrics();
     describe_db_pool_metrics();
     describe_auth_metrics();
     initialize_auth_metric_series();
@@ -306,24 +307,42 @@ pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
         .unwrap_or_else(|error| panic!("metrics exporter must install exactly once: {error}"));
 }
 
-/// Register the frozen readiness metric descriptions with the active recorder.
+/// Register the frozen readiness and dependency-diagnostic metric descriptions.
+///
+/// The two `buzz_readiness_*` probe families describe local process lifecycle.
+/// The dependency families keep their names for dashboard continuity but are
+/// published by the per-pod dependency sampler, not by the Kubernetes probe or
+/// by an `/_status` request — a shared-dependency failure no longer deroutes
+/// the pod, and nobody has to read the endpoint for the metrics to move.
 pub(crate) fn describe_readiness_metrics() {
     metrics::describe_counter!(
         "buzz_readiness_checks_total",
-        "Kubernetes health-listener readiness probes by terminal bounded reason"
+        "Kubernetes health-listener readiness probes by lifecycle reason (ready, shutting_down)"
     );
     metrics::describe_counter!(
         "buzz_readiness_dependency_checks_total",
-        "Completed readiness dependency attempts by dependency and bounded outcome"
+        "Completed dependency-sampler attempts by dependency and bounded outcome"
     );
     metrics::describe_histogram!(
         "buzz_readiness_check_duration_seconds",
         metrics::Unit::Seconds,
-        "Completed readiness check duration without outcome label multiplication"
+        "Completed dependency-sampler check duration without outcome label multiplication"
     );
     metrics::describe_gauge!(
         "buzz_readiness_state",
-        "Latest publishable readiness state by check, where 1 is ready and 0 is not ready"
+        "Latest private readiness-probe observation, where 1 is ready and 0 is shutting down"
+    );
+    metrics::describe_gauge!(
+        "buzz_readiness_dependency_sample_completed_timestamp_seconds",
+        "Unix time the cached /_status dependency report completed, absent until the first sample completes; sampler completion advances it and the publisher re-emits it"
+    );
+}
+
+/// Register the bounded community-admission contract.
+pub(crate) fn describe_community_admission_metrics() {
+    metrics::describe_counter!(
+        "buzz_community_admission_checks_total",
+        "Durable community-active checks at socket admission by bounded outcome"
     );
 }
 
@@ -541,7 +560,17 @@ pub(crate) fn readiness_test_recorder() -> (
     metrics_exporter_prometheus::PrometheusRecorder,
     metrics_exporter_prometheus::PrometheusHandle,
 ) {
-    let recorder = configured_prometheus_builder(300).build_recorder();
+    readiness_test_recorder_with_idle_timeout(300)
+}
+
+#[cfg(test)]
+pub(crate) fn readiness_test_recorder_with_idle_timeout(
+    gauge_idle_timeout_secs: u64,
+) -> (
+    metrics_exporter_prometheus::PrometheusRecorder,
+    metrics_exporter_prometheus::PrometheusHandle,
+) {
+    let recorder = configured_prometheus_builder(gauge_idle_timeout_secs).build_recorder();
     let handle = recorder.handle();
     (recorder, handle)
 }
