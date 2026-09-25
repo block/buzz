@@ -37,6 +37,7 @@ export class TerminalApp {
   private readonly dispose: () => void;
   private readonly onExit: () => void;
   private commandDraft = "";
+  private startupDraft = "";
   private quitArmedAt = 0;
 
   constructor(
@@ -61,6 +62,8 @@ export class TerminalApp {
       if (this.updating) return;
       const view = this.store.current;
       if (view && !this.pluginView) view.draft = this.editor.getExpandedText();
+      else if (this.session.startup && !this.pluginView)
+        this.startupDraft = this.editor.getExpandedText();
       else this.commandDraft = this.editor.getExpandedText();
     };
     this.session = new Session(this.store, transport, launch);
@@ -510,23 +513,23 @@ export class TerminalApp {
   private refresh(): void {
     if (this.stopped) return;
     const view = this.store.current;
+    const startupView = this.session.startup
+      ? this.store.views.get(`${this.session.startup.launch.channelId}:`)
+      : undefined;
+    if (startupView && this.startupDraft && !startupView.draft) {
+      startupView.draft = this.startupDraft;
+      this.startupDraft = "";
+    }
     const key = this.pluginView
       ? `plugin:${this.pluginView}`
       : (view?.key ?? "welcome");
     if (this.editorKey !== key) {
-      if (
-        view &&
-        this.editorKey === "welcome" &&
-        this.session.startup &&
-        !view.draft
-      ) {
-        view.draft = this.commandDraft;
-        this.commandDraft = "";
-      }
       this.editorKey = key;
       this.updating = true;
       this.editor.setText(
-        this.pluginView ? this.commandDraft : (view?.draft ?? ""),
+        this.pluginView
+          ? this.commandDraft
+          : (view?.draft ?? this.startupDraft),
       );
       this.updating = false;
       let scroll = this.scrolls.get(key);
@@ -705,6 +708,7 @@ export class TerminalApp {
   private requestQuit(): void {
     const hasDraft =
       this.commandDraft ||
+      this.startupDraft ||
       [...this.store.views.values()].some((view) => view.draft || view.pending);
     if (hasDraft && Date.now() - this.quitArmedAt > 3000) {
       this.quitArmedAt = Date.now();

@@ -124,7 +124,22 @@ test("typing during channel creation survives activation and sends to the config
     terminal.input("Please review the startup flow");
     terminal.input("\n");
     terminal.input("Keep my draft intact.");
+    terminal.input("\x1ba");
+    assert.match(await terminal.frame(), /Agent activity/);
+    assert.equal(app.editor.getExpandedText(), "");
+    terminal.input("/status");
+    terminal.input("\x1b");
+    await terminal.frame();
+    assert.equal(
+      app.editor.getExpandedText(),
+      "Please review the startup flow\nKeep my draft intact.",
+    );
+    terminal.input("\x1ba");
+    await terminal.frame();
     release();
+    assert.match(await terminal.frame(), /Agent activity/);
+    assert.equal(app.editor.getExpandedText(), "/status");
+    terminal.input("\x1b");
     const screen = await terminal.frame();
     assert.match(screen, /To Atlas/);
     assert.match(screen, /Keep my draft intact/);
