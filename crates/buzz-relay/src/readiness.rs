@@ -457,9 +457,11 @@ pub fn dependency_sample_completion_republish_interval(gauge_idle_timeout_secs: 
 
 /// The per-pod owner of shared-dependency evaluation.
 ///
-/// [`run_dependency_sampler`] is the only caller of [`Self::sample`], so at
-/// most one evaluation exists at a time and no request path can start another.
-/// `/_status` reads [`Self::snapshot`], which touches no dependency.
+/// The production [`run_dependency_sampler`] loop is the sole runtime owner of
+/// [`Self::sample`], so at most one evaluation exists at a time and no request
+/// path can start another. The companion completion publisher only reads the
+/// stored epoch, while `/_status` reads [`Self::snapshot`]; neither touches a
+/// dependency.
 pub(crate) struct DependencyDiagnostics {
     evaluator: Arc<dyn DependencyEvaluator>,
     latest: Mutex<Option<DependencySample>>,
@@ -579,22 +581,14 @@ pub fn start_dependency_sampler_and_completion_publisher(
     state: Arc<AppState>,
     republish_interval: Duration,
 ) {
-    let sampler_state = Arc::clone(&state);
-    tokio::spawn(run_dependency_sampler_for_diagnostics(
-        Arc::clone(&sampler_state.dependency_diagnostics),
-        sampler_state.db.clone(),
-        sampler_state.redis_pool.clone(),
-        DEPENDENCY_SAMPLE_INTERVAL,
-        sampler_state.dependency_sampler_cancel.clone(),
-    ));
+    let sampler_cancel = state.dependency_sampler_cancel.clone();
+    tokio::spawn(run_dependency_sampler(Arc::clone(&state), sampler_cancel));
 
-    let publisher_state = Arc::clone(&state);
-    tokio::spawn(run_dependency_sample_completion_publisher_for_diagnostics(
-        Arc::clone(&publisher_state.dependency_diagnostics),
+    let publisher_cancel = state.dependency_completion_publisher_cancel.clone();
+    tokio::spawn(run_dependency_sample_completion_publisher(
+        state,
         republish_interval,
-        publisher_state
-            .dependency_completion_publisher_cancel
-            .clone(),
+        publisher_cancel,
     ));
 }
 
@@ -967,15 +961,32 @@ mod tests {
         }
     }
 
+    struct DelayedEvaluator {
+        report: DependencyReport,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl DependencyEvaluator for DelayedEvaluator {
+        async fn evaluate(&self, _db: &Db, _redis_pool: &deadpool_redis::Pool) -> DependencyReport {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.report
+        }
+    }
+
+    fn ready_report() -> DependencyReport {
+        DependencyReport::from_results(
+            TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(3)),
+            TimedOutcome::new(RedisOutcome::Success, Duration::from_millis(2)),
+            TimedOutcome::new(DeletionCatalogOutcome::Success, Duration::from_millis(1)),
+            Duration::from_millis(3),
+        )
+    }
+
     fn ready_diagnostics() -> DependencyDiagnostics {
-        DependencyDiagnostics::with_evaluator(Arc::new(FixedEvaluator(
-            DependencyReport::from_results(
-                TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(3)),
-                TimedOutcome::new(RedisOutcome::Success, Duration::from_millis(2)),
-                TimedOutcome::new(DeletionCatalogOutcome::Success, Duration::from_millis(1)),
-                Duration::from_millis(3),
-            ),
-        )))
+        DependencyDiagnostics::with_evaluator(Arc::new(FixedEvaluator(ready_report())))
     }
 
     fn sampled(snapshot: DependencySnapshot) -> (Duration, bool) {
@@ -1239,6 +1250,7 @@ mod tests {
         let republish_interval = Duration::from_millis(100);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
+            .start_paused(true)
             .build()
             .expect("current-thread runtime");
         let (recorder, handle) =
@@ -1250,29 +1262,39 @@ mod tests {
                     "postgres://127.0.0.1:1/buzz",
                 )
                 .await;
+                let sample_started = Arc::new(tokio::sync::Notify::new());
+                let release_sample = Arc::new(tokio::sync::Notify::new());
                 Arc::get_mut(&mut state)
                     .expect("sole readiness state")
-                    .set_dependency_evaluator(Arc::new(FixedEvaluator(
-                        DependencyReport::from_results(
-                            TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(3)),
-                            TimedOutcome::new(RedisOutcome::Success, Duration::from_millis(2)),
-                            TimedOutcome::new(
-                                DeletionCatalogOutcome::Success,
-                                Duration::from_millis(1),
-                            ),
-                            Duration::from_millis(3),
-                        ),
-                    )));
+                    .set_dependency_evaluator(Arc::new(DelayedEvaluator {
+                        report: ready_report(),
+                        started: Arc::clone(&sample_started),
+                        release: Arc::clone(&release_sample),
+                    }));
 
                 start_dependency_sampler_and_completion_publisher(
                     Arc::clone(&state),
                     republish_interval,
                 );
 
+                sample_started.notified().await;
+                for _ in 0..3 {
+                    tokio::time::advance(republish_interval).await;
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    sample_completion_metric_value_from_scrape(&handle.render()),
+                    None,
+                    "republisher ticks must not fabricate an epoch before the first completion"
+                );
+
+                release_sample.notify_one();
+
                 let first =
                     wait_for_sample_completion_scrape_value(&handle, |value| value > 0).await;
 
                 state.dependency_sampler_cancel.cancel();
+                tokio::time::resume();
 
                 tokio::time::sleep(timeout + Duration::from_millis(200)).await;
                 assert_eq!(
