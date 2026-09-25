@@ -1534,6 +1534,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-terminal-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buzz-core",
+ "buzz-sdk",
+ "buzz-ws-client",
+ "futures-util",
+ "nostr 0.44.7",
+ "reqwest 0.13.4",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tokio-util",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-test-client"
 version = "0.1.0"
 dependencies = [
