@@ -46,7 +46,7 @@ assert.ok(
   actionPath && existsSync(actionPath),
   `Set PATHS_FILTER_ACTION to the local dist/index.js from dorny/paths-filter@${actionSha}`,
 );
-async function select(paths, pullRequest = false) {
+async function select(paths, pullRequest = false, apiStatus = 200) {
   const repo = mkdtempSync(join(scratch, "repo-"));
   const git = (...args) =>
     execFileSync("git", args, { cwd: repo, stdio: "pipe", timeout: 10000 });
@@ -132,6 +132,11 @@ async function select(paths, pullRequest = false) {
         "/repos/block/buzz/pulls/7809/files?per_page=100",
       );
       response.setHeader("Content-Type", "application/json");
+      if (apiStatus !== 200) {
+        response.writeHead(apiStatus);
+        response.end(JSON.stringify({ message: "Fixture access denied" }));
+        return;
+      }
       response.end(
         JSON.stringify(
           paths
@@ -335,3 +340,11 @@ for (const count of [2999, 3000, 3001]) {
     }
   });
 }
+
+test("PR API denial fails path selection instead of reporting no changes", async () => {
+  await assert.rejects(select(["README.md"], true, 403), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stdout + error.stderr, /Fixture access denied/);
+    return true;
+  });
+});
