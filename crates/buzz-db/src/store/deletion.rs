@@ -3605,6 +3605,207 @@ mod tests {
     }
 }
 
+/// Shared `community_deletion_owner_provenance` contract cases.
+///
+/// The same table is asserted against the migration-upgrade schema
+/// (`runtime::migration::postgres_tests`) and the desired-state bootstrap
+/// schema (`postgres_tests` below), so the two schema sources cannot drift
+/// into different owner-provenance guarantees.
+#[cfg(test)]
+pub(crate) mod owner_provenance_contract {
+    use sqlx::{PgPool, Row};
+    use uuid::Uuid;
+
+    /// Constraint that must reject every malformed owner-provenance row.
+    pub(crate) const CONSTRAINT: &str = "community_deletion_owner_provenance";
+
+    const VALID_OWNER: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const VALID_OPERATOR: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    /// One rejected owner-origin row: `(case name, owner, mediator, ack, requested_by)`.
+    type Case = (
+        &'static str,
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<i32>,
+        &'static str,
+    );
+
+    /// Every owner-origin row the constraint must refuse.
+    pub(crate) fn rejected_cases() -> Vec<Case> {
+        vec![
+            (
+                "missing owner_pubkey",
+                None,
+                Some(VALID_OPERATOR),
+                Some(1),
+                VALID_OWNER,
+            ),
+            (
+                "missing mediating_operator_pubkey",
+                Some(VALID_OWNER),
+                None,
+                Some(1),
+                VALID_OWNER,
+            ),
+            (
+                "missing acknowledgement_version",
+                Some(VALID_OWNER),
+                Some(VALID_OPERATOR),
+                None,
+                VALID_OWNER,
+            ),
+            (
+                "owner_pubkey too short",
+                Some("abc"),
+                Some(VALID_OPERATOR),
+                Some(1),
+                "abc",
+            ),
+            (
+                "owner_pubkey uppercase hex",
+                Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                Some(VALID_OPERATOR),
+                Some(1),
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ),
+            (
+                "owner_pubkey non-hex",
+                Some("zzzz111111111111111111111111111111111111111111111111111111111111"),
+                Some(VALID_OPERATOR),
+                Some(1),
+                "zzzz111111111111111111111111111111111111111111111111111111111111",
+            ),
+            (
+                "mediating_operator_pubkey too short",
+                Some(VALID_OWNER),
+                Some("abc"),
+                Some(1),
+                VALID_OWNER,
+            ),
+            (
+                "mediating_operator_pubkey uppercase hex",
+                Some(VALID_OWNER),
+                Some("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+                Some(1),
+                VALID_OWNER,
+            ),
+            (
+                "acknowledgement_version zero",
+                Some(VALID_OWNER),
+                Some(VALID_OPERATOR),
+                Some(0),
+                VALID_OWNER,
+            ),
+            (
+                "acknowledgement_version negative",
+                Some(VALID_OWNER),
+                Some(VALID_OPERATOR),
+                Some(-1),
+                VALID_OWNER,
+            ),
+            (
+                "requested_by is not the owner",
+                Some(VALID_OWNER),
+                Some(VALID_OPERATOR),
+                Some(1),
+                VALID_OPERATOR,
+            ),
+        ]
+    }
+
+    async fn seed_community(pool: &PgPool) -> Uuid {
+        let host = format!("owner-provenance-{}.example", Uuid::new_v4().simple());
+        sqlx::query_scalar::<_, Uuid>("INSERT INTO communities (host) VALUES ($1) RETURNING id")
+            .bind(&host)
+            .fetch_one(pool)
+            .await
+            .expect("seed owner-provenance community")
+    }
+
+    async fn insert_owner_row(
+        pool: &PgPool,
+        owner: Option<&str>,
+        mediator: Option<&str>,
+        acknowledgement: Option<i32>,
+        requested_by: &str,
+    ) -> Result<(), sqlx::Error> {
+        let community_id = seed_community(pool).await;
+        let host: String = sqlx::query("SELECT host FROM communities WHERE id = $1")
+            .bind(community_id)
+            .fetch_one(pool)
+            .await
+            .expect("seeded host")
+            .try_get("host")
+            .expect("host column");
+        sqlx::query(
+            "INSERT INTO community_deletion_requests \
+             (id, community_id, community_host, requested_by, request_origin, \
+              owner_pubkey, mediating_operator_pubkey, acknowledgement_version) \
+             VALUES ($1, $2, $3, $4, 'owner', $5, $6, $7)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(community_id)
+        .bind(host)
+        .bind(requested_by)
+        .bind(owner)
+        .bind(mediator)
+        .bind(acknowledgement)
+        .execute(pool)
+        .await
+        .map(|_| ())
+    }
+
+    /// Assert the live schema refuses every malformed owner row and still
+    /// admits a well-formed one.
+    pub(crate) async fn assert_contract(pool: &PgPool) {
+        for (name, owner, mediator, acknowledgement, requested_by) in rejected_cases() {
+            let error = insert_owner_row(pool, owner, mediator, acknowledgement, requested_by)
+                .await
+                .expect_err(&format!("owner-provenance case must be rejected: {name}"));
+            let constraint = error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint);
+            assert_eq!(
+                constraint,
+                Some(CONSTRAINT),
+                "case {name:?} must fail {CONSTRAINT}, got: {error}"
+            );
+        }
+
+        // Falsifiability: the constraint must still admit well-formed intent.
+        insert_owner_row(
+            pool,
+            Some(VALID_OWNER),
+            Some(VALID_OPERATOR),
+            Some(1),
+            VALID_OWNER,
+        )
+        .await
+        .expect("well-formed owner provenance must be accepted");
+
+        // The operator branch stays exclusive of owner columns.
+        let community_id = seed_community(pool).await;
+        let operator_with_owner_columns = sqlx::query(
+            "INSERT INTO community_deletion_requests \
+             (id, community_id, community_host, requested_by, request_origin, owner_pubkey) \
+             VALUES ($1, $2, 'operator.example', 'operator', 'operator', $3)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(community_id)
+        .bind(VALID_OWNER)
+        .execute(pool)
+        .await;
+        assert_eq!(
+            operator_with_owner_columns
+                .expect_err("operator-origin rows must not carry owner provenance")
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some(CONSTRAINT)
+        );
+    }
+}
+
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
@@ -4253,6 +4454,17 @@ mod postgres_tests {
                 .all(|row| row.id != community),
             "accepted deletion requests must not remain actionable archived rows"
         );
+    }
+
+    /// Desired-state bootstrap half of the owner-provenance contract.
+    ///
+    /// The migration-upgrade half lives in `runtime::migration::postgres_tests`
+    /// and asserts the same shared case table.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn desired_state_schema_enforces_owner_provenance_contract() {
+        let (db, _) = store().await;
+        owner_provenance_contract::assert_contract(&db.pool).await;
     }
 
     /// Privileged recovery abort at the reversible pre-approval boundary.

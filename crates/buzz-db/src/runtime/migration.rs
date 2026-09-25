@@ -2498,6 +2498,22 @@ mod postgres_tests {
         assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
     }
 
+    /// Migration-upgrade half of the owner-provenance contract.
+    ///
+    /// The desired-state bootstrap half lives in
+    /// `store::deletion::postgres_tests` and asserts the same shared case
+    /// table, so `schema/schema.sql` cannot admit owner rows the migration
+    /// path refuses (or the reverse).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migrated_schema_enforces_owner_provenance_contract() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool).await.expect("run migrations");
+
+        crate::store::deletion::owner_provenance_contract::assert_contract(&pool).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn run_migrations_applies_consolidated_initial_schema_on_fresh_database() {

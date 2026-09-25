@@ -1280,6 +1280,9 @@ CREATE TABLE community_deletion_requests (
             AND acknowledgement_version IS NULL)
         OR
         (request_origin = 'owner'
+            AND NOT (owner_pubkey IS NULL)
+            AND NOT (mediating_operator_pubkey IS NULL)
+            AND NOT (acknowledgement_version IS NULL)
             AND owner_pubkey ~ '^[0-9a-f]{64}$'
             AND mediating_operator_pubkey ~ '^[0-9a-f]{64}$'
             AND acknowledgement_version BETWEEN 1 AND 32767

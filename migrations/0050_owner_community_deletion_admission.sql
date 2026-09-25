@@ -4,6 +4,18 @@
 -- Owner admission supplies that UUID instead of creating a second identity
 -- column, while these bounded columns distinguish owner intent from the
 -- deployment operator that mediated it.
+--
+-- The owner branch rejects a NULL in every provenance column before testing
+-- its shape. A bare `col ~ '...'` on a NULL column yields NULL, and a CHECK is
+-- satisfied by NULL, so `FALSE OR NULL` would silently admit an owner-origin
+-- row with no owner key, no mediating operator, or no acknowledgement version.
+--
+-- The null rejection is spelled `NOT (col IS NULL)` rather than
+-- `col IS NOT NULL`: pgschema drops a named CHECK whose body contains
+-- `IS NOT NULL` and still exits 0, which would leave the desired-state
+-- bootstrap in `schema/schema.sql` silently unguarded while the migration path
+-- stayed correct. `store::deletion::owner_provenance_contract` asserts both
+-- schema sources against one case table so that divergence fails loudly.
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE community_deletion_requests
@@ -19,6 +31,9 @@ ALTER TABLE community_deletion_requests
             AND acknowledgement_version IS NULL)
         OR
         (request_origin = 'owner'
+            AND NOT (owner_pubkey IS NULL)
+            AND NOT (mediating_operator_pubkey IS NULL)
+            AND NOT (acknowledgement_version IS NULL)
             AND owner_pubkey ~ '^[0-9a-f]{64}$'
             AND mediating_operator_pubkey ~ '^[0-9a-f]{64}$'
             AND acknowledgement_version BETWEEN 1 AND 32767
