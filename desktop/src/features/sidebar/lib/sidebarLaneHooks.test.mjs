@@ -42,15 +42,24 @@ async function harness() {
     return () => {};
   });
   mock.method(relayClient, "publishEvent", async (event, _t, _e, isCurrent) => {
+    fx.attempts.push(event); // the manager reached the send boundary
     if (fx.holdPublish) await fx.holdPublish;
     if (isCurrent && !isCurrent()) throw new Error("canceled");
     fx.published.push(event);
-    fx.heads[event.tags[0][1]] = event;
+    const d = event.tags[0][1]; // relay rule: newer wins, ties to lower id
+    const [a, b] = [event, fx.heads[d]];
+    if (
+      !b ||
+      a.created_at > b.created_at ||
+      (a.created_at === b.created_at && a.id < b.id)
+    )
+      fx.heads[d] = event;
   });
   mock.method(console, "warn", () => {});
   window.__TAURI_INTERNALS__ = {
     invoke: async (cmd, args) => {
-      if (cmd === "nip44_encrypt_to_self") return args.plaintext;
+      if (cmd === "nip44_encrypt_to_self")
+        return Promise.resolve(fx.holdCrypto).then(() => args.plaintext);
       if (cmd === "nip44_decrypt_from_self") return args.ciphertext;
       if (cmd === "sign_event")
         return JSON.stringify({
@@ -77,7 +86,7 @@ beforeEach(() => {
   mock.restoreAll();
   mock.timers.reset();
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1e12 });
-  fx = { heads: {}, published: [], reconnect: null };
+  fx = { heads: {}, published: [], attempts: [], reconnect: null };
 });
 
 for (const [name, modPath, hookName, dTag, idsKey] of [
@@ -168,11 +177,28 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
     });
     const h = await harness();
     const hook = (await import(modPath))[hookName];
+    fx.storageKey = (
+      await import(`./channel${name === "stars" ? "Stars" : "Mutes"}Storage.ts`)
+    ).storageKey;
     return { ...h, hook };
+  };
+  // B (or the union) must hold in the UI and the persisted cache alike.
+  const shows = (result, ids, msg) => {
+    const cached = JSON.parse(window.localStorage.getItem(fx.storageKey(PK)));
+    assert.deepEqual([...result.current[idsKey]].sort(), ids, msg);
+    assert.deepEqual(Object.keys(cached.channels).sort(), ids, msg);
+  };
+  // A later authoritative head still applies: recovery kept polling.
+  const resumes = async ({ act, advance }, result, ids) => {
+    fx.heads[dTag] = ev(dTag, payload([...ids, "c7"], 9), 2e9);
+    await act(async () => visible());
+    await advance(1_000);
+    shows(result, [...ids, "c7"].sort(), "polling resumed");
   };
 
   test(`${name}: an older ACK leaves a newer edit pending through recovery`, async () => {
-    const { renderHook, act, advance, cleanup, hook } = await setup();
+    const h = await setup();
+    const { renderHook, act, advance, cleanup, hook } = h;
     const { result } = renderHook(() => hook(PK, RELAY));
     await advance(1_000);
     act(() => result.current[verb]("c1")); // edit A
@@ -182,14 +208,19 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
     act(() => result.current[verb]("c2")); // edit B, deadline +2 s
     fx.holdPublish = null;
     await act(async () => ack.resolve());
+    assert.deepEqual(headIds(), ["c1"], "A's ACK exit ran before recovery");
     await act(async () => visible()); // recovery before B's deadline
+    shows(result, ["c1", "c2"], "B survives the recovery");
     await advance(3_000);
     assert.deepEqual(headIds(), ["c1", "c2"], "B reached the relay");
+    shows(result, ["c1", "c2"], "B settled");
+    await resumes(h, result, ["c1", "c2"]);
     cleanup();
   });
 
   test(`${name}: an identical-payload exit leaves a newer edit pending through recovery`, async () => {
-    const { renderHook, act, advance, cleanup, hook } = await setup();
+    const h = await setup();
+    const { renderHook, act, advance, cleanup, hook } = h;
     const { result } = renderHook(() => hook(PK, RELAY));
     await advance(1_000);
     act(() => result.current[verb]("c1")); // A
@@ -205,28 +236,31 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
     act(() => result.current[verb]("c2")); // B
     fx.gate = null;
     await act(async () => gate.resolve()); // repeat of A exits as identical
+    assert.equal(fx.attempts.length, 1, "A's repeat sent nothing");
     await act(async () => visible());
+    shows(result, ["c1", "c2"], "B survives the recovery");
     await advance(3_000);
     assert.deepEqual(headIds(), ["c1", "c2"], "B reached the relay");
+    shows(result, ["c1", "c2"], "B settled");
+    await resumes(h, result, ["c1", "c2"]);
     cleanup();
   });
 
-  for (const preflight of ["absent", "failed", "found", "edit"]) {
+  const stages = ["absent", "failed", "found", "crypto", "socket"];
+  for (const stage of [...stages, "edit", "ack"]) {
     const what =
-      preflight === "edit"
-        ? "a genuine edit survives the seed's retirement"
-        : `an acquired seed yields to R (preflight ${preflight})`;
-    test(`${name}: startup recovery sees R; ${what}`, async () => {
+      {
+        edit: "a genuine edit survives the seed's retirement",
+        ack: "the seed's own ACK leaves a genuine edit pending",
+      }[stage] ?? `an acquired seed yields to R (retired at ${stage})`;
+    test(`${name}: startup recovery; ${what}`, async () => {
       const { renderHook, act, advance, cleanup, hook } = await setup();
-      const { storageKey } = await import(
-        `./channel${name === "stars" ? "Stars" : "Mutes"}Storage.ts`
-      );
       window.localStorage.setItem(
-        storageKey(PK),
+        fx.storageKey(PK),
         JSON.stringify(payload(["s1"])),
       );
       const R = ev(dTag, payload(["r1"], 2), 1e9 + 30); // future-dated
-      fx.heads[dTag] = R;
+      if (stage !== "ack") fx.heads[dTag] = R;
       const calls = [];
       fx.onFetch = () => {
         const d = deferred();
@@ -235,25 +269,54 @@ for (const [name, modPath, hookName, dTag, idsKey, verb, field] of [
       };
       const { result } = renderHook(() => hook(PK, RELAY));
       await act(async () => calls[0].resolve([])); // bootstrap: absent, seeds S
-      if (preflight === "edit") {
+      const held = deferred();
+      if (stage === "edit") {
         act(() => result.current[verb]("c9"));
         await act(async () => calls[1].resolve([R]));
         await advance(2_000);
         await act(async () => calls[2].resolve([R]));
+      } else if (stage === "ack") {
+        fx.holdPublish = held.promise;
+        await advance(2_000); // S acquired
+        await act(async () => calls[1].resolve([]));
+        await act(async () => calls[2].resolve([])); // S at the socket
+        act(() => result.current[verb]("c9")); // genuine edit B
+        fx.onFetch = fx.holdPublish = null;
+        await act(async () => held.resolve()); // S's own ACK
+      } else if (stage === "crypto" || stage === "socket") {
+        fx[stage === "crypto" ? "holdCrypto" : "holdPublish"] = held.promise;
+        await advance(2_000); // seed acquired
+        await act(async () => calls[2].resolve([])); // preflight: absent
+        await act(async () => calls[1].resolve([R])); // retire mid-stage
+        await act(async () => held.resolve());
+        const sends = stage === "crypto" ? 0 : 1; // observable send boundary
+        assert.equal(fx.attempts.length, sends, `retired during ${stage}`);
       } else {
         await advance(2_000); // seed acquired; its preflight waits
         await act(async () => calls[1].resolve([R])); // recovery observes R
-        if (preflight === "failed") calls[2].reject(new Error("offline"));
-        else calls[2].resolve(preflight === "found" ? [R] : []);
+        if (stage === "failed") calls[2].reject(new Error("offline"));
+        else calls[2].resolve(stage === "found" ? [R] : []);
       }
       await advance(3_000);
-      if (preflight === "edit") {
-        assert.deepEqual(headIds(), ["c9", "r1", "s1"]);
-      } else {
+      // The later scheduled read gets whatever head the relay kept.
+      fx.onFetch = null;
+      for (const c of calls) c.resolve([fx.heads[dTag]]);
+      await advance(60_000);
+      const kept = { edit: ["c9", "r1", "s1"], ack: ["c9", "s1"] }[stage];
+      shows(result, kept ?? ["r1", "s1"], "UI and cache");
+      if (!kept) {
         assert.equal(fx.published.length, 0, "the seed never published");
         assert.equal(fx.heads[dTag], R, "R stays the relay head");
-        assert.deepEqual([...result.current[idsKey]].sort(), ["r1", "s1"]);
       }
+      assert.deepEqual(headIds(), kept ?? ["r1"]);
+      cleanup(); // a fresh reader consumes only the retained head
+      window.localStorage.clear();
+      const fresh = renderHook(() => hook(PK, RELAY));
+      await advance(1_000);
+      assert.deepEqual(
+        [...fresh.result.current[idsKey]].sort(),
+        kept ?? ["r1"],
+      );
       cleanup();
     });
   }

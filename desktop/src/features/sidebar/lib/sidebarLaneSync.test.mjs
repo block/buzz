@@ -67,7 +67,7 @@ beforeEach(() => {
   mock.method(console, "warn", () => {});
   mock.method(relayClient, "publishEvent", async (event, _t, _e, isCurrent) => {
     fx.beforeSend?.();
-    if (!isCurrent()) throw new PublishCanceledError();
+    if (!isCurrent()) throw (await fx.consume) ?? new PublishCanceledError();
     fx.published.push(event);
     if (fx.publish === "cancelText") {
       fx.publish = "ok";
@@ -375,6 +375,30 @@ for (const L of LANES) {
     t.mock.timers.tick(3_000);
     for (let i = 0; i < 5; i++) await settle();
     assert.equal(fx.published.length, 2, "retried after the 5 s backoff");
+    rec.destroy();
+  });
+
+  test(`${L.name}: a hold cancel consumed after its deadline stays a hold`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1e12 });
+    const store = new LaneStore(L.lane, PK, RELAY);
+    const rec = new LaneReconciler(L.lane, store, PK, RELAY);
+    store.transact((tr) => L.edit(tr, "k1", "A"));
+    let consume;
+    fx.consume = new Promise((r) => (consume = r));
+    fx.beforeSend = () => {
+      fx.beforeSend = null;
+      rec.defer();
+    };
+    await rec.read(); // the send is canceled by the hold
+    for (let i = 0; i < 5; i++) await settle();
+    assert.equal(fx.beforeSend, null, "canceled at the send boundary");
+    t.mock.timers.tick(2_000); // the hold expires before the cancel is consumed
+    fx.consume = null;
+    consume();
+    for (let i = 0; i < 5; i++) await settle();
+    t.mock.timers.tick(1); // the kept, expired deadline re-arms at once
+    for (let i = 0; i < 5; i++) await settle();
+    assert.equal(fx.published.length, 1, "no failure backoff");
     rec.destroy();
   });
 
