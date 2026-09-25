@@ -50,8 +50,9 @@ pub enum BlossomStrictness {
 ///        one occurrence; require its content to be non-empty and equal to
 ///        `verb` (NIP-FI.md:658-666 — malformed/empty/duplicate instances MUST
 ///        be rejected as `evidence_rejected`).
-///      - `Permissive`: at least one valid-valued `t` tag equal to `verb`;
-///        valueless/empty tags are ignored (origin/main `found_t` semantics).
+///      - `Permissive`: at least one `t` tag equal to `verb`; any other valued
+///        `t` (including `""`) rejects and valueless tags are ignored
+///        (origin/main `found_t` semantics).
 ///   4. `expiration` tag present, strictly future, and within the freshness window
 ///   5. `created_at` bounded: not more than 5s in the future; not older than the
 ///      mode-selected window (60s `Strict`, 3600s `Permissive`)
@@ -121,17 +122,14 @@ pub fn verify_blossom_auth_event_for_verb(
                         _ => return Err(MediaError::InvalidAuthVerb),
                     }
                 } else {
-                    // Permissive: only valid-valued matching tags count
-                    // (origin/main's `found_t` semantics).  Valueless/empty
-                    // tags are ignored for cardinality; wrong-verb tags reject.
+                    // Permissive: origin/main's `found_t` semantics exactly.
+                    // Any valued tag (including empty) that is not the verb
+                    // rejects; valueless tags are ignored [FI-INV-15].
                     if let Some(v) = tag.content() {
-                        if v.is_empty() {
-                            // Empty string value: does not satisfy the requirement.
-                        } else if v != verb.as_str() {
+                        if v != verb.as_str() {
                             return Err(MediaError::InvalidAuthVerb);
-                        } else {
-                            t_count = t_count.saturating_add(1);
                         }
+                        t_count = t_count.saturating_add(1);
                     }
                     // No content: tag is ignored (not counted, not rejected).
                 }
@@ -1406,6 +1404,57 @@ mod tests {
             ),
             "expected InvalidAuthVerb or DuplicateTag(t), got unexpected error variant"
         );
+    }
+
+    /// Permissive must match origin/main's predicate exactly [FI-INV-15]: any
+    /// valued `t` unequal to the verb — including `""` — rejects, in either
+    /// order; only a valueless `["t"]` is ignored.
+    fn permissive_get_with_t_tags(t_tags: &[&[&str]]) -> Result<(), MediaError> {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        let exp_str = (Timestamp::now().as_secs() + 300).to_string();
+        let mut tags: Vec<Tag> = t_tags
+            .iter()
+            .map(|t| Tag::parse(t.iter().copied()).unwrap())
+            .collect();
+        tags.push(Tag::parse(["x", &sha256]).unwrap());
+        tags.push(Tag::parse(["expiration", &exp_str]).unwrap());
+        let event = build_get_auth(&keys, tags);
+        verify_blossom_get_auth(
+            &event,
+            &sha256,
+            Some("relay.example"),
+            BlossomStrictness::Permissive,
+        )
+    }
+
+    #[test]
+    fn test_permissive_rejects_empty_plus_valid_t_either_order() {
+        for order in [
+            &[&["t", ""][..], &["t", "get"][..]][..],
+            &[&["t", "get"][..], &["t", ""][..]][..],
+        ] {
+            assert!(
+                matches!(
+                    permissive_get_with_t_tags(order),
+                    Err(MediaError::InvalidAuthVerb)
+                ),
+                "Permissive must reject empty-valued t like main: {order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_permissive_admits_valueless_plus_valid_t_either_order() {
+        for order in [
+            &[&["t"][..], &["t", "get"][..]][..],
+            &[&["t", "get"][..], &["t"][..]][..],
+        ] {
+            assert!(
+                permissive_get_with_t_tags(order).is_ok(),
+                "Permissive must ignore valueless t like main: {order:?}"
+            );
+        }
     }
 
     /// `["x"]` (valueless) + `["x", sha256]` (valid) in Strict: `x_count` increments

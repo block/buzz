@@ -2425,11 +2425,32 @@ mod tests {
             authorization: &[&str],
             assertion: Option<&str>,
         ) -> (StatusCode, axum::http::HeaderMap, bytes::Bytes) {
+            let sha = sha256_hex(AUDIO_BODY);
+            upload_request_with(
+                rt,
+                state,
+                route,
+                host,
+                (Some(&sha), AUDIO_BODY),
+                authorization,
+                assertion,
+            )
+        }
+
+        /// `upload_request` with an explicit `X-SHA-256` header (or none) and body.
+        fn upload_request_with(
+            rt: &tokio::runtime::Runtime,
+            state: &Arc<AppState>,
+            route: &str,
+            host: &str,
+            (x_sha256, body): (Option<&str>, &[u8]),
+            authorization: &[&str],
+            assertion: Option<&str>,
+        ) -> (StatusCode, axum::http::HeaderMap, bytes::Bytes) {
             let mut headers = axum::http::HeaderMap::new();
-            headers.insert(
-                "x-sha-256",
-                sha256_hex(AUDIO_BODY).parse().expect("valid header"),
-            );
+            if let Some(x_sha256) = x_sha256 {
+                headers.insert("x-sha-256", x_sha256.parse().expect("valid header"));
+            }
             for value in authorization {
                 headers.append(
                     axum::http::header::AUTHORIZATION,
@@ -2448,7 +2469,7 @@ mod tests {
                 route,
                 host,
                 headers,
-                AUDIO_BODY,
+                body,
             ))
         }
 
@@ -3828,6 +3849,7 @@ mod tests {
         fn media_read(
             rt: &tokio::runtime::Runtime,
             state: &Arc<AppState>,
+            method: &str,
             host: &str,
             authorization: &str,
             assertion: Option<&str>,
@@ -3846,7 +3868,7 @@ mod tests {
             let path = format!("/media/{}", "a".repeat(64));
             rt.block_on(media_oneshot(
                 Arc::clone(state),
-                "GET",
+                method,
                 &path,
                 host,
                 headers,
@@ -3892,6 +3914,10 @@ mod tests {
             }
         }
 
+        /// GET and HEAD each derive strictness independently; HEAD carries the
+        /// same denial headers with the body suppressed.
+        const READ_METHODS: [(&str, &[u8]); 2] = [("GET", b"evidence rejected\n"), ("HEAD", b"")];
+
         #[test]
         #[ignore = "requires Postgres"]
         fn read_strictness_follows_nip_fi_mode() {
@@ -3901,23 +3927,216 @@ mod tests {
             let (rt, state, host) = media_fixture(media_enforce_test_state());
             let assertion = signed_assertion(&keys.public_key().to_hex());
             let proof = blossom_get_auth_value_with(&keys, &host, &sha, 300);
-            assert_exact_response(
-                &media_read(&rt, &state, &host, &proof, Some(&assertion)),
-                StatusCode::FORBIDDEN,
-                "text/plain; charset=utf-8",
-                None,
-                b"evidence rejected\n",
-                "Enforce read: 300s lifetime",
-            );
+            for (method, body) in READ_METHODS {
+                assert_exact_response(
+                    &media_read(&rt, &state, method, &host, &proof, Some(&assertion)),
+                    StatusCode::FORBIDDEN,
+                    "text/plain; charset=utf-8",
+                    None,
+                    body,
+                    &format!("Enforce {method}: 300s lifetime, non-member"),
+                );
+            }
 
             let (rt, state, host) = media_fixture(media_off_test_state());
             let proof = blossom_get_auth_value_with(&keys, &host, &sha, 300);
-            let (status, _, body) = media_read(&rt, &state, &host, &proof, None);
-            assert_eq!(
-                status,
-                StatusCode::NOT_FOUND,
-                "Off read must pass Permissive auth and reach the sidecar gate; body {body:?}"
-            );
+            for (method, _) in READ_METHODS {
+                let (status, _, body) = media_read(&rt, &state, method, &host, &proof, None);
+                assert_eq!(
+                    status,
+                    StatusCode::NOT_FOUND,
+                    "Off {method} must pass Permissive auth and reach the sidecar gate; \
+                     body {body:?}"
+                );
+            }
+        }
+
+        // ── Off keeps main's Permissive `t` predicate [FI-INV-15] ───────────
+
+        /// Blossom proof with the given `t` tags plus valid expiration, server,
+        /// and x tags.
+        fn blossom_auth_value_with_t(
+            keys: &Keys,
+            t_tags: &[&[&str]],
+            host: &str,
+            sha256_hex: &str,
+        ) -> String {
+            use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+            use nostr::JsonUtil as _;
+            let exp = (nostr::Timestamp::now().as_secs() + 55).to_string();
+            let mut tags: Vec<Tag> = t_tags
+                .iter()
+                .map(|t| Tag::parse(t.iter().copied()).unwrap())
+                .collect();
+            tags.push(Tag::parse(["expiration", &exp]).unwrap());
+            tags.push(Tag::parse(["server", host]).unwrap());
+            tags.push(Tag::parse(["x", sha256_hex]).unwrap());
+            let event = EventBuilder::new(Kind::from(24242), "Blossom auth")
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign blossom auth");
+            format!("Nostr {}", B64.encode(event.as_json().as_bytes()))
+        }
+
+        const LEGACY_AUTH_FAILED: &[u8] = br#"{"error":"authentication failed"}"#;
+
+        /// An empty-valued `t` beside a valid one is rejected with main's legacy
+        /// 401 JSON in either order; a valueless `t` is ignored, as on main.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn off_empty_t_tag_keeps_legacy_401_valueless_is_ignored() {
+            let (rt, state, host) = media_fixture(media_off_test_state());
+            let keys = Keys::generate();
+            let read_sha = "a".repeat(64);
+            let upload_sha = sha256_hex(AUDIO_BODY);
+            for (extra, rejected) in [(&["t", ""][..], true), (&["t"][..], false)] {
+                for (verb_first, order) in [(true, "verb first"), (false, "verb last")] {
+                    let t_tags = |verb: &'static str| -> Vec<&[&str]> {
+                        let verb: &[&str] = if verb == "get" {
+                            &["t", "get"]
+                        } else {
+                            &["t", "upload"]
+                        };
+                        if verb_first {
+                            vec![verb, extra]
+                        } else {
+                            vec![extra, verb]
+                        }
+                    };
+                    let context = format!("Off {extra:?} {order}");
+                    let read_proof =
+                        blossom_auth_value_with_t(&keys, &t_tags("get"), &host, &read_sha);
+                    let read = media_read(&rt, &state, "GET", &host, &read_proof, None);
+                    let upload_proof =
+                        blossom_auth_value_with_t(&keys, &t_tags("upload"), &host, &upload_sha);
+                    if rejected {
+                        assert_exact_response(
+                            &read,
+                            StatusCode::UNAUTHORIZED,
+                            "application/json",
+                            None,
+                            LEGACY_AUTH_FAILED,
+                            &format!("{context} read"),
+                        );
+                    } else {
+                        assert_eq!(read.0, StatusCode::NOT_FOUND, "{context} read");
+                    }
+                    for route in UPLOAD_ROUTES {
+                        let response =
+                            upload_request(&rt, &state, route, &host, &[&upload_proof], None);
+                        if rejected {
+                            assert_exact_response(
+                                &response,
+                                StatusCode::UNAUTHORIZED,
+                                "application/json",
+                                None,
+                                LEGACY_AUTH_FAILED,
+                                &format!("{context} {route}"),
+                            );
+                        } else {
+                            assert_exact_response(
+                                &response,
+                                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                                "application/json",
+                                None,
+                                AUDIO_REJECTION,
+                                &format!("{context} {route}"),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Upload hash denials go through the handler in both modes ────────
+
+        /// Decodable 1x1 PNG: passes content validation on both upload routes,
+        /// so a signed/header hash that differs from its digest is rejected by
+        /// the post-body hash check before any storage call.
+        const PNG_BODY: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xff, 0xff, 0x3f, 0x00, 0x05, 0xfe, 0x02, 0xfe, 0x0d, 0xef, 0x46,
+            0xb8, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+
+        fn assert_upload_hash_denials(enforce: bool) {
+            let (rt, state, host) = if enforce {
+                media_fixture(media_enforce_test_state())
+            } else {
+                media_fixture(media_off_test_state())
+            };
+            let keys = Keys::generate();
+            let assertion = signed_assertion(&keys.public_key().to_hex());
+            let assertion = enforce.then_some(assertion.as_str());
+            let audio_sha = sha256_hex(AUDIO_BODY);
+            let other_sha = "b".repeat(64);
+            let audio_proof = blossom_upload_auth_value(&keys, &host, &audio_sha);
+            let other_proof = blossom_upload_auth_value(&keys, &host, &other_sha);
+            let cases: [(&str, (Option<&str>, &[u8]), &str); 4] = [
+                ("X-SHA-256 missing", (None, AUDIO_BODY), &audio_proof),
+                (
+                    "X-SHA-256 malformed",
+                    (Some("not-hex"), AUDIO_BODY),
+                    &audio_proof,
+                ),
+                (
+                    "X-SHA-256 not in signed x",
+                    (Some(&other_sha), AUDIO_BODY),
+                    &audio_proof,
+                ),
+                (
+                    "body hash differs from signed/header hash",
+                    (Some(&other_sha), PNG_BODY),
+                    &other_proof,
+                ),
+            ];
+            for (case, request, proof) in cases {
+                for route in UPLOAD_ROUTES {
+                    let response = upload_request_with(
+                        &rt,
+                        &state,
+                        route,
+                        &host,
+                        request,
+                        &[proof],
+                        assertion,
+                    );
+                    let context = format!("enforce={enforce} {route}: {case}");
+                    if enforce {
+                        assert_exact_response(
+                            &response,
+                            StatusCode::FORBIDDEN,
+                            "text/plain; charset=utf-8",
+                            None,
+                            b"evidence rejected\n",
+                            &context,
+                        );
+                    } else {
+                        assert_exact_response(
+                            &response,
+                            StatusCode::UNAUTHORIZED,
+                            "application/json",
+                            None,
+                            LEGACY_AUTH_FAILED,
+                            &context,
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn upload_enforce_hash_denials_are_evidence_rejected() {
+            assert_upload_hash_denials(true);
+        }
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn upload_off_hash_denials_keep_legacy_json_401() {
+            assert_upload_hash_denials(false);
         }
 
         /// DenyProtected answers 503 before any proof check, so even a
@@ -3936,7 +4155,10 @@ mod tests {
                     upload_request(&rt, &state, "/upload", &host, &[&upload_proof], None),
                     "upload",
                 ),
-                (media_read(&rt, &state, &host, &read_proof, None), "read"),
+                (
+                    media_read(&rt, &state, "GET", &host, &read_proof, None),
+                    "read",
+                ),
             ] {
                 assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE, "{context}");
                 assert_eq!(
@@ -3971,7 +4193,7 @@ mod tests {
                     "upload",
                 ),
                 (
-                    media_read(&rt, &state, &host, &read_proof, Some(&assertion)),
+                    media_read(&rt, &state, "GET", &host, &read_proof, Some(&assertion)),
                     "read",
                 ),
             ] {
@@ -3999,7 +4221,10 @@ mod tests {
                     upload_request(&rt, &state, "/upload", &host, &[&upload_proof], None),
                     "upload",
                 ),
-                (media_read(&rt, &state, &host, &read_proof, None), "read"),
+                (
+                    media_read(&rt, &state, "GET", &host, &read_proof, None),
+                    "read",
+                ),
             ] {
                 assert_exact_response(
                     &response,
@@ -4033,7 +4258,7 @@ mod tests {
             .expect("add relay member");
             let assertion = signed_assertion(&keys.public_key().to_hex());
             let proof = blossom_get_auth_value(&keys, &host, &"a".repeat(64));
-            let (status, _, body) = media_read(&rt, &state, &host, &proof, Some(&assertion));
+            let (status, _, body) = media_read(&rt, &state, "GET", &host, &proof, Some(&assertion));
             assert_eq!(status, StatusCode::NOT_FOUND, "member read; body {body:?}");
         }
     }
