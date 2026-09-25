@@ -60,16 +60,15 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     // Compare every shown choice with the channel's members, so a candidate
     // who shares a member's name is told apart before being added.
     final choices = [...availableUsers, ...selectedUsers.value];
-    final names = ref
-        .watch(identityNameSourcesProvider)
-        .scope(
-          [...normalizedExisting, for (final user in choices) user.pubkey],
-          agentPubkeys: {
-            for (final user in choices)
-              if (user.isAgent) user.pubkey,
-          },
-          fallbackNames: {for (final user in choices) user.pubkey: user.label},
-        );
+    final names = watchIdentityNames(
+      ref,
+      [...normalizedExisting, for (final user in choices) user.pubkey],
+      agentPubkeys: {
+        for (final user in choices)
+          if (user.isAgent) user.pubkey,
+      },
+      fallbackNames: {for (final user in choices) user.pubkey: user.label},
+    );
     String labelFor(DirectoryUser user) => names.labelFor(user.pubkey);
 
     void toggleUser(DirectoryUser user) {

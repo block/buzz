@@ -120,7 +120,11 @@ class ForumPostCard extends HookConsumerWidget {
               children: [
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: () => showUserProfileSheet(context, post.pubkey),
+                  onTap: () => showUserProfileSheet(
+                    context,
+                    post.pubkey,
+                    channelId: post.channelId,
+                  ),
                   child: _PostAvatar(
                     profile: profile,
                     pubkey: post.pubkey,
@@ -131,7 +135,11 @@ class ForumPostCard extends HookConsumerWidget {
                 Expanded(
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onTap: () => showUserProfileSheet(context, post.pubkey),
+                    onTap: () => showUserProfileSheet(
+                      context,
+                      post.pubkey,
+                      channelId: post.channelId,
+                    ),
                     child: Text(
                       displayName,
                       maxLines: 1,

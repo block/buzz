@@ -31,3 +31,29 @@ void loadIdentityNameOwners(
     }
   });
 }
+
+/// Labels for a displayed collection with no channel context, such as search
+/// results, a Pulse timeline, or a picker's choices. [candidates] is that
+/// collection; keys outside it resolve against it plus themselves.
+IdentityNames watchIdentityNames(
+  WidgetRef ref,
+  Iterable<String> candidates, {
+  Set<String> agentPubkeys = const {},
+  Map<String, String> fallbackNames = const {},
+}) {
+  final sources = ref.watch(identityNameSourcesProvider);
+  final names = sources.scope(
+    candidates,
+    agentPubkeys: agentPubkeys,
+    fallbackNames: fallbackNames,
+  );
+  final missing = sources.missingOwnerProfiles(names.candidates);
+  if (missing.isNotEmpty) {
+    Future.microtask(() {
+      if (ref.context.mounted) {
+        ref.read(userCacheProvider.notifier).preload(missing.toList());
+      }
+    });
+  }
+  return names;
+}

@@ -161,8 +161,11 @@ class _ThreadMessage extends HookConsumerWidget {
                       children: [
                         if (showAuthor)
                           GestureDetector(
-                            onTap: () =>
-                                showUserProfileSheet(context, message.pubkey),
+                            onTap: () => showUserProfileSheet(
+                              context,
+                              message.pubkey,
+                              channelId: channelId,
+                            ),
                             child: _Avatar(
                               profile: profile,
                               pubkey: message.pubkey,
@@ -203,6 +206,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                                 showUserProfileSheet(
                                                   context,
                                                   message.pubkey,
+                                                  channelId: channelId,
                                                 ),
                                             displayNameKey: ValueKey(
                                               'thread-message-author-${message.id}',
@@ -285,7 +289,11 @@ class _ThreadMessage extends HookConsumerWidget {
                                     );
                                   },
                                   onMentionTap: (pubkey) =>
-                                      showUserProfileSheet(context, pubkey),
+                                      showUserProfileSheet(
+                                        context,
+                                        pubkey,
+                                        channelId: channelId,
+                                      ),
                                 ),
                               ],
                             ),

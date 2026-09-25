@@ -84,9 +84,20 @@ class _InboxRow extends HookConsumerWidget {
     // are relay-valid) fall back to the compact npub, never a blank sender.
     // Rows compare names within their own channel, like the channel itself.
     final channelId = channel?.id ?? item.item.channelId;
-    final contextualLabels = channelId == null
-        ? const <String, String>{}
-        : watchChannelIdentityLabels(ref, channelId, relevantPubkeys);
+    final Map<String, String> contextualLabels;
+    if (channelId == null) {
+      // No channel: the row's own identities are the comparison context.
+      final names = watchIdentityNames(ref, relevantPubkeys);
+      contextualLabels = {
+        for (final key in names.candidates) key: names.labelFor(key),
+      };
+    } else {
+      contextualLabels = watchChannelIdentityLabels(
+        ref,
+        channelId,
+        relevantPubkeys,
+      );
+    }
     final senderLabel =
         contextualLabels[senderPubkey] ??
         profile?.label ??

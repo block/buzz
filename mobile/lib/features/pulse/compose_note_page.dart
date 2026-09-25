@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -10,7 +13,6 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../channels/message_content.dart';
 import '../profile/profile_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
-import '../../shared/utils/string_utils.dart';
 import 'note_card.dart';
 import 'pulse_actions.dart';
 import 'pulse_models.dart';
@@ -24,7 +26,11 @@ import 'pulse_models.dart';
 class ComposeNotePage extends HookConsumerWidget {
   final UserNote? replyTo;
 
-  const ComposeNotePage({super.key, this.replyTo});
+  /// Identity labels from the surface that opened the reply, so the reply
+  /// context names people as they were shown there.
+  final IdentityNames? names;
+
+  const ComposeNotePage({super.key, this.replyTo, this.names});
 
   bool get _isReply => replyTo != null;
 
@@ -99,7 +105,7 @@ class ComposeNotePage extends HookConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             SizedBox(height: frostedAppBarHeight(context)),
-            if (_isReply) _ReplyContext(note: replyTo!),
+            if (_isReply) _ReplyContext(note: replyTo!, names: names),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.all(Grid.xs),
@@ -158,8 +164,9 @@ class ComposeNotePage extends HookConsumerWidget {
 /// height so a long note doesn't push the editor off-screen.
 class _ReplyContext extends ConsumerWidget {
   final UserNote note;
+  final IdentityNames? names;
 
-  const _ReplyContext({required this.note});
+  const _ReplyContext({required this.note, this.names});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -167,7 +174,10 @@ class _ReplyContext extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pubkey])) ??
         ref.read(userCacheProvider.notifier).get(pubkey);
-    final displayName = profile?.label ?? shortPubkey(pubkey);
+    final mentionPubkeys = mentionedPubkeysFromTags(note.tags);
+    final labels =
+        names ?? watchIdentityNames(ref, {pubkey, ...mentionPubkeys});
+    final displayName = labels.labelFor(pubkey);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(Grid.gutter, Grid.xs, Grid.gutter, 0),
@@ -244,6 +254,10 @@ class _ReplyContext extends ConsumerWidget {
                           heightFactor: 1,
                           child: MessageContent(
                             content: note.content,
+                            mentionLabels: {
+                              for (final key in mentionPubkeys)
+                                key: labels.labelFor(key),
+                            },
                             tags: note.tags,
                             baseStyle: messageBodyTextStyle.copyWith(
                               color: context.colors.onSurface,

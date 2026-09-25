@@ -166,8 +166,11 @@ class _MessageBubble extends HookConsumerWidget {
                     children: [
                       if (showAuthor)
                         GestureDetector(
-                          onTap: () =>
-                              showUserProfileSheet(context, message.pubkey),
+                          onTap: () => showUserProfileSheet(
+                            context,
+                            message.pubkey,
+                            channelId: currentChannelId,
+                          ),
                           child: _UserAvatar(
                             profile: profile,
                             pubkey: message.pubkey,
@@ -208,6 +211,7 @@ class _MessageBubble extends HookConsumerWidget {
                                               showUserProfileSheet(
                                                 context,
                                                 message.pubkey,
+                                                channelId: currentChannelId,
                                               ),
                                           displayNameKey: ValueKey(
                                             'message-author-${message.id}',
@@ -289,8 +293,11 @@ class _MessageBubble extends HookConsumerWidget {
                                     currentChannelId: currentChannelId,
                                   );
                                 },
-                                onMentionTap: (pubkey) =>
-                                    showUserProfileSheet(context, pubkey),
+                                onMentionTap: (pubkey) => showUserProfileSheet(
+                                  context,
+                                  pubkey,
+                                  channelId: currentChannelId,
+                                ),
                               ),
                             ],
                           ),

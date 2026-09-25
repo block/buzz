@@ -363,7 +363,11 @@ class _OriginalPost extends ConsumerWidget {
           Row(
             children: [
               GestureDetector(
-                onTap: () => showUserProfileSheet(context, post.pubkey),
+                onTap: () => showUserProfileSheet(
+                  context,
+                  post.pubkey,
+                  channelId: post.channelId,
+                ),
                 child: _Avatar(
                   key: ValueKey('forum-original-avatar-${post.eventId}'),
                   profile: profile,
@@ -378,7 +382,11 @@ class _OriginalPost extends ConsumerWidget {
                   children: [
                     Expanded(
                       child: GestureDetector(
-                        onTap: () => showUserProfileSheet(context, post.pubkey),
+                        onTap: () => showUserProfileSheet(
+                          context,
+                          post.pubkey,
+                          channelId: post.channelId,
+                        ),
                         child: Text(
                           displayName,
                           maxLines: 1,
@@ -414,7 +422,11 @@ class _OriginalPost extends ConsumerWidget {
             baseStyle: messageBodyTextStyle.copyWith(
               color: context.colors.onSurface,
             ),
-            onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
+            onMentionTap: (pubkey) => showUserProfileSheet(
+              context,
+              pubkey,
+              channelId: post.channelId,
+            ),
           ),
         ],
       ),
@@ -474,7 +486,11 @@ class _ReplyRow extends ConsumerWidget {
           Row(
             children: [
               GestureDetector(
-                onTap: () => showUserProfileSheet(context, reply.pubkey),
+                onTap: () => showUserProfileSheet(
+                  context,
+                  reply.pubkey,
+                  channelId: channelId,
+                ),
                 child: _Avatar(
                   key: ValueKey('forum-reply-avatar-${reply.eventId}'),
                   profile: profile,
@@ -489,8 +505,11 @@ class _ReplyRow extends ConsumerWidget {
                   children: [
                     Expanded(
                       child: GestureDetector(
-                        onTap: () =>
-                            showUserProfileSheet(context, reply.pubkey),
+                        onTap: () => showUserProfileSheet(
+                          context,
+                          reply.pubkey,
+                          channelId: channelId,
+                        ),
                         child: Text(
                           displayName,
                           maxLines: 1,
@@ -541,7 +560,8 @@ class _ReplyRow extends ConsumerWidget {
               baseStyle: messageBodyTextStyle.copyWith(
                 color: context.colors.onSurface,
               ),
-              onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
+              onMentionTap: (pubkey) =>
+                  showUserProfileSheet(context, pubkey, channelId: channelId),
             ),
           ),
         ],
