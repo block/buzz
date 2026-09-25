@@ -18,9 +18,8 @@ import 'channels_provider.dart';
 final channelIdentityNamesProvider = Provider.autoDispose
     .family<IdentityNames, String>((ref, channelId) {
       final sources = ref.watch(identityNameSourcesProvider);
-      final loaded = ref.watch(channelMembersProvider(channelId)).asData?.value;
       final members =
-          loaded ??
+          watchLatestChannelMembers(ref, channelId) ??
           (ref.watch(channelsProvider).asData == null
               ? const <ChannelMember>[]
               : ref
@@ -28,7 +27,13 @@ final channelIdentityNamesProvider = Provider.autoDispose
                     .cachedMembersForChannel(channelId));
       final names = sources.scope(
         [for (final member in members) member.pubkey],
-        agentPubkeys: ref.watch(agentMentionPubkeysProvider(channelId)),
+        // The roster's own bot roles stay available offline, when the
+        // relay-backed bot lookup and agent directory are empty.
+        agentPubkeys: {
+          ...ref.watch(agentMentionPubkeysProvider(channelId)),
+          for (final member in members)
+            if (member.isBot) member.pubkey,
+        },
         fallbackNames: {
           for (final member in members) member.pubkey: ?member.displayName,
         },
