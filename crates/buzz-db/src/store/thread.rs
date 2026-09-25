@@ -260,96 +260,6 @@ pub async fn insert_thread_metadata(
     Ok(())
 }
 
-/// Increment `reply_count` (and `last_reply_at`) on the parent event.
-/// If `root_event_id` is provided, also increments `descendant_count` on the
-/// root -- even when root == parent (direct reply to root). This is correct
-/// because `reply_count` tracks direct children only, while `descendant_count`
-/// tracks ALL descendants at every nesting level.
-///
-/// NOTE: The primary increment path is inlined inside [`insert_thread_metadata`]'s
-/// transaction. This standalone version exists for future use cases where
-/// incrementing outside of insert is needed (e.g., event re-parenting).
-#[allow(dead_code)]
-pub async fn increment_reply_count(
-    pool: &PgPool,
-    community_id: CommunityId,
-    parent_event_id: &[u8],
-    root_event_id: Option<&[u8]>,
-) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
-    // Always bump the parent's direct reply count and last-reply timestamp.
-    sqlx::query(
-        r#"
-        UPDATE thread_metadata
-        SET reply_count  = reply_count + 1,
-            last_reply_at = NOW()
-        WHERE community_id = $1 AND event_id = $2
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(parent_event_id)
-    .execute(&mut *connection)
-    .await?;
-
-    // Always bump root's descendant_count, regardless of whether root == parent.
-    if let Some(root_id) = root_event_id {
-        sqlx::query(
-            r#"
-            UPDATE thread_metadata
-            SET descendant_count = descendant_count + 1
-            WHERE community_id = $1 AND event_id = $2
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(root_id)
-        .execute(&mut *connection)
-        .await?;
-    }
-
-    Ok(())
-}
-
-/// Decrement `reply_count` on the parent event (floor at 0).
-/// If `root_event_id` is provided, also decrements `descendant_count` on the
-/// root -- even when root == parent. Mirrors the increment logic exactly.
-pub async fn decrement_reply_count(
-    pool: &PgPool,
-    community_id: CommunityId,
-    parent_event_id: &[u8],
-    root_event_id: Option<&[u8]>,
-) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
-    // Always decrement the parent's direct reply count (floor at 0).
-    sqlx::query(
-        r#"
-        UPDATE thread_metadata
-        SET reply_count = GREATEST(reply_count - 1, 0)
-        WHERE community_id = $1 AND event_id = $2
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(parent_event_id)
-    .execute(&mut *connection)
-    .await?;
-
-    // Always decrement root's descendant_count, regardless of whether root == parent.
-    if let Some(root_id) = root_event_id {
-        sqlx::query(
-            r#"
-            UPDATE thread_metadata
-            SET descendant_count = GREATEST(descendant_count - 1, 0)
-            WHERE community_id = $1 AND event_id = $2
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(root_id)
-        .execute(&mut *connection)
-        .await?;
-    }
-
-    Ok(())
-}
-
 // -- Read operations ----------------------------------------------------------
 
 /// Fetch all replies under a root event, ordered chronologically.
@@ -1251,23 +1161,6 @@ impl Db {
         event_id: &[u8],
     ) -> Result<Option<crate::thread::ThreadMetadataRecord>> {
         crate::thread::get_thread_metadata_by_event(&self.pool, community_id, event_id).await
-    }
-
-    /// Decrement reply counts.
-    #[datastore_span(name = "decrement_reply_count", system = "postgresql")]
-    pub async fn decrement_reply_count(
-        &self,
-        community_id: CommunityId,
-        parent_event_id: &[u8],
-        root_event_id: Option<&[u8]>,
-    ) -> Result<()> {
-        crate::thread::decrement_reply_count(
-            &self.pool,
-            community_id,
-            parent_event_id,
-            root_event_id,
-        )
-        .await
     }
 }
 
