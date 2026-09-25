@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 mod agent;
 pub mod auth;
+mod auth_http;
 mod builtin;
 pub mod catalog;
 pub mod config;
+pub mod databricks;
+mod databricks_label_grammar;
 mod handoff;
 mod hints;
 mod llm;
@@ -411,8 +414,7 @@ async fn resolve_models_catalog(
 fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
     let model = model.trim().to_string();
     let name = crate::model_capabilities::databricks_registry_label(&model)
-        .unwrap_or(&model)
-        .to_string();
+        .unwrap_or_else(|| model.clone());
     vec![ModelEntry { id: model, name }]
 }
 

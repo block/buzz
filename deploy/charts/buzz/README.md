@@ -148,8 +148,9 @@ state to zero; it does not fabricate dependency failures or latency samples.
 
 ### Operation-aware database pool acquisition contract
 
-The operation-aware families separate three questions: who is waiting now,
-how completed/abandoned attempts ended, and how long checkout waits took.
+The operation-aware families separate four questions: when an operation asked
+for a connection, who is waiting now, how completed/abandoned attempts ended,
+and how long checkout waits took.
 Outcome remains on the terminal counter for historical deployment comparison;
 it is intentionally absent from the expensive duration histogram.
 
@@ -161,6 +162,7 @@ maximum gauges when diagnosing total capacity pressure.
 
 | Metric | Type | Labels |
 |--------|------|--------|
+| `buzz_db_pool_acquire_started_total` | counter | `pool_role`, `operation` |
 | `buzz_db_pool_acquire_duration_seconds` | histogram | `pool_role`, `operation` |
 | `buzz_db_pool_acquire_attempts_total` | counter | `pool_role`, `operation`, `outcome` |
 | `buzz_db_pool_waiters` | gauge | `pool_role`, `operation`; tracked operations only, periodically refreshed including zero |
@@ -182,11 +184,81 @@ writer/maintenance
 ```
 
 Nine finite checkout buckets plus `+Inf`, sum, and count yield 12 histogram
-series per valid pair. The new contract therefore has a hard ceiling of 187
-raw Prometheus series per pod: `11 × (12 + 4 + 1)`. The two legacy acquisition
+series per valid pair. The new contract therefore has a hard ceiling of 198
+raw Prometheus series per pod: `11 × (1 + 12 + 4 + 1)`. The two legacy acquisition
 families remain temporarily for dashboard compatibility and are not part of
 that new-family budget. No `other` operation or request-controlled/sensitive
 label is valid.
+
+### Writer connection setup contract
+
+Writer connection setup is separate from checkout. At boot, SQLx constructs
+the writer pool and creates its minimum physical connections. Later it may
+create more when the pool grows or replaces a broken or expired connection.
+Every connected writer session must install the created-at floor, install the
+session timeouts, verify READ COMMITTED isolation, and reach `ready` before SQLx
+can give it to a caller.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_connection_step_started_total` | counter | `pool_role`, `step` |
+| `buzz_db_connection_step_duration_seconds` | histogram | `pool_role`, `step` |
+| `buzz_db_connection_step_attempts_total` | counter | `pool_role`, `step`, `outcome` |
+
+The fixed steps are `writer_pool`, `physical_connect`, `created_at_floor`,
+`session_timeouts`, `isolation`, and `ready`. Measurable phases emit start,
+duration, and terminal evidence. `physical_connect` and `ready` are success
+milestones: SQLx 0.9 exposes `after_connect` only after DNS, network, TLS, and
+authentication finish, so Buzz does not invent separate timings for those
+internal phases. Raw connect failures before `after_connect` are classified on
+the aggregate `writer_pool` phase during initial construction. Outcomes are
+`succeeded`, `failed`, `timed_out`, and `cancelled` where valid.
+
+For a measurable phase on one pod, subtract all terminal outcomes from its
+start counter to derive the number of attempts currently in progress. The
+session phases run in order, so a later phase start also proves the earlier
+phases succeeded for that attempt.
+
+Four start counters, four 13-series histograms, and fifteen terminal counters
+create a hard ceiling of 71 raw Prometheus series per pod. Connection ordinals,
+database URLs, hosts, usernames, SQL, and raw errors are forbidden as metric
+labels.
+
+When audit logging is enabled, the `buzz_db_connection_*` metric totals combine
+the main writer pool and the separate audit writer pool.
+
+### Physical database pool utilization and configuration contract
+
+Every physical Postgres pool the relay owns reports current utilization,
+capacity, and configuration under role-labelled families. The role vocabulary
+is closed — `writer`, `reader`, `audit`, `search` — and all four roles are always
+present, so a series never appears or disappears when an optional pool is
+enabled or disabled. An unconfigured optional pool reports
+`buzz_db_pool_configured` `0` with zero utilization and capacity rather than
+going missing.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_pool_connections` | gauge | `pool_role`, `state` |
+| `buzz_db_pool_max_connections` | gauge | `pool_role` |
+| `buzz_db_pool_configured` | gauge | `pool_role`; `1` configured, `0` not configured |
+
+States are `idle` and `active`; their sum is the pool's current size.
+`buzz_db_pool_max_connections` reports capacity separately, so summing the
+connections family counts each current connection exactly once. The three
+families are fixed at 16 raw Prometheus series per pod (`4 × 2` current
+utilization plus `4` maximum capacity plus `4` configured). The `audit` and
+`search` roles are statistics-only: pool ownership, capacities, timeouts, and
+query routing are unchanged, and these roles emit no acquisition telemetry.
+
+The pre-existing unlabelled `buzz_db_pool_*` (writer) and `buzz_db_read_pool_*`
+(reader) gauges are still exported unchanged for dashboard compatibility. The
+reader family remains absent when no read replica is configured; use
+`buzz_db_pool_configured{pool_role="reader"}` for the explicit signal.
+
+Pool sizing and the aggregate connection budget across all four roles remain
+deployment configuration concerns. The relay does not enforce a combined
+connection ceiling.
 
 ## Relay Pod extensions
 

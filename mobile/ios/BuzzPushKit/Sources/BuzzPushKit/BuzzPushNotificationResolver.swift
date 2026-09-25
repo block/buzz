@@ -611,8 +611,15 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       ? String(result.prefix(177)).trimmingCharacters(in: .whitespacesAndNewlines) + "…" : result
   }
 
+  /// Compact sender label for unnamed senders: the first 8 and last 4
+  /// characters of the sender's full npub, matching the compact npub shape
+  /// used across Buzz. A key that cannot be encoded as an npub falls back to
+  /// the neutral "Someone" identity so malformed payloads leak no key
+  /// material while the notification keeps a useful title.
   static func shortPubkey(_ pubkey: String) -> String {
-    pubkey.count > 8 ? String(pubkey.prefix(8)) + "…" : pubkey
+    guard let npub = Bech32.canonicalNpub(from: pubkey) else { return "Someone" }
+    return npub.count > 12
+      ? String(npub.prefix(8)) + "…" + String(npub.suffix(4)) : npub
   }
 
   private func loadCommunities() -> [PushLeaseCommunity] {

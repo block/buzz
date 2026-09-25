@@ -20,6 +20,7 @@ export default defineConfig({
       name: "smoke",
       testMatch: [
         "**/smoke.spec.ts",
+        "**/mock-subscription-readiness.spec.ts",
         "**/owned-agent-discovery.spec.ts",
         "**/thread-head-stale-edit.spec.ts",
         "**/sidebar-offcanvas-rail.spec.ts",
@@ -143,6 +144,8 @@ export default defineConfig({
         "**/drafts-screenshots.spec.ts",
         "**/drafts-all-fix-screenshots.spec.ts",
         "**/inbox-refactor-screenshots.spec.ts",
+        "**/inbox-title-overlap.spec.ts",
+        "**/message-author-overlap.spec.ts",
         "**/buzz-theme-screenshots.spec.ts",
         "**/appearance-previews.spec.ts",
         "**/channel-sort.spec.ts",

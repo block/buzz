@@ -11,13 +11,14 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
+ARG BUZZ_PUSH_CARGO_FEATURES=""
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json --features "$BUZZ_PUSH_CARGO_FEATURES"
 COPY . .
-RUN cargo build --release --locked -p buzz-push-gateway --bin buzz-push-gateway \
+RUN cargo build --release --locked -p buzz-push-gateway --bin buzz-push-gateway --features "$BUZZ_PUSH_CARGO_FEATURES" \
     && strip target/release/buzz-push-gateway
 
 FROM debian:${DEBIAN_VERSION}-slim AS runtime

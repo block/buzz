@@ -55,6 +55,8 @@ jobs:
               - 'deny.toml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
+              - 'docker-compose.yml'
+              - 'docker-compose.ci.yml'
               - 'scripts/run-tests.sh'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
@@ -63,7 +65,6 @@ jobs:
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
               - 'desktop/**'
-              - '!desktop/src-tauri/**'
               - 'pnpm-lock.yaml'
             desktop-rust:
               - 'desktop/src-tauri/**'
@@ -114,6 +115,8 @@ jobs:
           scripts/test-rust-cache-contract-regressions.sh
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
+      - name: CI path selection regression tests
+        run: node --test scripts/ci-selection.test.mjs
       - name: File size policy
         run: just file-size-check
 

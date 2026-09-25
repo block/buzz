@@ -19,6 +19,43 @@ mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 pub(crate) use path::{compose_path_entries, should_skip_claude_executable, should_use_inherited};
 
+/// Custom ACP harnesses do not run buzz-acp's Git bootstrap. Preserve the
+/// Desktop-provided relay credential helper for those commands.
+fn apply_custom_acp_git_credentials(
+    command: &mut std::process::Command,
+    acp_command: &str,
+    private_key: &str,
+    relay_url: &str,
+    credential_helper: Option<&std::path::Path>,
+) {
+    if acp_command == super::DEFAULT_ACP_COMMAND {
+        return;
+    }
+    let Some(helper) = credential_helper else {
+        eprintln!(
+            "buzz-desktop: git-credential-nostr not found — custom ACP command will not have automatic Buzz git auth"
+        );
+        return;
+    };
+    let relay_http_url = crate::relay::relay_http_base_url(relay_url);
+    command.env("NOSTR_PRIVATE_KEY", private_key);
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_CONFIG_COUNT", "2");
+    command.env(
+        "GIT_CONFIG_KEY_0",
+        format!("credential.{relay_http_url}/git.helper"),
+    );
+    command.env(
+        "GIT_CONFIG_VALUE_0",
+        helper.to_string_lossy().replace('\\', "/"),
+    );
+    command.env(
+        "GIT_CONFIG_KEY_1",
+        format!("credential.{relay_http_url}/git.useHttpPath"),
+    );
+    command.env("GIT_CONFIG_VALUE_1", "true");
+}
+
 pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondToEnv};
 
 mod metadata;
@@ -247,7 +284,6 @@ pub fn build_managed_agent_summary(
             &key.relay_url,
             global_config,
             super::owner_only_access_build(),
-            super::acp_session_policy(app.state::<crate::app_state::AppState>().inner()),
         );
         (runtime, current)
     });
@@ -308,6 +344,7 @@ pub fn build_managed_agent_summary(
         idle_timeout_seconds: record.idle_timeout_seconds,
         max_turn_duration_seconds: record.max_turn_duration_seconds,
         parallelism: record.parallelism,
+        session_policy: super::effective_acp_session_policy(record, personas),
         system_prompt: effective_prompt,
         avatar_url: record.avatar_url.clone(),
         model: effective_model,
@@ -725,29 +762,16 @@ pub fn spawn_agent_child(
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 
-    // Git credential helper: NIP-98 auth for Buzz relay git via git-credential-nostr.
-    // Ephemeral GIT_CONFIG_COUNT env vars scoped to relay HTTP URL; NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY.
-    if let Some(cred_helper) = resolve_command("git-credential-nostr") {
-        let relay_http_url = crate::relay::relay_http_base_url(&effective_relay_url);
-
-        command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
-        command.env("GIT_TERMINAL_PROMPT", "0");
-        command.env("GIT_CONFIG_COUNT", "2");
-        command.env(
-            "GIT_CONFIG_KEY_0",
-            format!("credential.{relay_http_url}/git.helper"),
-        );
-        let helper = cred_helper.to_string_lossy().replace('\\', "/");
-        command.env("GIT_CONFIG_VALUE_0", helper);
-        command.env(
-            "GIT_CONFIG_KEY_1",
-            format!("credential.{relay_http_url}/git.useHttpPath"),
-        );
-        command.env("GIT_CONFIG_VALUE_1", "true");
-    } else {
-        eprintln!(
-            "buzz-desktop: git-credential-nostr not found — agent {} will not have automatic Buzz git auth",
-            record.name,
+    // buzz-acp owns Git identity, scoped credentials, signing and key cleanup.
+    // An advanced custom ACP command bypasses that harness, so retain the
+    // earlier Desktop credential setup for that supported override.
+    if record.acp_command != super::DEFAULT_ACP_COMMAND {
+        apply_custom_acp_git_credentials(
+            &mut command,
+            &record.acp_command,
+            &record.private_key_nsec,
+            &effective_relay_url,
+            resolve_command("git-credential-nostr").as_deref(),
         );
     }
 
@@ -756,8 +780,9 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
-    // Resolve once and stamp the same value onto the snapshot below.
-    let acp_session_policy = super::apply_app_acp_session_policy_env(app, &mut command);
+    // Resolve once and stamp the same value onto the environment and snapshot.
+    let acp_session_policy = super::effective_acp_session_policy(record, &personas);
+    super::apply_acp_session_policy_env(&mut command, acp_session_policy);
 
     crate::build_identity::apply_demo_config_home(&mut command)?;
     // Publish-first replay floor: written AFTER the `descriptor.env` loop, the

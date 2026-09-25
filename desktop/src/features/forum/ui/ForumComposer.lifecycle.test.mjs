@@ -86,6 +86,9 @@ async function setup(options = {}) {
     "@/shared/lib/pubkey": {
       normalizePubkey: (s) => s.toLowerCase(),
       truncatePubkey: (s) => s,
+      // Compact-identity seam stubbed alongside its sibling: this suite
+      // renders display names, never key-form labels.
+      truncateNpub: (s) => s,
     },
     "@/features/channels/hooks": {
       useAddChannelMembersMutation: () => ({

@@ -17,7 +17,9 @@ use tauri::State;
 
 use crate::{
     app_state::AppState,
-    managed_agents::{validate_agent_definition_text, validate_agent_description_text},
+    managed_agents::{
+        validate_agent_definition_text, validate_agent_description_text, AcpSessionPolicy,
+    },
     native_relay_client::NativeRelayClient,
 };
 
@@ -52,11 +54,13 @@ struct CatalogAgentProjection {
     description: Option<String>,
     system_prompt: String,
     runtime: Option<String>,
+    acp_command: Option<String>,
     model: Option<String>,
     provider: Option<String>,
     name_pool: Vec<String>,
     respond_to: Option<String>,
     parallelism: Option<u64>,
+    session_policy: AcpSessionPolicy,
 }
 
 /// Fetches the active community's relay-confirmed persona catalog.
@@ -236,6 +240,12 @@ fn parse_agent(content: &str) -> Option<CatalogAgentProjection> {
     };
     validate_agent_description_text(raw_description.as_deref()).ok()?;
     let description = raw_description.filter(|value| !value.trim().is_empty());
+    let acp_command = match object.get("acp_command") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(command)) => Some(command.clone()),
+        _ => return None,
+    };
+    crate::managed_agents::validate_portable_acp_command(acp_command.as_deref()).ok()?;
 
     let respond_to = match object.get("respond_to").and_then(Value::as_str) {
         Some("allowlist") => Some("owner-only".to_string()),
@@ -246,6 +256,10 @@ fn parse_agent(content: &str) -> Option<CatalogAgentProjection> {
         .get("parallelism")
         .and_then(Value::as_u64)
         .filter(|value| (1..=32).contains(value));
+    let session_policy = match object.get("session_policy").and_then(Value::as_str) {
+        Some("thread") => AcpSessionPolicy::Thread,
+        _ => AcpSessionPolicy::Channel,
+    };
     let name_pool = object
         .get("name_pool")
         .and_then(Value::as_array)
@@ -268,11 +282,13 @@ fn parse_agent(content: &str) -> Option<CatalogAgentProjection> {
         description,
         system_prompt,
         runtime: optional_string(object.get("runtime")),
+        acp_command,
         model: optional_string(object.get("model")),
         provider: optional_string(object.get("provider")),
         name_pool,
         respond_to,
         parallelism,
+        session_policy,
     })
 }
 

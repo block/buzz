@@ -1,5 +1,4 @@
 use crate::managed_agents::known_acp_runtime;
-
 #[path = "cli_tests.rs"]
 mod cli_tests;
 
@@ -272,11 +271,13 @@ fn persona_with_provider(
     provider: Option<&str>,
 ) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        session_policy: Default::default(),
         description: None,
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,
         system_prompt: prompt.to_string(),
+        acp_command: None,
         runtime: None,
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
@@ -591,6 +592,44 @@ fn codex_spawn_does_not_set_a_claude_executable() {
     assert!(!command
         .get_envs()
         .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"));
+}
+
+#[test]
+fn custom_acp_command_keeps_relay_git_credentials() {
+    let helper = std::path::Path::new("/opt/buzz/git-credential-nostr");
+    let mut custom = std::process::Command::new("custom-acp");
+    super::apply_custom_acp_git_credentials(
+        &mut custom,
+        "custom-acp",
+        "nsec-test",
+        "wss://relay.example",
+        Some(helper),
+    );
+    let env: std::collections::HashMap<_, _> = custom
+        .get_envs()
+        .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+        .collect();
+    assert_eq!(env.get("NOSTR_PRIVATE_KEY"), Some(&"nsec-test"));
+    assert_eq!(env.get("GIT_CONFIG_COUNT"), Some(&"2"));
+    assert_eq!(
+        env.get("GIT_CONFIG_KEY_0"),
+        Some(&"credential.https://relay.example/git.helper")
+    );
+    assert_eq!(
+        env.get("GIT_CONFIG_VALUE_0"),
+        Some(&"/opt/buzz/git-credential-nostr")
+    );
+    assert_eq!(env.get("GIT_CONFIG_VALUE_1"), Some(&"true"));
+
+    let mut standard = std::process::Command::new("buzz-acp");
+    super::apply_custom_acp_git_credentials(
+        &mut standard,
+        super::super::DEFAULT_ACP_COMMAND,
+        "nsec-test",
+        "wss://relay.example",
+        Some(helper),
+    );
+    assert_eq!(standard.get_envs().count(), 0);
 }
 
 /// On Windows, `.cmd` and `.bat` batch shims must NOT be assigned to
@@ -1234,7 +1273,6 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
             "wss://relay.example",
             &Default::default(),
             false,
-            crate::managed_agents::AcpSessionPolicy::Channel,
         ),
         setup_mode: false,
         adapter_availability: None,

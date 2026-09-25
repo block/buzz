@@ -229,15 +229,14 @@ When the relay receives `["EVENT", <event>]`, the handler in `handlers/event.rs`
 4. EPHEMERAL ROUTE   — kind 20000–29999 → ephemeral sub-pipeline (see below)
 5. VERIFY            — spawn_blocking(verify_event) — Schnorr sig + ID hash
 6. MEMBERSHIP        — channel_id in event tags? → check_channel_membership
-7. DB INSERT         — db.insert_event (ON CONFLICT DO NOTHING — idempotent)
+7. DB INSERT         — db.insert_event (idempotent; search_tsv generated synchronously)
 8. REDIS PUBLISH     — pubsub.publish_event (if channel-scoped)
 9. FAN-OUT           — sub_registry.fan_out → conn_manager.send_to
-10. SEARCH INDEX     — search_index_tx.send (bounded worker queue, non-blocking)
-11. AUDIT LOG        — audit.log (spawned async, non-blocking)
-12. WORKFLOW TRIGGER — wf.on_event (spawned async, excludes kinds 46001–46012)
+10. AUDIT LOG        — audit.log (spawned async, non-blocking)
+11. WORKFLOW TRIGGER — wf.on_event (spawned async, excludes kinds 46001–46012)
 ```
 
-Steps 10–12 are fire-and-forget. Search indexing is sent to a bounded worker queue (`search_index_tx`, capacity 1000); audit and workflow triggers are spawned as independent async tasks. A failure in any of these does not fail the event submission. The client receives `["OK", <id>, true, ""]` at the end of the pipeline, not immediately after DB insert.
+Steps 10–11 are fire-and-forget: audit and workflow triggers are spawned as independent async tasks. A failure in either does not fail the event submission. Search has no asynchronous indexing step: Postgres maintains the generated `events.search_tsv` column as part of step 7, and `buzz-search` only queries it. The client receives `["OK", <id>, true, ""]` at the end of the pipeline, not immediately after DB insert.
 
 Step 9 (fan-out) explicitly **excludes** global subscriptions (no `channel_id` constraint) from channel-scoped events — global subscriptions do NOT receive events from private channels, regardless of filter match. This is a deliberate security boundary: only subscriptions scoped to an accessible `channel_id` receive those events.
 
@@ -562,6 +561,15 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 
 **Cron scheduler:** loop ticks every 60 seconds, evaluates cron expressions with window-based matching, and creates workflow runs for matched triggers. Fully implemented.
 
+**Deletion and recreation:** An authorized kind:5 `a`-tag deletion commits its
+public event, executable workflow removal, and visible kind:30620 removal in one
+transaction. Rejected deletions are not accepted history; identical concurrent
+requests have one dispatch/audit owner. Deletions older than a live definition
+leave that newer version intact. Deletion is not a permanent coordinate ban:
+clients may publish a distinct signed definition afterward, including a backdated
+version, to recreate the workflow and enable triggers again. This intentionally
+retains arrival-order recreation without a deletion watermark.
+
 **Does NOT:** recursively resolve templates (single-pass only). Does NOT queue workflow runs when at capacity — returns `CapacityExceeded` immediately.
 
 ---
@@ -600,10 +608,21 @@ pub struct AppState {
     pub handler_semaphore: Arc<Semaphore>,    // 1024 concurrent handlers
     pub relay_keypair: nostr::Keys,           // relay identity
     pub local_event_ids: moka::sync::Cache,   // local-echo dedup
-    pub search_index_tx: mpsc::Sender,        // bounded search worker queue
     // + config, redis_pool, membership_cache, media_storage, shutdown state
 }
 ```
+
+Postgres pools use the closed physical role vocabulary `writer`, `reader`,
+`audit`, and `search`. The periodic sampler retains cheap SQLx pool handles and
+exports `buzz_db_pool_connections{pool_role,state}` for the bounded states
+`idle` and `active`, `buzz_db_pool_max_connections{pool_role}` for capacity,
+and `buzz_db_pool_configured{pool_role}`. All four roles are always present (16
+raw gauge series total); absent optional pools report zero. Current pool size is
+exactly the sum of its idle and active connection gauges. The legacy
+`buzz_db_pool_*` writer gauges and `buzz_db_read_pool_*` reader gauges remain
+for dashboard compatibility. Pool sizing and aggregate deployment connection
+budgets remain configuration/deployment concerns rather than a relay pool
+manager.
 
 **`ConnectionState`** (per-connection):
 
@@ -783,7 +802,7 @@ Docker Compose provides the full local development stack. All services include h
 | Postgres | `postgres:17-alpine` | 5432 | Primary event store — events, channels, tokens, workflows, audit; full-text search (`search_tsv` GIN) |
 | Redis | `redis:7-alpine` | 6379 | Pub/sub fan-out, presence (SET EX), typing (sorted sets) |
 | Adminer | `adminer` | 8082 | DB web UI (dev only) |
-| MinIO | `minio/minio` | 9000 (API), 9001 (console) | S3-compatible object storage (media) |
+| MinIO | `quay.io/minio/minio` | 9000 (API), 9001 (console) | S3-compatible object storage (media) |
 | Prometheus | `prom/prometheus` | 9090 | Metrics collection |
 
 ### Postgres Schema (key tables)

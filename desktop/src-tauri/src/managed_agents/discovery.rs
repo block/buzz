@@ -10,6 +10,7 @@ use crate::managed_agents::{
 };
 mod auth_status_cache;
 mod bounded_command;
+pub(crate) mod command_search;
 mod login_shell;
 mod presets;
 mod runtime_metadata;
@@ -421,8 +422,7 @@ fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String
 }
 
 /// Resolve a command to an absolute path, caching results for the app lifetime.
-/// The cache eliminates redundant login-shell spawns when multiple agents share
-/// the same binaries (e.g. `npx`, `uvx`).
+/// The cache eliminates redundant login-shell spawns when multiple agents share binaries.
 pub fn resolve_command(command: &str) -> Option<PathBuf> {
     if let Some(managed) = resolve_buzz_managed_command(command) {
         return Some(managed);
@@ -783,12 +783,14 @@ pub(crate) fn classify_runtime(
 /// The oldest `codex-acp` version supported by Buzz managed agents.
 ///
 /// Older 1.x adapters are detected successfully, but can still bundle a Codex runtime
-/// that does not reliably give `buzz` CLI subprocesses outbound relay access.
+/// that cannot use newer models. Adapter 1.6.2 bundles Codex 0.148.x, which rejects
+/// GPT-6 Astra even when the separately installed Codex CLI has been updated.
+/// Published adapter 1.10.0 depends on `@openai/codex ^0.153.3`.
 ///
 /// Bump policy: raise this only when a newer adapter fixes a defect that breaks managed
 /// agents, and only to a version already published on npm — every user below the floor is
 /// offered a reinstall on their next discovery pass.
-pub(crate) const MIN_CODEX_ACP_VERSION: (u64, u64, u64) = (1, 1, 7);
+pub(crate) const MIN_CODEX_ACP_VERSION: (u64, u64, u64) = (1, 10, 0);
 
 /// Probe the full version of a `codex-acp` binary by running `--version`.
 ///

@@ -1,7 +1,6 @@
+use super::managed_agent_definition::validate_create_definition;
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, State};
-
-use super::managed_agent_definition::validate_create_definition;
 
 use crate::{
     app_state::AppState,
@@ -633,9 +632,10 @@ pub async fn create_managed_agent(
             auth_tag: auth_tag.clone(),
             relay_url: resolved_relay_url.clone(),
             avatar_url: resolved_avatar_url.clone(),
-            acp_command: input
-                .acp_command
-                .as_deref()
+            acp_command: linked_persona
+                .as_ref()
+                .and_then(|persona| persona.acp_command.as_deref())
+                .or(input.acp_command.as_deref())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or(DEFAULT_ACP_COMMAND)
@@ -652,6 +652,10 @@ pub async fn create_managed_agent(
             idle_timeout_seconds: input.idle_timeout_seconds.filter(|s| *s > 0),
             max_turn_duration_seconds: input.max_turn_duration_seconds.filter(|s| *s > 0),
             parallelism: minted.parallelism.unwrap_or(DEFAULT_AGENT_PARALLELISM),
+            session_policy: linked_persona
+                .as_ref()
+                .map(|persona| persona.session_policy)
+                .unwrap_or_default(),
             system_prompt: snapshot_prompt.or_else(|| {
                 input
                     .system_prompt

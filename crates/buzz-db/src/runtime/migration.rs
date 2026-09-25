@@ -489,6 +489,7 @@ mod postgres_tests {
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "storage_accounting_snapshots",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -702,7 +703,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 44);
+        assert_eq!(migrations.len(), 49);
+        assert_eq!(migrations[48].version, 49);
+        assert!(migrations[48]
+            .sql
+            .as_str()
+            .contains("idx_thread_metadata_window"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1282,6 +1288,11 @@ mod postgres_tests {
         // The restored exclusion function must NOT list any NIP-FI relation.
         assert!(!ledger_removal.contains("'authorization_operation_receipts'"));
         assert!(!ledger_removal.contains("'identity_bindings'"));
+        assert_eq!(migrations[45].version, 46);
+        assert!(migrations[45]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE storage_accounting_snapshots"));
         // schema.sql exclusion list must match the restored (pre-0041) body.
         assert!(
             desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
@@ -2253,9 +2264,9 @@ mod postgres_tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(39, &migrated)
+            .run_to(47, &migrated)
             .await
-            .expect("apply migrations 1-39");
+            .expect("apply migrations 1-47");
 
         for table in [
             "relay_admin_actions",

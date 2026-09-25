@@ -390,16 +390,19 @@ use crate::managed_agents::spawn_snapshot::{
 };
 use crate::managed_agents::AcpSessionPolicy;
 
-/// Build the prospective snapshot for a bare record under one session policy.
+/// Build the prospective snapshot for a linked record under one definition policy.
 fn snapshot_under(policy: AcpSessionPolicy) -> SpawnConfigSnapshot {
+    let mut record = record();
+    record.persona_id = Some("policy-persona".into());
+    let mut definition = persona("policy-persona", None, "You are a test agent.");
+    definition.session_policy = policy;
     prospective_spawn_config_snapshot(
-        &record(),
-        &[],
+        &record,
+        &[definition],
         &[],
         "wss://ws.example",
         &Default::default(),
         false,
-        policy,
     )
 }
 
@@ -422,10 +425,9 @@ fn policy_transition_diff(
 
 #[test]
 fn toggling_session_policy_while_running_requires_restart() {
-    // Regression: flipping the desktop experiment must reach the config-drift
-    // path so a running agent restarts onto the new policy. The harness reads
-    // BUZZ_ACP_SESSION_POLICY only at launch, so without the snapshot field the
-    // badge stayed dark and the process silently kept the old policy.
+    // A definition edit must reach the real config-drift path. The harness
+    // reads BUZZ_ACP_SESSION_POLICY only at launch, so an existing process
+    // keeps its old policy until the normal restart affordance is used.
     let channel = snapshot_under(AcpSessionPolicy::Channel);
     let thread = snapshot_under(AcpSessionPolicy::Thread);
 
@@ -456,4 +458,15 @@ fn unchanged_session_policy_does_not_require_restart() {
 
     let thread = snapshot_under(AcpSessionPolicy::Thread);
     assert!(policy_transition_diff(&thread, &snapshot_under(AcpSessionPolicy::Thread)).is_empty());
+}
+
+#[test]
+fn definitionless_instance_retains_its_stored_session_policy() {
+    let mut instance = record();
+    instance.session_policy = AcpSessionPolicy::Thread;
+
+    assert_eq!(
+        crate::managed_agents::effective_acp_session_policy(&instance, &[]),
+        AcpSessionPolicy::Thread
+    );
 }

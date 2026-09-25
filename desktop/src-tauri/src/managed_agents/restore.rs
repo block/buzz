@@ -573,22 +573,6 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
     }
 }
 
-#[cfg(test)]
-mod profile_reconcile_tests {
-    use super::profile_reconcile_completed;
-    use crate::commands::ProfileReconcileOutcome;
-
-    #[test]
-    fn skipped_reconciliation_never_retires_pending_work() {
-        assert!(profile_reconcile_completed(
-            ProfileReconcileOutcome::Reconciled
-        ));
-        assert!(!profile_reconcile_completed(
-            ProfileReconcileOutcome::SkippedDisabled
-        ));
-    }
-}
-
 #[cfg(feature = "mesh-llm")]
 fn persist_restore_error(
     app: &tauri::AppHandle,
@@ -643,5 +627,21 @@ mod device_policy_restore_tests {
             prepare_restore_housekeeping(false, || Ok(42)).unwrap(),
             Some(42)
         );
+    }
+}
+
+#[cfg(test)]
+mod profile_reconcile_tests {
+    use super::profile_reconcile_completed;
+    use crate::commands::ProfileReconcileOutcome;
+
+    #[test]
+    fn skipped_reconciliation_never_retires_pending_work() {
+        assert!(profile_reconcile_completed(
+            ProfileReconcileOutcome::Reconciled
+        ));
+        assert!(!profile_reconcile_completed(
+            ProfileReconcileOutcome::SkippedDisabled
+        ));
     }
 }

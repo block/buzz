@@ -437,15 +437,16 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         Err(e) => error!("Failed to backfill d_tags: {e}"),
     }
 
-    let audit = if config.audit_enabled {
+    let (audit, audit_metrics_pool) = if config.audit_enabled {
         let audit_pool = connect_audit_pool(&db_config)
             .await
             .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
         info!("Audit service ready");
-        Some(AuditService::new(audit_pool))
+        let metrics_pool = audit_pool.clone();
+        (Some(AuditService::new(audit_pool)), Some(metrics_pool))
     } else {
         info!("Audit logging disabled by BUZZ_AUDIT_ENABLED");
-        None
+        (None, None)
     };
 
     let redis_pool = {
@@ -495,6 +496,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         .connect(search_db_url)
         .await
         .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
+    let search_metrics_pool = search_pool.clone();
     let search = SearchService::new(search_pool);
     info!(
         replica = config.read_database_url.is_some(),
@@ -1101,20 +1103,18 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             loop {
                 interval.tick().await;
                 let db_stats = pool_state.db.pool_stats();
-                let active = db_stats.size.saturating_sub(db_stats.idle);
-                metrics::gauge!("buzz_db_pool_size").set(db_stats.size as f64);
-                metrics::gauge!("buzz_db_pool_idle").set(db_stats.idle as f64);
-                metrics::gauge!("buzz_db_pool_active").set(active as f64);
-                metrics::gauge!("buzz_db_pool_max").set(db_stats.max as f64);
+                let read_stats = pool_state.db.read_pool_stats();
+                relay_metrics::record_db_pool_metrics(relay_metrics::DbPoolMetricsInput {
+                    writer: db_stats,
+                    reader: read_stats,
+                    audit: audit_metrics_pool
+                        .as_ref()
+                        .map(buzz_db::DbPoolStats::from_pool),
+                    search: buzz_db::DbPoolStats::from_pool(&search_metrics_pool),
+                });
                 pool_state.db.refresh_pool_waiter_metrics();
 
-                if let Some(read_stats) = pool_state.db.read_pool_stats() {
-                    let read_active = read_stats.size.saturating_sub(read_stats.idle);
-                    metrics::gauge!("buzz_db_read_pool_size").set(read_stats.size as f64);
-                    metrics::gauge!("buzz_db_read_pool_idle").set(read_stats.idle as f64);
-                    metrics::gauge!("buzz_db_read_pool_active").set(read_active as f64);
-                    metrics::gauge!("buzz_db_read_pool_max").set(read_stats.max as f64);
-
+                if read_stats.is_some() {
                     // Fence observability: 1 when replica routing is
                     // eligible, and the verified-freshness lag in seconds.
                     // Closed/stale fence reports open=0 with lag untouched.
@@ -1609,6 +1609,7 @@ impl InMemoryMetricKey {
 /// racing the lifecycle-relative increments and decrements.
 fn refresh_legacy_active_gauge_recency() {
     metrics::gauge!("buzz_ws_connections_active").increment(0.0);
+    metrics::gauge!("buzz_ws_authenticated_connections_active").increment(0.0);
     metrics::gauge!("buzz_subscriptions_active").increment(0.0);
 }
 
@@ -1744,49 +1745,26 @@ async fn run_usage_metrics_tick(
     Ok(())
 }
 
-/// Storage-sweep half of the leader-only tick: harvest/spawn (never awaits
-/// the sweep itself) then re-emit whatever snapshot is cached. Split out of
-/// [`run_usage_metrics_tick`] because it has its own always-on config
-/// (independent of `EmissionScope`) and a hard kill switch — a disabled
-/// sweep must never touch a single storage-family gauge, including the
-/// health ones, so a relay without `s3:ListBucket` can turn the whole
-/// feature off cleanly.
+/// Read worker storage snapshots only on the existing leader metrics tick.
 async fn run_storage_sweep_tick(
     state: &AppState,
     emission_scope: &EmissionScope,
     host_map: &HashMap<Uuid, String>,
 ) {
-    static SWEEP_CONFIG: std::sync::OnceLock<storage_sweep::StorageSweepConfig> =
+    static MODE: std::sync::OnceLock<storage_sweep::StorageMetricsMode> =
         std::sync::OnceLock::new();
-    // SWEEP_CONFIG is a function-local OnceLock by design: it is localized
-    // feature config consumed only by this code path, read once on the first
-    // leader tick, and stable for the process lifetime (env is immutable).
-    // Keeping it here avoids widening Config/AppState for a single consumer.
-    let config = *SWEEP_CONFIG.get_or_init(storage_sweep::StorageSweepConfig::from_env);
-    if !config.enabled {
-        return;
-    }
-
-    let media_storage = Arc::clone(&state.media_storage);
-    let max_objects = config.max_objects;
-    storage_sweep::maybe_spawn_sweep(
+    let mode = *MODE.get_or_init(storage_sweep::StorageMetricsMode::from_env);
+    if let Err(error) = storage_sweep::run_storage_metrics_tick(
+        &state.db,
         &state.storage_sweep,
-        config.interval,
-        config.timeout,
-        async move {
-            buzz_media::fold_bucket_listing(max_objects, move |token| {
-                let media_storage = Arc::clone(&media_storage);
-                async move { media_storage.list_page(token, 1000).await }
-            })
-            .await
-        },
+        mode,
+        host_map,
+        |id| emission_scope.allows(id),
     )
-    .await;
-
-    storage_sweep::emit_storage_metrics(&state.storage_sweep, host_map, |id| {
-        emission_scope.allows(id)
-    })
-    .await;
+    .await
+    {
+        warn!(error = %error, "failed to load stored storage snapshot; retrying next usage tick");
+    }
 }
 
 /// Emit the database-derived usage snapshot from the stable leader only.
@@ -2291,13 +2269,16 @@ mod tests {
 
         metrics::with_local_recorder(&recorder, || {
             let connections = metrics::gauge!("buzz_ws_connections_active");
+            let authenticated = metrics::gauge!("buzz_ws_authenticated_connections_active");
             let subscriptions = metrics::gauge!("buzz_subscriptions_active");
             connections.increment(1.0);
+            authenticated.increment(1.0);
             subscriptions.increment(1.0);
 
             refresh_legacy_active_gauge_recency();
 
             connections.decrement(1.0);
+            authenticated.decrement(1.0);
             subscriptions.increment(1.0);
         });
 
@@ -2314,6 +2295,10 @@ mod tests {
             .collect::<std::collections::HashMap<_, _>>();
 
         assert_eq!(values.get("buzz_ws_connections_active"), Some(&0.0));
+        assert_eq!(
+            values.get("buzz_ws_authenticated_connections_active"),
+            Some(&0.0)
+        );
         assert_eq!(values.get("buzz_subscriptions_active"), Some(&2.0));
     }
 

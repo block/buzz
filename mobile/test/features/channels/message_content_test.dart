@@ -45,7 +45,8 @@ Widget _testable(
           data: MediaQuery.of(
             context,
           ).copyWith(disableAnimations: disableAnimations),
-          child: Scaffold(body: child),
+          // The app states its code style here, above the navigator.
+          child: AppMarkdownTheme(child: Scaffold(body: child)),
         ),
       ),
     ),
@@ -2811,6 +2812,50 @@ Photos
         expect(find.text('@'), findsOneWidget);
         expect(find.text('Alice'), findsOneWidget);
         expect(_allRichText(tester), isNot(contains('**')));
+      });
+
+      testWidgets('renders inline code in the app code style', (tester) async {
+        // The message surfaces pass this style in; the widget's own fallback
+        // is the smaller `bodyMedium`, which would move the expected size.
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Run `just test` now',
+              baseStyle: messageBodyTextStyle,
+            ),
+          ),
+        );
+
+        // gpt_markdown tags inline code with a CodeTextSpan carrying both the
+        // resolved text style and the colours the chip behind it is painted
+        // with. It renders through BidiRichText, a RichText subclass, so
+        // find.byType(RichText) would miss it.
+        final codeSpans = <CodeTextSpan>[];
+        for (final rich in tester.widgetList<RichText>(
+          find.byWidgetPredicate((widget) => widget is RichText),
+        )) {
+          rich.text.visitChildren((span) {
+            if (span is CodeTextSpan && span.text == 'just test') {
+              codeSpans.add(span);
+            }
+            return true;
+          });
+        }
+
+        expect(codeSpans, hasLength(1));
+        final code = codeSpans.single;
+        const scheme = lightColorScheme;
+
+        // Face, size and ink — the values a fenced code block is drawn with,
+        // not the package's bundled mono at its own 0.94 of the body size.
+        expect(code.style?.fontFamily, CodeStyle.fontFamily);
+        expect(code.style?.fontSize, closeTo(CodeStyle.fontSize, 0.001));
+        expect(code.style?.color, scheme.onSurface);
+
+        // Chip fill and outline come from the app's code surface rather than
+        // the package's `onSurface` tints.
+        expect(code.codeStyle.backgroundColor, CodeStyle.background(scheme));
+        expect(code.codeStyle.borderColor, CodeStyle.border(scheme));
       });
 
       testWidgets('renders code block between paragraphs', (tester) async {

@@ -242,6 +242,10 @@ pub fn run() {
                 macos_notifications::init(&app_handle)?;
             }
 
+            // Initialise the no-redirect admin HTTP client singleton before any
+            // admin command can be invoked. Must run before setup completes.
+            commands::admin::client::init_admin_client()?;
+
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
             // completes atomically on crash recovery.
@@ -600,6 +604,8 @@ pub fn run() {
             get_relay_http_url,
             get_media_proxy_port,
             fetch_link_preview_metadata,
+            cancel_link_preview_metadata,
+            release_link_preview_metadata,
             discover_acp_auth_methods,
             discover_acp_providers,
             discover_git_bash_prerequisite,
@@ -640,6 +646,7 @@ pub fn run() {
             join_channel,
             leave_channel,
             get_canvas,
+            get_canvas_history,
             set_canvas,
             get_feed,
             search_messages,
@@ -706,7 +713,6 @@ pub fn run() {
             start_managed_agent,
             stop_managed_agent,
             set_agent_managed_profiles,
-            set_thread_scoped_acp_sessions,
             set_managed_agent_start_on_app_launch,
             set_managed_agent_auto_restart,
             delete_managed_agent,
@@ -730,6 +736,7 @@ pub fn run() {
             mesh_installed_models,
             mesh_model_catalog,
             update_managed_agent,
+            discover_acp_commands,
             discover_backend_providers,
             probe_backend_provider,
             persona_catalog::fetch_persona_catalog,
@@ -835,6 +842,7 @@ pub fn run() {
             confirm_pairing_sas,
             cancel_pairing,
             apply_workspace,
+            set_agent_avatar_communities,
             validate_repos_dir,
             get_active_workspace,
             fetch_workspace_icon,
@@ -872,6 +880,27 @@ pub fn run() {
             tray_menu::take_tray_actions,
             #[cfg(target_os = "macos")]
             tray_menu::update_tray_agent_activity,
+            // ── Desktop admin surface ────────────────────────────────────────
+            admin_probe,
+            admin_list_reports,
+            admin_get_report,
+            admin_list_feedback,
+            admin_get_feedback,
+            admin_fetch_feedback_attachment,
+            admin_save_attachment,
+            admin_resolve_report,
+            admin_reopen_report,
+            admin_cancel_report,
+            admin_patch_feedback,
+            admin_list_operators,
+            admin_put_operator,
+            admin_delete_operator,
+            admin_list_restrictions,
+            admin_lift_ban,
+            admin_lift_timeout,
+            get_admin_origin,
+            set_admin_origin,
+            admin_discover_origin,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

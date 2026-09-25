@@ -2,10 +2,11 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod error;
+mod help_tree;
 mod links;
 mod validate;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
@@ -38,7 +39,7 @@ where
     // double-install returns Err and is harmless.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let cli = match Cli::try_parse_from(args) {
+    let cli = match parse_args(args) {
         Ok(cli) => cli,
         Err(e) => {
             if e.use_stderr() {
@@ -58,6 +59,41 @@ where
             error::exit_code(&e)
         }
     }
+}
+
+/// Root help layout. Identical to clap's default except that `{subcommands}`
+/// is dropped and the command tree arrives through `{after-help}` instead, so
+/// the group list is not printed twice. `{options}` and `{subcommands}` emit no
+/// heading of their own — clap writes those from `write_all_args`, which this
+/// template bypasses — so the headings are spelled out here.
+const ROOT_HELP_TEMPLATE: &str = "\
+{before-help}{about-with-newline}
+{usage-heading} {usage}{after-help}
+
+Options:
+{options}";
+
+/// The root command with the agent-friendly command tree installed.
+///
+/// clap picks `after_long_help` for `--help` and falls back to `after_help`
+/// for `-h`, which is what gives the two depths: `-h` keeps the group-level
+/// summary, `--help` shows every subcommand under every group.
+fn build_command() -> clap::Command {
+    let cmd = Cli::command();
+    let groups = help_tree::render(&cmd, 1);
+    let full = help_tree::render(&cmd, usize::MAX);
+    cmd.help_template(ROOT_HELP_TEMPLATE)
+        .after_help(format!("Commands:\n{groups}"))
+        .after_long_help(format!("Commands:\n{full}"))
+}
+
+fn parse_args<I, S>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString> + Clone,
+{
+    let matches = build_command().try_get_matches_from(args)?;
+    Cli::from_arg_matches(&matches)
 }
 
 #[derive(Parser)]
@@ -724,6 +760,10 @@ pub enum CanvasCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// Fetch a specific historical revision by event ID (64-char hex);
+        /// defaults to the current head
+        #[arg(long)]
+        revision: Option<String>,
     },
     /// Set (replace) the canvas document for a channel
     Set {
@@ -733,6 +773,24 @@ pub enum CanvasCmd {
         /// Canvas content (markdown; use '-' to read from stdin)
         #[arg(long)]
         content: String,
+    },
+    /// List canvas revision history for a channel, newest first
+    History {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Maximum number of revisions to return (1–10000)
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+        limit: u32,
+    },
+    /// Restore the canvas to a previous revision by re-publishing its content
+    Restore {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Revision event ID to restore (64-char hex)
+        #[arg(long)]
+        revision: String,
     },
 }
 
@@ -1237,6 +1295,38 @@ pub enum ReposCmd {
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
     Protect(ReposProtectCmd),
+    /// Inspect or change the relay-hosted repository's default branch.
+    #[command(subcommand)]
+    DefaultBranch(ReposDefaultBranchCmd),
+}
+
+/// Commands for the authoritative Git default branch, not announcement metadata.
+#[derive(Subcommand)]
+pub enum ReposDefaultBranchCmd {
+    /// Read the default branch and observed manifest version.
+    Get {
+        /// Repository identifier.
+        #[arg(long)]
+        id: String,
+        /// Repository owner (64-char hex). Defaults to your signing identity.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Select an existing branch without moving or deleting any refs.
+    Set {
+        /// Repository identifier.
+        #[arg(long)]
+        id: String,
+        /// Repository owner (64-char hex). Defaults to your signing identity.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Short branch name, e.g. main or release/v1 (not refs/heads/main).
+        #[arg(long)]
+        branch: String,
+        /// Manifest digest returned by get. Omit to read it before updating.
+        #[arg(long)]
+        expected_manifest: Option<String>,
+    },
 }
 
 /// Commands for inspecting and changing repository protection rules.
@@ -2225,6 +2315,29 @@ mod tests {
         .is_err());
     }
 
+    /// `canvas history --limit` is bounded 1–10000 at parse time: zero and
+    /// max+1 reject, the maximum is accepted, and the max stays above one
+    /// 1,000-row relay page so the >1,000 pagination path remains reachable.
+    #[test]
+    fn canvas_history_limit_is_bounded() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let parse = |limit: &str| {
+            Cli::try_parse_from([
+                "buzz",
+                "canvas",
+                "history",
+                "--channel",
+                channel,
+                "--limit",
+                limit,
+            ])
+        };
+        assert!(parse("0").is_err(), "zero must reject");
+        assert!(parse("10001").is_err(), "max+1 must reject");
+        assert!(parse("10000").is_ok(), "maximum must be accepted");
+        assert!(parse("1000").is_ok(), "one relay page must be reachable");
+    }
+
     #[test]
     fn set_status_clear_rejects_text_and_emoji() {
         for extra in [["--text", "busy"], ["--emoji", "🎶"]] {
@@ -2360,7 +2473,10 @@ mod tests {
                 "update"
             ]
         );
-        assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(
+            names(&cmd, "canvas"),
+            vec!["get", "history", "restore", "set"]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
@@ -2399,12 +2515,13 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "get", "list", "protect"]
+            vec!["bind", "create", "default-branch", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "repos")
             .expect("repos command");
+        assert_eq!(names(repos, "default-branch"), vec!["get", "set"]);
         let protect = repos
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "protect")
@@ -2463,7 +2580,7 @@ mod tests {
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
-            ("canvas", 2),
+            ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
             ("emoji", 5),
@@ -2476,7 +2593,7 @@ mod tests {
             ("pr", 5),
             ("projects", 8),
             ("reactions", 3),
-            ("repos", 5),
+            ("repos", 6),
             ("social", 7),
             ("upload", 1),
             ("users", 5),

@@ -1,7 +1,6 @@
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
-
 export type Channel = {
   id: string;
   name: string;
@@ -20,7 +19,6 @@ export type Channel = {
   ttlSeconds: number | null;
   ttlDeadline: string | null;
 };
-
 export type ChannelDetail = Channel & {
   createdBy: string;
   createdAt: string;
@@ -33,7 +31,6 @@ export type ChannelDetail = Channel & {
   maxMembers: number | null;
   nip29GroupId: string | null;
 };
-
 export type ChannelMember = {
   pubkey: string;
   role: ChannelRole;
@@ -69,21 +66,15 @@ export type SetChannelPurposeInput = {
   purpose: string;
 };
 
-export type CanvasResponse = {
-  content: string | null;
-  updatedAt: number | null;
-  author: string | null;
-};
+export type {
+  CanvasHistoryCursor,
+  CanvasHistoryResponse,
+  CanvasResponse,
+  CanvasRevision,
+  SetCanvasInput,
+  SetCanvasResult,
+} from "@/shared/api/canvasTypes";
 
-export type SetCanvasInput = {
-  channelId: string;
-  content: string;
-};
-
-export type SetCanvasResult = {
-  ok: boolean;
-  eventId: string;
-};
 export type AddChannelMembersInput = {
   channelId: string;
   pubkeys: string[];
@@ -303,6 +294,9 @@ export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
 
+/** ACP conversation boundary configured on an agent definition. */
+export type AcpSessionPolicy = "channel" | "thread";
+
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
@@ -332,6 +326,7 @@ export type ManagedAgent = {
   idleTimeoutSeconds: number | null;
   maxTurnDurationSeconds: number | null;
   parallelism: number;
+  sessionPolicy: AcpSessionPolicy;
   systemPrompt: string | null;
   avatarUrl: string | null;
   model: string | null;

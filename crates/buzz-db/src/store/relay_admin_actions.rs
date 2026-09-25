@@ -47,6 +47,12 @@ pub struct AdminActionRecord {
     pub cancelled_by: Option<Vec<u8>>,
     /// Error from the last failure, if any.
     pub error_message: Option<String>,
+    /// Authoritative target pubkey persisted at claim time (kick/ban/timeout pubkey targets).
+    /// `None` for event/blob targets or actions with no pubkey target.
+    pub enforcement_target_pubkey: Option<Vec<u8>>,
+    /// Authoritative channel persisted at claim time (kick actions).
+    /// `None` for community-wide actions.
+    pub enforcement_channel_id: Option<Uuid>,
     /// Row creation time.
     pub created_at: DateTime<Utc>,
     /// Row last-updated time.
@@ -241,6 +247,7 @@ pub async fn claim_report(
             r#"
             SELECT id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                    action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
+                   enforcement_target_pubkey, enforcement_channel_id,
                    created_at, updated_at
             FROM relay_admin_actions
             WHERE report_community_id = $1 AND report_id = $2 AND request_id = $3
@@ -269,10 +276,11 @@ pub async fn claim_report(
         r#"
         INSERT INTO relay_admin_actions (
             report_id, report_community_id, request_id, actor_pubkey, actor_role,
-            action, reason, timeout_until, state
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+            action, reason, timeout_until, state, enforcement_target_pubkey, enforcement_channel_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
         RETURNING id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                   action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
+                  enforcement_target_pubkey, enforcement_channel_id,
                   created_at, updated_at
         "#,
     )
@@ -284,6 +292,8 @@ pub async fn claim_report(
     .bind(action)
     .bind(reason)
     .bind(timeout_until)
+    .bind(target_pubkey)
+    .bind(channel_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -470,6 +480,15 @@ pub async fn execute_ban_with_marker(
         return Ok(false);
     }
 
+    // Acquire the action-row lock before evaluating the wall-clock expiry check.
+    // PostgreSQL can evaluate clock_timestamp() in the marker UPDATE predicate
+    // before waiting on the row; a lock acquired here ensures expiry is checked
+    // under the lock, not before it.
+    sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
+        .bind(action_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
     sqlx::query(
         r#"
         INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey, ban_reason)
@@ -492,7 +511,7 @@ pub async fn execute_ban_with_marker(
         SET step_marker = 'mutation_committed', updated_at = now()
         WHERE id = $1
           AND action_lease_token = $2
-          AND action_lease_expires_at > now()
+          AND action_lease_expires_at > clock_timestamp()
           AND state = 'enforcing'
           AND step_marker IS NULL
         "#,
@@ -549,6 +568,12 @@ pub async fn execute_timeout_with_marker(
         return Ok(false);
     }
 
+    // Acquire the action-row lock before evaluating the wall-clock expiry check.
+    sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
+        .bind(action_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
     sqlx::query(
         r#"
         INSERT INTO community_bans (community_id, pubkey, banned, muted_until, actor_pubkey, mute_reason)
@@ -574,7 +599,7 @@ pub async fn execute_timeout_with_marker(
         SET step_marker = 'mutation_committed', updated_at = now()
         WHERE id = $1
           AND action_lease_token = $2
-          AND action_lease_expires_at > now()
+          AND action_lease_expires_at > clock_timestamp()
           AND state = 'enforcing'
           AND step_marker IS NULL
         "#,
@@ -645,6 +670,12 @@ pub async fn execute_kick_with_marker(
         return Ok(KickWithMarkerResult::AlreadyMarked);
     }
 
+    // Acquire the action-row lock before evaluating the wall-clock expiry check.
+    sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
+        .bind(action_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
     let kick = sqlx::query(
         r#"
         UPDATE channel_members
@@ -670,7 +701,7 @@ pub async fn execute_kick_with_marker(
         SET step_marker = 'mutation_committed', updated_at = now()
         WHERE id = $1
           AND action_lease_token = $2
-          AND action_lease_expires_at > now()
+          AND action_lease_expires_at > clock_timestamp()
           AND state = 'enforcing'
           AND step_marker IS NULL
         "#,
@@ -702,7 +733,7 @@ pub async fn execute_delete_with_marker(
     community_id: CommunityId,
     target_event_id: &[u8],
     parent_event_id: Option<&[u8]>,
-    _root_event_id: Option<&[u8]>,
+    root_event_id: Option<&[u8]>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
 
@@ -727,33 +758,23 @@ pub async fn execute_delete_with_marker(
         return Ok(false);
     }
 
-    // Soft-delete the event and update thread metadata (idempotent: already-deleted is a no-op).
-    sqlx::query(
-        r#"
-        UPDATE events
-        SET deleted_at = now()
-        WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(target_event_id)
-    .execute(&mut *tx)
-    .await?;
-
-    // Update thread metadata if parent is known.
-    if let Some(parent) = parent_event_id {
-        sqlx::query(
-            r#"
-            UPDATE events
-            SET reply_count = GREATEST(reply_count - 1, 0)
-            WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(parent)
-        .execute(&mut *tx)
+    // Acquire the action-row lock before evaluating the wall-clock expiry check.
+    sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
+        .bind(action_id)
+        .fetch_optional(&mut *tx)
         .await?;
-    }
+
+    // Canonical delete + thread_metadata counters, fenced by this transaction.
+    // Counters move only when the row transitions to deleted, so a second
+    // action against an already-deleted target leaves them unchanged.
+    crate::event::soft_delete_event_and_update_thread_in_tx(
+        &mut tx,
+        community_id,
+        target_event_id,
+        parent_event_id,
+        root_event_id,
+    )
+    .await?;
 
     let marker = sqlx::query(
         r#"
@@ -761,7 +782,7 @@ pub async fn execute_delete_with_marker(
         SET step_marker = 'mutation_committed', updated_at = now()
         WHERE id = $1
           AND action_lease_token = $2
-          AND action_lease_expires_at > now()
+          AND action_lease_expires_at > clock_timestamp()
           AND state = 'enforcing'
           AND step_marker IS NULL
         "#,
@@ -1017,21 +1038,58 @@ pub async fn record_failure(
     lease_token: Uuid,
     error: &str,
 ) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+
+    // Acquire the action-row lock first so the wall-clock expiry check below
+    // is evaluated under the lock, not before it. Without this, Postgres can
+    // test clock_timestamp() before waiting on a locked row, allowing an
+    // expired writer to record failure after its lease ended.
+    let row = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT action_lease_expires_at > clock_timestamp()
+        FROM relay_admin_actions
+        WHERE id = $1
+          AND action_lease_token = $2
+          AND state = 'enforcing'
+          AND step_marker IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(action_id)
+    .bind(lease_token)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    match row {
+        Some(true) => {}
+        _ => {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+    }
+
     let result = sqlx::query(
         r#"
         UPDATE relay_admin_actions
         SET state = 'failed', error_message = $2, updated_at = now()
         WHERE id = $1 AND state = 'enforcing' AND step_marker IS NULL
           AND action_lease_token = $3
-          AND action_lease_expires_at > now()
+          AND action_lease_expires_at > clock_timestamp()
         "#,
     )
     .bind(action_id)
     .bind(error)
     .bind(lease_token)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(result.rows_affected() > 0)
+
+    if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// Cancel a failed action (pre-mutation only) and return its report to 'open'.
@@ -1242,6 +1300,7 @@ pub async fn get_action(pool: &PgPool, action_id: Uuid) -> Result<Option<AdminAc
         r#"
         SELECT id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
+               enforcement_target_pubkey, enforcement_channel_id,
                created_at, updated_at
         FROM relay_admin_actions WHERE id = $1
         "#,
@@ -1263,6 +1322,7 @@ pub async fn get_action_by_request(
         r#"
         SELECT id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
+               enforcement_target_pubkey, enforcement_channel_id,
                created_at, updated_at
         FROM relay_admin_actions
         WHERE report_community_id = $1 AND report_id = $2 AND request_id = $3
@@ -1520,7 +1580,8 @@ pub async fn claim_stranded_action_batch(
               AND (action_lease_expires_at IS NULL OR action_lease_expires_at < now())
             RETURNING id, report_id, report_community_id, request_id, actor_pubkey,
                       actor_role, action, reason, timeout_until, state, step_marker,
-                      cancelled_by, error_message, created_at, updated_at
+                      cancelled_by, error_message, enforcement_target_pubkey,
+                      enforcement_channel_id, created_at, updated_at
             "#,
         )
         .bind(id)
@@ -1618,6 +1679,8 @@ fn row_to_action(row: sqlx::postgres::PgRow) -> Result<AdminActionRecord> {
         step_marker: row.try_get("step_marker")?,
         cancelled_by: row.try_get("cancelled_by")?,
         error_message: row.try_get("error_message")?,
+        enforcement_target_pubkey: row.try_get("enforcement_target_pubkey")?,
+        enforcement_channel_id: row.try_get("enforcement_channel_id")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -2902,6 +2965,536 @@ mod postgres_tests {
         assert!(
             !second,
             "second execute_ban_with_marker must return false (already marked)"
+        );
+    }
+
+    // ── execute_delete_with_marker: thread counters ─────────────────────────
+
+    /// Root ← reply ← nested; returns (root, reply, nested) event ids.
+    async fn make_thread(pool: &PgPool, community: CommunityId) -> [Vec<u8>; 3] {
+        use crate::channel::{ChannelType, ChannelVisibility};
+        use crate::event::{insert_event_with_thread_metadata, ThreadMetadataParams};
+        use nostr::{EventBuilder, Keys, Kind};
+
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        crate::channel::create_channel_with_id(
+            pool,
+            community,
+            channel,
+            &format!("admin-delete-{channel}"),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            keys.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("channel");
+        let events: Vec<nostr::Event> = ["root", "reply", "nested"]
+            .iter()
+            .map(|c| {
+                EventBuilder::new(Kind::Custom(9), *c)
+                    .sign_with_keys(&keys)
+                    .expect("sign")
+            })
+            .collect();
+        let at = |e: &nostr::Event| {
+            DateTime::from_timestamp(e.created_at.as_secs() as i64, 0).expect("ts")
+        };
+        let (root, reply, nested) = (&events[0], &events[1], &events[2]);
+        for (event, parent, depth) in [
+            (root, None, 0),
+            (reply, Some(root), 1),
+            (nested, Some(reply), 2),
+        ] {
+            insert_event_with_thread_metadata(
+                pool,
+                community,
+                event,
+                Some(channel),
+                Some(ThreadMetadataParams {
+                    event_id: event.id.as_bytes(),
+                    event_created_at: at(event),
+                    channel_id: channel,
+                    parent_event_id: parent.map(|p| p.id.as_bytes().as_slice()),
+                    parent_event_created_at: parent.map(at),
+                    root_event_id: parent.map(|_| root.id.as_bytes().as_slice()),
+                    root_event_created_at: parent.map(|_| at(root)),
+                    depth,
+                    broadcast: false,
+                }),
+            )
+            .await
+            .expect("thread event");
+        }
+        [root, reply, nested].map(|e| e.id.as_bytes().to_vec())
+    }
+
+    /// Claim + enforce a fresh delete action; returns (action_id, lease_token).
+    async fn enforcing_action(
+        pool: &PgPool,
+        community_id: Uuid,
+        lease_until: DateTime<Utc>,
+    ) -> (Uuid, Uuid) {
+        let report_id = make_report(pool, community_id).await;
+        let action_id = match do_claim(pool, community_id, report_id, Uuid::new_v4()).await {
+            ClaimResult::Claimed(a) => a.id,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        begin_enforcing(pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        match acquire_action_lease(pool, action_id, lease_until)
+            .await
+            .expect("acquire lease")
+        {
+            LeaseResult::Acquired(t) => (action_id, t),
+            other => panic!("expected Acquired, got {other:?}"),
+        }
+    }
+
+    /// (reply_count, descendant_count) as the thread summary reader sees them.
+    async fn counts(pool: &PgPool, community: CommunityId, id: &[u8]) -> (i32, i32) {
+        let s = crate::thread::get_thread_summary(pool, community, id)
+            .await
+            .expect("summary")
+            .expect("thread row");
+        (s.reply_count, s.descendant_count)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_delete_updates_thread_summary_once_across_actions() {
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let cid = CommunityId::from_uuid(community_id);
+        let [root, reply, nested] = make_thread(&pool, cid).await;
+        assert_eq!(counts(&pool, cid, &reply).await, (1, 0));
+        assert_eq!(counts(&pool, cid, &root).await, (1, 2));
+
+        let lease_until = Utc::now() + chrono::Duration::seconds(60);
+        for _ in 0..2 {
+            // Two distinct actions against the same target: only the first
+            // transitions the row, so counters move exactly once.
+            let (action_id, token) = enforcing_action(&pool, community_id, lease_until).await;
+            let committed = execute_delete_with_marker(
+                &pool,
+                action_id,
+                token,
+                cid,
+                &nested,
+                Some(&reply),
+                Some(&root),
+            )
+            .await
+            .expect("delete");
+            assert!(committed, "each action commits its own marker");
+            assert_eq!(
+                counts(&pool, cid, &reply).await,
+                (0, 0),
+                "parent reply_count"
+            );
+            assert_eq!(
+                counts(&pool, cid, &root).await,
+                (1, 1),
+                "root descendant_count"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_delete_with_already_expired_lease_changes_nothing() {
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let cid = CommunityId::from_uuid(community_id);
+        let [root, reply, nested] = make_thread(&pool, cid).await;
+
+        let expired = Utc::now() - chrono::Duration::seconds(1);
+        let (action_id, token) = enforcing_action(&pool, community_id, expired).await;
+        let committed = execute_delete_with_marker(
+            &pool,
+            action_id,
+            token,
+            cid,
+            &nested,
+            Some(&reply),
+            Some(&root),
+        )
+        .await
+        .expect("delete");
+        assert!(!committed, "expired lease must not commit");
+
+        let deleted: bool = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id)
+        .bind(&nested)
+        .fetch_one(&pool)
+        .await
+        .expect("event row");
+        assert!(!deleted, "delete must roll back with the fence");
+        assert_eq!(counts(&pool, cid, &reply).await, (1, 0));
+        assert_eq!(counts(&pool, cid, &root).await, (1, 2));
+    }
+
+    /// Regression: lease live at transaction entry, expires while the event write blocks.
+    /// The target event row is locked externally; the worker blocks at the `UPDATE events`
+    /// domain write (after it has already acquired the action-row lock). The test confirms
+    /// the worker is observably blocked while the lease is live, waits for DB-clock expiry,
+    /// releases the event row unchanged, and asserts the worker rejects.
+    ///
+    /// This proves the final wall-clock CAS fires after the domain write, which is a
+    /// different wait point than the action-row test below. A slow setup fails the
+    /// observation precondition rather than passing through early rejection.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_delete_cluster_global_lease_expiring_during_write_changes_nothing() {
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let cid = CommunityId::from_uuid(community_id);
+        let [root, reply, nested] = make_thread(&pool, cid).await;
+
+        // 3-second lease: enough headroom for setup; will be expired before unlock.
+        let lease_until = Utc::now() + chrono::Duration::seconds(3);
+        let (action_id, token) = enforcing_action(&pool, community_id, lease_until).await;
+
+        // Lock the target event row without changing it. The worker acquires the
+        // action-row lock first (pre-entry + FOR UPDATE), then blocks here at the
+        // UPDATE events domain write before reaching the final marker CAS.
+        let mut locker = pool.begin().await.expect("locker tx");
+        let locker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *locker)
+            .await
+            .expect("locker pid");
+        sqlx::query("SELECT id FROM events WHERE community_id = $1 AND id = $2 FOR UPDATE")
+            .bind(community_id)
+            .bind(&nested)
+            .fetch_one(&mut *locker)
+            .await
+            .expect("lock event row");
+
+        let worker_pool = pool.clone();
+        let nr = nested.clone();
+        let pr = reply.clone();
+        let rr = root.clone();
+        let worker = tokio::spawn(async move {
+            execute_delete_with_marker(
+                &worker_pool,
+                action_id,
+                token,
+                cid,
+                &nr,
+                Some(&pr),
+                Some(&rr),
+            )
+            .await
+        });
+
+        // Wait until the worker is blocked on the event-row lock (domain write).
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (\
+                       SELECT 1 FROM pg_stat_activity \
+                       WHERE datname = current_database() \
+                         AND wait_event_type = 'Lock' \
+                         AND (query LIKE '%UPDATE events%' OR query LIKE '%events%FOR UPDATE%') \
+                         AND $1 = ANY(pg_blocking_pids(pid))\
+                     )",
+                )
+                .bind(locker_pid)
+                .fetch_one(&pool)
+                .await
+                .expect("observe worker blocked at event write");
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker must block on the event-row write within 10 s");
+
+        // Precondition: lease must still be live while the worker is blocked at the
+        // domain write. Slow setup fails here rather than passing through early rejection.
+        let live_when_blocked: bool = sqlx::query_scalar(
+            "SELECT action_lease_expires_at > clock_timestamp() FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .expect("live_when_blocked");
+        assert!(
+            live_when_blocked,
+            "lease must be live when worker is blocked at the event write — precondition failed, not a fence failure"
+        );
+
+        // Wait until the lease is definitely expired according to the DB clock.
+        sqlx::query(
+            "SELECT pg_sleep(GREATEST(EXTRACT(EPOCH FROM action_lease_expires_at - clock_timestamp()), 0)::double precision + 0.05) \
+             FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .execute(&pool)
+        .await
+        .expect("wait through expiry");
+
+        let expired: bool = sqlx::query_scalar(
+            "SELECT action_lease_expires_at <= clock_timestamp() FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .expect("expired_before_unlock");
+        assert!(
+            expired,
+            "lease must be expired before releasing the event-row lock"
+        );
+
+        // Release the event row without writing a new version.
+        locker.rollback().await.expect("release event-row lock");
+
+        let committed = worker.await.expect("worker join").expect("worker result");
+
+        let deleted: bool = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id)
+        .bind(&nested)
+        .fetch_one(&pool)
+        .await
+        .expect("event row");
+        assert!(!committed, "lease expired mid-write must not commit");
+        assert!(
+            !deleted,
+            "event must not be deleted when lease expires mid-write"
+        );
+        let stored_marker = get_action(&pool, action_id)
+            .await
+            .expect("action lookup")
+            .expect("action exists")
+            .step_marker;
+        assert_eq!(stored_marker, None, "step_marker must not be persisted");
+        assert_eq!(
+            counts(&pool, cid, &reply).await,
+            (1, 0),
+            "parent counts must be unchanged"
+        );
+        assert_eq!(
+            counts(&pool, cid, &root).await,
+            (1, 2),
+            "root counts must be unchanged"
+        );
+    }
+
+    /// Regression for the row-lock wait gap: Postgres can evaluate
+    /// `clock_timestamp()` before waiting to lock the action row. If another
+    /// transaction holds the row and releases it unchanged after the lease expires,
+    /// the final marker UPDATE would commit without the lock-first shape.
+    ///
+    /// This test locks the action row externally. The worker blocks at the
+    /// `SELECT … FOR UPDATE` that acquires the action-row lock. The test confirms
+    /// the worker is observably blocked while the lease is live, waits for DB-clock
+    /// expiry, releases the lock unchanged, and asserts the worker rejects.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_delete_cluster_global_lease_expiring_during_row_lock_wait_changes_nothing() {
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let cid = CommunityId::from_uuid(community_id);
+        let [root, reply, nested] = make_thread(&pool, cid).await;
+
+        // 3-second lease gives enough headroom for setup; will be expired before unlock.
+        let (action_id, token) = enforcing_action(
+            &pool,
+            community_id,
+            Utc::now() + chrono::Duration::seconds(3),
+        )
+        .await;
+
+        // Lock the action row without changing it; the worker will block at the
+        // explicit FOR UPDATE in execute_delete_with_marker.
+        let mut locker = pool.begin().await.expect("locker tx");
+        let locker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *locker)
+            .await
+            .expect("locker pid");
+        sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
+            .bind(action_id)
+            .fetch_one(&mut *locker)
+            .await
+            .expect("lock action row");
+
+        let worker_pool = pool.clone();
+        let nr = nested.clone();
+        let pr = reply.clone();
+        let rr = root.clone();
+        let worker = tokio::spawn(async move {
+            execute_delete_with_marker(
+                &worker_pool,
+                action_id,
+                token,
+                cid,
+                &nr,
+                Some(&pr),
+                Some(&rr),
+            )
+            .await
+        });
+
+        // Wait until the worker is blocked at the action-row lock.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (\
+                       SELECT 1 FROM pg_stat_activity \
+                       WHERE datname = current_database() \
+                         AND wait_event_type = 'Lock' \
+                         AND (query LIKE '%relay_admin_actions%FOR UPDATE%' OR query LIKE '%SET step_marker%') \
+                         AND $1 = ANY(pg_blocking_pids(pid))\
+                     )",
+                )
+                .bind(locker_pid)
+                .fetch_one(&pool)
+                .await
+                .expect("observe worker blocked");
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker must block on the action-row FOR UPDATE within 10 s");
+
+        // Precondition: lease must still be live when the worker is blocked.
+        let live_when_blocked: bool = sqlx::query_scalar(
+            "SELECT action_lease_expires_at > clock_timestamp() FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .expect("live_when_blocked");
+        assert!(
+            live_when_blocked,
+            "lease must be live when worker reaches the row lock"
+        );
+
+        // Wait until the lease is definitely expired according to the DB clock.
+        sqlx::query(
+            "SELECT pg_sleep(GREATEST(EXTRACT(EPOCH FROM action_lease_expires_at - clock_timestamp()), 0)::double precision + 0.05) \
+             FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .execute(&pool)
+        .await
+        .expect("wait through expiry");
+
+        let expired: bool = sqlx::query_scalar(
+            "SELECT action_lease_expires_at <= clock_timestamp() FROM relay_admin_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .expect("expired_before_unlock");
+        assert!(
+            expired,
+            "lease must be expired before releasing the row lock"
+        );
+
+        // Release the row lock without writing a new tuple version.
+        locker.rollback().await.expect("release row lock");
+
+        let committed = worker.await.expect("worker join").expect("worker result");
+
+        let deleted: bool = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id)
+        .bind(&nested)
+        .fetch_one(&pool)
+        .await
+        .expect("event row");
+        let stored_marker = get_action(&pool, action_id)
+            .await
+            .expect("action lookup")
+            .expect("action exists")
+            .step_marker;
+
+        assert!(
+            !committed,
+            "lease expired during row-lock wait must not commit"
+        );
+        assert!(!deleted, "event must not be deleted");
+        assert_eq!(stored_marker, None, "step_marker must not be persisted");
+        assert_eq!(
+            counts(&pool, cid, &reply).await,
+            (1, 0),
+            "parent counts unchanged"
+        );
+        assert_eq!(
+            counts(&pool, cid, &root).await,
+            (1, 2),
+            "root counts unchanged"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_delete_rolled_back_by_marker_fence_changes_nothing() {
+        // Same action re-driven after its marker is set: the marker UPDATE
+        // matches zero rows, so the whole transaction (delete + counters) rolls back.
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let cid = CommunityId::from_uuid(community_id);
+        let [root, reply, nested] = make_thread(&pool, cid).await;
+        let lease_until = Utc::now() + chrono::Duration::seconds(60);
+        let (action_id, token) = enforcing_action(&pool, community_id, lease_until).await;
+
+        assert!(execute_delete_with_marker(
+            &pool,
+            action_id,
+            token,
+            cid,
+            &reply,
+            Some(&root),
+            Some(&root)
+        )
+        .await
+        .expect("first delete"));
+        let second = execute_delete_with_marker(
+            &pool,
+            action_id,
+            token,
+            cid,
+            &nested,
+            Some(&reply),
+            Some(&root),
+        )
+        .await
+        .expect("second delete");
+        assert!(!second, "marker already set must roll back");
+
+        let deleted: bool = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id)
+        .bind(&nested)
+        .fetch_one(&pool)
+        .await
+        .expect("event row");
+        assert!(!deleted, "rolled-back delete must not persist");
+        assert_eq!(
+            counts(&pool, cid, &reply).await,
+            (1, 0),
+            "nested's parent untouched"
+        );
+        assert_eq!(
+            counts(&pool, cid, &root).await,
+            (0, 1),
+            "only the first delete counted"
         );
     }
 

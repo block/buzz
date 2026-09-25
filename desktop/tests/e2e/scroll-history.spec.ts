@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { waitForMockChannelHeadReady } from "../helpers/channelHeadReady";
 
 // First-pass settle budget for a full channel-history prepend. CI Linux font
 // rasterization can leave the restored anchor a subpixel off the local value
@@ -182,17 +183,18 @@ test("preserves user scroll while older channel history loads", async ({
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
 
-  // Use the `deep-history` channel: its store is seeded with 600 messages,
-  // more than CHANNEL_HISTORY_LIMIT (300, hooks.ts), so the cold load windows
-  // to the newest 300 and leaves ~300 genuinely older messages behind the
-  // `until` cursor. A shallow seed (store < 300) is fully drained by the cold
-  // load, so the wheel `fetchOlder` returns only already-cached duplicates that
-  // dedup to zero net growth -- the anchor never has a real prepend to hold and
-  // the assertion would measure virtualizer re-measure, not scroll preservation.
+  // The 600-row seed exceeds the 50-row head window, leaving genuinely older
+  // pages behind its composite cursor. A fully drained seed would only measure
+  // virtualizer re-measurement, not scroll preservation across real growth.
   await page.getByTestId("channel-deep-history").click();
   await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
+
+  await waitForMockChannelHeadReady(
+    page,
+    "deep-history",
+    "feedf00d-0000-4000-8000-000000000007",
+  );
   const timeline = page.getByTestId("message-timeline");
-  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
   await page.waitForFunction(() => {
     const element = document.querySelector(
       '[data-testid="message-timeline"]',
@@ -553,23 +555,23 @@ test("does not teleport upward when user abandons fetch by jumping to bottom", a
   expect(lastRowOffset as number).toBeLessThanOrEqual(200);
 });
 
-const REAL_BUZZ_BUGS_IMAGE_SHA =
-  "ff2862080bac3d009f97cad4bb94e6efec328eaaee058a405e854acd49fc1483";
-const REAL_BUZZ_BUGS_IMAGE_URL = `https://sprout-oss.stage.blox.sqprod.co/media/${REAL_BUZZ_BUGS_IMAGE_SHA}.png`;
-const REAL_BUZZ_BUGS_IMAGE_TAG = [
+const SYNTHETIC_WIDE_IMAGE_SHA =
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const SYNTHETIC_WIDE_IMAGE_URL = `https://media.example.com/media/${SYNTHETIC_WIDE_IMAGE_SHA}.png`;
+const SYNTHETIC_WIDE_IMAGE_TAG = [
   "imeta",
-  `url ${REAL_BUZZ_BUGS_IMAGE_URL}`,
+  `url ${SYNTHETIC_WIDE_IMAGE_URL}`,
   "m image/png",
-  `x ${REAL_BUZZ_BUGS_IMAGE_SHA}`,
-  "size 26257",
-  "dim 951x244",
-  "filename image.png",
+  `x ${SYNTHETIC_WIDE_IMAGE_SHA}`,
+  "size 24576",
+  "dim 960x240",
+  "filename sample-banner.png",
 ] as string[];
 
-test("reserves real buzz-bugs imeta image height before image loads", async ({
+test("reserves imeta image height before a synthetic image loads", async ({
   page,
 }) => {
-  await page.route("**/media/**", () => new Promise(() => {}));
+  await page.route(SYNTHETIC_WIDE_IMAGE_URL, () => new Promise(() => {}));
   await installMockBridge(page);
   await page.goto("/");
   await page.waitForFunction(
@@ -585,15 +587,15 @@ test("reserves real buzz-bugs imeta image height before image loads", async ({
       });
     },
     {
-      content: `this setting gets reverted on every update\n![image](${REAL_BUZZ_BUGS_IMAGE_URL})`,
-      extraTags: [REAL_BUZZ_BUGS_IMAGE_TAG],
+      content: `Synthetic wide image fixture\n![sample banner](${SYNTHETIC_WIDE_IMAGE_URL})`,
+      extraTags: [SYNTHETIC_WIDE_IMAGE_TAG],
     },
   );
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  const image = page.getByAltText("image").last();
+  const image = page.getByAltText("sample banner").last();
   const rect = await image.evaluate((element) => {
     const img = element as HTMLImageElement;
     const box = img.getBoundingClientRect();
@@ -606,8 +608,8 @@ test("reserves real buzz-bugs imeta image height before image loads", async ({
       width: box.width,
     };
   });
-  expect(rect.attrWidth).toBe("951");
-  expect(rect.attrHeight).toBe("244");
+  expect(rect.attrWidth).toBe("960");
+  expect(rect.attrHeight).toBe("240");
   expect(rect.offsetHeight).toBeGreaterThan(80);
 });
 
@@ -1316,6 +1318,12 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
     return element && element.scrollHeight > element.clientHeight * 3;
   });
 
+  await page.waitForFunction(() =>
+    window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+      channelName: "general",
+      kind: 39005,
+    }),
+  );
   // Land a genuine prepend first. This is what turns `shift` on; subsequent
   // ordinary list updates and measurements must happen with it cleared.
   const scrollHeightBeforePrepend = (await getTimelineMetrics(page))
@@ -1648,6 +1656,11 @@ test("channel intro stays hidden while paginating past the timeline cap", async 
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockChannelHeadReady(
+    page,
+    "general",
+    "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+  );
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
 
@@ -1785,6 +1798,11 @@ test("older-history fetches never overlap (no concurrent in-flight requests)", a
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockChannelHeadReady(
+    page,
+    "general",
+    "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+  );
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
 
@@ -1848,6 +1866,11 @@ test("older-history spinner stays visible in viewport while fetching mid-scroll"
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockChannelHeadReady(
+    page,
+    "general",
+    "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+  );
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
 
@@ -2024,6 +2047,11 @@ test("older-history prepend keeps the reading row fixed (no jump to oldest)", as
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockChannelHeadReady(
+    page,
+    "general",
+    "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+  );
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
   await page.waitForFunction(() => {

@@ -46,6 +46,7 @@ export function createPersonaDialogState(): PersonaDialogState {
       displayName: "",
       avatarUrl: "",
       systemPrompt: "",
+      acpCommand: "buzz-acp",
       runtime: undefined,
       model: undefined,
     },
@@ -65,6 +66,7 @@ export function duplicatePersonaDialogState(
       avatarUrl: persona.avatarUrl ?? "",
       description: persona.description ?? undefined,
       systemPrompt: persona.systemPrompt,
+      acpCommand: persona.acpCommand || "buzz-acp",
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,
       provider: persona.provider ?? undefined,
@@ -88,7 +90,11 @@ export function duplicatePersonaDialogState(
 function behaviorEntry(
   persona: AgentPersona,
 ): { behavior: PersonaBehaviorInput } | Record<string, never> {
-  if (persona.respondTo == null && persona.parallelism == null) {
+  if (
+    persona.respondTo == null &&
+    persona.parallelism == null &&
+    (persona.sessionPolicy ?? "channel") === "channel"
+  ) {
     return {};
   }
   return {
@@ -99,6 +105,7 @@ function behaviorEntry(
           ? persona.respondToAllowlist
           : undefined,
       parallelism: persona.parallelism ?? undefined,
+      sessionPolicy: persona.sessionPolicy ?? "channel",
     },
   };
 }
@@ -124,6 +131,7 @@ export function editPersonaDialogState(
       avatarUrl: persona.avatarUrl ?? "",
       description: persona.description ?? undefined,
       systemPrompt: persona.systemPrompt,
+      acpCommand: persona.acpCommand || "buzz-acp",
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,
       provider: persona.provider ?? undefined,

@@ -38,6 +38,10 @@ pub struct AdminReport {
     pub target_kind: String,
     /// Hex target identifier.
     pub target: String,
+    /// Author of the reported event when `target_kind` is `"event"` and the
+    /// event is stored (deleted events included), so a list row can name the
+    /// reported person without a per-report detail read.
+    pub target_author_pubkey: Option<String>,
     /// Optional channel.
     pub channel_id: Option<Uuid>,
     /// NIP-56 report category.
@@ -195,9 +199,19 @@ pub async fn list_reports(
                r.report_event_id, r.reporter_pubkey, r.target_kind,
                r.target_event_id, r.target_pubkey, r.target_blob_sha256,
                r.channel_id, r.report_type, r.note, r.status, r.resolved_by,
-               r.resolved_at, r.action_id, r.created_at
+               r.resolved_at, r.action_id, r.created_at,
+               target.pubkey AS target_author_pubkey
         FROM moderation_reports r
         JOIN communities c ON c.id = r.community_id
+        LEFT JOIN LATERAL (
+            SELECT e.pubkey
+            FROM events e
+            WHERE r.target_kind = 'event'
+              AND e.community_id = r.community_id
+              AND e.id = r.target_event_id
+            ORDER BY e.created_at DESC
+            LIMIT 1
+        ) target ON TRUE
         WHERE ($1::uuid IS NULL OR r.community_id = $1)
           AND ($2::text IS NULL OR r.status = $2)
           AND ($3::text IS NULL OR r.report_type = $3)
@@ -233,6 +247,7 @@ pub async fn get_report(pool: &PgPool, report_id: Uuid) -> Result<Option<AdminRe
                r.channel_id, r.report_type, r.note, r.status, r.resolved_by,
                r.resolved_at, r.action_id, r.created_at,
                target.pubkey AS message_author_pubkey,
+               target.pubkey AS target_author_pubkey,
                target.content AS message_content,
                target.created_at AS message_created_at,
                target.deleted_at AS message_deleted_at,
@@ -340,6 +355,9 @@ fn row_to_report(row: sqlx::postgres::PgRow) -> Result<AdminReport> {
         reporter_pubkey: hex::encode(row.try_get::<Vec<u8>, _>("reporter_pubkey")?),
         target_kind,
         target: hex::encode(target),
+        target_author_pubkey: row
+            .try_get::<Option<Vec<u8>>, _>("target_author_pubkey")?
+            .map(hex::encode),
         channel_id: row.try_get("channel_id")?,
         report_type: row.try_get("report_type")?,
         note: row.try_get("note")?,
@@ -626,6 +644,67 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("delete community fixtures");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn list_reports_names_same_community_event_author_including_deleted() {
+        let pool = setup_pool().await;
+        let report_community = insert_community(&pool, "list-author").await;
+        let other_community = insert_community(&pool, "list-author-other").await;
+        let event_id = vec![2_u8; 32];
+        insert_event(
+            &pool,
+            report_community,
+            &event_id,
+            &[5_u8; 32],
+            "gone",
+            Some(Utc::now()),
+        )
+        .await;
+        insert_event(
+            &pool,
+            other_community,
+            &event_id,
+            &[6_u8; 32],
+            "wrong tenant",
+            None,
+        )
+        .await;
+        let event_report = insert_event_report(&pool, report_community, &event_id).await;
+        let pubkey_report = insert_pubkey_report(&pool, report_community).await;
+
+        let reports = list_reports(
+            &pool,
+            Some(report_community),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            50,
+        )
+        .await
+        .expect("list reports");
+        let author_of = |id: Uuid| {
+            reports
+                .iter()
+                .find(|r| r.id == id)
+                .expect("report listed")
+                .target_author_pubkey
+                .clone()
+        };
+        assert_eq!(author_of(event_report), Some(hex::encode([5_u8; 32])));
+        assert_eq!(author_of(pubkey_report), None);
+
+        sqlx::query("DELETE FROM events WHERE community_id = ANY($1)")
+            .bind(vec![report_community, other_community])
+            .execute(&pool)
+            .await
+            .expect("delete event fixtures");
+        delete_report_fixture(&pool, report_community).await;
+        delete_report_fixture(&pool, other_community).await;
     }
 
     #[tokio::test]
