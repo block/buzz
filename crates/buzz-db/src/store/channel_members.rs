@@ -328,12 +328,12 @@ pub async fn lock_member_snapshot(
     channel_id: Uuid,
     relay_pubkey: &[u8],
 ) -> Result<LockedMemberSnapshot> {
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
     // Match the canonical replacement writer's lock order. Old binaries take
     // this key before INSERT; migration 0032 then takes the membership key in
     // the INSERT trigger. Taking both in that order avoids mixed-version
@@ -2829,6 +2829,60 @@ mod postgres_tests {
                 .len(),
             2
         );
+    }
+
+    /// Captured roster publication must hold the same shared community-deletion
+    /// lock as serving event writes so deletion fencing can serialize against it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn locked_member_snapshot_holds_shared_community_fence_lock() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "snapshot-community-fence-lock",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let snapshot_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(1))
+            .connect(&crate::test_support::database_url())
+            .await
+            .expect("connect one-connection pool");
+        let relay_keys = Keys::generate();
+        let snapshot = lock_member_snapshot(
+            &snapshot_pool,
+            community,
+            channel.id,
+            &relay_keys.public_key().to_bytes(),
+        )
+        .await
+        .expect("capture locked roster");
+
+        let mut contender = pool.begin().await.expect("begin deletion contender");
+        let exclusive_taken: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
+                .bind(community.as_uuid())
+                .fetch_one(&mut *contender)
+                .await
+                .expect("try exclusive community deletion lock");
+        assert!(
+            !exclusive_taken,
+            "snapshot publication must hold a shared community deletion lock"
+        );
+        contender.rollback().await.expect("rollback contender");
+
+        snapshot.release().await.expect("release snapshot fence");
     }
 
     /// The lock must be shared with `remove_member`: a demotion racing an owner

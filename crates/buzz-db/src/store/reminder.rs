@@ -124,6 +124,12 @@ pub async fn claim_due_reminder_with_stamp(
     event_created_at: DateTime<Utc>,
     delivery_stamp: i64,
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE events
@@ -135,8 +141,10 @@ pub async fn claim_due_reminder_with_stamp(
     .bind(community_id.as_uuid())
     .bind(event_created_at)
     .bind(event_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -156,6 +164,12 @@ pub async fn release_due_reminder(
     event_created_at: DateTime<Utc>,
     delivery_stamp: i64,
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE events
@@ -170,8 +184,10 @@ pub async fn release_due_reminder(
     .bind(event_created_at)
     .bind(event_id)
     .bind(delivery_stamp)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(result.rows_affected() == 1)
 }

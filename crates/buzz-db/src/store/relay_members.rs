@@ -978,11 +978,15 @@ impl Db {
             None,
         );
 
-        let (mut tx, transaction_timer) = observability::begin_transaction(
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
-            observability::TransactionOperation::PublishNip43MembershipLocked,
+            community_id,
+            observability::WriterOperation::EventWrite,
         )
         .await?;
+        let transaction_timer = observability::TransactionTimer::start(
+            observability::TransactionOperation::PublishNip43MembershipLocked,
+        );
         let (event, received_at, was_inserted, member_count) = transaction_timer
             .observe(async {
 

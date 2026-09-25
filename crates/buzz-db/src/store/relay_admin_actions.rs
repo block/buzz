@@ -714,7 +714,12 @@ pub async fn execute_delete_with_marker(
     parent_event_id: Option<&[u8]>,
     _root_event_id: Option<&[u8]>,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
 
     let owned: bool = sqlx::query_scalar(
         r#"

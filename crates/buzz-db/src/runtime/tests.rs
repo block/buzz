@@ -170,6 +170,69 @@ fn nip43_reconciliation_compatibility_alias_is_preserved() {
 }
 
 #[tokio::test]
+async fn community_write_transaction_compatibility_metrics_are_limited_to_legacy_entrypoints() {
+    use metrics_util::debugging::DebuggingRecorder;
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy(&crate::test_support::database_url())
+        .expect("construct lazy compatibility pool");
+    pool.close().await;
+    let db = Db::from_pool(pool);
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let community = CommunityId::from_uuid(Uuid::new_v4());
+
+    let direct = begin_community_event_write_transaction(
+        &db.pool,
+        community,
+        observability::WriterOperation::EventWrite,
+    )
+    .await;
+    assert!(matches!(
+        direct,
+        Err(DbError::Sqlx(sqlx::Error::PoolClosed))
+    ));
+    assert_eq!(
+        legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
+        0,
+        "typed-only tenant-local chokepoint must not emit legacy compatibility metrics"
+    );
+
+    let legacy = db.begin_community_write_transaction(community).await;
+    assert!(matches!(
+        legacy,
+        Err(DbError::Sqlx(sqlx::Error::PoolClosed))
+    ));
+    assert_eq!(
+        legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
+        1,
+        "Db::begin_community_write_transaction must preserve the legacy compatibility population"
+    );
+}
+
+fn legacy_acquisition_count(
+    snapshot: &[(
+        metrics_util::CompositeKey,
+        Option<metrics::Unit>,
+        Option<metrics::SharedString>,
+        metrics_util::debugging::DebugValue,
+    )],
+) -> u64 {
+    snapshot
+        .iter()
+        .filter_map(|(key, _, _, value)| {
+            (key.key().name() == "buzz_db_pool_acquisitions_total")
+                .then_some(value)
+                .map(|value| match value {
+                    metrics_util::debugging::DebugValue::Counter(value) => *value,
+                    _ => panic!("legacy acquisitions must be a counter"),
+                })
+        })
+        .sum()
+}
+
+#[tokio::test]
 #[ignore = "requires Postgres"]
 async fn readiness_check_distinguishes_pool_exhaustion_from_success() {
     let database_url = crate::test_support::database_url();

@@ -111,8 +111,9 @@ pub async fn add_reaction(
     emoji: &str,
     reaction_event_id: Option<&[u8]>,
 ) -> Result<bool> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
@@ -123,8 +124,10 @@ pub async fn add_reaction(
         .bind(pubkey)
         .bind(emoji)
         .bind(reaction_event_id)
-        .execute(&mut *connection)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     // Three cases:
     // (a) New reaction (no existing row): INSERT succeeds → rows_affected = 1 → true.
@@ -178,12 +181,12 @@ pub async fn insert_reaction_event_with_thread_metadata(
     actor_pubkey: &[u8],
     emoji: &str,
 ) -> Result<ReactionEventInsertOutcome> {
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     let target_row = sqlx::query(
         "SELECT created_at FROM events \
@@ -218,6 +221,13 @@ pub async fn insert_reaction_event_with_thread_metadata(
         return Ok(ReactionEventInsertOutcome::Duplicate);
     }
 
+    crate::event::acquire_canvas_event_write_lock_if_needed(
+        &mut tx,
+        community_id,
+        reaction_event,
+        channel_id,
+    )
+    .await?;
     let (stored_event, was_inserted) = insert_event_with_thread_metadata_tx(
         &mut tx,
         community_id,
@@ -226,6 +236,11 @@ pub async fn insert_reaction_event_with_thread_metadata(
         thread_meta,
     )
     .await?;
+
+    if was_inserted {
+        crate::insert_mentions_in_transaction(&mut tx, community_id, reaction_event, channel_id)
+            .await?;
+    }
 
     tx.commit().await?;
 
@@ -246,8 +261,9 @@ pub async fn remove_reaction(
     pubkey: &[u8],
     emoji: &str,
 ) -> Result<bool> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
@@ -268,8 +284,10 @@ pub async fn remove_reaction(
     .bind(event_id)
     .bind(pubkey)
     .bind(emoji)
-    .execute(&mut *connection)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -282,8 +300,9 @@ pub async fn remove_reaction_by_source_event_id(
     community: CommunityId,
     reaction_event_id: &[u8],
 ) -> Result<bool> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
@@ -298,8 +317,10 @@ pub async fn remove_reaction_by_source_event_id(
     )
     .bind(community.as_uuid())
     .bind(reaction_event_id)
-    .execute(&mut *connection)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -360,8 +381,9 @@ pub async fn set_reaction_event_id(
     emoji: &str,
     reaction_event_id: &[u8],
 ) -> Result<bool> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
@@ -383,8 +405,10 @@ pub async fn set_reaction_event_id(
     .bind(event_id)
     .bind(pubkey)
     .bind(emoji)
-    .execute(&mut *connection)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -567,7 +591,7 @@ impl Db {
         actor_pubkey: &[u8],
         emoji: &str,
     ) -> Result<ReactionEventInsertOutcome> {
-        let outcome = crate::reaction::insert_reaction_event_with_thread_metadata(
+        crate::reaction::insert_reaction_event_with_thread_metadata(
             &self.pool,
             community_id,
             event,
@@ -577,18 +601,7 @@ impl Db {
             actor_pubkey,
             emoji,
         )
-        .await?;
-        if let ReactionEventInsertOutcome::Inserted {
-            was_inserted: true, ..
-        } = &outcome
-        {
-            if let Err(e) =
-                crate::insert_mentions(&self.pool, community_id, event, channel_id).await
-            {
-                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
-            }
-        }
-        Ok(outcome)
+        .await
     }
 
     /// Add (or re-activate) a reaction.
@@ -759,6 +772,70 @@ mod postgres_tests {
         id
     }
 
+    async fn make_test_channel(pool: &PgPool, community_id: Uuid) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, created_by) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(community_id)
+        .bind(format!("reaction-test-channel-{}", id.simple()))
+        .bind(vec![7_u8; 32])
+        .execute(pool)
+        .await
+        .expect("insert test channel");
+        id
+    }
+
+    async fn admin_url() -> String {
+        crate::test_support::database_url()
+    }
+
+    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
+        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(admin)
+            .await
+            .expect("create scratch db");
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        let scratch_url = format!("{}/{}", &base[..idx], name);
+        let pool = PgPool::connect(&scratch_url)
+            .await
+            .expect("connect scratch db");
+        crate::migration::run_migrations(&pool)
+            .await
+            .expect("migrate scratch db");
+        (pool, name)
+    }
+
+    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
+        pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+        )))
+        .execute(admin)
+        .await;
+    }
+
+    async fn install_mention_failure_injection(pool: &PgPool) {
+        sqlx::query(
+            "CREATE FUNCTION reject_test_mention() RETURNS trigger AS $$ \
+             BEGIN RAISE EXCEPTION 'injected mention failure'; END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(pool)
+        .await
+        .expect("create failure function");
+        sqlx::query(
+            "CREATE TRIGGER reject_test_mention BEFORE INSERT ON event_mentions \
+             FOR EACH ROW EXECUTE FUNCTION reject_test_mention()",
+        )
+        .execute(pool)
+        .await
+        .expect("install failure injection");
+    }
+
     fn make_text_event(content: &str) -> nostr::Event {
         EventBuilder::new(Kind::Custom(9), content)
             .sign_with_keys(&Keys::generate())
@@ -770,6 +847,23 @@ mod postgres_tests {
         EventBuilder::new(Kind::Custom(7), emoji)
             .tags(vec![
                 Tag::parse(["e", target_id_hex]).expect("reaction e tag"),
+                Tag::parse(["nonce", nonce.as_str()]).expect("nonce tag"),
+            ])
+            .sign_with_keys(keys)
+            .expect("sign reaction event")
+    }
+
+    fn make_reaction_event_with_mention(
+        keys: &Keys,
+        target_id_hex: &str,
+        emoji: &str,
+        mentioned_pubkey_hex: &str,
+    ) -> nostr::Event {
+        let nonce = Uuid::new_v4().to_string();
+        EventBuilder::new(Kind::Custom(7), emoji)
+            .tags(vec![
+                Tag::parse(["e", target_id_hex]).expect("reaction e tag"),
+                Tag::parse(["p", mentioned_pubkey_hex]).expect("reaction p tag"),
                 Tag::parse(["nonce", nonce.as_str()]).expect("nonce tag"),
             ])
             .sign_with_keys(keys)
@@ -1057,6 +1151,216 @@ mod postgres_tests {
         );
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_insert_with_thread_metadata_mention_failure_rolls_back_everything() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin database");
+        let (scratch_pool, name) =
+            create_scratch_db(&admin, "reaction_thread_mention_rollback").await;
+        install_mention_failure_injection(&scratch_pool).await;
+
+        let db = Db::from_pool(scratch_pool.clone());
+        let community_uuid = make_test_community(&scratch_pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&scratch_pool, community_uuid).await;
+
+        let target = make_text_event("reaction mention failure target");
+        insert_event(&scratch_pool, community, &target, Some(channel))
+            .await
+            .expect("insert reaction target");
+
+        let actor = Keys::generate();
+        let mentioned = Keys::generate();
+        let reaction = make_reaction_event_with_mention(
+            &actor,
+            &target.id.to_hex(),
+            "👍",
+            &mentioned.public_key().to_hex(),
+        );
+        let reaction_ts = DateTime::from_timestamp(reaction.created_at.as_secs() as i64, 0)
+            .expect("reaction timestamp");
+
+        let error = db
+            .insert_reaction_event_with_thread_metadata(
+                community,
+                &reaction,
+                Some(channel),
+                Some(ThreadMetadataParams {
+                    event_id: reaction.id.as_bytes(),
+                    event_created_at: reaction_ts,
+                    channel_id: channel,
+                    parent_event_id: None,
+                    parent_event_created_at: None,
+                    root_event_id: None,
+                    root_event_created_at: None,
+                    depth: 0,
+                    broadcast: true,
+                }),
+                target.id.as_bytes(),
+                &actor.public_key().to_bytes(),
+                "👍",
+            )
+            .await
+            .expect_err("mention-indexing failure must fail reaction insert");
+        assert!(
+            error.to_string().contains("injected mention failure"),
+            "unexpected error: {error}"
+        );
+
+        let reaction_row_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM reactions WHERE community_id = $1 AND reaction_event_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(reaction.id.as_bytes().as_slice())
+        .fetch_one(&scratch_pool)
+        .await
+        .expect("count rolled-back reaction rows");
+        assert_eq!(
+            reaction_row_count, 0,
+            "reaction row must not persist when mention indexing fails"
+        );
+
+        let event_row_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(reaction.id.as_bytes().as_slice())
+                .fetch_one(&scratch_pool)
+                .await
+                .expect("count rolled-back reaction events");
+        assert_eq!(
+            event_row_count, 0,
+            "reaction event must not persist when mention indexing fails"
+        );
+
+        let thread_meta_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM thread_metadata WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(reaction.id.as_bytes().as_slice())
+        .fetch_one(&scratch_pool)
+        .await
+        .expect("count rolled-back thread metadata rows");
+        assert_eq!(
+            thread_meta_count, 0,
+            "thread metadata must not persist when mention indexing fails"
+        );
+
+        drop_scratch_db(&admin, scratch_pool, &name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_insert_with_thread_metadata_mention_success_commits_atomically() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid).await;
+
+        let target = make_text_event("reaction mention success target");
+        insert_event(&pool, community, &target, Some(channel))
+            .await
+            .expect("insert reaction target");
+
+        let actor = Keys::generate();
+        let actor_pubkey = actor.public_key().to_bytes();
+        let mentioned = Keys::generate();
+        let reaction = make_reaction_event_with_mention(
+            &actor,
+            &target.id.to_hex(),
+            "👍",
+            &mentioned.public_key().to_hex(),
+        );
+        let reaction_ts = DateTime::from_timestamp(reaction.created_at.as_secs() as i64, 0)
+            .expect("reaction timestamp");
+        let target_created_at = DateTime::from_timestamp(target.created_at.as_secs() as i64, 0)
+            .expect("target timestamp");
+
+        let outcome = db
+            .insert_reaction_event_with_thread_metadata(
+                community,
+                &reaction,
+                Some(channel),
+                Some(ThreadMetadataParams {
+                    event_id: reaction.id.as_bytes(),
+                    event_created_at: reaction_ts,
+                    channel_id: channel,
+                    parent_event_id: None,
+                    parent_event_created_at: None,
+                    root_event_id: None,
+                    root_event_created_at: None,
+                    depth: 0,
+                    broadcast: true,
+                }),
+                target.id.as_bytes(),
+                &actor_pubkey,
+                "👍",
+            )
+            .await
+            .expect("insert reaction with thread metadata and mention");
+        assert!(matches!(
+            outcome,
+            ReactionEventInsertOutcome::Inserted {
+                was_inserted: true,
+                ..
+            }
+        ));
+
+        let reaction_row = crate::reaction::get_active_reaction_record(
+            &pool,
+            community,
+            target.id.as_bytes(),
+            target_created_at,
+            &actor_pubkey,
+            "👍",
+        )
+        .await
+        .expect("lookup reaction row")
+        .expect("reaction row must exist");
+        assert_eq!(
+            reaction_row.reaction_event_id.as_deref(),
+            Some(reaction.id.as_bytes().as_slice()),
+            "reaction row and reaction event must commit together"
+        );
+
+        let event_row_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(reaction.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count reaction event rows");
+        assert_eq!(event_row_count, 1, "reaction event must persist");
+
+        let thread_meta_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM thread_metadata WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(reaction.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count thread metadata rows");
+        assert_eq!(
+            thread_meta_count, 1,
+            "thread metadata must commit with reaction event"
+        );
+
+        let mention_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(reaction.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count mention rows");
+        assert_eq!(
+            mention_count, 1,
+            "mention row must commit atomically with reaction, event, and thread metadata"
+        );
+    }
+
     /// BUG-5 regression: the `reactions` table is community-scoped
     /// (`PK (community_id, event_created_at, event_id, pubkey, emoji)`), so a
     /// reaction added under community A must be invisible and unremovable from
@@ -1185,5 +1489,186 @@ mod postgres_tests {
             groups_a_after.is_empty(),
             "A's reaction must be gone after A removes it"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_insert_fails_closed_and_rolls_back_when_community_is_fenced() {
+        use crate::deletion::DeletionStore;
+
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+
+        let target = make_text_event("fenced reaction target");
+        insert_event(&pool, community, &target, None)
+            .await
+            .expect("insert target before fencing");
+
+        let store = DeletionStore::new(pool.clone());
+        let host: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
+            .bind(community_uuid)
+            .fetch_one(&pool)
+            .await
+            .expect("load community host");
+        let submitted = store
+            .submit(&host, "test-operator", Some("reaction fence regression"))
+            .await
+            .expect("submit deletion request");
+        let empty_digest = crate::deletion::KeyStreamDigest::new().finish().0;
+        let empty_storage = crate::deletion::StorageManifest {
+            version: 4,
+            prefixes: vec![
+                crate::deletion::PrefixManifest {
+                    prefix: format!("_meta/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest.clone(),
+                },
+                crate::deletion::PrefixManifest {
+                    prefix: format!("_uploads/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest.clone(),
+                },
+                crate::deletion::PrefixManifest {
+                    prefix: format!("repos/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest,
+                },
+            ],
+        };
+        let inventory = crate::deletion::FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("inventory schema"),
+            storage: empty_storage,
+        };
+        let request = store
+            .freeze_inventory(submitted.id, &inventory)
+            .await
+            .expect("freeze inventory");
+        store
+            .approve(request.id, "test-approver", Some("approved"))
+            .await
+            .expect("approve request");
+        let claim = store
+            .claim_specific(
+                request.id,
+                "test-executor",
+                crate::deletion::DEFAULT_LEASE_DURATION,
+            )
+            .await
+            .expect("claim request")
+            .expect("claim winner");
+        store
+            .begin_quiescing(&claim.lease)
+            .await
+            .expect("begin quiescing");
+        store.fence(&claim.lease).await.expect("fence community");
+
+        let actor = Keys::generate();
+        let actor_pubkey = actor.public_key().to_bytes();
+        let emoji = "👍";
+        let reaction = make_reaction_event(&actor, &target.id.to_hex(), emoji);
+
+        let error = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &reaction,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor_pubkey,
+            emoji,
+        )
+        .await
+        .expect_err("fenced community must reject reaction inserts");
+        assert!(
+            matches!(&error, DbError::AccessDenied(message) if message.contains("write-fenced")),
+            "expected write-fenced access denial, got: {error:#}"
+        );
+
+        let reaction_row_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM reactions WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(target.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count reaction rows");
+        assert_eq!(
+            reaction_row_count, 0,
+            "fenced rejection must not leave a partially committed reaction row"
+        );
+
+        let event_row_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(reaction.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count reaction event rows");
+        assert_eq!(
+            event_row_count, 0,
+            "fenced rejection must not leave a partially committed kind:7 event row"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_chokepoint_transaction_holds_shared_community_deletion_lock() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+
+        let writer = crate::begin_community_event_write_transaction(
+            &pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("open reaction chokepoint transaction");
+
+        let mut contender = pool.begin().await.expect("begin exclusive contender");
+        let exclusive_taken: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
+                .bind(community_uuid)
+                .fetch_one(&mut *contender)
+                .await
+                .expect("probe exclusive community-deletion lock");
+        assert!(
+            !exclusive_taken,
+            "reaction chokepoint transaction must hold the shared community-deletion lock \
+             for its full lifetime"
+        );
+        contender
+            .rollback()
+            .await
+            .expect("rollback exclusive contender");
+
+        writer
+            .rollback()
+            .await
+            .expect("rollback chokepoint transaction");
+
+        let mut released = pool.begin().await.expect("begin post-release contender");
+        let exclusive_after_release: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
+                .bind(community_uuid)
+                .fetch_one(&mut *released)
+                .await
+                .expect("probe exclusive lock after release");
+        assert!(
+            exclusive_after_release,
+            "exclusive community-deletion lock must become available once the reaction \
+             chokepoint transaction releases the shared lock"
+        );
+        released
+            .rollback()
+            .await
+            .expect("rollback post-release contender");
     }
 }
