@@ -1061,8 +1061,7 @@ mod postgres_tests {
             .expect("hold shared floor lock");
 
         let sample_pool = pool.clone();
-        let sampling = tokio::spawn(async move { sample_writer(&sample_pool).await });
-        let mut sampling = sampling;
+        let mut sampling = tokio::spawn(async move { sample_writer(&sample_pool).await });
         assert!(
             tokio::time::timeout(Duration::from_millis(100), &mut sampling)
                 .await
@@ -1099,7 +1098,6 @@ mod postgres_tests {
     /// sessions' rows in `pg_stat_activity`. The oldest-xact term is then
     /// untrustworthy and the sample must fail closed (`MaskedActivity`) —
     /// never silently `MIN()` the hidden row away.
-
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cluster_global_sample_writer_fails_closed_when_activity_is_masked() {

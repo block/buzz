@@ -3188,10 +3188,9 @@ async fn replica_floor_probe_waits_for_shared_writer_and_records_after_release()
 
     let probe_pool = db.pool.clone();
     let probe_fence = std::sync::Arc::clone(db.fence());
-    let probing = tokio::spawn(async move {
+    let mut probing = tokio::spawn(async move {
         crate::replica_fence::probe_once(&probe_pool, probe_fence.as_ref()).await
     });
-    let mut probing = probing;
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(100), &mut probing)
             .await
