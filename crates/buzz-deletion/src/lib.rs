@@ -1929,9 +1929,9 @@ mod postgres_tests {
         (db, services, claim)
     }
 
-    async fn claimed_owner_preparation(
+    async fn owner_preparation_fixture(
         prefix: &str,
-    ) -> (Db, Services, ClaimedDeletion, FrozenInventory) {
+    ) -> (Db, Services, DeletionRequest, FrozenInventory) {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .expect("BUZZ_TEST_DATABASE_URL or DATABASE_URL is required");
@@ -1957,15 +1957,13 @@ mod postgres_tests {
             .expect("archive owner preparation community")
             .expect("owned community");
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        store
+        let buzz_db::deletion::OwnerDeletionAdmission::Accepted(request) = store
             .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
             .await
-            .expect("admit owner request");
-        let claim = store
-            .claim_next_owner_submission("test-preparer", DEFAULT_LEASE_DURATION)
-            .await
-            .expect("claim owner request")
-            .expect("owner request is preparable");
+            .expect("admit owner request")
+        else {
+            panic!("owner request must be accepted")
+        };
         let inventory = FrozenInventory {
             schema: store
                 .inventory_schema(community.id)
@@ -1998,7 +1996,107 @@ mod postgres_tests {
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .expect("construct unused Redis pool"),
         };
+        (db, services, *request, inventory)
+    }
+
+    async fn claimed_owner_preparation(
+        prefix: &str,
+    ) -> (Db, Services, ClaimedDeletion, FrozenInventory) {
+        let (db, services, request, inventory) = owner_preparation_fixture(prefix).await;
+        let claim = services
+            .store
+            .claim_specific_owner_submission(request.id, "test-preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner request")
+            .expect("owner request is preparable");
         (db, services, claim, inventory)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn drain_loop_prioritizes_approved_work_then_dispatches_owner_submission() {
+        let (db, services, owner_request, _) =
+            owner_preparation_fixture("owner-preparation-dispatch").await;
+        let approved_host = format!("approved-{}.example", Uuid::new_v4().simple());
+        let approved_community = db
+            .ensure_configured_community(&approved_host)
+            .await
+            .expect("create approved community");
+        let approved = services
+            .store
+            .submit(&approved_host, "manual-operator", None)
+            .await
+            .expect("submit approved request");
+        let inventory = FrozenInventory {
+            schema: services
+                .store
+                .inventory_schema(approved_community.id)
+                .await
+                .expect("inventory approved community"),
+            storage: empty_storage_manifest(approved_community.id),
+        };
+        services
+            .store
+            .freeze_inventory(approved.id, &inventory)
+            .await
+            .expect("freeze approved request");
+        services
+            .store
+            .approve(approved.id, "manual-approver", None)
+            .await
+            .expect("approve request");
+
+        assert_eq!(
+            run_loop(
+                services.clone(),
+                LoopMode::Drain,
+                None,
+                "priority-executor".to_string(),
+            )
+            .await
+            .expect("approved work failure remains typed"),
+            1
+        );
+        let approved_after = services
+            .store
+            .get(approved.id)
+            .await
+            .expect("approved request after drain");
+        assert!(
+            approved_after.attempts > 0,
+            "approved work must be claimed first"
+        );
+        let owner_after_priority = services
+            .store
+            .get(owner_request.id)
+            .await
+            .expect("owner request after approved work");
+        assert_eq!(owner_after_priority.stage, DeletionStage::Submitted);
+        assert_eq!(owner_after_priority.attempts, 0);
+        assert!(owner_after_priority.lease_owner.is_none());
+
+        assert_eq!(
+            run_loop(
+                services.clone(),
+                LoopMode::Drain,
+                None,
+                "owner-dispatch-executor".to_string(),
+            )
+            .await
+            .expect("owner inventory failure remains typed"),
+            1
+        );
+        let owner_after_dispatch = services
+            .store
+            .get(owner_request.id)
+            .await
+            .expect("owner request after dispatch");
+        assert_eq!(owner_after_dispatch.attempts, 1);
+        assert_eq!(
+            owner_after_dispatch.retry_stage,
+            Some(DeletionStage::Submitted)
+        );
+        assert!(owner_after_dispatch.lease_owner.is_none());
     }
 
     #[tokio::test]

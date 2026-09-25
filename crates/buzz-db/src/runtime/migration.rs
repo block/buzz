@@ -1838,6 +1838,43 @@ mod postgres_tests {
                 );
             }
         }
+        let migration_approval_table = migration
+            .tables
+            .get("community_deletion_approvals")
+            .expect("0029 approval table");
+        let schema_approval_table = schema
+            .tables
+            .get("community_deletion_approvals")
+            .expect("schema.sql approval table");
+        for invariant in [
+            "inventory_digest bytea not null check (length(inventory_digest) = 32)",
+            "foreign key (request_id, community_id, inventory_digest) references community_deletion_requests(id, community_id, inventory_digest) on delete restrict",
+        ] {
+            assert!(
+                migration_approval_table.contains(invariant),
+                "0029 deletion approvals are missing {invariant}"
+            );
+            assert!(
+                schema_approval_table.contains(invariant),
+                "schema.sql deletion approvals are missing {invariant}"
+            );
+        }
+        let migration_request_table = migration
+            .tables
+            .get("community_deletion_requests")
+            .expect("0029 deletion request table");
+        for request_table in [
+            migration_request_table,
+            schema
+                .tables
+                .get("community_deletion_requests")
+                .expect("schema.sql deletion request table"),
+        ] {
+            assert!(
+                request_table.contains("unique (id, community_id, inventory_digest)"),
+                "deletion requests must expose the exact composite approval target"
+            );
+        }
         for (function, definition) in &migration.functions {
             let in_schema = schema
                 .functions
