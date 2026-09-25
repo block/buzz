@@ -1145,6 +1145,286 @@ mod postgres_tests {
         assert_eq!(mismatched.status(), StatusCode::CONFLICT);
     }
 
+    /// Every signature-binding failure mode on the owner-delete endpoint.
+    ///
+    /// The endpoint mediates an irreversible request, so a caller that cannot
+    /// prove operator authority over this exact method, URL, and body must be
+    /// refused without leaving durable intent behind.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_delete_endpoint_requires_operator_bound_nip98_signature() {
+        let operator = Keys::generate();
+        let outsider = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        archive_for_owner_deletion(&state, &host, &owner).await;
+
+        let delete_url = format!("http://{INGRESS_HOST}/operator/communities/delete");
+
+        // 1. No Authorization header at all.
+        let unsigned_id = Uuid::new_v4();
+        let unsigned = raw_owner_delete(
+            Arc::clone(&state),
+            None,
+            None,
+            owner_delete_body(&host, &owner, unsigned_id),
+        )
+        .await;
+        assert_eq!(unsigned.status(), StatusCode::UNAUTHORIZED);
+        assert_no_persisted_request(&state, unsigned_id, "unsigned").await;
+
+        // 2. X-Pubkey only: the dev fallback is disabled for operator endpoints.
+        let x_pubkey_id = Uuid::new_v4();
+        let x_pubkey_only = raw_owner_delete(
+            Arc::clone(&state),
+            None,
+            Some(("x-pubkey", operator.public_key().to_hex())),
+            owner_delete_body(&host, &owner, x_pubkey_id),
+        )
+        .await;
+        assert_eq!(x_pubkey_only.status(), StatusCode::UNAUTHORIZED);
+        assert_no_persisted_request(&state, x_pubkey_id, "X-Pubkey only").await;
+
+        // 3. Valid NIP-98 from a key that is not an allowlisted operator.
+        let outsider_id = Uuid::new_v4();
+        let outsider_body = owner_delete_body(&host, &owner, outsider_id);
+        let outsider_response = raw_owner_delete(
+            Arc::clone(&state),
+            Some(nip98_auth_header(
+                &outsider,
+                &delete_url,
+                "POST",
+                Some(outsider_body.as_bytes()),
+            )),
+            None,
+            outsider_body,
+        )
+        .await;
+        assert_eq!(outsider_response.status(), StatusCode::FORBIDDEN);
+        assert_no_persisted_request(&state, outsider_id, "non-operator signer").await;
+
+        // 4. Operator signature that omits the payload tag.
+        let no_payload_id = Uuid::new_v4();
+        let no_payload = raw_owner_delete(
+            Arc::clone(&state),
+            Some(nip98_auth_header_without_payload(
+                &operator,
+                &delete_url,
+                "POST",
+            )),
+            None,
+            owner_delete_body(&host, &owner, no_payload_id),
+        )
+        .await;
+        assert_eq!(no_payload.status(), StatusCode::UNAUTHORIZED);
+        assert_no_persisted_request(&state, no_payload_id, "missing payload tag").await;
+
+        // 5. Payload tag bound to a different body than the one sent.
+        let signed_id = Uuid::new_v4();
+        let tampered_id = Uuid::new_v4();
+        let signed_body = owner_delete_body(&host, &owner, signed_id);
+        let tampered = raw_owner_delete(
+            Arc::clone(&state),
+            Some(nip98_auth_header(
+                &operator,
+                &delete_url,
+                "POST",
+                Some(signed_body.as_bytes()),
+            )),
+            None,
+            owner_delete_body(&host, &owner, tampered_id),
+        )
+        .await;
+        assert_eq!(tampered.status(), StatusCode::UNAUTHORIZED);
+        assert_no_persisted_request(&state, tampered_id, "tampered payload").await;
+        assert_no_persisted_request(&state, signed_id, "tampered payload (signed id)").await;
+
+        // 6. Signature bound to a different operator URL.
+        let wrong_url_id = Uuid::new_v4();
+        let wrong_url_body = owner_delete_body(&host, &owner, wrong_url_id);
+        let wrong_url = raw_owner_delete(
+            Arc::clone(&state),
+            Some(nip98_auth_header(
+                &operator,
+                &format!("http://{INGRESS_HOST}/operator/communities"),
+                "POST",
+                Some(wrong_url_body.as_bytes()),
+            )),
+            None,
+            wrong_url_body,
+        )
+        .await;
+        assert_eq!(wrong_url.status(), StatusCode::UNAUTHORIZED);
+        assert_no_persisted_request(&state, wrong_url_id, "wrong signed URL").await;
+
+        // 7. Signature bound to a different method.
+        let wrong_method_id = Uuid::new_v4();
+        let wrong_method_body = owner_delete_body(&host, &owner, wrong_method_id);
+        let wrong_method = raw_owner_delete(
+            Arc::clone(&state),
+            Some(nip98_auth_header(
+                &operator,
+                &delete_url,
+                "GET",
+                Some(wrong_method_body.as_bytes()),
+            )),
+            None,
+            wrong_method_body,
+        )
+        .await;
+        assert_eq!(wrong_method.status(), StatusCode::UNAUTHORIZED);
+        assert_no_persisted_request(&state, wrong_method_id, "wrong signed method").await;
+
+        // Falsifiability: the same shape, correctly bound, is accepted.
+        let accepted_id = Uuid::new_v4();
+        let accepted = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(owner_delete_body(&host, &owner, accepted_id)),
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    }
+
+    /// The request UUID is the correlation identity, so a replay that changes
+    /// any bound field is a conflict rather than a second interpretation.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_delete_replay_rejects_any_changed_field_without_mutating_intent() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let other_owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        archive_for_owner_deletion(&state, &host, &owner).await;
+
+        let other_host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &other_host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        archive_for_owner_deletion(&state, &other_host, &owner).await;
+
+        let request_id = Uuid::new_v4();
+        assert_eq!(
+            signed_operator_request(
+                Arc::clone(&state),
+                &operator,
+                "POST",
+                "/operator/communities/delete",
+                Some(owner_delete_body(&host, &owner, request_id)),
+            )
+            .await
+            .status(),
+            StatusCode::ACCEPTED
+        );
+        let admitted = state
+            .db
+            .deletion_store()
+            .get(request_id)
+            .await
+            .expect("admitted request");
+
+        // Exactly one field differs per case; the rest replay verbatim.
+        let owner_hex = owner.public_key().to_hex();
+        let cases: Vec<(&str, StatusCode, String)> = vec![
+            (
+                "changed owner_pubkey",
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "host": host,
+                    "owner_pubkey": other_owner.public_key().to_hex(),
+                    "request_id": request_id,
+                    "acknowledgement_version": 1,
+                })
+                .to_string(),
+            ),
+            (
+                "changed host",
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "host": other_host,
+                    "owner_pubkey": owner_hex,
+                    "request_id": request_id,
+                    "acknowledgement_version": 1,
+                })
+                .to_string(),
+            ),
+            (
+                "changed acknowledgement_version",
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "host": host,
+                    "owner_pubkey": owner_hex,
+                    "request_id": request_id,
+                    "acknowledgement_version": 2,
+                })
+                .to_string(),
+            ),
+        ];
+        for (case, expected, body) in cases {
+            let response = signed_operator_request(
+                Arc::clone(&state),
+                &operator,
+                "POST",
+                "/operator/communities/delete",
+                Some(body),
+            )
+            .await;
+            assert_eq!(response.status(), expected, "{case}");
+            let current = state
+                .db
+                .deletion_store()
+                .get(request_id)
+                .await
+                .expect("request still readable");
+            assert_eq!(current.community_id, admitted.community_id, "{case}");
+            assert_eq!(current.community_host, admitted.community_host, "{case}");
+            assert_eq!(current.owner_pubkey, admitted.owner_pubkey, "{case}");
+            assert_eq!(
+                current.acknowledgement_version, admitted.acknowledgement_version,
+                "{case}"
+            );
+            assert_eq!(current.stage, admitted.stage, "{case}");
+        }
+
+        // An identical replay still converges on the same request.
+        let converged = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(owner_delete_body(&host, &owner, request_id)),
+        )
+        .await;
+        assert_eq!(converged.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            read_json(converged).await["request_id"],
+            request_id.to_string()
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn post_operator_body_requires_payload_tag() {
