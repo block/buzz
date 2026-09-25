@@ -72,6 +72,8 @@ A project points at repos. That's all it does. The signer gets no authority over
 
 The cost is stated plainly: a third-party NIP-34 client sees the member repos individually and ignores the grouping. Nothing degrades — the repos are still standard, portable `kind:30617` events. And a repo in no project still renders on its own, exactly as before.
 
+For Buzz 1.0, projects are `buzz.project` [channel artifacts](docs/nips/NIP-AR.md) (`kind:45010`), superseding NIP-MP `kind:30621`. The reasoning above still holds: a project lives in one place, is edited by the people who can write in its home channel, and points at repos without gaining any authority over them.
+
 ---
 
 ## Branches as Channels
@@ -182,11 +184,11 @@ Every step traced. Every trace a signed event. Change the project CI once and ev
 
 ## Issues, Docs, Releases
 
-### Issues → Forum + NIP-34
+### Tasks → Channel artifacts
 
-Bug reports are NIP-34 kind:1621 events, rendered through Buzz's forum surface. Threaded comments use NIP-22 kind:1111. Labels, assignees, milestones are nostr tags. Design discussions and RFCs use the forum's long-form async surface.
+Tasks and bug reports are `buzz.task` [channel artifacts](docs/nips/NIP-AR.md), homed in a channel or thread next to the conversation about them. They supersede NIP-34 kind:1621 issues. Labels, assignees, and project links are client-defined tags. Design discussions and RFCs use the forum's long-form async surface.
 
-NIP-34 clients can discover and interact with issues. Buzz's forum gives them a home with threading, search, and agent triage.
+The trade-off: third-party NIP-34 clients don't see Buzz tasks as issues. In exchange, any channel writer — human or agent — can update a task without per-author replaceable events, and a task's home channel decides who can see it.
 
 ### Docs → Canvases
 
@@ -212,7 +214,7 @@ Agents are project members with npubs, contribution histories, and reputations. 
 
 | Role | Watches | Does |
 |------|---------|------|
-| **Triage** | Issues (kind:1621) | Labels, assigns, detects duplicates, pre-screens |
+| **Triage** | Tasks (kind:45010) | Labels, assigns, detects duplicates, pre-screens |
 | **Review** | Patches (kind:1617) | First-pass code review, style checks, dependency audit |
 | **Docs** | Ref updates (kind:30618) | Keeps docs in sync after merges |
 | **Merge coordinator** | CI results | Runs the merge train, requests human sign-off |
@@ -226,16 +228,16 @@ Standard kinds as substrate. Custom kinds only where genuinely novel.
 
 | Layer | Standard NIP Kinds | Buzz Custom | Rationale |
 |-------|-------------------|---------------|-----------|
-| **Git state** | 30617, 30618, 1617, 1618, 1621, 1630-1633 (NIP-34) | — | Interop with ngit, gitworkshop.dev |
+| **Git state** | 30617, 30618, 1617, 1618, 1630-1633 (NIP-34) | — | Interop with ngit, gitworkshop.dev |
 | **Comments** | 1111 (NIP-22) | — | Threaded replies everywhere |
 | **Channels** | 9000-9022, 39000-39003 (NIP-29) | — | Project workspaces |
 | **HTTP auth** | 27235 (NIP-98) | — | Git push authentication |
 | **Agent identity** | 0 (NIP-01 profile) | — | Agents are npubs |
-| **Artifacts** | 1063 (NIP-94) | — | Build outputs on Blossom/S3 |
+| **Build outputs** | 1063 (NIP-94) | — | Files on Blossom/S3 |
 | **Workflows** | — | 46001-46012 | No NIP equivalent |
 | **Job dispatch** | — | 43001-43006 | Delegation trees |
 | **Project binding** | 30617 (NIP-34) | `buzz-` tags | Channel, visibility |
-| **Multi-repo projects** | — | 30621 ([NIP-MP](docs/nips/NIP-MP.md)) | Cross-owner grouping is unexpressible in per-repo tags |
+| **Tasks and projects** | — | 45010 ([NIP-AR](docs/nips/NIP-AR.md)) | Multi-writer records homed in channels; cross-owner grouping is unexpressible in per-repo tags |
 | **Audit** | — | 48001 | Hash-chain tamper-evident log |
 
 If Buzz disappears tomorrow, your repos still work on gitworkshop.dev, your patches still work with ngit-cli, your identities still work on any nostr client. Centralized deployment, decentralized protocol.
@@ -252,10 +254,9 @@ If Buzz disappears tomorrow, your repos still work on gitworkshop.dev, your patc
 | Blossom media storage (SHA-256, S3) | ✅ Ships today |
 | Approval gates | 🚧 Infrastructure exists; executor wiring in progress |
 | Project binding (kind:30617 + `buzz-` tags) | 📋 Designed |
-| Multi-repo projects (kind:30621, [NIP-MP](docs/nips/NIP-MP.md)) | 📋 Designed |
+| Tasks and projects as channel artifacts (kind:45010, [NIP-AR](docs/nips/NIP-AR.md)) | 📋 Designed |
 | Git hosting (smart HTTP + NIP-34) | ✅ Ships today |
 | Merge coordinator | 📋 Designed |
-| NIP-34 issues (kind:1621) | 📋 Designed |
 | Web-of-trust reputation | 📋 Designed |
 
 The collaboration platform is built, and git hosting ships today — `git clone`/`git push` over smart HTTP with NIP-34 manifests. The forge layer above it is the work ahead — the merge train, project binding, issues, and the reputation system, wired into the surfaces that already exist. See [VISION.md](VISION.md) for the platform and [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) for the sovereign relay story.
