@@ -47,7 +47,14 @@ IdentityNames watchIdentityNames(
     agentPubkeys: agentPubkeys,
     fallbackNames: fallbackNames,
   );
-  final missing = sources.missingOwnerProfiles(names.candidates);
+  // A displayed identity's profile carries its owner hint, so load uncached
+  // candidates as well as their owners; channels load member profiles
+  // elsewhere, but a displayed collection has no other loader.
+  final missing = {
+    for (final key in names.candidates)
+      if (!sources.profiles.containsKey(key)) key,
+    ...sources.missingOwnerProfiles(names.candidates),
+  };
   if (missing.isNotEmpty) {
     Future.microtask(() {
       if (ref.context.mounted) {

@@ -17,6 +17,9 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
   @override
   UserProfile? get(String pubkey) => _users[pubkey.toLowerCase()];
+
+  @override
+  Future<bool> preload(List<String> pubkeys) async => true;
 }
 
 void main() {
