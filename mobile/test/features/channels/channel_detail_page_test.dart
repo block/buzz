@@ -47,6 +47,7 @@ import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
+import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
@@ -478,6 +479,45 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
+  });
+
+  testWidgets('profile sheet names the author as the channel does', (
+    tester,
+  ) async {
+    final first = 'a' * 64, second = 'b' * 64;
+    final users = {
+      first: UserProfile(pubkey: first, displayName: 'Scout'),
+      second: UserProfile(pubkey: second, displayName: 'Scout'),
+    };
+    final expected = IdentityNameSources(
+      profiles: users,
+    ).scope([first, second]).labelFor(first);
+    expect(expected, isNot('Scout'));
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [_textMsg(id: 'm1', pubkey: first, content: 'hello')],
+        users: users,
+        members: [
+          for (final key in [first, second])
+            ChannelMember(
+              pubkey: key,
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text(expected).first);
+    await tester.pumpAndSettle();
+
+    final sheet = find.byType(UserProfileSheet);
+    expect(sheet, findsOneWidget);
+    expect(
+      find.descendant(of: sheet, matching: find.text(expected)),
+      findsOneWidget,
+    );
   });
 
   for (final thread in [false, true]) {

@@ -1,6 +1,8 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/crypto/nip_oa.dart';
+import '../../../shared/identity_names/identity_names.dart';
+import '../../../shared/identity_names/identity_names_provider.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/profile/user_cache_provider.dart';
@@ -112,5 +114,35 @@ final mentionCandidatesProvider = Provider.family
         currentPubkey: currentPubkey,
       );
 
-      return rankMentionCandidates(candidates, args.query);
+      final names = mentionPickerNames(
+        ref.watch(identityNameSourcesProvider),
+        candidates,
+      );
+      loadIdentityNameOwners(
+        ref,
+        ref.read(identityNameSourcesProvider),
+        names.candidates,
+      );
+      return rankMentionCandidates([
+        for (final candidate in candidates)
+          candidate.withContextLabel(names.resolve(candidate.pubkey)?.name),
+      ], args.query);
     });
+
+/// Picker labels compare every selectable choice, before query ranking
+/// filters them, so a row's label does not change as the query narrows.
+IdentityNames mentionPickerNames(
+  IdentityNameSources sources,
+  List<MentionCandidate> candidates,
+) => sources.scope(
+  [for (final candidate in candidates) candidate.pubkey],
+  agentPubkeys: {
+    for (final candidate in candidates)
+      if (candidate.isAgent) candidate.pubkey,
+  },
+  fallbackNames: {
+    for (final candidate in candidates)
+      if (candidate.displayName?.trim().isNotEmpty == true)
+        candidate.pubkey: candidate.displayName!,
+  },
+);

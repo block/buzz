@@ -13,7 +13,7 @@ import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/emoji/positive_emoji.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
-import '../../shared/utils/string_utils.dart';
+import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
 import 'emoji_picker.dart';
 import 'recent_emoji_provider.dart';
@@ -92,6 +92,9 @@ class ReactionRow extends StatelessWidget {
   /// the right pill — the same emoji can be pending on a different message.
   final String messageId;
 
+  /// Channel whose members define the reactor names' comparison context.
+  final String channelId;
+
   final List<TimelineReaction> reactions;
   final void Function(String emoji) onToggle;
 
@@ -106,6 +109,7 @@ class ReactionRow extends StatelessWidget {
   const ReactionRow({
     super.key,
     required this.messageId,
+    required this.channelId,
     required this.reactions,
     required this.onToggle,
     this.showAddButton = false,
@@ -131,6 +135,7 @@ class ReactionRow extends StatelessWidget {
               onTap: () => onToggle(reaction.emoji),
               onLongPress: () => showReactionDetailSheet(
                 context: context,
+                channelId: channelId,
                 reactions: reactions,
                 initialEmoji: reaction.emoji,
               ),
@@ -315,6 +320,7 @@ class _ReactionEmoji extends StatelessWidget {
 
 void showReactionDetailSheet({
   required BuildContext context,
+  required String channelId,
   required List<TimelineReaction> reactions,
   required String initialEmoji,
 }) {
@@ -323,16 +329,21 @@ void showReactionDetailSheet({
     isScrollControlled: true,
     showDragHandle: true,
     backgroundColor: context.colors.surfaceContainerHighest,
-    builder: (sheetContext) =>
-        _ReactionDetailSheet(reactions: reactions, initialEmoji: initialEmoji),
+    builder: (sheetContext) => _ReactionDetailSheet(
+      channelId: channelId,
+      reactions: reactions,
+      initialEmoji: initialEmoji,
+    ),
   );
 }
 
 class _ReactionDetailSheet extends HookConsumerWidget {
+  final String channelId;
   final List<TimelineReaction> reactions;
   final String initialEmoji;
 
   const _ReactionDetailSheet({
+    required this.channelId,
     required this.reactions,
     required this.initialEmoji,
   });
@@ -341,6 +352,7 @@ class _ReactionDetailSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final selectedEmoji = useState(initialEmoji);
     final userCache = ref.watch(userCacheProvider);
+    final identityNames = ref.watch(channelIdentityNamesProvider(channelId));
 
     final currentReaction = reactions.firstWhere(
       (r) => r.emoji == selectedEmoji.value,
@@ -434,7 +446,11 @@ class _ReactionDetailSheet extends HookConsumerWidget {
               itemBuilder: (context, index) {
                 final pubkey = currentReaction.userPubkeys[index];
                 final profile = userCache[pubkey.toLowerCase()];
-                return _ReactorTile(profile: profile, pubkey: pubkey);
+                return _ReactorTile(
+                  profile: profile,
+                  pubkey: pubkey,
+                  displayName: identityNames.labelFor(pubkey),
+                );
               },
             ),
           ),
@@ -447,12 +463,16 @@ class _ReactionDetailSheet extends HookConsumerWidget {
 class _ReactorTile extends StatelessWidget {
   final UserProfile? profile;
   final String pubkey;
+  final String displayName;
 
-  const _ReactorTile({required this.profile, required this.pubkey});
+  const _ReactorTile({
+    required this.profile,
+    required this.pubkey,
+    required this.displayName,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final displayName = profile?.label ?? shortPubkey(pubkey);
     final about = profile?.about;
 
     return ListTile(

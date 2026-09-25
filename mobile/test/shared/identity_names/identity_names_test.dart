@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/features/channels/mentions/mention_ranking.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
@@ -96,5 +98,27 @@ void main() {
       sources.scope([_human, _wesAgent]).labelFor(_wesAgent),
       'Honey (agent)',
     );
+  });
+
+  test('mention picker labels compare all choices but keep wire names', () {
+    final candidates = [
+      MentionCandidate(pubkey: _human, displayName: 'Honey', isMember: true),
+      MentionCandidate(
+        pubkey: _wesAgent,
+        displayName: 'Honey',
+        isAgent: true,
+        ownerPubkey: _wes,
+      ),
+    ];
+    final names = mentionPickerNames(_sources(), candidates);
+    final labeled = [
+      for (final c in candidates)
+        c.withContextLabel(names.resolve(c.pubkey)?.name),
+    ];
+    // A query that matches only the agent still shows its contextual label.
+    final ranked = rankMentionCandidates(labeled, 'hon');
+    expect(ranked.map((c) => c.pickerLabel), ['Honey', 'Wes’s Honey']);
+    // The inserted mention text still uses the agent's own name.
+    expect(ranked.map((c) => c.label), ['Honey', 'Honey']);
   });
 }

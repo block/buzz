@@ -39,7 +39,7 @@ class _ThreadMessage extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? shortPubkey(message.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, channelId, pk);
     final isAgent =
         ref.watch(agentMentionPubkeysProvider(channelId)).contains(pk) ||
         profile?.ownerPubkey != null;
@@ -73,6 +73,11 @@ class _ThreadMessage extends HookConsumerWidget {
       profileMentionNames: mentionNames,
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
+    );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      channelId,
+      message.mentionPubkeys,
     );
 
     void openMessageActions(MessageLongPressDetails details) {
@@ -156,8 +161,11 @@ class _ThreadMessage extends HookConsumerWidget {
                       children: [
                         if (showAuthor)
                           GestureDetector(
-                            onTap: () =>
-                                showUserProfileSheet(context, message.pubkey),
+                            onTap: () => showUserProfileSheet(
+                              context,
+                              message.pubkey,
+                              channelId: channelId,
+                            ),
                             child: _Avatar(
                               profile: profile,
                               pubkey: message.pubkey,
@@ -198,6 +206,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                                 showUserProfileSheet(
                                                   context,
                                                   message.pubkey,
+                                                  channelId: channelId,
                                                 ),
                                             displayNameKey: ValueKey(
                                               'thread-message-author-${message.id}',
@@ -229,6 +238,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                 MessageContent(
                                   content: message.content,
                                   mentionNames: resolvedMentionNames,
+                                  mentionLabels: mentionLabels,
                                   agentMentionPubkeys: agentMentionPubkeys,
                                   channelNames: channelNames,
                                   tags: message.tags,
@@ -279,7 +289,11 @@ class _ThreadMessage extends HookConsumerWidget {
                                     );
                                   },
                                   onMentionTap: (pubkey) =>
-                                      showUserProfileSheet(context, pubkey),
+                                      showUserProfileSheet(
+                                        context,
+                                        pubkey,
+                                        channelId: channelId,
+                                      ),
                                 ),
                               ],
                             ),
@@ -295,6 +309,7 @@ class _ThreadMessage extends HookConsumerWidget {
                       ),
                       child: ReactionRow(
                         messageId: message.id,
+                        channelId: channelId,
                         reactions: message.reactions,
                         onToggle: (emoji) =>
                             toggleReaction(ref, message, emoji),

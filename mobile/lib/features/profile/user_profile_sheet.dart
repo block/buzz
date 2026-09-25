@@ -7,6 +7,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/animated_avatar.dart';
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
@@ -16,6 +18,7 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/channel_identity_names_provider.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
 import 'presence_cache_provider.dart';
@@ -23,12 +26,22 @@ import '../../shared/profile/user_cache_provider.dart';
 import 'user_status_cache_provider.dart';
 
 /// Show a user profile bottom sheet for the given [pubkey].
-void showUserProfileSheet(BuildContext context, String pubkey) {
+///
+/// The sheet names [pubkey] as the opening surface did: within [channelId]
+/// when given, otherwise within [names] (for example a Pulse timeline's
+/// authors). With neither, the identity is compared only with itself.
+void showUserProfileSheet(
+  BuildContext context,
+  String pubkey, {
+  String? channelId,
+  IdentityNames? names,
+}) {
   showBuzzModalBottomSheet<Channel>(
     context: context,
     isScrollControlled: true,
     showDragHandle: false,
-    builder: (_) => UserProfileSheet(pubkey: pubkey),
+    builder: (_) =>
+        UserProfileSheet(pubkey: pubkey, channelId: channelId, names: names),
   ).then((channel) {
     if (channel == null || !context.mounted) return;
     Navigator.of(context).push(
@@ -42,7 +55,18 @@ void showUserProfileSheet(BuildContext context, String pubkey) {
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
 
-  const UserProfileSheet({super.key, required this.pubkey});
+  /// The channel whose members form the naming context, if any.
+  final String? channelId;
+
+  /// The opening surface's identity labels, used when [channelId] is null.
+  final IdentityNames? names;
+
+  const UserProfileSheet({
+    super.key,
+    required this.pubkey,
+    this.channelId,
+    this.names,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -88,10 +112,12 @@ class UserProfileSheet extends HookConsumerWidget {
     // never placed on the clipboard.
     final npub = fullNpub(pubkey);
 
-    // Routed through the shared label so a blank cached name (empty or
-    // whitespace-only, relay-valid) falls back to the compact npub instead
-    // of an empty heading.
-    final displayName = profile?.label;
+    // The contextual label from the opening surface, so the sheet names the
+    // identity exactly as the row that was tapped.
+    final contextChannelId = channelId;
+    final displayName = contextChannelId != null
+        ? watchChannelIdentityLabel(ref, contextChannelId, pk)
+        : (names ?? watchIdentityNames(ref, {pk})).labelFor(pk);
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
@@ -178,7 +204,7 @@ class UserProfileSheet extends HookConsumerWidget {
                     // Display name — centered, large
                     Center(
                       child: Text(
-                        displayName ?? shortPubkey(pubkey),
+                        displayName,
                         style: context.textTheme.headlineSmall?.copyWith(
                           fontWeight: FontWeight.w700,
                         ),
