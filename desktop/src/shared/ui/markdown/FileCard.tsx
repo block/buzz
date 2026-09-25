@@ -6,7 +6,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 
 /** Human-readable byte size: "820 B", "12.4 KB", "3.1 MB". */
-function formatFileSize(bytes: number): string {
+export function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "";
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -17,6 +17,16 @@ function formatFileSize(bytes: number): string {
     i += 1;
   }
   return `${size < 10 ? size.toFixed(1) : Math.round(size)} ${units[i]}`;
+}
+
+/** Save a relay attachment via the native `download_file` save dialog. */
+export function downloadFileAttachment(href: string, filename: string): void {
+  invokeTauri("download_file", { url: href, filename }).catch(
+    (err: unknown) => {
+      const msg = err instanceof Error ? err.message : "Download failed";
+      toast.error(msg);
+    },
+  );
 }
 
 /**
@@ -46,14 +56,7 @@ export function FileCard({
     <button
       ref={cardRef}
       type="button"
-      onClick={() => {
-        invokeTauri("download_file", { url: href, filename }).catch(
-          (err: unknown) => {
-            const msg = err instanceof Error ? err.message : "Download failed";
-            toast.error(msg);
-          },
-        );
-      }}
+      onClick={() => downloadFileAttachment(href, filename)}
       data-testid="file-card"
       className="my-1 inline-flex max-w-sm items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-3 py-2 text-left no-underline transition-colors hover:bg-muted/70"
       style={{ borderRadius: "1rem" }}

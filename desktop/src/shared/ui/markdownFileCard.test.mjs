@@ -47,7 +47,64 @@ test("resolveFileCard: builds a card for a generic file, preferring imeta filena
     href: PDF_URL,
     filename: "Q3-budget.pdf",
     size: 2048,
+    kind: "pdf",
+    preview: undefined,
   });
+});
+
+test("resolveFileCard: application/pdf resolves as a pdf card", () => {
+  const card = resolveFileCard({ m: "application/pdf" }, PDF_URL, "");
+  assert.equal(card?.kind, "pdf");
+});
+
+test("resolveFileCard: PDF MIME match is case-insensitive", () => {
+  const card = resolveFileCard({ m: "Application/PDF" }, PDF_URL, "");
+  assert.equal(card?.kind, "pdf");
+});
+
+test("resolveFileCard: non-PDF generic MIMEs keep the plain file card", () => {
+  for (const m of [
+    "application/zip",
+    "application/octet-stream",
+    "text/plain",
+    "application/x-pdf-like",
+  ]) {
+    const card = resolveFileCard({ m, filename: "report.pdf" }, PDF_URL, "");
+    assert.equal(card?.kind, "file", m);
+    assert.equal(card?.preview, undefined, m);
+  }
+});
+
+test("resolveFileCard: pdf href stays the canonical relay URL (download + byte fetch contract)", () => {
+  // `download_file` and `fetch_media_bytes` reject the localhost proxy, so the
+  // href must never be rewritten to it even though previews are.
+  const card = resolveFileCard({ m: "application/pdf" }, PDF_URL, "");
+  assert.equal(card?.href, PDF_URL);
+});
+
+test("resolveFileCard: pdf preview prefers imeta image over thumb", () => {
+  const image = "https://nostr.build/i/cover.jpg";
+  const thumb = "https://nostr.build/i/cover-thumb.jpg";
+  const card = resolveFileCard(
+    { m: "application/pdf", image, thumb },
+    PDF_URL,
+    "",
+  );
+  assert.equal(card?.preview, image);
+});
+
+test("resolveFileCard: pdf preview falls back to imeta thumb", () => {
+  const thumb = "https://nostr.build/i/cover-thumb.jpg";
+  const card = resolveFileCard({ m: "application/pdf", thumb }, PDF_URL, "");
+  assert.equal(card?.preview, thumb);
+});
+
+test("resolveFileCard: relay-hosted pdf thumb goes through the media proxy", () => {
+  const thumb = `https://relay.example/media/${"c".repeat(64)}.thumb.jpg`;
+  const card = resolveFileCard({ m: "application/pdf", thumb }, PDF_URL, "");
+  assert.ok(card?.preview, "expected a preview URL");
+  assert.notEqual(card.preview, thumb);
+  assert.ok(card.preview.endsWith(`/media/${"c".repeat(64)}.thumb.jpg`));
 });
 
 test("resolveFileCard: falls back to link child text when imeta has no filename", () => {

@@ -54,6 +54,7 @@ import {
 import { EntityLinkAnchor, useOpenEntityLink } from "./markdown/entityLinks";
 import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
+import { PdfAttachmentCard } from "./markdown/PdfAttachmentCard";
 import {
   AuthoredDeepLinkAnchor,
   ChannelDeepLinkAnchor,
@@ -1287,9 +1288,8 @@ export function createMarkdownComponents(
       label,
     );
     if (card) {
-      return (
-        <FileCard href={card.href} filename={card.filename} size={card.size} />
-      );
+      const Card = card.kind === "pdf" ? PdfAttachmentCard : FileCard;
+      return <Card {...card} />;
     }
 
     // Keep Buzz channel/message navigation in-app.

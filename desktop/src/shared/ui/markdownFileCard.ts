@@ -9,13 +9,25 @@ export type FileCardImetaEntry = {
   x?: string;
   /** Optional thumbnail URL (from imeta `thumb` field). */
   thumb?: string;
+  /** Optional preview image URL (from imeta `image` field). */
+  image?: string;
 };
 
 export type ResolvedFileCard = {
   href: string;
   filename: string;
   size?: number;
+  /** `pdf` renders a first-page preview card; `file` the generic FileCard. */
+  kind: "pdf" | "file";
+  /**
+   * Display-only preview image (imeta `image`, else `thumb`), rewritten
+   * through the media proxy. Only set for PDFs, where it stands in for the
+   * first page until pdf.js has rendered it.
+   */
+  preview?: string;
 };
+
+const PDF_MIME = "application/pdf";
 
 /**
  * A snapshot candidate resolved from an imeta entry.  The card shows both
@@ -121,6 +133,8 @@ export function resolveSnapshotCard(
  * Decide whether a markdown link should render as a generic-file download
  * card. A link qualifies when its href matches an imeta entry whose MIME is
  * neither image nor video (media goes through the `img` renderer instead).
+ * `application/pdf` entries resolve with `kind: "pdf"` so the renderer can
+ * show a first-page preview; every other MIME is `kind: "file"`.
  *
  * Pure — extracted from `markdown.tsx` so the FileCard decision (the riskiest
  * part of the generic-file rendering path) is unit-testable without mounting
@@ -142,5 +156,15 @@ export function resolveFileCard(
   }
   const filename =
     entry.filename || childText.trim() || href.split("/").pop() || "file";
-  return { href: rewriteRelayUrl(href), filename, size: entry.size };
+  // Generic-file extensions (.pdf, .zip, ...) are outside the proxy regex, so
+  // `href` stays the canonical relay URL that `download_file` and
+  // `fetch_media_bytes` require (both reject the localhost proxy origin).
+  const card = { href: rewriteRelayUrl(href), filename, size: entry.size };
+  if (entry.m.toLowerCase() !== PDF_MIME) return { ...card, kind: "file" };
+  const previewSource = entry.image || entry.thumb;
+  return {
+    ...card,
+    kind: "pdf",
+    preview: previewSource ? rewriteRelayUrl(previewSource) : undefined,
+  };
 }

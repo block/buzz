@@ -71,6 +71,7 @@
     "lucide-react": "^1.0.0",
     "mdast-util-from-markdown": "^2.0.3",
     "motion": "^12.38.0",
+    "pdfjs-dist": "^6.3.289",
     "qrcode": "^1.5.4",
     "qrcode.react": "^4.2.0",
     "react": "^19.1.0",
