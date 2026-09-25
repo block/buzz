@@ -1054,32 +1054,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         ));
     }
 
-    // Per-pod dependency sampler: the single owner of Postgres/Redis/deletion-
-    // catalog evaluation. It publishes the dependency metrics and caches the
-    // report `/_status` serves, so neither operator polling nor a quiet endpoint
-    // changes how often a shared dependency is probed.
+    // Per-pod dependency diagnostics runtime: one seam starts the dependency
+    // sampler and its independent completion-epoch republisher together.
     {
-        let sampler_state = Arc::clone(&state);
-        let cancel = sampler_state.dependency_sampler_cancel.clone();
-        tokio::spawn(buzz_relay::readiness::run_dependency_sampler(
-            sampler_state,
-            cancel,
-        ));
-    }
-
-    // Completion-epoch publisher: independent from sampling so the completion
-    // gauge survives recorder idle-eviction even when sampling stalls.
-    {
-        let publisher_state = Arc::clone(&state);
-        let cancel = publisher_state
-            .dependency_completion_publisher_cancel
-            .clone();
-        tokio::spawn(
-            buzz_relay::readiness::run_dependency_sample_completion_publisher(
-                publisher_state,
-                dependency_sample_completion_republish_interval,
-                cancel,
-            ),
+        let diagnostics_state = Arc::clone(&state);
+        buzz_relay::readiness::start_dependency_sampler_and_completion_publisher(
+            diagnostics_state,
+            dependency_sample_completion_republish_interval,
         );
     }
 
