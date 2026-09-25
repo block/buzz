@@ -3132,6 +3132,10 @@ async fn replica_floor_writer_transaction_holds_shared_lock() {
         shared_taken,
         "compliant writer must allow another shared replica-floor lock holder"
     );
+    shared_contender
+        .rollback()
+        .await
+        .expect("rollback shared contender");
 
     let mut contender = db.pool.begin().await.expect("begin exclusive contender");
     let exclusive_taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
@@ -3148,10 +3152,6 @@ async fn replica_floor_writer_transaction_holds_shared_lock() {
         .rollback()
         .await
         .expect("rollback exclusive contender");
-    shared_contender
-        .rollback()
-        .await
-        .expect("rollback shared contender");
     writer.rollback().await.expect("rollback writer tx");
     db.pool.close().await;
     drop_scratch_db(&admin, seed_pool, &name).await;

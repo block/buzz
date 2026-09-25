@@ -4155,6 +4155,10 @@ mod postgres_tests {
             shared_taken,
             "compliant writer must allow another shared community deletion lock holder"
         );
+        shared_contender
+            .rollback()
+            .await
+            .expect("rollback shared contender");
 
         let mut deleter = db.pool.begin().await.expect("begin deletion contender");
         let exclusive_taken: bool =
@@ -4171,10 +4175,6 @@ mod postgres_tests {
             .rollback()
             .await
             .expect("rollback deletion contender");
-        shared_contender
-            .rollback()
-            .await
-            .expect("rollback shared contender");
         writer
             .rollback()
             .await
