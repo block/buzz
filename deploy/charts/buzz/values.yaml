@@ -402,7 +402,9 @@ operatorJobs:
     successfulJobsHistoryLimit: 1
     failedJobsHistoryLimit: 3
     terminationGracePeriodSeconds: 30
-    serviceAccountName: ""       # defaults to the main Buzz service account
+    # Empty inherits the relay service account, and with it any cloud IAM
+    # binding on that account. Name a dedicated account to narrow the executor.
+    serviceAccountName: ""
     podLabels: {}
     podAnnotations:
       sidecar.istio.io/inject: "false"
