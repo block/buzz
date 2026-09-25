@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Instant;
 
 use axum::body::Bytes;
@@ -35,6 +35,139 @@ use crate::connection::{ConnectionSubscriptions, RestartClose};
 use crate::subscription::SubscriptionRegistry;
 
 pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
+
+// Finite WebSocket windows hold a handler permit until their output is queued.
+// Bound that lifetime before acquiring the shared handler permit. The total
+// cap leaves capacity for EVENT/COUNT/legacy REQ; the community cap prevents
+// multiple identities in one tenant from consuming every finite slot. At the
+// default 1024-handler capacity: 256 total, 128/community, 4/principal.
+// Reduced test deployments (8 handlers) admit one/community, two total.
+// These are per-process limits; a multi-pod deployment needs a shared quota
+// to make a fleet-wide fairness guarantee.
+pub(crate) struct FiniteWindowWork {
+    limits: (usize, usize, usize), // global, community, principal
+    counts: StdMutex<FiniteWindowCounts>,
+}
+
+#[derive(Default)]
+struct FiniteWindowCounts {
+    total: usize,
+    communities: HashMap<CommunityId, usize>,
+    principals: HashMap<ScopedPubkeyKey, usize>,
+}
+
+pub(crate) struct FiniteWindowPermit {
+    work: Arc<FiniteWindowWork>,
+    key: ScopedPubkeyKey,
+}
+
+impl FiniteWindowWork {
+    fn new(handler_capacity: usize) -> Self {
+        Self {
+            limits: (
+                (handler_capacity / 4).max(1),
+                (handler_capacity / 8).max(1),
+                4,
+            ),
+            counts: StdMutex::new(FiniteWindowCounts::default()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn community_limit(&self) -> usize {
+        self.limits.1
+    }
+
+    pub(crate) fn try_acquire(
+        self: &Arc<Self>,
+        key: ScopedPubkeyKey,
+    ) -> Option<FiniteWindowPermit> {
+        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        if counts.total >= self.limits.0
+            || counts.communities.get(&key.0).copied().unwrap_or(0) >= self.limits.1
+            || counts.principals.get(&key).copied().unwrap_or(0) >= self.limits.2
+        {
+            return None;
+        }
+        counts.total += 1;
+        *counts.communities.entry(key.0).or_default() += 1;
+        *counts.principals.entry(key).or_default() += 1;
+        Some(FiniteWindowPermit {
+            work: Arc::clone(self),
+            key,
+        })
+    }
+}
+
+impl Drop for FiniteWindowPermit {
+    fn drop(&mut self) {
+        let mut counts = self
+            .work
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        counts.total -= 1;
+        if let Some(community) = counts.communities.get_mut(&self.key.0) {
+            *community -= 1;
+            if *community == 0 {
+                counts.communities.remove(&self.key.0);
+            }
+        }
+        if let Some(principal) = counts.principals.get_mut(&self.key) {
+            *principal -= 1;
+            if *principal == 0 {
+                counts.principals.remove(&self.key);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod finite_window_work_tests {
+    use super::*;
+
+    #[test]
+    fn finite_work_is_bounded_by_principal_community_and_global_capacity() {
+        let work = Arc::new(FiniteWindowWork::new(64));
+        let a = CommunityId::from_uuid(Uuid::new_v4());
+        let b = CommunityId::from_uuid(Uuid::new_v4());
+        let permits: Vec<_> = (0..4)
+            .map(|_| work.try_acquire((a, [1; 32])).unwrap())
+            .collect();
+        assert!(work.try_acquire((a, [1; 32])).is_none(), "principal cap");
+        let neighbors: Vec<_> = (2..6)
+            .map(|n| work.try_acquire((a, [n; 32])).unwrap())
+            .collect();
+        assert!(work.try_acquire((a, [9; 32])).is_none(), "community cap");
+        let neighbor: Vec<_> = (0..8)
+            .map(|n| work.try_acquire((b, [n; 32])).unwrap())
+            .collect();
+        let c = CommunityId::from_uuid(Uuid::new_v4());
+        assert!(work.try_acquire((c, [9; 32])).is_none(), "global cap");
+        drop(permits);
+        assert!(
+            work.try_acquire((a, [1; 32])).is_some(),
+            "release on completion"
+        );
+        drop(neighbors);
+        drop(neighbor);
+        assert_eq!(work.counts.lock().unwrap().total, 0);
+    }
+
+    #[test]
+    fn reduced_handler_limit_leaves_non_finite_capacity() {
+        let work = Arc::new(FiniteWindowWork::new(8));
+        let a = CommunityId::from_uuid(Uuid::new_v4());
+        let b = CommunityId::from_uuid(Uuid::new_v4());
+        let attacker = work.try_acquire((a, [1; 32])).unwrap();
+        assert!(work.try_acquire((a, [2; 32])).is_none());
+        let other = work.try_acquire((b, [3; 32])).unwrap();
+        assert!(work.try_acquire((b, [4; 32])).is_none());
+        drop(attacker);
+        assert!(work.try_acquire((a, [2; 32])).is_some());
+        drop(other);
+    }
+}
 
 /// Why a community-bound socket is being asked to stop.
 ///
@@ -656,6 +789,8 @@ pub struct AppState {
     pub conn_semaphore: Arc<Semaphore>,
     /// Semaphore limiting concurrent message handler tasks.
     pub handler_semaphore: Arc<Semaphore>,
+    /// In-flight finite WS windows, held through the last EVENT/EOSE or cancellation.
+    pub(crate) finite_window_work: Arc<FiniteWindowWork>,
     /// Semaphore limiting concurrent git subprocess operations across
     /// the whole relay. Bounds resource use; **not** writer
     /// serialization — that's the CAS at the manifest pointer (spec
@@ -881,6 +1016,7 @@ impl AppState {
             community_disconnect_publish_attempts: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
+            finite_window_work: Arc::new(FiniteWindowWork::new(max_concurrent_handlers)),
             git_semaphore: Arc::new(Semaphore::new(git_max_concurrent_ops)),
             media_upload_semaphore: Arc::new(Semaphore::new(media_max_concurrent_uploads)),
             workflow_engine,

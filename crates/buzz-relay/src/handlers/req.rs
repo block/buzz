@@ -15,7 +15,8 @@ use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
 use buzz_pubsub::EventTopic;
 use hex;
-use nostr::Filter;
+use nostr::{Filter, PublicKey};
+use serde_json::Value;
 
 use buzz_auth::Scope;
 
@@ -52,6 +53,7 @@ const _: () = assert!(FILTER_QUERY_CONCURRENCY >= 2 && FILTER_QUERY_CONCURRENCY 
 pub async fn handle_req(
     sub_id: String,
     filters: Vec<Filter>,
+    raw_filters: Vec<Value>,
     before_ids: Vec<Option<Vec<u8>>>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
@@ -93,6 +95,69 @@ pub async fn handle_req(
             }
         }
     };
+
+    let thread_windows = match crate::api::bridge::thread_window::parse(&raw_filters) {
+        Ok(windows) => windows,
+        Err((status, body)) => {
+            close_thread_window_error(&conn, &sub_id, status, &body);
+            return;
+        }
+    };
+    if thread_windows.iter().any(Option::is_some) {
+        if thread_windows.iter().any(Option::is_none) {
+            send_thread_window_closed(
+                &conn,
+                &sub_id,
+                "invalid: thread_window cannot mix with other query modes",
+            );
+            return;
+        }
+        let reader = match PublicKey::from_slice(&pubkey_bytes) {
+            Ok(reader) => reader,
+            Err(error) => {
+                warn!(conn_id = %conn_id, %error, "Authenticated reader key became invalid");
+                send_thread_window_closed(&conn, &sub_id, "error: invalid authenticated reader");
+                return;
+            }
+        };
+        // A finite REQ replaces any live subscription with the same id before
+        // its first row can be sent. Release its fan-out topic as CLOSE does.
+        conn.subscriptions.lock().await.remove(&sub_id);
+        if let Some(replaced) = state.sub_registry.remove_subscription(conn_id, &sub_id) {
+            release_subscription_topics(&state, &conn.tenant, &replaced.scope).await;
+        }
+        let deadline = tokio::time::Instant::now() + crate::api::bridge::thread_window::DEADLINE;
+        let result = tokio::time::timeout_at(
+            deadline,
+            serve_thread_windows(
+                &sub_id,
+                thread_windows.iter().flatten(),
+                token_channel_ids.as_deref(),
+                &reader,
+                &conn,
+                &state,
+                deadline,
+            ),
+        )
+        .await;
+        match result {
+            Ok(Ok(true)) => {
+                if !send_thread_window_frame(&conn, RelayMessage::eose(&sub_id), deadline).await {
+                    conn.cancel.cancel();
+                }
+            }
+            Ok(Ok(false)) => {
+                // Some EVENTs could already be queued. Close rather than
+                // claim a complete page or leave this request silent.
+                conn.cancel.cancel();
+            }
+            Ok(Err((status, body))) => close_thread_window_error(&conn, &sub_id, status, &body),
+            Err(_) => {
+                send_thread_window_closed(&conn, &sub_id, "error: thread window deadline exceeded");
+            }
+        }
+        return;
+    }
 
     let channel_id = extract_channel_id_from_filters(&filters);
     let requested_channel_ids = match extract_channel_ids_from_filters_limited(&filters) {
@@ -491,6 +556,107 @@ pub async fn handle_req(
         count = total_sent,
         "EOSE sent after historical delivery"
     );
+}
+
+pub(crate) async fn serve_thread_windows<'a>(
+    sub_id: &str,
+    requests: impl Iterator<Item = &'a buzz_core::thread_window::Request>,
+    allowed_channels: Option<&[uuid::Uuid]>,
+    reader: &PublicKey,
+    conn: &ConnectionState,
+    state: &AppState,
+    deadline: tokio::time::Instant,
+) -> Result<bool, crate::api::bridge::thread_window::Error> {
+    let events = crate::api::bridge::thread_window::query_batch(
+        state,
+        &conn.tenant,
+        reader,
+        requests,
+        allowed_channels,
+    )
+    .await?;
+    for event in events {
+        if !send_thread_window_frame(
+            conn,
+            serde_json::json!(["EVENT", sub_id, event]).to_string(),
+            deadline,
+        )
+        .await
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+// Leave space for live fan-out, which uses try_send rather than a queued
+// reservation. Waiting on send() would claim every freed slot before fan-out
+// can use it; a bounded retry only takes a slot when headroom remains.
+async fn send_thread_window_frame(
+    conn: &ConnectionState,
+    frame: String,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let reserve = (conn.send_tx.max_capacity() / 4)
+        .max(1)
+        .min(conn.send_tx.max_capacity().saturating_sub(1));
+    let frame = axum::extract::ws::Message::Text(frame.into());
+    loop {
+        if conn.cancel.is_cancelled() || tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        if conn.send_tx.is_closed() {
+            return false;
+        }
+        if conn.send_tx.capacity() > reserve {
+            if let Ok(permit) = conn.send_tx.try_reserve() {
+                // The permit is already subtracted from capacity. Holding it
+                // during this check makes concurrent finite senders respect
+                // the reserve; live producers only see transient contention.
+                if conn.send_tx.capacity() >= reserve {
+                    permit.send(frame);
+                    conn.backpressure_count
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    return true;
+                }
+            } else if conn.send_tx.is_closed() {
+                return false;
+            }
+        }
+        // No reservation: a live producer can take the reserved slots before
+        // our next attempt. Polling is bounded by the common request deadline.
+        tokio::select! {
+            biased;
+            _ = conn.cancel.cancelled() => return false,
+            _ = tokio::time::sleep_until(deadline) => return false,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
+        }
+    }
+}
+
+fn send_thread_window_closed(conn: &ConnectionState, sub_id: &str, reason: &str) {
+    if !conn.send(RelayMessage::closed(sub_id, reason)) {
+        conn.cancel.cancel();
+    }
+}
+
+fn close_thread_window_error(
+    conn: &ConnectionState,
+    sub_id: &str,
+    status: axum::http::StatusCode,
+    body: &axum::Json<Value>,
+) {
+    let detail = body
+        .0
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("thread window failed");
+    let prefix = if status.is_client_error() {
+        "invalid"
+    } else {
+        "error"
+    };
+    send_thread_window_closed(conn, sub_id, &format!("{prefix}: {detail}"));
 }
 
 /// FTS candidate hits fetched per page. Pages are always full regardless of
@@ -2540,5 +2706,126 @@ mod tests {
         ));
         // No #p tag — fallback required.
         assert!(!result_gated_count_safe_for_pushdown(&f, &owner));
+    }
+}
+
+#[cfg(test)]
+mod thread_window_queue_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use tokio::time::{timeout, Duration, Instant};
+
+    #[tokio::test]
+    async fn finite_frames_leave_live_capacity_and_reset_stale_backpressure() {
+        let (conn, mut rx) = crate::connection::tests::test_conn_with_auth(
+            crate::connection::tests::authenticated_state(),
+        );
+        let manager = crate::state::ConnectionManager::new();
+        manager.register(
+            conn.conn_id,
+            conn.send_tx.clone(),
+            conn.ctrl_tx.clone(),
+            None,
+            conn.cancel.clone(),
+            conn.tenant.community(),
+            conn.backpressure_count.clone(),
+            conn.subscriptions.clone(),
+            conn.grace_limit,
+        );
+        conn.backpressure_count.store(2, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for n in 0..3 {
+            assert!(send_thread_window_frame(&conn, format!("finite-{n}"), deadline).await);
+        }
+        assert_eq!(conn.backpressure_count.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            conn.send_tx.capacity(),
+            1,
+            "one slot reserved for live frames"
+        );
+        assert!(manager.send_to(conn.conn_id, "live-0".into()));
+        assert!(!manager.send_to(conn.conn_id, "transient-full".into()));
+        assert_eq!(conn.backpressure_count.load(Ordering::Relaxed), 1);
+        assert!(!conn.cancel.is_cancelled());
+        // A queued finite frame must not steal capacity before the live
+        // producer can use it when the reader frees a slot.
+        let pending = tokio::spawn({
+            let conn = conn.clone();
+            async move { send_thread_window_frame(&conn, "finite-3".into(), deadline).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+        assert_eq!(rx.recv().await.unwrap().to_text().unwrap(), "finite-0");
+        assert!(manager.send_to(conn.conn_id, "live-1".into()));
+        assert_eq!(rx.recv().await.unwrap().to_text().unwrap(), "finite-1");
+        assert_eq!(rx.recv().await.unwrap().to_text().unwrap(), "finite-2");
+        assert!(timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap());
+        let remaining: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|msg| msg.to_text().unwrap().to_owned())
+            .collect();
+        assert_eq!(remaining, ["live-0", "live-1", "finite-3"]);
+        for n in 4..7 {
+            assert!(send_thread_window_frame(&conn, format!("finite-{n}"), deadline).await);
+        }
+        for n in 4..7 {
+            assert_eq!(
+                rx.recv().await.unwrap().to_text().unwrap(),
+                format!("finite-{n}")
+            );
+        }
+        assert!(!conn.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn concurrent_finite_senders_preserve_live_headroom() {
+        let (conn, _rx) = crate::connection::tests::test_conn_with_auth(
+            crate::connection::tests::authenticated_state(),
+        );
+        let results = futures_util::future::join_all((0..12).map(|n| {
+            let conn = conn.clone();
+            async move {
+                send_thread_window_frame(
+                    &conn,
+                    format!("finite-{n}"),
+                    Instant::now() + Duration::from_millis(30),
+                )
+                .await
+            }
+        }))
+        .await;
+        assert_eq!(results.iter().filter(|&&sent| sent).count(), 3);
+        assert_eq!(conn.send_tx.capacity(), 1);
+        assert!(conn.send("live".into()), "reserved slot remains available");
+    }
+
+    #[tokio::test]
+    async fn finite_frame_stalled_reader_expires_without_filling_reserved_slot() {
+        let (conn, mut rx) = crate::connection::tests::test_conn_with_auth(
+            crate::connection::tests::authenticated_state(),
+        );
+        for n in 0..3 {
+            assert!(conn.send(format!("padding-{n}")));
+        }
+        assert!(
+            !send_thread_window_frame(
+                &conn,
+                "finite".into(),
+                Instant::now() + Duration::from_millis(20),
+            )
+            .await
+        );
+        assert_eq!(rx.try_recv().unwrap().to_text().unwrap(), "padding-0");
+        conn.cancel.cancel();
+        assert!(
+            !send_thread_window_frame(
+                &conn,
+                "cancelled".into(),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+        );
     }
 }

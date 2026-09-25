@@ -22,6 +22,8 @@ pub enum ClientMessage {
         sub_id: String,
         /// The filters that determine which events are delivered.
         filters: Vec<Filter>,
+        /// Raw filters retained because `nostr::Filter` drops extension fields.
+        raw_filters: Vec<Value>,
         /// Optional per-filter composite cursor tiebreaks from raw extension fields.
         before_ids: Vec<Option<Vec<u8>>>,
     },
@@ -108,6 +110,12 @@ impl ClientMessage {
                 let before_ids = filter_values
                     .iter()
                     .map(|value| {
+                        // Thread-mode cursor validation belongs to the REQ handler,
+                        // where invalid input can terminate this subscription with
+                        // CLOSED rather than leaving a bare NOTICE.
+                        if value.get("thread_window").is_some_and(|v| v != false) {
+                            return Ok(None);
+                        }
                         let Some(raw) = value.get("before_id") else {
                             return Ok(None);
                         };
@@ -137,6 +145,7 @@ impl ClientMessage {
                 Ok(ClientMessage::Req {
                     sub_id,
                     filters,
+                    raw_filters: filter_values.to_vec(),
                     before_ids,
                 })
             }
@@ -336,6 +345,81 @@ mod tests {
             } => {
                 assert_eq!(sub_id, "sub2");
                 assert_eq!(filters.len(), 2);
+            }
+            _ => panic!("expected Req"),
+        }
+    }
+
+    #[test]
+    fn parse_req_routes_malformed_thread_cursor_to_subscription_validation() {
+        for (flag, cursor) in [
+            (
+                serde_json::json!(true),
+                serde_json::json!({"until": 1, "before_id": "zz"}),
+            ),
+            (
+                serde_json::json!(true),
+                serde_json::json!({"before_id": "ab".repeat(32)}),
+            ),
+            (
+                serde_json::json!("yes"),
+                serde_json::json!({"before_id": "ab".repeat(32)}),
+            ),
+        ] {
+            let mut filter = serde_json::json!({
+                "thread_window": flag,
+                "#h": [uuid::Uuid::nil()],
+                "#e": ["ab".repeat(32)],
+                "kinds": [9]
+            });
+            filter
+                .as_object_mut()
+                .unwrap()
+                .extend(cursor.as_object().unwrap().clone());
+            let parsed =
+                ClientMessage::parse(&serde_json::json!(["REQ", "window", filter]).to_string())
+                    .expect("malformed thread cursor must reach subscription-specific CLOSED");
+            match parsed {
+                ClientMessage::Req {
+                    raw_filters,
+                    before_ids,
+                    ..
+                } => {
+                    assert_eq!(before_ids, vec![None]);
+                    assert!(crate::api::bridge::thread_window::parse(&raw_filters).is_err());
+                }
+                _ => panic!("expected REQ"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_req_preserves_thread_window_extension_fields() {
+        let raw = serde_json::json!([
+            "REQ",
+            "thread-window",
+            {
+                "thread_window": true,
+                "#h": [uuid::Uuid::nil()],
+                "#e": ["ab".repeat(32)],
+                "kinds": [9],
+                "depth_limit": 42,
+                "include_aux": true,
+            }
+        ])
+        .to_string();
+
+        match ClientMessage::parse(&raw).unwrap() {
+            ClientMessage::Req {
+                filters,
+                raw_filters,
+                ..
+            } => {
+                assert_eq!(filters.len(), 1);
+                assert_eq!(raw_filters.len(), 1);
+                assert_eq!(raw_filters[0]["thread_window"], true);
+                assert_eq!(raw_filters[0]["depth_limit"], 42);
+                assert_eq!(raw_filters[0]["include_aux"], true);
             }
             _ => panic!("expected Req"),
         }

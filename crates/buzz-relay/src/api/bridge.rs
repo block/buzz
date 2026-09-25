@@ -24,7 +24,7 @@ use crate::state::AppState;
 use super::{api_error, internal_error, not_found};
 
 mod thread_roots;
-mod thread_window;
+pub(crate) mod thread_window;
 
 pub(crate) async fn enforce_http_admission(
     state: &AppState,
@@ -1232,7 +1232,13 @@ async fn query_events_authed(
         }
         return tokio::time::timeout(
             thread_window::DEADLINE,
-            thread_window::query_batch(state, tenant, &pubkey, thread_windows.iter().flatten()),
+            thread_window::query_batch(
+                state,
+                tenant,
+                &pubkey,
+                thread_windows.iter().flatten(),
+                None,
+            ),
         )
         .await
         .map_err(|_| {

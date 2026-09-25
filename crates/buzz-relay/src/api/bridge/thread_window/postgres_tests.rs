@@ -71,6 +71,27 @@ impl Fixture {
         json!({"thread_window":true,"#h":[self.channel],"#e":[self.root.id.to_hex()],
             "kinds":[9],"limit":50,"include_aux":true})
     }
+    fn ws_conn(
+        &self,
+        allowed: Option<Vec<Uuid>>,
+    ) -> (
+        Arc<crate::connection::ConnectionState>,
+        tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    ) {
+        let auth = buzz_auth::AuthContext {
+            pubkey: self.keys.public_key(),
+            scopes: vec![],
+            channel_ids: allowed,
+            auth_method: buzz_auth::AuthMethod::Nip42,
+            agent_owner_pubkey: None,
+        };
+        let (mut conn, rx) = crate::connection::tests::test_conn_with_auth(
+            crate::connection::AuthState::Authenticated(auth),
+        );
+        Arc::get_mut(&mut conn).unwrap().tenant =
+            TenantContext::resolved(self.community, self.host.clone());
+        (conn, rx)
+    }
     async fn post(&self, key: &Keys, path: &str, body: Value) -> (StatusCode, Value) {
         post(self.state.clone(), &self.host, key, path, body).await
     }
@@ -398,6 +419,262 @@ async fn thread_window_real_query_denial_revocation_and_colliding_tenants() {
     let (status, revoked) = f.post(&f.keys, "/query", json!([filter])).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(revoked, json!([]));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn websocket_batch_enforces_token_scope_and_rejects_queue_truncation() {
+    let f = Fixture::new().await;
+    f.reply(1).await;
+    let filter = f.filter();
+    let parsed = nostr::Filter::new();
+
+    let (denied, mut denied_rx) = f.ws_conn(Some(vec![]));
+    crate::handlers::req::handle_req(
+        "denied".into(),
+        vec![parsed.clone()],
+        vec![filter.clone()],
+        vec![None],
+        denied,
+        f.state.clone(),
+    )
+    .await;
+    assert_eq!(frame(&mut denied_rx)[0], "EOSE");
+    assert!(
+        denied_rx.try_recv().is_err(),
+        "token-excluded channel emitted rows"
+    );
+
+    let (allowed, mut allowed_rx) = f.ws_conn(Some(vec![f.channel]));
+    crate::handlers::req::handle_req(
+        "allowed".into(),
+        vec![parsed.clone()],
+        vec![filter.clone()],
+        vec![None],
+        allowed.clone(),
+        f.state.clone(),
+    )
+    .await;
+    let mut frames = vec![frame(&mut allowed_rx), frame(&mut allowed_rx)];
+    frames.push(frame(&mut allowed_rx));
+    assert_eq!(
+        frames.iter().map(|v| v[0].as_str()).collect::<Vec<_>>(),
+        vec![Some("EVENT"), Some("EVENT"), Some("EOSE")]
+    );
+    assert_eq!(frames[1][2]["kind"], 39007);
+    assert!(
+        !allowed.cancel.is_cancelled(),
+        "complete page closed socket"
+    );
+
+    // A slow but draining writer must receive the entire page even when its
+    // queue holds fewer frames than the window produces.
+    let (draining, mut draining_rx) = f.ws_conn(None);
+    let drain = tokio::spawn(async move {
+        let mut frames = Vec::new();
+        for _ in 0..7 {
+            let message = draining_rx.recv().await.expect("complete window frame");
+            frames.push(serde_json::from_str::<Value>(message.to_text().unwrap()).unwrap());
+        }
+        frames
+    });
+    crate::handlers::req::handle_req(
+        "draining".into(),
+        vec![parsed.clone(); 3],
+        vec![filter.clone(); 3],
+        vec![None; 3],
+        draining.clone(),
+        f.state.clone(),
+    )
+    .await;
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(2), drain)
+        .await
+        .expect("draining writer completes")
+        .unwrap();
+    assert_eq!(drained.len(), 7);
+    assert!(drained[..6].iter().all(|frame| frame[0] == "EVENT"));
+    assert_eq!(drained[6][0], "EOSE");
+    assert!(!draining.cancel.is_cancelled());
+
+    // A queue with room for the page but not EOSE must close, not complete.
+    let (terminal, mut terminal_rx) = f.ws_conn(None);
+    for _ in 0..1 {
+        assert!(terminal.send("padding".into()));
+    }
+    crate::handlers::req::handle_req(
+        "terminal".into(),
+        vec![parsed.clone()],
+        vec![filter.clone()],
+        vec![None],
+        terminal.clone(),
+        f.state.clone(),
+    )
+    .await;
+    assert!(
+        terminal.cancel.is_cancelled(),
+        "failed EOSE must close socket"
+    );
+    let terminal_frames: Vec<_> = std::iter::from_fn(|| terminal_rx.try_recv().ok())
+        .filter_map(|msg| serde_json::from_str::<Value>(msg.to_text().unwrap()).ok())
+        .collect();
+    assert_eq!(terminal_frames.len(), 2);
+    assert!(terminal_frames.iter().all(|frame| frame[0] == "EVENT"));
+
+    // The source reports truncation if delivery cannot proceed by its bound.
+    let (probe, _probe_rx) = f.ws_conn(None);
+    let requests = super::parse(&vec![filter.clone(); 3]).unwrap();
+    let sent = crate::handlers::req::serve_thread_windows(
+        "full",
+        requests.iter().flatten(),
+        None,
+        &f.keys.public_key(),
+        &probe,
+        &f.state,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    assert!(!sent, "a failed EVENT enqueue must not authorize EOSE");
+
+    // A stalled writer cannot receive EOSE; the finite request must close.
+    let (slow, mut slow_rx) = f.ws_conn(None);
+    crate::handlers::req::handle_req(
+        "full".into(),
+        vec![parsed.clone(); 3],
+        vec![filter.clone(); 3],
+        vec![None; 3],
+        slow.clone(),
+        f.state.clone(),
+    )
+    .await;
+    assert!(
+        slow.cancel.is_cancelled(),
+        "truncated page must close socket"
+    );
+    let drained: Vec<_> = std::iter::from_fn(|| slow_rx.try_recv().ok())
+        .map(|m| serde_json::from_str::<Value>(m.to_text().unwrap()).unwrap())
+        .collect();
+    assert_eq!(drained.len(), 3);
+    assert!(
+        drained.iter().all(|frame| frame[0] == "EVENT"),
+        "{drained:?}"
+    );
+
+    let (invalid, mut invalid_rx) = f.ws_conn(None);
+    let mut bad = filter.clone();
+    bad["before_id"] = json!("zz");
+    bad["until"] = json!(1);
+    crate::handlers::req::handle_req(
+        "bad".into(),
+        vec![parsed.clone()],
+        vec![bad],
+        vec![None],
+        invalid,
+        f.state.clone(),
+    )
+    .await;
+    assert_eq!(frame(&mut invalid_rx)[0], "CLOSED");
+    assert!(invalid_rx.try_recv().is_err());
+
+    let (mixed, mut mixed_rx) = f.ws_conn(None);
+    crate::handlers::req::handle_req(
+        "mixed".into(),
+        vec![parsed; 2],
+        vec![filter, json!({"kinds":[9]})],
+        vec![None; 2],
+        mixed,
+        f.state.clone(),
+    )
+    .await;
+    assert_eq!(frame(&mut mixed_rx)[0], "CLOSED");
+    assert!(mixed_rx.try_recv().is_err());
+
+    // A rejected window with a saturated terminal queue must not leave its
+    // subscription waiting on a socket that will never deliver CLOSED.
+    let (rejected, _rejected_rx) = f.ws_conn(None);
+    for _ in 0..4 {
+        assert!(rejected.send("padding".into()));
+    }
+    crate::handlers::req::handle_req(
+        "invalid-full".into(),
+        vec![nostr::Filter::new()],
+        vec![json!({"thread_window":true,"until":1})],
+        vec![None],
+        rejected.clone(),
+        f.state.clone(),
+    )
+    .await;
+    assert!(rejected.cancel.is_cancelled());
+}
+
+fn frame(rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>) -> Value {
+    serde_json::from_str(rx.try_recv().expect("queued frame").to_text().unwrap()).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn websocket_window_replaces_live_subscription_before_eose() {
+    let f = Fixture::new().await;
+    f.reply(1).await;
+    let (conn, mut rx) = f.ws_conn(None);
+    let live_filter = nostr::Filter::new().kind(Kind::Custom(9));
+    conn.subscriptions
+        .lock()
+        .await
+        .insert("replace".into(), vec![live_filter.clone()]);
+    f.state.sub_registry.register_scoped(
+        f.community,
+        conn.conn_id,
+        "replace".into(),
+        vec![live_filter],
+        Some(f.channel),
+    );
+    f.state
+        .pubsub
+        .retain_topic(&conn.tenant, buzz_pubsub::EventTopic::Channel(f.channel))
+        .await;
+    assert_eq!(
+        f.state
+            .pubsub
+            .topic_refcount(&conn.tenant, buzz_pubsub::EventTopic::Channel(f.channel))
+            .await,
+        1,
+        "fixture must retain the live channel topic"
+    );
+    assert_eq!(
+        f.state
+            .sub_registry
+            .channel_subscriber_conns_scoped(f.community, f.channel),
+        vec![conn.conn_id]
+    );
+
+    crate::handlers::req::handle_req(
+        "replace".into(),
+        vec![nostr::Filter::new()],
+        vec![f.filter()],
+        vec![None],
+        conn.clone(),
+        f.state.clone(),
+    )
+    .await;
+    assert!(conn.subscriptions.lock().await.get("replace").is_none());
+    assert_eq!(
+        f.state
+            .pubsub
+            .topic_refcount(&conn.tenant, buzz_pubsub::EventTopic::Channel(f.channel))
+            .await,
+        0,
+        "replacing the live subscription must release its channel topic"
+    );
+    assert!(f
+        .state
+        .sub_registry
+        .channel_subscriber_conns_scoped(f.community, f.channel)
+        .is_empty());
+    assert_eq!(frame(&mut rx)[0], "EVENT");
+    assert_eq!(frame(&mut rx)[0], "EVENT");
+    assert_eq!(frame(&mut rx)[0], "EOSE");
+    assert!(rx.try_recv().is_err());
 }
 
 #[tokio::test]

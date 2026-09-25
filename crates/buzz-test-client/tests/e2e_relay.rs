@@ -2719,6 +2719,86 @@ async fn test_private_channel_member_cannot_grant_admin() {
     member_client.disconnect().await.expect("disconnect member");
 }
 
+/// WebSocket REQ preserves thread-window extension fields and serves the same
+/// newest-first row + signed-bounds contract as POST /query.
+#[tokio::test]
+#[ignore]
+async fn test_thread_window_req_returns_rows_bounds_and_eose() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let root = EventBuilder::new(Kind::Custom(9), "thread-window root")
+        .tags([Tag::parse(["h", channel.as_str()]).unwrap()])
+        .sign_with_keys(&keys)
+        .expect("sign root");
+    let root_id = root.id;
+    let ok = client.send_event(root).await.expect("send root");
+    assert!(ok.accepted, "root rejected: {}", ok.message);
+
+    let mut expected = Vec::new();
+    for content in ["older reply", "newer reply"] {
+        let reply = EventBuilder::new(Kind::Custom(9), content)
+            .tags([
+                Tag::parse(["h", channel.as_str()]).unwrap(),
+                Tag::parse(["e", &root_id.to_hex(), "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign reply");
+        expected.push(reply.clone());
+        let ok = client.send_event(reply).await.expect("send reply");
+        assert!(ok.accepted, "reply rejected: {}", ok.message);
+    }
+    expected.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let sid = sub_id("thread-window");
+    client
+        .send_raw(&serde_json::json!([
+            "REQ",
+            sid,
+            {
+                "thread_window": true,
+                "#h": [channel],
+                "#e": [root_id.to_hex()],
+                "kinds": [9],
+                "limit": 10,
+            }
+        ]))
+        .await
+        .expect("send thread-window REQ");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(10))
+        .await
+        .expect("collect thread-window response through EOSE");
+
+    let rows: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == Kind::Custom(9))
+        .collect();
+    assert_eq!(
+        rows.iter().map(|event| event.id).collect::<Vec<_>>(),
+        expected.iter().map(|event| event.id).collect::<Vec<_>>(),
+        "thread rows must use created_at DESC, id ASC order"
+    );
+    let bounds: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == Kind::Custom(39007))
+        .collect();
+    assert_eq!(bounds.len(), 1, "served window must have one bounds event");
+    let content: serde_json::Value =
+        serde_json::from_str(&bounds[0].content).expect("bounds content JSON");
+    assert_eq!(content["has_more"], false);
+    assert_eq!(content["next_cursor"], serde_json::Value::Null);
+
+    client.disconnect().await.expect("disconnect");
+}
+
 /// Live badge counts: every thread mutation pushes a fresh relay-signed
 /// kind:39005 recount to channel subscribers — a reply counts up, deleting
 /// that reply counts back down — without any window refetch.

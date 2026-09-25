@@ -856,6 +856,14 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         return;
     }
 
+    dispatch_client_message(msg, conn, state).await;
+}
+
+async fn dispatch_client_message(
+    msg: ClientMessage,
+    conn: Arc<ConnectionState>,
+    state: Arc<AppState>,
+) {
     match msg {
         ClientMessage::Auth(event) => {
             // AUTH remains inline so only one frame can race the connection's
@@ -902,10 +910,41 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         ClientMessage::Req {
             sub_id,
             filters,
+            raw_filters,
             before_ids,
         } => {
             let conn = Arc::clone(&conn);
             let state = Arc::clone(&state);
+            // Admission precedes the shared handler permit. A slow finite
+            // reader must not be able to occupy the entire process-wide pool.
+            // Invalid/unauthenticated filters still follow normal REQ validation.
+            let finite_window = if raw_filters.iter().any(|filter| {
+                filter
+                    .get("thread_window")
+                    .is_some_and(|value| value != false)
+            }) {
+                match conn.auth_state_snapshot() {
+                    AuthState::Authenticated(ctx) => {
+                        let principal = ctx.agent_owner_pubkey.unwrap_or(ctx.pubkey);
+                        match state
+                            .finite_window_work
+                            .try_acquire((conn.tenant.community(), principal.to_bytes()))
+                        {
+                            Some(permit) => Some(permit),
+                            None => {
+                                conn.send(request_rejection_message(
+                                    RejectionTarget::Subscription(&sub_id),
+                                    "rate-limited: too many concurrent thread windows",
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
@@ -919,8 +958,17 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
             tokio::spawn(
                 async move {
-                    handlers::req::handle_req(sub_id, filters, before_ids, conn, state).await;
+                    handlers::req::handle_req(
+                        sub_id,
+                        filters,
+                        raw_filters,
+                        before_ids,
+                        conn,
+                        state,
+                    )
+                    .await;
                     drop(permit);
+                    drop(finite_window);
                 }
                 .instrument(span),
             );
@@ -1546,6 +1594,96 @@ pub(crate) mod tests {
         let frame = read_frame(&mut rx);
         assert_eq!(frame[0], "CLOSED");
         assert_eq!(frame[1], "history-abc");
+    }
+
+    /// A saturated tenant is rejected before occupying another tenant's
+    /// handler permits. This binds the actual REQ dispatcher, not a quota-only
+    /// helper; Redis admission is outside this isolated test seam.
+    #[tokio::test]
+    async fn finite_window_quota_preserves_other_community_handler_capacity() {
+        let state = crate::state::tests::test_state().await;
+        let (mut attacker, mut attacker_rx) = test_conn_with_auth(authenticated_state());
+        let a = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let b = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        Arc::get_mut(&mut attacker).unwrap().tenant = TenantContext::resolved(a, "attacker.local");
+        let AuthState::Authenticated(ctx) = attacker.auth_state_snapshot() else {
+            panic!("authenticated test connection");
+        };
+        let key = (a, ctx.pubkey.to_bytes());
+        let held: Vec<_> = (0..4)
+            .map(|_| state.finite_window_work.try_acquire(key).unwrap())
+            .collect();
+        let saturation: Vec<_> = (4..state.finite_window_work.community_limit())
+            .map(|n| {
+                state
+                    .finite_window_work
+                    .try_acquire((a, [n as u8; 32]))
+                    .unwrap()
+            })
+            .collect();
+        let slots_before = state.handler_semaphore.available_permits();
+        let raw = serde_json::json!(["REQ", "saturated", {"thread_window": true}]).to_string();
+        dispatch_client_message(
+            ClientMessage::parse(&raw).unwrap(),
+            Arc::clone(&attacker),
+            Arc::clone(&state),
+        )
+        .await;
+        let rejected = read_frame(&mut attacker_rx);
+        assert_eq!(rejected[0], "CLOSED");
+        assert_eq!(rejected[1], "saturated");
+        assert_eq!(
+            rejected[2],
+            "rate-limited: too many concurrent thread windows"
+        );
+        assert_eq!(state.handler_semaphore.available_permits(), slots_before);
+        let neighbor = state.finite_window_work.try_acquire((b, [8; 32])).unwrap();
+        assert_eq!(state.handler_semaphore.available_permits(), slots_before);
+        drop(neighbor);
+        drop(saturation);
+        drop(held);
+
+        // The other community remains able to enter the same production REQ
+        // dispatcher while the first tenant's finite quota is saturated.
+        // Hold all but one handler permit to make admission observable.
+        let attacker_held: Vec<_> = (0..state.finite_window_work.community_limit())
+            .map(|n| {
+                state
+                    .finite_window_work
+                    .try_acquire((a, [n as u8; 32]))
+                    .unwrap()
+            })
+            .collect();
+        let capacity = state.handler_semaphore.available_permits();
+        let _busy = Arc::clone(&state.handler_semaphore)
+            .acquire_many_owned(capacity as u32 - 1)
+            .await
+            .unwrap();
+        // An invalid finite query terminates without touching Postgres but
+        // travels through the same permit acquisition and release.
+        let (mut neighbor_conn, mut neighbor_rx) = test_conn_with_auth(authenticated_state());
+        Arc::get_mut(&mut neighbor_conn).unwrap().tenant =
+            TenantContext::resolved(b, "neighbor.local");
+        let neighbor_raw =
+            serde_json::json!(["REQ", "neighbor", {"thread_window": true}]).to_string();
+        dispatch_client_message(
+            ClientMessage::parse(&neighbor_raw).unwrap(),
+            Arc::clone(&neighbor_conn),
+            Arc::clone(&state),
+        )
+        .await;
+        let response = tokio::time::timeout(Duration::from_secs(2), neighbor_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(response.to_text().unwrap()).unwrap();
+        assert_eq!(response[0], "CLOSED");
+        assert_eq!(response[1], "neighbor");
+        assert!(response[2].as_str().unwrap().starts_with("invalid:"));
+        assert_eq!(state.handler_semaphore.available_permits(), 1);
+        drop(attacker_held);
+        assert!(state.finite_window_work.try_acquire(key).is_some());
     }
 
     /// COUNT refusals follow NIP-45 and close the named query.
