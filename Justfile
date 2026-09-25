@@ -395,8 +395,10 @@ test-unit:
         cargo nextest run -p buzz-db --lib
         # Storage accounting crosses three crates whose focused regression
         # suites are otherwise absent from the infra-free unit lane.
+        # The request-body error classifier decides 408 vs 413 vs 500 at every
+        # body-consumption path (relay API guard, media uploads); infra-free.
         cargo nextest run -p buzz-media --lib \
-            -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys)'
+            -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys) + test(/^upload::tests::classify_body_error/) + test(=upload::tests::video_stream_idle_timeout_maps_to_request_body_timeout_not_500)'
         cargo nextest run -p buzz-admin \
             -E 'test(storage_snapshot)'
         # Multi-tenant conformance gate (buzz-conformance): the independent
@@ -470,7 +472,7 @@ test-unit:
         # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
         # unit job either.
         cargo nextest run -p buzz-relay --lib \
-            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/)'
+            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^api::git::transport::track_c_tests::git_compatibility_probe_/) + test(/^router::tests::body_guards::/)'
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
