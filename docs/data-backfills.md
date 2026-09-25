@@ -298,6 +298,12 @@ four configurations are valid:
 | on | off | The relay MUST run migrations, but MUST NOT start `pending` backfills or add a backfill readiness gate. Operators run them manually while the application serves mixed repaired and unrepaired data. Already-started work MUST remain recoverable. |
 | on | on | The relay MUST run migrations, then required backfills, and remain unready until every required backfill reaches `completed`. |
 
+Automatic mode assumes the rollout prerequisite above is already satisfied. A
+required automatic backfill MUST ship in a release after its prerequisite write
+path is fully rolled out and old writer behavior is drained. A definition that
+ships with its prerequisite write-path change MUST NOT auto-start in that
+release; an operator MUST start it manually only after rollout completion.
+
 In automatic mode, every required `pending`, `running`, `paused`, `blocked`,
 `failed`, or `validating` row MUST keep the serving gate closed. The relay MUST
 register the complete set of required stable IDs before evaluating that gate.
