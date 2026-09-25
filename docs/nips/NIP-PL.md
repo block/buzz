@@ -395,13 +395,13 @@ Success is `200 {"status":"revoked"}`. The revocation atomically invalidates the
 
 ### Relay delivery
 
-`POST /v1/deliveries/apns` has the exact externally configured URL `https://push.buzz.xyz/v1/deliveries/apns`. Request:
+The relay sends requests to the configured HTTP(S) delivery URL ending in `/v1/deliveries/apns`. The NIP-98 signed URL MUST exactly match that request URL. `https://push.buzz.xyz/v1/deliveries/apns` is an example. Request:
 
 ```json
 {"v":1,"endpoint_grant":"<opaque-capability>","request_id":"<uuid>","expires_at":<unix-seconds>}
 ```
 
-The relay supplies a NIP-98 `Authorization: Nostr <standard-base64-event-json>` header for method `POST`, the exact URL above, and the SHA-256 payload hash of the **received request body bytes**. The gateway verifies the NIP-98 event signature, timestamp under NIP-98 rules, method, URL, and payload; the event pubkey is the relay identity. It decrypts `endpoint_grant`, requires that signer, current installation/delegation, endpoint epoch and generation, and both `now <= request.expires_at <= grant.expires_at`. Every NIP-98 event id is burned at admission.
+The relay supplies a NIP-98 `Authorization: Nostr <standard-base64-event-json>` header for method `POST`, the configured delivery URL, and the SHA-256 payload hash of the **received request body bytes**. The gateway verifies the NIP-98 event signature, timestamp under NIP-98 rules, method, URL, and payload; the event pubkey is the relay identity. It decrypts `endpoint_grant`, requires that signer, current installation/delegation, endpoint epoch and generation, and both `now <= request.expires_at <= grant.expires_at`. Every NIP-98 event id is burned at admission.
 
 The relay's durable job UUID is `request_id` and becomes the stable APNs `apns-id`. Delivery replay/quota reservation is one transaction. The commit of that transaction is send-begin: a revocation or rotation commit that completes first prevents the old-capability send; a send admitted first may finish. Terminal outcomes retain the `(relay_pubkey, request_id)` reservation; transient/configuration outcomes release it only after provider processing so a fresh NIP-98 event may retry the same job. Endpoint quota is charged once per admitted attempt and never refunded. A crash before transient cleanup can reject that id until its bounded request expiry; exactly-once provider delivery is not guaranteed.
 
