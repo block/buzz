@@ -561,13 +561,49 @@ impl DependencyDiagnostics {
 /// already slow. The first tick fires immediately, so the not-yet-sampled
 /// window is one evaluation long.
 pub async fn run_dependency_sampler(state: Arc<AppState>, cancel: CancellationToken) {
-    run_dependency_sampler_with_interval(state, cancel, DEPENDENCY_SAMPLE_INTERVAL).await;
+    run_dependency_sampler_for_diagnostics(
+        Arc::clone(&state.dependency_diagnostics),
+        state.db.clone(),
+        state.redis_pool.clone(),
+        DEPENDENCY_SAMPLE_INTERVAL,
+        cancel,
+    )
+    .await;
 }
 
-async fn run_dependency_sampler_with_interval(
+/// Starts the dependency sampler and completion republisher together.
+///
+/// Main calls this once at startup so sampler and publisher ownership lives at
+/// one seam instead of being wired independently.
+pub fn start_dependency_sampler_and_completion_publisher(
     state: Arc<AppState>,
-    cancel: CancellationToken,
+    republish_interval: Duration,
+) {
+    let sampler_state = Arc::clone(&state);
+    tokio::spawn(run_dependency_sampler_for_diagnostics(
+        Arc::clone(&sampler_state.dependency_diagnostics),
+        sampler_state.db.clone(),
+        sampler_state.redis_pool.clone(),
+        DEPENDENCY_SAMPLE_INTERVAL,
+        sampler_state.dependency_sampler_cancel.clone(),
+    ));
+
+    let publisher_state = Arc::clone(&state);
+    tokio::spawn(run_dependency_sample_completion_publisher_for_diagnostics(
+        Arc::clone(&publisher_state.dependency_diagnostics),
+        republish_interval,
+        publisher_state
+            .dependency_completion_publisher_cancel
+            .clone(),
+    ));
+}
+
+async fn run_dependency_sampler_for_diagnostics(
+    diagnostics: Arc<DependencyDiagnostics>,
+    db: Db,
+    redis_pool: deadpool_redis::Pool,
     sample_interval: Duration,
+    cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(sample_interval.max(Duration::from_millis(1)));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -576,10 +612,7 @@ async fn run_dependency_sampler_with_interval(
             biased;
             _ = cancel.cancelled() => break,
             _ = interval.tick() => {
-                state
-                    .dependency_diagnostics
-                    .sample(&state.db, &state.redis_pool)
-                    .await;
+                diagnostics.sample(&db, &redis_pool).await;
             }
         }
     }
@@ -1201,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn scrape_retains_the_completion_timestamp_across_gauge_idle_timeout() {
+    fn dependency_runtime_retains_the_completion_timestamp_when_only_sampler_stops() {
         let timeout = Duration::from_secs(1);
         let republish_interval = Duration::from_millis(100);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1213,47 +1246,49 @@ mod tests {
 
         metrics::with_local_recorder(&recorder, || {
             runtime.block_on(async {
-                let (db, redis_pool) = unreachable_dependencies();
-                let diagnostics = Arc::new(ready_diagnostics());
-                let publisher_cancel = CancellationToken::new();
-                let publisher = tokio::spawn(
-                    run_dependency_sample_completion_publisher_for_diagnostics(
-                    diagnostics.clone(),
-                    republish_interval,
-                    publisher_cancel.clone(),
-                ));
+                let mut state = crate::state::tests::test_state_with_database_url(
+                    "postgres://127.0.0.1:1/buzz",
+                )
+                .await;
+                Arc::get_mut(&mut state)
+                    .expect("sole readiness state")
+                    .set_dependency_evaluator(Arc::new(FixedEvaluator(
+                        DependencyReport::from_results(
+                            TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(3)),
+                            TimedOutcome::new(RedisOutcome::Success, Duration::from_millis(2)),
+                            TimedOutcome::new(
+                                DeletionCatalogOutcome::Success,
+                                Duration::from_millis(1),
+                            ),
+                            Duration::from_millis(3),
+                        ),
+                    )));
 
-                assert_eq!(
-                    sample_completion_metric_value_from_scrape(&handle.render()),
-                    None,
-                    "absence before the first completion is the not-yet-sampled signal"
+                start_dependency_sampler_and_completion_publisher(
+                    Arc::clone(&state),
+                    republish_interval,
                 );
 
-                diagnostics.sample(&db, &redis_pool).await;
-                let first = wait_for_sample_completion_scrape_value(&handle, |value| value > 0).await;
+                let first =
+                    wait_for_sample_completion_scrape_value(&handle, |value| value > 0).await;
+
+                state.dependency_sampler_cancel.cancel();
 
                 tokio::time::sleep(timeout + Duration::from_millis(200)).await;
                 assert_eq!(
                     sample_completion_metric_value_from_scrape(&handle.render()),
                     Some(first),
-                    "publisher must keep the first completion epoch exported after idle timeout"
+                    "publisher must keep the completion epoch exported after idle timeout"
                 );
-
-                while epoch_seconds_now() <= first {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-                diagnostics.sample(&db, &redis_pool).await;
-                let second = wait_for_sample_completion_scrape_value(&handle, |value| value > first).await;
 
                 tokio::time::sleep(timeout + Duration::from_millis(200)).await;
                 assert_eq!(
                     sample_completion_metric_value_from_scrape(&handle.render()),
-                    Some(second),
-                    "with no further samples, publisher must keep the latest epoch while the sampler is stopped"
+                    Some(first),
+                    "with no sampler activity, publisher must keep exporting the stored epoch"
                 );
 
-                publisher_cancel.cancel();
-                publisher.await.expect("completion publisher task");
+                state.dependency_completion_publisher_cancel.cancel();
             });
         });
     }

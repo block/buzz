@@ -187,9 +187,9 @@ the cached report completed**, in Unix seconds. The relay sampler is the only
 owner allowed to advance that epoch, and it writes it immediately after the
 cache is replaced. A separate bounded publisher re-emits the stored epoch often
 enough to survive local gauge idle-timeout; republishing never advances the
-timestamp. Nor does it ever move the series backwards: a republish that raced a
-completing sample re-emits the newer epoch it finds, so the exported value never
-regresses to a completion the pod has already passed. So the value stands still
+timestamp. If a republish races a newer completion, one scrape can briefly see
+the older epoch, but the republish path verifies after writing and repairs to the
+newer stored epoch before that republish call returns. So the value stands still
 when sampling stops, and the time elapsed since it was written is whatever the
 reader computes at read time.
 
