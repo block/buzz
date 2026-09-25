@@ -1980,6 +1980,7 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
     async fn disabled_mode_allows_unauthenticated_requests_on_the_admin_host() {
         let state = disabled_mode_state().await;
         for uri in read_routes() {
@@ -1993,7 +1994,7 @@ mod postgres_tests {
             )
             .await;
             // The routes return 200 (or 404 for unknown resources) — never 401.
-            // 404 is fine here: there is no real DB, so the row lookups fail.
+            // 404 is fine for unknown resources; the assertion is only that auth is skipped.
             assert_ne!(
                 response.status(),
                 StatusCode::UNAUTHORIZED,

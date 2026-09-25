@@ -444,18 +444,11 @@ test-unit:
         # and a red one could ship green (exactly how a broken admin test slipped
         # past every gate once). Scoped to api::admin, not the whole buzz-relay
         # --lib, because api::media has non-ignored tests that require Postgres.
-        # Two api::admin tests are excluded: both exercise a read-route DB
-        # fallthrough and pass without a database only by waiting out the sqlx
-        # acquire timeout (~30s each), so they do not belong in the infra-free
-        # unit job. nip98_mode_unrostered_signer_does_not_consume_a_replay_slot
-        # asserts a unique replay-guard invariant, so it is wired into the
-        # Postgres-backed Backend Integration job (see ci.yml "Admin API
-        # unrostered-signer replay invariant"). disabled_mode_allows_
-        # unauthenticated_requests_on_the_admin_host has no unique invariant:
-        # disabled-mode unauthenticated success is covered by
-        # disabled_mode_regression_pin_unauthenticated_request_is_served on the
-        # DB-free /probe route, and its Host/Origin gating is covered here by
-        # disabled_mode_still_requires_the_correct_host / _a_matching_origin.
+        # DB-backed api::admin tests are #[ignore]d and run in the PostgreSQL
+        # lane; the non-ignored ones reject before touching the database. Any
+        # new non-ignored test here must stay DB-free: without a database, a
+        # DB fallthrough only "passes" by waiting out the ~30s sqlx acquire
+        # timeout.
         # The second clause adds the relay's pure authorization-decision tests:
         # the NIP-29 channel membership grid (handlers::channel_authz), the
         # moderation capability grid (handlers::moderation_authz), and the pure
@@ -471,7 +464,7 @@ test-unit:
         # unit job either. The REQ subscription-lifecycle tests are picked by
         # exact name for the same reason: the rest of handlers::req needs a DB.
         cargo nextest run -p buzz-relay --lib \
-            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(=handlers::req::tests::timed_out_historical_read_deregisters_before_closed) + test(=handlers::req::tests::superseded_timeout_leaves_replacement_intact) + test(=handlers::req::tests::search_claim_retires_live_and_yields_to_replacement) + test(=handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner) + test(=handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim) + test(=handlers::req::tests::revoke_then_replacement_keeps_replacement_whole) + test(=handlers::req::tests::claims_after_connection_cleanup_are_refused) + test(=handlers::req::tests::dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection)'
+            -E 'test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(=handlers::req::tests::timed_out_historical_read_deregisters_before_closed) + test(=handlers::req::tests::superseded_timeout_leaves_replacement_intact) + test(=handlers::req::tests::search_claim_retires_live_and_yields_to_replacement) + test(=handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner) + test(=handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim) + test(=handlers::req::tests::revoke_then_replacement_keeps_replacement_whole) + test(=handlers::req::tests::claims_after_connection_cleanup_are_refused) + test(=handlers::req::tests::dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection)'
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
@@ -743,7 +736,7 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
         chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
     cd {{desktop_dir}}
-    export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
+    export BUZZ_RELAY_URL="wss://buzz.test.blockstaging.build"
     source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
