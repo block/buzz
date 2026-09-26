@@ -27,11 +27,11 @@ test("slash and both navigation shortcuts share live channel and command search 
     assert.equal(app.tui.hasOverlay(), true);
     assert.match(frame, /Commands & channels/);
     assert.match(frame, /#platform/);
-    assert.match(frame, /\/to/);
+    assert.match(frame, /Switch agent\s+Ctrl\+R/);
     assert.equal(app.editor.getExpandedText(), "");
-    terminal.input("activity");
+    terminal.input("/activity");
     frame = await terminal.frame();
-    assert.match(frame, /\/activity/);
+    assert.match(frame, /Agent activity\s+Alt\+A/);
     assert.doesNotMatch(frame, /#platform/);
     terminal.input("\r");
     assert.match(await terminal.frame(), /Agent activity/);
@@ -117,11 +117,29 @@ test("agent color matches chat, the palette dims only its backdrop, and closing 
     let palette = await terminal.frame();
     const titleRow = palette
       .split("\n")
-      .findIndex((line) => line.includes("│ Commands & channels"));
+      .findIndex((line) => line.includes("┌ Commands & channels"));
     assert.ok(titleRow > 0);
     const titleColumn = palette.split("\n")[titleRow].indexOf("Commands");
     assert.notEqual(cell(0, headerColumn).isDim(), 0);
     assert.equal(cell(titleRow, titleColumn).isDim(), 0);
+    const paletteRows = palette.split("\n");
+    const selectedRow = paletteRows.findIndex(
+      (line, index) => index > titleRow && line.includes("#engineering"),
+    );
+    assert.ok(selectedRow > titleRow);
+    const left = paletteRows[titleRow].indexOf("┌") + 2;
+    const right = paletteRows[selectedRow].lastIndexOf("│") - 2;
+    for (let column = left; column <= right; column++) {
+      assert.equal(cell(selectedRow, column).getBgColor(), 3);
+      assert.equal(cell(selectedRow, column).getFgColor(), 0);
+      assert.equal(cell(selectedRow, column).isDim(), 0);
+    }
+    assert.equal(cell(selectedRow + 1, left).isBgDefault(), true);
+    assert.equal(paletteRows[selectedRow + 1].includes("#platform"), true);
+    terminal.input("\x1b[B");
+    await terminal.frame();
+    assert.equal(cell(selectedRow, left).isBgDefault(), true);
+    assert.equal(cell(selectedRow + 1, left).getBgColor(), 3);
     terminal.columns = 42;
     terminal.rows = 18;
     terminal.screen.resize(42, 18);

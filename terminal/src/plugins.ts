@@ -114,7 +114,7 @@ export function activityPlugin(
     activate(context) {
       context.command({
         name: "activity",
-        description: "Inspect all owned-agent executions",
+        description: "Agent activity · Alt+A",
         run: () => show("activity"),
       });
       context.view({

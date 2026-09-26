@@ -112,3 +112,34 @@ test("live picker updates retain the selected identity rather than its old row i
   picker.handleInput("\r");
   assert.equal(selected, "b");
 });
+
+test("compact picker aligns Unicode rows and keeps selection visible without color", (t) => {
+  const noColor = process.env.NO_COLOR;
+  process.env.NO_COLOR = "1";
+  t.after(() => {
+    if (noColor === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = noColor;
+  });
+  const picker = new Picker({
+    title: "Commands & channels",
+    items: [
+      { id: "a", label: "工程师 👩🏽‍💻", category: "频道", badge: "current" },
+      { id: "b", label: "Switch agent", category: "buzz", badge: "Ctrl+R" },
+    ],
+    onSelect: () => {},
+    onCancel: () => {},
+    requestRender: () => {},
+  });
+  for (const width of [12, 29, 30, 80]) {
+    const lines = picker.render(width);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    assert.equal(lines.filter((line) => line.startsWith("›")).length, 2);
+    assert.equal(lines.length, 5);
+    assert.deepEqual(
+      lines.slice(3).map(stripTerminalSequences),
+      lines.slice(3).map((line) => line.replaceAll("\x1b[0m", "")),
+    );
+  }
+  picker.handleInput("\x1b[B");
+  assert.match(picker.render(80)[4], /^›\s+buzz\s+Switch agent\s+Ctrl\+R\s*$/);
+});

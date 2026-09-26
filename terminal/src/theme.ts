@@ -42,6 +42,9 @@ export function singleLine(input: string): string {
 export const style = {
   accent: color("33"),
   muted: color("2;37"),
+  secondary: color("38;5;244"),
+  border: color("38;5;240"),
+  selected: color("1;30;43"),
   text: color("39"),
   success: color("32"),
   error: color("31"),

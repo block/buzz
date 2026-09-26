@@ -4,6 +4,7 @@ import {
   fuzzyFilter,
   Input,
   parseKey,
+  visibleWidth,
 } from "@earendil-works/pi-tui";
 import { fit, singleLine, style } from "./theme.ts";
 
@@ -13,6 +14,7 @@ export interface PickerItem {
   label: string;
   detail?: string;
   badge?: string;
+  category?: string;
 }
 
 interface PickerOptions {
@@ -47,7 +49,7 @@ export class Picker implements Component, Focusable {
     this.input = new Input({
       prompt: "› ",
       placeholder: "Search",
-      placeholderStyle: style.muted,
+      placeholderStyle: style.secondary,
     });
   }
 
@@ -59,9 +61,12 @@ export class Picker implements Component, Focusable {
         label: singleLine(item.label),
         detail: item.detail === undefined ? undefined : singleLine(item.detail),
         badge: item.badge === undefined ? undefined : singleLine(item.badge),
+        category:
+          item.category === undefined ? undefined : singleLine(item.category),
       })),
       this.input.getValue(),
-      (item) => `${item.label} ${item.detail ?? ""} ${item.badge ?? ""}`,
+      (item) =>
+        `${item.label} ${item.detail ?? ""} ${item.badge ?? ""} ${item.category ?? ""}`,
     );
     const index = filtered.findIndex((item) => item.id === this.selectedId);
     this.selected = index < 0 ? 0 : index;
@@ -104,8 +109,9 @@ export class Picker implements Component, Focusable {
     const filtered = this.filtered();
     this.selected = Math.min(this.selected, Math.max(0, filtered.length - 1));
     const lines = [
-      fit(style.bold(this.title), available),
+      fit(style.secondary(this.title), available),
       ...this.input.render(available),
+      "",
     ];
     if (filtered.length === 0) {
       lines.push(
@@ -116,11 +122,14 @@ export class Picker implements Component, Focusable {
       return lines;
     }
 
+    const compact = filtered.every((item) => item.category !== undefined);
     const maxRows = Math.max(
       1,
       Math.min(
-        7,
-        Math.floor((this.availableRows() - 2) / (available >= 24 ? 2 : 1)),
+        compact ? 14 : 7,
+        Math.floor(
+          (this.availableRows() - 3) / (!compact && available >= 24 ? 2 : 1),
+        ),
       ),
     );
     const start = Math.max(
@@ -137,15 +146,32 @@ export class Picker implements Component, Focusable {
     ) {
       const item = filtered[index];
       if (!item) continue;
-      const marker = index === this.selected ? style.accent("›") : " ";
-      const badge = item.badge ? `  ${style.muted(item.badge)}` : "";
-      lines.push(
-        fit(
-          `${marker} ${index === this.selected ? style.accent(item.label) : item.label}${badge}`,
-          available,
-        ),
+      const selected = index === this.selected;
+      const marker = selected && process.env.NO_COLOR !== undefined ? "›" : " ";
+      const group = fit(item.category ?? "", 7);
+      const category =
+        item.category && available >= 30
+          ? `${" ".repeat(7 - visibleWidth(group))}${group}  `
+          : "";
+      const badge = fit(item.badge ?? "", Math.floor(available / 3));
+      const label = fit(
+        item.label,
+        available - visibleWidth(category) - visibleWidth(badge) - 3,
       );
-      if (item.detail && available >= 24)
+      const gap = " ".repeat(
+        Math.max(1, available - visibleWidth(category + label + badge) - 2),
+      );
+      lines.push(
+        selected
+          ? style.selected(
+              fit(`${marker}${category}${label}${gap}${badge} `, available),
+            )
+          : fit(
+              ` ${style.secondary(category)}${style.bold(label)}${gap}${style.secondary(badge)} `,
+              available,
+            ),
+      );
+      if (!item.category && item.detail && available >= 24)
         lines.push(fit(`    ${style.muted(item.detail)}`, available));
     }
     return lines;

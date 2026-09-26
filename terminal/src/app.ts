@@ -166,22 +166,22 @@ export class TerminalApp {
     return [
       {
         name: "switch",
-        description: "Search channels and commands · Ctrl+K",
+        description: "Switch conversation · Ctrl+K",
         run: () => this.commandPalette(),
       },
       {
         name: "to",
-        description: "Choose an exact recipient · Ctrl+R",
+        description: "Switch agent · Ctrl+R",
         run: () => this.recipients(),
       },
       {
         name: "threads",
-        description: "Open a thread from this conversation · Ctrl+T",
+        description: "Open thread · Ctrl+T",
         run: () => this.threads(),
       },
       {
         name: "chat",
-        description: "Return to the conversation · Esc",
+        description: "Return to chat · Esc",
         run: () => {
           this.pluginView = undefined;
           this.refresh();
@@ -189,12 +189,12 @@ export class TerminalApp {
       },
       {
         name: "latest",
-        description: "Jump to latest output · Ctrl+L",
+        description: "Jump to latest · Ctrl+L",
         run: () => this.scroll.scrollToEnd(),
       },
       {
         name: "retry",
-        description: "Retry the identical unresolved message",
+        description: "Retry pending message",
         run: async () => {
           if (!this.store.current)
             throw new Error("Choose a conversation first.");
@@ -207,8 +207,7 @@ export class TerminalApp {
       },
       {
         name: "discard",
-        description:
-          "Forget an unresolved send after inspecting the conversation",
+        description: "Forget pending send",
         run: () => {
           const view = this.store.current;
           if (!view?.pending || view.sending)
@@ -240,22 +239,21 @@ export class TerminalApp {
       },
       {
         name: "retry-setup",
-        description:
-          "Retry setup of this launch's channel without creating another",
+        description: "Retry channel setup",
         run: async () => {
           await this.session.startup?.retry();
         },
       },
       {
         name: "reconnect",
-        description: "Retry the relay connection and refresh recent history",
+        description: "Reconnect",
         run: async () => {
           await this.session.transport.request("reconnect", {});
         },
       },
       {
         name: "close",
-        description: "Close this view without cancelling the agent",
+        description: "Close conversation",
         run: () => {
           const view = this.store.current;
           if (!view) return;
@@ -272,7 +270,7 @@ export class TerminalApp {
       },
       {
         name: "help",
-        description: "Keyboard shortcuts and client boundaries",
+        description: "Keyboard shortcuts",
         run: () => this.help(),
       },
       {
@@ -326,27 +324,38 @@ export class TerminalApp {
     const framed: Component = {
       render: (width) => {
         const innerWidth = Math.max(1, width - 4);
-        const lines = picker.render(innerWidth);
-        const border = style.muted("─".repeat(Math.max(0, width - 2)));
+        const [heading, ...lines] = picker.render(innerWidth);
+        const border = style.border("─".repeat(Math.max(0, width - 2)));
+        const caption = ` ${heading} `;
         return [
-          style.muted("┌") + border + style.muted("┐"),
+          style.border("┌") +
+            caption +
+            style.border(
+              "─".repeat(Math.max(0, width - visibleWidth(caption) - 2)),
+            ) +
+            style.border("┐"),
+          style.border("│") +
+            " ".repeat(Math.max(0, width - 2)) +
+            style.border("│"),
           ...lines.map(
             (line) =>
-              style.muted("│") +
+              style.border("│") +
               " " +
               line +
               " ".repeat(Math.max(0, width - visibleWidth(line) - 3)) +
-              style.muted("│"),
+              style.border("│"),
           ),
-          style.muted("│") +
-            fit(
-              width >= 40
-                ? " ↑↓ select · Enter open · Esc back"
-                : " ↑↓ · Enter · Esc back",
-              Math.max(1, width - 2),
-            ).padEnd(Math.max(1, width - 2)) +
-            style.muted("│"),
-          style.muted("└") + border + style.muted("┘"),
+          style.border("│") +
+            style.secondary(
+              fit(
+                width >= 40
+                  ? " ↑↓ select · Enter open · Esc back"
+                  : " ↑↓ · Enter · Esc back",
+                Math.max(1, width - 2),
+              ).padEnd(Math.max(1, width - 2)),
+            ) +
+            style.border("│"),
+          style.border("└") + border + style.border("┘"),
         ];
       },
       invalidate: () => picker.invalidate(),
@@ -370,8 +379,8 @@ export class TerminalApp {
         detail: view.recipient
           ? `To ${this.store.name(view.recipient)} · ${view.recipient.slice(0, 12)}`
           : "Choose a recipient with Ctrl+R",
+        category: "channel",
         badge: [
-          "channel",
           view.key === this.store.activeKey ? "current" : "",
           view.unread ? `${view.unread} new` : "",
           view.draft ? "draft" : "",
@@ -386,7 +395,7 @@ export class TerminalApp {
           id: `context:${channel.id}`,
           label: `#${channel.name}`,
           detail: `${channel.members.length} members · ${channel.id}`,
-          badge: "channel",
+          category: "channel",
         });
     }
     return items;
@@ -403,7 +412,7 @@ export class TerminalApp {
       startup?.launch.mode === "new" &&
       startup.launch.channelId === view.channelId;
     this.pick(
-      "Send as you · choose one recipient",
+      "Choose recipient · as you",
       () => {
         const members = this.store.channels.get(view.channelId)?.members ?? [];
         const candidates = new Set([
@@ -475,9 +484,10 @@ export class TerminalApp {
         ...this.contextItems(),
         ...[...this.plugins.commands.values()].map((command) => ({
           id: `command:${command.name}`,
-          label: `/${command.name}`,
-          detail: command.description,
-          badge: "command",
+          label: command.description.split(" · ")[0],
+          detail: `/${command.name}`,
+          badge: command.description.split(" · ")[1],
+          category: "buzz",
         })),
       ],
       (item) => {
