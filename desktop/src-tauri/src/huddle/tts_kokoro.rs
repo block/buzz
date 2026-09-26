@@ -20,7 +20,7 @@ pub(super) fn maybe_run_kokoro_worker(
         return false;
     }
 
-    let engine = match KokoroGerman::load(&model_dir) {
+    let mut engine = match KokoroGerman::load(&model_dir) {
         Ok(engine) => engine,
         Err(error) => {
             let _ = startup_tx.send(Err(format!(
