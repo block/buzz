@@ -23,9 +23,8 @@ report instead.
 7. [Architecture Overview](#architecture-overview)
 8. [Ecosystem](#ecosystem)
 9. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
-10. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
-11. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
-12. [License and CLA](#license-and-cla)
+10. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
+11. [License and CLA](#license-and-cla)
 
 ---
 
@@ -278,7 +277,6 @@ races and emits a warning if all five attempts fail.
 End-to-end tests live in `crates/buzz-test-client/tests/`:
 
 - `e2e_relay.rs` — WebSocket relay tests
-- `e2e_mcp.rs` — MCP tool tests
 - `e2e_nostr_interop.rs` — Nostr protocol interoperability tests
 - `e2e_media.rs` — media upload/download tests
 - `e2e_media_extended.rs` — extended media tests (GIF, image processing)
