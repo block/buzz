@@ -562,6 +562,10 @@ export function AppShell() {
       },
       onCreated?: (channelId: string) => void,
     ) => {
+      // Capture the community that initiated create. Closing the browser and
+      // switching communities while the mutation is in flight must not let the
+      // continuation applyCanvas / goChannel / agents against the new tenant.
+      const initiatingCommunityId = communitiesHook.activeCommunity?.id ?? null;
       const createdChannel = await createChannelMutation.mutateAsync({
         name,
         description,
@@ -569,13 +573,24 @@ export function AppShell() {
         visibility,
         ttlSeconds,
       });
+      if (
+        (communitiesHook.activeCommunity?.id ?? null) !== initiatingCommunityId
+      ) {
+        return;
+      }
 
       await applyCanvas(templateId, createdChannel.id, name);
       await goChannel(createdChannel.id);
       onCreated?.(createdChannel.id);
       void applyAgents(templateId, createdChannel.id);
     },
-    [applyAgents, applyCanvas, createChannelMutation, goChannel],
+    [
+      applyAgents,
+      applyCanvas,
+      communitiesHook.activeCommunity?.id,
+      createChannelMutation,
+      goChannel,
+    ],
   );
   const handleCreateForum = React.useCallback(
     async ({
@@ -591,6 +606,7 @@ export function AppShell() {
       ttlSeconds?: number;
       templateId?: string;
     }) => {
+      const initiatingCommunityId = communitiesHook.activeCommunity?.id ?? null;
       const createdForum = await createForumMutation.mutateAsync({
         name,
         description,
@@ -598,12 +614,23 @@ export function AppShell() {
         visibility,
         ttlSeconds,
       });
+      if (
+        (communitiesHook.activeCommunity?.id ?? null) !== initiatingCommunityId
+      ) {
+        return;
+      }
 
       await applyCanvas(templateId, createdForum.id, name);
       await goChannel(createdForum.id);
       void applyAgents(templateId, createdForum.id);
     },
-    [applyAgents, applyCanvas, createForumMutation, goChannel],
+    [
+      applyAgents,
+      applyCanvas,
+      communitiesHook.activeCommunity?.id,
+      createForumMutation,
+      goChannel,
+    ],
   );
 
   // The channel browser can create either a stream or a forum depending on
