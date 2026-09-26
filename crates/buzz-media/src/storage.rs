@@ -1,4 +1,4 @@
-//! S3/MinIO storage client.
+//! S3-compatible storage client.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -211,7 +211,7 @@ impl MediaStorage {
     ///
     /// Credential selection:
     /// - If both `s3_access_key` and `s3_secret_key` are non-empty, use them as
-    ///   static credentials (MinIO/local/dev, or any static-key deployment).
+    ///   static credentials (local/dev, or any static-key deployment).
     /// - Otherwise, fall back to the AWS default credential chain via
     ///   [`Credentials::default`]: environment, shared profile, web-identity
     ///   token (IRSA on EKS — `AssumeRoleWithWebIdentity`), container, and

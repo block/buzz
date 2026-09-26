@@ -35,6 +35,9 @@ phase() {
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
+  if [[ "${status}" -ne 0 ]]; then
+    "${ROOT}/scripts/diagnose-compose-runtime.sh" postgres redis rustfs rustfs-init || true
+  fi
   if [[ -n "${RELAY_PID}" ]]; then
     kill "${RELAY_PID}" 2>/dev/null || true
     for _ in $(seq 1 50); do
@@ -68,8 +71,8 @@ cd "${ROOT}"
 
 phase_start="$(date +%s)"
 log "starting backing services"
-docker compose up -d postgres redis minio minio-init
-for container in buzz-postgres buzz-redis buzz-minio; do
+docker compose up -d postgres redis rustfs rustfs-init
+for container in buzz-postgres buzz-redis buzz-rustfs; do
   for _ in $(seq 1 60); do
     [[ "$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || true)" == "healthy" ]] && break
     sleep 1
@@ -79,6 +82,22 @@ for container in buzz-postgres buzz-redis buzz-minio; do
     exit 1
   }
 done
+for _ in $(seq 1 60); do
+  init_status="$(docker inspect --format='{{.State.Status}}' buzz-rustfs-init 2>/dev/null || true)"
+  if [[ "${init_status}" == "exited" ]]; then
+    init_exit_code="$(docker inspect --format='{{.State.ExitCode}}' buzz-rustfs-init 2>/dev/null || true)"
+    if [[ "${init_exit_code}" == "0" ]]; then
+      break
+    fi
+    docker logs buzz-rustfs-init || true
+    exit 1
+  fi
+  sleep 1
+done
+[[ "$(docker inspect --format='{{.State.Status}}' buzz-rustfs-init 2>/dev/null || true)" == "exited" ]] || {
+  docker logs buzz-rustfs-init || true
+  exit 1
+}
 phase services "${phase_start}"
 
 phase_start="$(date +%s)"

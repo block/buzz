@@ -290,7 +290,7 @@ pub struct Config {
     /// and its proxy routes return 404.
     pub klipy: Option<KlipyConfig>,
 
-    /// Media storage configuration (S3/MinIO).
+    /// Media storage configuration (S3-compatible).
     pub media: buzz_media::MediaConfig,
     /// Maximum concurrent media uploads handled by one relay process.
     pub media_max_concurrent_uploads: usize,
@@ -1391,7 +1391,7 @@ mod tests {
         assert_eq!(
             config.media.s3_addressing_style,
             buzz_media::config::S3AddressingStyle::Path,
-            "S3 addressing must default to path style for bundled MinIO compatibility"
+            "S3 addressing must default to path style for bundled S3 compatibility"
         );
         assert!(
             config.join_policy.is_none(),

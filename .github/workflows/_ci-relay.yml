@@ -225,11 +225,12 @@ jobs:
       - name: Start integration services
         run: |
           for attempt in 1 2 3; do
-            if docker compose up -d postgres redis minio minio-init; then
+            if docker compose up -d postgres redis rustfs rustfs-init; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
-              echo "docker compose up failed after 3 attempts" >&2
+              echo "::error::dependency image/startup failure: docker compose up failed after 3 attempts" >&2
+              ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
               exit 1
             fi
             echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2
@@ -281,12 +282,34 @@ jobs:
               fi
               sleep 2
             done
-            docker logs "${container}" || true
+            echo "::error::dependency readiness failure: ${service}" >&2
+            ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
             return 1
           }
           wait_healthy "Postgres" "buzz-postgres"
           wait_healthy "Redis" "buzz-redis"
-          wait_healthy "MinIO" "buzz-minio"
+          wait_healthy "RustFS" "buzz-rustfs"
+          wait_completed() {
+            local service="$1"
+            local container="$2"
+            for attempt in $(seq 1 60); do
+              status=$(docker inspect --format='{{.State.Status}}' "${container}" 2>/dev/null || echo "not_found")
+              if [ "${status}" = "exited" ]; then
+                exit_code=$(docker inspect --format='{{.State.ExitCode}}' "${container}" 2>/dev/null || echo "unknown")
+                if [ "${exit_code}" = "0" ]; then
+                  echo "${service} completed"
+                  return 0
+                fi
+                docker logs "${container}" || true
+                return 1
+              fi
+              sleep 2
+            done
+            echo "::error::dependency initialization failure: ${service}" >&2
+            ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
+            return 1
+          }
+          wait_completed "RustFS bucket initialization" "buzz-rustfs-init"
       - name: Download relay binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -420,11 +443,12 @@ jobs:
       - name: Start integration services
         run: |
           for attempt in 1 2 3; do
-            if docker compose up -d postgres redis minio minio-init; then
+            if docker compose up -d postgres redis rustfs rustfs-init; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
-              echo "docker compose up failed after 3 attempts" >&2
+              echo "::error::dependency image/startup failure: docker compose up failed after 3 attempts" >&2
+              ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
               exit 1
             fi
             echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2
@@ -443,12 +467,34 @@ jobs:
               fi
               sleep 2
             done
-            docker logs "${container}" || true
+            echo "::error::dependency readiness failure: ${service}" >&2
+            ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
             return 1
           }
           wait_healthy "Postgres" "buzz-postgres"
           wait_healthy "Redis" "buzz-redis"
-          wait_healthy "MinIO" "buzz-minio"
+          wait_healthy "RustFS" "buzz-rustfs"
+          wait_completed() {
+            local service="$1"
+            local container="$2"
+            for attempt in $(seq 1 60); do
+              status=$(docker inspect --format='{{.State.Status}}' "${container}" 2>/dev/null || echo "not_found")
+              if [ "${status}" = "exited" ]; then
+                exit_code=$(docker inspect --format='{{.State.ExitCode}}' "${container}" 2>/dev/null || echo "unknown")
+                if [ "${exit_code}" = "0" ]; then
+                  echo "${service} completed"
+                  return 0
+                fi
+                docker logs "${container}" || true
+                return 1
+              fi
+              sleep 2
+            done
+            echo "::error::dependency initialization failure: ${service}" >&2
+            ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
+            return 1
+          }
+          wait_completed "RustFS bucket initialization" "buzz-rustfs-init"
       - name: Download relay artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -604,7 +650,7 @@ jobs:
         # Reads require kind:24242 `t=get` auth, so these binaries are the only
         # coverage that a real relay rejects bare reads and honours host- and
         # hash-scoped tokens. They were #[ignore]d and selected by no CI job, so
-        # the lane never ran; select it here, where MinIO and the seeded
+        # the lane never ran; select it here, where RustFS and the seeded
         # 'localhost:3000' community already exist.
         # --no-fail-fast: without it cargo stops after the first failing binary,
         # so one broken case hides every later binary's result.

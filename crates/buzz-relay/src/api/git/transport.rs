@@ -2741,21 +2741,21 @@ mod track_c_tests {
         pool.close().await;
     }
 
-    mod external_infra_minio_tests {
+    mod external_infra_s3_tests {
         #[tokio::test]
-        #[ignore = "requires Postgres and MinIO"]
+        #[ignore = "requires Postgres and S3-compatible object storage"]
         async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
             super::repo_announcement_holds_serving_lease_until_pointer_is_seeded().await;
         }
 
         #[tokio::test]
-        #[ignore = "requires Postgres and MinIO"]
+        #[ignore = "requires Postgres and S3-compatible object storage"]
         async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
             super::finalize_push_holds_serving_lease_through_post_cas_publication().await;
         }
 
         #[tokio::test]
-        #[ignore = "requires Postgres and MinIO"]
+        #[ignore = "requires Postgres and S3-compatible object storage"]
         async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
             super::finalize_push_db_failure_after_cas_is_not_success_and_releases_lease().await;
         }

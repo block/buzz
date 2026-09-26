@@ -21,6 +21,7 @@ on:
       - 'desktop/src-tauri/src/mesh_llm/**'
       - 'scripts/ci-mesh-lifecycle-smoke.sh'
       - 'scripts/start-relay-for-tests.sh'
+      - 'scripts/diagnose-compose-runtime.sh'
       - '.github/workflows/mesh-lifecycle.yml'
       - 'docker-compose.yml'
       - 'docker-compose.ci.yml'
@@ -35,6 +36,7 @@ on:
       - 'desktop/src-tauri/src/mesh_llm/**'
       - 'scripts/ci-mesh-lifecycle-smoke.sh'
       - 'scripts/start-relay-for-tests.sh'
+      - 'scripts/diagnose-compose-runtime.sh'
       - '.github/workflows/mesh-lifecycle.yml'
       - 'docker-compose.yml'
       - 'docker-compose.ci.yml'
@@ -83,11 +85,12 @@ jobs:
       - name: Start integration services
         run: |
           for attempt in 1 2 3; do
-            if docker compose up -d postgres redis minio minio-init; then
+            if docker compose up -d postgres redis rustfs rustfs-init; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
-              echo "docker compose up failed after 3 attempts" >&2
+              echo "::error::dependency image/startup failure: docker compose up failed after 3 attempts" >&2
+              ./scripts/diagnose-compose-runtime.sh postgres redis rustfs rustfs-init || true
               exit 1
             fi
             echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2

@@ -282,7 +282,7 @@ rolling.
 For local review, run `just admin-seed` before `just admin`. `just admin`
 defaults to `BUZZ_ADMIN_AUTH=disabled`, so the dashboard renders without a
 credential. The seed command also uploads real image and diagnostic fixtures to
-local MinIO. Feedback search and filters run over the bounded browser result
+local RustFS. Feedback search and filters run over the bounded browser result
 set. The feedback **status** control (`new`/`reviewed`/`archived`) is
 server-backed: in `nip98` mode it `PATCH`es the relay and adopts the returned
 status, so every operator sees the same state; in `disabled` mode it renders as

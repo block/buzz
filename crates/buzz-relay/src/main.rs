@@ -596,7 +596,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         info!(runtime_id = %runtime_id, "Inter-relay mesh started");
     }
 
-    // Git-on-object-storage: admit the configured S3/MinIO backend against the
+    // Git-on-object-storage: admit the configured S3-compatible backend against the
     // linearizable conditional-write axiom (A3) before serving git traffic.
     // Failure is fatal: a backend that cannot satisfy pointer CAS invalidates
     // the manifest-pointer protocol. This is a deployment gate, not a proof.
