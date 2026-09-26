@@ -448,6 +448,11 @@ a reaction, a workflow step, a canvas update — is a Nostr event with a kind
 integer. Adding a new feature means defining a new kind. No breaking changes
 to existing clients.
 
+**`@mention` boundaries live in `buzz-sdk`.** ASCII letter/digit before `@`
+keeps emails inert; whitespace, punctuation, and non-ASCII scripts open a
+mention so CJK handoffs still wake agents. See
+[docs/mention-boundaries.md](docs/mention-boundaries.md).
+
 ---
 
 ## Ecosystem
