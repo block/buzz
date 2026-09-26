@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { browserWebviewLabel, pinWebviewLabelForWindow } from "./labels.ts";
 
-test("playground label uses window suffix off main", () => {
+test("playground label is canonical on every window (single live webview)", () => {
   assert.equal(
     browserWebviewLabel({ surface: "playground", surfaceId: "demo" }),
     "playground-demo",
@@ -14,7 +14,7 @@ test("playground label uses window suffix off main", () => {
       surfaceId: "demo",
       windowLabel: "pop-1",
     }),
-    "playground-demo--pop-1",
+    "playground-demo",
   );
 });
 

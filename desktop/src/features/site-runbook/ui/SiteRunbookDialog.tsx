@@ -1,6 +1,8 @@
 import { BookOpen } from "lucide-react";
 import * as React from "react";
 
+import { ExportBrowserShareButton } from "@/features/browser-share/ui/ExportBrowserShareButton";
+import type { BrowserShareSource } from "@/features/browser-share/lib/types";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
@@ -9,23 +11,44 @@ import { useSiteRunbook } from "../hooks";
 import type { SiteRunbookRef } from "../lib/types";
 import { SiteRunbookPanel } from "./SiteRunbookPanel";
 
+export type SiteRunbookExportShare = {
+  url: string;
+  title?: string;
+  source: BrowserShareSource;
+};
+
 export function SiteRunbookDialog({
   open,
   onOpenChange,
   runbookRef,
   title = "How to use this site",
+  exportShare,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   runbookRef: SiteRunbookRef;
   title?: string;
+  /** When set, footer includes Export (URL + runbook JSON). */
+  exportShare?: SiteRunbookExportShare;
 }) {
   const api = useSiteRunbook(open ? runbookRef : null);
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <ChooserDialogContent
         footer={
-          <div className="flex justify-end">
+          <div className="flex items-center justify-between gap-2">
+            {exportShare ? (
+              <ExportBrowserShareButton
+                runbookRef={runbookRef}
+                source={exportShare.source}
+                testId="site-runbook-export"
+                title={exportShare.title}
+                url={exportShare.url}
+                variant="ghost"
+              />
+            ) : (
+              <span />
+            )}
             <Button
               onClick={() => onOpenChange(false)}
               type="button"
@@ -56,10 +79,12 @@ export function SiteRunbookOpenButton({
   runbookRef,
   label = "Runbook",
   testId,
+  exportShare,
 }: {
   runbookRef: SiteRunbookRef;
   label?: string;
   testId?: string;
+  exportShare?: SiteRunbookExportShare;
 }) {
   const [open, setOpen] = React.useState(false);
   return (
@@ -75,6 +100,7 @@ export function SiteRunbookOpenButton({
         {label}
       </Button>
       <SiteRunbookDialog
+        exportShare={exportShare}
         onOpenChange={setOpen}
         open={open}
         runbookRef={runbookRef}

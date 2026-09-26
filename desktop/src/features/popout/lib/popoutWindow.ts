@@ -280,8 +280,8 @@ export async function openPopoutWindow(input: {
     return;
   }
   writePopoutPayload(label, payload);
-  // OS playground/split gets its own window-scoped WKWebView. Park the main
-  // overlay and hide main playground-{sid} so it cannot drift over main.
+  // OS playground/split reparents the one live WKWebView. Park the main
+  // overlay and hide on main so the stage can claim it in the pop-out.
   if (
     input.playground?.sid &&
     (input.kind === "playground" || input.kind === "split")
