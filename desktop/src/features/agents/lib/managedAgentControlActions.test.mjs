@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
+  isManagedAgentActive,
 } from "./managedAgentControlActions.ts";
 
 function agent(overrides = {}) {
@@ -165,4 +166,44 @@ test("test_respawn_onStopped_fires_before_start_resolves", async () => {
     ["stop", "onStopped", "start"],
     "onStopped must fire after stop resolves and before start is called",
   );
+});
+
+// --- isManagedAgentActive: backend-agnostic, on purpose --------------------
+//
+// runtime.rs's two-axis model: for a provider-backed agent, `status` is a
+// control-plane fact ("the provider was invoked") that stays "deployed"
+// forever once set — there is no v1 undeploy. It never reverts on its own
+// after `!shutdown` takes the harness offline. respawnManagedAgentWithRules
+// already knows how to redeploy a provider agent (it skips the stop step and
+// just calls start), so a caller that additionally gates Restart on
+// `backend.type === "local"` (as UserProfilePanelSections.tsx did) leaves
+// every provider-backed agent with no way back from "Shutdown" once it goes
+// offline — the primary action stays wired to `!shutdown` forever, never
+// reaching `start` again. isManagedAgentActive itself must stay
+// backend-agnostic so callers have no reason to bolt on that extra check.
+
+test("isManagedAgentActive is true for a deployed provider agent", () => {
+  const providerAgent = agent({
+    status: "deployed",
+    backend: { type: "provider", id: "lxc", config: {} },
+  });
+  assert.equal(isManagedAgentActive(providerAgent), true);
+});
+
+test("isManagedAgentActive is true for a running local agent", () => {
+  const localAgent = agent({ status: "running" });
+  assert.equal(isManagedAgentActive(localAgent), true);
+});
+
+test("isManagedAgentActive is false for a provider agent never deployed", () => {
+  const undeployedAgent = agent({
+    status: "not_deployed",
+    backend: { type: "provider", id: "lxc", config: {} },
+  });
+  assert.equal(isManagedAgentActive(undeployedAgent), false);
+});
+
+test("isManagedAgentActive is false for a stopped local agent", () => {
+  const stoppedAgent = agent({ status: "stopped" });
+  assert.equal(isManagedAgentActive(stoppedAgent), false);
 });
