@@ -112,7 +112,7 @@ impl DevMcp {
 
     #[tool(
         name = "browser_drive",
-        description = "Drive a Buzz WKWebView you hold in Drive mode. Prefer surface_id (stable across popout); webview_label also works. `action` is a DriveAction object (or JSON string): { kind, id?, url?, x?, y?, text?, selector?, dx?, dy?, key?, urlContains?, timeoutMs? }. Use `kind` (not `type`): navigate|click|type|scroll|hover|key|waitFor. Optional `actions` batch is validated then queued. By default waits up to ~10s for per-step drive/drive_error results (set queue_only=true to skip). Returns {ok, results, url, ids, complete, webviewLabel, surfaceId}. Requires BUZZ_AGENT_PUBKEY."
+        description = "Drive a Buzz WKWebView you hold in Drive mode. Prefer surface_id. Protocol: one goal/one surface; snapshot then one click/type/key; waitFor after nav/URL change; do not screenshot every step; on no element retry once then stop. `action`: { kind, id?, url?, x?, y?, text?, selector?, ref?, dx?, dy?, key?, urlContains?, timeoutMs? }. kind=navigate|click|type|scroll|hover|key|waitFor. click/hover accept x,y OR CSS selector OR snapshot ref (e0). Optional `actions` batch for atomic sequences only. Default wait ~10s (queue_only skips). Returns {ok, results, url, ids, complete, webviewLabel, surfaceId}. Requires BUZZ_AGENT_PUBKEY."
     )]
     async fn browser_drive(
         &self,
@@ -123,7 +123,7 @@ impl DevMcp {
 
     #[tool(
         name = "browser_snapshot",
-        description = "Request an accessibility/DOM snapshot for a granted Buzz browser (Observe or Drive). Prefer surface_id (stable across popout); webview_label also works. Returns grant + last known url/title immediately and writes snapshot-request.json for Desktop to fill a kind=snapshot observe event. Optional screenshot=true asks Desktop to capture via playground PNG. Poll browser_observe_poll for the snapshot event. Requires BUZZ_AGENT_PUBKEY."
+        description = "Request a DOM/a11y snapshot for a granted Buzz browser (Observe or Drive). Prefer surface_id. Primary perception for Drive — prefer this over screenshot every step. Returns grant + url/title immediately; Desktop fills kind=snapshot via eval (interactives include ref e0.. + center). Optional screenshot=true for visual proof only. Poll browser_observe_poll for the snapshot. Requires BUZZ_AGENT_PUBKEY."
     )]
     async fn browser_snapshot(
         &self,

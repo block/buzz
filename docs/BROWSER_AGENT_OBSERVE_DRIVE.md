@@ -117,7 +117,7 @@ Instrumentation runs **inside** the Buzz WKWebView (page script), not OpenClaw C
 When `mode=drive`:
 
 1. Human pointer/keyboard on the child webview is locked (full-page `#__buzz_agent_lock` overlay) unless the human has Taken control. Lock stays for the human; agent hit-tests **through** it via `document.elementsFromPoint` (lock `pointer-events` briefly cleared), skipping `#__buzz_agent_lock` and `#__buzz_agent_cursor`. If that returns nothing (hidden/parked WKWebView), a `getBoundingClientRect` geometry fallback matches snapshot centers.
-2. Agent actions (`browser_drive`): `navigate` | `click` | `type` | `scroll` | `hover` | `key` | `waitFor` — injected with a visible ghost cursor / highlight.
+2. Agent actions (`browser_drive`): `navigate` | `click` | `type` | `scroll` | `hover` | `key` | `waitFor` — injected with a visible ghost cursor / highlight (skipped when the WKWebView is parked/hidden). `click`/`hover` accept `x,y` **or** CSS `selector` **or** snapshot `ref` (e.g. `e0`).
 3. Every action has an `id`. Page returns `{ id, ok, kind, hit?: { tag, role, name }, url, error? }` via cookie `__buzz_ba_drive_result`. Desktop writes a `drive` (ok) or `drive_error` event to `events.jsonl`.
 4. **`key`:** `{ "kind":"key", "key":"Enter" }` — Enter, Tab, Escape, Backspace, arrows. Fires keydown/keypress/keyup on `document.activeElement`. If keydown not defaultPrevented: Enter in input+form → `form.requestSubmit()`; Enter in textarea → newline; Tab → move focus. No site special-cases.
 5. **MCP → Desktop path:** `buzz-dev-mcp` `browser_drive` validates the DriveAction shape (object or JSON string; field is **`kind`**, not `type`), assigns `id`, appends one line to `{appData}/browser-agent/{label}/drive-inbox.jsonl`. Prefer **`surface_id`** when calling (see Agent target). Desktop drains the inbox via a **Rust-side watcher** (~200ms over live grants) plus optional chrome backup poll; MCP and Desktop share a `drive-inbox.lock`, then Desktop **atomically renames** the inbox to a temp file, reads/deletes the temp (so appends during processing land in a fresh file). Bad lines / unknown kinds → `drive_error` (never silent ok).
@@ -140,7 +140,8 @@ Main-frame only. Same-URL repeats are dropped; title is filled when available (p
   "url": "navigate",
   "x": 0, "y": 0,
   "text": "type or waitFor text",
-  "selector": "type target or waitFor",
+  "selector": "click/hover/type target or waitFor",
+  "ref": "snapshot interactive ref (e0) for click/hover",
   "dx": 0, "dy": 0,
   "key": "Enter|Tab|Escape|Backspace|ArrowLeft|ArrowRight|ArrowUp|ArrowDown",
   "urlContains": "waitFor",
@@ -158,7 +159,7 @@ Prefer **Desktop-managed / local ACP** agents that can call Desktop-side tools:
 |------|------|
 | `browser_observe_poll` | Drain observe events. Prefer `surface_id`; `webview_label` optional. |
 | `browser_drive` | Drive action or `actions` batch (Drive mode only). Prefer `surface_id`. Validates `kind`; waits for results unless `queue_only`. |
-| `browser_snapshot` | Request DOM/a11y snapshot. Prefer `surface_id`. Writes `snapshot-request.json`; Desktop fills `kind=snapshot`. Optional `screenshot=true`. |
+| `browser_snapshot` | Request DOM/a11y snapshot. Prefer `surface_id`. Writes `snapshot-request.json`; Desktop fills `kind=snapshot` via `eval_with_callback` (interactives include `ref` + `center`). Optional `screenshot=true`. |
 | `browser_agent_grants` | List grants (`surfaceId` + live `webviewLabel`) for this agent |
 | `browser_tabs` | List tabs in the granted browser group (`mainTabSid` primary; extras from in-page open). Prefer `surface_id`. |
 | `browser_switch_tab` | Focus a tab by `surface_id` (rebinds grant). Poll `tab_switched` or re-call `browser_tabs`. |

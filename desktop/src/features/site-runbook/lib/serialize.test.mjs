@@ -99,6 +99,8 @@ test("shapeRunbookInject includes only active procedures", () => {
   assert.equal(inject.procedures.length, 1);
   assert.equal(inject.procedures[0].id, "a1");
   assert.equal(inject.procedures[0].summary, "Click Save Confirm");
+  assert.ok(Array.isArray(inject.driveProtocol));
+  assert.ok(inject.driveProtocol.some((line) => line.includes("surfaceId")));
 });
 
 test("propose stays pending until accept", () => {

@@ -767,6 +767,9 @@ pub async fn playground_webview_show(
         } else {
             webview.hide().map_err(|error| error.to_string())?;
         }
+        if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
+            crate::browser_agent::set_webview_hidden(&state, &live_label, !show);
+        }
         crate::browser_agent::ensure_instrumentation_for_label(&app, &live_label);
         emit_nav(&app, nav.clone(), &live_label);
         return Ok(nav);
@@ -843,6 +846,9 @@ pub async fn playground_webview_show(
     if !show {
         webview.hide().map_err(|error| error.to_string())?;
     }
+    if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
+        crate::browser_agent::set_webview_hidden(&state, &label, !show);
+    }
     sync_user_agent(
         &app,
         &manager,
@@ -866,9 +872,12 @@ pub async fn playground_webview_hide(
     let window_label = normalize_window_label(window_label.as_deref());
     // Only hide when this window still parents the live child. After reparent
     // to another host, the abandoning stage must not blank the active view.
-    if let Some((_label, webview)) = find_playground_webview_for_sid(&app, &sid) {
+    if let Some((label, webview)) = find_playground_webview_for_sid(&app, &sid) {
         if playground_parent_is(&webview, &window_label) {
             webview.hide().map_err(|error| error.to_string())?;
+            if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
+                crate::browser_agent::set_webview_hidden(&state, &label, true);
+            }
         }
     }
     Ok(())
@@ -888,6 +897,9 @@ pub async fn playground_webview_hide_all(
             continue;
         }
         let _ = webview.hide();
+        if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
+            crate::browser_agent::set_webview_hidden(&state, webview.label(), true);
+        }
     }
     Ok(())
 }

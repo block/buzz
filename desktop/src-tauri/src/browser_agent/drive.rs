@@ -20,6 +20,9 @@ pub struct DriveAction {
     pub text: Option<String>,
     #[serde(default)]
     pub selector: Option<String>,
+    /// Snapshot interactive ref (e.g. "e0") from the latest browser_snapshot.
+    #[serde(default, rename = "ref")]
+    pub ref_id: Option<String>,
     #[serde(default)]
     pub dx: Option<f64>,
     #[serde(default)]
@@ -68,8 +71,21 @@ pub fn validate_action(action: &DriveAction) -> Result<String, String> {
     let kind = action.kind.trim().to_ascii_lowercase();
     match kind.as_str() {
         "click" | "hover" => {
-            if action.x.is_none() || action.y.is_none() {
-                return Err(format!("{kind} requires x and y"));
+            let has_xy = action.x.is_some() && action.y.is_some();
+            let has_sel = action
+                .selector
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            let has_ref = action
+                .ref_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            if !has_xy && !has_sel && !has_ref {
+                return Err(format!("{kind} requires x,y or selector or ref"));
             }
         }
         "type" => {
@@ -168,15 +184,35 @@ pub fn action_js(action: &DriveAction) -> Result<String, String> {
     let id_js = serde_json::to_string(id).map_err(|e| e.to_string())?;
 
     let call = match kind.as_str() {
-        "click" => {
-            let x = action.x.unwrap();
-            let y = action.y.unwrap();
-            format!("a.clickAt({x},{y},{id_js})")
-        }
-        "hover" => {
-            let x = action.x.unwrap();
-            let y = action.y.unwrap();
-            format!("a.hoverAt({x},{y},{id_js})")
+        "click" | "hover" => {
+            let x_js = action
+                .x
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".into());
+            let y_js = action
+                .y
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".into());
+            let selector_js = match action
+                .selector
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(s) => serde_json::to_string(s).map_err(|e| e.to_string())?,
+                None => "null".into(),
+            };
+            let ref_js = match action
+                .ref_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(s) => serde_json::to_string(s).map_err(|e| e.to_string())?,
+                None => "null".into(),
+            };
+            let fn_name = if kind == "click" { "clickAt" } else { "hoverAt" };
+            format!("a.{fn_name}({x_js},{y_js},{id_js},{selector_js},{ref_js})")
         }
         "type" => {
             let text = action.text.as_deref().unwrap_or("");
@@ -287,6 +323,7 @@ mod tests {
             y: None,
             text: None,
             selector: None,
+            ref_id: None,
             dx: None,
             dy: None,
             key: None,
@@ -301,7 +338,7 @@ mod tests {
         a.x = Some(10.0);
         a.y = Some(20.0);
         let js = action_js(&a).unwrap();
-        assert!(js.contains("clickAt(10,20,\"t1\")"));
+        assert!(js.contains("clickAt(10,20,\"t1\",null,null)"), "{js}");
         assert!(js.contains("__buzz_ba_drive_result"));
         assert!(js.contains("await out"));
     }
@@ -348,5 +385,29 @@ mod tests {
     #[test]
     fn unknown_kind_rejected() {
         assert!(validate_action(&base("teleport")).unwrap_err().contains("unknown"));
+    }
+
+    #[test]
+    fn click_accepts_selector_without_xy() {
+        let mut a = base("click");
+        a.selector = Some("#save".into());
+        assert!(validate_action(&a).is_ok());
+        let js = action_js(&a).unwrap();
+        assert!(js.contains("clickAt(null,null,\"t1\",\"#save\",null)"), "{js}");
+    }
+
+    #[test]
+    fn click_accepts_ref_without_xy() {
+        let mut a = base("click");
+        a.ref_id = Some("e3".into());
+        assert!(validate_action(&a).is_ok());
+        let js = action_js(&a).unwrap();
+        assert!(js.contains("\"e3\""), "{js}");
+    }
+
+    #[test]
+    fn click_requires_target() {
+        let a = base("click");
+        assert!(validate_action(&a).unwrap_err().contains("x,y"));
     }
 }

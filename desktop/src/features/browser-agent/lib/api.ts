@@ -267,6 +267,7 @@ export function subscribeBrowserAgentSwitchTab(
 export type BrowserAgentRunbookMirror = {
   agentBrief: string;
   procedures: Array<{ id: string; title: string; summary: string }>;
+  driveProtocol?: string[];
 };
 
 export type BrowserAgentRunbookFull = {
