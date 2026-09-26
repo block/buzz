@@ -5,13 +5,19 @@ use crate::client::{
     BuzzClient,
 };
 use crate::error::CliError;
-use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
+use crate::validate::{parse_uuid, read_or_stdin, sdk_err};
 
 // TODO(phase-4): Replace raw nostr::EventBuilder usage with buzz-sdk builder functions
 
 /// List workflows in a channel — query kind:30620 workflow definition events.
 pub async fn cmd_list_workflows(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
+    // Canonicalize before filtering. `validate_uuid` only checks that the input
+    // parses and discards the result, but `Uuid::parse_str` accepts uppercase,
+    // the unhyphenated 32-character form, braces and a `urn:uuid:` prefix. Every
+    // `h`/`d` tag in the tree is written in the canonical lowercase hyphenated
+    // form and a NIP-01 generic tag filter compares tag values byte for byte, so
+    // any other spelling matches nothing and this prints `[]` instead of failing.
+    let channel_id = parse_uuid(channel_id)?.hyphenated().to_string();
     let filter = serde_json::json!({
         "kinds": [30620],
         "#h": [channel_id]
@@ -36,7 +42,8 @@ pub async fn cmd_list_workflows(client: &BuzzClient, channel_id: &str) -> Result
 
 /// Get a single workflow definition.
 pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<(), CliError> {
-    validate_uuid(workflow_id)?;
+    // Same canonicalization as `cmd_list_workflows`; see the note there.
+    let workflow_id = parse_uuid(workflow_id)?.hyphenated().to_string();
     let filter = serde_json::json!({
         "kinds": [30620],
         "#d": [workflow_id]
@@ -68,7 +75,8 @@ pub async fn cmd_get_workflow_runs(
     workflow_id: &str,
     limit: Option<u32>,
 ) -> Result<(), CliError> {
-    validate_uuid(workflow_id)?;
+    // Same canonicalization as `cmd_list_workflows`; see the note there.
+    let workflow_id = parse_uuid(workflow_id)?.hyphenated().to_string();
     let limit = limit.unwrap_or(20).min(100);
     let filter = serde_json::json!({
         "kinds": [46001, 46002, 46003],
@@ -126,6 +134,10 @@ pub async fn cmd_update_workflow(
     let wf_uuid = parse_uuid(workflow_id)?;
     let yaml_definition = read_or_stdin(yaml)?;
 
+    // The parsed value is already to hand; the revision lookup below was still
+    // filtering on the raw argument. See `cmd_list_workflows` for why that
+    // matters — here it turns an existing workflow into "not found".
+    let workflow_id = wf_uuid.hyphenated().to_string();
     let filter = serde_json::json!({
         "kinds": [30620],
         "#d": [workflow_id]
@@ -202,6 +214,24 @@ pub async fn cmd_trigger_workflow(
     Ok(())
 }
 
+/// Hex SHA-256 of an approval token, computed over its canonical spelling.
+///
+/// The relay looks approvals up by `hex(SHA256(token))` and the token it stored
+/// came from `Uuid::new_v4().to_string()` — canonical lowercase hyphenated
+/// (`buzz-workflow`'s `generate_approval_token`). Hashing the argument's own
+/// bytes therefore makes the digest depend on how the operator spelled the
+/// token: `validate_uuid` passes uppercase, the unhyphenated form, braces and a
+/// `urn:uuid:` prefix, and each hashes to something the relay has never seen.
+/// The approval is then refused as `approval not found`, which sends whoever ran
+/// it looking for an expired or already-answered request rather than at their
+/// own paste.
+///
+/// Parse first, hash the canonical form.
+fn approval_token_hash(approval_token: &str) -> Result<String, CliError> {
+    let canonical = parse_uuid(approval_token)?.hyphenated().to_string();
+    Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
+}
+
 /// Approve or deny a workflow step — sign and submit a kind:46030 (grant) or 46031 (deny) event.
 pub async fn cmd_approve_step(
     client: &BuzzClient,
@@ -209,12 +239,9 @@ pub async fn cmd_approve_step(
     approved: bool,
     note: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_uuid(approval_token)?;
-
     let content = note.unwrap_or("");
 
-    // The relay expects d-tag = hex(SHA256(token)), not the raw token UUID.
-    let token_hash = hex::encode(Sha256::digest(approval_token.as_bytes()));
+    let token_hash = approval_token_hash(approval_token)?;
     let builder =
         buzz_sdk::build_workflow_approval(&token_hash, approved, content).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
@@ -252,5 +279,50 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
             // approved is already a bool — no parse_bool_flag needed
             cmd_approve_step(client, &token, approved, note.as_deref()).await
         }
+    }
+}
+
+#[cfg(test)]
+mod approval_token_tests {
+    use super::approval_token_hash;
+
+    /// The token the relay stored is `Uuid::new_v4().to_string()` — canonical
+    /// lowercase hyphenated. Every spelling `validate_uuid` accepts must hash to
+    /// the same digest as that one, or the approval is refused as not found.
+    #[test]
+    fn every_accepted_spelling_hashes_to_the_canonical_digest() {
+        let canonical = "550e8400-e29b-41d4-a716-446655440000";
+        let expected = approval_token_hash(canonical).expect("canonical token parses");
+
+        for spelling in [
+            "550E8400-E29B-41D4-A716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+            "{550e8400-e29b-41d4-a716-446655440000}",
+            "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+        ] {
+            assert_eq!(
+                approval_token_hash(spelling).expect("spelling parses"),
+                expected,
+                "{spelling} hashed to a digest the relay never stored"
+            );
+        }
+    }
+
+    /// Pinned against the relay's side of the contract: `hex(SHA256(token))`
+    /// over the canonical bytes, so a change to either half is a red test rather
+    /// than a silent "approval not found".
+    #[test]
+    fn digest_is_hex_sha256_of_the_canonical_bytes() {
+        assert_eq!(
+            approval_token_hash("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+                "550e8400-e29b-41d4-a716-446655440000".as_bytes()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_token_that_is_not_a_uuid_is_a_usage_error() {
+        assert!(approval_token_hash("not-a-token").is_err());
     }
 }
