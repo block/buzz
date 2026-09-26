@@ -62,7 +62,8 @@ const UPLOAD_PACK_MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 /// NIP-98 auth extractor for git routes.
 ///
 /// Validates the `Authorization: Nostr <base64>` header before the request body
-/// is read. Same pattern as `AuthenticatedUpload` in media.rs.
+/// is read. Same pattern as `UploadContext` in media.rs: auth is deferred out of
+/// the extractor so NIP-FI admission can map failures to canonical denial bytes.
 ///
 /// Authorization model: reads (ref advertisement, upload-pack) require the
 /// caller's *current* active membership in the repo's bound channel — see
@@ -79,44 +80,31 @@ pub struct GitAuth {
 impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
     type Rejection = Response;
 
+    #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let method = parts.method.as_str();
 
-        let auth_header = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .header(
-                        "WWW-Authenticate",
-                        format!("Nostr realm=\"buzz\", method=\"{method}\""),
-                    )
-                    .body(Body::from("missing Authorization header"))
-                    .unwrap()
-            })?;
-
-        let token = auth_header.strip_prefix("Nostr ").ok_or_else(|| {
-            Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header(
-                    "WWW-Authenticate",
-                    format!("Nostr realm=\"buzz\", method=\"{method}\""),
-                )
-                .body(Body::from("expected Authorization: Nostr <base64>"))
-                .unwrap()
-        })?;
-
-        let event_bytes = base64::engine::general_purpose::STANDARD
-            .decode(token)
-            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token))
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid base64").into_response())?;
-        let event_json = String::from_utf8(event_bytes)
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid utf-8").into_response())?;
+        // Off mode: parse and validate the Authorization header BEFORE tenant
+        // lookup.  [FI-INV-15] — Off mode preserves pre-NIP-FI error precedence:
+        // missing credentials → 401 + WWW-Authenticate challenge;
+        // malformed credentials (bad base64, bad UTF-8) → 401 without challenge;
+        // regardless of whether the Host resolves to a known community.  No
+        // database work for syntactically bad requests in Off mode.
+        //
+        // Enforce: the header syntax is validated
+        // inside the NIP-FI admission closure below, where proof failures are
+        // mapped to NIP-FI denial bytes.  (DenyProtected returns 503 at the
+        // start of admission without running the closure.)  Tenant lookup still happens before
+        // admission (immediately after this block) because the signed `u` tag
+        // must be verified against the tenant-bound host, not a process-global
+        // domain.
+        let mode = state.config.nip_fi.mode;
+        if matches!(mode, buzz_auth::NipFiMode::Off) {
+            parse_git_auth_header(&parts.headers, method)?;
+        }
 
         // Row zero for Git HTTP: bind the request Host to a server-resolved
         // tenant before URL verification. We still do not trust forwarded
@@ -142,21 +130,15 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         )
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "unrecognized git endpoint").into_response())?;
 
-        // Repo-root URL verification.
+        // NIP-FI admission: the NIP-98 extraction closure runs inside
+        // `admit_nip_fi_http_on_state` so all proof failures (missing header,
+        // invalid base64, bad signature) are mapped to NIP-FI denial bytes in
+        // Enforce mode, and cardinality is enforced uniformly.  Off mode
+        // preserves legacy Git 401 responses per [FI-INV-15]; Off-mode header
+        // syntax was already validated above so the closure cannot fail on the
+        // syntax cases.
+        // [FI-TRACE-AUTHORITY-UNIFORM, FI-TRACE-DENIAL-ORACLE]
         //
-        // The credential helper signs a NIP-98 token with:
-        //   u = <repo-root>   (e.g., http://host/git/{owner}/{repo})
-        //
-        // Git's credential protocol does NOT pass query strings to helpers, so
-        // service-scoping (`?service=...`) cannot be implemented at the NIP-98
-        // level without protocol changes. The token is repo-scoped, not service-scoped.
-        //
-        // Security is still provided by:
-        // - ±60s timestamp window (limits replay)
-        // - HTTPS in production (prevents token theft)
-        // - Pre-receive hook for push authorization (role + protection rules)
-        // - Endpoint routing (clone/push are different HTTP paths)
-
         // Skip HTTP method check for git routes.
         //
         // Git's credential helper signs with `method=GET` (the initial /info/refs request)
@@ -165,42 +147,58 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // Security is provided by: service-binding in the URL (clone vs push scoped),
         // ±60s timestamp, and the pre-receive hook for push authorization.
         // We pass the method from the event itself so verify_nip98_event always accepts.
-        let event_method = serde_json::from_str::<serde_json::Value>(&event_json)
-            .ok()
-            .and_then(|v| {
-                v["tags"]
-                    .as_array()?
-                    .iter()
-                    .find(|t| t[0].as_str() == Some("method"))?[1]
-                    .as_str()
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| method.to_owned());
-
-        // SECURITY: method intentionally not verified for git routes. The tautological
-        // check (event.method == event.method) is deliberate — see comment block above.
-        // Git's credential protocol signs once with GET and reuses for POST. The URL tag
-        // provides the real security boundary (±60s timestamp + URL lock + HTTPS).
-
+        //
         // body=None: can't buffer streaming pack data to verify payload hash.
         // Token is time-bounded (±60s) and URL-locked — acceptable trade-off.
-        let pubkey =
-            buzz_auth::nip98::verify_nip98_event(&event_json, &expected_url, &event_method, None)
+        let headers_clone = parts.headers.clone();
+        let method_str = method.to_owned();
+        let admission = crate::nip_fi_http::admit_nip_fi_http_on_state(
+            state,
+            &parts.headers,
+            move || -> Result<crate::nip_fi_http::Nip98Proof<(nostr::Event, u64)>, Response> {
+                // In Off mode `parse_git_auth_header` already ran above and
+                // succeeded, so re-parsing here is purely for the return value.
+                // In Enforce mode it runs for the first time inside this closure
+                // (on the auth-rejection path the NIP-FI layer maps the error).
+                let (event_json, method_for_verify) =
+                    parse_git_auth_header_full(&headers_clone, &method_str)?;
+
+                // SECURITY: method intentionally not verified for git routes. The tautological
+                // check (event.method == event.method) is deliberate — see comment block above.
+                // Git's credential protocol signs once with GET and reuses for POST. The URL tag
+                // provides the real security boundary (±60s timestamp + URL lock + HTTPS).
+                let pubkey = buzz_auth::nip98::verify_nip98_event(
+                    &event_json,
+                    &expected_url,
+                    &method_for_verify,
+                    None,
+                )
                 .map_err(|e| {
-                warn!(error = %e, "git NIP-98 auth failed");
-                (StatusCode::UNAUTHORIZED, "NIP-98 auth failed").into_response()
-            })?;
+                    warn!(error = %e, "git NIP-98 auth failed");
+                    (StatusCode::UNAUTHORIZED, "NIP-98 auth failed").into_response()
+                })?;
 
-        // NOTE: NIP-98 event-ID dedup intentionally NOT implemented here.
-        // Git's credential protocol reuses one signed token across multiple requests
-        // in a session (info_refs GET → upload-pack/receive-pack POST). Rejecting
-        // replayed event IDs would break normal clone/push operations.
-        // The ±60s timestamp window + URL scoping + HTTPS transport provide sufficient
-        // replay protection for v1. Per-request signing requires protocol changes.
+                // NOTE: NIP-98 event-ID dedup intentionally NOT implemented here.
+                // Git's credential protocol reuses one signed token across multiple requests
+                // in a session (info_refs GET -> upload-pack/receive-pack POST). Rejecting
+                // replayed event IDs would break normal clone/push operations.
+                // The +-60s timestamp window + URL scoping + HTTPS transport provide sufficient
+                // replay protection for v1. Per-request signing requires protocol changes.
 
-        let event: nostr::Event = serde_json::from_str(&event_json)
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid auth event").into_response())?;
-        let signed_auth_created_at = event.created_at.as_secs();
+                let event: nostr::Event = serde_json::from_str(&event_json).map_err(|_| {
+                    (StatusCode::UNAUTHORIZED, "invalid auth event").into_response()
+                })?;
+                let signed_auth_created_at = event.created_at.as_secs();
+
+                Ok(crate::nip_fi_http::Nip98Proof::new(
+                    pubkey,
+                    (event, signed_auth_created_at),
+                ))
+            },
+        )?;
+
+        let pubkey = *admission.proven_pubkey();
+        let (event, signed_auth_created_at) = admission.into_extra();
 
         // Relay membership gate (NIP-43). Git cannot carry a standalone
         // x-auth-tag header through the credential-helper protocol, so agents
@@ -247,7 +245,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
 /// Cascades to the proven NIP-OA owner, matching the NIP-42 gate in
 /// `handlers::auth`: banning a human must also revoke their agents, or the ban
 /// is bypassable by cloning and pushing through an agent key.
-async fn deny_banned_git_principal(
+pub(super) async fn deny_banned_git_principal(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
     pubkey: &nostr::PublicKey,
@@ -324,6 +322,86 @@ fn enforce_git_ban_cascade(
     }
 }
 
+/// Parse and syntax-validate the `Authorization: Nostr <base64>` header for
+/// Git HTTP requests.  Returns `Ok(())` on success (the caller only needs to
+/// know whether the syntax is valid); on failure returns a `Response` that
+/// already carries the correct 401 + `WWW-Authenticate` challenge.
+///
+/// Shared by the Off-mode early-exit path and the full extraction below.
+/// Keeps the response bytes identical between the two call sites.
+///
+/// [FI-INV-15] — Off mode must return 401 + challenge for missing/malformed
+/// credentials before any tenant lookup.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
+fn parse_git_auth_header(headers: &axum::http::HeaderMap, method: &str) -> Result<(), Response> {
+    parse_git_auth_header_full(headers, method).map(|_| ())
+}
+
+/// Full extraction: parse the Authorization header and return
+/// `(event_json, method_for_verify)`.  `method_for_verify` is taken from the
+/// NIP-98 event's `method` tag when present, falling back to the HTTP method;
+/// this is the "tautological" bypass that lets git clients reuse a GET token
+/// for the subsequent POST.
+///
+/// Returns `Err(Response)` for missing/malformed-scheme → 401 + `WWW-Authenticate`;
+/// bad-base64/bad-utf-8 → 401 without `WWW-Authenticate` (use `into_response()`
+/// which does not add the challenge header).
+#[allow(clippy::result_large_err)]
+fn parse_git_auth_header_full(
+    headers: &axum::http::HeaderMap,
+    method: &str,
+) -> Result<(String, String), Response> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header(
+                    "WWW-Authenticate",
+                    format!("Nostr realm=\"buzz\", method=\"{method}\""),
+                )
+                .body(Body::from("missing Authorization header"))
+                .unwrap()
+        })?;
+
+    let token = auth_header.strip_prefix("Nostr ").ok_or_else(|| {
+        Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(
+                "WWW-Authenticate",
+                format!("Nostr realm=\"buzz\", method=\"{method}\""),
+            )
+            .body(Body::from("expected Authorization: Nostr <base64>"))
+            .unwrap()
+    })?;
+
+    let event_bytes = base64::engine::general_purpose::STANDARD
+        .decode(token)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token))
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid base64").into_response())?;
+    let event_json = String::from_utf8(event_bytes)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid utf-8").into_response())?;
+
+    // Extract `method` from the NIP-98 event tag; fall back to HTTP method.
+    // SECURITY: method intentionally not verified for git routes (see GitAuth
+    // comment block).  Git's credential helper signs once with GET and reuses
+    // for POST; the tautological self-comparison is deliberate.
+    let method_for_verify = serde_json::from_str::<serde_json::Value>(&event_json)
+        .ok()
+        .and_then(|v| {
+            v["tags"]
+                .as_array()?
+                .iter()
+                .find(|t| t[0].as_str() == Some("method"))?[1]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| method.to_owned());
+
+    Ok((event_json, method_for_verify))
+}
+
 /// Construct the repo-root NIP-98 `u` URL expected for a git HTTP request.
 ///
 /// The host is always the server-resolved tenant host. `config_relay_url` only
@@ -362,7 +440,7 @@ fn git_expected_url(
 /// repo root — but the *name* validation stays because owner/repo are
 /// still used as object-store key components via `manifest::pointer_key`.
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
-fn validate_repo_id<'a>(owner: &str, repo: &'a str) -> Result<&'a str, Response> {
+pub(super) fn validate_repo_id<'a>(owner: &str, repo: &'a str) -> Result<&'a str, Response> {
     // Owner must be exactly 64 lowercase hex chars.
     if owner.len() != 64
         || !owner
@@ -483,13 +561,13 @@ fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Resp
 /// — so the remediation body leaks nothing, and only the author can rebind
 /// (kind:30617 is keyed by `(author, d)`). A *broken* binding stays generic
 /// even for the author: ambiguity fails closed.
-async fn authorize_git_read(
+pub(super) async fn authorize_git_read(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
     caller: &nostr::PublicKey,
     owner_hex: &str,
     repo_name: &str,
-) -> Result<(), Response> {
+) -> Result<nostr::Event, Response> {
     fn denied() -> Response {
         (StatusCode::NOT_FOUND, "repository not found").into_response()
     }
@@ -552,7 +630,7 @@ async fn authorize_git_read(
         .get_member_role(community, channel_id, &caller.to_bytes())
         .await
     {
-        Ok(role) if read_role_allows(role.as_deref()) => Ok(()),
+        Ok(role) if read_role_allows(role.as_deref()) => Ok(repo_event.event),
         Ok(_) => Err(denied()),
         Err(e) => {
             error!(repo = %repo_name, error = %e, "git read gate: role lookup failed (deny)");
@@ -2118,6 +2196,7 @@ pub fn git_router(state: Arc<AppState>) -> Router {
         .route("/git/{owner}/{repo}/info/refs", get(info_refs))
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
+        .merge(super::settings::router())
         .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
 }
@@ -2435,8 +2514,6 @@ mod track_c_tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and MinIO"]
     async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
         let (state, pool) = finalize_test_state().await;
         let host = format!(
@@ -2533,8 +2610,6 @@ mod track_c_tests {
         pool.close().await;
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and MinIO"]
     async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
         let (state, pool) = finalize_test_state().await;
         let host = format!("git-finalize-{}.example", uuid::Uuid::new_v4().simple());
@@ -2626,8 +2701,6 @@ mod track_c_tests {
         pool.close().await;
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and MinIO"]
     async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
         let (state, pool) = finalize_test_state().await;
         let host = format!(
@@ -2666,6 +2739,26 @@ mod track_c_tests {
             .expect("serving lease released on failure"));
         drop(state);
         pool.close().await;
+    }
+
+    mod external_infra_minio_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
+            super::repo_announcement_holds_serving_lease_until_pointer_is_seeded().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
+            super::finalize_push_holds_serving_lease_through_post_cas_publication().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
+            super::finalize_push_db_failure_after_cas_is_not_success_and_releases_lease().await;
+        }
     }
 
     /// A gzip-encoded request body is transparently inflated before it
@@ -3180,7 +3273,7 @@ mod track_c_tests {
 }
 
 #[cfg(test)]
-mod sec005_read_gate_tests {
+mod sec005_postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -3291,7 +3384,7 @@ mod sec005_read_gate_tests {
     /// can assert on the exact bytes a git client would see. A blind
     /// `.is_err()` cannot distinguish the generic 404 from the remediation
     /// 404 — and that distinction IS the security property.
-    async fn denial_parts(result: Result<(), Response>) -> (StatusCode, String) {
+    async fn denial_parts<T: std::fmt::Debug>(result: Result<T, Response>) -> (StatusCode, String) {
         let response = result.expect_err("expected a denial");
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -3766,5 +3859,1485 @@ mod sec005_read_gate_tests {
             "a store outage must deny as retryable, never allow and never claim a 403"
         );
         assert_eq!(body, "authorization unavailable");
+    }
+}
+
+// ── R4 Off-mode precedence regression tests ───────────────────────────────
+//
+// Proves that in Off mode, missing/malformed Authorization headers are rejected
+// with 401 + WWW-Authenticate BEFORE any tenant lookup.  [FI-INV-15]
+//
+// The `parse_git_auth_header` helper is the single source of this behavior;
+// these tests cover all four cases Thufir specified.
+//
+// Mutation evidence for all tests: replacing the Off-mode early-exit
+// (`if matches!(mode, NipFiMode::Off) { parse_git_auth_header(...)?; }`)
+// with a no-op causes the request to proceed to `bind_community()`.  On an
+// unmapped host that returns 404 `repository not found` — the test's
+// status assertion fires (404 ≠ 401).  On a mapped host the parse
+// runs inside the NIP-FI closure, but at that point the `admit_nip_fi_http`
+// wrapper (Off mode) propagates the legacy response — so the status still
+// matches.  Only the unmapped-host cases truly distinguish the regression.
+// Both cases are included so the full invariant (credential-before-DB) is
+// visible in the test record.
+#[cfg(test)]
+mod off_mode_precedence_tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn make_headers(auth: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(a) = auth {
+            h.insert(
+                header::AUTHORIZATION,
+                a.parse().expect("valid header value"),
+            );
+        }
+        h
+    }
+
+    // ── Case A: missing Authorization header ─────────────────────────────
+
+    /// Off mode, no Authorization header → 401 + WWW-Authenticate challenge.
+    ///
+    /// Scope: this test exercises `parse_git_auth_header` directly, not the
+    /// full `GitAuth::from_request_parts` path.  It proves the parser
+    /// rejects a missing header with the correct status and challenge.
+    ///
+    /// Falsifying mutation: return `Ok(())` from `parse_git_auth_header`
+    /// when no Authorization header is present → `unwrap_err()` panics.
+    #[test]
+    fn off_mode_missing_auth_header_returns_401_with_challenge() {
+        let headers = make_headers(None);
+        let err = parse_git_auth_header(&headers, "GET").unwrap_err();
+        assert_eq!(
+            err.status(),
+            StatusCode::UNAUTHORIZED,
+            "Off mode: missing Authorization must yield 401, not a tenant-lookup result"
+        );
+        let challenge = err
+            .headers()
+            .get("WWW-Authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            challenge.contains("Nostr realm=\"buzz\""),
+            "Off mode: missing Authorization must include WWW-Authenticate: Nostr challenge; got {challenge:?}"
+        );
+    }
+
+    // ── Case B: wrong scheme (not "Nostr ") ──────────────────────────────
+
+    /// Off mode, wrong Authorization scheme → 401 + challenge.
+    ///
+    /// Scope: parser-only test (calls `parse_git_auth_header` directly).
+    /// Falsifying mutations: return `Ok(())` for non-Nostr schemes, or
+    /// emit 403 instead of 401 — status assertion fires; or omit the
+    /// WWW-Authenticate header — challenge assertion fires.
+    #[test]
+    fn off_mode_wrong_scheme_returns_401_with_challenge() {
+        let headers = make_headers(Some("Bearer sometoken"));
+        let err = parse_git_auth_header(&headers, "GET").unwrap_err();
+        assert_eq!(
+            err.status(),
+            StatusCode::UNAUTHORIZED,
+            "Off mode: wrong auth scheme must yield 401"
+        );
+        let challenge = err
+            .headers()
+            .get("WWW-Authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            challenge.contains("Nostr realm=\"buzz\""),
+            "Off mode: wrong scheme must include Nostr challenge"
+        );
+    }
+
+    // ── Case C: invalid base64 ────────────────────────────────────────────
+
+    /// Off mode, Authorization: Nostr <invalid-base64> → 401.
+    ///
+    /// Scope: parser-only test. Falsifying mutation: accept invalid
+    /// base64 and return `Ok(())` → `unwrap_err()` panics.
+    #[test]
+    fn off_mode_invalid_base64_returns_401() {
+        let headers = make_headers(Some("Nostr !!!not-base64!!!"));
+        let err = parse_git_auth_header(&headers, "GET").unwrap_err();
+        assert_eq!(
+            err.status(),
+            StatusCode::UNAUTHORIZED,
+            "Off mode: invalid base64 must yield 401"
+        );
+    }
+
+    // ── Case D: valid base64 but invalid UTF-8 bytes ─────────────────────
+
+    /// Off mode, Authorization: Nostr <valid-base64-but-not-utf8> → 401.
+    ///
+    /// Scope: parser-only test. Falsifying mutation: skip UTF-8 check,
+    /// return `Ok(())` → `unwrap_err()` panics.
+    #[test]
+    fn off_mode_invalid_utf8_returns_401() {
+        // 0xC3 0x28 is invalid UTF-8.
+        let bad_utf8 = base64::engine::general_purpose::STANDARD.encode([0xC3u8, 0x28]);
+        let headers = make_headers(Some(&format!("Nostr {bad_utf8}")));
+        let err = parse_git_auth_header(&headers, "GET").unwrap_err();
+        assert_eq!(
+            err.status(),
+            StatusCode::UNAUTHORIZED,
+            "Off mode: non-UTF-8 base64 payload must yield 401"
+        );
+    }
+
+    // ── Positive control ──────────────────────────────────────────────────
+
+    /// Valid Nostr base64 JSON payload passes syntax validation.
+    ///
+    /// Scope: parser-only test. A structurally correct credential passes
+    /// `parse_git_auth_header`, allowing the request to proceed to tenant
+    /// lookup in the full path.
+    ///
+    /// Falsifying mutation: always return `Err(...)` from
+    /// `parse_git_auth_header` → `is_ok()` fails and the assertion fires.
+    /// Without this positive control, an always-denying parser could pass
+    /// all four negative cases above while also breaking valid requests.
+    #[test]
+    fn off_mode_valid_nostr_token_passes_syntax_check() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let keys = Keys::generate();
+        let tags = vec![
+            Tag::parse(["u", "http://example.local/git/abc/def"]).unwrap(),
+            Tag::parse(["method", "GET"]).unwrap(),
+        ];
+        let event = EventBuilder::new(Kind::Custom(27235), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+        let token = format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&event).unwrap())
+        );
+        let headers = make_headers(Some(&token));
+        assert!(
+            parse_git_auth_header(&headers, "GET").is_ok(),
+            "Off mode: a valid Nostr token must pass syntax validation"
+        );
+    }
+
+    // ── Router-level Off-precedence tests (require Postgres) ─────────────
+    //
+    // These tests go through `git_router` → `GitAuth::from_request_parts`
+    // and prove that the Off-mode early-exit at transport.rs:100-102 fires
+    // BEFORE `bind_community()`.
+    //
+    // Key falsifiability: the unmapped-host cases assert 401.  Deleting lines
+    // 100-102 causes `bind_community()` to run for the unmapped host and
+    // return 404 — the status assertions fire.  Parser-only unit tests above
+    // cannot prove this ordering because they never call `from_request_parts`.
+    #[cfg(test)]
+    mod postgres_tests {
+        use super::*;
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+
+        const UNMAPPED_HOST: &str = "off-prec-unmapped.git.test.invalid";
+        // Valid 64-hex owner (all zeros except last digit = 1) so validate_repo_id
+        // passes owner validation in the handler body.  The NIP-FI gate fires in
+        // GitAuth::from_request_parts BEFORE validate_repo_id in Enforce mode;
+        // the valid owner ensures tests that probe post-auth behavior see the
+        // correct downstream path.
+        const OWNER_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+        const GIT_PATH: &str = concat!(
+            "/git/0000000000000000000000000000000000000000000000000000000000000001",
+            "/myrepo/info/refs?service=git-upload-pack"
+        );
+
+        async fn off_mode_state() -> Option<Arc<AppState>> {
+            let mut config = crate::config::Config::from_env().ok()?;
+            config.nip_fi.mode = buzz_auth::NipFiMode::Off;
+            config.require_auth_token = false;
+            config.require_relay_membership = false;
+            config.redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+
+            let pool = sqlx::PgPool::connect(&config.database_url).await.ok()?;
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .ok()?;
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .ok()?,
+            );
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage = buzz_media::MediaStorage::new(&config.media).ok()?;
+            let (state, _) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            Some(Arc::new(state))
+        }
+
+        async fn git_request(
+            state: Arc<AppState>,
+            host: &str,
+            auth: Option<&str>,
+        ) -> (axum::http::StatusCode, axum::http::HeaderMap, bytes::Bytes) {
+            let mut builder = axum::http::Request::builder()
+                .method("GET")
+                .uri(GIT_PATH)
+                .header("host", host);
+            if let Some(a) = auth {
+                builder = builder.header("authorization", a);
+            }
+            let req = builder
+                .body(axum::body::Body::empty())
+                .expect("build request");
+            let resp = git_router(Arc::clone(&state))
+                .oneshot(req)
+                .await
+                .expect("router oneshot");
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let body = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+            (status, headers, body)
+        }
+
+        // ── Unmapped host — missing auth: must be 401 before DB lookup ────
+        //
+        // An unmapped host has no community row.  If the Off-mode early-exit
+        // is removed, `bind_community()` returns 404 for this host.
+        // The assertion fires because 404 ≠ 401.
+        //
+        // Falsifying mutation: delete the `if matches!(mode, Off)` block
+        // (transport.rs:101-104) → unmapped host proceeds to `bind_community()` → 404.
+        //
+        // NOTE: missing-auth and wrong-scheme carry WWW-Authenticate; bad-base64
+        // and bad-UTF8 do NOT (those use `into_response()` without the header).
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_unmapped_host_missing_auth_returns_401_before_db() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let (status, headers, body) = git_request(state, UNMAPPED_HOST, None).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + unmapped host + missing auth must yield 401 BEFORE \
+                 bind_community (not 404). \
+                 Falsifying mutation: delete Off-mode early-exit (transport.rs:101-104) \
+                 → bind_community returns 404 for unmapped host → assertion fires."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"missing Authorization header",
+                "missing-auth 401 body must be exact 'missing Authorization header'"
+            );
+            // FI-INV-15: Off-mode bytes match origin/main, whose legacy 401
+            // builder sets no Content-Type on this response.
+            assert!(
+                headers.get("content-type").is_none(),
+                "missing-auth 401 must carry no Content-Type (legacy Off bytes); got {:?}",
+                headers.get("content-type")
+            );
+            let challenge = headers
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                challenge,
+                "Nostr realm=\"buzz\", method=\"GET\"",
+                "missing-auth 401 must carry exact WWW-Authenticate: Nostr realm=\"buzz\", method=\"GET\"; got {challenge:?}"
+            );
+        }
+
+        // ── Unmapped host — wrong scheme: must be 401 before DB lookup ────
+        //
+        // Same falsifiability as the missing-auth case.
+        //
+        // Falsifying mutation: delete transport.rs:101-104 → 404.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_unmapped_host_wrong_scheme_returns_401_before_db() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let (status, headers, body) =
+                git_request(state, UNMAPPED_HOST, Some("Bearer token")).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + unmapped host + wrong auth scheme must yield 401 before \
+                 bind_community. \
+                 Falsifying mutation: delete transport.rs:101-104 → 404."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"expected Authorization: Nostr <base64>",
+                "wrong-scheme 401 body must be 'expected Authorization: Nostr <base64>'"
+            );
+            assert!(
+                headers.get("content-type").is_none(),
+                "wrong-scheme 401 must carry no Content-Type (legacy Off bytes); got {:?}",
+                headers.get("content-type")
+            );
+            let challenge_ws = headers
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                challenge_ws, "Nostr realm=\"buzz\", method=\"GET\"",
+                "wrong-scheme 401 must carry exact WWW-Authenticate: \
+                 Nostr realm=\"buzz\", method=\"GET\"; got {challenge_ws:?}"
+            );
+        }
+
+        // ── Unmapped host — invalid base64: must be 401 before DB lookup ──
+        //
+        // bad-base64 and bad-UTF8 use `into_response()` — NO WWW-Authenticate.
+        // Falsifying mutation: delete transport.rs:101-104 → 404.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_unmapped_host_invalid_base64_returns_401_before_db() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let (status, headers, body) =
+                git_request(state, UNMAPPED_HOST, Some("Nostr !!!not-base64!!!")).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + unmapped host + invalid base64 must yield 401 before \
+                 bind_community. \
+                 Falsifying mutation: delete transport.rs:101-104 → 404."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"invalid base64",
+                "invalid-base64 401 body must be exact 'invalid base64'"
+            );
+            assert!(
+                headers.get("www-authenticate").is_none(),
+                "invalid-base64 401 MUST NOT carry WWW-Authenticate \
+                 (uses into_response(), not the WWW-Authenticate builder path)"
+            );
+        }
+
+        // ── Unmapped host — bad UTF-8 payload: must be 401 before DB lookup ─
+        //
+        // A Nostr token where base64 decodes to non-UTF8 bytes triggers the
+        // UTF-8 guard in `parse_git_auth_header_full` (transport.rs:379-380).
+        // Body: "invalid utf-8"; NO WWW-Authenticate (uses `into_response()`).
+        //
+        // Falsifying mutation: delete transport.rs:101-104 → 404.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_unmapped_host_bad_utf8_returns_401_before_db() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            // base64-encode non-UTF8 bytes (0xff 0xfe is an invalid UTF-8 start)
+            let bad_utf8_b64 = base64::engine::general_purpose::STANDARD.encode(b"\xff\xfe\x00");
+            let (status, headers, body) =
+                git_request(state, UNMAPPED_HOST, Some(&format!("Nostr {bad_utf8_b64}"))).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + unmapped host + bad-UTF8 payload must yield 401 before \
+                 bind_community. \
+                 Falsifying mutation: delete transport.rs:101-104 → 404."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"invalid utf-8",
+                "bad-UTF8 401 body must be exact 'invalid utf-8'"
+            );
+            assert!(
+                headers.get("www-authenticate").is_none(),
+                "bad-UTF8 401 MUST NOT carry WWW-Authenticate \
+                 (uses into_response(), not the WWW-Authenticate builder path)"
+            );
+        }
+
+        // ── Mapped host — missing auth: compatibility control ──────────────
+        //
+        // Proves the same missing-auth behavior holds for mapped hosts.
+        // Compatibility control: the Off-mode early-exit (`transport.rs:101-104`)
+        // and the Enforce-mode NIP-FI closure both route through
+        // `parse_git_auth_header_full()`, which produces the same 401 + challenge.
+        //
+        // Falsifying mutation: replace `parse_git_auth_header` with always-pass
+        // → missing auth is not caught → request proceeds to URL verification
+        // → different status or body.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_mapped_host_missing_auth_returns_401() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let host = format!(
+                "off-prec-mapped-{}.git.test.invalid",
+                uuid::Uuid::new_v4().simple()
+            );
+            state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community");
+            let (status, headers, body) = git_request(state, &host, None).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + mapped host + missing auth must yield 401 from Off-mode early-exit \
+                 (compatibility control: same response via NIP-FI closure in Enforce mode). \
+                 Falsifying mutation: skip parse_git_auth_header for missing auth → different error."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"missing Authorization header",
+                "mapped-host missing-auth 401 body must be 'missing Authorization header'"
+            );
+            let challenge = headers
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                challenge, "Nostr realm=\"buzz\", method=\"GET\"",
+                "mapped-host missing-auth 401 must carry exact WWW-Authenticate: Nostr realm=\"buzz\", method=\"GET\"; got {challenge:?}"
+            );
+        }
+
+        // ── Mapped host — invalid base64: compatibility control ───────────
+        //
+        // Proves the bad-base64 check holds for mapped hosts.
+        // `parse_git_auth_header_full()` handles bad base64 and returns 401 (no
+        // WWW-Authenticate).  This is a compatibility assertion: both the Off-mode
+        // early-exit and the Enforce-mode NIP-FI closure call the same function, so
+        // the same 401 body is produced in both modes.
+        //
+        // Falsifying mutation: remove `parse_git_auth_header` error for bad base64
+        // → bad-base64 request passes syntax check → URL verification fails differently.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_mapped_host_invalid_base64_returns_401() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let host = format!(
+                "off-prec-mapped-b64-{}.git.test.invalid",
+                uuid::Uuid::new_v4().simple()
+            );
+            state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community");
+            let (status, headers, body) =
+                git_request(state, &host, Some("Nostr !!!not-base64!!!")).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + mapped host + invalid base64 must yield 401. \
+                 Falsifying mutation: delete transport.rs:101-104 → different error."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"invalid base64",
+                "mapped-host invalid-base64 401 body must be 'invalid base64'"
+            );
+            assert!(
+                headers.get("www-authenticate").is_none(),
+                "invalid-base64 401 MUST NOT carry WWW-Authenticate"
+            );
+        }
+
+        // ── Positive control: valid syntax with unmapped host reaches DB ──
+        //
+        // A syntactically valid Nostr token PASSES the Off-mode early-exit
+        // and proceeds to `bind_community()`.  The unmapped host then yields
+        // 404 — proving the early-exit was NOT the blocker.
+        //
+        // Falsifying mutation: always-deny `parse_git_auth_header` regardless
+        // of input → this control returns 401 instead of 404 → assertion fires.
+        // The negative cases above prove the opposite direction.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_unmapped_host_valid_syntax_reaches_db_and_returns_404() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let keys = nostr::Keys::generate();
+            let tags = vec![
+                nostr::Tag::parse(["u", &format!("http://{UNMAPPED_HOST}{GIT_PATH}")]).unwrap(),
+                nostr::Tag::parse(["method", "GET"]).unwrap(),
+            ];
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(27235), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .unwrap();
+            let token = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&event).unwrap())
+            );
+            let (status, _headers, _body) = git_request(state, UNMAPPED_HOST, Some(&token)).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::NOT_FOUND,
+                "Off mode + unmapped host + valid syntax: parser passes → \
+                 bind_community fires → 404. \
+                 Falsifying mutation: always-deny parser → 401 instead of 404."
+            );
+        }
+
+        // ── Enforce mode: missing assertion on info/refs → exact body/CT/challenge ─
+        //
+        // Proves that git routes (info/refs, upload-pack, receive-pack) produce the
+        // exact contract bytes for MissingEvidence in Enforce mode.  All three routes
+        // share `GitAuth::from_request_parts`; the pack routes are additionally
+        // tested in `enforce_mode_git_pack_routes_missing_assertion_exact_bytes`.
+        //
+        // A Nostr-scheme Authorization header is present (syntactically valid)
+        // so the Off-mode early-exit passes; no Nostr-Federated-Identity header
+        // is sent, so `extract_bearer_token` returns MissingEvidence → 401.
+        //
+        // Falsifying mutation: remove the `admit_nip_fi_http_on_state` call
+        // from `GitAuth::from_request_parts` → `GitAuth` falls back to the
+        // legacy NIP-98 verifier → valid proof is accepted → request reaches
+        // `validate_repo_id` which succeeds (OWNER_HEX is valid 64-hex), then
+        // `authorize_git_read` which denies (repo not member of a channel) →
+        // different status or body → assertion fires.
+        //
+        // Why no assertion header: in Enforce mode with no verifier configured
+        // (startup race) an assertion present + no verifier would return 503.
+        // The MissingEvidence path (no assertion header) is the correct gate
+        // test for git routes and is the most discriminating falsifiable case.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn enforce_mode_git_info_refs_missing_assertion_exact_bytes() {
+            use buzz_auth::NipFiMode;
+
+            let mut config = match crate::config::Config::from_env() {
+                Ok(c) => c,
+                Err(_) => panic!("local Postgres not reachable (enforce git): config"),
+            };
+            config.nip_fi.mode = NipFiMode::Enforce;
+            config.require_auth_token = false;
+            config.require_relay_membership = false;
+            // Pin relay_url to a ws:// value so git_expected_url() deterministically
+            // derives the http:// scheme for the NIP-98 `u` tag.
+            config.relay_url = "ws://nip-fi-git-test.invalid".to_string();
+            config.redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+
+            let pool = match sqlx::PgPool::connect(&config.database_url).await {
+                Ok(p) => p,
+                Err(_) => panic!("local Postgres not reachable (enforce git)"),
+            };
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub"),
+            );
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            let state = Arc::new(state);
+
+            // Register a mapped host so bind_community succeeds → the NIP-FI
+            // gate is the first denial point after Off-mode early-exit.
+            let host = format!(
+                "nip-fi-git-enf-{}.test.invalid",
+                uuid::Uuid::new_v4().simple()
+            );
+            state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community");
+
+            // Build a syntactically valid Nostr token signed for the repo-root URL.
+            // `git_expected_url()` strips `/info/refs?service=…` and keeps only
+            // the repository path prefix: `http://{host}/git/{OWNER_HEX}/myrepo`.
+            // No Nostr-Federated-Identity header → MissingEvidence in Enforce.
+            let keys = nostr::Keys::generate();
+            // GIT_PATH strips "/info/refs?..." suffix → repo root used for URL signing.
+            // OWNER_HEX is valid 64-hex so validate_repo_id would pass if auth succeeded.
+            let git_repo_root = format!("/git/{OWNER_HEX}/myrepo");
+            let tags = vec![
+                nostr::Tag::parse(["u", &format!("http://{host}{git_repo_root}")]).unwrap(),
+                nostr::Tag::parse(["method", "GET"]).unwrap(),
+            ];
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(27235), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .unwrap();
+            let auth_token = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&event).unwrap())
+            );
+
+            let (status, headers, body) = git_request(state, &host, Some(&auth_token)).await;
+
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Enforce mode + info/refs + missing assertion MUST deny 401 MissingEvidence. \
+                 Falsifying mutation: remove admit_nip_fi_http_on_state from GitAuth → \
+                 legacy NIP-98 verifier accepts the valid proof → request proceeds past \
+                 the admission gate → different status or body → assertion fires."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"authentication required\n",
+                "Enforce mode: git MissingEvidence body must be exact 'authentication required\\n' \
+                 [FI-TRACE-DENIAL-ORACLE]. Different body means the legacy git error path fired \
+                 instead of the NIP-FI gate."
+            );
+            let ct = headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                ct, "text/plain; charset=utf-8",
+                "Enforce mode: git 401 content-type must be text/plain; charset=utf-8"
+            );
+            let www_auth = headers
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                www_auth, "Nostr",
+                "Enforce mode: git 401 must carry WWW-Authenticate: Nostr"
+            );
+        }
+
+        // ── Enforce mode: pack routes (upload-pack + receive-pack) missing assertion ─
+        //
+        // Parameterized test: both POST pack routes share `GitAuth::from_request_parts`
+        // and must produce the same exact denial bytes as `info/refs` when the
+        // Nostr-Federated-Identity assertion header is absent.
+        //
+        // For each route:
+        //   - missing assertion → 401 MissingEvidence (exact body + CT + challenge)
+        //   - EvidenceRejected (invalid base64 Nostr token) → 401 (NIP-FI maps it)
+        //   - duplicate Authorization headers → 403 cardinality in Enforce mode
+        //
+        // Falsifying mutation: remove `admit_nip_fi_http_on_state` from
+        // `GitAuth::from_request_parts` → NIP-98 validates the token, no assertion
+        // check, request reaches `validate_repo_id` → succeeds (OWNER_HEX valid)
+        // → `authorize_git_read` denies (no channel membership) → 403 or 404
+        // → 401 assertion fires.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn enforce_mode_git_pack_routes_missing_assertion_exact_bytes() {
+            use buzz_auth::NipFiMode;
+
+            let mut config = match crate::config::Config::from_env() {
+                Ok(c) => c,
+                Err(_) => panic!("local Postgres not reachable (pack routes): config"),
+            };
+            config.nip_fi.mode = NipFiMode::Enforce;
+            config.require_auth_token = false;
+            config.require_relay_membership = false;
+            config.relay_url = "ws://nip-fi-git-pack-test.invalid".to_string();
+            config.redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+
+            let pool = match sqlx::PgPool::connect(&config.database_url).await {
+                Ok(p) => p,
+                Err(_) => panic!("local Postgres not reachable (pack routes)"),
+            };
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub"),
+            );
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            // Inject a static NIP-FI verifier into the Enforce state so that
+            // every case requiring cryptographic assertion validation (including
+            // the malformed-assertion Case 3) reaches the verifier rather than
+            // hitting the absent-verifier 503.  Without this, Case 3 sends
+            // `Bearer !!!not-valid-base64!!!` which passes `extract_bearer_token`
+            // (scheme/cardinality checks only) and then trips the absent-verifier
+            // check at nip_fi_http.rs:332-335 → 503, not 403.
+            // [FI-TRACE-DENIAL-ORACLE: verifier required for all crypto cases]
+            let state = {
+                use buzz_auth::{
+                    AssertionKeySet, FederatedAssertionVerifier, FreshnessClass, IssuerPolicy,
+                    IssuerRegistry, StaticIssuerKeySource, TokenClass, VerifyAssertion,
+                };
+                use jsonwebtoken::{jwk::JwkSet, Algorithm, EncodingKey};
+
+                const GIT_TEST_ISSUER: &str = "https://git-pack-test.issuer.invalid";
+                const GIT_TEST_AUDIENCE: &str = "https://git-pack-test.relay.invalid";
+                const GIT_TEST_KID: &str = "git-pack-test-key-1";
+                const GIT_TEST_EC_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+                    MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
+                    WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
+                    zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
+                    -----END PRIVATE KEY-----\n";
+
+                let jwks: JwkSet = serde_json::from_value(serde_json::json!({
+                    "keys": [{
+                        "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256",
+                        "kid": GIT_TEST_KID,
+                        "x": "RW-mZ7H5Kjjl8hIY9ygUKYRiheL02s4Xm22r22dWaJI",
+                        "y": "WqQXVwaD6NM7us40BUTNe9dRa1XoJ0NX6vJuJWYU_bA"
+                    }]
+                }))
+                .expect("valid test JWKS");
+                let hard_deadline = chrono::Utc::now() + chrono::Duration::seconds(3600);
+                let key_set = AssertionKeySet::new_for_test(
+                    GIT_TEST_ISSUER.to_owned(),
+                    1,
+                    jwks,
+                    hard_deadline,
+                )
+                .expect("valid test key set");
+                let jwks_contract = buzz_auth::JwksSourceContract::new(
+                    format!("{GIT_TEST_ISSUER}/.well-known/jwks.json"),
+                    300,
+                    3600,
+                )
+                .expect("valid jwks contract");
+                let policy = IssuerPolicy::new(
+                    GIT_TEST_ISSUER.to_owned(),
+                    vec![GIT_TEST_AUDIENCE.to_owned()],
+                    TokenClass::DedicatedNipFi,
+                    FreshnessClass::OfflineJwt,
+                    vec![Algorithm::ES256],
+                    60,
+                    3600,
+                    None,
+                    jwks_contract,
+                )
+                .expect("valid issuer policy");
+                let mut registry = IssuerRegistry::new();
+                registry.insert(policy);
+                let verifier: Arc<dyn VerifyAssertion> = Arc::new(FederatedAssertionVerifier::new(
+                    registry,
+                    StaticIssuerKeySource::new([key_set]),
+                ));
+
+                // Encode the test key for use in Case 4 assertions.
+                // Store in a Mutex so it can be read from the outer scope later.
+                let enc_key =
+                    EncodingKey::from_ec_pem(GIT_TEST_EC_PEM.as_bytes()).expect("valid EC PEM");
+
+                let mut s = state;
+                s.nip_fi_verifier = Some(verifier);
+                (
+                    Arc::new(s),
+                    GIT_TEST_ISSUER,
+                    GIT_TEST_AUDIENCE,
+                    GIT_TEST_KID,
+                    enc_key,
+                )
+            };
+            let (state, git_test_issuer, git_test_audience, git_test_kid, git_enc_key) = state;
+
+            let host = format!(
+                "nip-fi-git-pack-{}.test.invalid",
+                uuid::Uuid::new_v4().simple()
+            );
+            state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community");
+
+            // Build a valid NIP-98 token signed for the upload-pack repo root.
+            // Git credential helper signs once with GET and reuses for POST pack requests.
+            let keys = nostr::Keys::generate();
+            let repo_root = format!("/git/{OWNER_HEX}/myrepo");
+            let tags = vec![
+                nostr::Tag::parse(["u", &format!("http://{host}{repo_root}")]).unwrap(),
+                nostr::Tag::parse(["method", "GET"]).unwrap(),
+            ];
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(27235), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .unwrap();
+            let nip98_token = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&event).unwrap())
+            );
+
+            // Helper: send a pack-route POST request and return (status, headers, body).
+            let send_pack_request =
+                |state: Arc<AppState>,
+                 route: &'static str,
+                 auth_headers: Vec<(&'static str, String)>| {
+                    let host = host.clone();
+                    async move {
+                        let uri = format!("/git/{OWNER_HEX}/myrepo/{route}");
+                        let mut builder = axum::http::Request::builder()
+                            .method("POST")
+                            .uri(&uri)
+                            .header("host", &host)
+                            .header(
+                                "content-type",
+                                if route == "git-upload-pack" {
+                                    "application/x-git-upload-pack-request"
+                                } else {
+                                    "application/x-git-receive-pack-request"
+                                },
+                            );
+                        for (name, value) in &auth_headers {
+                            builder = builder.header(*name, value);
+                        }
+                        let req = builder
+                            .body(axum::body::Body::empty())
+                            .expect("build request");
+                        let resp = git_router(Arc::clone(&state))
+                            .oneshot(req)
+                            .await
+                            .expect("router oneshot");
+                        let status = resp.status();
+                        let headers = resp.headers().clone();
+                        let body = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                        (status, headers, body)
+                    }
+                };
+
+            // ── Same-key material: built once, shared by Cases 5–7 and Case 4 ──
+            //
+            // Hoisted here so Cases 5–7 (inside the per-route loop below) can
+            // reference `same_key_assertion` without a forward-reference error.
+            // Case 4 reuses the same variables — no duplication.
+            {
+                use jsonwebtoken::{Algorithm, Header};
+                let test_keys_outer = nostr::Keys::generate();
+                let test_pubkey_hex_outer = test_keys_outer.public_key().to_hex();
+                let now_outer = chrono::Utc::now().timestamp();
+                let claims_outer = serde_json::json!({
+                    "iss": git_test_issuer,
+                    "aud": git_test_audience,
+                    "iat": now_outer,
+                    "exp": now_outer + 600,
+                    "sub": "test-subject",
+                    "nostr_pubkey": test_pubkey_hex_outer,
+                });
+                let mut hdr_outer = Header::new(Algorithm::ES256);
+                hdr_outer.kid = Some(git_test_kid.to_owned());
+                hdr_outer.typ = Some("nip-fi+jwt".to_owned());
+                let same_key_assertion =
+                    jsonwebtoken::encode(&hdr_outer, &claims_outer, &git_enc_key)
+                        .expect("sign assertion");
+
+                for route in &["git-upload-pack", "git-receive-pack"] {
+                    let route: &'static str = route;
+
+                    // ── Case 1: missing assertion → 401 MissingEvidence ─────────
+                    let (status, headers, body) = send_pack_request(
+                        Arc::clone(&state),
+                        route,
+                        vec![("authorization", nip98_token.clone())],
+                    )
+                    .await;
+                    assert_eq!(
+                        status,
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        "{route}: missing assertion MUST deny 401 MissingEvidence. \
+                     Falsifying mutation: remove admit_nip_fi_http_on_state from GitAuth \
+                     → legacy NIP-98 accepts → reaches validate_repo_id (valid owner) \
+                     → authorize_git_read denies → different status/body."
+                    );
+                    assert_eq!(
+                    body.as_ref(),
+                    b"authentication required\n",
+                    "{route}: MissingEvidence body must be exact 'authentication required\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                );
+                    let ct = headers
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    assert_eq!(
+                        ct, "text/plain; charset=utf-8",
+                        "{route}: 401 content-type must be 'text/plain; charset=utf-8'"
+                    );
+                    let www_auth = headers
+                        .get("www-authenticate")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    assert_eq!(
+                        www_auth, "Nostr",
+                        "{route}: 401 must carry WWW-Authenticate: Nostr"
+                    );
+
+                    // ── Case 2: duplicate Authorization → 403 cardinality ───────
+                    // Two NIP-98 tokens → cardinality gate fires before NIP-FI assertion check.
+                    // No assertion header needed — cardinality fires first.
+                    let (dup_status, dup_headers, dup_body) = send_pack_request(
+                        Arc::clone(&state),
+                        route,
+                        vec![
+                            ("authorization", nip98_token.clone()),
+                            ("authorization", nip98_token.clone()),
+                        ],
+                    )
+                    .await;
+                    assert_eq!(
+                        dup_status,
+                        axum::http::StatusCode::FORBIDDEN,
+                        "{route}: duplicate Authorization headers MUST deny 403 EvidenceRejected \
+                     (cardinality gate). \
+                     Falsifying mutation: remove cardinality check from admit_nip_fi_http \
+                     → request reaches NIP-FI assertion check → different denial."
+                    );
+                    assert_eq!(
+                        dup_body.as_ref(),
+                        b"evidence rejected\n",
+                        "{route}: cardinality 403 body must be exact 'evidence rejected\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                    );
+                    let dup_ct = dup_headers
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    assert_eq!(
+                        dup_ct, "text/plain; charset=utf-8",
+                        "{route}: cardinality 403 content-type must be 'text/plain; charset=utf-8'"
+                    );
+                    assert!(
+                        dup_headers.get("www-authenticate").is_none(),
+                        "{route}: cardinality 403 MUST NOT carry WWW-Authenticate \
+                     (client has a token, it's malformed — not absent)"
+                    );
+
+                    // ── Case 3: invalid base64 assertion → 403 EvidenceRejected ─
+                    // A syntactically invalid Nostr-Federated-Identity value (non-base64
+                    // after the "Nostr " prefix) → EvidenceRejected → 403.
+                    // This is distinct from MissingEvidence (absent header → 401).
+                    //
+                    // Falsifying mutation: skip assertion validation for malformed tokens →
+                    // request reaches handler → different status/body.
+                    let (inv_status, inv_headers, inv_body) = send_pack_request(
+                        Arc::clone(&state),
+                        route,
+                        vec![
+                            ("authorization", nip98_token.clone()),
+                            (
+                                buzz_auth::CLIENT_ATTACHED_HEADER,
+                                "Bearer !!!not-valid-base64!!!".to_string(),
+                            ),
+                        ],
+                    )
+                    .await;
+                    assert_eq!(
+                        inv_status,
+                        axum::http::StatusCode::FORBIDDEN,
+                        "{route}: invalid base64 assertion MUST deny 403 EvidenceRejected. \
+                     Falsifying mutation: skip assertion parsing on bad input → \
+                     handler reached → different status/body."
+                    );
+                    assert_eq!(
+                        inv_body.as_ref(),
+                        b"evidence rejected\n",
+                        "{route}: invalid assertion body must be exact 'evidence rejected\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                    );
+                    let inv_ct = inv_headers
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    assert_eq!(
+                    inv_ct, "text/plain; charset=utf-8",
+                    "{route}: invalid assertion 403 content-type must be 'text/plain; charset=utf-8'"
+                );
+                    assert!(
+                        inv_headers.get("www-authenticate").is_none(),
+                        "{route}: invalid assertion 403 MUST NOT carry WWW-Authenticate \
+                     (client has a token, it's malformed — not absent)"
+                    );
+
+                    // ── Case 5: missing proof + valid assertion → 401 MissingEvidence ─
+                    //
+                    // Valid NFI assertion present, but NO Authorization (NIP-98) header.
+                    // NIP-98 extraction closure returns MissingEvidence (no Authorization) →
+                    // maps to 401 `authentication required\n`.
+                    // Proves proof validation is not bypassed by a valid assertion.
+                    //
+                    // Falsifying mutation: make the NIP-98 closure skip missing-auth →
+                    // NIP-98 proves something other than 401 → assertion fires.
+                    let (miss_proof_status, _miss_proof_headers, miss_proof_body) =
+                        send_pack_request(
+                            Arc::clone(&state),
+                            route,
+                            vec![(
+                                buzz_auth::CLIENT_ATTACHED_HEADER,
+                                format!("Bearer {same_key_assertion}"),
+                            )],
+                        )
+                        .await;
+                    assert_eq!(
+                        miss_proof_status,
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        "{route}: missing proof + valid assertion MUST deny 401 MissingEvidence. \
+                     A valid assertion does NOT bypass NIP-98 proof requirement. \
+                     Falsifying mutation: skip NIP-98 when assertion present → handler reached."
+                    );
+                    assert_eq!(
+                    miss_proof_body.as_ref(),
+                    b"authentication required\n",
+                    "{route}: missing-proof 401 body must be exact 'authentication required\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                );
+
+                    // ── Case 6: malformed proof + valid assertion → 403 EvidenceRejected ─
+                    //
+                    // Valid NFI assertion + syntactically malformed NIP-98 (`Nostr !!!bad!!!`).
+                    // NIP-98 closure fails (bad base64) → maps to 403 EvidenceRejected.
+                    // Proves malformed-proof detection is not bypassed by a valid assertion.
+                    //
+                    // Falsifying mutation: accept malformed NIP-98 when assertion present →
+                    // admission bypassed → response is not 403 EvidenceRejected.
+                    let (mal_proof_status, _mal_proof_headers, mal_proof_body) = send_pack_request(
+                        Arc::clone(&state),
+                        route,
+                        vec![
+                            ("authorization", "Nostr !!!not-valid-base64!!!".to_string()),
+                            (
+                                buzz_auth::CLIENT_ATTACHED_HEADER,
+                                format!("Bearer {same_key_assertion}"),
+                            ),
+                        ],
+                    )
+                    .await;
+                    assert_eq!(
+                    mal_proof_status,
+                    axum::http::StatusCode::FORBIDDEN,
+                    "{route}: malformed proof + valid assertion MUST deny 403 EvidenceRejected. \
+                     Falsifying mutation: skip NIP-98 validation when assertion present → \
+                     admission bypassed → not 403."
+                );
+                    assert_eq!(
+                        mal_proof_body.as_ref(),
+                        b"evidence rejected\n",
+                        "{route}: malformed-proof 403 body must be exact 'evidence rejected\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                    );
+
+                    // ── Case 7: duplicate proof + valid assertion → 403 cardinality ─
+                    //
+                    // Two Authorization headers + valid NFI assertion.  The cardinality gate
+                    // fires before NIP-98 extraction (it runs on Authorization count).
+                    // 403 EvidenceRejected — same result as Case 2 (dup without assertion),
+                    // proving the assertion does not gate the cardinality check.
+                    //
+                    // `nip98_token` is signed by `keys` while `same_key_assertion` names
+                    // `test_keys_outer`, so disabling cardinality predicts key pairing
+                    // denial: 403 `authorization denied\n`.  The exact
+                    // `evidence rejected\n` body below distinguishes that mutation.
+                    let (dup_proof_status, _dup_proof_headers, dup_proof_body) = send_pack_request(
+                        Arc::clone(&state),
+                        route,
+                        vec![
+                            ("authorization", nip98_token.clone()),
+                            ("authorization", nip98_token.clone()),
+                            (
+                                buzz_auth::CLIENT_ATTACHED_HEADER,
+                                format!("Bearer {same_key_assertion}"),
+                            ),
+                        ],
+                    )
+                    .await;
+                    assert_eq!(
+                        dup_proof_status,
+                        axum::http::StatusCode::FORBIDDEN,
+                        "{route}: duplicate proof + valid assertion MUST deny 403 cardinality. \
+                     Disabling cardinality → key pairing 403 'authorization denied\\n'."
+                    );
+                    assert_eq!(
+                        dup_proof_body.as_ref(),
+                        b"evidence rejected\n",
+                        "{route}: dup-proof 403 body must be exact 'evidence rejected\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                    );
+                }
+
+                // ── Case 4: same-key admission → passes NIP-FI, reaches handler ──
+                //
+                // The verifier was injected into `state` at the top of this test.
+                // Same-key: NIP-98 signed by test_keys; assertion nostr_pubkey =
+                // test_keys.public_key().  Key pairing passes → request reaches
+                // `validate_repo_id` → `authorize_git_read`.
+                //
+                // The repo does not exist in the test database, so `authorize_git_read`
+                // returns 404 "repository not found" — not a NIP-FI code.
+                //
+                // Falsifying mutation: replace the pairing check with always-deny →
+                // 403 `authorization denied\n` → status/body checks fire.
+                //
+                // Also covers `info/refs` (GET) with the same assertion; the route
+                // shares `GitAuth::from_request_parts` and `authorize_git_read`.
+                {
+                    use jsonwebtoken::{Algorithm, Header};
+
+                    // Same-key: NIP-98 signed by test_keys; assertion nostr_pubkey =
+                    // test_keys.public_key().  Pairing passes.
+                    let test_keys = nostr::Keys::generate();
+                    let test_pubkey_hex = test_keys.public_key().to_hex();
+                    let now = chrono::Utc::now().timestamp();
+                    let claims = serde_json::json!({
+                        "iss": git_test_issuer,
+                        "aud": git_test_audience,
+                        "iat": now,
+                        "exp": now + 600,
+                        "sub": "test-subject",
+                        "nostr_pubkey": test_pubkey_hex,
+                    });
+                    let mut header = Header::new(Algorithm::ES256);
+                    header.kid = Some(git_test_kid.to_owned());
+                    header.typ = Some("nip-fi+jwt".to_owned());
+                    let same_key_assertion = jsonwebtoken::encode(&header, &claims, &git_enc_key)
+                        .expect("sign assertion");
+
+                    // Build same-key NIP-98 token for upload-pack repo root.
+                    let admitted_nip98_tags = vec![
+                        nostr::Tag::parse(["u", &format!("http://{host}{repo_root}")]).unwrap(),
+                        nostr::Tag::parse(["method", "GET"]).unwrap(),
+                    ];
+                    let admitted_event = nostr::EventBuilder::new(nostr::Kind::Custom(27235), "")
+                        .tags(admitted_nip98_tags)
+                        .sign_with_keys(&test_keys)
+                        .unwrap();
+                    let admitted_nip98_token = format!(
+                        "Nostr {}",
+                        base64::engine::general_purpose::STANDARD
+                            .encode(serde_json::to_vec(&admitted_event).unwrap())
+                    );
+
+                    // ── git-upload-pack (POST): same-key admission → 404 ─────────
+                    //
+                    // upload-pack calls authorize_git_read which queries DB for
+                    // kind:30617 announcement. Repo absent → 404 "repository not found".
+                    //
+                    // Falsifying mutation: key-pairing always-deny → 403
+                    // `authorization denied\n` → body check fires.
+                    {
+                        let (s_up, _h_up, b_up) = send_pack_request(
+                            Arc::clone(&state),
+                            "git-upload-pack",
+                            vec![
+                                ("authorization", admitted_nip98_token.clone()),
+                                (
+                                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                                    format!("Bearer {same_key_assertion}"),
+                                ),
+                            ],
+                        )
+                        .await;
+                        assert_eq!(
+                            s_up,
+                            axum::http::StatusCode::NOT_FOUND,
+                            "git-upload-pack: same-key admission MUST reach authorize_git_read \
+                             → 404 (repo absent). \
+                             If 401/403: NIP-FI denial — check verifier injection and key pairing. \
+                             Body: {b_up:?}"
+                        );
+                        assert_eq!(
+                            b_up.as_ref(),
+                            b"repository not found",
+                            "git-upload-pack: same-key admitted 404 body must be exact \
+                             'repository not found'. \
+                             Falsifying mutation: key pairing always-deny → 403 \
+                             'authorization denied\\n'."
+                        );
+                    }
+
+                    // ── git-receive-pack (POST): same-key admission → git busy 503 ─
+                    //
+                    // Every `git_semaphore` permit is held, so an admitted request
+                    // stops at `receive_pack` → `acquire_git_permit`, which returns
+                    // exactly 503, `Retry-After: 5`, body `git service busy`, no
+                    // Content-Type, no challenge — before hydration, the
+                    // subprocess, or finalize.  Any NIP-FI denial (401
+                    // `authentication required\n`, 403 `evidence rejected\n` /
+                    // `authorization denied\n`, 503 `authorization unavailable\n`)
+                    // happens in `GitAuth` before the handler and cannot produce
+                    // these bytes.
+                    {
+                        let held: Vec<_> = std::iter::from_fn(|| {
+                            Arc::clone(&state.git_semaphore).try_acquire_owned().ok()
+                        })
+                        .collect();
+                        assert!(
+                            !held.is_empty(),
+                            "fixture must hold at least one git permit"
+                        );
+                        let (s_rp, h_rp, b_rp) = send_pack_request(
+                            Arc::clone(&state),
+                            "git-receive-pack",
+                            vec![
+                                ("authorization", admitted_nip98_token.clone()),
+                                (
+                                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                                    format!("Bearer {same_key_assertion}"),
+                                ),
+                            ],
+                        )
+                        .await;
+                        drop(held);
+                        assert_eq!(
+                            s_rp,
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            "git-receive-pack: admitted request MUST reach acquire_git_permit \
+                             → 503 busy. Body: {b_rp:?}"
+                        );
+                        assert_eq!(
+                            h_rp.get("retry-after").and_then(|v| v.to_str().ok()),
+                            Some("5"),
+                            "git-receive-pack: busy 503 carries Retry-After: 5"
+                        );
+                        assert!(
+                            h_rp.get("content-type").is_none(),
+                            "git-receive-pack: busy 503 carries no Content-Type"
+                        );
+                        assert!(
+                            h_rp.get("www-authenticate").is_none(),
+                            "git-receive-pack: busy 503 carries no challenge"
+                        );
+                        assert_eq!(
+                            b_rp.as_ref(),
+                            b"git service busy",
+                            "git-receive-pack: exact busy body from acquire_git_permit"
+                        );
+                    }
+
+                    // ── info/refs (GET): shares GitAuth + authorize_git_read ──────
+                    //
+                    // info/refs is a GET with ?service=git-upload-pack sharing
+                    // `GitAuth::from_request_parts` and `authorize_git_read`: missing
+                    // assertion, missing / malformed / duplicate proof with a valid
+                    // assertion, and the same-key positive.
+                    {
+                        let uri =
+                            format!("/git/{OWNER_HEX}/myrepo/info/refs?service=git-upload-pack");
+                        // ── info/refs Case 1: missing assertion → 401 ────────────
+                        let (s, _, b) = {
+                            let req = axum::http::Request::builder()
+                                .method("GET")
+                                .uri(&uri)
+                                .header("host", &host)
+                                .header("authorization", &nip98_token)
+                                .body(axum::body::Body::empty())
+                                .expect("build request");
+                            let resp = git_router(Arc::clone(&state))
+                                .oneshot(req)
+                                .await
+                                .expect("router oneshot");
+                            let st = resp.status();
+                            let hd = resp.headers().clone();
+                            let bd = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                            (st, hd, bd)
+                        };
+                        assert_eq!(
+                            s,
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "info/refs: missing assertion MUST deny 401. Body: {b:?}"
+                        );
+                        assert_eq!(
+                        b.as_ref(),
+                        b"authentication required\n",
+                        "info/refs: missing assertion 401 body must be 'authentication required\\n'."
+                    );
+
+                        // ── info/refs Case 5: missing proof + valid assertion → 401 ─
+                        let (s5, _, b5) = {
+                            let req = axum::http::Request::builder()
+                                .method("GET")
+                                .uri(&uri)
+                                .header("host", &host)
+                                .header(
+                                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                                    format!("Bearer {same_key_assertion}"),
+                                )
+                                .body(axum::body::Body::empty())
+                                .expect("build request");
+                            let resp = git_router(Arc::clone(&state))
+                                .oneshot(req)
+                                .await
+                                .expect("router oneshot");
+                            let st = resp.status();
+                            let bd = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                            (st, (), bd)
+                        };
+                        assert_eq!(
+                        s5,
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        "info/refs: missing proof + valid assertion MUST deny 401. Body: {b5:?}"
+                    );
+                        assert_eq!(
+                        b5.as_ref(),
+                        b"authentication required\n",
+                        "info/refs: missing-proof 401 body must be 'authentication required\\n'."
+                    );
+
+                        // ── info/refs Cases 6/7: malformed / duplicate proof +
+                        //    valid same-key assertion → 403 `evidence rejected\n` ─
+                        for (authorization, case) in [
+                            (
+                                vec!["Nostr !!!not-valid-base64!!!".to_string()],
+                                "malformed proof",
+                            ),
+                            (
+                                vec![admitted_nip98_token.clone(), admitted_nip98_token.clone()],
+                                "duplicate proof",
+                            ),
+                        ] {
+                            let mut builder = axum::http::Request::builder()
+                                .method("GET")
+                                .uri(&uri)
+                                .header("host", &host)
+                                .header(
+                                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                                    format!("Bearer {same_key_assertion}"),
+                                );
+                            for value in &authorization {
+                                builder = builder.header("authorization", value);
+                            }
+                            let resp = git_router(Arc::clone(&state))
+                                .oneshot(builder.body(axum::body::Body::empty()).expect("build"))
+                                .await
+                                .expect("router oneshot");
+                            let st = resp.status();
+                            let hd = resp.headers().clone();
+                            let bd = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                            assert_eq!(
+                                st,
+                                axum::http::StatusCode::FORBIDDEN,
+                                "info/refs {case}: MUST deny 403. Body: {bd:?}"
+                            );
+                            assert_eq!(
+                                hd.get("content-type").and_then(|v| v.to_str().ok()),
+                                Some("text/plain; charset=utf-8"),
+                                "info/refs {case}: 403 Content-Type"
+                            );
+                            assert!(
+                                hd.get("www-authenticate").is_none(),
+                                "info/refs {case}: 403 carries no challenge"
+                            );
+                            assert_eq!(
+                                bd.as_ref(),
+                                b"evidence rejected\n",
+                                "info/refs {case}: exact EvidenceRejected body"
+                            );
+                        }
+
+                        // ── info/refs Case 4 (same-key positive) → 404 ───────────
+                        let (s4, _, b4) = {
+                            let req = axum::http::Request::builder()
+                                .method("GET")
+                                .uri(&uri)
+                                .header("host", &host)
+                                .header("authorization", &admitted_nip98_token)
+                                .header(
+                                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                                    format!("Bearer {same_key_assertion}"),
+                                )
+                                .body(axum::body::Body::empty())
+                                .expect("build request");
+                            let resp = git_router(Arc::clone(&state))
+                                .oneshot(req)
+                                .await
+                                .expect("router oneshot");
+                            let st = resp.status();
+                            let bd = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                            (st, (), bd)
+                        };
+                        assert_eq!(
+                            s4,
+                            axum::http::StatusCode::NOT_FOUND,
+                            "info/refs: same-key admission MUST reach handler → \
+                         404 (repo not found). Body: {b4:?}"
+                        );
+                        assert_eq!(
+                        b4.as_ref(),
+                        b"repository not found",
+                        "info/refs: same-key admitted 404 body must be 'repository not found'. \
+                         Falsifying mutation: key pairing always-deny → 403 body."
+                    );
+                    }
+                }
+            } // closes same-key outer block (test_keys_outer / same_key_assertion)
+        }
     }
 }

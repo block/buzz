@@ -1,6 +1,7 @@
 part of '../compose_bar.dart';
 
-class _ComposeBarLayout extends StatelessWidget {
+class _ComposeBarLayout extends HookWidget {
+  final Widget? voiceNoteRecorder;
   final List<_PendingAttachment> attachments;
   final ValueChanged<int> onRemoveAttachment;
   final String? uploadError;
@@ -29,6 +30,7 @@ class _ComposeBarLayout extends StatelessWidget {
   final bool isSending;
 
   const _ComposeBarLayout({
+    required this.voiceNoteRecorder,
     required this.attachments,
     required this.onRemoveAttachment,
     required this.uploadError,
@@ -59,15 +61,43 @@ class _ComposeBarLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _DragDownToDismissKeyboard(child: _buildBar(context));
+    final recordingTransition = useAnimationController(
+      duration: motionDuration,
+      reverseDuration: MediaQuery.disableAnimationsOf(context)
+          ? Duration.zero
+          : const Duration(milliseconds: 140),
+      initialValue: voiceNoteRecorder == null ? 0 : 1,
+    );
+    useEffect(() {
+      if (voiceNoteRecorder == null) {
+        recordingTransition.reverse();
+      } else {
+        recordingTransition.forward();
+      }
+      return null;
+    }, [voiceNoteRecorder != null, motionDuration]);
+    return _DragDownToDismissKeyboard(
+      child: _buildBar(context, recordingTransition),
+    );
   }
 
-  Widget _buildBar(BuildContext context) {
+  Widget _buildBar(
+    BuildContext context,
+    Animation<double> recordingTransition,
+  ) {
     final trimmedDraft = controller.text.trim();
     final collapsedText = trimmedDraft.isEmpty
         ? resolvedHint
         : trimmedDraft.replaceAll(RegExp(r'\s+'), ' ');
-    final content = Column(
+    final hasVoiceNoteAttachment = attachments.any(
+      (attachment) => attachment.kind == _PendingAttachmentKind.voiceNote,
+    );
+    final composerContent = Column(
+      key: ValueKey(
+        hasVoiceNoteAttachment
+            ? 'composer-voice-note-preview-content'
+            : 'composer-standard-content',
+      ),
       mainAxisSize: MainAxisSize.min,
       children: [
         if (attachments.isNotEmpty) ...[
@@ -214,24 +244,79 @@ class _ComposeBarLayout extends StatelessWidget {
         ),
       ],
     );
+    final contentMotionDuration = MediaQuery.disableAnimationsOf(context)
+        ? Duration.zero
+        : const Duration(milliseconds: 140);
+    final content = ClipRect(
+      child: AnimatedSwitcher(
+        key: const ValueKey('composer-content-morph'),
+        duration: contentMotionDuration,
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeOutCubic,
+        layoutBuilder: (currentChild, previousChildren) => Stack(
+          alignment: Alignment.bottomCenter,
+          children: [...previousChildren, ?currentChild],
+        ),
+        transitionBuilder: (child, animation) => FadeTransition(
+          opacity: animation,
+          child: SizeTransition(
+            sizeFactor: animation,
+            axisAlignment: 1,
+            child: child,
+          ),
+        ),
+        child: voiceNoteRecorder == null
+            ? composerContent
+            : KeyedSubtree(
+                key: const ValueKey('composer-voice-note-content'),
+                child: voiceNoteRecorder!,
+              ),
+      ),
+    );
     return AnimatedBuilder(
-      animation: expansionAnimation,
+      animation: Listenable.merge([expansionAnimation, recordingTransition]),
       child: content,
       builder: (context, child) {
         final progress = expansionAnimation.value.clamp(0.0, 1.0).toDouble();
         final composerRadius = Radii.dialog + Grid.quarter * (1 - progress);
-        return Container(
+        final radius = BorderRadius.lerp(
+          BorderRadius.circular(composerRadius),
+          BorderRadius.circular(Radii.full),
+          Curves.easeInOutCubic.transform(recordingTransition.value),
+        )!;
+        final usesIosConcentricSurface =
+            defaultTargetPlatform == TargetPlatform.iOS;
+        final voiceNoteInsetProgress = hasVoiceNoteAttachment
+            ? 1.0
+            : recordingTransition.value;
+        final composer = Container(
           key: const ValueKey('composer-surface'),
           decoration: BoxDecoration(
-            color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(composerRadius),
+            color: usesIosConcentricSurface
+                ? Colors.transparent
+                : context.colors.surfaceContainerHighest,
+            borderRadius: radius,
             border: Border.all(
               color: Colors.black.withValues(alpha: 0.04),
               width: 1,
             ),
           ),
-          padding: const EdgeInsets.all(Grid.xxs),
+          padding: EdgeInsets.all(
+            Grid.xxs + Grid.half * voiceNoteInsetProgress,
+          ),
           child: child,
+        );
+        if (!usesIosConcentricSurface) return composer;
+        return ConcentricSheetSurface(
+          key: const ValueKey('composer-ios-concentric-surface'),
+          enabled: true,
+          usesGlass: true,
+          color: context.colors.surfaceContainerHighest,
+          padding: EdgeInsets.zero,
+          providesSheetSurface: false,
+          minimumRadius: radius.topLeft.x,
+          contentClipRadius: radius.topLeft.x,
+          child: composer,
         );
       },
     );

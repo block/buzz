@@ -395,7 +395,12 @@ pub async fn verify_floor_guard_behavior(pool: &PgPool) -> crate::Result<()> {
         }
     };
 
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Bootstrap,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     // 1. Pool arming (Perci: assert the effective value, not the intent).
     let armed: String = sqlx::query_scalar("SHOW buzz.created_at_floor")
@@ -552,7 +557,11 @@ pub enum ProbeError {
 /// a single SELECT would not guarantee evaluation order across the
 /// subexpressions, reopening the race this ordering exists to close.
 async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
-    let mut conn = writer.acquire().await?;
+    let mut conn = crate::observability::acquire_writer(
+        writer,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
 
     // 1. S first.
     let sampled_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -671,11 +680,16 @@ pub async fn probe_once(writer: &PgPool, fence: &ReplicaFence) -> Result<TokenEn
             // so the same three-bucket argument (and the same wall) holds
             // for the rotated token.
             let committed_at = Instant::now();
+            let mut connection = crate::observability::acquire_writer(
+                writer,
+                crate::observability::WriterOperation::Maintenance,
+            )
+            .await?;
             let row = sqlx::query(
                 "UPDATE replica_heartbeat SET epoch = gen_random_uuid(), token = token + 1 \
                  WHERE id = 1 RETURNING token, epoch",
             )
-            .fetch_optional(writer)
+            .fetch_optional(&mut *connection)
             .await?
             .ok_or(ProbeError::HeartbeatRowMissing)?;
             let token: i64 = row.get("token");
@@ -789,20 +803,14 @@ pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>) {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
-
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-
-    fn test_db_url() -> String {
-        std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into())
-    }
 
     /// A private scratch database with migrations applied: the probe tests
     /// mutate the singleton heartbeat row (rewind/rotate), which must never
     /// race the shared dev database or each other.
     async fn scratch_db() -> (PgPool, PgPool, String) {
-        let admin = PgPool::connect(&test_db_url())
+        let admin = PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect admin");
         let name = format!("fence_probe_{}", uuid::Uuid::new_v4().simple());
@@ -810,7 +818,7 @@ mod tests {
             .execute(&admin)
             .await
             .expect("create scratch db");
-        let base = test_db_url();
+        let base = crate::test_support::database_url();
         let idx = base.rfind('/').expect("db url has a path segment");
         let pool = PgPool::connect(&format!("{}/{}", &base[..idx], name))
             .await
@@ -973,17 +981,27 @@ mod tests {
     /// sessions, per the agreed classification.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn sample_writer_sees_open_transactions_and_ignores_idle() {
-        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
+    async fn migration_schema_cluster_global_sample_writer_sees_open_transactions_and_ignores_idle()
+    {
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect");
+        crate::migration::run_migrations(&pool)
+            .await
+            .expect("apply migration schema");
 
         // A plain idle session: pinned connection, no transaction.
-        let idle_pool = PgPool::connect(&test_db_url()).await.expect("connect idle");
+        let idle_pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect idle");
         let _idle_conn = idle_pool.acquire().await.expect("idle conn");
 
         let before = sample_writer(&pool).await.expect("sample without tx");
 
         // Now hold a transaction open on a second connection.
-        let tx_pool = PgPool::connect(&test_db_url()).await.expect("connect tx");
+        let tx_pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect tx");
         let mut tx = tx_pool.begin().await.expect("begin");
         sqlx::query("SELECT 1")
             .execute(&mut *tx)
@@ -1016,12 +1034,16 @@ mod tests {
     /// never silently `MIN()` the hidden row away.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn sample_writer_fails_closed_when_activity_is_masked() {
-        let admin = PgPool::connect(&test_db_url()).await.expect("connect");
+    async fn cluster_global_sample_writer_fails_closed_when_activity_is_masked() {
+        let admin = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect");
 
         // Hold a transaction open as the privileged user: this is the row
         // the unprivileged probe must notice it cannot classify.
-        let tx_pool = PgPool::connect(&test_db_url()).await.expect("connect tx");
+        let tx_pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect tx");
         let mut tx = tx_pool.begin().await.expect("begin");
         sqlx::query("SELECT 1")
             .execute(&mut *tx)
@@ -1038,7 +1060,7 @@ mod tests {
         .await
         .expect("create unprivileged role");
 
-        let base = test_db_url();
+        let base = crate::test_support::database_url();
         let unpriv_url = {
             let rest = base.strip_prefix("postgres://").expect("pg url");
             let at = rest.rfind('@').expect("credentials in url");
@@ -1079,7 +1101,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn aurora_identity_probe_reports_false_on_plain_postgres() {
-        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect");
         let mut conn = pool.acquire().await.expect("conn");
         assert!(
             !reader_supports_aurora_identity(&mut conn)
@@ -1100,7 +1124,7 @@ mod tests {
     /// same database observes a token/epoch that resolves that entry.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn probe_commits_tokens_and_sessions_prove_coverage() {
+    async fn cluster_global_probe_commits_tokens_and_sessions_prove_coverage() {
         let (admin, pool, name) = scratch_db().await;
         let fence = ReplicaFence::new();
 
@@ -1155,7 +1179,7 @@ mod tests {
     /// epoch — fails the epoch check instead of proving stale coverage.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn probe_rotates_epoch_on_same_epoch_token_regression() {
+    async fn cluster_global_probe_rotates_epoch_on_same_epoch_token_regression() {
         let (admin, pool, name) = scratch_db().await;
         let fence = ReplicaFence::new();
 

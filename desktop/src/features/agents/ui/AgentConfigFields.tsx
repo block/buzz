@@ -86,14 +86,10 @@ type AgentConfigDisclosure =
   | "onboarding-essential"
   | "progressive-defaults";
 
-// Canonical behaviors (PR 2 flag cleanup). These were per-surface props;
-// onboarding's values won every call and are now the only behavior:
-// - auto-select a valid model when the provider changes
-// - keep the model select usable during discovery
-// - preserve credential env vars across provider switches (the abandoned
-//   provider's key stays in env_vars — visible/deletable under Advanced)
-// - require a provider before model/effort are editable (no saveable
-//   invalid state — design principle #4)
+// Canonical behaviors (formerly per-surface props; onboarding's values won
+// every call and are now the only behavior). Design principle #4: require a
+// provider before model/effort are editable; preserve credential env vars
+// across provider switches; auto-select model on provider change.
 const autoSelectModelOnProviderChange = true;
 const disableModelSelectDuringDiscovery = false;
 const preserveCredentialEnvVarsOnProviderChange = true;
@@ -188,6 +184,8 @@ export type AgentConfigFieldsProps = {
   runtimeFileConfig?: RuntimeFileConfigSubset | null;
   placeholderClassName?: string;
   selectClassName?: string;
+  showApiKeyEnvVarName?: boolean;
+  stackModelAndEffortHorizontally?: boolean;
   /**
    * Which disclosure preset to render (PR 2 flag cleanup — replaces eight
    * independent show* booleans):
@@ -224,6 +222,8 @@ export function AgentConfigFields({
   runtimeFileConfig,
   placeholderClassName,
   selectClassName,
+  showApiKeyEnvVarName = true,
+  stackModelAndEffortHorizontally = false,
   disclosure = "full",
   unstyled = false,
   useCustomSelect = false,
@@ -255,6 +255,11 @@ export function AgentConfigFields({
     effortField?.currentPersistence.kind === "envVar"
       ? effortField.currentPersistence.key
       : null;
+  // True when the runtime owns its own effort vocabulary (e.g. Goose) and
+  // should bypass the buzz-agent provider/model catalog: harnessNative + envVar.
+  const isHarnessNativeEffort =
+    effortField?.optionSource === "harnessNative" &&
+    effortField?.currentPersistence.kind === "envVar";
 
   const numericDescriptors = fieldModel.fields.filter(
     (d): d is NumericDescriptor =>
@@ -287,8 +292,7 @@ export function AgentConfigFields({
   const modelField = fieldModel.fields.find(
     (field) => field.kind === "model" && field.render === "control",
   );
-  // CLI-login harnesses apply this setting through ACP rather than an env var
-  // and provide their own default when no model override is persisted.
+  // CLI-login harnesses use ACP for this setting; they provide their own default.
   const modelIsOptional = modelField?.targetApplication.kind === "acpNative";
   const modelIsValid =
     modelIsOptional ||
@@ -384,20 +388,15 @@ export function AgentConfigFields({
     showCustomModelOption,
   });
 
-  // Mount-time healing policy: onboarding page 4 edits the root config during
-  // first-run (no higher layers to inherit from), so acting on open is safe
-  // and intentional there — it heals stale state and picks a valid model.
-  // Evergreen surfaces (Settings, dialogs) edit saved data that may pair with
-  // higher layers (see PR #2148 review thread), so they only act after the
-  // user explicitly edits the provider in this session.
+  // Mount-time healing policy: onboarding (first-run, no higher layers) heals
+  // on open. Evergreen surfaces (Settings, dialogs) only heal after an explicit
+  // provider edit — acting on open would break multi-layer configs (PR #2148).
   const healOnMount =
     fieldModel.dependentValuePolicy.onCatalogMismatch === "onboardingCleanup";
   const userEditedProviderRef = React.useRef(false);
-  // Advanced visibility is user-controlled. Provider changes can add required
-  // rows, but must not open this section without an explicit toggle click.
+  // Advanced visibility is user-controlled; must not auto-open on provider change.
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
-  // Read inside effects via ref so biome's exhaustive-deps stays honest:
-  // refs are stable, and healOnMount is captured at declaration.
+  // Stable ref for effects; healOnMount is captured at declaration time.
   const mayMutateDependentFieldsRef = React.useRef(false);
   mayMutateDependentFieldsRef.current =
     healOnMount || userEditedProviderRef.current;
@@ -439,14 +438,10 @@ export function AgentConfigFields({
     ? (config.env_vars[effortPersistenceKey] ?? "")
     : "";
 
-  // When the selected harness changes outside this component (Back → setup
-  // page → choose a different harness → Next), the saved model can belong to
-  // the old harness. In onboarding, heal that stale value as soon as the new
-  // harness catalog proves it is unsupported; otherwise a Codex id like
-  // `gpt-5.5[low]` appears as a Claude Code custom model.
-  // Also clear when the Model control is omitted after a confirmed successful
-  // empty catalog — never while discovery failed/unavailable (transient
-  // failures must not erase saved model/effort).
+  // Heal a stale model when the harness changes (e.g. Back → pick different
+  // harness → Next in onboarding). Clear once the new catalog proves the saved
+  // model unsupported; also clear when Model is omitted after a confirmed empty
+  // catalog. Never clear on failure/unavailable — transient errors must not erase.
   React.useEffect(() => {
     if (!healOnMount) return;
     const currentModel = (config.model ?? "").trim();
@@ -463,7 +458,9 @@ export function AgentConfigFields({
     if (!catalogMiss && !omittedAfterSuccessfulEmpty) return;
 
     const nextEnvVars = { ...config.env_vars };
-    if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+    // Harness-native effort is model-independent; never clear it on a catalog miss.
+    if (effortPersistenceKey && !isHarnessNativeEffort)
+      delete nextEnvVars[effortPersistenceKey];
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -477,28 +474,29 @@ export function AgentConfigFields({
     onCustomModelEditingChange,
     healOnMount,
     effortPersistenceKey,
+    isHarnessNativeEffort,
   ]);
 
   // Orphan-model clearing follows the mount-time healing policy above: the
-  // backend resolves provider and model independently across layers
-  // (agent → definition → global), so a saved global model WITHOUT a global
-  // provider can be a deliberate, working pattern (provider supplied by a
-  // higher layer). Clearing it on page-open in evergreen surfaces silently
-  // breaks that agent on its next restart — see PR #2148 review thread.
-  // Onboarding heals on open by design (discriminating spec: "gates stale
-  // saved model and effort until provider selection").
+  // backend resolves provider+model independently across layers, so a global
+  // model without a global provider can be deliberate (PR #2148). Evergreen
+  // surfaces only clear on explicit edit; onboarding heals on open.
   React.useEffect(() => {
     if (!mayMutateDependentFieldsRef.current) return;
     if (!dependentFieldsDisabled) return;
+    // When model is absent, harness-native effort is model-independent so no
+    // orphan to fix; non-native effort with no value is already clean.
     if (
       (config.model ?? "").trim().length === 0 &&
-      currentEffortForAutoClear.length === 0
-    ) {
+      (isHarnessNativeEffort || currentEffortForAutoClear.length === 0)
+    )
       return;
-    }
 
     const nextEnvVars = { ...config.env_vars };
-    if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+    // Preserve harness-native effort — it is model-independent and must survive
+    // the provider→Custom transition.
+    if (effortPersistenceKey && !isHarnessNativeEffort)
+      delete nextEnvVars[effortPersistenceKey];
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -508,13 +506,16 @@ export function AgentConfigFields({
     onConfigChange,
     onCustomModelEditingChange,
     effortPersistenceKey,
+    isHarnessNativeEffort,
   ]);
+  // `useEffortAutoClear` must not delete a valid harness-native value (e.g.
+  // "off" for Goose). Suppress it by passing "" as the current effort.
   const { validValues: effortValidForAutoClear } = getProviderEffortConfig(
     config.provider ?? "",
     config.model ?? "",
   );
   useEffortAutoClear({
-    currentEffort: currentEffortForAutoClear,
+    currentEffort: isHarnessNativeEffort ? "" : currentEffortForAutoClear,
     effortValid: effortValidForAutoClear,
     onClear: () => {
       const nextEnvVars = { ...config.env_vars };
@@ -635,10 +636,36 @@ export function AgentConfigFields({
     : implicitEffortProvider;
   const { validValues: effortValid, defaultValue: effortDefault } =
     getProviderEffortConfig(effortProvider, config.model ?? "");
+  // Harness-native runtimes own their effort vocabulary via the catalog entry.
+  const effortValidForRenderer = isHarnessNativeEffort
+    ? (selectedRuntime?.effortCanonicalValues ?? [])
+    : effortValid;
+  const effortDefaultForRenderer = isHarnessNativeEffort ? null : effortDefault;
   const currentEffort = effortPersistenceKey
     ? (config.env_vars[effortPersistenceKey] ?? "")
     : "";
   const effortFieldVisible = showEffortField && effortField !== undefined;
+  const apiKeyCredentialPresent =
+    apiKeyValue.trim().length > 0 || apiKeyInherited;
+  const apiKeyValidationRequired =
+    stackModelAndEffortHorizontally && apiKeyEnvVar !== null;
+  const apiKeyValidationPending =
+    apiKeyValidationRequired &&
+    apiKeyCredentialPresent &&
+    modelDiscoveryLoading;
+  const apiKeyValidationSucceeded =
+    !apiKeyValidationRequired ||
+    (apiKeyCredentialPresent &&
+      !modelDiscoveryLoading &&
+      discoveredModelOptions !== null);
+  const apiKeyValidationFailed =
+    apiKeyValidationRequired &&
+    apiKeyCredentialPresent &&
+    !modelDiscoveryLoading &&
+    discoveredModelOptions === null &&
+    modelDiscoveryStatus !== null;
+  const onboardingModelAndEffortVisible =
+    configuredProviderValue.trim().length > 0 && apiKeyValidationSucceeded;
 
   const progressiveDefaults = disclosure === "progressive-defaults";
   const fieldClassName = unstyled
@@ -648,7 +675,9 @@ export function AgentConfigFields({
     : "space-y-1.5 p-3";
   const blockClassName = unstyled ? "" : "p-3";
   const fieldLabelClassName =
-    unstyled && !progressiveDefaults ? "pl-3" : undefined;
+    unstyled && !progressiveDefaults && !stackModelAndEffortHorizontally
+      ? "pl-3"
+      : undefined;
   const providerDropdownOptions = [
     ...providerOptions
       .filter(
@@ -768,32 +797,8 @@ export function AgentConfigFields({
     </>
   );
 
-  const dependentContent = (
+  const modelAndEffortFields = (
     <>
-      {providerFieldVisible && apiKeyEnvVar ? (
-        <div className={blockClassName}>
-          <PersonaProviderApiKeyField
-            disabled={false}
-            envVarName={apiKeyEnvVar}
-            inheritedLabel={
-              apiKeyFileSatisfied
-                ? "Set in runtime config"
-                : "Provided by this build"
-            }
-            isInherited={apiKeyInherited}
-            isRequired={!apiKeyInherited && apiKeyValue.length === 0}
-            label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
-            onValueChange={(value) =>
-              onConfigChange({
-                ...config,
-                env_vars: { ...config.env_vars, [apiKeyEnvVar]: value },
-              })
-            }
-            value={apiKeyValue}
-          />
-        </div>
-      ) : null}
-
       {/* Model field — omitted only after confirmed successful empty discovery */}
       {modelControlVisible ? (
         <div className={showDescriptions ? fieldClassName : undefined}>
@@ -853,21 +858,21 @@ export function AgentConfigFields({
             currentEffort={dependentFieldsDisabled ? "" : currentEffort}
             disabled={dependentFieldsDisabled}
             emptyOptionLabel={
-              // Semantic, not copy: onboarding-essential hides inheritance
-              // concepts (first-run users pick, they don't inherit), so the
-              // zero option is a plain placeholder. Full disclosure leaves
-              // this unset so EffortSelectField computes the inherit/default
-              // label ("Default (medium)", "Inherit (high)", …).
+              // Onboarding-essential hides inherit/default labels; show a plain
+              // placeholder. Full disclosure lets EffortSelectField compute
+              // its own label ("Default (medium)", "Inherit (high)", …).
               disclosure === "onboarding-essential"
                 ? "Select effort level"
                 : undefined
             }
-            effortDefault={effortDefault}
-            effortValid={effortValid}
+            effortDefault={effortDefaultForRenderer}
+            effortValid={effortValidForRenderer}
             fieldClassName={unstyled ? fieldClassName : undefined}
             htmlFor="global-agent-thinking-effort"
             inheritFallbackLabel={
-              effortDefault !== null ? `Default (${effortDefault})` : undefined
+              effortDefaultForRenderer !== null
+                ? `Default (${effortDefaultForRenderer})`
+                : undefined
             }
             inheritedEffort={bakedEffort ?? undefined}
             label="Effort"
@@ -890,6 +895,50 @@ export function AgentConfigFields({
             useCustomSelect={useCustomSelect}
           />
         </div>
+      ) : null}
+    </>
+  );
+
+  const dependentContent = (
+    <>
+      {providerFieldVisible && apiKeyEnvVar ? (
+        <div className={blockClassName}>
+          <PersonaProviderApiKeyField
+            disabled={false}
+            envVarName={showApiKeyEnvVarName ? apiKeyEnvVar : undefined}
+            inheritedLabel={
+              apiKeyFileSatisfied
+                ? "Set in runtime config"
+                : "Provided by this build"
+            }
+            isInherited={apiKeyInherited}
+            isRequired={!apiKeyInherited && apiKeyValue.length === 0}
+            isValidating={apiKeyValidationPending}
+            label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
+            onValueChange={(value) =>
+              onConfigChange({
+                ...config,
+                env_vars: { ...config.env_vars, [apiKeyEnvVar]: value },
+              })
+            }
+            validationMessage={
+              apiKeyValidationFailed
+                ? "We couldn’t validate this API key. Check the key or your connection and try again."
+                : null
+            }
+            value={apiKeyValue}
+          />
+        </div>
+      ) : null}
+
+      {!stackModelAndEffortHorizontally || onboardingModelAndEffortVisible ? (
+        stackModelAndEffortHorizontally ? (
+          <div className="grid w-full grid-cols-2 gap-4 [&>*:only-child]:col-span-2">
+            {modelAndEffortFields}
+          </div>
+        ) : (
+          modelAndEffortFields
+        )
       ) : null}
 
       {showAdvancedFields ? (

@@ -13,7 +13,7 @@ use crate::{
 #[tauri::command]
 pub fn set_agent_managed_profiles(enabled: bool, state: State<'_, AppState>) {
     state
-        .managed_agent_profile_reconcile_enabled
+        .managed_agent_profile_reconcile_enabled()
         .store(!enabled, Ordering::Release);
 }
 

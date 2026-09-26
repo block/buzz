@@ -17,6 +17,43 @@ const base = {
 
 // --- selectionOnRuntimeChange ---
 
+test("runtime switch clears stale effort env aliases (native + ACP sentinel), preserving the Save-gated column", () => {
+  // Claude/buzz-agent → Goose: the previous runtime's effort env aliases are
+  // stale under Goose. They are cleared; unrelated env survives. The canonical
+  // effort column is Save-gated, not in this state, so it is untouched here.
+  const next = selectionOnRuntimeChange(
+    {
+      ...base,
+      envVars: {
+        BUZZ_ACP_EFFORT_LEVEL: "high",
+        BUZZ_AGENT_THINKING_EFFORT: "medium",
+        GOOSE_THINKING_EFFORT: "max",
+        KEEP: "x",
+      },
+    },
+    {
+      previousRuntime: "buzz-agent",
+      nextRuntime: "goose",
+      nextRuntimeCanChooseProvider: true,
+      lockedRuntimeReset: "full",
+    },
+  );
+  assert.deepEqual(next.envVars, { KEEP: "x" });
+});
+
+test("no-op runtime change (previous === next) leaves effort env aliases intact", () => {
+  const next = selectionOnRuntimeChange(
+    { ...base, envVars: { GOOSE_THINKING_EFFORT: "high", KEEP: "x" } },
+    {
+      previousRuntime: "goose",
+      nextRuntime: "goose",
+      nextRuntimeCanChooseProvider: true,
+      lockedRuntimeReset: "full",
+    },
+  );
+  assert.deepEqual(next.envVars, { GOOSE_THINKING_EFFORT: "high", KEEP: "x" });
+});
+
 test("runtime change to a provider-locked runtime, full reset (Persona/Edit): clears provider, custom flags, and managed API key", () => {
   const next = selectionOnRuntimeChange(
     {

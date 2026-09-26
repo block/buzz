@@ -1,7 +1,7 @@
 {
   "name": "buzz",
   "private": true,
-  "version": "0.5.20",
+  "version": "0.5.25",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,7 @@
     "lint": "biome lint .",
     "check": "biome check . && pnpm check:px-text && pnpm check:pubkey-truncation",
     "format": "biome format --write .",
-    "test": "node --import ./test-loader.mjs --experimental-strip-types --test \"src/**/*.test.mjs\" \"scripts/*.test.mjs\"",
+    "test": "node --import ./test-loader.mjs --experimental-strip-types --test \"src/**/*.test.mjs\" \"scripts/*.test.mjs\" && node --import ./test-jsdom-setup.mjs --import ./test-loader.mjs --experimental-strip-types --test-force-exit --test \"src/**/*.jsdom-test.mjs\"",
     "preview": "vite preview",
     "tauri": "node ./scripts/tauri-command.mjs",
     "test:e2e": "pnpm build:e2e && playwright test",
@@ -63,6 +63,7 @@
     "@tiptap/starter-kit": "^3.22.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "diff": "^8.0.4",
     "embla-carousel-react": "^8.6.0",
     "emoji-mart": "^5.6.0",
     "jdenticon": "^3.3.0",
@@ -73,6 +74,7 @@
     "qrcode": "^1.5.4",
     "qrcode.react": "^4.2.0",
     "react": "^19.1.0",
+    "react-day-picker": "^10.0.1",
     "react-diff-view": "^3.3.2",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",

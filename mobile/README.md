@@ -2,6 +2,9 @@
 
 Flutter mobile client for Buzz.
 
+See [VISION_MOBILE.md](../VISION_MOBILE.md) for intended behavior and
+architecture.
+
 ## Setup
 
 Use the Flutter SDK pinned by the repository. Activate Hermit from the repo
@@ -25,7 +28,7 @@ engine all come from the same Flutter version.
 just mobile-dev
 
 # Direct (uses the app's configured community; apply worktree overrides first):
-cd mobile && flutter run
+cd mobile && flutter run --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 ### Worktree-aware debug identity
@@ -70,13 +73,18 @@ For direct Xcode / Android Studio / `flutter run` development, run
 switch to refresh the display label (the install identity never changes);
 the persisted files are then picked up by any subsequent build. In the main
 checkout the script is a no-op that removes stale override files, restoring
-the plain `Buzz` identity.
+the plain `Buzz` identity. To enable push in direct Xcode builds and Runner tests, supply a
+`BUZZ_PUSH_GATEWAY_URL` build setting in the gitignored
+`mobile/ios/Flutter/AppOverrides.xcconfig`; the build phase validates and
+passes it through as a Flutter Dart define. Since `//` begins an xcconfig
+comment, spell the origin as `BUZZ_PUSH_GATEWAY_URL = https:/$()/push.example`.
 
 For an Android debug build that must remain installed alongside other Buzz
 worktree builds, set an explicit launcher name and package suffix when invoking
 the generator or a recipe that invokes it:
 
 ```bash
+BUZZ_PUSH_GATEWAY_URL="https://push.example" \
 BUZZ_ANDROID_DEBUG_APP_NAME="Buzz Huddles" \
 BUZZ_ANDROID_DEBUG_ID_SUFFIX=".huddles_829c" \
 ./bin/just mobile-build-android
@@ -104,6 +112,25 @@ enrollment, or lease publication, so a later user opt-in can display pushes
 without rebuilding transport authority. An absent, malformed, or unreachable
 descriptor leaves push inactive without partial enrollment.
 
+Mobile builds without a gateway origin succeed with push unavailable. To enable
+push, supply the gateway origin explicitly:
+
+```bash
+flutter build ios --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+flutter build apk --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+```
+
+The iOS and Android build gates validate any supplied define, rejecting empty or
+malformed values. Release/profile builds require an HTTPS origin without an
+explicit port. An absent define disables permission requests, APNs registration,
+gateway enrollment, and lease publication; Settings shows push as unavailable.
+No production gateway is selected implicitly. Enrollment
+grants and crash-recovery journals are scoped to this origin. Push has not
+shipped to existing users, so there is no legacy-state or cross-gateway
+migration. Changing gateways requires fresh enrollment; old installations
+expire under their original gateway's lease policy. Current-gateway response
+loss is still retried from the exact journaled request.
+
 Relay rollout remains an explicit deployment opt-in. Only deployments with
 `BUZZ_PUSH_ENABLED=true` advertise the descriptor and process push. See
 `docs/push-gateway-deployment.md` for the canonical gateway profile contract,
@@ -113,19 +140,22 @@ For local physical-device development, override the identity and sandbox
 environments in the gitignored `mobile/ios/Flutter/AppOverrides.xcconfig`:
 
 ```xcconfig
-BUNDLE_IDENTIFIER = xyz.block.buzz.mobile
-BUZZ_DEVELOPMENT_TEAM = EYF346PHUG
+BUNDLE_IDENTIFIER = com.example.buzz.mobile
+BUZZ_DEVELOPMENT_TEAM = YOUR_TEAM_ID
 BUZZ_IOS_PUSH_ENVIRONMENT = development
 BUZZ_APP_ATTEST_ENVIRONMENT = development
+BUZZ_PUSH_GATEWAY_URL = https:/$()/push.example
 ```
 
-This exercises the client, extension, relay, and gateway integration without
-requiring a dogfood development signing identity. It uses the canonical
-gateway's server-owned App Store profile configured for sandbox in the local
-development gateway; it does not validate the internally distributed dogfood
-artifact or enable the App Store profile in production. Validate dogfood APNs
-end to end by cutting an internal release, waiting for it to reach Mobile
-Releases/Comp Portal, and installing that signed artifact on a physical device.
+Use your personal bundle ID and team above. Provision both the parent and its
+`.NotificationService` extension. Configure an isolated gateway with the matching
+App Attest application ID, APNs topic and sandbox certificate. Development
+attestation requires the explicit `personal-dev-app-attest` gateway build feature
+and `BUZZ_PUSH_APP_ATTEST_ENVIRONMENT=development`; ordinary gateway builds accept
+production attestation only. See `docs/push-gateway-deployment.md`.
+This validates the personal client/relay/gateway integration, not the internally
+distributed dogfood artifact. Validate dogfood separately using the signed
+internal release and its production gateway configuration.
 
 Parent app identifiers require Apple's Communication
 Notifications capability and a regenerated app provisioning profile. The
@@ -148,7 +178,7 @@ short sender pubkey, community subtitle, and no image.
 ```bash
 dart format --output=none --set-exit-if-changed .
 flutter analyze
-flutter test
+flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 Or from the repo root: `just mobile-check` and `just mobile-test`.

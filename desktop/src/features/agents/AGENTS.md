@@ -153,8 +153,8 @@ with a TypeScript lookup table or an id comparison in a component.
    place that resolves it for dialog surfaces and publishes it through
    `ui/AgentRunLocationContext.tsx`; the field reads that context and lets an
    explicit `runLocation` prop win. Do **not** thread the value as a prop
-   through `AgentDefinitionDialog` / `AgentInstanceEditDialog` — both are
-   already over the 1000-line ceiling, and neither uses the value itself.
+   through `AgentDefinitionDialog` / `AgentInstanceEditDialog` — neither uses
+   the value itself, and the shared context keeps the dialog boundary stable.
    Surfaces rendered outside `AgentDialog` (e.g. `EditRespondToDialog`) pass the
    prop directly. Local names "your
    computer, including files, accounts, and connected tools"; remote names "the
@@ -200,25 +200,46 @@ with a TypeScript lookup table or an id comparison in a component.
    agent from Agents, a DM, or a channel must expose the same actions, tabs,
    fields, and profile-wide activity selection. Caller context may control the
    panel shell or return navigation, but must not filter or replace profile
-   content.
+   content. Explicit public-key targets are always exact, including stopped,
+   archived, and relay-only identities. Only explicit persona navigation may
+   select a representative or offer persona Start; a relay persona link cannot
+   borrow a local sibling's management controls. See
+   [the identity contract](../../../../docs/agent-profile-identity.md).
+   Availability dots read relay presence, never a saved deployment
+   receipt or runtime status. Failed/disconnected reads are unknown; lifecycle
+   actions retain their separate routing. Current exact-key Online/Away presence
+   suppresses Start for an inactive local record without granting Stop authority;
+   list/profile/member startup guards must not interpret Offline as proof of safe
+   startup. Deletion also consumes that same exact-key availability reader:
+   unknown requests shutdown when a channel exists, request failure retains the
+   record, and only established Offline keeps the intentional no-request path.
+   Unqueried persona siblings are unknown. No presence state grants deletion or
+   Stop authority; native local stop-before-remove remains independent. See
+   [the availability contract](../../../../docs/agent-availability.md).
+   The shared cloud marker means “Not managed on this device” only
+   after ownership and successful local inventory are known. It does not imply
+   hosting location, availability, or permission. Keep all identity surfaces on
+   the shared provenance context, without per-row directory subscriptions. See
+   [the provenance contract](../../../../docs/agent-management-provenance.md).
 14. **Thinking effort has two surfaces: a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
    (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
-   `AgentInstanceEditDialog` beside the Model block. It is direct-write, not
-   part of the frozen `UpdateManagedAgentInput` shape: each selection calls
-   `persistAgentEffortLevel` and invalidates the config-surface query, mirroring
-   the `setManagedAgentAutoRestart` standalone-setter precedent. Its gating and
-   option compute live in the pure helper `ui/effortPicker.ts`
-   (`effortPickerState`): the picker renders only when
-   `agent.backend.type === "local"` **AND** a `thought_level` `effortConfigId`
-   has been discovered from the running session (absent pre-first-session and
-   for runtimes/models without effort support). Local-only is load-bearing, not
-   cosmetic — the Rust command rejects non-local backends because remote effort
-   is set at deploy time via `policy_env`. Because it reads its inputs from the
-   config surface the dialog already fetches (`useAgentConfigSurface`) and owns
-   its own mutation, it does **not** thread new props through the over-1000-line
-   dialog (see rule 11): keep effort state inside the section component, never
-   as dialog-level props. The read-only display is the `thinkingEffort`
+   `AgentInstanceEditDialog` beside the Model block. It is **Save-gated, not
+   direct-write**: the control is fully controlled by the parent dialog
+   (`value`/`onChange`) and owns no mutation. The dialog persists the selection
+   by embedding `effortLevel` in the locked `update_managed_agent` IPC call, so
+   the effort write is atomic with any access-policy change and can never race
+   or survive a Cancel or failed Save. There is no standalone
+   `persistAgentEffortLevel` setter. Its gating and option compute live in the
+   pure helper `ui/effortPicker.ts` (`effortPickerState`): the picker renders
+   only when `agent.backend.type === "local"` **AND** a `thought_level`
+   `effortConfigId` has been discovered from the running session (absent
+   pre-first-session and for runtimes/models without effort support). Local-only
+   is load-bearing, not cosmetic — the Rust command rejects non-local backends
+   because remote effort is set at deploy time via `policy_env`. Because the
+   control reads its inputs from the config surface the dialog already fetches
+   (`useAgentConfigSurface`), it integrates into the dialog's existing field
+   group without additional IPC. The read-only display is the `thinkingEffort`
    normalized field rendered by `AgentConfigPanel` via `NormalizedRow`, which
    already shows both facts — `field.value` (canonical, the effort the next
    spawn will launch with) and, when a running ACP session differs,
@@ -272,7 +293,11 @@ with a TypeScript lookup table or an id comparison in a component.
     managed agent. Independently operated relay agents with NIP-OA ownership
     remain eligible in every build when their verified owner's signed
     `respond_to` policy admits the viewer and relay membership includes the
-    target channel. Marked builds require that verified owner coordinate but do
+    target channel at publication. Owned nonmembers may be offered for preparation
+    and Invite; this is not permission to publish. Final authorization refreshes
+    the exact destination and retains captured selected identities across uploads
+    and edits. Denial preserves the draft, never silently removes a selected key.
+    See `docs/remote-mention-routing.md`. Marked builds require that verified owner coordinate but do
     not require it to equal the viewer; OSS builds retain compatibility with
     self-authored legacy directory records. Keep native discovery and send-time
     revalidation fail closed on invalid ownership or managed policy evidence,
@@ -281,7 +306,54 @@ with a TypeScript lookup table or an id comparison in a component.
     refresh only local persona/team/managed-agent caches; they must never
     invalidate the remote relay directory.
 
-17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
+17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. Verified provider-qualified exact records in `scripts/model-capabilities.json` take precedence for UC FQNs: `data_workflow_tools.goose.goose-claude-opus-5-5` uses Anthropic Messages, adaptive thinking, and `output_config.effort` (default medium). This does not confer capabilities on other namespaces or similarly named services. Uncurated UC FQNs do not inherit family effort capabilities: Claude service components select Anthropic Messages and expose no effort choices, while GPT-5-or-newer service components select OpenAI Responses with neutral fallback effort capabilities; other uncurated FQNs use MLflow Chat Completions. Catalog/schema components never infer routing. Keep exact-record precedence and fallback rules identical in the Rust and TypeScript capability interpreters and shared corpus. Effort inheritance, persistence, and clearing semantics are unchanged. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
+
+18. **ACP transport is persona-owned before deployment.** Select `acp_command` in the persona create/edit form beside the harness. Deployment inherits that value; linked instances do not expose a competing post-deploy override. Legacy definitions without the field use `buzz-acp`; definition-less agents retain their stored command. Switching a linked definition back to stock resets the instance transport on the next spawn. Shared persona events and restart snapshots carry the field so edits apply on the next spawn.
+
+19. **ACP command selection is convention-based.** The editor always offers
+    stock `buzz-acp` and installed executable `buzz-*-acp` aliases discovered
+    from normal executable search directories. It does not offer arbitrary
+    command entry. A persisted value outside that set remains visible as an
+    unavailable compatibility option but is not editable; selecting a conventional
+    option replaces it. Discovery returns the path produced by the same resolver
+    used at spawn, so a duplicate alias must never advertise one executable and
+    later launch another. Keep these transitions in the pure
+    `ui/acpCommandPicker.ts` helper and preserve persisted values across loading,
+    failed discovery, and late candidate arrival. ACP-only selections must mark
+    the form dirty, including catalog-update and embedded discard protection.
+    Catalog and portable agent/team snapshots carry only stock or conventional
+    aliases (ASCII letters, digits, hyphens, and underscores in the middle).
+    Foreign artifacts with other command values are rejected; exports omit
+    legacy machine-local commands. Owner-native and owner-device synchronization
+    retain custom-command compatibility and are not an execution sandbox.
+    Shared persona heads redact nonportable commands and emit explicit stock
+    for resets; owner replay of a redacted head preserves only a nonportable
+    local override. That local path is not synchronized through catalog heads.
+
+## Channel-only runtime controls
+
+Desktop observer controls identify a channel, not a thread session. The harness
+rejects `cancel_turn` and `switch_model` with `ambiguous_target` when that channel
+has multiple known session scopes, including retained idle scopes. Do not treat
+that result as success or a deferred model switch. Stop feedback waits for the
+harness result matching the control type, channel, and request ID; relay delivery
+alone does not prove that a turn was signalled. A missing result is unconfirmed,
+not success. The activity pane must use its resolved `sessionChannelId` for
+both the outgoing control and result correlation, even without a loaded
+`Channel` object. Stop is unavailable in an unscoped all-channel pane.
+
+Per-thread observer controls remain a separate protocol/UI change. Do not tell
+users to type `!cancel` beside an inline mention: the owner command requires
+kind 9, body exactly `!cancel` after trimming, and the agent's separate `p` tag.
+The automatic-mention picker also inserts literal `@Name` into the body, so it
+does not provide an exact-command workaround. The UI must state this limitation
+rather than offer an ineffective command. An authorized owner can instead use
+the CLI with the channel and target thread root:
+
+```sh
+buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
+  --mention <agent-pubkey> --content '!cancel'
+```
 
 ## The tests that enforce this
 
@@ -311,6 +383,9 @@ with a TypeScript lookup table or an id comparison in a component.
   every profile tab when opened from Agents and from the agent's DM.
 - `ui/AgentConfigPanelPresentation.test.mjs` — shared profile/agent config rows
   show only effective values, with an em dash for unknown values.
+- `ui/acpCommandPicker.test.mjs` — stock/discovered/unavailable command mode,
+  late discovery, query-failure compatibility, and conventional replacement of
+  persisted unknown commands.
 - `ui/effortPicker.test.mjs` — `effortPickerState` gating (local + discovered
   `effortConfigId` renders; provider backend or missing configId hides) and
   option/preselect compute, plus `effortSelectionToPersistedValue` sentinel →
@@ -330,6 +405,25 @@ with a TypeScript lookup table or an id comparison in a component.
   enqueue errors, relay rejection/unavailability, and accepted publication.
 - Rust: `definition_validation` and inbound persona tests pin the shared
   Unicode/control-character policy at local, import, publish, and sync gates.
+
+## Managed avatar media
+
+Desktop-managed profiles retain the saved persona/instance avatar as the desired
+source. Never publish another configured community's authenticated `/media/` URL
+verbatim: `relay::profile_avatar::localize_avatar` verifies/copies its bytes into
+the caller-pinned target before kind:0 comparison/publication. The shared record
+keeps the source URL, not the target projection. Transfer or kind:0 rejection
+leaves the previous profile intact so normal reconciliation can retry. The
+Agent-managed profiles opt-out still disables automatic reconciliation.
+
+The configured community origin set is refreshed through narrow workspace IPC
+before startup restore and when inactive communities change, without resetting
+active community state. After source removal, the shared writer may reuse an
+already-published target-local picture with the same original content hash;
+this is not permission to fetch the removed source. It is not learned from profile URLs. Media transfer
+uses the fixed agent signer, origin-scoped Blossom auth, no redirects, byte caps,
+and hash/descriptor verification; ordinary public external avatars remain
+unauthenticated passthrough. No image-reader proxy or tenant isolation exception.
 
 ## Keep this file true
 

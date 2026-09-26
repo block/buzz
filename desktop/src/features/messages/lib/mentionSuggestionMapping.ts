@@ -1,3 +1,4 @@
+import { isOwnedAgentNotManagedOnDevice } from "@/features/agents/lib/otherSetupAgent";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { formatOwnerLabel } from "@/features/profile/lib/identity";
@@ -61,10 +62,12 @@ export function mapMentionCandidateToSuggestion(opts: {
       agentProvenanceReady && candidate.kind === "identity" && candidate.isAgent
         ? candidate.isManagedAgent
           ? "managed-here"
-          : candidate.ownerPubkey &&
-              currentPubkey &&
-              normalizePubkey(candidate.ownerPubkey) ===
-                normalizePubkey(currentPubkey)
+          : isOwnedAgentNotManagedOnDevice({
+                currentPubkey: currentPubkey ?? undefined,
+                ownerPubkey: candidate.ownerPubkey,
+                localInventoryReady: agentProvenanceReady,
+                isLocallyManaged: Boolean(candidate.isManagedAgent),
+              })
             ? "managed-elsewhere"
             : undefined
         : undefined,

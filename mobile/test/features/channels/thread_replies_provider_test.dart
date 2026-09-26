@@ -8,6 +8,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 class _FakeRelaySession extends RelaySessionNotifier {
   int queryCount = 0;
+  bool honorDepthLimit = false;
+  final filtersSeen = <NostrFilter>[];
   List<NostrEvent> replies = const [];
   Completer<List<NostrEvent>>? nextQueryGate;
 
@@ -24,10 +26,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     queryCount++;
+    filtersSeen.addAll(filters);
     final gate = nextQueryGate;
     if (gate != null) {
       nextQueryGate = null;
       return gate.future;
+    }
+    if (honorDepthLimit) {
+      final depth = filters.single.extensions['depth_limit'] as int;
+      return replies.where((event) => event.createdAt <= depth).toList();
     }
     return replies;
   }
@@ -48,6 +55,85 @@ NostrEvent _reply(String id, int createdAt) => NostrEvent(
 
 void main() {
   const args = ThreadRepliesArgs(channelId: 'chan', rootId: 'root');
+
+  test('complete scan includes a legal 80-deep reply chain', () async {
+    final session = _FakeRelaySession()
+      ..honorDepthLimit = true
+      ..replies = [
+        for (var depth = 1; depth <= 80; depth++)
+          NostrEvent(
+            id: 'reply-$depth',
+            pubkey: 'bob',
+            createdAt: depth,
+            kind: EventKind.streamMessage,
+            tags: [
+              ['h', 'chan'],
+              ['e', 'root', '', 'root'],
+              ['e', depth == 1 ? 'root' : 'reply-${depth - 1}', '', 'reply'],
+            ],
+            content: '',
+            sig: '',
+          ),
+      ];
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.listen(threadRepliesProvider(args), (_, _) {});
+    expect(
+      await container.read(threadRepliesProvider(args).future),
+      hasLength(80),
+    );
+  });
+
+  test(
+    'origin cursor includes epoch-zero events in an exhaustive scan',
+    () async {
+      final session = _FakeRelaySession()..replies = [_reply('epoch', 0)];
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.listen(threadRepliesProvider(args), (_, _) {});
+      expect(
+        (await container.read(
+          threadRepliesProvider(args).future,
+        )).single.createdAt,
+        0,
+      );
+      expect(session.filtersSeen.single.extensions['thread_cursor'], -1);
+      expect(
+        session.filtersSeen.single.extensions['thread_cursor_id'],
+        '0' * 64,
+      );
+    },
+  );
+
+  test(
+    'disposes empty local overlays after their last listener leaves',
+    () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final provider = threadLocalRepliesProvider(args);
+      final subscription = container.listen(provider, (_, _) {});
+      subscription.close();
+      await container.pump();
+      expect(container.exists(provider), isFalse);
+    },
+  );
+
+  test('retains local replies without listeners until confirmation', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final provider = threadLocalRepliesProvider(args);
+    final notifier = container.read(provider.notifier);
+    notifier.add(_reply('pending', 1000));
+    await container.pump();
+    expect(container.read(provider).single.id, 'pending');
+    notifier.confirm({'pending'});
+    await container.pump();
+    expect(container.exists(provider), isFalse);
+  });
 
   (ProviderContainer, _FakeRelaySession, ProviderSubscription<Object?>)
   makeHarness(List<NostrEvent> initialReplies) {
@@ -212,6 +298,53 @@ void main() {
         'r1',
         'r2',
       ]);
+    },
+  );
+
+  test(
+    'local replies preserve cached authoritative replies after refresh failure',
+    () async {
+      final cached = _reply('cached', 1000);
+      final local = _reply('local', 1001);
+      final session = _FakeRelaySession()..replies = [cached];
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      final combined = container.listen(
+        threadRepliesWithLocalProvider(args),
+        (_, _) {},
+      );
+      await container.read(threadRepliesProvider(args).future);
+      container.read(threadLocalRepliesProvider(args).notifier).add(local);
+      await container.pump();
+      final refresh = Completer<List<NostrEvent>>();
+      session.nextQueryGate = refresh;
+      container.invalidate(threadRepliesProvider(args));
+      await container.pump();
+      expect(combined.read().value?.map((event) => event.id), [
+        'cached',
+        'local',
+      ]);
+      refresh.completeError(Exception('Refresh failed'));
+      await container.pump();
+      expect(container.read(threadRepliesProvider(args)).hasError, isTrue);
+      expect(combined.read().value?.map((event) => event.id), [
+        'cached',
+        'local',
+      ]);
+      expect(container.read(threadLocalRepliesProvider(args)), [local]);
+      session.replies = [cached, local];
+      container.invalidate(threadRepliesProvider(args));
+      await container.read(threadRepliesProvider(args).future);
+      await container.pump();
+      expect(combined.read().value?.map((event) => event.id), [
+        'cached',
+        'local',
+      ]);
+      await Future<void>.delayed(Duration.zero);
+      expect(container.read(threadLocalRepliesProvider(args)), isEmpty);
     },
   );
 

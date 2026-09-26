@@ -40,7 +40,7 @@ impl DevMcp {
 
     #[tool(
         name = "shell",
-        description = "Run a shell command (bash by default; set `BUZZ_SHELL` to use cmd, PowerShell, or another shell). Ephemeral process per call. Output tail-truncated to ~8KB for the LLM; full output (first 10MB) saved to artifact file. timeout_ms defaults to 120000 (2 min) if omitted; capped at 600000 (10 min). For long-running commands (git push with hooks, cargo build, test suites), use 300000+. On PATH: rg (prefer over grep; flags: -n -i -l -g <glob> -C <n> --files), tree (flags: -d <depth>; shows line counts), and buzz (Buzz relay CLI — run buzz --help for commands)."
+        description = "Run a shell command (bash by default; set `BUZZ_SHELL` to use cmd, PowerShell, or another shell). Ephemeral process per call. Output tail-truncated to ~8KB for the LLM; full output (first 10MB) saved to artifact file. timeout_ms defaults to 120000 (2 min) if omitted; capped at 1,200,000 (20 min). For long-running commands (git push with hooks, cargo build, test suites), use 300000+. On PATH: rg (prefer over grep; flags: -n -i -l -g <glob> -C <n> --files), tree (flags: -d <depth>; shows line counts), and buzz (Buzz relay CLI — run buzz --help for commands)."
     )]
     async fn shell(
         &self,
@@ -149,8 +149,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     match cmd.as_str() {
         "rg" => std::process::exit(rg::run(std::env::args().skip(1).collect())),
         "tree" => std::process::exit(tree::run(std::env::args().skip(1).collect())),
-        "git-credential-nostr" => std::process::exit(git_credential_nostr::run()),
-        "git-sign-nostr" => std::process::exit(git_sign_nostr::run()),
         _ => {}
     }
 

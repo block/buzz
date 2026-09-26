@@ -728,7 +728,7 @@ class _PeopleSection extends ConsumerWidget {
               key: ValueKey('search-person-leading-${user.pubkey}'),
               imageUrl: user.avatarUrl,
               radius: 20,
-              fallback: Text(user.label.substring(0, 1).toUpperCase()),
+              fallback: Text(user.initial),
               isAgent: user.isAgent,
             ),
             title: Text(

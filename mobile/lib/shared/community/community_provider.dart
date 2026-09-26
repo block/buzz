@@ -80,9 +80,7 @@ final communityStorageProvider = Provider<CommunityStorage>((ref) {
 typedef CommunitySnapshotWriter =
     Future<void> Function(List<Community> communities);
 
-/// Writes the complete persisted community set to storage shared with the iOS
-/// notification service extension. Tests override this provider to verify that
-/// every persistence path refreshes (or clears) the native snapshot.
+/// Exports persisted communities to the notification service extension.
 final communitySnapshotWriterProvider = Provider<CommunitySnapshotWriter>((
   ref,
 ) {
@@ -182,9 +180,23 @@ class _CommunitySnapshotSync {
 
   final CommunitySnapshotWriter _writer;
   String? _lastSuccessfulSnapshot;
+  Future<void> _mutationTail = Future.value();
 
-  Future<void> write(List<Community> communities) async {
-    final fingerprint = communities
+  Future<void> _serializeMutation(Future<void> Function() operation) {
+    final result = _mutationTail.then((_) => operation());
+    _mutationTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
+  }
+
+  Future<void> write(List<Community> communities) =>
+      _serializeMutation(() => _write(communities));
+
+  Future<void> _write(List<Community> communities) async {
+    final effectiveCommunities = communities;
+    final contentFingerprint = effectiveCommunities
         .map(
           (community) => [
             community.id,
@@ -199,10 +211,9 @@ class _CommunitySnapshotSync {
           ].join('\u0000'),
         )
         .join('\u0001');
-    if (fingerprint == _lastSuccessfulSnapshot) return;
-
-    await _writer(communities);
-    _lastSuccessfulSnapshot = fingerprint;
+    if (contentFingerprint == _lastSuccessfulSnapshot) return;
+    await _writer(effectiveCommunities);
+    _lastSuccessfulSnapshot = contentFingerprint;
   }
 }
 
@@ -412,7 +423,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     });
   }
 
-  Future<void> markPushLeaseAccepted(
+  Future<bool> markPushLeaseAccepted(
     String id, {
     required List<BuzzPushSubscription> subscriptions,
     required int generation,
@@ -420,14 +431,20 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? await storage.loadAll();
     final index = current.indexWhere((community) => community.id == id);
-    if (index < 0) return;
+    if (index < 0) return false;
 
     final community = current[index];
     final acceptedGeneration =
         community.pushSubscriptionState.acceptedGeneration ?? 0;
     final generationCursor =
         community.pushSubscriptionState.generationCursor ?? 0;
-    if (generation < max(acceptedGeneration, generationCursor)) return;
+    if (generation < max(acceptedGeneration, generationCursor)) return false;
+    if (buzzPushSubscriptionsFingerprint(
+          community.pushSubscriptionState.desired,
+        ) !=
+        buzzPushSubscriptionsFingerprint(subscriptions)) {
+      return false;
+    }
     final updated = community.copyWith(
       pushSubscriptionState: community.pushSubscriptionState.withAccepted(
         subscriptions: subscriptions,
@@ -438,6 +455,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final updatedList = [...current]..[index] = updated;
     state = AsyncData(updatedList);
     await syncCommunitySnapshot(ref, updatedList);
+    return true;
   });
 
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {

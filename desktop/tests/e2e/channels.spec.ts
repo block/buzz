@@ -27,6 +27,16 @@ const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const DM_RELAY_AGENT_PUBKEY =
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+// Unnamed roster fixtures whose two plausible orders disagree (the e2e twin
+// of the memberUtils unit pair): both keys share the `npub1qqq…` head, so
+// the compact display labels order V5 first (`…2hcx` < `…2w5c`) while the
+// full canonical npubs order V24 first (`…vq53…` < `…zsfj…`). Only the
+// full-npub order is correct for the roster.
+const UNNAMED_MEMBER_V5_PUBKEY =
+  "0000000000000000000000000000000000000000000000000000000000000005";
+const UNNAMED_MEMBER_V24_PUBKEY =
+  "0000000000000000000000000000000000000000000000000000000000000018";
+const NEW_DM_AGENT_PUBKEY = "f".repeat(64);
 
 type MockFeedWindow = Window & {
   __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
@@ -213,26 +223,29 @@ async function waitForMockLiveSubscription(
   kind?: number,
 ) {
   await expect
-    .poll(async () => {
-      return page.evaluate(
-        ({ currentChannelName, kind }) => {
-          return (
-            (
-              window as Window & {
-                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                  channelName: string;
-                  kind?: number;
-                }) => boolean;
-              }
-            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
-              channelName: currentChannelName,
-              kind,
-            }) ?? false
-          );
-        },
-        { currentChannelName: channelName, kind },
-      );
-    })
+    .poll(
+      async () => {
+        return page.evaluate(
+          ({ currentChannelName, kind }) => {
+            return (
+              (
+                window as Window & {
+                  __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                    channelName: string;
+                    kind?: number;
+                  }) => boolean;
+                }
+              ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+                channelName: currentChannelName,
+                kind,
+              }) ?? false
+            );
+          },
+          { currentChannelName: channelName, kind },
+        );
+      },
+      { timeout: 15_000 },
+    )
     .toBe(true);
 }
 
@@ -571,6 +584,16 @@ test("shows presence in sidebar, DM header, and member list", async ({
     "Online",
   );
   await expect(page.getByTestId("channel-presence-alice-tyler")).toBeVisible();
+  const dmAvatarMask = page.getByTestId("channel-avatar-alice-tyler-mask");
+  await expect(dmAvatarMask).toHaveCSS("border-radius", "0px");
+  await expect(dmAvatarMask).toHaveCSS("clip-path", /polygon\(/);
+  await expect
+    .poll(() =>
+      dmAvatarMask.evaluate(
+        (element) => getComputedStyle(element).clipPath.split(",").length,
+      ),
+    )
+    .toBeGreaterThan(100);
 
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
@@ -588,6 +611,22 @@ test("shows presence in sidebar, DM header, and member list", async ({
 });
 
 test("start a new direct message from the sidebar", async ({ page }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: NEW_DM_AGENT_PUBKEY,
+        name: "Squircle Agent",
+        status: "stopped",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: NEW_DM_AGENT_PUBKEY,
+        displayName: "Squircle Agent",
+        isAgent: true,
+      },
+    ],
+  });
   await page.goto("/");
 
   await openNewMessagePage(page);
@@ -632,11 +671,27 @@ test("start a new direct message from the sidebar", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
 
+  await page.getByTestId("new-dm-search").fill("squircle agent");
+  await page.getByTestId(`new-dm-result-${NEW_DM_AGENT_PUBKEY}`).click();
+  const selectedAgent = page.getByTestId(
+    `new-dm-selected-${NEW_DM_AGENT_PUBKEY}`,
+  );
+  await expect(selectedAgent).toBeVisible();
+  await selectedAgent.focus();
+  await expect(selectedAgent).toBeFocused();
+  await expect(selectedAgent).toHaveCSS("clip-path", "none");
+  await expect(selectedAgent).not.toHaveClass(/rounded-squircle/);
+  await expect(
+    selectedAgent.locator("span.absolute[data-avatar-shape='squircle']"),
+  ).toHaveCSS("clip-path", /url\(["']?#rounded-squircle-clip["']?\)/);
+
   await page.getByTestId("message-input").fill("Hello charlie");
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("dm-list")).toContainText("charlie");
-  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+  await expect(page.getByTestId("chat-title")).toHaveText(
+    "charlie, Squircle Agent",
+  );
   await expect(page.getByTestId("section-actions-dms")).not.toBeFocused();
 });
 
@@ -935,6 +990,13 @@ test("routes a managed relay-agent mention from an existing DM to the expanded c
   expect(sendCommands.map((entry) => entry.command)).not.toContain(
     "add_channel_members",
   );
+  // The awaited DM expansion is a relay round-trip between the
+  // pre-side-effect authorization pass and the publish, so the publish
+  // boundary re-validates instead of reusing the earlier pass.
+  expect(
+    sendCommands.filter((entry) => entry.command === "revalidate_relay_agents")
+      .length,
+  ).toBe(2);
 });
 
 test("does not reroute an expanded DM after the user navigates away", async ({
@@ -1032,7 +1094,13 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   await page.keyboard.type(" for a hand");
   await page.getByTestId("send-message").click();
 
-  await expect(page.getByText(sendError)).toBeVisible();
+  await expect(
+    page.getByTestId("new-message-page").getByText(sendError, { exact: true }),
+  ).toBeVisible();
+  const sendErrorToast = page
+    .locator("[data-sonner-toast]")
+    .filter({ hasText: `Message failed to send: ${sendError}` });
+  await expect(sendErrorToast).toBeVisible();
   await expect(input).toContainText("Fizz");
 
   const commandsAfterFailure = await readCommandPayloadLog(page);
@@ -1054,6 +1122,11 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
     "open_dm",
   );
 
+  // fill() does not move the pointer off Send, where the error toast appears.
+  // Sonner pauses dismissal on hover; move back to the editor and observe the
+  // toast's normal expiry before retrying the covered button.
+  await input.hover();
+  await expect(sendErrorToast).toHaveCount(0, { timeout: 10_000 });
   await input.fill(retryMessage);
   const retryBaseline = commandsAfterFailure.length;
   await page.getByTestId("send-message").click();
@@ -1087,8 +1160,13 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   ).toHaveAttribute("data-channel-id", retryChannelId ?? "");
 });
 
-test("drops an expanded DM after agent startup fails", async ({ page }) => {
-  const retryMessage = "Retry after agent startup failed";
+test("publishes into an expanded DM even when agent startup fails", async ({
+  page,
+}) => {
+  // Agent starts are detached from the send: the message publishes into the
+  // expanded DM and the start failure surfaces as a post-send toast. Failures
+  // that still block the publish (and drop the expanded DM) are covered by
+  // the preceding "drops an expanded DM after the first message fails" spec.
   const startError = "Mock agent startup failed.";
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
@@ -1114,53 +1192,32 @@ test("drops an expanded DM after agent startup fails", async ({ page }) => {
   await page.keyboard.type(" before startup fails");
   await page.getByTestId("send-message").click();
 
+  // The message lands in the expanded DM despite the failed start.
+  await expect(page.getByTestId("chat-title")).toContainText("Fizz");
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "before startup fails",
+  );
+
+  // The start failure surfaces as a toast, and the sent text is not restored
+  // into the composer — the send succeeded, so there is nothing to retry.
+  // (The persistent agent audience may legitimately re-seed a "@Fizz"
+  // auto-mention, so only the message body proves there was no restore.)
   await expect(
     page.getByText(startError, { exact: false }).first(),
   ).toBeVisible();
-  await expect(input).toContainText("Fizz");
+  await expect(input).not.toContainText("before startup fails");
 
-  const commandsAfterFailure = await readCommandPayloadLog(page);
-  const openDmCallsAfterFailure = commandsAfterFailure.filter(
-    (entry) => entry.command === "open_dm",
+  const commands = await readCommandPayloadLog(page);
+  const lastOpenDm = commands
+    .filter((entry) => entry.command === "open_dm")
+    .at(-1);
+  const openDmPubkeys = (
+    lastOpenDm?.payload as { pubkeys?: string[] } | undefined
+  )?.pubkeys;
+  expect(openDmPubkeys).toEqual(
+    expect.arrayContaining([TEST_IDENTITIES.charlie.pubkey]),
   );
-  expect(openDmCallsAfterFailure).toHaveLength(2);
-  expect(
-    (openDmCallsAfterFailure.at(-1)?.payload as { pubkeys?: string[] })
-      ?.pubkeys,
-  ).toEqual(expect.arrayContaining([TEST_IDENTITIES.charlie.pubkey]));
-  expect(
-    (openDmCallsAfterFailure.at(-1)?.payload as { pubkeys?: string[] })
-      ?.pubkeys,
-  ).toHaveLength(2);
-
-  await input.fill(retryMessage);
-  const retryBaseline = commandsAfterFailure.length;
-  // The first send left the cursor parked over the bottom-right error toast,
-  // which overlaps the send button. Sonner pauses its dismiss timer while the
-  // toaster is hovered, so move the cursor away and let the transient toast
-  // clear before retrying — otherwise the retry click is intercepted for the
-  // full timeout.
-  await page.mouse.move(0, 0);
-  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, {
-    timeout: 10_000,
-  });
-  await page.getByTestId("send-message").click();
-
-  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
-  await expect(page.getByTestId("message-timeline")).toContainText(
-    retryMessage,
-  );
-
-  const retryCommands = (await readCommandPayloadLog(page)).slice(
-    retryBaseline,
-  );
-  const retryOpenDm = retryCommands.find(
-    (entry) => entry.command === "open_dm",
-  );
-  expect(
-    (retryOpenDm?.payload as { pubkeys?: string[] } | undefined)?.pubkeys,
-  ).toEqual([TEST_IDENTITIES.charlie.pubkey]);
-  await expect(page.getByTestId("chat-title")).not.toContainText("Fizz");
+  expect(openDmPubkeys).toHaveLength(2);
 });
 
 test("closes direct message results while opening", async ({ page }) => {
@@ -1593,7 +1650,6 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     throw new Error("Created ephemeral channel is missing its channel id.");
   }
 
-  await waitForMockLiveSubscription(page, channelName);
   await page.getByTestId("channel-general").click();
   await page.evaluate(
     ({ agentPubkey, channelId: activeChannelId }) => {
@@ -1638,6 +1694,9 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     .getByRole("button", { name: "Toggle Sidebar", exact: true })
     .click();
 
+  // The active channel's window subscription is not the background unread
+  // listener. Wait for message admission after switching away.
+  await waitForMockLiveSubscription(page, channelName, 40002);
   await page.evaluate(
     ({ channelName: targetChannelName, mentionPubkey, senderPubkey }) => {
       (window as MockFeedWindow).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -1655,10 +1714,16 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     },
   );
 
-  await expect(page.getByTestId(`channel-unread-${channelName}`)).toBeVisible();
+  await expect(page.getByTestId(`channel-${channelName}`)).toHaveCSS(
+    "font-weight",
+    "700",
+  );
+  await expect(page.getByTestId(`channel-unread-${channelName}`)).toHaveCount(
+    0,
+  );
   await expect(
     page.getByTestId(`channel-ephemeral-${channelName}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
 });
 
 test("ephemeral countdown refreshes when switching channels after a clock jump", async ({
@@ -2143,6 +2208,14 @@ test("shows and clears activity indicators for active channel agents", async ({
   }, TEST_IDENTITIES.alice.pubkey);
 
   await expect(page.getByTestId("bot-activity-composer-trigger")).toBeVisible();
+  const activityAvatar = page.getByTestId(
+    `bot-activity-composer-avatar-${TEST_IDENTITIES.alice.pubkey}`,
+  );
+  await expect(activityAvatar).toHaveCSS("border-radius", "0px");
+  await expect(activityAvatar).toHaveCSS(
+    "clip-path",
+    'url("#rounded-squircle-clip")',
+  );
   await expect(
     page.getByTestId("bot-activity-composer-trigger"),
   ).not.toContainText("View activity");
@@ -2453,7 +2526,7 @@ test("sidebar shows unread indicator for newly active channels", async ({
   await page.goto("/");
 
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
-  await waitForMockLiveSubscription(page, "random");
+  await waitForMockLiveSubscription(page, "random", 40002);
 
   // The unread tracker ignores the current user's own messages, so emit as
   // alice — simulating a real "another user posted while I was elsewhere".
@@ -2487,7 +2560,7 @@ test("sidebar shows unread indicator for new forum posts", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("channel-unread-watercooler")).toHaveCount(0);
-  await waitForMockLiveSubscription(page, "watercooler");
+  await waitForMockLiveSubscription(page, "watercooler", 45001);
 
   // Emit as alice — the unread tracker ignores self-authored messages.
   await page.evaluate(
@@ -2517,7 +2590,7 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("channel-unread-alice-tyler")).toHaveCount(0);
-  await waitForMockLiveSubscription(page, "alice-tyler");
+  await waitForMockLiveSubscription(page, "alice-tyler", 9);
 
   await page.evaluate((pubkey) => {
     window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -3119,6 +3192,88 @@ test("manage channel places canvas between channel info and actions", async ({
   expect(leaveBox).not.toBeNull();
   expect(channelIdBox?.y).toBeLessThan(canvasBox?.y);
   expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
+});
+
+test("canvas history, save-conflict, and restore journey", async ({ page }) => {
+  // Seed a two-revision canvas so the history panel has an older revision to
+  // diff and restore, and the head is the newer one.
+  await installMockBridge(page, {
+    canvasRevisions: [
+      { content: "# Kickoff\n\nfirst draft", createdAt: 1_700_000_000 },
+      { content: "# Kickoff\n\nsecond draft", createdAt: 1_700_000_100 },
+    ],
+  });
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-canvas-ingress").click();
+
+  const section = page.getByTestId("channel-canvas-section");
+  await expect(section.getByTestId("channel-canvas-content")).toContainText(
+    "second draft",
+  );
+
+  // History lists both revisions, newest first with the head marked Current.
+  await section.getByTestId("channel-canvas-history-toggle").click();
+  const historyItems = section.getByTestId("channel-canvas-history-item");
+  await expect(historyItems).toHaveCount(2);
+  await expect(historyItems.first()).toContainText("Current");
+
+  // Expanding the older revision shows a diff against the current content.
+  await historyItems.nth(1).getByRole("button").first().click();
+  await expect(section.getByTestId("channel-canvas-diff")).toContainText(
+    "first draft",
+  );
+
+  // Save-conflict: open the editor (snapshots head), move the head via a
+  // concurrent save through the bridge, then save — the save command's
+  // advisory check must surface the frozen conflict string as the
+  // reload-required conflict copy, not a raw error.
+  await section.getByTestId("channel-canvas-history-toggle").click();
+  await section.getByTestId("channel-canvas-edit").click();
+  await page.evaluate((channelId) => {
+    return (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (cmd: string, args: unknown) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__.invoke("set_canvas", {
+      channelId,
+      content: "# Kickoff\n\nconcurrent edit",
+      expectedRevision: null,
+    });
+  }, GENERAL_CHANNEL_ID);
+  await section.getByTestId("channel-canvas-editor").fill("# Kickoff\n\nmine");
+  await section.getByTestId("channel-canvas-save").click();
+  await expect(section).toContainText(
+    "This canvas changed since you loaded it",
+  );
+
+  // Cancel, reload the head (reopen the sheet → fresh get_canvas), and restore
+  // the oldest revision — restore must publish a new head (not mutate history),
+  // so the count grows.
+  await section.getByTestId("channel-canvas-cancel").click();
+  await closeChannelManagement(page);
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-canvas-ingress").click();
+  await expect(section.getByTestId("channel-canvas-content")).toContainText(
+    "concurrent edit",
+  );
+
+  await section.getByTestId("channel-canvas-history-toggle").click();
+  const items = section.getByTestId("channel-canvas-history-item");
+  await expect(items).toHaveCount(3);
+  await items.last().getByRole("button").first().click();
+  await section.getByTestId("channel-canvas-restore").click();
+  // Restore now requires explicit confirmation before it mutates the shared
+  // canvas; the dialog identifies the target revision.
+  await page.getByTestId("channel-canvas-restore-confirm-action").click();
+  await expect(section.getByTestId("channel-canvas-content")).toContainText(
+    "first draft",
+  );
+  await expect(section.getByTestId("channel-canvas-history-item")).toHaveCount(
+    4,
+  );
 });
 
 test("channel settings hides workflows and skips its query when the experiment is disabled", async ({
@@ -3949,6 +4104,17 @@ test("Inbox keeps the unread boundary for replies from multiple agents", async (
 
   const firstUnreadRow = page.getByTestId(`home-inbox-item-${replyIds[0]}`);
   await expect(firstUnreadRow).toBeVisible();
+
+  const inboxAvatar = page.getByTestId(`home-inbox-avatar-${replyIds[0]}`);
+  await expect(inboxAvatar).toBeVisible();
+  await inboxAvatar.focus();
+  await expect(inboxAvatar).toBeFocused();
+  await expect(inboxAvatar).toHaveCSS("clip-path", "none");
+  await expect(inboxAvatar).not.toHaveClass(/rounded-squircle/);
+  await expect(inboxAvatar.locator("[data-avatar-shape='squircle']")).toHaveCSS(
+    "clip-path",
+    /url\(["']?#rounded-squircle-clip["']?\)/,
+  );
   await firstUnreadRow.click();
 
   const detail = page.getByTestId("home-inbox-detail");
@@ -4168,8 +4334,27 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   await expect(memberRows.first()).toBeVisible();
   expect(await memberRows.count()).toBeLessThan(50);
 
+  // Generated members have no display name, so the roster sorts them by
+  // their full canonical npub: these sequential pubkeys share an
+  // `npub1qqq…` head and diverge mid-key, while the compact label's
+  // checksum tail is display-only and decides nothing. Resolve
+  // a generated member from the rows the initial window actually rendered
+  // instead of assuming `pubkeys[0]` sorts into that window.
+  const generatedPubkeySet = new Set(pubkeys);
+  const renderedPubkeys = await memberRows.evaluateAll((rows) =>
+    rows.map(
+      (row) =>
+        (row as HTMLElement).dataset.testid?.slice("sidebar-member-".length) ??
+        "",
+    ),
+  );
+  const firstRenderedGeneratedPubkey = renderedPubkeys.find((pubkey) =>
+    generatedPubkeySet.has(pubkey),
+  );
+  expect(firstRenderedGeneratedPubkey).toBeTruthy();
+
   const firstGeneratedRow = memberList.getByTestId(
-    `sidebar-member-${pubkeys[0]}`,
+    `sidebar-member-${firstRenderedGeneratedPubkey}`,
   );
   await expect
     .poll(() =>
@@ -4206,9 +4391,76 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
     element.scrollTop = element.scrollHeight;
     element.dispatchEvent(new Event("scroll"));
   });
+  // Fully scrolling must render the roster's true tail, and the tail
+  // endpoint must be known independently of whatever the virtual window
+  // happens to render. The sidebar's own roster accounting — the
+  // "Members · N" header — must read exactly the fixture-known total
+  // ("random" seeds alice, the mock identity, and bob; this test adds the
+  // 500 generated pubkeys on top), so fixture or classification drift
+  // fails loudly here instead of silently weakening the tail check.
+  const rosterCount = 3 + pubkeys.length;
+  await expect(memberList.getByText(/^Members · \d+$/)).toHaveText(
+    `Members · ${rosterCount}`,
+  );
+  // VirtualizedList stamps each rendered row with its item index, so the
+  // final item's row is a fixed target that no window sample can pick in
+  // its place: a virtualizer clamped mid-roster never renders it.
   await expect(
-    memberList.getByTestId(`sidebar-member-${pubkeys.at(-1)}`),
+    memberList.locator(
+      `[data-index="${rosterCount - 1}"] > [data-testid^="sidebar-member-"]`,
+    ),
   ).toBeVisible();
+});
+
+test("members sidebar orders unnamed members by full canonical npub", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const channelId = await page
+    .getByTestId("channel-random")
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error("Random channel id missing.");
+  }
+
+  // Added in the opposite of the expected order, so incoming membership
+  // order can never satisfy the assertion on its own.
+  await invokeMockCommand(page, "add_channel_members", {
+    channelId,
+    pubkeys: [UNNAMED_MEMBER_V5_PUBKEY, UNNAMED_MEMBER_V24_PUBKEY],
+    role: "member",
+  });
+
+  await openMembersSidebar(page, "random");
+  // "random" seeds alice, the mock identity, and bob, so the two unnamed
+  // fixtures round out a five-row roster that the initial virtual window
+  // renders entirely — both fixtures are visible without scrolling.
+  await expect(
+    page.getByTestId(`sidebar-member-${UNNAMED_MEMBER_V24_PUBKEY}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`sidebar-member-${UNNAMED_MEMBER_V5_PUBKEY}`),
+  ).toBeVisible();
+
+  // The compact labels (`npub1qqq…2hcx` < `npub1qqq…2w5c`) would order V5
+  // first; the full canonical npubs disagree and order V24 first. The
+  // rendered roster must follow the full key, not the display label.
+  const renderedOrder = await page
+    .getByTestId("members-sidebar-people")
+    .locator('[data-index] > [data-testid^="sidebar-member-"]')
+    .evaluateAll((rows) =>
+      rows.map(
+        (row) =>
+          (row as HTMLElement).dataset.testid?.slice(
+            "sidebar-member-".length,
+          ) ?? "",
+      ),
+    );
+  const v24Position = renderedOrder.indexOf(UNNAMED_MEMBER_V24_PUBKEY);
+  const v5Position = renderedOrder.indexOf(UNNAMED_MEMBER_V5_PUBKEY);
+  expect(v24Position).toBeGreaterThanOrEqual(0);
+  expect(v5Position).toBeGreaterThanOrEqual(0);
+  expect(v24Position).toBeLessThan(v5Position);
 });
 
 test("opening a human-only members sidebar skips managed runtime discovery", async ({

@@ -1,7 +1,7 @@
 //! Unit tests for `managed_agents/agent_snapshot.rs`.
 //!
 //! Kept in a sibling file so `agent_snapshot.rs` stays under the
-//! 1000-line gate; `#[path]`-included from there.
+//! 1500-line gate; `#[path]`-included from there.
 
 use super::*;
 use crate::managed_agents::types::{BackendKind, ManagedAgentRecord, RespondTo};
@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 /// relevant to snapshot export are filled; the rest use defaults.
 fn minimal_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
         description: None,
         pubkey: "deadbeef".to_string(),
         name: "Test Agent".to_string(),
@@ -668,4 +669,55 @@ fn unsupported_version_is_rejected() {
     let result = decode_snapshot_json(&bytes);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Unsupported snapshot version"));
+}
+
+#[test]
+fn portable_acp_command_survives_json_and_png_and_legacy_absence() {
+    let mut record = minimal_record();
+    record.acp_command = "buzz-janet-acp".to_string();
+    let snapshot = build_snapshot(&record, MemoryLevel::None, vec![], None);
+    let json = encode_snapshot_json(&snapshot).unwrap();
+    let decoded = decode_snapshot_json(&json).unwrap();
+    assert_eq!(
+        decoded.definition.acp_command.as_deref(),
+        Some("buzz-janet-acp")
+    );
+    let png = encode_snapshot_png(&snapshot, None).unwrap();
+    assert_eq!(
+        decode_snapshot_png(&png).unwrap().definition.acp_command,
+        decoded.definition.acp_command
+    );
+    let mut legacy: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    legacy["definition"]
+        .as_object_mut()
+        .unwrap()
+        .remove("acpCommand");
+    assert_eq!(
+        decode_snapshot_json(&serde_json::to_vec(&legacy).unwrap())
+            .unwrap()
+            .definition
+            .acp_command,
+        None
+    );
+}
+
+#[test]
+fn foreign_snapshot_rejects_nonportable_acp_commands() {
+    let mut snapshot = build_snapshot(&minimal_record(), MemoryLevel::None, vec![], None);
+    for command in [
+        "/tmp/buzz-janet-acp",
+        r"C:\buzz-janet-acp.cmd",
+        "sh",
+        "buzz-a b-acp",
+    ] {
+        snapshot.definition.acp_command = Some(command.to_string());
+        let json = serde_json::to_vec(&snapshot).unwrap();
+        assert!(decode_snapshot_json(&json)
+            .unwrap_err()
+            .contains("ACP command"));
+        let png = encode_snapshot_png(&snapshot, None).unwrap();
+        assert!(decode_snapshot_png(&png)
+            .unwrap_err()
+            .contains("ACP command"));
+    }
 }

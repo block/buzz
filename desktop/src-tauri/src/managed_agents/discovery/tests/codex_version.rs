@@ -46,3 +46,30 @@ fn probe_codex_acp_version_uses_augmented_path_for_env_shebang_interpreter() {
         "the injected augmented PATH should allow /usr/bin/env to find node"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn codex_adapter_availability_outdated_for_older_1x_binary() {
+    use super::super::{codex_adapter_availability, codex_adapter_is_outdated};
+    use crate::managed_agents::AcpAvailabilityStatus;
+    use std::os::unix::fs::PermissionsExt;
+
+    for version in ["1.1.5", "1.1.7", "1.6.2", "1.9.0"] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("codex-acp");
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\necho '@agentclientprotocol/codex-acp {version}'\nexit 0\n"),
+        )
+        .expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        assert_eq!(
+            codex_adapter_availability(&bin),
+            AcpAvailabilityStatus::AdapterOutdated,
+            "adapter {version} must be offered an upgrade"
+        );
+        assert!(codex_adapter_is_outdated(&bin));
+    }
+}

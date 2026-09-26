@@ -7,7 +7,7 @@ import { ComposerDockBackdrop } from "@/features/messages/ui/ComposerDockBackdro
 import { ComposerUploadProgressOverlay } from "@/features/messages/ui/ComposerUploadProgressOverlay";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { ComposerTimeoutBanner } from "@/features/moderation/ui/ComposerTimeoutBanner";
-import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
+import { useTimeoutActive } from "@/features/moderation/lib/timeoutStore";
 import { isModerationDm } from "@/features/moderation/lib/moderationDm";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
@@ -201,6 +201,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const [isMainDeferredEditPending, setMainDeferredEditPending] =
     React.useState(false);
+  const [acceptsMainAttachments, setAcceptsMainAttachments] =
+    React.useState(true);
   const isNonMemberView =
     activeChannel !== null &&
     !activeChannel.isMember &&
@@ -251,7 +253,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   const isEditInThread = editTarget?.isThreadReply === true;
   const mainEditTarget = editTarget && !isEditInThread ? editTarget : null;
   const threadEditTarget = editTarget && isEditInThread ? editTarget : null;
-  const timeoutState = useTimeoutState();
+  const timeoutActive = useTimeoutActive();
   const relaySelfQuery = useRelaySelfQuery(activeChannel?.channelType === "dm");
   const isModerationDmChannel = isModerationDm(
     activeChannel ?? null,
@@ -262,7 +264,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     !activeChannel?.isMember ||
     activeChannel.archivedAt !== null ||
     activeChannel.channelType === "forum" ||
-    timeoutState.active ||
+    timeoutActive ||
     isModerationDmChannel ||
     isSending;
   const knownAgentPubkeys = React.useMemo(() => {
@@ -328,6 +330,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     hasMainComposerOverlay &&
     !isComposerDisabled &&
     !isMainDeferredEditPending &&
+    acceptsMainAttachments &&
     !isSinglePanelView;
   const hasTypingActivity = typingPubkeys.length > 0;
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
@@ -735,7 +738,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     hasComposerBottomActivity && "composer-dock--with-activity",
                   )}
                 >
-                  {isActiveWelcomeChannel && !timeoutState.active ? (
+                  {isActiveWelcomeChannel && !timeoutActive ? (
                     <WelcomeComposerGuidanceLayer
                       onDismiss={handleDismissWelcomeBanner}
                       settingUp={welcomeKickoffSettingUp}
@@ -744,14 +747,9 @@ export const ChannelPane = React.memo(function ChannelPane({
                       {welcomeKickoffStage}
                     </WelcomeComposerGuidanceLayer>
                   ) : null}
-                  {timeoutState.active ? (
-                    <ComposerTimeoutBanner
-                      expiresAtMs={timeoutState.expiresAtMs}
-                    />
-                  ) : null}
+                  {timeoutActive ? <ComposerTimeoutBanner /> : null}
                   <ComposerDockBackdrop gutterClassName="inset-x-5" />
                   <MessageComposer
-                    audienceContext={{ type: "channel" }}
                     channelId={activeChannel?.id ?? null}
                     channelName={activeChannel?.name ?? "channel"}
                     channelType={activeChannel?.channelType ?? null}
@@ -763,6 +761,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     onAutoSubmitComplete={handleAutoSubmitComplete}
                     isSending={isSending}
                     mediaController={mainComposerMedia}
+                    onAttachmentAcceptanceChange={setAcceptsMainAttachments}
                     onDeferredEditPendingChange={setMainDeferredEditPending}
                     onCancelEdit={onCancelEdit}
                     onEditLastOwnMessage={handleEditLastOwnMainMessage}
@@ -776,7 +775,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     {...{ profiles, recentMentionPubkeys: recentMentions }}
                     showBackgroundUploadProgress={false}
                     placeholder={
-                      timeoutState.active
+                      timeoutActive
                         ? "You're timed out by community moderators."
                         : isModerationDmChannel
                           ? "This channel is read-only."
@@ -793,8 +792,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                     }
                     showTopBorder={false}
                   />
-                  {/* The reserved bottom rail keeps accessory fades from moving
-                    the conversation while content remains responsive. */}
                   <ChannelComposerActivityAccessory
                     agents={activityAgents}
                     channel={activeChannel}

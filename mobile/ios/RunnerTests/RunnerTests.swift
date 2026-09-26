@@ -8,6 +8,78 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
+  func testVoiceNotePackagingStagesHaveBoundedDeadlines() {
+    XCTAssertEqual(VoiceNotePackager.videoEnvelopeTimeout, 30)
+    XCTAssertEqual(VoiceNotePackager.exportTimeout, 30)
+  }
+
+  func testTimedOutVoiceNoteExportCleansLateOutputWithoutRedelivering() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let outputURL = directory.appendingPathComponent("output.mp4")
+    let videoURL = directory.appendingPathComponent("envelope.mp4")
+    try Data([1]).write(to: outputURL)
+    try Data([2]).write(to: videoURL)
+    let completion = VoiceNoteExportCompletion(
+      outputURL: outputURL,
+      videoURL: videoURL
+    )
+    var cancelCount = 0
+    var deliveryCount = 0
+
+    completion.timeout(
+      cancel: { cancelCount += 1 },
+      deliver: { deliveryCount += 1 }
+    )
+    XCTAssertFalse(FileManager.default.fileExists(atPath: outputURL.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: videoURL.path))
+
+    // AVFoundation may recreate the destination while cancellation settles.
+    try Data([3]).write(to: outputURL)
+    completion.exportDidFinish(
+      succeeded: false,
+      deliver: { deliveryCount += 1 }
+    )
+
+    XCTAssertEqual(cancelCount, 1)
+    XCTAssertEqual(deliveryCount, 1)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: outputURL.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: videoURL.path))
+  }
+
+  func testSuccessfulVoiceNoteExportPreservesOutputForFlutter() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let outputURL = directory.appendingPathComponent("output.mp4")
+    let videoURL = directory.appendingPathComponent("envelope.mp4")
+    try Data([1]).write(to: outputURL)
+    try Data([2]).write(to: videoURL)
+    let completion = VoiceNoteExportCompletion(
+      outputURL: outputURL,
+      videoURL: videoURL
+    )
+    var deliveryCount = 0
+
+    completion.exportDidFinish(
+      succeeded: true,
+      deliver: { deliveryCount += 1 }
+    )
+
+    XCTAssertEqual(deliveryCount, 1)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: videoURL.path))
+  }
+
   func testPushAuthorizationStatusNamesCoverDisplayPermissionStates() {
     XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.notDetermined), "notDetermined")
     XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.denied), "denied")
@@ -328,7 +400,7 @@ class RunnerTests: XCTestCase {
     let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
 
     XCTAssertEqual(size.width, 216)
-    XCTAssertEqual(size.height, 264)
+    XCTAssertEqual(size.height, 324) // Five actions, including voice notes.
     XCTAssertEqual(NativeAttachmentMenuLayout.contentPadding, 16)
     XCTAssertEqual(
       NativeAttachmentMenuLayout.itemHeight(compatibleWith: traits),
@@ -830,6 +902,42 @@ class RunnerTests: XCTestCase {
     XCTAssertNotNil(row.actionImageView.image)
     row.sendActions(for: .touchUpInside)
     XCTAssertTrue(selected)
+  }
+
+  @MainActor
+  func testNativeMessageActionRowReceivesTapsAcrossItsWholeSurface() throws {
+    let definition = try XCTUnwrap(
+      NativeMessageActionDefinition(
+        arguments: [
+          "id": "edit", "title": "Edit message",
+          "symbol": "pencil", "group": "primary",
+        ]
+      )
+    )
+    var selectionCount = 0
+    let row = NativeMessageActionRowControl(
+      definition: definition,
+      foregroundColor: .label,
+      destructiveColor: .systemRed,
+      onSelected: { selectionCount += 1 }
+    )
+    row.frame = CGRect(x: 0, y: 0, width: 288, height: 48)
+    row.layoutIfNeeded()
+
+    let iconCenter = row.actionImageView.convert(
+      CGPoint(x: row.actionImageView.bounds.midX, y: row.actionImageView.bounds.midY),
+      to: row
+    )
+    let labelCenter = row.actionTitleLabel.convert(
+      CGPoint(x: row.actionTitleLabel.bounds.midX, y: row.actionTitleLabel.bounds.midY),
+      to: row
+    )
+    for point in [CGPoint(x: 4, y: 24), iconCenter, labelCenter, CGPoint(x: 284, y: 24)] {
+      let target = row.hitTest(point, with: nil)
+      XCTAssertTrue(target === row, "Tap at \(point) must reach the action control")
+      (target as? UIControl)?.sendActions(for: .touchUpInside)
+    }
+    XCTAssertEqual(selectionCount, 4)
   }
 
   @MainActor

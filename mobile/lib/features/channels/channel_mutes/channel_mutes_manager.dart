@@ -45,6 +45,17 @@ class ChannelMutesManager {
   void Function()? _unsubscribe;
   bool _disposed = false;
 
+  /// Base delay for the recovery-read retry backoff. Overridable in tests.
+  final Duration _startupRetryBaseDelay;
+  Timer? _startupRetryTimer;
+  int _startupRetryAttempt = 0;
+  bool _headApplied = false;
+  bool _liveSettled = false;
+  int _localRevision = 0;
+  bool _publishPending = false;
+  Future<void>? _syncInFlight;
+  bool _syncAgain = false;
+
   ChannelMutesManager({
     required this.pubkey,
     required SharedPreferences prefs,
@@ -53,12 +64,15 @@ class ChannelMutesManager {
     required SignedEventRelay? signedEventRelay,
     required bool remoteEnabled,
     required VoidCallback onChanged,
+    @visibleForTesting
+    Duration startupRetryBaseDelay = const Duration(seconds: 2),
   }) : _storage = ChannelMutesStorage(prefs),
        _crypto = crypto,
        _relaySession = relaySession,
        _signedEventRelay = signedEventRelay,
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
+       _startupRetryBaseDelay = startupRetryBaseDelay,
        _store = ChannelMutesStorage(prefs).read(pubkey);
 
   ChannelMuteStore get store => _store;
@@ -71,14 +85,84 @@ class ChannelMutesManager {
       return;
     }
 
-    await _fetchAndMerge();
-    await _startLiveSubscription();
+    await _syncWithRelay();
     _onChanged();
+  }
+
+  /// Re-reads the retained head once, e.g. on app foreground resume, to catch
+  /// an EVENT a healthy socket never delivered. One shot: skipped while an
+  /// edit is pending, not retried on failure, and leaves startup state alone.
+  void refreshFromRelay() {
+    if (_disposed || !_remoteEnabled || _relaySession == null) return;
+    unawaited(_recoverHead());
+  }
+
+  /// Applies the retained head and opens the live subscription, retrying with
+  /// bounded backoff (2s base, 30s ceiling) until both are done. Transient
+  /// live-subscription CLOSED recovery belongs to [RelaySessionNotifier].
+  Future<void> _syncWithRelay() {
+    if (_disposed) return Future.value();
+    final inFlight = _syncInFlight;
+    if (inFlight != null) {
+      _syncAgain = true;
+      return inFlight;
+    }
+    final sync = _runSyncWithRelay();
+    _syncInFlight = sync;
+    return sync.whenComplete(() {
+      _syncInFlight = null;
+      if (_disposed || !_syncAgain) return;
+      _syncAgain = false;
+      unawaited(_syncWithRelay());
+    });
+  }
+
+  Future<void> _runSyncWithRelay() async {
+    if (!_headApplied) {
+      final applied = await _recoverHead();
+      if (_disposed) return;
+      _headApplied = applied;
+    }
+
+    final subscribed = _liveSettled || await _startLiveSubscription();
+    if (_disposed) return;
+
+    if (!_headApplied || !subscribed) {
+      _scheduleStartupRetry();
+    } else {
+      _startupRetryAttempt = 0;
+    }
+  }
+
+  void _scheduleStartupRetry() {
+    if (_disposed) return;
+    _startupRetryTimer?.cancel();
+    final delayMs = min(
+      _startupRetryBaseDelay.inMilliseconds << min(_startupRetryAttempt, 5),
+      30000,
+    );
+    _startupRetryAttempt++;
+    debugPrint(
+      '[ChannelMutesManager] relay sync incomplete; '
+      'retrying in ${delayMs}ms (attempt $_startupRetryAttempt)',
+    );
+    _startupRetryTimer = Timer(Duration(milliseconds: delayMs), () {
+      _startupRetryTimer = null;
+      unawaited(
+        _syncWithRelay().then((_) {
+          if (!_disposed) _onChanged();
+        }),
+      );
+    });
   }
 
   void dispose({bool flushPending = true}) {
     if (_disposed) return;
     _disposed = true;
+    _syncAgain = false;
+
+    _startupRetryTimer?.cancel();
+    _startupRetryTimer = null;
 
     final hadPending = _publishDebounce != null;
     _publishDebounce?.cancel();
@@ -99,7 +183,7 @@ class ChannelMutesManager {
       updatedAt: currentUnixSeconds(),
     );
     _store = ChannelMuteStore(channels: {..._store.channels, channelId: entry});
-    _persist();
+    unawaited(_persist());
     _onChanged();
     markDirty();
   }
@@ -111,101 +195,126 @@ class ChannelMutesManager {
       updatedAt: currentUnixSeconds(),
     );
     _store = ChannelMuteStore(channels: {..._store.channels, channelId: entry});
-    _persist();
+    unawaited(_persist());
     _onChanged();
     markDirty();
   }
 
   void markDirty() {
     if (!_remoteEnabled || _disposed) return;
+    _localRevision++;
+    _publishPending = true;
     _publishDebounce?.cancel();
     _publishDebounce = Timer(const Duration(seconds: 5), () {
       _publishDebounce = null;
-      unawaited(_publish());
+      unawaited(
+        _publish().whenComplete(
+          () => _publishPending = _publishDebounce != null,
+        ),
+      );
     });
   }
 
-  Future<void> _fetchAndMerge() async {
-    if (_relaySession == null) return;
+  /// A recovery read that loses to a local edit is deferred, never applied:
+  /// a peer entry stamped by a skewed clock could otherwise overwrite it.
+  Future<bool> _recoverHead() async {
+    if (_publishPending) return false;
+    final revision = _localRevision;
+    final events = await _fetchHead();
+    if (events == null || _disposed) return false;
+    if (revision != _localRevision || _publishPending) return false;
+    final applied = await _applyEvents(events);
+    if (!_disposed) _onChanged();
+    return applied;
+  }
+
+  Future<List<NostrEvent>?> _fetchHead() async {
     try {
-      final events = await _relaySession.fetchHistory(
-        NostrFilter(
-          kinds: const [EventKind.readState],
-          authors: [pubkey],
-          tags: const {
-            '#d': ['channel-mutes'],
-          },
-          limit: 1,
-        ),
-      );
-      _mergeEvents(events);
-      _persist();
-      if (!_disposed) _onChanged();
-    } catch (_) {
-      // Local state remains usable when relay is unavailable.
+      return await _relaySession!.fetchHistory(_filter());
+    } catch (error) {
+      debugPrint('[ChannelMutesManager] fetch failed: $error');
+      return null;
     }
   }
 
-  Future<void> _startLiveSubscription() async {
-    if (_relaySession == null) return;
+  Future<bool> _startLiveSubscription() async {
     try {
-      _unsubscribe = await _relaySession.subscribe(
-        NostrFilter(
-          kinds: const [EventKind.readState],
-          authors: [pubkey],
-          tags: const {
-            '#d': ['channel-mutes'],
-          },
-          limit: 1,
-        ),
+      final unsubscribe = await _relaySession!.subscribe(
+        _filter(),
         _handleIncomingEvent,
+        // Only terminal rejections reach here; re-sending the same REQ would
+        // be rejected again, so the live lane stays settled.
+        onClosed: (message) {
+          _liveSettled = true;
+          debugPrint(
+            '[ChannelMutesManager] live subscription closed: $message',
+          );
+        },
       );
-    } catch (_) {
-      // Non-fatal — local state and history still work.
+      if (_disposed) {
+        unsubscribe();
+        return false;
+      }
+      _unsubscribe = unsubscribe;
+      return _liveSettled = true;
+    } catch (error) {
+      debugPrint('[ChannelMutesManager] live subscription failed: $error');
+      return _liveSettled;
     }
   }
 
-  void _mergeEvents(List<NostrEvent> events) {
+  NostrFilter _filter() => NostrFilter(
+    kinds: const [EventKind.readState],
+    authors: [pubkey],
+    tags: const {
+      '#d': ['channel-mutes'],
+    },
+    limit: 1,
+  );
+
+  /// Relay retains `ORDER BY created_at DESC, id ASC`: at equal second the
+  /// lower event ID wins.
+  bool _isAfterCursor(int createdAt, String id) =>
+      createdAt > _lastRemoteCreatedAt ||
+      (createdAt == _lastRemoteCreatedAt &&
+          id.compareTo(_lastRemoteEventId ?? '') < 0);
+
+  /// Returns false only when a newer head could not be persisted; the cursor
+  /// then stays put so the same head is retried. An undecodable head is
+  /// skipped without holding startup open.
+  Future<bool> _applyEvents(List<NostrEvent> events) async {
+    var applied = true;
     for (final event in events) {
-      if (event.pubkey != pubkey) continue;
-      _mergeEvent(event);
-    }
-  }
-
-  void _mergeEvent(NostrEvent event) {
-    // Only process channel-mutes d-tag events.
-    final dTag = event.getTagValue('d');
-    if (dTag != 'channel-mutes') return;
-
-    try {
-      final plaintext = _crypto.decrypt(event.content);
-      final parsed = jsonDecode(plaintext);
-      if (parsed is! Map<String, dynamic>) return;
-
-      final incoming = ChannelMuteStore.fromJson(parsed);
-
-      // Gate on createdAt: ignore events older than what we've already seen.
-      final isNewer =
-          event.createdAt > _lastRemoteCreatedAt ||
-          (event.createdAt == _lastRemoteCreatedAt &&
-              event.id.compareTo(_lastRemoteEventId ?? '') > 0);
-
-      if (isNewer) {
+      if (event.pubkey != pubkey || event.getTagValue('d') != 'channel-mutes') {
+        continue;
+      }
+      if (!_isAfterCursor(event.createdAt, event.id)) continue;
+      try {
+        final parsed = jsonDecode(_crypto.decrypt(event.content));
+        if (parsed is! Map<String, dynamic>) throw const FormatException();
+        // Per-channel merge: keep the entry with the highest updatedAt.
+        _store = mergeStores(_store, ChannelMuteStore.fromJson(parsed));
+      } catch (error) {
+        debugPrint('[ChannelMutesManager] undecodable head: $error');
+        continue;
+      }
+      if (!await _persist()) {
+        applied = false;
+        continue;
+      }
+      if (_isAfterCursor(event.createdAt, event.id)) {
         _lastRemoteCreatedAt = event.createdAt;
         _lastRemoteEventId = event.id;
-        // Per-channel merge: keep the entry with the highest updatedAt for each channel.
-        _store = mergeStores(_store, incoming);
-        _persist();
       }
-    } catch (_) {
-      // Decryption failure or parse error — keep existing state.
     }
+    return applied;
   }
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed) return;
-    _mergeEvent(event);
-    if (!_disposed) _onChanged();
+    unawaited(
+      _applyEvents([event]).then((_) => _disposed ? null : _onChanged()),
+    );
   }
 
   bool _isIdenticalToLastPublished() {
@@ -232,7 +341,9 @@ class ChannelMutesManager {
     }
 
     // Read-before-write: merge remote state before publishing
-    await _fetchAndMerge();
+    final events = await _fetchHead();
+    if (events != null) await _applyEvents(events);
+    if (!_disposed) _onChanged();
 
     // No-op suppression: skip if nothing changed
     if (_isIdenticalToLastPublished()) return;
@@ -242,6 +353,7 @@ class ChannelMutesManager {
       final ciphertext = _crypto.encrypt(payload);
       final createdAt = max(currentUnixSeconds(), _lastRemoteCreatedAt + 1);
 
+      String? signedId;
       await _signedEventRelay.submit(
         kind: EventKind.readState,
         content: ciphertext,
@@ -250,16 +362,29 @@ class ChannelMutesManager {
           ['t', 'channel-mutes'],
         ],
         createdAt: createdAt,
+        onSigned: (event) => signedId = event.id,
       );
 
-      _lastRemoteCreatedAt = max(_lastRemoteCreatedAt, createdAt);
+      // Keep the cursor a coherent (created_at, id) pair so an OK that beats
+      // its own echo cannot make later same-second heads compare against a
+      // stale ID. A newer head learned during the await stays.
+      if (signedId != null && _isAfterCursor(createdAt, signedId!)) {
+        _lastRemoteCreatedAt = createdAt;
+        _lastRemoteEventId = signedId;
+      }
       _lastPublishedStore = ChannelMuteStore(channels: Map.of(_store.channels));
     } catch (error) {
       debugPrint('[ChannelMutesManager] publish failed: $error');
     }
   }
 
-  void _persist() {
-    _storage.write(pubkey, _store);
+  Future<bool> _persist() async {
+    try {
+      if (await _storage.write(pubkey, _store)) return true;
+      debugPrint('[ChannelMutesManager] persist returned false');
+    } catch (error) {
+      debugPrint('[ChannelMutesManager] persist failed: $error');
+    }
+    return false;
   }
 }

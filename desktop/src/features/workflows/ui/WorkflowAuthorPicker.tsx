@@ -10,7 +10,7 @@ import {
 } from "@/features/profile/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { Input } from "@/shared/ui/input";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
@@ -348,7 +348,7 @@ function AuthorOption({
       <span className="min-w-0 max-w-full">
         <span className="block truncate text-sm font-medium">{label}</span>
         <span className="block truncate text-xs text-muted-foreground">
-          {truncatePubkey(candidate.pubkey)}
+          {truncateNpub(candidate.pubkey)}
         </span>
       </span>
       <Check

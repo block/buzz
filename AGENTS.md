@@ -25,6 +25,48 @@ and runtime evidence answer different questions.
 
 ---
 
+## Before opening a PR
+
+Open work in progress as a draft PR. Mark it ready for review only when this
+checklist holds for the current change. Scale it to what changed:
+documentation-only changes need content, link, and diff checks plus human
+confirmation, not app runs.
+
+1. **Agent review ran** under [Reviewing](#reviewing), and its recommended
+   blockers were fixed or explicitly declined by the human author. Optional
+   suggestions do not gate readiness.
+2. **An agent exercised the changed behavior.** Client changes: the affected flow
+   in the app, using the native app or a device when the behavior needs it
+   (browser or headless Playwright counts only for what it can exercise). Relay
+   changes: a local relay, exercising the changed events or endpoints. CLI or
+   tooling changes: the affected command or workflow. The human may skip this
+   step, for example for a small change or while iterating.
+3. **A human then tested it themselves**: in the app, against the local relay
+   (through the app or `curl`), or by running the changed command. Agent testing
+   does not substitute. Agents give the human exact steps and what working looks
+   like, then wait for explicit confirmation. Never mark this step done yourself.
+4. **Add `buzz-review-completed` to the PR description** once steps 1–3 hold. It
+   attests the checklist, and automated reviewers may skip review because of it.
+   If later edits change behavior, remove it and return the PR to draft until the
+   affected steps are redone.
+
+## Reviewing
+
+- Before reviewing, read [VISION.md](VISION.md), the `VISION_*.md` docs for the affected surface, and the PR's stated goal and linked
+  issue. Review the change against what it is trying to do.
+- Check the change against the [Review-Proven Rules](#review-proven-rules): the defects reviewers here find most often.
+- Judge minimalism, elegance, and correctness, aiming for 9/10 on each. A score
+  below 9 names the concrete defect and the fix.
+- Recommend blocking only for concrete correctness, security, or agreed-contract
+  defects with a realistic failure scenario: state the defect, how it fails, and
+  the fix. Label everything else (nits, wording, speculative hardening,
+  out-of-scope improvements) as optional.
+- Put all findings in the first review. Later reviews check prior blockers and
+  defects the fixes introduced; reopen other areas only on new evidence of a
+  material defect.
+- Agents post reviews as comments, never Request Changes. Humans decide which
+  findings must be fixed.
+
 ## Ecosystem
 
 Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
@@ -112,6 +154,10 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 Run `just ci` before every PR — it runs repository-wide formatting, lint,
 and static checks; Rust, Tauri, desktop, and mobile tests; and desktop and web
 builds. Clippy passing does not mean fmt passes; run both.
+For changes limited to Flutter/Dart code in the mobile app, run
+`just mobile-install mobile-check mobile-test` instead of `just ci`.
+Native code and build-configuration changes also require the corresponding
+platform checks.
 
 Run `just test` for integration tests if you touched `buzz-relay`,
 `buzz-db`, or `buzz-auth` — these require a running Postgres and Redis.
@@ -161,8 +207,8 @@ the same clusters and measured how often authors actually fix each class
 once flagged: test-seam binding and unbounded-resource findings were fixed
 **100%** of the time, swallowed-error findings **90%**, stale-state races
 **70%** — these are not style opinions, they are defects authors agree
-with on sight. Apply the rules **before writing code**; each cites the
-PRs where reviewers litigated it.
+with on sight. Authors apply them **before writing code**, and reviewers check
+against them; each cites the PRs where reviewers litigated it.
 
 1. **Every caught failure must leave a durable retry record or propagate.**
    Never catch-log-and-return-success (opt-out revocation permanently
@@ -674,11 +720,13 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
   over raw `Theme.of(context)` calls.
 - **Keep widgets small and composable.** One public widget per file; push
   private sub-widgets (`_Foo`) into sibling `part` files under a
-  `<page>/` folder rather than growing the page file. Hard ceiling:
-  **1000 lines/file**, enforced across Desktop, Web, and Mobile by the
+  `<page>/` folder rather than growing the page file. Mobile's hard ceiling is
+  **1200 lines/file**, enforced with the other surface-specific limits by the
   repository-level `just file-size-check` gate (`just check`, CI, and every
-  pre-push). If the guard trips, **split the file — never bump the limit or add
-  an override to slip under it.**
+  pre-push). If an individual file trips the guard, **split the file — never
+  bump a surface limit or add an override merely to admit that file.**
+  Deliberate repository-wide policy revisions must update the enforced rules,
+  tests, and guidance together.
 - Feature modules must not import from other feature modules — only from
   `shared/`.
 - Use `Grid` tokens for spacing, `Radii` for border radius.
@@ -689,7 +737,7 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 cd mobile
 dart format --output=none --set-exit-if-changed .
 flutter analyze
-flutter test
+flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).
@@ -731,3 +779,16 @@ usage.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+### Mention editor contract
+
+Autocomplete inserts a literal full label and a separator, including multi-word
+names. Only autocomplete settlement may move the caret past that separator;
+internal label spaces and deliberate ArrowLeft/click movement must be respected.
+See `docs/mention-editor.md` and `desktop/tests/e2e/mention-spacing.spec.ts`.
+
+Selected mention labels bind exact keys, including same-name teammates and
+persistent automatic addresses. Use the returned label from registration for
+insert/restore/remove. Ambiguous manually typed names must fail visibly without
+clearing the draft in chat, edit, and standalone forum consumers; never fan out
+silently to all identities sharing a name. See `docs/mention-editor.md`.

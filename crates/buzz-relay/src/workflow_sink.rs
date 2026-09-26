@@ -257,7 +257,7 @@ impl ActionSink for RelayActionSink {
 
             let channel = state
                 .db
-                .get_channel(tenant.community(), channel_uuid)
+                .get_channel_for_event_write(tenant.community(), channel_uuid)
                 .await
                 .map_err(|e| match &e {
                     buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
@@ -364,13 +364,13 @@ impl ActionSink for RelayActionSink {
             // must not drop the message, so log and proceed with the base tags.
             let members = state
                 .db
-                .get_members(tenant.community(), channel_uuid)
+                .get_members_for_event_write(tenant.community(), channel_uuid)
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
             let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
             let users = state
                 .db
-                .get_users_bulk(tenant.community(), &member_pubkeys)
+                .get_users_bulk_for_event_write(tenant.community(), &member_pubkeys)
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
             let named_members: Vec<(String, String)> = users
@@ -772,7 +772,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod integration_tests {
+mod postgres_tests {
     //! Regression test for `e3661764` / `7899c1a8`: a workflow `send_message`
     //! that mentions a channel member by name (`@Name`) in its author-written
     //! step template must emit both the legacy `p` tag and authenticated
@@ -994,7 +994,7 @@ mod integration_tests {
                     .to_vec();
                 state
                     .db
-                    .get_event_by_id(community, &id_bytes)
+                    .get_event_by_id_for_event_write(community, &id_bytes)
                     .await
                     .expect("query event")
                     .expect("event persisted")
@@ -1117,7 +1117,7 @@ mod integration_tests {
             .to_vec();
         let stored = state
             .db
-            .get_event_by_id(community, &reply_id_bytes)
+            .get_event_by_id_for_event_write(community, &reply_id_bytes)
             .await
             .expect("query reply")
             .expect("reply persisted");
@@ -1286,7 +1286,7 @@ mod integration_tests {
         // reply→the immediate parent (matching the ingest resolver).
         let stored = state
             .db
-            .get_event_by_id(community, &reply_id_bytes)
+            .get_event_by_id_for_event_write(community, &reply_id_bytes)
             .await
             .expect("query reply")
             .expect("reply persisted");

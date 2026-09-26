@@ -11,6 +11,9 @@ spec:
   template:
     metadata:
       labels: {{- include "push.runtimeLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 60
@@ -29,8 +32,8 @@ spec:
           env:
             - { name: BUZZ_PUSH_BIND_ADDR, value: "0.0.0.0:8080" }
             - { name: BUZZ_PUSH_HEALTH_ADDR, value: "0.0.0.0:8081" }
-            - { name: BUZZ_PUSH_PUBLIC_DELIVERY_URL, value: {{ .Values.publicDeliveryUrl | quote }} }
-            - { name: BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS, value: {{ .Values.maxGrantLifetimeSeconds | quote }} }
+            {{/* Schema bounds this integer; normalize YAML numbers before quote can emit scientific notation. */}}
+            - { name: BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS, value: {{ .Values.maxGrantLifetimeSeconds | int64 | quote }} }
             - { name: BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH, value: /run/buzz/app-attest/root.pem }
             - { name: BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID, value: {{ .Values.profiles.dogfood.appAttestAppId | quote }} }
             - { name: BUZZ_PUSH_DOGFOOD_APNS_TOPIC, value: {{ .Values.profiles.dogfood.apnsTopic | quote }} }

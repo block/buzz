@@ -428,6 +428,15 @@ test("databricks_v2 with databricks-prefixed claude model strips prefix and rout
   assert.equal(defaultValue, "high");
 });
 
+test("databricks_v2 Claude FQN exposes no effort controls", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks_v2",
+    "catalog.schema.claude-sonnet-custom",
+  );
+  assert.deepEqual([...validValues], []);
+  assert.equal(defaultValue, null);
+});
+
 test("databricks_v2 with gpt-5.4 routes to openai gpt-5.5/5.4 table", () => {
   const { validValues, defaultValue } = getProviderEffortConfig(
     "databricks_v2",
