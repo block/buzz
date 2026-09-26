@@ -529,6 +529,16 @@ mod windows {
         }
 
         #[test]
+        fn shortcut_already_carrying_aumid_is_accepted() {
+            let directory = tempfile::tempdir().expect("temporary programs folder");
+            let executable = std::env::current_exe().expect("test executable");
+            for launch in ["first", "second"] {
+                ensure_shortcut_in(directory.path(), "Buzz", &executable, "buzz.test")
+                    .unwrap_or_else(|error| panic!("{launch} launch: {error}"));
+            }
+        }
+
+        #[test]
         fn shortcut_failure_is_propagated() {
             let directory = tempfile::tempdir().expect("temporary programs folder");
             std::fs::write(directory.path().join("Buzz"), "blocks directory creation")
