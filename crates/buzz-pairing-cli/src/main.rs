@@ -113,7 +113,7 @@ async fn run(cmd: Cmd) -> Result<(), CliError> {
 
 async fn cmd_source(relay_url: String, nsec: Option<String>) -> Result<(), CliError> {
     // Resolve the payload to transfer.
-    let (payload_str, payload_type) = resolve_payload(nsec)?;
+    let (payload_str, payload_type) = resolve_payload(&relay_url, nsec)?;
 
     // Create pairing session.
     let (mut session, qr) = PairingSession::new_source(relay_url.clone());
@@ -576,14 +576,22 @@ fn parse_relay_event(text: &str, sub_id: &str) -> Option<Event> {
 
 /// Resolve the payload to send.
 ///
-/// If `nsec` is provided, parse it as bech32 and return the raw nsec string.
-/// Otherwise generate a fresh test key and return its nsec.
-fn resolve_payload(nsec: Option<String>) -> Result<(Zeroizing<String>, PayloadType), CliError> {
-    match nsec {
+/// If `nsec` is provided, parse it as bech32 and return a JSON-encoded payload
+/// containing the relay URL, pubkey, and nsec.
+/// Otherwise generate a fresh test key and return the same JSON payload format.
+///
+/// The mobile app expects the payload to be a JSON object with `relayUrl`,
+/// `pubkey`, and `nsec` fields — not a raw nsec string.
+fn resolve_payload(
+    relay_url: &str,
+    nsec: Option<String>,
+) -> Result<(Zeroizing<String>, PayloadType), CliError> {
+    let (nsec_str, pubkey_hex) = match nsec {
         Some(s) => {
-            // Validate it parses as a secret key.
-            let _sk = SecretKey::parse(&s).map_err(|e| CliError::InvalidNsec(e.to_string()))?;
-            Ok((Zeroizing::new(s), PayloadType::Nsec))
+            let sk = SecretKey::parse(&s).map_err(|e| CliError::InvalidNsec(e.to_string()))?;
+            let keys = Keys::new(sk);
+            let pk = keys.public_key().to_hex();
+            (s, pk)
         }
         None => {
             let keys = Keys::generate();
@@ -591,10 +599,22 @@ fn resolve_payload(nsec: Option<String>) -> Result<(Zeroizing<String>, PayloadTy
                 .secret_key()
                 .to_bech32()
                 .map_err(|e| CliError::InvalidNsec(e.to_string()))?;
+            let pk = keys.public_key().to_hex();
             println!("(no --nsec provided; using generated test key)");
-            Ok((Zeroizing::new(nsec_str), PayloadType::Nsec))
+            (nsec_str, pk)
         }
-    }
+    };
+
+    // Build the JSON payload that the mobile app expects:
+    // { "relayUrl": "ws://...", "pubkey": "...", "nsec": "nsec1..." }
+    let payload_json = serde_json::json!({
+        "relayUrl": relay_url,
+        "pubkey": pubkey_hex,
+        "nsec": nsec_str,
+    })
+    .to_string();
+
+    Ok((Zeroizing::new(payload_json), PayloadType::Nsec))
 }
 
 /// Read a single line from stdin (trims trailing newline).
