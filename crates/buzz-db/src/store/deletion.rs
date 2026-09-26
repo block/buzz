@@ -606,10 +606,36 @@ pub struct DeletionApproval {
     pub inventory_digest: String,
     /// Approving operator identity.
     pub approved_by: String,
+    /// Bounded provenance for the approval decision.
+    pub approval_origin: DeletionApprovalOrigin,
     /// Optional approval note.
     pub note: Option<String>,
     /// Approval timestamp.
     pub approved_at: DateTime<Utc>,
+}
+
+/// Durable provenance class for an inventory approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionApprovalOrigin {
+    /// A deployment operator explicitly approved the inventory.
+    Operator,
+    /// Privileged policy approved authenticated owner intent automatically.
+    OwnerAutomatic,
+}
+
+impl FromStr for DeletionApprovalOrigin {
+    type Err = DbError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "operator" => Ok(Self::Operator),
+            "owner_automatic" => Ok(Self::OwnerAutomatic),
+            other => Err(DbError::InvalidData(format!(
+                "unknown community deletion approval origin: {other}"
+            ))),
+        }
+    }
 }
 
 /// Monotonic lease token required by every execution mutation.
@@ -955,7 +981,7 @@ impl DeletionStore {
     pub async fn inspect(&self, request_id: Uuid) -> Result<DeletionInspection> {
         let request = self.get(request_id).await?;
         let approval_row = sqlx::query(
-            "SELECT inventory_digest, approved_by, note, approved_at \
+            "SELECT inventory_digest, approved_by, approval_origin, note, approved_at \
              FROM community_deletion_approvals WHERE request_id = $1",
         )
         .bind(request_id)
@@ -966,6 +992,7 @@ impl DeletionStore {
                 Ok::<DeletionApproval, DbError>(DeletionApproval {
                     inventory_digest: hex::encode(row.try_get::<Vec<u8>, _>("inventory_digest")?),
                     approved_by: row.try_get("approved_by")?,
+                    approval_origin: row.try_get::<String, _>("approval_origin")?.parse()?,
                     note: row.try_get("note")?,
                     approved_at: row.try_get("approved_at")?,
                 })
@@ -1183,7 +1210,7 @@ impl DeletionStore {
         .bind(schema)
         .bind(storage)
         .bind(frozen)
-        .bind(digest)
+        .bind(&digest)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
@@ -1225,8 +1252,8 @@ impl DeletionStore {
         }
         sqlx::query(
             "INSERT INTO community_deletion_approvals \
-             (request_id, community_id, inventory_digest, approved_by, note) \
-             VALUES ($1, $2, $3, $4, $5)",
+             (request_id, community_id, inventory_digest, approved_by, approval_origin, note) \
+             VALUES ($1, $2, $3, $4, 'operator', $5)",
         )
         .bind(request_id)
         .bind(community_id)
@@ -1270,6 +1297,217 @@ impl DeletionStore {
         lease_duration: Duration,
     ) -> Result<Option<ClaimedDeletion>> {
         self.claim(None, owner, lease_duration).await
+    }
+
+    /// Claim the oldest due authenticated owner submission for preparation.
+    pub async fn claim_next_owner_submission(
+        &self,
+        owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedDeletion>> {
+        self.claim_owner_submission(None, owner, lease_duration)
+            .await
+    }
+
+    /// Claim one due authenticated owner submission by request id.
+    pub async fn claim_specific_owner_submission(
+        &self,
+        request_id: Uuid,
+        owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedDeletion>> {
+        self.claim_owner_submission(Some(request_id), owner, lease_duration)
+            .await
+    }
+
+    async fn claim_owner_submission(
+        &self,
+        request_id: Option<Uuid>,
+        owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedDeletion>> {
+        let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"WITH candidate AS (
+                SELECT id FROM community_deletion_requests
+                WHERE ($1::uuid IS NULL OR id = $1)
+                  AND request_origin = 'owner' AND acknowledgement_version = $4
+                  AND stage = 'submitted'
+                  AND blocked_at IS NULL AND next_attempt_at <= now()
+                  AND (lease_until IS NULL OR lease_until < now())
+                ORDER BY created_at, id
+                FOR UPDATE SKIP LOCKED LIMIT 1
+            )
+            UPDATE community_deletion_requests request
+            SET lease_owner = $2, lease_generation = lease_generation + 1,
+                lease_until = now() + make_interval(secs => $3),
+                attempts = attempts + 1, updated_at = now()
+            FROM candidate WHERE request.id = candidate.id
+            RETURNING request.*"#,
+        )
+        .bind(request_id)
+        .bind(owner)
+        .bind(lease_seconds)
+        .bind(OWNER_DELETION_ACKNOWLEDGEMENT_VERSION)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let request = row_to_request(row)?;
+        let lease = LeaseToken {
+            request_id: request.id,
+            owner: owner.to_owned(),
+            generation: request.lease_generation,
+            community_id: request.community_id,
+            fence_generation: request.fence_generation,
+        };
+        Ok(Some(ClaimedDeletion { request, lease }))
+    }
+
+    /// Renew a live owner-submission preparation lease.
+    pub async fn heartbeat_owner_submission(
+        &self,
+        token: &LeaseToken,
+        executor_mode: &str,
+        lease_duration: Duration,
+        draining: bool,
+    ) -> Result<()> {
+        let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
+        let mut tx = self.pool.begin().await?;
+        verify_owner_submission_lease(&mut tx, token).await?;
+        let affected = sqlx::query(
+            "UPDATE community_deletion_requests SET lease_until = \
+             now() + make_interval(secs => $4), updated_at = now() \
+             WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3",
+        )
+        .bind(token.request_id)
+        .bind(&token.owner)
+        .bind(token.generation)
+        .bind(lease_seconds)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(stale_lease_error(token));
+        }
+        upsert_executor_heartbeat(&mut tx, token, executor_mode, draining).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically freeze inventory and approve authenticated owner intent.
+    pub async fn complete_owner_preparation(
+        &self,
+        token: &LeaseToken,
+        inventory: &FrozenInventory,
+    ) -> Result<DeletionRequest> {
+        validate_storage_manifest(&inventory.storage)?;
+        let digest = inventory.digest()?;
+        let schema = serde_json::to_value(&inventory.schema)?;
+        let storage = serde_json::to_value(&inventory.storage)?;
+        let frozen = serde_json::to_value(inventory)?;
+        let mut tx = self.pool.begin().await?;
+        let request_row =
+            sqlx::query("SELECT * FROM community_deletion_requests WHERE id = $1 FOR UPDATE")
+                .bind(token.request_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| stale_lease_error(token))?;
+        let request = row_to_request(request_row)?;
+        let lease_live: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
+             WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3 \
+               AND lease_until >= now())",
+        )
+        .bind(token.request_id)
+        .bind(&token.owner)
+        .bind(token.generation)
+        .fetch_one(&mut *tx)
+        .await?;
+        let lease_matches = lease_live
+            && request.community_id == token.community_id
+            && request.request_origin == DeletionRequestOrigin::Owner
+            && request.acknowledgement_version == Some(OWNER_DELETION_ACKNOWLEDGEMENT_VERSION)
+            && request.lease_owner.as_deref() == Some(token.owner.as_str())
+            && request.lease_generation == token.generation
+            && request.blocked_reason.is_none();
+        if !lease_matches {
+            return Err(stale_lease_error(token));
+        }
+        if request.stage == DeletionStage::Approved {
+            let approval: Option<(Vec<u8>, String, String)> = sqlx::query_as(
+                "SELECT inventory_digest, approved_by, approval_origin \
+                 FROM community_deletion_approvals WHERE request_id = $1",
+            )
+            .bind(token.request_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let expected_operator = request.mediating_operator_pubkey.as_deref();
+            let digest_hex = hex::encode(&digest);
+            let converged = request.inventory_digest.as_deref() == Some(digest_hex.as_str())
+                && approval
+                    .as_ref()
+                    .is_some_and(|(approved_digest, approved_by, origin)| {
+                        approved_digest.as_slice() == digest
+                            && Some(approved_by.as_str()) == expected_operator
+                            && origin == "owner_automatic"
+                    });
+            if converged {
+                tx.commit().await?;
+                return Ok(request);
+            }
+            return Err(DbError::DeletionSafety(format!(
+                "deletion {} automatic preparation does not match frozen approval evidence",
+                token.request_id
+            )));
+        }
+        if request.stage != DeletionStage::Submitted {
+            return Err(stale_lease_error(token));
+        }
+        let mediating_operator = request.mediating_operator_pubkey.clone().ok_or_else(|| {
+            DbError::DeletionSafety(format!(
+                "owner deletion {} is missing mediating operator provenance",
+                token.request_id
+            ))
+        })?;
+        sqlx::query(
+            "UPDATE community_deletion_requests SET stage = 'inventoried', \
+             schema_manifest = $2, storage_manifest = $3, inventory_manifest = $4, \
+             inventory_digest = $5, inventory_frozen_at = now(), updated_at = now() \
+             WHERE id = $1",
+        )
+        .bind(token.request_id)
+        .bind(schema)
+        .bind(storage)
+        .bind(frozen)
+        .bind(&digest)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO community_deletion_approvals \
+             (request_id, community_id, inventory_digest, approved_by, approval_origin) \
+             VALUES ($1, $2, $3, $4, 'owner_automatic')",
+        )
+        .bind(token.request_id)
+        .bind(token.community_id.as_uuid())
+        .bind(digest)
+        .bind(mediating_operator)
+        .execute(&mut *tx)
+        .await?;
+        let row = sqlx::query(
+            "UPDATE community_deletion_requests SET stage = 'approved', \
+             retry_count = 0, retry_stage = NULL, next_attempt_at = now(), \
+             last_error = NULL, last_error_at = NULL, updated_at = now() \
+             WHERE id = $1 AND stage = 'inventoried' RETURNING *",
+        )
+        .bind(token.request_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row_to_request(row)
     }
 
     async fn claim(
@@ -1402,19 +1640,7 @@ impl DeletionStore {
         if affected != 1 {
             return Err(stale_lease_error(token));
         }
-        sqlx::query(
-            "INSERT INTO community_deletion_executor_heartbeats \
-             (executor_id, mode, request_id, draining) VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (executor_id) DO UPDATE SET mode = EXCLUDED.mode, \
-                 request_id = EXCLUDED.request_id, heartbeat_at = now(), \
-                 draining = EXCLUDED.draining, stopped_at = NULL",
-        )
-        .bind(&token.owner)
-        .bind(executor_mode)
-        .bind(token.request_id)
-        .bind(draining)
-        .execute(&mut *tx)
-        .await?;
+        upsert_executor_heartbeat(&mut tx, token, executor_mode, draining).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -2192,6 +2418,81 @@ impl DeletionStore {
         .bind(exhausted)
         .bind(consecutive_retries)
         .bind(stage_name)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Persist a retryable owner-inventory failure and release its preparation lease.
+    pub async fn record_owner_preparation_retry(
+        &self,
+        token: &LeaseToken,
+        unit_key: &str,
+        error: &str,
+        retry_after: Duration,
+    ) -> Result<()> {
+        let bounded = bound_text(error, 4096);
+        let retry_seconds = i64::try_from(retry_after.as_secs()).unwrap_or(i64::MAX);
+        let mut tx = self.pool.begin().await?;
+        verify_owner_submission_lease(&mut tx, token).await?;
+        let (retry_count, retry_stage): (i32, Option<String>) = sqlx::query_as(
+            "SELECT retry_count, retry_stage FROM community_deletion_requests \
+             WHERE id = $1 FOR UPDATE",
+        )
+        .bind(token.request_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let consecutive_retries = if retry_stage.as_deref() == Some("submitted") {
+            retry_count.saturating_add(1)
+        } else {
+            1
+        };
+        let exhausted = consecutive_retries >= 8;
+        checkpoint_failed_tx(&mut tx, token, DeletionStage::Submitted, unit_key, &bounded).await?;
+        sqlx::query(
+            "UPDATE community_deletion_requests SET retry_count = $5, \
+             retry_stage = 'submitted', last_error = $4, last_error_at = now(), \
+             next_attempt_at = CASE WHEN $6 THEN next_attempt_at \
+                                    ELSE now() + make_interval(secs => $7) END, \
+             blocked_at = CASE WHEN $6 THEN now() ELSE blocked_at END, \
+             blocked_reason = CASE WHEN $6 THEN $4 ELSE blocked_reason END, \
+             lease_owner = NULL, lease_until = NULL, updated_at = now() \
+             WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3",
+        )
+        .bind(token.request_id)
+        .bind(&token.owner)
+        .bind(token.generation)
+        .bind(&bounded)
+        .bind(consecutive_retries)
+        .bind(exhausted)
+        .bind(retry_seconds)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Permanently block unsafe owner inventory preparation and release its lease.
+    pub async fn block_owner_preparation(
+        &self,
+        token: &LeaseToken,
+        unit_key: &str,
+        error: &str,
+    ) -> Result<()> {
+        let bounded = bound_text(error, 4096);
+        let mut tx = self.pool.begin().await?;
+        verify_owner_submission_lease(&mut tx, token).await?;
+        checkpoint_failed_tx(&mut tx, token, DeletionStage::Submitted, unit_key, &bounded).await?;
+        sqlx::query(
+            "UPDATE community_deletion_requests SET blocked_at = now(), blocked_reason = $4, \
+             last_error = $4, last_error_at = now(), lease_owner = NULL, lease_until = NULL, \
+             updated_at = now() WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3",
+        )
+        .bind(token.request_id)
+        .bind(&token.owner)
+        .bind(token.generation)
+        .bind(&bounded)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -3114,6 +3415,55 @@ fn validate_manifest_key_chunks(
         close(summary, KeyStreamDigest::new())?;
     }
     Ok(())
+}
+
+async fn upsert_executor_heartbeat(
+    tx: &mut Transaction<'_, Postgres>,
+    token: &LeaseToken,
+    executor_mode: &str,
+    draining: bool,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO community_deletion_executor_heartbeats \
+         (executor_id, mode, request_id, draining) VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (executor_id) DO UPDATE SET mode = EXCLUDED.mode, \
+             request_id = EXCLUDED.request_id, heartbeat_at = now(), \
+             draining = EXCLUDED.draining, stopped_at = NULL",
+    )
+    .bind(&token.owner)
+    .bind(executor_mode)
+    .bind(token.request_id)
+    .bind(draining)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn verify_owner_submission_lease(
+    tx: &mut Transaction<'_, Postgres>,
+    token: &LeaseToken,
+) -> Result<()> {
+    let valid = sqlx::query_scalar::<_, Uuid>(
+        "SELECT request.id FROM community_deletion_requests request \
+         WHERE request.id = $1 AND request.community_id = $4 \
+           AND request.request_origin = 'owner' AND request.stage = 'submitted' \
+           AND request.acknowledgement_version = $5 \
+           AND request.lease_owner = $2 AND request.lease_generation = $3 \
+           AND request.lease_until >= now() AND request.blocked_at IS NULL \
+         FOR UPDATE",
+    )
+    .bind(token.request_id)
+    .bind(&token.owner)
+    .bind(token.generation)
+    .bind(token.community_id.as_uuid())
+    .bind(OWNER_DELETION_ACKNOWLEDGEMENT_VERSION)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if valid.is_some() {
+        Ok(())
+    } else {
+        Err(stale_lease_error(token))
+    }
 }
 
 async fn verify_lease(
@@ -4805,6 +5155,292 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn owner_preparation_claim_is_owner_only_concurrent_and_reclaimable() {
+        let (db, store) = store().await;
+        let (owner_host, owner, _) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        let OwnerDeletionAdmission::Accepted(owner_request) = store
+            .admit_owner_request(&owner_host, &owner, operator, 1, request_id)
+            .await
+            .expect("admit owner request")
+        else {
+            panic!("expected accepted owner request")
+        };
+        let operator_host = format!("operator-delete-{}.example", Uuid::new_v4().simple());
+        db.ensure_configured_community(&operator_host)
+            .await
+            .expect("create operator community");
+        let operator_request = store
+            .submit(&operator_host, "manual-operator", None)
+            .await
+            .expect("submit manual request");
+
+        let (first, second) = tokio::join!(
+            store.claim_specific_owner_submission(
+                owner_request.id,
+                "preparer-a",
+                DEFAULT_LEASE_DURATION,
+            ),
+            store.claim_specific_owner_submission(
+                owner_request.id,
+                "preparer-b",
+                DEFAULT_LEASE_DURATION,
+            ),
+        );
+        let claims = [first.expect("first claim"), second.expect("second claim")];
+        assert_eq!(claims.iter().filter(|claim| claim.is_some()).count(), 1);
+        let claim = claims.into_iter().flatten().next().expect("one winner");
+        assert_eq!(claim.request.id, owner_request.id);
+        assert_eq!(claim.request.request_origin, DeletionRequestOrigin::Owner);
+        assert_ne!(claim.request.id, operator_request.id);
+        assert!(store
+            .claim_specific_owner_submission(
+                operator_request.id,
+                "operator-preparer",
+                DEFAULT_LEASE_DURATION,
+            )
+            .await
+            .expect("operator request selection")
+            .is_none());
+
+        store
+            .heartbeat_owner_submission(&claim.lease, "drain", DEFAULT_LEASE_DURATION, false)
+            .await
+            .expect("heartbeat owner preparation");
+        sqlx::query(
+            "UPDATE community_deletion_requests SET lease_until = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(owner_request.id)
+        .execute(&db.pool)
+        .await
+        .expect("expire preparation lease");
+        let successor = store
+            .claim_specific_owner_submission(owner_request.id, "preparer-c", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("reclaim expired preparation")
+            .expect("expired owner preparation is reclaimable");
+        assert_eq!(successor.request.id, owner_request.id);
+        assert!(successor.lease.generation > claim.lease.generation);
+        assert!(store
+            .heartbeat_owner_submission(&claim.lease, "drain", DEFAULT_LEASE_DURATION, false)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_atomically_approves_exact_inventory_and_converges() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .await
+            .expect("admit owner request");
+        let claim = store
+            .claim_specific_owner_submission(request_id, "preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner request")
+            .expect("owner request is preparable");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("schema inventory"),
+            storage: empty_storage_manifest(community),
+        };
+
+        let approved = store
+            .complete_owner_preparation(&claim.lease, &inventory)
+            .await
+            .expect("complete owner preparation");
+        assert_eq!(approved.stage, DeletionStage::Approved);
+        assert_eq!(
+            approved.inventory_digest,
+            Some(hex::encode(inventory.digest().unwrap()))
+        );
+        let replay = store
+            .complete_owner_preparation(&claim.lease, &inventory)
+            .await
+            .expect("ambiguous commit replay converges");
+        assert_eq!(replay, approved);
+        let inspection = store.inspect(request_id).await.expect("inspect approval");
+        let approval = inspection.approval.expect("automatic approval evidence");
+        assert_eq!(
+            approval.approval_origin,
+            DeletionApprovalOrigin::OwnerAutomatic
+        );
+        assert_eq!(approval.approved_by, operator);
+        assert!(store
+            .claim_specific(request_id, "other-executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("existing execution claim remains approval-bound")
+            .is_none());
+        store
+            .verify_execution_token(&claim.lease, DeletionStage::Approved)
+            .await
+            .expect("retained lease is immediately execution eligible");
+
+        let changed = FrozenInventory {
+            schema: inventory.schema.clone(),
+            storage: StorageManifest {
+                version: inventory.storage.version,
+                prefixes: inventory
+                    .storage
+                    .prefixes
+                    .iter()
+                    .cloned()
+                    .map(|mut prefix| {
+                        prefix.total_bytes += 1;
+                        prefix
+                    })
+                    .collect(),
+            },
+        };
+        assert!(store
+            .complete_owner_preparation(&claim.lease, &changed)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stale_owner_preparation_generation_cannot_freeze_or_approve() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .await
+            .expect("admit owner request");
+        let stale = store
+            .claim_specific_owner_submission(request_id, "stale-preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner request")
+            .expect("owner request is preparable");
+        sqlx::query(
+            "UPDATE community_deletion_requests SET lease_until = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(stale.request.id)
+        .execute(&db.pool)
+        .await
+        .expect("expire stale lease");
+        let successor = store
+            .claim_specific_owner_submission(
+                request_id,
+                "successor-preparer",
+                DEFAULT_LEASE_DURATION,
+            )
+            .await
+            .expect("reclaim owner request")
+            .expect("expired request is reclaimable");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("schema inventory"),
+            storage: empty_storage_manifest(community),
+        };
+        assert!(is_stale_deletion_lease(
+            &store
+                .complete_owner_preparation(&stale.lease, &inventory)
+                .await
+                .expect_err("stale generation cannot commit")
+        ));
+        let approved = store
+            .complete_owner_preparation(&successor.lease, &inventory)
+            .await
+            .expect("successor commits preparation");
+        assert_eq!(approved.stage, DeletionStage::Approved);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_retry_block_and_privileged_abort_are_recoverable() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .await
+            .expect("admit owner request");
+        let claim = store
+            .claim_specific_owner_submission(request_id, "preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner request")
+            .expect("owner request is preparable");
+        store
+            .record_owner_preparation_retry(
+                &claim.lease,
+                "inventory",
+                "temporary object-store failure",
+                Duration::ZERO,
+            )
+            .await
+            .expect("record preparation retry");
+        let retried = store.get(request_id).await.expect("load retried request");
+        assert_eq!(retried.retry_stage, Some(DeletionStage::Submitted));
+        assert_eq!(retried.retry_count, 1);
+        assert!(retried.lease_owner.is_none());
+
+        let claim = store
+            .claim_specific_owner_submission(request_id, "preparer-2", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("reclaim owner request")
+            .expect("retried request is due");
+        store
+            .block_owner_preparation(&claim.lease, "inventory", "unsafe storage taxonomy")
+            .await
+            .expect("block preparation");
+        assert_eq!(
+            store
+                .get(request_id)
+                .await
+                .expect("load blocked request")
+                .blocked_reason
+                .as_deref(),
+            Some("unsafe storage taxonomy")
+        );
+        let aborted = store
+            .abort(
+                request_id,
+                "recovery-operator",
+                "cannot safely enumerate storage",
+            )
+            .await
+            .expect("abort submitted request");
+        assert_eq!(aborted.stage, DeletionStage::Aborted);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT deletion_state FROM communities WHERE id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("community lifecycle"),
+            "active"
+        );
+        assert!(sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            "SELECT archived_at FROM communities WHERE id = $1"
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .expect("community archive state")
+        .is_some());
+        assert!(matches!(
+            store
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+                .await
+                .expect("fresh owner request after recovery abort"),
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn approval_boundary_blocks_claim_until_exact_inventory_is_approved() {
         let (db, store) = store().await;
         let (request, inventory) = inventoried_request(&db, &store).await;
@@ -4851,6 +5487,16 @@ mod postgres_tests {
             .await
             .expect("approve");
         assert_eq!(approved.stage, DeletionStage::Approved);
+        assert_eq!(
+            store
+                .inspect(request.id)
+                .await
+                .expect("inspect manual approval")
+                .approval
+                .expect("manual approval evidence")
+                .approval_origin,
+            DeletionApprovalOrigin::Operator
+        );
         assert_eq!(
             approved.inventory_digest,
             Some(hex::encode(inventory.digest().unwrap()))

@@ -44,6 +44,18 @@ on the row. Owner provenance pins `requested_by` to `owner_pubkey`, so passing
 the operator's own pubkey does not converge — it conflicts with the existing
 one-active-request invariant instead.
 
+The privileged one-shot `buzz-admin deletions drain` process gives already-
+approved work priority. When none is ready, it may claim only an authenticated
+owner-origin `submitted` request under the same durable generation lease used
+for execution, inventory it with lease-loss cancellation, and atomically freeze
+the inventory plus a digest-bound `owner_automatic` approval. The mediating
+operator remains the approval actor; the owner acknowledgement is pre-inventory
+intent, not a claim that the owner reviewed the digest. The retained lease then
+enters the unchanged approved-request executor. Operator-origin requests never
+auto-progress and still require explicit inventory and approval. Owner
+admission still has no owner-facing cancellation or grace period; the
+privileged abort described above remains the recovery path.
+
 Ownership is mutable only while a community is active. Archiving freezes the
 current owner. Normal transfer and deployment-root legacy convergence take the
 same community-row lock as owner-deletion admission, then reject archived,
@@ -761,6 +773,10 @@ Postgres/Redis clients and S3 client; it does not call relay HTTP. Durable
 requests, leases, retry timing, and checkpoints in Postgres are the handoff and
 execution authority, so Kubernetes uses `Forbid` concurrency and zero Job
 retries rather than introducing a second retry system.
+The same drain first claims runnable approved work and, only when none exists,
+may prepare one owner-origin submission. Inventory, automatic approval, and
+execution share one generation lease and the existing retry/block/checkpoint
+records; there is no preparation worker, command, queue, or retry authority.
 
 ---
 
