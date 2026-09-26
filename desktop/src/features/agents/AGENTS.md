@@ -330,6 +330,20 @@ with a TypeScript lookup table or an id comparison in a component.
     for resets; owner replay of a redacted head preserves only a nonportable
     local override. That local path is not synchronized through catalog heads.
 
+18. **Registering an existing agent never takes custody of its identity.** The
+    registration path accepts only an existing pubkey whose live kind:0 profile
+    contains a valid NIP-OA attestation to the current owner. It publishes an
+    owner-signed kind:30177 directory record with the explicitly selected
+    `respond_to` policy and allowlist, and does not generate, import, replace,
+    persist, or request the agent's private key. Allowlist mode does not
+    implicitly admit the owner: the UI must tell the owner to include their own
+    pubkey when they want discovery, and the published allowlist must match the
+    requested normalized values exactly. This directory policy controls Desktop
+    discovery only; an independently operated agent's runtime gate remains
+    external and must be configured to admit the same audience. Registration
+    also must not create a secretless local `ManagedAgentRecord`: independently
+    operated agents remain relay agents, not startable Desktop runtimes.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness
@@ -354,7 +368,6 @@ the CLI with the channel and target thread root:
 buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
   --mention <agent-pubkey> --content '!cancel'
 ```
-
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing

@@ -24,7 +24,10 @@ import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
-import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
+import {
+  useBakedBuildEnvQuery,
+  useRegisterExistingAgentMutation,
+} from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
@@ -44,6 +47,7 @@ export function AgentsView() {
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
+  const registerExistingAgentMutation = useRegisterExistingAgentMutation();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const fullAiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -94,6 +98,7 @@ export function AgentsView() {
   const isActionPending =
     agents.isPending ||
     personas.isPending ||
+    registerExistingAgentMutation.isPending ||
     teamActions.createTeamMutation.isPending ||
     teamActions.updateTeamMutation.isPending ||
     teamActions.deleteTeamMutation.isPending;
@@ -511,12 +516,16 @@ export function AgentsView() {
               ? personas.personaNoticeMessage
               : null
           }
+          isRegistrationPending={registerExistingAgentMutation.isPending}
           onClearFeedback={() => {
             personas.clearFeedback("catalog");
           }}
           onImportFile={(fileBytes, fileName) => {
             void personas.handleImportSnapshotFile(fileBytes, fileName);
           }}
+          onRegisterExistingAgent={(input) =>
+            registerExistingAgentMutation.mutateAsync(input)
+          }
           onSelectPersona={async (persona, active) => {
             const addedPersona = await personas.handleSetActive(
               persona,
