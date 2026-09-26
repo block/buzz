@@ -363,11 +363,34 @@ pub fn build_message_edit(
     edit_tags: MessageEditTags<'_>,
     suppress_link_previews: bool,
 ) -> Result<EventBuilder, String> {
+    build_message_edit_with_editor(
+        channel_id,
+        target_event_id,
+        content,
+        edit_tags,
+        suppress_link_previews,
+        None,
+    )
+}
+
+/// Kind 40003 — build an edit carrying the signed editor's provenance.
+pub fn build_message_edit_with_editor(
+    channel_id: Uuid,
+    target_event_id: EventId,
+    content: &str,
+    edit_tags: MessageEditTags<'_>,
+    suppress_link_previews: bool,
+    editor_pubkey: Option<&str>,
+) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![
         tag(vec!["h", &channel_id.to_string()])?,
         tag(vec!["e", &target_event_id.to_hex()])?,
     ];
+    if let Some(editor_pubkey) = editor_pubkey {
+        check_pubkey(editor_pubkey)?;
+        tags.push(tag(vec!["edited_by", editor_pubkey])?);
+    }
     tags.extend(mention_tags(edit_tags.mentions)?);
     imeta_tags(edit_tags.media, &mut tags)?;
     emoji_tags(edit_tags.custom_emoji, &mut tags)?;

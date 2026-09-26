@@ -1206,8 +1206,42 @@ pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::Publ
     event.pubkey.to_bytes().to_vec()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditAuthorization {
+    Author,
+    ChannelOwnerOrAdmin,
+    AgentOwner,
+}
+
+fn authorize_edit_actor(
+    actor: &[u8],
+    author: &[u8],
+    same_channel: bool,
+    channel_owner_or_admin: bool,
+    agent_owner: bool,
+    provenance_matches: bool,
+) -> Result<EditAuthorization, String> {
+    if !same_channel {
+        return Err("target event belongs to a different channel".to_string());
+    }
+    if actor == author {
+        return Ok(EditAuthorization::Author);
+    }
+    if !provenance_matches {
+        return Err("non-author edits must carry an edited_by tag matching the editor".to_string());
+    }
+    if channel_owner_or_admin {
+        return Ok(EditAuthorization::ChannelOwnerOrAdmin);
+    }
+    if agent_owner {
+        return Ok(EditAuthorization::AgentOwner);
+    }
+    Err("must be event author or channel owner/admin".to_string())
+}
+
 /// Validate kind:40003 edit ownership — event.pubkey must match target's effective author,
-/// or the actor must be the owning human of the agent that authored the target message.
+/// or the actor must be a channel owner/admin or the owning human of the agent
+/// that authored the target message.
 async fn validate_edit_ownership(
     community_id: CommunityId,
     event: &Event,
@@ -1242,48 +1276,86 @@ async fn validate_edit_ownership(
 
     // Verify target belongs to the same channel as the edit event.
     let edit_channel_id = extract_channel_id(event);
-    match (edit_channel_id, target_event.channel_id) {
+    let same_channel = match (edit_channel_id, target_event.channel_id) {
         (Some(edit_ch), Some(target_ch)) if edit_ch != target_ch => {
             return Err("target event belongs to a different channel".to_string());
         }
         (Some(_), None) => {
             return Err("target event has no channel".to_string());
         }
-        _ => {} // Same channel or no channel context — OK
-    }
+        _ => true, // Same channel or no channel context — OK
+    };
 
     let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
     let actor = event.pubkey.to_bytes().to_vec();
-    if author == actor {
-        // Author editing their own message: re-gate on membership/open visibility so that
-        // a removed private-channel member cannot mutate old messages after access is revoked.
-        if let Some(ch_id) = target_event.channel_id {
-            let is_member = state
-                .is_member_cached(community_id, ch_id, &actor)
-                .await
-                .map_err(|e| format!("db error checking membership: {e}"))?;
-            if !is_member {
-                let is_open = state
-                    .db
-                    .get_channel_for_event_write(community_id, ch_id)
-                    .await
-                    .map(|ch| ch.visibility == "open")
-                    .unwrap_or(false);
-                if !is_open {
-                    return Err("restricted: not a channel member".to_string());
-                }
-            }
+    let edited_by = event.tags.iter().find_map(|tag| {
+        if tag.kind().to_string() == "edited_by" {
+            tag.content().map(str::to_string)
+        } else {
+            None
         }
+    });
+    let actor_hex = hex::encode(&actor);
+    let provenance_matches = edited_by
+        .as_deref()
+        .map(|value| value.eq_ignore_ascii_case(&actor_hex))
+        .unwrap_or(false);
+
+    let channel_owner_or_admin = if author == actor {
+        false
+    } else if let Some(ch_id) = target_event.channel_id {
+        let members = state
+            .db
+            .get_members(community_id, ch_id)
+            .await
+            .map_err(|e| format!("db error checking channel role: {e}"))?;
+        members.iter().any(|member| {
+            member.pubkey == actor && (member.role == "owner" || member.role == "admin")
+        })
     } else {
-        // Allow the owning human to edit messages authored by their agent.
-        let is_owner = state
+        false
+    };
+
+    let agent_owner = if author == actor || channel_owner_or_admin {
+        false
+    } else {
+        state
             .db
             .is_agent_owner(community_id, &author, &actor)
             .await
-            .map_err(|e| format!("db error checking agent ownership: {e}"))?;
-        if !is_owner {
-            return Err("must be event author to edit".to_string());
+            .map_err(|e| format!("db error checking agent ownership: {e}"))?
+    };
+
+    match authorize_edit_actor(
+        &actor,
+        &author,
+        same_channel,
+        channel_owner_or_admin,
+        agent_owner,
+        provenance_matches,
+    )? {
+        EditAuthorization::Author => {
+            // Author editing their own message: re-gate on membership/open visibility so that
+            // a removed private-channel member cannot mutate old messages after access is revoked.
+            if let Some(ch_id) = target_event.channel_id {
+                let is_member = state
+                    .is_member_cached(community_id, ch_id, &actor)
+                    .await
+                    .map_err(|e| format!("db error checking membership: {e}"))?;
+                if !is_member {
+                    let is_open = state
+                        .db
+                        .get_channel_for_event_write(community_id, ch_id)
+                        .await
+                        .map(|ch| ch.visibility == "open")
+                        .unwrap_or(false);
+                    if !is_open {
+                        return Err("restricted: not a channel member".to_string());
+                    }
+                }
+            }
         }
+        EditAuthorization::ChannelOwnerOrAdmin | EditAuthorization::AgentOwner => {}
     }
     Ok(())
 }
@@ -3443,6 +3515,56 @@ mod postgres_tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    #[test]
+    fn non_author_non_admin_edit_is_rejected() {
+        let actor = [1_u8; 32];
+        let author = [2_u8; 32];
+        let error = authorize_edit_actor(&actor, &author, true, false, false, true)
+            .expect_err("ordinary members must not edit another author's message");
+        assert_eq!(error, "must be event author or channel owner/admin");
+    }
+
+    #[test]
+    fn same_channel_admin_edit_is_authorized_with_provenance() {
+        let actor = [1_u8; 32];
+        let author = [2_u8; 32];
+        assert_eq!(
+            authorize_edit_actor(&actor, &author, true, true, false, true),
+            Ok(EditAuthorization::ChannelOwnerOrAdmin)
+        );
+    }
+
+    #[test]
+    fn admin_of_another_channel_is_rejected_before_role_authorization() {
+        let actor = [1_u8; 32];
+        let author = [2_u8; 32];
+        let error = authorize_edit_actor(&actor, &author, false, true, false, true)
+            .expect_err("channel roles must not cross channel boundaries");
+        assert_eq!(error, "target event belongs to a different channel");
+    }
+
+    #[test]
+    fn channel_owner_edit_is_authorized_with_provenance() {
+        let actor = [1_u8; 32];
+        let author = [2_u8; 32];
+        assert_eq!(
+            authorize_edit_actor(&actor, &author, true, true, false, true),
+            Ok(EditAuthorization::ChannelOwnerOrAdmin)
+        );
+    }
+
+    #[test]
+    fn non_author_edit_requires_matching_provenance() {
+        let actor = [1_u8; 32];
+        let author = [2_u8; 32];
+        let error = authorize_edit_actor(&actor, &author, true, true, false, false)
+            .expect_err("admin edits must identify their signed editor");
+        assert_eq!(
+            error,
+            "non-author edits must carry an edited_by tag matching the editor"
+        );
+    }
 
     #[test]
     fn missing_huddle_backing_channel_is_a_client_rejection() {
