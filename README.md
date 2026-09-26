@@ -179,6 +179,119 @@ Want a single-node / VPS relay instead of the local-dev stack? Use the productio
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 
+### Configure Goose (optional ACP agent)
+
+Goose is the default ACP runtime used by [`buzz-acp`](crates/buzz-acp). Install it, configure an LLM provider, then verify before wiring it to the relay.
+
+**Install (macOS):**
+
+```bash
+brew install --cask block-goose
+```
+
+The app lands at `/Applications/Goose.app`. The CLI ships inside the bundle; put it on your `PATH`:
+
+```bash
+mkdir -p ~/.local/bin
+ln -sf "/Applications/Goose.app/Contents/Resources/bin/goose" ~/.local/bin/goose
+# ensure ~/.local/bin is on PATH (already true if you followed Quick start / Hermit)
+goose --version   # expect 1.45.x or newer
+```
+
+**Configure provider + API key:**
+
+Goose stores non-secret settings in `~/.config/goose/config.yaml` and secrets in the macOS Keychain (`service=goose`, `account=secrets`). Prefer the interactive wizard, or seed config manually.
+
+Interactive:
+
+```bash
+goose configure
+# Configure Providers → OpenRouter (or Anthropic / OpenAI / …)
+# paste the provider API key when prompted
+# pick a model (e.g. anthropic/claude-sonnet-4 for OpenRouter)
+```
+
+Manual OpenRouter example (API key stays out of the YAML file):
+
+```bash
+mkdir -p ~/.config/goose
+cat > ~/.config/goose/config.yaml <<'EOF'
+GOOSE_PROVIDER: openrouter
+GOOSE_MODEL: anthropic/claude-sonnet-4
+active_provider: openrouter
+GOOSE_TELEMETRY_ENABLED: true
+providers:
+  openrouter:
+    enabled: true
+    configured: true
+    model: anthropic/claude-sonnet-4
+extensions:
+  developer:
+    enabled: true
+    type: platform
+    name: developer
+    bundled: true
+EOF
+
+# Store OPENROUTER_API_KEY in the Goose keychain entry (do not commit secrets).
+# From 1Password CLI, for example:
+#   export KEY="$(op item get 'OpenRouter API Key - Buzz' --fields credential --reveal)"
+#   SECRETS="$(python3 -c 'import json,os; print(json.dumps({"OPENROUTER_API_KEY": os.environ["KEY"]}))')"
+#   security add-generic-password -U -s goose -a secrets -w "$SECRETS"
+#   unset KEY SECRETS
+# Or export for the current shell only:
+export OPENROUTER_API_KEY="sk-or-…"   # env vars override keychain for that process
+```
+
+Useful env overrides (process-scoped; win over `config.yaml`):
+
+| Variable | Purpose |
+|---|---|
+| `GOOSE_PROVIDER` | Provider id (`openrouter`, `anthropic`, `openai`, …) |
+| `GOOSE_MODEL` | Model id for that provider |
+| `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Provider credentials |
+| `GOOSE_MODE` | Tool autonomy — use `auto` with `buzz-acp` or Goose hangs on approval prompts |
+
+Inspect active config (never prints secrets):
+
+```bash
+goose info -v
+```
+
+**Verify with a sample session:**
+
+```bash
+# One-shot connectivity check (no session file)
+goose run --no-session -q -t 'Reply with exactly: goose-openrouter-ok'
+# expect: goose-openrouter-ok
+
+# Named session (shows up in `goose session list`)
+goose run -n "verify-openrouter-$(date +%Y%m%d%H%M%S)" -q \
+  -t 'Compute 17*23. Reply with only the number.'
+# expect: 391
+
+goose session list
+```
+
+When verification is done, remove throwaway sessions and local dumps you created while debugging keys:
+
+```bash
+goose session remove --id <session-id>   # from `goose session list`
+# optional: clear today's CLI logs if you do not need them
+# rm -rf ~/.local/state/goose/logs/cli/$(date +%Y-%m-%d)
+```
+
+**Connect Goose to a local Buzz relay:**
+
+```bash
+export BUZZ_PRIVATE_KEY="nsec1…"          # agent identity (see crates/buzz-acp/README.md)
+export BUZZ_RELAY_URL="ws://localhost:3000"
+export GOOSE_MODE=auto
+buzz-acp                                  # spawns `goose acp` by default
+```
+
+Full harness options, membership, and multi-agent recipes: [`crates/buzz-acp/README.md`](crates/buzz-acp/README.md) and [`TESTING.md`](TESTING.md).
+
 ---
 
 ## Windows prerequisites
