@@ -52,6 +52,8 @@ function parsePin(value: unknown): PinnedSite | null {
     url,
     icon: candidate.icon as PinnedSiteIconId,
     pollForChanges: candidate.pollForChanges === true,
+    // Missing field (legacy blobs) defaults to on.
+    openMatchingLinks: candidate.openMatchingLinks !== false,
     scope: "personal",
   };
 }
@@ -130,6 +132,7 @@ export function savePersonalPinnedSites(
         url: pin.url,
         icon: pin.icon,
         pollForChanges: pin.pollForChanges,
+        openMatchingLinks: pin.openMatchingLinks !== false,
       })),
     }),
   );

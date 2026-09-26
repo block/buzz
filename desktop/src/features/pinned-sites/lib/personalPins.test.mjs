@@ -93,3 +93,37 @@ test("loadPersonalPinnedSites persists the seed flag via storage key", () => {
   const first = loadPersonalPinnedSites("abc", "wss://relay.example.com");
   assert.equal(first.pins[0].id, WAYFINDER_PIN_ID);
 });
+
+test("openMatchingLinks defaults to true when missing from stored blob", () => {
+  const parsed = parsePersonalPinnedSitesBlob({
+    version: 1,
+    wayfinderSeeded: true,
+    pins: [
+      {
+        id: "legacy",
+        name: "Legacy",
+        url: "https://example.com",
+        icon: "globe",
+      },
+    ],
+  });
+  assert.equal(parsed?.pins.length, 1);
+  assert.equal(parsed?.pins[0].openMatchingLinks, true);
+});
+
+test("openMatchingLinks false is preserved", () => {
+  const parsed = parsePersonalPinnedSitesBlob({
+    version: 1,
+    wayfinderSeeded: true,
+    pins: [
+      {
+        id: "off",
+        name: "Off",
+        url: "https://example.com",
+        icon: "globe",
+        openMatchingLinks: false,
+      },
+    ],
+  });
+  assert.equal(parsed?.pins[0].openMatchingLinks, false);
+});

@@ -13,6 +13,7 @@ const pins = [
     url: "https://docs.example.com/guide",
     icon: "book-open",
     pollForChanges: false,
+    openMatchingLinks: true,
     scope: "personal",
   },
   {
@@ -21,6 +22,7 @@ const pins = [
     url: "https://www.example.com",
     icon: "globe",
     pollForChanges: false,
+    openMatchingLinks: true,
     scope: "personal",
   },
   {
@@ -29,6 +31,7 @@ const pins = [
     url: "https://app.example.com/dashboard",
     icon: "layout-dashboard",
     pollForChanges: false,
+    openMatchingLinks: true,
     scope: "personal",
   },
 ];
@@ -64,6 +67,7 @@ test("more specific dashboard pin wins over weaker domain", () => {
       url: "https://app.example.com",
       icon: "globe",
       pollForChanges: false,
+      openMatchingLinks: true,
       scope: "personal",
     },
   ];
@@ -72,4 +76,48 @@ test("more specific dashboard pin wins over weaker domain", () => {
     withDomain,
   );
   assert.equal(match?.id, "app");
+});
+
+test("skips pins with openMatchingLinks disabled", () => {
+  const withDisabled = pins.map((pin) =>
+    pin.id === "root" ? { ...pin, openMatchingLinks: false } : pin,
+  );
+  // root would normally match example.com/blog; disabled → no match (docs/app differ)
+  assert.equal(
+    matchPinnedSiteForUrl("https://example.com/blog/post", withDisabled),
+    null,
+  );
+  // docs still matches its own host
+  assert.equal(
+    matchPinnedSiteForUrl("https://docs.example.com/guide/intro", withDisabled)
+      ?.id,
+    "docs",
+  );
+});
+
+test("disabled pin loses to another matching pin on same host", () => {
+  const both = [
+    {
+      id: "weak",
+      name: "Weak",
+      url: "https://docs.example.com",
+      icon: "globe",
+      pollForChanges: false,
+      openMatchingLinks: false,
+      scope: "personal",
+    },
+    {
+      id: "docs",
+      name: "Docs",
+      url: "https://docs.example.com/guide",
+      icon: "book-open",
+      pollForChanges: false,
+      openMatchingLinks: true,
+      scope: "personal",
+    },
+  ];
+  assert.equal(
+    matchPinnedSiteForUrl("https://docs.example.com/guide/intro", both)?.id,
+    "docs",
+  );
 });

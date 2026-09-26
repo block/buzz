@@ -246,6 +246,9 @@ function PinFormDialog({
   const [pollForChanges, setPollForChanges] = React.useState(
     pin?.pollForChanges ?? false,
   );
+  const [openMatchingLinks, setOpenMatchingLinks] = React.useState(
+    pin?.openMatchingLinks !== false,
+  );
   const [community, setCommunity] = React.useState(pin?.scope === "community");
   const [error, setError] = React.useState<string | null>(null);
   const [saving, setSaving] = React.useState(false);
@@ -260,6 +263,7 @@ function PinFormDialog({
         url,
         icon,
         pollForChanges,
+        openMatchingLinks,
         community,
       });
       onOpenChange(false);
@@ -364,6 +368,22 @@ function PinFormDialog({
               checked={pollForChanges}
               data-testid="pinned-site-poll"
               onCheckedChange={setPollForChanges}
+            />
+          </SettingsOptionRow>
+          <SettingsOptionRow className="rounded-lg border border-border/70 px-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium">Open matching links here</p>
+              <p className="text-xs text-muted-foreground/70">
+                When on, left-click links for this pin&apos;s domain open in this
+                pinned site, and right-click offers &quot;Open in Pinned
+                Website&quot;. When off, this pin is skipped for domain routing
+                (other pins may still match).
+              </p>
+            </div>
+            <Switch
+              checked={openMatchingLinks}
+              data-testid="pinned-site-open-matching-links"
+              onCheckedChange={setOpenMatchingLinks}
             />
           </SettingsOptionRow>
           <SettingsOptionRow className="rounded-lg border border-border/70 px-3">
