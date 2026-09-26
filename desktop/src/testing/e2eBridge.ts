@@ -7999,6 +7999,42 @@ async function handleRemoveChannelMember(
   });
 }
 
+async function handleChangeChannelMemberRole(
+  args: {
+    channelId: string;
+    pubkey: string;
+    role: RawChannelMember["role"];
+  },
+  config: E2eConfig | undefined,
+) {
+  const identity = getIdentity(config);
+  if (!identity) {
+    const channel = getMockChannel(args.channelId);
+    const member = channel.members.find(
+      (candidate) =>
+        normalizePubkey(candidate.pubkey) === normalizePubkey(args.pubkey),
+    );
+    if (!member) {
+      throw new Error("Not a member of this channel.");
+    }
+    member.role = args.role;
+    member.is_agent = member.is_agent || args.role === "bot";
+    syncMockChannel(channel);
+    touchMockChannel(channel);
+    return;
+  }
+
+  await submitSignedEvent(config, {
+    kind: 9000,
+    content: "",
+    tags: [
+      ["h", args.channelId],
+      ["p", args.pubkey],
+      ["role", args.role],
+    ],
+  });
+}
+
 async function handleJoinChannel(
   args: {
     channelId: string;
@@ -14384,6 +14420,11 @@ export function maybeInstallE2eTauriMocks() {
       case "remove_channel_member":
         return handleRemoveChannelMember(
           payload as Parameters<typeof handleRemoveChannelMember>[0],
+          activeConfig,
+        );
+      case "change_channel_member_role":
+        return handleChangeChannelMemberRole(
+          payload as Parameters<typeof handleChangeChannelMemberRole>[0],
           activeConfig,
         );
       case "join_channel":
