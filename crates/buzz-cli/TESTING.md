@@ -410,7 +410,12 @@ buzz workflows trigger --workflow "$WF_ID" | jq .
 
 # workflows runs
 buzz workflows runs --workflow "$WF_ID" | jq .
-# Expected: [] — relay stores runs in DB, not as Nostr events; empty is normal
+# Expected: {"runs": [...], "next": null or {"before": "...", "before_id": "..."}}
+# Runs are relay database rows. A completed SendMessage workflow records relay
+# message acceptance, not completion of the agent task or an external delivery.
+# Continue a page using both values returned in next:
+# buzz workflows runs --workflow "$WF_ID" --before <timestamp> --before-id <run-uuid>
+# An unsupported endpoint or denied request must fail, never print a false empty history.
 
 # workflows approve — requires a workflow run waiting for approval
 # This is hard to test ad-hoc without a workflow that has an approval gate.
