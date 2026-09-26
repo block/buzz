@@ -697,9 +697,21 @@ pub fn read_archived_events(
 /// Will's (a) ruling (2026-07-08), while ensuring the row exists so a re-run
 /// is a no-op.
 ///
+/// **Conditional on the canonical event.** The insert is an `INSERT ... SELECT`
+/// gated on the matching `archived_events` row still existing, so a derived
+/// index row can never be created for an event that is absent — the
+/// stale-backfill orphan race. The TS backfill driver reads a snapshot of
+/// unindexed rows, decrypts each asynchronously, then calls back here; a prune
+/// pass (or a concurrent GC) can delete the underlying observer frame in that
+/// window, and an unconditional insert would resurrect an index row pointing at
+/// a deleted event — an orphan the prune's candidate-scoped GC already ran past.
+/// Gating the insert on `EXISTS(archived_events)` closes that window at the
+/// write itself rather than relying on a later repair pass.
+///
 /// Idempotent: if the (identity, relay, id) PK already exists the row is left
-/// unchanged (INSERT OR IGNORE). Called both at ingest time (new frames) and
-/// from the one-shot backfill for existing archived rows.
+/// unchanged (`ON CONFLICT DO NOTHING`). Called both at ingest time (new
+/// frames, where the canonical row was just inserted in the same transaction)
+/// and from the one-shot backfill for existing archived rows.
 pub fn upsert_observer_channel_index(
     conn: &Connection,
     identity_pubkey: &str,
@@ -709,9 +721,14 @@ pub fn upsert_observer_channel_index(
     created_at: i64,
 ) -> Result<(), String> {
     conn.execute(
-        "INSERT OR IGNORE INTO observer_channel_index
+        "INSERT INTO observer_channel_index
              (identity_pubkey, relay_url, id, channel_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+         SELECT ?1, ?2, ?3, ?4, ?5
+         WHERE EXISTS (
+             SELECT 1 FROM archived_events
+             WHERE identity_pubkey = ?1 AND relay_url = ?2 AND id = ?3
+         )
+         ON CONFLICT (identity_pubkey, relay_url, id) DO NOTHING",
         params![identity_pubkey, relay_url, event_id, channel_id, created_at],
     )
     .map_err(|e| format!("failed to upsert observer_channel_index: {e}"))?;
