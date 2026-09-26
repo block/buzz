@@ -127,6 +127,10 @@ class ComposeNotePage extends HookConsumerWidget {
                         autofocus: true,
                         keyboardType: TextInputType.multiline,
                         textInputAction: TextInputAction.newline,
+                        // Prose input: capitalize sentence starts like the
+                        // platform keyboard does in Messages/Mail/Notes
+                        // (issue #7579).
+                        textCapitalization: TextCapitalization.sentences,
                         style: context.textTheme.bodyLarge,
                         decoration: InputDecoration(
                           hintText: _isReply
