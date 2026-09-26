@@ -342,13 +342,12 @@ not success. The activity pane must use its resolved `sessionChannelId` for
 both the outgoing control and result correlation, even without a loaded
 `Channel` object. Stop is unavailable in an unscoped all-channel pane.
 
-Per-thread observer controls remain a separate protocol/UI change. Do not tell
-users to type `!cancel` beside an inline mention: the owner command requires
-kind 9, body exactly `!cancel` after trimming, and the agent's separate `p` tag.
-The automatic-mention picker also inserts literal `@Name` into the body, so it
-does not provide an exact-command workaround. The UI must state this limitation
-rather than offer an ineffective command. An authorized owner can instead use
-the CLI with the channel and target thread root:
+Per-thread observer controls remain a separate protocol/UI change. The owner
+can instead reply in the target thread with `@Agent !cancel` (or `!rotate`)
+from the composer: the harness accepts the command when the rest of the body is
+mention text, as long as the event is kind 9 from the owner and carries the
+agent's `p` tag. Anything after the command (`@Agent !cancel now`) makes it an
+ordinary message. The CLI works too, with the channel and target thread root:
 
 ```sh
 buzz messages send --channel <channel-id> --reply-to <thread-root-id> \

@@ -405,22 +405,16 @@ That splits the problem in half in one run:
 
 ## 5. Backlog
 
-**`!cancel` / `!shutdown` / `!rotate` are unreachable from every product
-surface.** `is_owner_control_command` (`lib.rs:2476`) requires *all* of: kind:9,
-`content.trim() == "!cancel"` (**exact**), and a `p` tag naming the agent. But
-every surface derives the `p` tag *from `@Name` text in the content* (Desktop:
-`hasMention.ts:143`; CLI: `resolve_content_mentions`, `messages.rs:128` —
-`SendMessageParams` has no mention flag). So `@Fizz !cancel` fails the exact
-match, and bare `!cancel` produces no `p` tag. **Mutually exclusive on every
-real surface.** Only a hand-crafted signed event via `POST /events` fires them.
-The unit test passes only because it attaches the `p` tag independently of
-content — a shape no product path can produce.
+**`!cancel` / `!shutdown` / `!rotate` from product surfaces — resolved.** The
+gate used to require the trimmed content to equal the command exactly, while
+Desktop and mobile render the mention as `@Name` text next to the `p` tag, so
+`@Fizz !cancel` never matched and bare `!cancel` carried no `p` tag.
+`is_owner_control_command` now ignores rendered `@Name` / `nostr:` mention text
+around the command (see `control_command_content_matches` in `lib.rs` and the
+owner control commands section of `crates/buzz-acp/README.md`). The CLI can also
+send the bare command with `--mention`.
 
-Options: relax the matcher to accept a leading `@Name` before the command, or
-add a mention flag to `buzz messages send`. First confirm these were ever
-intended for anything but hand-crafted/test use.
-
-Even fixed, `!cancel` cancels **one turn, one agent, one channel**, and the
+`!cancel` cancels **one turn, one agent, one channel**, and the
 agent resumes on the next mention — not a loop breaker. Note stop/cancel
 controls were explicitly descoped from the loop work (2026-07-18); this is
 tracked as its own bug.
