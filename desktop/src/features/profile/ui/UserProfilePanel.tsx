@@ -8,6 +8,7 @@ import {
   useAcpRuntimesQuery,
   useAvailableAcpRuntimes,
   useCreateManagedAgentMutation,
+  useClearManagedAgentLogMutation,
   useCreatePersonaMutation,
   useDeleteManagedAgentMutation,
   useDeletePersonaMutation,
@@ -750,6 +751,18 @@ export function UserProfilePanel({
       relayAgent,
     });
   const isDiagnosticsLikeView = view === "diagnostics" || view === "logs";
+  const clearLogMutation = useClearManagedAgentLogMutation();
+  const handleClearLog = React.useCallback(() => {
+    if (!managedAgent) return;
+    clearLogMutation.mutate(managedAgent.pubkey, {
+      onError: (error) =>
+        toast.error(
+          error instanceof Error
+            ? `Failed to clear log: ${error.message}`
+            : "Failed to clear log.",
+        ),
+    });
+  }, [clearLogMutation, managedAgent]);
   const managedAgentLogContent = managedAgentLogQuery.data?.content ?? null;
   const logHeaderSubtitle =
     isDiagnosticsLikeView && managedAgent
@@ -760,9 +773,11 @@ export function UserProfilePanel({
       agentSettingsMenu,
       effectivePubkey,
       ownerPubkey: profile?.ownerPubkey,
+      isLogClearPending: clearLogMutation.isPending,
       logCopyValue: isDiagnosticsLikeView ? managedAgentLogContent : null,
       logSubtitle: logHeaderSubtitle,
       onBack: () => setView("summary"),
+      onClearLog: managedAgent ? handleClearLog : undefined,
       onEditAgent: canEditAgent ? handleEditAgent : undefined,
       view,
       viewerIsOwner,
