@@ -130,7 +130,7 @@ test("compact picker aligns Unicode rows and keeps selection visible without col
     onCancel: () => {},
     requestRender: () => {},
   });
-  for (const width of [12, 29, 30, 80]) {
+  for (const width of [12, 39, 40, 80]) {
     const lines = picker.render(width);
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
     assert.equal(lines.filter((line) => line.startsWith("›")).length, 2);

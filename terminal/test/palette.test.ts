@@ -121,6 +121,7 @@ test("agent color matches chat, the palette dims only its backdrop, and closing 
     assert.ok(titleRow > 0);
     const titleColumn = palette.split("\n")[titleRow].indexOf("Commands");
     assert.notEqual(cell(0, headerColumn).isDim(), 0);
+    assert.equal(cell(0, headerColumn).getFgColor(), 240);
     assert.equal(cell(titleRow, titleColumn).isDim(), 0);
     const paletteRows = palette.split("\n");
     const selectedRow = paletteRows.findIndex(
@@ -129,9 +130,15 @@ test("agent color matches chat, the palette dims only its backdrop, and closing 
     assert.ok(selectedRow > titleRow);
     const left = paletteRows[titleRow].indexOf("┌") + 2;
     const right = paletteRows[selectedRow].lastIndexOf("│") - 2;
+    const bottom = paletteRows.findIndex((line) => line[left - 2] === "└");
+    assert.ok(bottom > selectedRow);
+    for (let row = titleRow + 1; row < bottom; row++) {
+      assert.equal(paletteRows[row][left - 2], "│");
+      assert.equal(paletteRows[row][right + 2], "│");
+    }
     for (let column = left; column <= right; column++) {
-      assert.equal(cell(selectedRow, column).getBgColor(), 3);
-      assert.equal(cell(selectedRow, column).getFgColor(), 0);
+      assert.equal(cell(selectedRow, column).isBgDefault(), true);
+      assert.equal(cell(selectedRow, column).getFgColor(), 3);
       assert.equal(cell(selectedRow, column).isDim(), 0);
     }
     assert.equal(cell(selectedRow + 1, left).isBgDefault(), true);
@@ -139,7 +146,8 @@ test("agent color matches chat, the palette dims only its backdrop, and closing 
     terminal.input("\x1b[B");
     await terminal.frame();
     assert.equal(cell(selectedRow, left).isBgDefault(), true);
-    assert.equal(cell(selectedRow + 1, left).getBgColor(), 3);
+    assert.notEqual(cell(selectedRow, left).getFgColor(), 3);
+    assert.equal(cell(selectedRow + 1, left).getFgColor(), 3);
     terminal.columns = 42;
     terminal.rows = 18;
     terminal.screen.resize(42, 18);
@@ -147,6 +155,8 @@ test("agent color matches chat, the palette dims only its backdrop, and closing 
     palette = await terminal.frame();
     assert.match(palette, /Commands & channels/);
     assert.match(palette, /Esc back/);
+    terminal.input("/activity");
+    assert.match(await terminal.frame(), /Agent activity\s+Alt\+A/);
     terminal.input("\x1b");
     const restored = (await terminal.frame()).split("\n")[0];
     assert.match(restored, /Atlas\s*$/);

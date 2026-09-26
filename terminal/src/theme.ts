@@ -44,7 +44,7 @@ export const style = {
   muted: color("2;37"),
   secondary: color("38;5;244"),
   border: color("38;5;240"),
-  selected: color("1;30;43"),
+  selected: color("1;33"),
   text: color("39"),
   success: color("32"),
   error: color("31"),
@@ -64,7 +64,7 @@ export function agentName(pubkey: string, name: string): string {
 /** Remove foreground styles but preserve renderer cursor markers behind overlays. */
 export function dimBackground(line: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: replace SGR only, not cursor markers
-  return style.muted(line.replace(/\x1b\[[0-9;]*m/g, ""));
+  return color("2;38;5;240")(line.replace(/\x1b\[[0-9;]*m/g, ""));
 }
 
 export const editorTheme: EditorTheme = {

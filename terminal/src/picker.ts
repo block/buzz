@@ -147,27 +147,27 @@ export class Picker implements Component, Focusable {
       const item = filtered[index];
       if (!item) continue;
       const selected = index === this.selected;
-      const marker = selected && process.env.NO_COLOR !== undefined ? "›" : " ";
+      const marker = selected ? "›" : " ";
       const group = fit(item.category ?? "", 7);
       const category =
-        item.category && available >= 30
+        item.category && available >= 40
           ? `${" ".repeat(7 - visibleWidth(group))}${group}  `
           : "";
       const badge = fit(item.badge ?? "", Math.floor(available / 3));
       const label = fit(
         item.label,
-        available - visibleWidth(category) - visibleWidth(badge) - 3,
+        available - visibleWidth(category) - visibleWidth(badge) - 4,
       );
       const gap = " ".repeat(
-        Math.max(1, available - visibleWidth(category + label + badge) - 2),
+        Math.max(1, available - visibleWidth(category + label + badge) - 3),
       );
       lines.push(
         selected
           ? style.selected(
-              fit(`${marker}${category}${label}${gap}${badge} `, available),
+              fit(`${marker} ${category}${label}${gap}${badge} `, available),
             )
           : fit(
-              ` ${style.secondary(category)}${style.bold(label)}${gap}${style.secondary(badge)} `,
+              `  ${style.secondary(category)}${style.bold(label)}${gap}${style.secondary(badge)} `,
               available,
             ),
       );
