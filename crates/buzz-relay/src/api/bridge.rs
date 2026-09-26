@@ -24,6 +24,9 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found, parse_query_or_400};
 
+#[cfg(test)]
+#[path = "bridge/ephemeral_postgres_tests.rs"]
+mod ephemeral_postgres_tests;
 mod thread_roots;
 mod thread_window;
 
@@ -1148,7 +1151,19 @@ async fn submit_event_authed(
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
     };
 
-    match crate::handlers::ingest::ingest_event(state, tenant, event, auth).await {
+    let result = if buzz_core::kind::is_ephemeral(kind_u32) {
+        let event_id = event.id.to_hex();
+        crate::handlers::ephemeral::submit(state, tenant, event, &auth)
+            .await
+            .map(|()| crate::handlers::ingest::IngestResult {
+                event_id,
+                accepted: true,
+                message: String::new(),
+            })
+    } else {
+        crate::handlers::ingest::ingest_event(state, tenant, event, auth).await
+    };
+    match result {
         Ok(result) => {
             let response = Json(serde_json::json!({
                 "event_id": result.event_id,

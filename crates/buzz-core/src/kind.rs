@@ -469,6 +469,9 @@ pub const KIND_PAIRING: u32 = 24134;
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
+/// Ephemeral: complete public agent-run activity snapshot for a conversation.
+/// See `docs/agent-activity.md`; separate from owner-only observer telemetry.
+pub const KIND_AGENT_ACTIVITY_SNAPSHOT: u32 = 24201;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
 pub const KIND_HUDDLE_REACTION: u32 = 24810;
@@ -704,6 +707,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PAIRING,
     KIND_AGENT_OBSERVER_FRAME,
     KIND_HTTP_AUTH,
+    KIND_AGENT_ACTIVITY_SNAPSHOT,
     KIND_STREAM_MESSAGE,
     KIND_STREAM_MESSAGE_V2,
     KIND_STREAM_MESSAGE_EDIT,
@@ -905,6 +909,14 @@ const _: () = assert!(!is_moderation_command_kind(KIND_REPORT));
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_snapshots_are_ephemeral_and_conversation_visible() {
+        assert!(is_ephemeral(KIND_AGENT_ACTIVITY_SNAPSHOT));
+        assert!(ALL_KINDS.contains(&KIND_AGENT_ACTIVITY_SNAPSHOT));
+        assert!(!P_GATED_KINDS.contains(&KIND_AGENT_ACTIVITY_SNAPSHOT));
+        assert!(!AUTHOR_ONLY_KINDS.contains(&KIND_AGENT_ACTIVITY_SNAPSHOT));
+    }
 
     #[test]
     fn no_duplicate_kind_values() {
