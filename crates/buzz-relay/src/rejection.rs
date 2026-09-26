@@ -133,7 +133,9 @@ fn send_admission_result(
             metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable", "bucket" => bucket).increment(1);
             conn.send(request_rejection_message(
                 target,
-                "rate-limited: shared admission unavailable",
+                // This is a retry delay, not a quota reset: Redis may recover
+                // quickly. Without a hint, mobile gates all reads for 10s.
+                "rate-limited: shared admission unavailable; retry in 1s",
             ));
             false
         }
@@ -321,6 +323,10 @@ mod tests {
         );
         assert_eq!(frame[1], event_id);
         assert_eq!(frame[2], false);
+        assert_eq!(
+            frame[3],
+            "rate-limited: shared admission unavailable; retry in 1s"
+        );
     }
 
     #[tokio::test]
@@ -331,6 +337,10 @@ mod tests {
 
         assert_eq!(frame[0], "CLOSED");
         assert_eq!(frame[1], "count-abc");
+        assert_eq!(
+            frame[2],
+            "rate-limited: shared admission unavailable; retry in 1s"
+        );
     }
 
     #[tokio::test]
@@ -341,6 +351,10 @@ mod tests {
 
         assert_eq!(frame[0], "CLOSED");
         assert_eq!(frame[1], "history-abc");
+        assert_eq!(
+            frame[2],
+            "rate-limited: shared admission unavailable; retry in 1s"
+        );
     }
 }
 
