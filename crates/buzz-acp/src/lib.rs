@@ -2657,6 +2657,13 @@ async fn run_harness(
     tracing::info!("connected to relay at {}", config.relay_url);
 
     let relay_rest_client = relay.rest_client();
+    let stale_working_reactions = pool::clear_stale_working_reactions(&relay_rest_client).await;
+    if stale_working_reactions > 0 {
+        tracing::info!(
+            count = stale_working_reactions,
+            "cleared stale working reactions from a previous harness process"
+        );
+    }
     let mut author_gate_ctx =
         InboundAuthorGate::connect(&relay_rest_client, &pubkey_hex, "startup").await;
 
@@ -4871,6 +4878,7 @@ fn handle_prompt_result(
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
                 "outcome": outcome_label,
+                "reason": classify_turn_error_reason(error_msg),
                 "error": error_msg,
             });
             if let Some(code) = error_code {
@@ -5065,6 +5073,124 @@ fn handle_prompt_result(
         }
     }
     LoopAction::Continue
+}
+
+/// Stable capability reason attached to every `turn_error` observer event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TurnErrorReason {
+    AuthRequired,
+    QuotaBlocked,
+    ModelUnavailable,
+    TransientProviderError,
+    Unknown,
+}
+
+/// Classify an ACP failure into the stable operator-facing reason contract.
+///
+/// JSON-RPC server-error codes are adapter-specific: Buzz-owned agents reserve
+/// codes for authentication and missing models, but external adapters may reuse
+/// those same values for unrelated failures. The raw code remains in the
+/// observer payload; this stable reason requires narrow diagnostic text so a
+/// generic resource error is never presented as a model or credential problem.
+/// Unknown errors stay explicitly `unknown` instead of being guessed into a
+/// misleading remediation.
+fn classify_turn_error_reason(error: &str) -> TurnErrorReason {
+    let message = error.to_ascii_lowercase();
+    if message.contains("llm auth:")
+        || message.contains("authentication required")
+        || message.contains("authorization required")
+        || message.contains("re-authenticate")
+        || message.contains("api error: 401")
+        || message.contains("http 401")
+        || message.contains("401 unauthorized")
+        || message.contains("oauth access token has expired")
+    {
+        return TurnErrorReason::AuthRequired;
+    }
+
+    if message.contains("http 402")
+        || message.contains("402 payment required")
+        || message.contains("credits exhausted")
+        || message.contains("insufficient_quota")
+        || message.contains("quota exceeded")
+        || message.contains("spend limit")
+    {
+        return TurnErrorReason::QuotaBlocked;
+    }
+
+    if message.contains("llm model not found:")
+        || message.contains("model not found")
+        || message.contains("model is not available")
+        || message.contains("model unavailable")
+    {
+        return TurnErrorReason::ModelUnavailable;
+    }
+
+    if message.contains("http 429")
+        || message.contains("api error: 429")
+        || message.contains("429 too many requests")
+        || message.contains("rate limit")
+        || message.contains("provider overloaded")
+        || message.contains("service unavailable")
+        || message.contains("bad gateway")
+        || message.contains("gateway timeout")
+        || message.contains("connection reset")
+        || message.contains("request timeout")
+    {
+        return TurnErrorReason::TransientProviderError;
+    }
+
+    TurnErrorReason::Unknown
+}
+
+#[cfg(test)]
+mod turn_error_reason_tests {
+    use super::{classify_turn_error_reason, TurnErrorReason};
+
+    #[test]
+    fn classifies_diagnostics_independently_of_adapter_codes() {
+        assert_eq!(
+            classify_turn_error_reason("model not found"),
+            TurnErrorReason::ModelUnavailable
+        );
+        assert_eq!(
+            classify_turn_error_reason("quota exceeded"),
+            TurnErrorReason::QuotaBlocked
+        );
+    }
+
+    #[test]
+    fn classifies_actionable_provider_text_conservatively() {
+        assert_eq!(
+            classify_turn_error_reason("OpenRouter credits exhausted"),
+            TurnErrorReason::QuotaBlocked
+        );
+        assert_eq!(
+            classify_turn_error_reason("429 Too Many Requests"),
+            TurnErrorReason::TransientProviderError
+        );
+        assert_eq!(
+            classify_turn_error_reason("llm model not found: vendor/model"),
+            TurnErrorReason::ModelUnavailable
+        );
+        assert_eq!(
+            classify_turn_error_reason("API Error: 401 OAuth access token has expired"),
+            TurnErrorReason::AuthRequired
+        );
+    }
+
+    #[test]
+    fn leaves_ambiguous_failures_unknown() {
+        assert_eq!(
+            classify_turn_error_reason("404 endpoint does not support tool use"),
+            TurnErrorReason::Unknown
+        );
+        assert_eq!(
+            classify_turn_error_reason("Agent process exited unexpectedly"),
+            TurnErrorReason::Unknown
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9774,9 +9900,9 @@ mod error_outcome_emission_tests {
             .contains_key(&scope::SessionScope::Conversation { channel_id }));
     }
 
-    /// Drive one error outcome through `handle_prompt_result` and return how
-    /// many `turn_error` events it emitted to the observer feed.
-    async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
+    /// Drive one error outcome through `handle_prompt_result` and return the
+    /// `turn_error` events it emitted to the observer feed.
+    async fn turn_error_events_for(outcome: PromptOutcome) -> Vec<observer::ObserverEvent> {
         let agent = dummy_agent(0).await;
         let mut pool = AgentPool::from_slots(vec![None]);
 
@@ -9847,7 +9973,68 @@ mod error_outcome_emission_tests {
                 .all(|event| event.turn_id.as_deref() == Some("test-turn-id")),
             "turn_error must retain the completed turn id"
         );
-        turn_errors.len()
+        turn_errors
+    }
+
+    async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
+        turn_error_events_for(outcome).await.len()
+    }
+
+    async fn turn_error_reason_emitted_for(outcome: PromptOutcome) -> String {
+        let events = turn_error_events_for(outcome).await;
+        events[0].payload["reason"]
+            .as_str()
+            .expect("turn_error reason is a string")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn turn_error_reasons_cross_observer_boundary() {
+        assert_eq!(
+            turn_error_reason_emitted_for(PromptOutcome::Error(acp::AcpError::AgentError {
+                code: -32001,
+                message: "authentication required".into(),
+            },))
+            .await,
+            "auth_required"
+        );
+        assert_eq!(
+            turn_error_reason_emitted_for(PromptOutcome::Error(acp::AcpError::AgentError {
+                code: -32002,
+                message: "llm model not found: configured model".into(),
+            },))
+            .await,
+            "model_unavailable"
+        );
+        assert_eq!(
+            turn_error_reason_emitted_for(PromptOutcome::Error(acp::AcpError::AgentError {
+                code: -32000,
+                message: "OpenRouter credits exhausted".into(),
+            },))
+            .await,
+            "quota_blocked"
+        );
+        assert_eq!(
+            turn_error_reason_emitted_for(PromptOutcome::Error(acp::AcpError::AgentError {
+                code: -32000,
+                message: "API Error: 429 Too Many Requests".into(),
+            },))
+            .await,
+            "transient_provider_error"
+        );
+        assert_eq!(
+            turn_error_reason_emitted_for(PromptOutcome::Error(acp::AcpError::AgentError {
+                code: -32002,
+                message: "Resource not found: session no longer exists".into(),
+            },))
+            .await,
+            "unknown",
+            "adapter-specific server codes must not mislabel generic resources as models"
+        );
+        assert_eq!(
+            turn_error_reason_emitted_for(PromptOutcome::AgentExited).await,
+            "unknown"
+        );
     }
 
     #[tokio::test]
