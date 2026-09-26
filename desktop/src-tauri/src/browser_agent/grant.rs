@@ -217,12 +217,10 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn playground_label(sid: &str, window_label: &str) -> String {
-    if window_label == "main" || window_label.is_empty() {
-        format!("playground-{sid}")
-    } else {
-        format!("playground-{sid}--{window_label}")
-    }
+/// Canonical live webview label for a playground sid. Window is ignored —
+/// one WKWebView is reparented across hosts instead of forking siblings.
+pub fn playground_label(sid: &str, _window_label: &str) -> String {
+    format!("playground-{sid}")
 }
 
 pub fn pin_label(pin_id: &str, window_label: &str) -> String {

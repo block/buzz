@@ -57,7 +57,7 @@ test("inspect result does not describe a resized stage or the app webview", asyn
   assert.equal(result.webviewId.startsWith("playground-"), true);
 });
 
-test("window-scoped labels stay playground-sid on main and suffix elsewhere", () => {
+test("playground labels stay playground-sid on every window (single live webview)", () => {
   assert.equal(playgroundWebviewLabelForWindow("demo-1"), "playground-demo-1");
   assert.equal(
     playgroundWebviewLabelForWindow("demo-1", "main"),
@@ -65,7 +65,7 @@ test("window-scoped labels stay playground-sid on main and suffix elsewhere", ()
   );
   assert.equal(
     playgroundWebviewLabelForWindow("demo-1", "popout-split-abc"),
-    "playground-demo-1--popout-split-abc",
+    "playground-demo-1",
   );
   assert.equal(
     playgroundHideCloseIsWindowScoped(

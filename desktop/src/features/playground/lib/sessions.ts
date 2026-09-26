@@ -6,6 +6,13 @@ import {
   getActiveEmbeddedWindow,
   registerEmbedOpenHandler,
 } from "@/features/popout/lib/embeddedWindows";
+import {
+  closePopoutWindow,
+  getPopoutWindows,
+  playgroundSidsHostedInOsPopouts,
+  popoutKindFromLabel,
+} from "@/features/popout/lib/popoutWindows";
+import { readPopoutPayload } from "@/features/popout/lib/popoutWindow";
 import type { PlaygroundCard } from "./types";
 import {
   clearPlaygroundViewport,
@@ -397,6 +404,24 @@ function disposePlaygroundSessionOnly(sid: string) {
   void closePlaygroundWebview(sid);
 }
 
+
+/** Close OS playground/split pop-outs that host this sid so pin Open / RHS
+ * stage reparents the one live WKWebView instead of fighting a sibling stage. */
+function releaseOsPopoutsHostingSid(sid: string): void {
+  const trimmed = sid.trim();
+  if (!trimmed) return;
+  if (!playgroundSidsHostedInOsPopouts(getPopoutWindows()).has(trimmed)) {
+    return;
+  }
+  for (const row of getPopoutWindows()) {
+    const kind = popoutKindFromLabel(row.label);
+    if (kind !== "playground" && kind !== "split") continue;
+    const hosted = readPopoutPayload(row.label)?.playground?.sid;
+    if (hosted !== trimmed) continue;
+    void closePopoutWindow(row.label);
+  }
+}
+
 /** True when this sid already has a left-menu playground row. */
 export function hasPlaygroundSession(sid: string): boolean {
   return store.sessions.has(sid);
@@ -424,6 +449,11 @@ export function showPlaygroundSession(
   persist();
   emit();
   dismissEmbeddedWindow();
+  // Claim on main/RHS: release OS hosts so Destroyed reparents the live
+  // WKWebView to main (parked) instead of leaving a competing stage.
+  if (options?.preferSidePanel) {
+    releaseOsPopoutsHostingSid(sid);
+  }
   void hideAllPinWebviews();
 }
 
