@@ -159,14 +159,12 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
 }
 
 /// The agent command a freshly-created agent defaults to when the create
-/// request supplies none. Resolves the bundled `buzz-agent` from the catalog so
-/// the default cannot drift from the provider definition. Falls back to the id
-/// if the catalog entry is missing. (Previous default was bare `goose`, which
-/// is not on PATH on a stock Windows install; buzz-agent ships with the app.)
+/// request supplies none. Resolves the bundled lean Goose ACP executable from
+/// the Goose catalog so the default cannot drift from the runtime definition.
 pub fn default_agent_command() -> String {
-    known_acp_runtime_exact("buzz-agent")
-        .and_then(|p| p.commands.first().copied())
-        .unwrap_or("buzz-agent")
+    known_acp_runtime_exact("goose")
+        .and_then(|runtime| runtime.commands.first().copied())
+        .unwrap_or("goose-acp")
         .to_string()
 }
 
@@ -322,6 +320,7 @@ pub fn try_record_agent_command(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
+        "goose-acp" => Some(Vec::new()),
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
