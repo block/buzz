@@ -738,10 +738,6 @@ requirement: full assertion verification, exact key equality between the
 assertion's `nostr_pubkey` claim and the kind-24242 event's public key, and
 deny-map enforcement (see Admission procedure, steps 1–6).
 
-The effectiveness of deny-map enforcement is contingent on the real
-issuer-scoped deny map.  Until that map is operational, the stub implementation
-constitutes a **known gap** in this section's security guarantees.
-
 #### Compliance note
 
 The implementation as of PR #7264 pairs via a permissive Blossom verifier and
