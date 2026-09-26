@@ -1534,6 +1534,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-swarm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buzz-core",
+ "buzz-sdk",
+ "clap",
+ "nostr 0.44.7",
+ "rustix 1.1.4",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "buzz-test-client"
 version = "0.1.0"
 dependencies = [

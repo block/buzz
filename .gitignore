@@ -61,6 +61,8 @@ doc/
 /repos/
 
 # Local identity files
+*.nsec
+/buzz-swarm.yaml
 identity.key
 **/identity.key
 

@@ -179,6 +179,10 @@ Want a single-node / VPS relay instead of the local-dev stack? Use the productio
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 
+To run a team of agents on your laptop, a VM, or in a container, use
+[`buzz-swarm`](crates/buzz-swarm). One YAML file connects each agent to your
+chosen relays using its own identity and your NIP-OA owner attestation.
+
 ---
 
 ## Windows prerequisites

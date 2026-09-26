@@ -100,6 +100,7 @@ jobs:
           cross "$CARGO_CMD" --release --target "$TARGET" \
             -p buzz-relay \
             -p buzz-acp \
+            -p buzz-swarm \
             -p buzz-agent \
             -p buzz-dev-mcp \
             -p git-credential-nostr \

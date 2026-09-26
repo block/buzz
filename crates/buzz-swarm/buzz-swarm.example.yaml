@@ -1,0 +1,29 @@
+# Run from any directory: buzz-swarm --config /path/to/buzz-swarm.yaml
+owner:
+  nsec: {env: BUZZ_OWNER_NSEC}
+  conditions: "" # Optional NIP-OA conditions.
+
+defaults:
+  relays:
+    - wss://team.example.com
+    - wss://project.example.com
+  # Runtime configuration uses the existing ACP/agent environment contract.
+  env:
+    BUZZ_AGENT_PROVIDER: anthropic
+    BUZZ_AGENT_MODEL: your-model-id
+    ANTHROPIC_API_KEY: {env: ANTHROPIC_API_KEY}
+    BUZZ_ACP_RESPOND_TO: owner-only
+
+agents:
+  - name: helper
+    # Omit nsec to generate and reuse keys/helper.nsec beside this file.
+    env:
+      BUZZ_ACP_SYSTEM_PROMPT: You are a helpful engineering teammate.
+
+  - name: reviewer
+    nsec: {file: keys/reviewer.nsec} # Optional existing identity.
+    env:
+      BUZZ_ACP_SYSTEM_PROMPT: Review changes for correctness and maintainability.
+
+  # An agent can replace the shared relay list or supply a pre-signed auth_tag.
+  # With pre-signed tags for every agent, omit owner on the execution host.
