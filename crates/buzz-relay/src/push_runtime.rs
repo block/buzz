@@ -689,7 +689,13 @@ fn class_rank(_: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::State, routing::post, Json, Router};
+    use axum::{
+        body::Bytes,
+        extract::{OriginalUri, State},
+        http::HeaderMap,
+        routing::post,
+        Json, Router,
+    };
     use serde_json::Value;
     use std::{future::IntoFuture, sync::Arc};
     use tokio::sync::Mutex;
@@ -729,9 +735,25 @@ mod tests {
 
     async fn capture(
         State(seen): State<Arc<Mutex<Vec<Value>>>>,
-        Json(body): Json<Value>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        body: Bytes,
     ) -> Json<Value> {
-        seen.lock().await.push(body);
+        let url: url::Url = format!("http://{}{}", headers["host"].to_str().unwrap(), uri)
+            .parse()
+            .unwrap();
+        assert!(!headers.contains_key("x-forwarded-proto"));
+        nostr::nips::nip98::verify_auth_header(
+            headers["authorization"].to_str().unwrap(),
+            &url,
+            nostr::nips::nip98::HttpMethod::POST,
+            nostr::Timestamp::now(),
+            Some(&body),
+        )
+        .unwrap();
+        seen.lock()
+            .await
+            .push(serde_json::from_slice(&body).unwrap());
         Json(serde_json::json!({"status":"accepted"}))
     }
 
@@ -744,12 +766,14 @@ mod tests {
             axum::serve(
                 listener,
                 Router::new()
-                    .route("/deliver", post(capture))
+                    .route("/v1/deliveries/apns", post(capture))
                     .with_state(seen.clone()),
             )
             .into_future(),
         );
-        let url: url::Url = format!("http://{address}/deliver").parse().unwrap();
+        let url: url::Url = format!("http://{address}/v1/deliveries/apns")
+            .parse()
+            .unwrap();
         let http = reqwest::Client::new();
         let keys = nostr::Keys::generate();
         let request_id = uuid::Uuid::new_v4();

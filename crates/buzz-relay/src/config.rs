@@ -346,7 +346,7 @@ pub struct Config {
     pub push_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
-    /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
+    /// Exact HTTP(S) gateway endpoint used to sign and submit APNs delivery capabilities.
     /// Required while push is enabled. An explicitly empty setting is allowed
     /// only while push is disabled.
     pub push_gateway_delivery_url: Option<url::Url>,
@@ -459,9 +459,9 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
             "BUZZ_PUSH_GATEWAY_DELIVERY_URL is not a valid URL: {e}"
         ))
     })?;
-    if url.scheme() != "https"
+    if !matches!(url.scheme(), "http" | "https")
         || url.host().is_none()
-        || url.port().is_some()
+        || (url.scheme() == "https" && url.port().is_some())
         || !url.username().is_empty()
         || url.password().is_some()
         || url.path() != "/v1/deliveries/apns"
@@ -469,7 +469,7 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
         || url.fragment().is_some()
     {
         return Err(ConfigError::InvalidValue(
-            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTPS /v1/deliveries/apns URL without an explicit port, credentials, query, or fragment"
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTP(S) /v1/deliveries/apns URL without credentials, query, or fragment; explicit ports are supported only for HTTP"
                 .to_string(),
         ));
     }
@@ -2450,8 +2450,19 @@ mod tests {
     #[test]
     fn push_gateway_url_is_exact_and_fail_closed() {
         assert!(parse_push_gateway_delivery_url("https://push.example/v1/deliveries/apns").is_ok());
+        let delivery_url = "http://push.example:8080/v1/deliveries/apns";
+        assert_eq!(
+            parse_push_gateway_delivery_url(delivery_url)
+                .unwrap()
+                .as_str(),
+            delivery_url
+        );
+        assert!(parse_push_gateway_delivery_url("http://push-gateway/v1/deliveries/apns").is_ok());
         for invalid in [
-            "http://push.example/v1/deliveries/apns",
+            "ftp://push.example/v1/deliveries/apns",
+            "http://push-gateway:8080/v1/deliveries/apns?token=x",
+            "http://user@push-gateway:8080/v1/deliveries/apns",
+            "http://push-gateway:8080/v1/deliveries/apns#fragment",
             "https://push.example:8443/v1/deliveries/apns",
             "https://push.example/v1/deliveries/apns/",
             "https://push.example/v1/deliveries/apns?token=x",
