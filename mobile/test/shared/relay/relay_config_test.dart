@@ -64,4 +64,31 @@ void main() {
       expect(config.wsUrl, 'wss://relay.example.com:8443');
     });
   });
+
+  group('RelayConfig equality', () {
+    test('two configs with the same origin and key are equal', () {
+      // RelayConfigNotifier.build() mints a fresh instance every time the
+      // active community record is re-emitted (any save of that record, e.g.
+      // reserving a push-lease generation). Riverpod's default
+      // updateShouldNotify is `previous != next`, so without value equality
+      // every such save read as a relay change and RelaySessionNotifier
+      // disconnected and reconnected.
+      final a = RelayConfig(baseUrl: 'https://relay.example.com', nsec: 'nsec1abc');
+      final b = RelayConfig(baseUrl: 'https://relay.example.com', nsec: 'nsec1abc');
+      expect(a, equals(b));
+      expect(a.hashCode, b.hashCode);
+    });
+
+    test('a different origin is not equal', () {
+      final a = RelayConfig(baseUrl: 'https://relay.example.com', nsec: 'nsec1abc');
+      final b = RelayConfig(baseUrl: 'https://other.example.com', nsec: 'nsec1abc');
+      expect(a, isNot(equals(b)));
+    });
+
+    test('a different key is not equal', () {
+      final a = RelayConfig(baseUrl: 'https://relay.example.com', nsec: 'nsec1abc');
+      final b = RelayConfig(baseUrl: 'https://relay.example.com', nsec: 'nsec1xyz');
+      expect(a, isNot(equals(b)));
+    });
+  });
 }
