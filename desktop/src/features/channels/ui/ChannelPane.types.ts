@@ -190,7 +190,7 @@ export type ChannelPaneProps = {
   threadMessagesError?: boolean;
   onRetryThreadReplies?: () => void;
   threadPanelWidthPx: number;
-  threadTypingPubkeys: string[];
+  threadTypingEntries: TypingIndicatorEntry[];
   threadReplyTargetMessage: TimelineMessage | null;
   threadScrollTargetId: string | null;
   threadUnreadCounts?: ReadonlyMap<string, number>;
@@ -201,7 +201,7 @@ export type ChannelPaneProps = {
   targetSearchMessageId?: string | null;
   /** Search text to highlight within the clicked result. */
   targetSearchQuery?: string;
-  typingPubkeys: string[];
+  typingEntries: TypingIndicatorEntry[];
   isFollowingThread?: boolean;
   onFollowThread?: () => void;
   onUnfollowThread?: () => void;
