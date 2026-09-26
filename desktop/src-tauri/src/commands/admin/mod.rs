@@ -862,6 +862,122 @@ pub async fn admin_lift_timeout(
     Ok(())
 }
 
+// ── Direct moderation actions ─────────────────────────────────────────────
+
+/// A direct ban, timeout, or delete as the confirm dialog froze it. The same
+/// intent (including `request_id`) is resent verbatim on every retry; only the
+/// NIP-98 signature is minted fresh per attempt.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminDirectIntent {
+    pub origin: String,
+    /// Relay the intent was confirmed against.
+    pub expected_relay: String,
+    /// Signer the intent was confirmed under.
+    pub expected_pubkey: String,
+    /// Typed community host; sent only as the `communityHost` query parameter.
+    pub community_host: String,
+    pub action: DirectAction,
+    /// Member pubkey for ban/timeout, event id for delete (64 lowercase hex).
+    pub target: String,
+    pub request_id: uuid::Uuid,
+    pub reason: Option<String>,
+    pub expiration_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DirectAction {
+    Ban,
+    Timeout,
+    Delete,
+}
+
+/// Build the URL and body for a direct action, refusing it before any request
+/// when the active relay or signer no longer matches what was confirmed.
+fn direct_action_request(
+    intent: &AdminDirectIntent,
+    relay_base: &str,
+    signer_hex: &str,
+) -> Result<(String, Vec<u8>), String> {
+    let origin = origin::AdminOrigin::parse(&intent.origin)?;
+    if intent.expected_relay.trim().is_empty()
+        || crate::relay::assert_expected_relay_scope(Some(&intent.expected_relay), relay_base)
+            .is_err()
+    {
+        return Err(RELAY_SCOPE_CHANGED.to_string());
+    }
+    if intent.expected_pubkey.trim().is_empty()
+        || crate::relay::assert_expected_signer(Some(&intent.expected_pubkey), signer_hex).is_err()
+    {
+        return Err(
+            "active identity changed since the action was confirmed; nothing was sent".to_string(),
+        );
+    }
+    let host = buzz_core_pkg::tenant::validate_community_host(intent.community_host.trim())
+        .map_err(|e| format!("invalid community host: {e}"))?;
+    let target =
+        routes::HexPubkey::parse(&intent.target).map_err(|e| format!("invalid target: {e}"))?;
+    let route = match intent.action {
+        DirectAction::Ban => routes::AdminRoute::MemberBan { pubkey: target },
+        DirectAction::Timeout => routes::AdminRoute::MemberTimeout { pubkey: target },
+        DirectAction::Delete => routes::AdminRoute::EventDelete { id: target },
+    };
+    let expiration_secs = match (intent.action, intent.expiration_secs) {
+        (DirectAction::Timeout, Some(secs)) if secs > 0 => Some(secs),
+        (DirectAction::Timeout, _) => return Err("timeout needs a positive duration".to_string()),
+        (_, Some(_)) => return Err("only a timeout takes a duration".to_string()),
+        (_, None) => None,
+    };
+    let mut body = serde_json::json!({ "requestId": intent.request_id });
+    if let Some(reason) = &intent.reason {
+        body["reason"] = reason.clone().into();
+    }
+    if let Some(secs) = expiration_secs {
+        body["expirationSecs"] = secs.into();
+    }
+    let q = routes::AdminQuery {
+        community_host: Some(host),
+        ..Default::default()
+    };
+    let body = serde_json::to_vec(&body).map_err(|e| format!("failed to serialise body: {e}"))?;
+    Ok((origin.route_url(&route, &q), body))
+}
+
+/// Ban, time out, or delete without a report — POST
+/// /api/admin/v1/{members/{pubkey}/ban|members/{pubkey}/timeout|events/{id}/delete}?communityHost=.
+///
+/// Returns the relay's `{actionId, state, replayed}` (200) or `{state:"pending"}` (202).
+#[tauri::command]
+pub async fn admin_direct_action(
+    intent: AdminDirectIntent,
+    state: tauri::State<'_, crate::app_state::AppState>,
+) -> Result<serde_json::Value, AdminMutationError> {
+    let keys = state.signing_keys()?;
+    send_direct_action(&intent, keys, &state).await
+}
+
+/// Validate `intent` against the `keys` snapshot and sign every request with
+/// that same snapshot, so an identity swapped in after the snapshot can never
+/// sign an action confirmed under the previous one.
+async fn send_direct_action(
+    intent: &AdminDirectIntent,
+    keys: nostr::Keys,
+    state: &crate::app_state::AppState,
+) -> Result<serde_json::Value, AdminMutationError> {
+    let relay_base = crate::relay::relay_api_base_url_with_override(state);
+    let (url, body) = direct_action_request(intent, &relay_base, &keys.public_key().to_hex())?;
+    let bytes = helpers::send_admin_mutation(
+        &keys,
+        reqwest::Method::POST,
+        &url,
+        Some(&body),
+        SUCCESS_JSON_CAP,
+    )
+    .await?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON from relay: {e}").into())
+}
+
 // ── Origin storage commands ───────────────────────────────────────────────
 
 /// Core storage logic for `get_admin_origin`, parameterised by data directory

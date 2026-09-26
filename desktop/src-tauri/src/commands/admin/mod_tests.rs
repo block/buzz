@@ -1387,3 +1387,6 @@ fn restrictions_url_rejects_a_caller_relay_that_no_longer_matches() {
         }
     }
 }
+
+#[path = "direct_action_tests.rs"]
+mod direct_action;

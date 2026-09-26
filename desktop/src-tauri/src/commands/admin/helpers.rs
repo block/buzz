@@ -109,11 +109,28 @@ pub(super) async fn mutation_admin_json(
     state: &tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<Vec<u8>, AdminMutationError> {
     let keys = state.signing_keys()?;
+    send_admin_mutation(&keys, method, url, body, cap).await
+}
+
+/// State-free core of [`mutation_admin_json`]: every request, including the
+/// 401 retry, is signed by the caller's `keys` snapshot and never re-reads the
+/// active identity. The body passes the key-backup egress guard before any
+/// request is built, so free-text admin fields cannot carry an `ncryptsec`.
+pub(super) async fn send_admin_mutation(
+    keys: &nostr::Keys,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<&[u8]>,
+    cap: u64,
+) -> Result<Vec<u8>, AdminMutationError> {
+    if let Some(bytes) = body {
+        crate::egress_guard::assert_no_key_backup_bytes(bytes, "admin API mutation")?;
+    }
     let http_client = client::ADMIN_CLIENT
         .get()
         .ok_or_else(|| "admin client not initialised".to_string())?;
 
-    let resp = build_admin_mutation_request(http_client, &keys, &method, url, body)?
+    let resp = build_admin_mutation_request(http_client, keys, &method, url, body)?
         .send()
         .await
         .map_err(|e| crate::relay::classify_request_error(&e))?;
@@ -121,7 +138,7 @@ pub(super) async fn mutation_admin_json(
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         // Retry once with a freshly signed request — each build mints a new
         // NIP-98 nonce, so this is a distinct event, not a replay of the first.
-        let resp2 = build_admin_mutation_request(http_client, &keys, &method, url, body)?
+        let resp2 = build_admin_mutation_request(http_client, keys, &method, url, body)?
             .send()
             .await
             .map_err(|e| crate::relay::classify_request_error(&e))?;
