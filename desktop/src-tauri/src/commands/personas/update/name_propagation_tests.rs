@@ -209,3 +209,48 @@ fn test_rename_renames_all_matching_instances_in_one_pass() {
     assert_eq!(records[1].name, "Duncan Idaho");
     assert_eq!(records[2].name, "Birch", "pool-named instance untouched");
 }
+
+#[test]
+fn unique_persona_rename_rejects_multiple_prospective_identities() {
+    let mut records = vec![
+        agent("persona-1", "Paul", None),
+        agent("persona-1", "Paul", None),
+    ];
+    records[1].pubkey = "second-key".into();
+    assert!(super::persona_rename_key(&records, "persona-1", "Paul", "Duncan", true).is_err());
+    assert!(super::persona_rename_key(&records, "persona-1", "Paul", "Paul", true).is_ok());
+    assert!(super::persona_rename_key(&records, "persona-1", "Paul", "Duncan", false).is_ok());
+    assert!(super::persona_rename_key(&records, "persona-1", "Paul", "paul", true).is_err());
+}
+
+#[test]
+fn unique_persona_rename_selects_actual_target_after_pool_named_instance() {
+    let records = vec![
+        agent("persona-1", "Birch", None),
+        agent("persona-1", "Paul", None),
+    ];
+    assert_eq!(
+        super::persona_rename_key(&records, "persona-1", "Paul", "Duncan", true).unwrap(),
+        Some("pubkey-Paul")
+    );
+    assert_eq!(
+        super::persona_rename_key(&records[..1], "persona-1", "Paul", "Duncan", true).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn unique_persona_rename_rechecks_collisions_with_existing_pool_and_other_personas() {
+    for other_persona in ["persona-1", "persona-2"] {
+        let records = vec![
+            agent("persona-1", "Paul", None),
+            agent(other_persona, " dUnCaN ", None),
+        ];
+        assert!(super::persona_rename_key(&records, "persona-1", "Paul", "Duncan", true).is_err());
+    }
+    let records = vec![agent("persona-2", "Paul", None)];
+    assert_eq!(
+        super::persona_rename_key(&records, "persona-1", "Paul", "Duncan", true).unwrap(),
+        None
+    );
+}

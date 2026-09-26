@@ -51,6 +51,7 @@ pub(crate) async fn deploy_to_provider(
     expected_signer_pubkey: Option<&str>,
     replay_floor_unix: Option<u64>,
 ) -> Result<(), String> {
+    crate::managed_agents::device_policy::require_hosting(app)?;
     let deploy_lock = {
         let mut locks = state
             .provider_deploy_locks

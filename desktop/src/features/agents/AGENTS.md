@@ -330,6 +330,29 @@ with a TypeScript lookup table or an id comparison in a component.
     for resets; owner replay of a redacted head preserves only a nonportable
     local override. That local path is not synchronized through catalog heads.
 
+## Device-only hosting policy
+
+Client-only mode is an installation preference, never a synchronized definition
+field. Native mint, import, execute, deploy and definition-management boundaries
+enforce it. Local runnable inventory is empty; `list_personas` projects inactive
+definitions without saving them. Do not infer permission to host from relay
+presence or create a secretless managed record for a remotely hosted identity.
+Automatic control-plane publication pauses while inbound public state still
+applies. Preferred exact identities narrow discovery within one owner/community;
+explicit historical keys remain exact. See `docs/agent-device-policy.md` at the
+repository root. Configuration edits to these rules must preserve the native
+guards and the restart boundary.
+
+Unique-name hosting separates execution from automatic control-plane sync:
+`client_only: false, unique_names: true` permits distinct local names while
+protecting remote names, keys and definition IDs. Apply the guard to the old
+identity before edits, to proposed names, and to indirect persona/team cascades.
+Only explicit local lifecycle retention can register keys for selective 30177,
+deletion and archive publication. Inbound replay and old queue scans cannot
+register keys. Runnable templates and the old backlog remain local. Never reuse
+the execution predicate to resume the whole queue. Discovery visibility controls
+must not remove the bindings used for execution protection.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness

@@ -83,6 +83,7 @@ export default defineConfig({
         "**/cloud-provenance.spec.ts",
         "**/mention-recipients.spec.ts",
         "**/remote-owned-mentions.spec.ts",
+        "**/client-only-agents.spec.ts",
         "**/forum-agent-invitation.spec.ts",
         "**/team-mentions.spec.ts",
         "**/persistent-agent-audience.spec.ts",

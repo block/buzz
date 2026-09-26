@@ -59,6 +59,7 @@ pub async fn add_team_from_catalog(
     input: AddTeamFromCatalogRequest,
     app: AppHandle,
 ) -> Result<AddTeamFromCatalogResult, String> {
+    crate::managed_agents::device_policy::require_full_hosting(&app)?;
     let source = TeamCatalogSource {
         owner_pubkey: input.owner_pubkey,
         team_d_tag: input.team_d_tag,

@@ -16,6 +16,7 @@ pub(crate) mod claude_config;
 pub(crate) mod config_bridge;
 pub(crate) mod custom_harnesses;
 mod definition_validation;
+pub(crate) mod device_policy;
 mod discovery;
 pub(crate) mod effective_config;
 mod env_vars;
