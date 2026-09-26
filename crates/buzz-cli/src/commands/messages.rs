@@ -608,6 +608,51 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+/// Turn command-line `\n` escapes into real line feeds before Markdown parsing.
+///
+/// Agents frequently construct a shell command from model output, where a
+/// multiline body arrives as the two characters `\` and `n`. Without this
+/// normalization the relay stores one visual line, so Markdown tables,
+/// lists, and fenced blocks cannot be parsed. A doubled backslash preserves a
+/// literal `\n` sequence.
+fn normalize_message_content(content: String) -> String {
+    if !content.contains("\\n") {
+        return content;
+    }
+
+    let mut normalized = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            normalized.push(character);
+            continue;
+        }
+
+        let mut slash_count = 1;
+        while chars.peek() == Some(&'\\') {
+            chars.next();
+            slash_count += 1;
+        }
+
+        if chars.peek() == Some(&'n') {
+            for _ in 0..slash_count / 2 {
+                normalized.push('\\');
+            }
+            chars.next();
+            if slash_count % 2 == 1 {
+                normalized.push('\n');
+            } else {
+                normalized.push('n');
+            }
+        } else {
+            for _ in 0..slash_count {
+                normalized.push('\\');
+            }
+        }
+    }
+    normalized
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -616,7 +661,7 @@ pub async fn cmd_send_message(
     // jam shell-metacharacter-heavy text (backticks, $vars, etc.) through argv
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
-    p.content = read_or_stdin(&p.content)?;
+    p.content = normalize_message_content(read_or_stdin(&p.content)?);
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
@@ -1086,9 +1131,9 @@ mod tests {
     use super::{
         channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
         find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
-        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
+        missing_members, normalize_explicit_mentions, normalize_message_content,
+        parse_member_pubkeys, resolve_names_to_pubkeys, resolve_thread_target,
+        thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1105,6 +1150,22 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn normalize_message_content_decodes_unescaped_line_feeds() {
+        assert_eq!(
+            normalize_message_content(r"before\n\n| left | right |\n|---|---|".into()),
+            "before\n\n| left | right |\n|---|---|"
+        );
+    }
+
+    #[test]
+    fn normalize_message_content_preserves_doubled_backslash() {
+        assert_eq!(
+            normalize_message_content(r"literal \\n sequence".into()),
+            r"literal \n sequence"
+        );
+    }
 
     #[test]
     fn compact_event_format_remains_the_three_key_contract() {
@@ -1812,6 +1873,27 @@ mod tests {
         assert!(
             emoji_tags.is_empty(),
             "no-colon content must produce no emoji tags, got: {emoji_tags:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_normalizes_escaped_newlines_before_publish() {
+        let (url, _query_count, captured_event) = fake_send_relay(send_palette_response()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        cmd_send_message(
+            &client,
+            send_params(r"before\n\n| left | right |\n|---|---|"),
+        )
+        .await
+        .unwrap();
+
+        let raw = captured_event.lock().unwrap();
+        let raw = raw.as_ref().expect("event must have been submitted");
+        let event: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        assert_eq!(
+            event["content"], "before\n\n| left | right |\n|---|---|",
+            "published Markdown must contain real line feeds"
         );
     }
 
