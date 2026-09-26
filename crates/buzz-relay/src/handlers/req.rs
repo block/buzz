@@ -1730,7 +1730,7 @@ mod tests {
         crate::nip11::RelayInfo::build(
             None,
             None,
-            false,
+            crate::nip11::NIP11Requirements::none(),
             crate::config::DEFAULT_MAX_FRAME_BYTES,
             None,
             None,

@@ -120,6 +120,12 @@ relay:
   requireAuthToken: true
   requireRelayMembership: true
   allowNipOaAuth: true
+  # NIP-FI enterprise-auth advertisement mode. "shadow" changes only the
+  # relay's NIP-11 document: it advertises the privacy-safe federated-identity
+  # limitation/descriptor for client discovery/readiness while admission remains
+  # unchanged. "enforce" is reserved but the relay rejects it until NIP-FI
+  # validation and protected-ingress enforcement are implemented.
+  nipFiMode: "off"
   pubkeyAllowlist: false
   corsOrigins: []
   # Huddle audio is safe only for single-pod relay deployments until an SFU
