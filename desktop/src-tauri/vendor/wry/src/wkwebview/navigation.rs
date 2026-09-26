@@ -69,19 +69,27 @@ pub(crate) fn navigation_policy(
       .map(|s| s.to_string())
       .unwrap_or_default();
 
-    // target=_blank / window.open: targetFrame is nil. Handle here (emit URL +
-    // Cancel) so Deny in createWebView cannot leave left-click as a no-op or
-    // same-frame fallback. Right-click "Open Link in New Window" uses the same
-    // path. createWebView remains a safety net when decidePolicy is skipped.
+    // target=_blank / window.open: targetFrame is nil.
+    // When the request already has a concrete URL, emit + Cancel here so
+    // left-click cannot fall through as a no-op after createWebView Deny.
+    // When the URL is still empty / about:blank (common on the first
+    // decidePolicy pass), Allow so createWebView can run with the real
+    // request — Canceling an empty URL blocks createWebView and leaves
+    // left-click dead while right-click "Open Link in New Window" still
+    // works (it often hits createWebView directly).
     #[cfg(target_os = "macos")]
     if action.targetFrame().is_none() {
-      if let Some(ref on_new_window) = this.ivars().new_window_url_handler {
-        if !url.is_empty() {
-          on_new_window(url.clone());
+      let usable = !url.is_empty() && url != "about:blank";
+      if usable {
+        if let Some(ref on_new_window) = this.ivars().new_window_url_handler {
+          let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            on_new_window(url.clone());
+          }));
         }
+        (*handler).call((WKNavigationActionPolicy::Cancel,));
+        return;
       }
-      (*handler).call((WKNavigationActionPolicy::Cancel,));
-      return;
+      // Fall through → Allow → createWebView emits + Deny.
     }
 
     if should_download {

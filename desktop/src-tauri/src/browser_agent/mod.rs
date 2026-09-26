@@ -2,6 +2,7 @@
 //! Pins are out of scope. Not OpenClaw Chromium / CDP.
 
 pub mod drive;
+pub mod drive_screen;
 pub mod grant;
 pub mod observe;
 
@@ -31,6 +32,7 @@ use observe::{
 pub struct BrowserAgentState {
     pub grants: BrowserAgentGrantStore,
     pub observe: BrowserObserveBuffer,
+    pub drive_screens: drive_screen::DriveScreenTracker,
 }
 
 fn ensure_data_root(app: &AppHandle, state: &BrowserAgentState) -> Result<PathBuf, String> {
@@ -203,6 +205,7 @@ pub fn clear_grant_for_label(app: &AppHandle, webview_label: &str) {
     };
     if state.grants.clear(webview_label).is_some() {
         state.observe.clear(webview_label);
+        state.drive_screens.clear(webview_label);
         if let Ok(root) = ensure_data_root(app, &state) {
             mirror_grant(&root, None, webview_label);
         }
@@ -224,6 +227,8 @@ pub fn record_nav_event(app: &AppHandle, webview_label: &str, url: &str, title: 
         "browser-agent-observe",
         json!({ "webviewLabel": webview_label, "kind": "nav" }),
     );
+    // Host-side Drive screen shot + path caption into grant channel/thread.
+    drive_screen::schedule_drive_screen_post(app, webview_label, url);
 }
 
 /// Ask the page to emit a main-frame nav with document.title (deduped in-buffer).
