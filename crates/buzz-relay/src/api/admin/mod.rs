@@ -11094,24 +11094,69 @@ mod postgres_tests {
         .await
     }
 
-    /// Every row a direct action can write in `community`, plus its live events:
-    /// (actions, audit, restrictions, outbox, live events).
+    /// Everything a direct action can change in `community`: row counts
+    /// (actions, audit, restrictions, outbox, live events) and the full values
+    /// of every restriction, so a rejection that rewrites one is caught.
+    #[derive(Debug, PartialEq)]
+    struct DirectEffects {
+        counts: (i64, i64, i64, i64, i64),
+        restrictions: String,
+    }
+
     async fn direct_effects(
         pool: &sqlx::PgPool,
         community: buzz_core::CommunityId,
-    ) -> (i64, i64, i64, i64, i64) {
-        sqlx::query_as(
+    ) -> DirectEffects {
+        let (a, b, c, d, e, restrictions) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM relay_admin_actions WHERE report_community_id = $1), \
              (SELECT COUNT(*) FROM moderation_actions WHERE community_id = $1), \
              (SELECT COUNT(*) FROM community_bans WHERE community_id = $1), \
              (SELECT COUNT(*) FROM relay_admin_outbox o JOIN relay_admin_actions a \
                 ON a.id = o.action_id WHERE a.report_community_id = $1), \
-             (SELECT COUNT(*) FROM events WHERE community_id = $1 AND deleted_at IS NULL)",
+             (SELECT COUNT(*) FROM events WHERE community_id = $1 AND deleted_at IS NULL), \
+             (SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.pubkey), '[]')::text \
+                FROM community_bans r WHERE r.community_id = $1)",
         )
         .bind(community.as_uuid())
         .fetch_one(pool)
         .await
-        .expect("direct effects")
+        .expect("direct effects");
+        DirectEffects {
+            counts: (a, b, c, d, e),
+            restrictions,
+        }
+    }
+
+    /// A rejection leaves `community` exactly as `before`: no new rows and no
+    /// restriction value changed.
+    async fn assert_no_effects(
+        pool: &sqlx::PgPool,
+        community: buzz_core::CommunityId,
+        before: &DirectEffects,
+        what: &str,
+    ) {
+        assert_eq!(&direct_effects(pool, community).await, before, "{what}");
+    }
+
+    /// Seed an existing restriction (timed ban + mute) whose values a
+    /// rejection must not touch.
+    async fn seed_restriction(
+        pool: &sqlx::PgPool,
+        community: buzz_core::CommunityId,
+        target: &[u8],
+    ) {
+        sqlx::query(
+            "INSERT INTO community_bans (community_id, pubkey, banned, ban_expires_at, ban_reason, \
+             muted_until, mute_reason, actor_pubkey) VALUES ($1, $2, true, now() + interval '1 day', \
+             'seeded ban', now() + interval '1 hour', 'seeded mute', $3) \
+             ON CONFLICT (community_id, pubkey) DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(target)
+        .bind([0x5eu8; 32].as_slice())
+        .execute(pool)
+        .await
+        .expect("seed restriction");
     }
 
     fn direct_input<'a>(
@@ -11198,6 +11243,7 @@ mod postgres_tests {
             (first["actionId"].clone(), true.into())
         );
 
+        let applied = direct_effects(&pool, community).await;
         let changed = serde_json::json!({ "requestId": rid, "reason": "other" });
         let (status, err) = direct_post(&state, &path, changed).await;
         assert_eq!(
@@ -11205,7 +11251,7 @@ mod postgres_tests {
             (StatusCode::CONFLICT, Some("request_id_conflict")),
             "{err}"
         );
-        assert_eq!(count_where(&pool, ACTIONS_IN, community).await, 1);
+        assert_no_effects(&pool, community, &applied, "changed reason").await;
         let label: String = sqlx::query_scalar("SELECT action || ':' || actor_authority FROM moderation_actions WHERE community_id = $1")
             .bind(community.as_uuid()).fetch_one(&pool).await.unwrap();
         assert_eq!(label, "ban:relay_operator");
@@ -11233,7 +11279,7 @@ mod postgres_tests {
             (status, err["error"]["code"].as_str()),
             (StatusCode::BAD_REQUEST, Some("invalid_community_host"))
         );
-        assert_eq!(count_where(&pool, ACTIONS_IN, community).await, 1);
+        assert_no_effects(&pool, community, &applied, "malformed host").await;
     }
 
     /// D2: config staff (the actor itself) and DB staff are refused for ban and
@@ -11248,7 +11294,12 @@ mod postgres_tests {
             .upsert_relay_operator(&db_staff, "moderator", &[1u8; 32], true)
             .await
             .unwrap();
-        for target in [test_operator_keys().public_key().to_bytes(), db_staff] {
+        let targets = [test_operator_keys().public_key().to_bytes(), db_staff];
+        for target in &targets {
+            seed_restriction(&pool, community, target).await;
+        }
+        let before = direct_effects(&pool, community).await;
+        for target in targets {
             let t = hex::encode(target);
             for (verb, extra) in [("ban", None), ("timeout", Some(60))] {
                 let path = format!("/members/{t}/{verb}?communityHost={host}");
@@ -11263,19 +11314,9 @@ mod postgres_tests {
                     (StatusCode::CONFLICT, Some("target_is_staff")),
                     "{verb} {t}"
                 );
+                assert_no_effects(&pool, community, &before, verb).await;
             }
         }
-        assert_eq!(count_where(&pool, ACTIONS_IN, community).await, 0);
-        assert_eq!(count_where(&pool, AUDIT_IN, community).await, 0);
-        assert_eq!(
-            count_where(
-                &pool,
-                "SELECT COUNT(*) FROM community_bans WHERE community_id = $1",
-                community
-            )
-            .await,
-            0
-        );
         sqlx::query("DELETE FROM relay_operators WHERE pubkey = $1")
             .bind(db_staff.as_slice())
             .execute(&pool)
@@ -11472,6 +11513,14 @@ mod postgres_tests {
             )
             .bind(report_id).bind(community).bind([2u8; 32].as_slice()).bind(hex::decode(&event).unwrap())
             .execute(&pool).await.unwrap();
+            let community = buzz_core::CommunityId::from_uuid(community);
+            seed_restriction(
+                &pool,
+                community,
+                &test_operator_keys().public_key().to_bytes(),
+            )
+            .await;
+            let before = direct_effects(&pool, community).await;
             let path = format!("/reports/{report_id}/resolve");
             let (status, err) = direct_post(
                 &state,
@@ -11491,6 +11540,7 @@ mod postgres_tests {
                 "{action} {err}"
             );
             assert_eq!(report_status, "open");
+            assert_no_effects(&pool, community, &before, action).await;
             cleanup_admin_host_report(&pool, report_id).await;
         }
     }
@@ -11514,6 +11564,7 @@ mod postgres_tests {
         .unwrap();
         let disabled = disabled_mode_state().await;
         let (op, outsider) = (test_operator_keys(), nostr::Keys::generate());
+        seed_restriction(&pool, community, &[0x4eu8; 32]).await;
         let before = direct_effects(&pool, community).await;
         let member = hex::encode([0x4eu8; 32]);
         for path in [
@@ -11579,9 +11630,9 @@ mod postgres_tests {
                 let (status, err) =
                     direct_send(st, keys, host_header, (signed.0, signed.1), (&path, &body)).await;
                 assert_eq!(status, want, "{name} {path}: {err}");
+                assert_no_effects(&pool, community, &before, name).await;
             }
         }
-        assert_eq!(direct_effects(&pool, community).await, before);
     }
 
     /// §8 6: a delete naming another community's event is 404 and neither
@@ -11595,11 +11646,15 @@ mod postgres_tests {
             .await
             .unwrap()
             .id;
-        let id = seed_signed_event(&pool, foreign, &nostr::Keys::generate()).await;
-        let before = (
+        let author = nostr::Keys::generate();
+        let id = seed_signed_event(&pool, foreign, &author).await;
+        for c in [community, foreign] {
+            seed_restriction(&pool, c, &author.public_key().to_bytes()).await;
+        }
+        let before = [
             direct_effects(&pool, community).await,
             direct_effects(&pool, foreign).await,
-        );
+        ];
         let path = format!("/events/{id}/delete?communityHost={host}");
         let (status, err) = direct_post(
             &state,
@@ -11611,11 +11666,8 @@ mod postgres_tests {
             (status, err["error"]["code"].as_str()),
             (StatusCode::NOT_FOUND, Some("event_not_in_community"))
         );
-        let after = (
-            direct_effects(&pool, community).await,
-            direct_effects(&pool, foreign).await,
-        );
-        assert_eq!(after, before);
+        assert_no_effects(&pool, community, &before[0], "home community").await;
+        assert_no_effects(&pool, foreign, &before[1], "foreign community").await;
     }
 
     /// Staff authority is relay-level: a staff actor banned in the community
@@ -11665,7 +11717,7 @@ mod postgres_tests {
             sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
                 "SELECT a.timeout_until, b.muted_until FROM relay_admin_actions a \
                  JOIN community_bans b ON b.community_id = a.report_community_id \
-                 WHERE a.report_community_id = $1",
+                 AND b.pubkey = a.enforcement_target_pubkey WHERE a.report_community_id = $1",
             )
             .bind(community.as_uuid())
             .fetch_one(&pool)
@@ -11685,6 +11737,8 @@ mod postgres_tests {
         );
         assert_eq!(expiry().await, applied, "a retry must not move the expiry");
 
+        seed_restriction(&pool, community, &[0x62u8; 32]).await;
+        let before = direct_effects(&pool, community).await;
         let ban = format!("/members/{target}/ban?communityHost={host}");
         let moved = format!("/members/{other}/timeout?communityHost={host}");
         for (p, changed) in [
@@ -11712,8 +11766,8 @@ mod postgres_tests {
                 "{p}: {err}"
             );
             assert_eq!(status, StatusCode::CONFLICT);
+            assert_no_effects(&pool, community, &before, p).await;
         }
-        assert_eq!(count_where(&pool, ACTIONS_IN, community).await, 1);
         assert_eq!(expiry().await, applied);
     }
 
@@ -11765,7 +11819,10 @@ mod postgres_tests {
         let mut input = direct_input(community, Uuid::new_v4(), &actor, &target, None);
         input.actor_authority = "not_an_authority";
         assert!(state.db.claim_direct_action(&input).await.is_err());
-        assert_eq!(direct_effects(&pool, community).await, (0, 0, 0, 0, 0));
+        assert_eq!(
+            direct_effects(&pool, community).await.counts,
+            (0, 0, 0, 0, 0)
+        );
     }
 
     /// §8 22: the ban committed with its marker, then the driver crashed. Recovery
@@ -11812,7 +11869,12 @@ mod postgres_tests {
                 .await
                 .unwrap();
             for claim in claims.into_iter().filter(|c| c.record.id == rec.id) {
-                crate::handlers::admin_action_worker::recover_one(&state, claim).await;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    crate::handlers::admin_action_worker::recover_one(&state, claim),
+                )
+                .await
+                .expect("recovery did not converge");
                 recovered += 1;
             }
         }
@@ -11826,6 +11888,9 @@ mod postgres_tests {
         .unwrap();
         assert_eq!((recovered, done.state.as_str()), (1, "succeeded"));
         assert_eq!(outbox, vec![("affected_user_notice".to_string(), 1)]);
-        assert_eq!(direct_effects(&pool, community).await, (1, 1, 1, 1, 0));
+        assert_eq!(
+            direct_effects(&pool, community).await.counts,
+            (1, 1, 1, 1, 0)
+        );
     }
 }
