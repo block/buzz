@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
 
 import { pinRunbookRef, sidRunbookRef } from "./lib/keys";
@@ -24,8 +25,10 @@ import type { SiteRunbook, SiteRunbookRef } from "./lib/types";
 
 function useSiteRunbooksConfigured(): void {
   const identity = useIdentityQuery();
+  const { activeCommunity } = useCommunities();
   const pubkey = identity.data?.pubkey ?? "";
-  const relayUrl = identity.data?.relayUrl ?? "";
+  // Identity has no relayUrl; scope matches pinned-sites (pubkey + active community relay).
+  const relayUrl = activeCommunity?.relayUrl ?? "";
   React.useEffect(() => {
     if (!pubkey || !relayUrl) return;
     configureSiteRunbooksScope(pubkey, relayUrl);
