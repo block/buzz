@@ -33,6 +33,7 @@ test("parseCommunityPinnedSitesPayload keeps valid https pins", () => {
   assert.equal(pins[0].id, "docs");
   assert.equal(pins[0].scope, "community");
   assert.equal(pins[0].pollForChanges, true);
+  assert.equal(pins[0].openMatchingLinks, true);
 });
 
 test("selectLatestCommunityPins uses the newest created_at", () => {
@@ -67,4 +68,23 @@ test("selectLatestCommunityPins uses the newest created_at", () => {
   ]);
   assert.equal(pins.length, 1);
   assert.equal(pins[0].id, "new");
+});
+
+test("parseCommunityPinnedSitesPayload respects openMatchingLinks false", () => {
+  const pins = parseCommunityPinnedSitesPayload(
+    JSON.stringify({
+      version: 1,
+      pins: [
+        {
+          id: "docs",
+          name: "Docs",
+          url: "https://example.com/docs",
+          icon: "book-open",
+          openMatchingLinks: false,
+        },
+      ],
+    }),
+  );
+  assert.equal(pins.length, 1);
+  assert.equal(pins[0].openMatchingLinks, false);
 });

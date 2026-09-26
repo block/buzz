@@ -17,6 +17,7 @@ export type CommunityPinnedSitesPayload = {
     url: string;
     icon: PinnedSiteIconId;
     pollForChanges?: boolean;
+    openMatchingLinks?: boolean;
   }>;
 };
 
@@ -39,6 +40,7 @@ function parseCommunityPin(value: unknown): PinnedSite | null {
     url,
     icon: candidate.icon,
     pollForChanges: candidate.pollForChanges === true,
+    openMatchingLinks: candidate.openMatchingLinks !== false,
     scope: "community",
   };
 }
@@ -107,6 +109,7 @@ export async function publishCommunityPinnedSites(
       url: pin.url,
       icon: pin.icon,
       pollForChanges: pin.pollForChanges,
+      openMatchingLinks: pin.openMatchingLinks !== false,
     })),
   };
   const event = await signRelayEvent({

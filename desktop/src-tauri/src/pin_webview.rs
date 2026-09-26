@@ -102,14 +102,21 @@ impl PinSession {
             .iter()
             .filter_map(|entry| Url::parse(entry).ok())
             .collect();
-        let history = if history.is_empty() || history[0].origin() != start_url.origin() {
-            vec![start_url.clone()]
+        let (history, index) = if history.is_empty() || history[0].origin() != start_url.origin() {
+            (vec![start_url.clone()], 0usize)
         } else {
+            let start_changed = history.first() != Some(&start_url);
             let mut history = history;
             history[0] = start_url.clone();
-            history
+            // Deep link / changed start must open at start_url (index 0), not a
+            // stale mid-history entry that would ignore the full href.
+            let index = if start_changed {
+                0
+            } else {
+                persisted.index.min(history.len().saturating_sub(1))
+            };
+            (history, index)
         };
-        let index = persisted.index.min(history.len().saturating_sub(1));
         Self {
             start_url,
             history,

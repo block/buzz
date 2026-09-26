@@ -55,6 +55,8 @@ export function matchPinnedSiteForUrl(
   let best: PinnedSite | null = null;
   let bestScore = -1;
   for (const pin of pins) {
+    // Per-pin setting: unchecked pins are not domain-routing destinations.
+    if (pin.openMatchingLinks === false) continue;
     const score = scorePinnedSiteMatch(href, pin.url);
     if (score > bestScore) {
       bestScore = score;

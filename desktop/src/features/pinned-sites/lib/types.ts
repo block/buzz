@@ -32,6 +32,8 @@ export type PinnedSiteDraft = {
   url: string;
   icon: PinnedSiteIconId;
   pollForChanges: boolean;
+  /** When true, matching-domain links open into this pin. */
+  openMatchingLinks: boolean;
   community: boolean;
 };
 
@@ -41,6 +43,8 @@ export type PinnedSite = {
   url: string;
   icon: PinnedSiteIconId;
   pollForChanges: boolean;
+  /** When true, matching-domain links open into this pin. Default true. */
+  openMatchingLinks: boolean;
   scope: PinnedSiteScope;
 };
 
@@ -52,6 +56,7 @@ export const WAYFINDER_PIN: PinnedSite = {
   url: "https://wayfinder.huladesk.com",
   icon: "compass",
   pollForChanges: false,
+  openMatchingLinks: true,
   scope: "personal",
 };
 

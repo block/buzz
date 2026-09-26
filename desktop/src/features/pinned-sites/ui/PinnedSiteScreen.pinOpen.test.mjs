@@ -9,7 +9,7 @@ test("PinnedSiteScreen keeps deep startUrl after pending clear (no home clobber)
   const source = readFileSync(join(dir, "PinnedSiteScreen.tsx"), "utf8");
   assert.match(
     source,
-    /Never fall back to pin\.url on every layout pass/,
+    /Pending\/navOpenUrl always win over sticky navClearsDeepLink/,
   );
   assert.match(
     source,
@@ -22,5 +22,10 @@ test("PinnedSiteScreen keeps deep startUrl after pending clear (no home clobber)
   assert.match(
     source,
     /clearPinnedSiteOpenUrl\(id, appliedUrl\)/,
+  );
+  assert.match(
+    source,
+    /const pending =[\s\S]*navClearsDeepLink/,
+    "pending/deep URL is resolved before sticky home-clear branch",
   );
 });

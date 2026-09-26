@@ -56,8 +56,17 @@ pub fn should_navigate_existing(
     if is_unusable_document_url(current) {
         return true;
     }
+    // Explicit new start (deep link / home change) must navigate even on-origin.
     if previous_start.is_some_and(|previous| previous != start_url) {
         return true;
+    }
+    // Session lost but webview still alive: honor requested start when the
+    // document is not already there (deep link after manager drop).
+    if previous_start.is_none() {
+        return match current {
+            Some(url) => url != start_url,
+            None => true,
+        };
     }
     match current {
         Some(url) => !same_https_origin(url, start_url),
@@ -148,6 +157,18 @@ mod tests {
             Some(&current),
             &start,
             Some(&start),
+            false,
+        ));
+    }
+
+    #[test]
+    fn reuse_navigates_deep_link_when_previous_start_missing() {
+        let start = url("https://wayfinder.huladesk.com/docs/guide");
+        let current = url("https://wayfinder.huladesk.com/");
+        assert!(should_navigate_existing(
+            Some(&current),
+            &start,
+            None,
             false,
         ));
     }

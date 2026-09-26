@@ -58,8 +58,8 @@ export function PinnedSiteScreen({ pinId }: { pinId: string }) {
   // Deep-link / markdown open into this pin: navigate webview to clicked URL.
   // consume peeks only (Strict Mode remount-safe). Clear after the surface
   // applies startUrl via showPinWebview. Subscribe for already-mounted re-opens.
-  // Never fall back to pin.url on every layout pass — after clear, that would
-  // clobber the deep href back to home (left-click bug vs context-menu).
+  // Pending/navOpenUrl always win over sticky navClearsDeepLink + pin.url so a
+  // queued full href is not clobbered back to pin home before router state lands.
   const [startUrl, setStartUrl] = React.useState(() => {
     if (!pin) return "";
     return consumePinnedSiteOpenUrl(pin.id, "") || navOpenUrl || pin.url;
@@ -72,24 +72,30 @@ export function PinnedSiteScreen({ pinId }: { pinId: string }) {
       setStartUrl("");
       return;
     }
-    if (navClearsDeepLink) {
-      clearPinnedSiteOpenUrl(pin.id);
-      appliedPinIdRef.current = pin.id;
-      setStartUrl(pin.url);
-      return;
-    }
-    const pending =
-      consumePinnedSiteOpenUrl(pin.id, "") || navOpenUrl || "";
     const pinChanged = appliedPinIdRef.current !== pin.id;
     appliedPinIdRef.current = pin.id;
+
+    // Prefer an in-flight queued deep link over sticky sidebar "clear" state.
+    // Otherwise a layout pass while location.state still has pinnedSiteOpenUrl:
+    // null (after a prior home open) wipes queue + resets startUrl to home
+    // before goPinnedSite's deep-link state lands — left-click only refreshes
+    // pin home.
+    const pending =
+      consumePinnedSiteOpenUrl(pin.id, "") || navOpenUrl || "";
     if (pending) {
-      // Keep module queue aligned with router state for subscribe / remount.
       if (navOpenUrl) {
         queuePinnedSiteOpenUrl(pin.id, navOpenUrl);
       }
       setStartUrl(pending);
       return;
     }
+
+    if (navClearsDeepLink) {
+      clearPinnedSiteOpenUrl(pin.id);
+      setStartUrl(pin.url);
+      return;
+    }
+
     if (pinChanged) {
       setStartUrl(pin.url);
       return;
