@@ -89,7 +89,7 @@ pub enum MultipleEventHandling {
 ///
 /// - `owner-only` — only the agent's registered owner (default).
 /// - `allowlist`  — owner + explicit pubkey list (`--respond-to-allowlist`).
-/// - `anyone`     — all events forwarded (no author filtering).
+/// - `anyone`     — all verified non-DM channels; DMs stay owner/sibling-only.
 /// - `nobody`     — all events dropped (proactive/heartbeat-only mode).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub enum RespondTo {
