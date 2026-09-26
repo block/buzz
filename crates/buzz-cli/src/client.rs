@@ -67,6 +67,7 @@ const ALLOWED_MIMES: &[&str] = &[
     "image/gif",
     "image/webp",
     "video/mp4",
+    "application/pdf",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -74,6 +75,19 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic document uploads (100 MB).
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+fn max_upload_bytes(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else if mime.starts_with("image/") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1230,11 +1244,7 @@ impl BuzzClient {
         }
 
         // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
+        let max = max_upload_bytes(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",
@@ -2318,6 +2328,58 @@ mod retry_policy_tests {
         assert!(
             auths.iter().all(|a| a.contains("Nostr ")),
             "each attempt must carry Nostr auth"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_accepts_pdf() {
+        use std::io::Write;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let pdf = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF";
+        tmp.write_all(pdf).unwrap();
+        let file_path = tmp.path().to_str().unwrap().to_string();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = vec![0u8; 8192];
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                stream.read(&mut request),
+            )
+            .await;
+            let body = format!(
+                r#"{{"url":"https://relay.test/media/aabbcc.pdf","sha256":"aabbcc","size":{},"type":"application/pdf","uploaded":0}}"#,
+                pdf.len()
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        let client = test_client(&format!("http://{addr}"));
+
+        let descriptor = client
+            .upload_file(&file_path)
+            .await
+            .expect("PDF upload should reach and succeed against the relay");
+
+        assert_eq!(descriptor.mime_type, "application/pdf");
+        assert_eq!(descriptor.size, pdf.len() as u64);
+    }
+
+    #[test]
+    fn pdf_uses_generic_file_size_limit() {
+        assert_eq!(
+            super::max_upload_bytes("application/pdf"),
+            100 * 1024 * 1024
         );
     }
 
