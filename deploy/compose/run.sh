@@ -11,6 +11,20 @@ fi
 if [[ "${BUZZ_COMPOSE_DEV:-false}" == "true" ]]; then
   COMPOSE_FILES+=(-f compose.dev.yml)
 fi
+if [[ -n "${BUZZ_COMPOSE_EXTRA_FILES:-}" ]]; then
+  IFS=': ' read -r -a EXTRA_FILES <<<"${BUZZ_COMPOSE_EXTRA_FILES}"
+  for extra_file in "${EXTRA_FILES[@]}"; do
+    if [[ -z "${extra_file}" ]]; then
+      continue
+    fi
+    if [[ ! -f "${extra_file}" ]]; then
+      echo "BUZZ_COMPOSE_EXTRA_FILES entry not found: ${extra_file}" >&2
+      echo "Paths are resolved relative to deploy/compose/." >&2
+      exit 1
+    fi
+    COMPOSE_FILES+=(-f "${extra_file}")
+  done
+fi
 
 compose() {
   docker compose --env-file .env "${COMPOSE_FILES[@]}" "$@"
@@ -123,6 +137,10 @@ Commands:
 Environment switches:
   BUZZ_COMPOSE_TLS=true   Include compose.caddy.yml for automatic HTTPS
   BUZZ_COMPOSE_DEV=true   Include compose.dev.yml for local admin ports/tools
+  BUZZ_COMPOSE_EXTRA_FILES=<paths>
+                          Colon- or space-separated compose files appended
+                          after the built-in ones (site-local overrides such
+                          as resource limits win the Compose merge)
 MSG
     ;;
   *)
