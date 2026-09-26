@@ -7,6 +7,7 @@ import {
 import { createPreventSleepActivityTracker } from "@/features/agents/preventSleepActivity";
 import { setPreventSleepActive } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 // Intentionally not scoped per-pubkey — multi-user desktop is rare and the
@@ -82,9 +83,17 @@ function usePreventSleepInternal() {
   }, []);
 
   React.useEffect(() => {
+    // Fire-and-forget with no .catch, so an unguarded call is a genuine
+    // unhandled rejection in a browser (web) runtime, not just console noise.
+    if (!isTauri()) return;
+
     void setPreventSleepActive(active);
   }, [active]);
   React.useEffect(() => {
+    // Sleep prevention is a native OS concept — no such event exists in a
+    // browser (web) runtime, and `listen()` throws without Tauri internals.
+    if (!isTauri()) return;
+
     const unlisten = listen("prevent-sleep-expired", () => {
       setExpired(true);
     });

@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
 import { toast } from "sonner";
@@ -22,6 +23,10 @@ const MIGRATION_TOAST_KEY = "buzz-legacy-nest-migrated-notified";
  */
 export function useNestNotifications(): void {
   useEffect(() => {
+    // Both events come from the Rust nest backend — no local nest exists in a
+    // browser (web) runtime, and `listen()` throws without Tauri internals.
+    if (!isTauri()) return;
+
     const unlistenReposError = listen<string>("repos-dir-error", (event) => {
       toast.error("Repos directory not applied", {
         description: event.payload,
