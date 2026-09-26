@@ -10,21 +10,18 @@ const NEVER_MATCH = /(?!)/gi;
 
 /**
  * Build a regex that matches a given prefix followed by known multi-word names
- * (longest-first to avoid partial matches). When known names are provided,
- * only those names are matched — no generic fallback.
+ * (longest-first to avoid partial matches). An optional generic token pattern
+ * stays available alongside known names, so channel chips do not depend on
+ * membership or a loaded directory. Generic matching uses mobile's channel
+ * boundaries to exclude URL fragments and trailing punctuation.
  *
- * When no names are available:
- * - If `options.fallbackToGeneric` is true, falls back to `prefix + \S+` so
- *   that patterns like `#channel` still render while channel names are loading
- *   asynchronously (used by remarkChannelLinks).
- * - Otherwise returns a never-matching regex, preventing arbitrary `@word`
- *   patterns from being highlighted as valid mentions when no p-tags are
- *   present (used by remarkMentions / buildMentionPattern).
+ * Without a generic pattern, only known names match. In particular, arbitrary
+ * @words are never highlighted as mentions without matching p-tagged names.
  */
 export function buildPrefixPattern(
   prefix: string,
   knownNames: string[],
-  options?: { fallbackToGeneric?: boolean },
+  options?: { genericTokenPattern?: string },
 ): RegExp {
   const sorted = [...new Set(knownNames)]
     .filter((name) => name.trim().length > 0)
@@ -32,10 +29,7 @@ export function buildPrefixPattern(
 
   const escapedPrefix = escapeRegExp(prefix);
 
-  if (sorted.length === 0) {
-    if (options?.fallbackToGeneric) {
-      return new RegExp(`${escapedPrefix}\\S+`, "gi");
-    }
+  if (sorted.length === 0 && !options?.genericTokenPattern) {
     return NEVER_MATCH;
   }
 
@@ -45,6 +39,15 @@ export function buildPrefixPattern(
     )
     .join("|");
   const boundary = "(?=[\\s,;.!?:)\\]}]|$)";
+  if (options?.genericTokenPattern) {
+    const alternatives = [nameAlternatives, options.genericTokenPattern]
+      .filter(Boolean)
+      .join("|");
+    return new RegExp(
+      `(?<![\\w./:-])${escapedPrefix}(?:${alternatives})${boundary}`,
+      "gi",
+    );
+  }
   return new RegExp(`${escapedPrefix}(?:${nameAlternatives})${boundary}`, "gi");
 }
 
