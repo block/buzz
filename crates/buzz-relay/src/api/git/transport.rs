@@ -32,8 +32,8 @@ use super::binding::{resolve_repo_binding, RepoBinding};
 use super::cas_publish::{cas_publish, CasError, ParentState, PublishLimits};
 use super::hook::install_hook;
 use super::hydrate::{
-    hydrate_for_read, hydrate_for_write, load_manifest_for_read, HydrateError, HydratedRepo,
-    HydrationOptions,
+    empty_bare_repo, hydrate_for_read, hydrate_for_write, load_manifest_for_read, HydrateError,
+    HydratedRepo, HydrationOptions,
 };
 use super::manifest_event::{build_ref_state_event, RefStateInputs};
 use crate::state::AppState;
@@ -911,21 +911,38 @@ async fn info_refs_subprocess(
 ) -> Result<Response, Response> {
     let _permit = acquire_git_permit(state, "info_refs")?;
 
+    let options = HydrationOptions {
+        pack_cache: &state.git_pack_cache,
+        scratch_dir: &state.config.git_repo_path,
+        max_pack_bytes: state.config.git_max_pack_bytes,
+        max_repo_bytes: state.config.git_max_repo_bytes,
+    };
+
     let repo = match hydrate_for_read(
         &state.git_store,
         tenant,
         &params.owner,
         &params.repo,
-        HydrationOptions {
-            pack_cache: &state.git_pack_cache,
-            scratch_dir: &state.config.git_repo_path,
-            max_pack_bytes: state.config.git_max_pack_bytes,
-            max_repo_bytes: state.config.git_max_repo_bytes,
-        },
+        options,
     )
     .await
     {
         Ok(Some(repo)) => repo,
+        // Pointer absent = no published content yet.
+        //
+        // For `git-upload-pack` that's a definitive 404: there is nothing
+        // to clone. For `git-receive-pack` it is the *first push*, and a
+        // 404 here is fatal to it — git does the ref-discovery GET before
+        // it sends anything, so 404 aborts the push and the first-push
+        // branch of `hydrate_for_write` in `receive_pack` is unreachable.
+        // Advertise against an empty bare repo instead: git sees the
+        // zero-id "empty repository" advertisement, POSTs the pack, and
+        // `receive_pack` creates the repo. Authorization is unchanged —
+        // `info_refs` already ran `authorize_git_read`, and push policy
+        // is still enforced by the pre-receive hook.
+        Ok(None) if service == "git-receive-pack" => empty_bare_repo(&options)
+            .await
+            .map_err(|e| hydrate_error_to_response(&params.owner, &params.repo, e))?,
         Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
         Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
     };
