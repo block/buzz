@@ -17,6 +17,7 @@ import '../../shared/huddle/huddle.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/utils/adaptive_layout.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/bouncing_dots_indicator.dart';
@@ -253,6 +254,7 @@ class ChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
   final String? initialMessageId;
   final String? initialThreadRootId;
+  final VoidCallback? onTabletWorkspaceActivated;
 
   /// How the automatically opened initial thread affects the route stack.
   final InitialThreadRouteBehavior initialThreadRouteBehavior;
@@ -262,11 +264,33 @@ class ChannelDetailPage extends HookConsumerWidget {
     required this.channel,
     this.initialMessageId,
     this.initialThreadRootId,
+    this.onTabletWorkspaceActivated,
     this.initialThreadRouteBehavior = InitialThreadRouteBehavior.push,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final windowSize = MediaQuery.sizeOf(context);
+    final usesTabletLayout = usesTabletWorkspace(
+      width: windowSize.width,
+      height: windowSize.height,
+    );
+    final routeIsCurrent = ModalRoute.of(context)?.isCurrent ?? false;
+    useEffect(() {
+      if (!usesTabletLayout ||
+          onTabletWorkspaceActivated == null ||
+          !routeIsCurrent) {
+        return null;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) {
+          return;
+        }
+        onTabletWorkspaceActivated!();
+        Navigator.of(context).pop();
+      });
+      return null;
+    }, [usesTabletLayout, onTabletWorkspaceActivated, routeIsCurrent]);
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
     final restoreComposerFocus = useRef<VoidCallback?>(null);

@@ -50,6 +50,7 @@ class _InboxRow extends HookConsumerWidget {
   final Channel? channel;
   final String? currentPubkey;
   final bool isDone;
+  final bool selected;
   final VoidCallback onTap;
   final VoidCallback onMarkRead;
   final VoidCallback onMarkUnread;
@@ -60,6 +61,7 @@ class _InboxRow extends HookConsumerWidget {
     required this.channel,
     required this.currentPubkey,
     required this.isDone,
+    this.selected = false,
     required this.onTap,
     required this.onMarkRead,
     required this.onMarkUnread,
@@ -212,7 +214,9 @@ class _InboxRow extends HookConsumerWidget {
                     }
                   },
                   child: Material(
-                    color: context.colors.surface,
+                    color: selected
+                        ? context.colors.primaryContainer.withValues(alpha: 0.5)
+                        : context.colors.surface,
                     child: InkWell(
                       key: ValueKey('inbox-row-${item.id}'),
                       onTap: onTap,
