@@ -602,43 +602,47 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
   });
   await expect(sentChip).toBeVisible();
   await expect(sentChip).toHaveClass(/wrapping-inline-chip/);
-  await sentChip.evaluate((element) => {
-    const container = element.parentElement;
-    if (container) container.style.width = "220px";
-  });
-  const fragmentMetrics = await sentChip.evaluate((element) => {
-    const chipStyle = getComputedStyle(element);
-    const rects = Array.from(element.getClientRects(), (rect) => ({
-      bottom: rect.bottom,
-      height: rect.height,
-      left: rect.left,
-      right: rect.right,
-      top: rect.top,
-      width: rect.width,
-    })).filter((rect) => rect.width > 0 && rect.height > 0);
-    const fragmentTops = Array.from(
-      new Set(rects.map((rect) => Math.round(rect.top))),
-    ).sort((a, b) => a - b);
-    return {
-      boxDecorationBreak:
-        chipStyle.getPropertyValue("box-decoration-break") ||
-        chipStyle.getPropertyValue("-webkit-box-decoration-break"),
-      fragmentStep:
-        fragmentTops.length > 1 ? fragmentTops[1] - fragmentTops[0] : null,
-      lineHeight: Number.parseFloat(chipStyle.lineHeight),
-      rects,
-    };
-  });
-  expect(fragmentMetrics.boxDecorationBreak).toBe("clone");
-  expect(fragmentMetrics.lineHeight).toBe(22);
-  expect(fragmentMetrics.fragmentStep).toBe(22);
-  expect(fragmentMetrics.rects.length).toBeGreaterThanOrEqual(2);
+  // The optimistic message row can be re-created when the relay echo lands,
+  // dropping any inline style applied before the swap — apply the width and
+  // measure in one evaluate, polling until the chip settles into wrapped
+  // fragments with the expected cloned-box metrics.
+  await expect
+    .poll(() =>
+      sentChip.evaluate((element) => {
+        const container = element.parentElement;
+        if (container) container.style.width = "220px";
+        const chipStyle = getComputedStyle(element);
+        const rects = Array.from(element.getClientRects()).filter(
+          (rect) => rect.width > 0 && rect.height > 0,
+        );
+        const fragmentTops = Array.from(
+          new Set(rects.map((rect) => Math.round(rect.top))),
+        ).sort((a, b) => a - b);
+        return {
+          boxDecorationBreak:
+            chipStyle.getPropertyValue("box-decoration-break") ||
+            chipStyle.getPropertyValue("-webkit-box-decoration-break"),
+          fragmentStep:
+            fragmentTops.length > 1 ? fragmentTops[1] - fragmentTops[0] : null,
+          lineHeight: Number.parseFloat(chipStyle.lineHeight),
+          wrapped: rects.length >= 2,
+        };
+      }),
+    )
+    .toMatchObject({
+      boxDecorationBreak: "clone",
+      fragmentStep: 22,
+      lineHeight: 22,
+      wrapped: true,
+    });
 
   const tooltip = page.getByRole("tooltip");
   await sentChip.focus();
   await expect(tooltip).toBeVisible();
   const positionOverFragment = async (index: number) => {
     const fragment = await sentChip.evaluate((element, fragmentIndex) => {
+      const container = element.parentElement;
+      if (container) container.style.width = "220px";
       const rects = Array.from(element.getClientRects()).filter(
         (rect) => rect.width > 0 && rect.height > 0,
       );

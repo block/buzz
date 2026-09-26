@@ -43,6 +43,37 @@ type ChannelMembersBarProps = {
   variant?: "inline" | "compact";
 };
 
+type ChannelMembersButtonProps = {
+  memberCount: number;
+  onToggleMembers: () => void;
+};
+
+export function ChannelMembersButton({
+  memberCount,
+  onToggleMembers,
+}: ChannelMembersButtonProps) {
+  return (
+    <Tooltip disableHoverableContent>
+      <TooltipTrigger asChild>
+        <Button
+          aria-label={`View channel members (${memberCount})`}
+          className="h-8 px-2.5"
+          data-testid="channel-members-trigger"
+          onClick={onToggleMembers}
+          type="button"
+          variant="outline"
+        >
+          <Users />
+          <span className="min-w-[1ch] text-sm font-medium tabular-nums">
+            {memberCount}
+          </span>
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Channel members</TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function ChannelMembersBar({
   channel,
   currentPubkey,
@@ -229,24 +260,10 @@ export function ChannelMembersBar({
       </div>
     ) : (
       <div className="flex items-center gap-[6px]">
-        <Tooltip disableHoverableContent>
-          <TooltipTrigger asChild>
-            <Button
-              aria-label={`View channel members (${memberCount})`}
-              className="h-8 px-2.5"
-              data-testid="channel-members-trigger"
-              onClick={onToggleMembers}
-              type="button"
-              variant="outline"
-            >
-              <Users />
-              <span className="min-w-[1ch] text-sm font-medium tabular-nums">
-                {memberCount}
-              </span>
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Channel members</TooltipContent>
-        </Tooltip>
+        <ChannelMembersButton
+          memberCount={memberCount}
+          onToggleMembers={onToggleMembers}
+        />
 
         {huddleIndicator}
 
