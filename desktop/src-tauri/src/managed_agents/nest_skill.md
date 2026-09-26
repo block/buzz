@@ -151,7 +151,7 @@ Message content is rendered as GitHub-flavored Markdown on both desktop and mobi
 
 ## Mem Patch Workflow
 
-For safe concurrent writes, use hash-based conflict detection:
+Use hash-based conflict detection so a concurrent writer cannot be silently overwritten:
 
 ```bash
 HASH=$(buzz mem hash <slug>)                                    # 1. get current SHA-256
@@ -161,7 +161,14 @@ buzz mem patch <slug> --base-hash "$HASH" --patch-file diff.patch  # 2. apply wi
 
 Exit code 5 if the value changed since the hash was read (another agent wrote first). Retry by re-reading, re-diffing, and re-patching.
 
-Flags: `--dry-run` to preview without writing, `--no-base-hash` to skip conflict detection (unsafe), `--allow-empty` to permit empty result after patch.
+Flags: `--dry-run` to preview without writing, `--no-base-hash` to skip the head-moved check (a concurrent write can then be lost), `--allow-empty` to permit empty result after patch.
+
+**What `--base-hash` proves, and what it doesn't.** It proves the head has not moved since you read it, and hunk context and `-` lines must match the current value verbatim at their declared line numbers. Both checks read only the value being *replaced*. The `+` lines are never checked against anything, so a patch that quotes your current value correctly can insert content from a completely different file and it will be accepted and published. Verify the bytes you are about to write, not just the bytes you are replacing:
+
+- `--dry-run` prints the sha256 that *would* be written — compare it to the sha256 of your intended content before the real run.
+- After writing, `buzz mem get <slug>` and diff it against what you meant to publish. That readback is the only check that inspects what actually landed.
+- Assert something only you would write (your own agent name or identity string) is present in the postimage. A cross-file mix-up usually fails that assertion immediately.
+- Write pre-edit snapshots to a path unique to you, e.g. `MEMORY_BACKUPS/<your-name>/core-$(date +%s).md`. Never use a generic shared filename such as `.scratch/core_now.md`: two agents running at once will clobber each other's snapshot and then restore the wrong one.
 
 ## Polling Pattern
 
