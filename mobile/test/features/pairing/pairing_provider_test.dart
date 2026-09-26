@@ -17,6 +17,32 @@ import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 /// Exercises payload validation, credential import, and cancellation across
 /// pairing and credential-validation socket lifetimes.
 void main() {
+  group('pairing endpoint diagnostics', () {
+    test('pairingEndpointNotFoundMessage mentions operator levers', () {
+      expect(
+        pairingEndpointNotFoundMessage('wss://relay.example/pair'),
+        contains('BUZZ_PAIRING_RELAY_URL'),
+      );
+    });
+
+    test('pairingLooksLikeMissingLegacyEndpoint detects /pair 404s', () {
+      expect(
+        pairingLooksLikeMissingLegacyEndpoint(
+          Exception('WebSocket connection failed: HTTP error: 404 Not Found'),
+          relayUrl: 'wss://relay.example/pair',
+        ),
+        isTrue,
+      );
+      expect(
+        pairingLooksLikeMissingLegacyEndpoint(
+          Exception('Connection refused'),
+          relayUrl: 'wss://relay.example/pair',
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('PairingNotifier', () {
     late ProviderContainer container;
     late FakeAuthNotifier fakeAuth;
