@@ -776,8 +776,8 @@ async fn navigate_host(
         }
         BrowserAgentSurface::Pin => {
             let parsed = Url::parse(url).map_err(|e| e.to_string())?;
-            if parsed.scheme() != "https" {
-                return Err("pin navigate must use https".into());
+            if parsed.scheme() != "https" && parsed.scheme() != "http" {
+                return Err("pin navigate must use http or https".into());
             }
             let webview = app
                 .get_webview(label)

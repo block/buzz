@@ -66,8 +66,17 @@ export function encodeTerminalKey(event: {
   ctrlKey: boolean;
   altKey: boolean;
   metaKey: boolean;
+  /** When true with Enter, emit CSI u Shift+Enter (newline in chat TUIs). */
+  shiftKey?: boolean;
 }): string | null {
   if (event.metaKey) return null;
+  // Shift+Enter must not collapse to CR — Claude Code / Codex / similar
+  // agent composers treat plain Enter as submit and CSI u Shift+Enter
+  // (`ESC [ 13 ; 2 u`) as insert-newline. Channel MessageComposer already
+  // uses Shift+Enter for hard breaks; Term was ignoring the Shift modifier.
+  if (event.key === "Enter" && event.shiftKey && !event.ctrlKey) {
+    return "\u001b[13;2u";
+  }
   const special: Readonly<Record<string, string>> = {
     Enter: "\r",
     Backspace: "\u007f",
@@ -103,6 +112,7 @@ export function encodeTerminalKeystroke(event: {
   ctrlKey: boolean;
   altKey: boolean;
   metaKey: boolean;
+  shiftKey?: boolean;
 }): string | null {
   const encoded = encodeTerminalKey(event);
   if (encoded) return encoded;
