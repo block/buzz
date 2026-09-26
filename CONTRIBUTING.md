@@ -76,6 +76,15 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 
 ## Setting Up the Development Environment
 
+### Docker permissions (Linux)
+
+`just setup` / `scripts/dev-setup.sh` need a working `docker info`. If the
+daemon is running but you see **permission denied**, add your user to the
+`docker` group and re-login (`sudo usermod -aG docker "$USER"`), or use
+rootless Docker / Docker Desktop. The setup script classifies this separately
+from a stopped daemon (#3713).
+
+
 ### Prerequisites
 
 | Tool | Version | Notes |
