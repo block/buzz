@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -166,29 +168,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     try {
       final session = ref.read(relaySessionProvider.notifier);
 
-      try {
-        final unsubscribe = await session.subscribe(
-          NostrFilter(
-            kinds: _channelLiveEventKinds,
-            tags: {
-              '#h': [channelId],
-            },
-            since: _currentUnixSeconds(),
-            limit: 200,
-          ),
-          _handleLiveEvent,
-        );
-        if (!_isCurrentInit(initVersion)) {
-          unsubscribe();
-          return;
-        }
-        _unsubscribe = unsubscribe;
-      } catch (error) {
-        if (!_isCurrentInit(initVersion)) return;
-        debugPrint(
-          '[ChannelMessagesNotifier] live subscription failed for $channelId: $error',
-        );
-      }
+      unawaited(_subscribeLive(session, initVersion));
 
       final historyVersion = ++_threadQuerySerial;
       final history = await _fetchNewestHistory(session);
@@ -222,6 +202,35 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         _initInFlight = false;
         _deletionOwnerQueue.resume();
       }
+    }
+  }
+
+  Future<void> _subscribeLive(
+    RelaySessionNotifier session,
+    int initVersion,
+  ) async {
+    try {
+      final unsubscribe = await session.subscribe(
+        NostrFilter(
+          kinds: _channelLiveEventKinds,
+          tags: {
+            '#h': [channelId],
+          },
+          since: _currentUnixSeconds(),
+          limit: 200,
+        ),
+        _handleLiveEvent,
+      );
+      if (!_isCurrentInit(initVersion)) {
+        unsubscribe();
+        return;
+      }
+      _unsubscribe = unsubscribe;
+    } catch (error) {
+      if (!_isCurrentInit(initVersion)) return;
+      debugPrint(
+        '[ChannelMessagesNotifier] live subscription failed for $channelId: $error',
+      );
     }
   }
 
