@@ -96,7 +96,15 @@ impl GitEnvironment {
         ));
         env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
         // CLI flags must work even when the caller did not export these variables.
-        env.push(("BUZZ_PRIVATE_KEY".into(), secret.to_string()));
+        //
+        // The buzz CLI reads its key from BUZZ_PRIVATE_KEY_FILE (a path, not a
+        // secret) rather than a raw BUZZ_PRIVATE_KEY value — this is the same
+        // keyfile already written above for git's nostr.keyfile config (`info`
+        // is derived from this same `keys`, so it's the identical secret).
+        // Putting the raw key in env would let any shell tool a model runs
+        // (buzz-dev-mcp's `shell` tool spawns children without env_clear())
+        // read it straight out via `env`/`/proc/self/environ`.
+        env.push(("BUZZ_PRIVATE_KEY_FILE".into(), info.keyfile_path.clone()));
         env.push(("BUZZ_RELAY_URL".into(), relay_url.to_owned()));
         // MCP children start from a cleared env; forward the resolved mode so a
         // nested harness keeps it instead of defaulting to `agent`.
@@ -386,7 +394,7 @@ pub(crate) fn is_managed_env(name: &str) -> bool {
             name,
             "PATH"
                 | "GIT_TERMINAL_PROMPT"
-                | "BUZZ_PRIVATE_KEY"
+                | "BUZZ_PRIVATE_KEY_FILE"
                 | "BUZZ_RELAY_URL"
                 | GIT_IDENTITY_ENV
         )
@@ -779,5 +787,21 @@ mod git_identity_mode_tests {
                 "{err}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod base_prompt_keyfile_tests {
+    /// The agents learn their auth environment from the base prompt. The raw key is no longer in the
+    /// shell (only BUZZ_PRIVATE_KEY_FILE is), so the prompt must name the file variable; a prompt that
+    /// still lists BUZZ_PRIVATE_KEY made a model write `BUZZ_PRIVATE_KEY="" buzz ...` and fail to send.
+    #[test]
+    fn base_prompt_names_the_keyfile_variable_not_the_raw_key() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("BUZZ_PRIVATE_KEY_FILE"));
+        assert!(
+            !prompt.contains("`BUZZ_PRIVATE_KEY`"),
+            "the base prompt must not list the raw key variable as an auth env var"
+        );
     }
 }
