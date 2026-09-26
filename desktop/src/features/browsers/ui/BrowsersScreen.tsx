@@ -60,6 +60,8 @@ import {
   buildBrowserConversationBindings,
 } from "../lib/browserBindings";
 import { disposeBrowserSession } from "../lib/disposeBrowserSession";
+import { sidRunbookRef } from "@/features/site-runbook/lib/keys";
+import { SiteRunbookOpenButton } from "@/features/site-runbook/ui/SiteRunbookDialog";
 import {
   type BrowserListRow,
   type DetachedBrowserHost,
@@ -527,6 +529,11 @@ export function BrowsersScreen() {
                       </div>
                       <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
                         {agentToggle}
+                        <SiteRunbookOpenButton
+                          label="Runbook"
+                          runbookRef={sidRunbookRef(row.mainSurfaceId)}
+                          testId={`browser-row-runbook-${row.key}`}
+                        />
                         {browserRowShowsOpenButton(row) ? (
                           <Button
                             aria-label={

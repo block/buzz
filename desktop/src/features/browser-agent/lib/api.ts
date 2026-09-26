@@ -263,3 +263,59 @@ export function subscribeBrowserAgentSwitchTab(
     (event) => onRequest(event.payload),
   );
 }
+
+export type BrowserAgentRunbookMirror = {
+  agentBrief: string;
+  procedures: Array<{ id: string; title: string; summary: string }>;
+};
+
+export type BrowserAgentRunbookFull = {
+  agentBrief: string;
+  procedures: Array<{
+    id: string;
+    title: string;
+    steps: string;
+    status: string;
+    sourceAgent?: string;
+    sourceChannel?: string;
+    createdAt: number;
+    updatedAt: number;
+    acceptedAt?: number;
+  }>;
+  updatedAt: number;
+};
+
+/** Mirror runbook inject + full copy next to the live grant for MCP tools. */
+export async function mirrorBrowserAgentRunbook(input: {
+  webviewLabel: string;
+  inject: BrowserAgentRunbookMirror;
+  full: BrowserAgentRunbookFull;
+}): Promise<void> {
+  if (!native()) return;
+  await invoke("browser_agent_mirror_runbook", {
+    input: {
+      webviewLabel: input.webviewLabel,
+      inject: input.inject,
+      full: input.full,
+    },
+  });
+}
+
+export type BrowserAgentRunbookPropose = {
+  title: string;
+  steps: string;
+  sourceAgent?: string;
+  sourceChannel?: string;
+  atMs?: number;
+};
+
+/** Drain agent runbook proposals written by MCP next to the grant. */
+export async function takeBrowserAgentRunbookProposes(
+  webviewLabel: string,
+): Promise<BrowserAgentRunbookPropose[]> {
+  if (!native()) return [];
+  return invoke<BrowserAgentRunbookPropose[]>(
+    "browser_agent_take_runbook_proposes",
+    { webviewLabel },
+  );
+}

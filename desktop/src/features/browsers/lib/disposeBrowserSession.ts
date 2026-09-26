@@ -9,6 +9,9 @@ import {
 import { closeEmbeddedWindow } from "@/features/popout/lib/embeddedWindows";
 import { closePopoutWindow } from "@/features/popout/lib/popoutWindows";
 
+import { sidRunbookRef } from "@/features/site-runbook/lib/keys";
+import { clearSiteRunbook } from "@/features/site-runbook/lib/store";
+
 import type { BrowserListRow } from "./browserRows";
 import { findGrantForRow } from "./browserRows";
 
@@ -77,6 +80,9 @@ export async function disposeBrowserSession(input: {
     disposePlaygroundBrowser(browserId);
   } else {
     disposePlayground(row.surfaceId);
+  }
+  for (const sid of surfaceIds) {
+    clearSiteRunbook(sidRunbookRef(sid));
   }
   return host;
 }

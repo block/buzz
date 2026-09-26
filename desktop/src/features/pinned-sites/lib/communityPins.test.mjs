@@ -5,6 +5,7 @@ import { KIND_COMMUNITY_PINNED_SITES } from "@/shared/constants/kinds.ts";
 
 import {
   parseCommunityPinnedSitesPayload,
+  parseCommunityPinnedSitesWithRunbooks,
   selectLatestCommunityPins,
 } from "./communityPins.ts";
 
@@ -87,4 +88,38 @@ test("parseCommunityPinnedSitesPayload respects openMatchingLinks false", () => 
   );
   assert.equal(pins.length, 1);
   assert.equal(pins[0].openMatchingLinks, false);
+});
+
+
+test("community pin runbook payload hydrates active procedures", () => {
+  const rows = parseCommunityPinnedSitesWithRunbooks(
+    JSON.stringify({
+      version: 1,
+      pins: [
+        {
+          id: "wf",
+          name: "Wayfinder",
+          url: "https://wayfinder.huladesk.com",
+          icon: "compass",
+          runbook: {
+            agentBrief: "Prefer left nav",
+            procedures: [
+              {
+                id: "p1",
+                title: "Open project",
+                steps: "Click Projects",
+                createdAt: 1,
+                updatedAt: 2,
+              },
+            ],
+          },
+        },
+      ],
+    }),
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].pin.id, "wf");
+  assert.equal(rows[0].runbook?.agentBrief, "Prefer left nav");
+  assert.equal(rows[0].runbook?.procedures[0]?.status, "active");
+  assert.equal(rows[0].runbook?.procedures[0]?.title, "Open project");
 });

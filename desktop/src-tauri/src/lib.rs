@@ -860,6 +860,8 @@ pub fn run() {
             browser_agent::browser_observe_poll,
             browser_agent::browser_drive,
             browser_agent::browser_agent_process_drive_inbox,
+            browser_agent::browser_agent_mirror_runbook,
+            browser_agent::browser_agent_take_runbook_proposes,
             push_audio_pcm,
             reconnect_huddle_audio,
             start_stt_pipeline,

@@ -355,11 +355,14 @@ pub fn observe_poll(p: ObservePollParams) -> Result<CallToolResult, ErrorData> {
             }
         }
     }
+    let runbook = read_json(&dir.join("runbook.json"));
     let body = json!({
         "grant": grant,
         "webviewLabel": label,
         "surfaceId": grant_surface_id(&grant),
+        "runbook": runbook,
         "events": events,
+        "runbookNote": "runbook.agentBrief + active procedure titles/summaries. Use browser_runbook_get for full steps; browser_runbook_propose to add a pending procedure (human Accept required)."
     });
     Ok(CallToolResult::success(vec![Content::text(
         body.to_string(),
@@ -1326,3 +1329,262 @@ mod tests {
 
 }
 
+
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunbookGetParams {
+    /// Live webview label (fragile across popout). Prefer `surface_id`.
+    #[serde(default)]
+    pub webview_label: String,
+    #[serde(default)]
+    pub surface_id: Option<String>,
+    /// When set, return that procedure's full steps from runbook-full.json.
+    #[serde(default)]
+    pub procedure_id: Option<String>,
+}
+
+/// Return runbook inject index, or one procedure's full steps.
+pub fn runbook_get(p: RunbookGetParams) -> Result<CallToolResult, ErrorData> {
+    let Some(pubkey) = caller_pubkey() else {
+        return Err(ErrorData::invalid_params(
+            "BUZZ_AGENT_PUBKEY required for browser_runbook_get",
+            None,
+        ));
+    };
+    let (dir, grant, label) = resolve_grant_target(
+        &pubkey,
+        &p.webview_label,
+        p.surface_id.as_deref(),
+    )?;
+    let inject = read_json(&dir.join("runbook.json")).unwrap_or_else(|| json!({
+        "agentBrief": "",
+        "procedures": []
+    }));
+    if let Some(proc_id) = p.procedure_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let full = read_json(&dir.join("runbook-full.json")).unwrap_or(json!({}));
+        let procedures = full
+            .get("procedures")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let found = procedures.into_iter().find(|entry| {
+            entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| id == proc_id)
+                .unwrap_or(false)
+        });
+        let Some(procedure) = found else {
+            return Err(ErrorData::invalid_params(
+                format!("procedure_id={proc_id} not found in runbook"),
+                None,
+            ));
+        };
+        let body = json!({
+            "webviewLabel": label,
+            "surfaceId": grant_surface_id(&grant),
+            "procedure": procedure,
+        });
+        return Ok(CallToolResult::success(vec![Content::text(body.to_string())]));
+    }
+    let body = json!({
+        "webviewLabel": label,
+        "surfaceId": grant_surface_id(&grant),
+        "runbook": inject,
+        "note": "Pass procedure_id to fetch full steps for one active/pending/archived entry."
+    });
+    Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunbookProposeParams {
+    /// Live webview label (fragile across popout). Prefer `surface_id`.
+    #[serde(default)]
+    pub webview_label: String,
+    #[serde(default)]
+    pub surface_id: Option<String>,
+    pub title: String,
+    pub steps: String,
+}
+
+/// Queue a pending procedure for human Accept in Desktop (never auto-activates).
+pub fn runbook_propose(p: RunbookProposeParams) -> Result<CallToolResult, ErrorData> {
+    let Some(pubkey) = caller_pubkey() else {
+        return Err(ErrorData::invalid_params(
+            "BUZZ_AGENT_PUBKEY required for browser_runbook_propose",
+            None,
+        ));
+    };
+    let title = p.title.trim().to_string();
+    if title.is_empty() {
+        return Err(ErrorData::invalid_params("title is required", None));
+    }
+    let (dir, grant, label) = resolve_grant_target(
+        &pubkey,
+        &p.webview_label,
+        p.surface_id.as_deref(),
+    )?;
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join("runbook-propose.jsonl");
+    let line = json!({
+        "title": title,
+        "steps": p.steps,
+        "sourceAgent": pubkey,
+        "sourceChannel": grant.get("channelId").and_then(|v| v.as_str()),
+        "atMs": now_ms(),
+    });
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    writeln!(file, "{line}")
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    let body = json!({
+        "ok": true,
+        "queued": true,
+        "webviewLabel": label,
+        "surfaceId": grant_surface_id(&grant),
+        "title": title,
+        "note": "Pending until a human Accepts in Desktop Runbook UI. Does not auto-activate."
+    });
+    Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
+}
+
+#[cfg(test)]
+mod runbook_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<R>(dir: &Path, pubkey: &str, f: impl FnOnce() -> R) -> R {
+        let _g = LOCK.lock().unwrap();
+        TEST_AGENT_DIR.with(|c| *c.borrow_mut() = Some(dir.to_path_buf()));
+        TEST_PUBKEY.with(|c| *c.borrow_mut() = Some(pubkey.to_string()));
+        let out = f();
+        TEST_AGENT_DIR.with(|c| *c.borrow_mut() = None);
+        TEST_PUBKEY.with(|c| *c.borrow_mut() = None);
+        out
+    }
+
+    fn seed_grant(dir: &Path, label: &str, pubkey: &str, sid: &str) {
+        let gdir = dir.join(label);
+        fs::create_dir_all(&gdir).unwrap();
+        let grant = json!({
+            "webviewLabel": label,
+            "surface": "playground",
+            "surfaceId": sid,
+            "agentId": pubkey,
+            "agentPubkey": pubkey,
+            "channelId": "ch1",
+            "mode": "drive",
+            "userHasControl": false,
+            "createdAtMs": 1
+        });
+        fs::write(gdir.join("grant.json"), grant.to_string()).unwrap();
+    }
+
+    #[test]
+    fn runbook_get_returns_inject_and_procedure() {
+        let dir = tempfile::tempdir().unwrap();
+        let pubkey = "aa".repeat(32);
+        let label = "playground-sid1";
+        seed_grant(dir.path(), label, &pubkey, "sid1");
+        let gdir = dir.path().join(label);
+        fs::write(
+            gdir.join("runbook.json"),
+            json!({
+                "agentBrief": "Use SSO",
+                "procedures": [{"id":"p1","title":"Login","summary":"Click Sign in"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            gdir.join("runbook-full.json"),
+            json!({
+                "agentBrief": "Use SSO",
+                "procedures": [{
+                    "id":"p1",
+                    "title":"Login",
+                    "steps":"1. Click Sign in\n2. Wait",
+                    "status":"active",
+                    "createdAt":1,
+                    "updatedAt":1
+                }],
+                "updatedAt": 1
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        with_env(dir.path(), &pubkey, || {
+            let index = runbook_get(RunbookGetParams {
+                webview_label: label.into(),
+                surface_id: None,
+                procedure_id: None,
+            })
+            .unwrap();
+            let text = format!("{index:?}");
+            assert!(text.contains("Use SSO"), "{text}");
+            assert!(text.contains("Login"), "{text}");
+
+            let detail = runbook_get(RunbookGetParams {
+                webview_label: String::new(),
+                surface_id: Some("sid1".into()),
+                procedure_id: Some("p1".into()),
+            })
+            .unwrap();
+            let text = format!("{detail:?}");
+            assert!(text.contains("Click Sign in"), "{text}");
+        });
+    }
+
+    #[test]
+    fn runbook_propose_appends_pending_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let pubkey = "bb".repeat(32);
+        let label = "playground-sid2";
+        seed_grant(dir.path(), label, &pubkey, "sid2");
+        with_env(dir.path(), &pubkey, || {
+            runbook_propose(RunbookProposeParams {
+                webview_label: label.into(),
+                surface_id: None,
+                title: "How to filter".into(),
+                steps: "Open Filters".into(),
+            })
+            .unwrap();
+            let raw = fs::read_to_string(dir.path().join(label).join("runbook-propose.jsonl"))
+                .unwrap();
+            assert!(raw.contains("How to filter"));
+            assert!(raw.contains("Open Filters"));
+            assert!(raw.contains(&pubkey));
+        });
+    }
+
+    #[test]
+    fn observe_poll_includes_runbook() {
+        let dir = tempfile::tempdir().unwrap();
+        let pubkey = "cc".repeat(32);
+        let label = "playground-sid3";
+        seed_grant(dir.path(), label, &pubkey, "sid3");
+        fs::write(
+            dir.path().join(label).join("runbook.json"),
+            json!({"agentBrief":"brief","procedures":[]}).to_string(),
+        )
+        .unwrap();
+        with_env(dir.path(), &pubkey, || {
+            let result = observe_poll(ObservePollParams {
+                webview_label: label.into(),
+                surface_id: None,
+                after_id: None,
+                limit: None,
+            })
+            .unwrap();
+            let text = format!("{result:?}");
+            assert!(text.contains("runbook"), "{text}");
+            assert!(text.contains("brief"), "{text}");
+        });
+    }
+}
