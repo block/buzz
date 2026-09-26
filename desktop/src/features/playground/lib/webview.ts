@@ -104,6 +104,9 @@ export const PLAYGROUND_WEBVIEW_RESTORE_EVENT =
  */
 const playgroundShowGeneration = new Map<string, number>();
 
+/** Last on-stage / visible bounds per sid — keeper park must not invent 64×64. */
+const playgroundLastVisibleBounds = new Map<string, PlaygroundWebviewBounds>();
+
 export function getPlaygroundShowGeneration(sid: string): number {
   return playgroundShowGeneration.get(sid) ?? 0;
 }
@@ -111,6 +114,44 @@ export function getPlaygroundShowGeneration(sid: string): number {
 /** Test helper. */
 export function resetPlaygroundShowGeneration(): void {
   playgroundShowGeneration.clear();
+  playgroundLastVisibleBounds.clear();
+}
+
+/**
+ * Bounds for a parked (visible:false) keeper show. Prefer the last full stage
+ * size so Drive/Observe keep a real viewport while the React host is closed.
+ * Falls back to the legacy off-screen 64×64 square only when never shown.
+ */
+export function playgroundKeeperParkBounds(
+  sid: string,
+  fallback: PlaygroundWebviewBounds = {
+    x: -64,
+    y: -64,
+    width: 64,
+    height: 64,
+  },
+): PlaygroundWebviewBounds {
+  const last = playgroundLastVisibleBounds.get(sid);
+  if (
+    last &&
+    last.width >= MIN_PLAYGROUND_WEBVIEW_EDGE &&
+    last.height >= MIN_PLAYGROUND_WEBVIEW_EDGE &&
+    (last.width > 64 || last.height > 64)
+  ) {
+    return {
+      x: fallback.x,
+      y: fallback.y,
+      width: last.width,
+      height: last.height,
+    };
+  }
+  return { ...fallback };
+}
+
+export function getPlaygroundLastVisibleBounds(
+  sid: string,
+): PlaygroundWebviewBounds | undefined {
+  return playgroundLastVisibleBounds.get(sid);
 }
 
 function nextPlaygroundShowGeneration(sid: string): number {
@@ -144,6 +185,9 @@ export async function showPlaygroundWebview(input: {
   const generationAtStart = wantVisible
     ? nextPlaygroundShowGeneration(input.sid)
     : (playgroundShowGeneration.get(input.sid) ?? 0);
+  if (wantVisible && playgroundWebviewBoundsAreUsable(input.bounds)) {
+    playgroundLastVisibleBounds.set(input.sid, { ...input.bounds });
+  }
   const nav = await invokePlayground(
     "playground_webview_show",
     {
@@ -167,11 +211,15 @@ export async function showPlaygroundWebview(input: {
 }
 
 export async function hidePlaygroundWebview(sid: string): Promise<void> {
+  // Intentional park / unmount releases stage ownership so a concurrent
+  // keeper does not dispatch restore into a tearing-down host.
+  playgroundShowGeneration.delete(sid);
   await invokePlayground("playground_webview_hide", { sid }, undefined);
 }
 
 export async function hideAllPlaygroundWebviews(): Promise<void> {
   if (!isNativePlaygroundRuntime()) return;
+  playgroundShowGeneration.clear();
   await invoke("playground_webview_hide_all", withWindowLabel({}));
 }
 

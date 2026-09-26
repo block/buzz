@@ -52,10 +52,12 @@ import {
   hidePlaygroundWebview,
   playgroundWebviewDomHash,
   pollPlaygroundWebview,
+  playgroundKeeperParkBounds,
   showPlaygroundWebview,
   subscribePlaygroundNewTab,
 } from "./webview.ts";
 
+/** Legacy off-screen placeholder; prefer {@link playgroundKeeperParkBounds}. */
 const KEEPER_BOUNDS = { x: -64, y: -64, width: 64, height: 64 };
 const domBaselines = new Map<string, string>();
 
@@ -333,10 +335,14 @@ function usePlaygroundWebviewKeeper() {
         void hidePlaygroundWebview(session.sid);
         continue;
       }
+      // Keep last full stage size while parked. Shrinking to 64×64 collapsed
+      // the live page viewport and broke Drive clicks ("no element") until the
+      // user re-opened the card. Native show also refuses to apply keeper
+      // park bounds on an existing WKWebView.
       void showPlaygroundWebview({
         sid: session.sid,
         url: session.url,
-        bounds: KEEPER_BOUNDS,
+        bounds: playgroundKeeperParkBounds(session.sid, KEEPER_BOUNDS),
         visible: false,
       }).then(() =>
         evalPlaygroundWebview(session.sid, PLAYGROUND_DOM_PROBE_SCRIPT),
