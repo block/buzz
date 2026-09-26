@@ -25,12 +25,11 @@ const CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.buzz.app.dev";
 const LEGACY_CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.sprout.app.dev";
 const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.sprout.app";
 
-/// JSON files symlinked from worktree data directories to the canonical
-/// dev data directory. Only data files — never `agent-pids/` or `logs/`.
-/// `identity.key` is deliberately excluded because worktree instances
-/// receive their identity via the `BUZZ_PRIVATE_KEY` env var.
+/// JSON files shared through symlinks. `agent-pids/`, `logs/`, and `identity.key` stay local.
+/// Worktrees receive the identity through `BUZZ_PRIVATE_KEY`.
 const SHARED_AGENT_FILES: &[&str] = &[
     "agents/managed-agents.json",
+    "agents/pending-team-membership.json",
     "agents/personas.json",
     "agents/teams.json",
 ];
@@ -185,6 +184,7 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // Repair dropped team↔member links, then detach directory-backed teams,
     // gated on a clean repair so a failure preserves `source_dir` for a retry.
     team_membership::repair_then_detach_teams(app);
+    team_membership::replay_pending_team_membership_update(app);
     reconcile_provider_mcp_commands(app);
     reconcile_databricks_v1_to_v2(app);
     materialize_agent_runtimes(app);
