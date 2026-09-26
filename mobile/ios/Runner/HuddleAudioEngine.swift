@@ -412,6 +412,7 @@ final class HuddleAudioEngine {
   private let onLocalPacket: (HuddleLocalOpusPacket) -> Void
   private let onFailure: (String, String) -> Void
   private let onDiagnostics: (HuddleCaptureDiagnostics) -> Void
+  private let onCapture: (AVAudioPCMBuffer) -> Void
   private let diagnosticsEnabled: Bool
   private let audioEngine = AVAudioEngine()
   private let processingQueue = DispatchQueue(
@@ -448,6 +449,7 @@ final class HuddleAudioEngine {
     onLocalPacket: @escaping (HuddleLocalOpusPacket) -> Void,
     onFailure: @escaping (String, String) -> Void,
     onDiagnostics: @escaping (HuddleCaptureDiagnostics) -> Void,
+    onCapture: @escaping (AVAudioPCMBuffer) -> Void,
     diagnosticsEnabled: Bool
   ) throws {
     pcmFormat = try HuddleAudioFormats.makePCM()
@@ -455,6 +457,7 @@ final class HuddleAudioEngine {
     self.onLocalPacket = onLocalPacket
     self.onFailure = onFailure
     self.onDiagnostics = onDiagnostics
+    self.onCapture = onCapture
     self.diagnosticsEnabled = diagnosticsEnabled
     configurationObserver = NotificationCenter.default.addObserver(
       forName: .AVAudioEngineConfigurationChange,
@@ -717,10 +720,12 @@ final class HuddleAudioEngine {
   private func processCapturedBuffer(_ input: AVAudioPCMBuffer) throws {
     stateLock.lock()
     let isRunning = running
+    let shouldRecognize = !muted && !interrupted
     stateLock.unlock()
     guard isRunning else { return }
 
     let normalized = try normalizeCapturedBuffer(input)
+    if shouldRecognize { onCapture(normalized) }
     guard let channel = normalized.floatChannelData?.pointee else {
       throw HuddleNativeMediaError.conversion(
         "iOS microphone PCM data is unavailable."

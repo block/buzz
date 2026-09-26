@@ -1,5 +1,6 @@
 import AVFoundation
 import Flutter
+import Speech
 import UIKit
 
 /// Foreground-only native seam for iOS Huddle media.
@@ -8,6 +9,8 @@ import UIKit
 /// Opus capture/playout, interruptions, and the built-in output toggle.
 final class HuddleMediaPlugin {
   private let channel: FlutterMethodChannel
+  private let speechChannel: FlutterMethodChannel
+  private var speech: HuddleSpeech?
   private let audioSession = AVAudioSession.sharedInstance()
   private var audioSessionPrepared = false
   private var speakerEnabled = false
@@ -20,6 +23,10 @@ final class HuddleMediaPlugin {
       name: "buzz/huddle_media",
       binaryMessenger: messenger
     )
+    speechChannel = FlutterMethodChannel(name: "buzz/huddle_speech", binaryMessenger: messenger)
+    speechChannel.setMethodCallHandler { [weak self] call, result in
+      self?.handleSpeech(call, result: result)
+    }
     channel.setMethodCallHandler { [weak self] call, result in
       self?.handle(call, result: result)
     }
@@ -41,6 +48,8 @@ final class HuddleMediaPlugin {
 
   deinit {
     channel.setMethodCallHandler(nil)
+    speechChannel.setMethodCallHandler(nil)
+    speech?.stop()
     audioEngine?.stop()
     audioEngine = nil
     if let interruptionObserver {
@@ -83,6 +92,39 @@ final class HuddleMediaPlugin {
       removeRemotePeer(arguments: call.arguments, result: result)
     case "stop":
       stop(result: result)
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  private func handleSpeech(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    switch call.method {
+    case "start":
+      guard audioEngine != nil else {
+        result(FlutterError(code: "invalid_state", message: "Join the Huddle first.", details: nil))
+        return
+      }
+      if speech == nil {
+        speech = HuddleSpeech(
+          onTranscript: { [weak self] text in
+            self?.speechChannel.invokeMethod("transcript", arguments: ["text": text])
+          },
+          onError: { [weak self] message in
+            self?.speechChannel.invokeMethod("error", arguments: ["message": message])
+          }
+        )
+      }
+      speech?.start(result: result)
+    case "stop":
+      speech?.stop()
+      result(nil)
+    case "speak":
+      guard let text = (call.arguments as? [String: Any])?["text"] as? String else {
+        result(FlutterError(code: "invalid_arguments", message: "Missing speech text.", details: nil))
+        return
+      }
+      speech?.speak(text)
+      result(nil)
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -241,6 +283,11 @@ final class HuddleMediaPlugin {
         },
         onDiagnostics: { [weak self] diagnostics in
           self?.emitCaptureDiagnostics(diagnostics)
+        },
+        onCapture: { [weak self] buffer in
+          DispatchQueue.main.async { [weak self] in
+            self?.speech?.append(buffer)
+          }
         },
         diagnosticsEnabled: Self.diagnosticsEnabled
       )
@@ -452,6 +499,7 @@ final class HuddleMediaPlugin {
   }
 
   private func handleMediaServicesReset() {
+    speech?.stop()
     guard audioSessionPrepared || audioEngine != nil else { return }
     audioEngine?.stop()
     audioEngine = nil
@@ -464,6 +512,7 @@ final class HuddleMediaPlugin {
   }
 
   private func stop(result: @escaping FlutterResult) {
+    speech?.stop()
     audioEngine?.stop()
     audioEngine = nil
     guard audioSessionPrepared else {
@@ -560,5 +609,129 @@ final class HuddleMediaPlugin {
     #else
       false
     #endif
+  }
+}
+
+private final class HuddleSpeech: NSObject, AVSpeechSynthesizerDelegate {
+  private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+  private let synthesizer = AVSpeechSynthesizer()
+  private let onTranscript: (String) -> Void
+  private let onError: (String) -> Void
+  private var request: SFSpeechAudioBufferRecognitionRequest?
+  private var task: SFSpeechRecognitionTask?
+  private var generation = 0
+  private var latestText = ""
+  private var silentSamples = 0
+  private var listening = false
+  private var speaking = false
+
+  init(onTranscript: @escaping (String) -> Void, onError: @escaping (String) -> Void) {
+    self.onTranscript = onTranscript
+    self.onError = onError
+    super.init()
+    synthesizer.delegate = self
+  }
+
+  func start(result: @escaping FlutterResult) {
+    guard recognizer?.supportsOnDeviceRecognition == true, recognizer?.isAvailable == true else {
+      result(FlutterError(code: "on_device_speech_unavailable", message: "On-device English speech recognition is unavailable.", details: nil))
+      return
+    }
+    SFSpeechRecognizer.requestAuthorization { [weak self] status in
+      DispatchQueue.main.async {
+        guard status == .authorized, let self else {
+          result(FlutterError(code: "speech_permission_denied", message: "Allow speech recognition in Settings.", details: nil))
+          return
+        }
+        self.listening = true
+        self.beginSegment()
+        result(nil)
+      }
+    }
+  }
+
+  func stop() {
+    listening = false
+    speaking = false
+    clearSegment()
+    synthesizer.stopSpeaking(at: .immediate)
+  }
+
+  func append(_ buffer: AVAudioPCMBuffer) {
+    guard listening, !speaking, let request else { return }
+    request.append(buffer)
+    guard let samples = buffer.floatChannelData?.pointee, buffer.frameLength > 0 else { return }
+    let count = Int(buffer.frameLength)
+    let energy = (0..<count).reduce(Float.zero) { $0 + samples[$1] * samples[$1] }
+    if energy / Float(count) > 0.000025 {
+      silentSamples = 0
+    } else if !latestText.isEmpty {
+      silentSamples += count
+      if silentSamples >= Int(buffer.format.sampleRate * 0.9) {
+        finishSegment()
+      }
+    }
+  }
+
+  func speak(_ text: String) {
+    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    speaking = true
+    clearSegment()
+    synthesizer.stopSpeaking(at: .immediate)
+    let utterance = AVSpeechUtterance(string: String(text.prefix(500)))
+    utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+    synthesizer.speak(utterance)
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+    speaking = false
+    if listening { beginSegment() }
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+    if listening && !speaking { beginSegment() }
+  }
+
+  private func beginSegment() {
+    guard listening, !speaking else { return }
+    clearSegment()
+    let request = SFSpeechAudioBufferRecognitionRequest()
+    request.requiresOnDeviceRecognition = true
+    request.shouldReportPartialResults = true
+    request.taskHint = .dictation
+    self.request = request
+    let currentGeneration = generation
+    task = recognizer?.recognitionTask(with: request) { [weak self] result, error in
+      DispatchQueue.main.async {
+        guard let self, self.listening, self.generation == currentGeneration else { return }
+        if let error {
+          self.listening = false
+          self.clearSegment()
+          self.onError(error.localizedDescription)
+          return
+        }
+        if let result {
+          self.latestText = result.bestTranscription.formattedString
+          if result.isFinal { self.finishSegment() }
+        }
+      }
+    }
+  }
+
+  private func finishSegment() {
+    let text = latestText.trimmingCharacters(in: .whitespacesAndNewlines)
+    clearSegment()
+    if !text.isEmpty { onTranscript(text) }
+    beginSegment()
+  }
+
+  private func clearSegment() {
+    generation += 1
+    request?.endAudio()
+    task?.cancel()
+    request = nil
+    task = nil
+    latestText = ""
+    silentSamples = 0
   }
 }

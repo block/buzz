@@ -703,6 +703,11 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                   ),
                 ),
                 if (connected)
+                  _HuddleAgentVoice(
+                    parentChannelId: invite.parentChannelId,
+                    ephemeralChannelId: invite.ephemeralChannelId,
+                  ),
+                if (connected)
                   _HuddleCallControls(
                     isMuted: session.isMuted,
                     isSpeakerEnabled: session.isSpeakerEnabled,
