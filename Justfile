@@ -134,6 +134,30 @@ desktop-install-ci:
 desktop-check:
     cd {{desktop_dir}} && pnpm check
 
+# Build the dedicated terminal client's local signing host
+terminal-build:
+    cargo build -p buzz-terminal-host -p buzz-cli
+
+# Run the terminal without contacting a relay
+terminal-demo:
+    pnpm --dir terminal demo
+
+# Run the terminal using explicitly configured relay credentials
+terminal: terminal-build
+    pnpm --dir terminal start
+
+# Check the terminal client independently of desktop/mobile
+terminal-check:
+    pnpm --dir terminal check
+    cargo fmt -p buzz-terminal-host -p buzz-cli -- --check
+    cargo clippy -p buzz-terminal-host -p buzz-cli --all-targets -- -D warnings
+
+# Test terminal rendering/state and the real host's local WebSocket protocol
+terminal-test:
+    pnpm --dir terminal test
+    cargo test -p buzz-terminal-host
+    cargo test -p buzz-cli --bin buzz
+
 # Fix desktop lint and format issues
 desktop-fix:
     cd {{desktop_dir}} && pnpm exec biome check --write .
@@ -350,7 +374,7 @@ desktop-e2e-pre-push: _ensure-migrations
     cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
+ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test terminal-check terminal-test
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 

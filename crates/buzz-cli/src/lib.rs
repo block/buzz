@@ -103,6 +103,11 @@ where
     long_about = "\
 Buzz CLI — interact with a Buzz relay
 
+Interactive terminal (Node 24 and terminal assets required):
+  buzz                       Create a fresh private channel
+  buzz join <channel-uuid>    Open an existing channel
+  buzz --demo                Offline terminal preview
+
 Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]

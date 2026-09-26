@@ -1,0 +1,30 @@
+[package]
+name = "buzz-terminal-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+buzz-core = { workspace = true }
+buzz-sdk = { workspace = true }
+buzz-ws-client = { workspace = true }
+futures-util = { workspace = true }
+nostr = { workspace = true }
+reqwest = { workspace = true }
+rustls = { version = "0.23", features = ["ring"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-std"] }
+tokio-util = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio-tungstenite = { workspace = true }
+
+[[bin]]
+name = "buzz-terminal-host"
+path = "src/main.rs"
