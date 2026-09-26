@@ -187,20 +187,12 @@ pub(crate) async fn connect_audio_relay(
     let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
 
     // TTS interrupt flags — recv task cancels TTS when remote humans speak.
-    let (
-        tts_cancel,
-        tts_active,
-        local_tts_publishers,
-        remote_stt_pipeline,
-        agent_pubkeys,
-        human_floor,
-    ) = {
+    let (tts_cancel, tts_active, local_tts_publishers, agent_pubkeys, human_floor) = {
         let hs = state.huddle()?;
         (
             Arc::clone(&hs.tts_cancel),
             Arc::clone(&hs.tts_active),
             Arc::clone(&hs.local_tts_publishers),
-            Arc::clone(&hs.remote_stt_pipeline),
             Arc::clone(&hs.agent_pubkeys),
             hs.human_floor.clone(),
         )
@@ -233,7 +225,6 @@ pub(crate) async fn connect_audio_relay(
             tts_cancel,
             tts_active,
             local_tts_publishers,
-            remote_stt_pipeline,
             agent_pubkeys,
             human_floor,
             output_device_name,
@@ -458,7 +449,6 @@ struct AudioRelayPipelineArgs {
     tts_cancel: Arc<AtomicBool>,
     tts_active: Arc<AtomicBool>,
     local_tts_publishers: super::tts::LocalTtsPublishers,
-    remote_stt_pipeline: Arc<std::sync::Mutex<Option<std::sync::Weak<super::stt::SttPipeline>>>>,
     agent_pubkeys: Arc<std::sync::Mutex<Vec<String>>>,
     human_floor: super::human_floor::HumanFloor,
     output_device_name: Option<String>,
@@ -475,7 +465,6 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         tts_cancel,
         tts_active,
         local_tts_publishers,
-        remote_stt_pipeline,
         agent_pubkeys,
         human_floor,
         output_device_name,
@@ -588,7 +577,6 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         tts_active,
         tts_cancel,
         local_tts_publishers,
-        remote_stt_pipeline,
         agent_pubkeys,
         human_floor,
     ));
