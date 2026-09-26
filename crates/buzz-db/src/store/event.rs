@@ -1732,7 +1732,12 @@ pub async fn insert_channel_head_checked(
     let received_at = Utc::now();
     let incoming_id = event.id.as_bytes();
 
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     // Serialize check+insert per (community, kind, channel).
     let lock_key = event_replacement_lock_key(
