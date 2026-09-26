@@ -1324,6 +1324,44 @@ async fn test_unarchive_emits_member_added_notification() {
     ws.disconnect().await.expect("disconnect");
 }
 
+/// Deleting an archived channel must succeed without an unarchive first.
+/// Archive is a write-lock, not a tombstone — kind:9008 is an allowed exception,
+/// matching the huddle/ephemeral-reaper path that archives backing channels.
+#[tokio::test]
+#[ignore]
+async fn test_owner_can_delete_archived_channel() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let channel_id = create_test_channel(&owner_keys).await;
+
+    let mut ws = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+
+    let archive = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["archived", "true"]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let ok = ws.send_event(archive).await.expect("send archive");
+    assert!(ok.accepted, "archive rejected: {}", ok.message);
+
+    let delete = EventBuilder::new(Kind::Custom(9008), "")
+        .tags([Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let ok = ws.send_event(delete).await.expect("send delete-group");
+    assert!(
+        ok.accepted,
+        "delete of archived channel rejected: {}",
+        ok.message
+    );
+
+    ws.disconnect().await.expect("disconnect");
+}
+
 /// NIP-29 kind 9000 (PUT_USER): "nobody" policy blocks a third party from adding the agent.
 #[tokio::test]
 #[ignore]
