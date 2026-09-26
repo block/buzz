@@ -486,6 +486,10 @@ export function OnboardingFlow({
           }}
           onChangeCommunity={() => setIsCommunityChangeOpen(true)}
           onImportKey={importExistingKey}
+          onInviteRedeemStarted={() => {
+            setTransitionDirection("forward");
+            setCurrentPage(deniedFromPage);
+          }}
           onRetry={() => {
             void saveProfileAndContinue(membershipRetryPage);
           }}
