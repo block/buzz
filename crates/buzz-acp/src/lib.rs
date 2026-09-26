@@ -5305,6 +5305,16 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_says_plain_text_is_never_delivered() {
+        // Without this, agents whose runtime treats the final assistant text
+        // as the reply (e.g. Claude Code via claude-agent-acp) answer DMs in
+        // plain text and never call `buzz messages send` (#6984).
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("so is your final text response"));
+        assert!(prompt.contains("plain assistant text is never delivered to anyone"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_real_newlines_for_multiline_messages() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("pass real newline bytes through stdin"));
