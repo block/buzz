@@ -158,6 +158,15 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
     KNOWN_ACP_RUNTIMES.iter().find(|p| p.id == id)
 }
 
+/// The ids of every builtin (tier-1) ACP runtime, for ID reservation.
+/// Derived at compile time — no hand-maintained copy: adding a runtime to
+/// `KNOWN_ACP_RUNTIMES` automatically reserves its id.
+pub(crate) fn known_acp_runtime_ids() -> &'static [&'static str] {
+    static IDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    IDS.get_or_init(|| KNOWN_ACP_RUNTIMES.iter().map(|runtime| runtime.id).collect())
+        .as_slice()
+}
+
 /// The agent command a freshly-created agent defaults to when the create
 /// request supplies none. Resolves the bundled `buzz-agent` from the catalog so
 /// the default cannot drift from the provider definition. Falls back to the id

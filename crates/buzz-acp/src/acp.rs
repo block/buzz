@@ -4969,4 +4969,185 @@ mod tests {
             "error must mention sandbox_workspace_write"
         );
     }
+
+    // ── DSH (DeepSeek Harness) fake-agent e2e ───────────────────────────────────
+    //
+    // The dsh ACP runtime (desktop discovery/catalog.rs: builtin `dsh`) is
+    // validated end to end against a fake ACP child that mirrors the real DSH
+    // ACP profile's wire contract (packages/acp: initialize → agentInfo
+    // `deepseek-harness-acp`; session/new → {sessionId, configOptions} with a
+    // `category:"model"` live catalog picker; session/set_config_option for
+    // model switching; session/prompt → {stopReason}).
+    //
+    // Request id sequence from AcpClient (next_id starts at 0):
+    // initialize = 0, session/new = 1, set_config_option = 2, prompt = 3.
+    //
+    // This is the Phase-2 "discovery row → readiness → spawn → one turn" proof
+    // for the dsh runtime: discovery/readiness are covered by the
+    // `dsh_is_exposed_in_the_runtime_catalog` test in the desktop crate; here
+    // we prove a buzz-acp child spawned exactly as the desktop spawns dsh
+    // (the bundled relay execs `dsh --profile acp` — the desktop pins the
+    // profile via `BUZZ_ACP_AGENT_ARGS`, see `apply_dsh_spawn_args` in the
+    // desktop's runtime.rs) survives the full turn loop without protocol
+    // errors.
+
+    /// DSH wire-shape fragments, shared by the fakes below (real ids/keys from
+    /// packages/acp/src/index.ts + model-control.ts).
+    const DSH_AGENT_INFO: &str = "{\"name\":\"deepseek-harness-acp\",\"version\":\"0.0.1\"}";
+    const DSH_MODEL_OPTION: &str = "{\"id\":\"model\",\"name\":\"Model\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":\"deepseek/deepseek-v4-flash\",\"options\":[{\"group\":\"deepseek\",\"name\":\"DeepSeek\",\"options\":[{\"value\":\"deepseek/deepseek-v4-flash\",\"name\":\"deepseek-v4-flash\"}]}]}";
+    const DSH_THOUGHT_OPTION: &str = "{\"id\":\"thought_level\",\"name\":\"Reasoning effort\",\"category\":\"thought_level\",\"type\":\"select\",\"currentValue\":\"default\",\"options\":[{\"value\":\"default\",\"name\":\"Provider default\"}]}";
+
+    /// Spawn a fake `dsh --profile acp` child whose bash script is written by
+    /// `script_body` (POSIX shell; reads stdin lines, responds on stdout).
+    async fn spawn_dsh_fake(script_body: impl AsRef<str>) -> AcpClient {
+        AcpClient::spawn(
+            "bash",
+            &["-c".into(), format!("{}\n", script_body.as_ref())],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake dsh --profile acp child")
+    }
+
+    #[tokio::test]
+    async fn dsh_runtime_invocation_handshakes_like_the_real_acp_profile() {
+        // The exact invocation the desktop produces: the bundled relay execs
+        // `dsh --profile acp` (profile pinned via BUZZ_ACP_AGENT_ARGS). The
+        // fake child speaks the DSH ACP surface only — initialize — and the
+        // turn never sends session/load or session/resume (buzz-acp is
+        // session/new-only; DSH rejects load/fork, a non-collision).
+        let script = r#"read -t 5 REQ
+echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentInfo":{"name":"deepseek-harness-acp","version":"0.0.1"},"agentCapabilities":{"sessionCapabilities":{"list":{},"close":{}}},"authMethods":[]}}'
+"#;
+        let mut client = spawn_dsh_fake(script).await;
+        let init = client
+            .initialize()
+            .await
+            .expect("dsh fake initialize failed");
+        assert_eq!(
+            init["protocolVersion"].as_u64(),
+            Some(1),
+            "DSH reports its single supported ACP version"
+        );
+        assert_eq!(
+            init["agentInfo"]["name"].as_str(),
+            Some("deepseek-harness-acp"),
+            "agent identity must match the DSH ACP bundle"
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dsh_runtime_session_new_advertises_live_model_catalog() {
+        // session/new result carries the DSH live-catalog model picker:
+        // one `category:"model"` select option whose id is `model` (the DSH
+        // key; buzz-acp accepts both `configId` and `id`).
+        let options = format!("[{DSH_MODEL_OPTION},{DSH_THOUGHT_OPTION}]");
+        let script = format!(
+            r#"read -t 5 REQ
+echo '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentInfo":{agent_info},"agentCapabilities":{{}}}}}}'
+read -t 5 REQ
+echo '{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"dsh-fake-sess","configOptions":{options}}}}}'
+"#,
+            agent_info = DSH_AGENT_INFO,
+            options = options
+        );
+        let mut client = spawn_dsh_fake(script).await;
+        client
+            .initialize()
+            .await
+            .expect("dsh fake initialize failed");
+        let SessionNewResponse { session_id, raw } = client
+            .session_new_full("/tmp", Vec::new(), None, None)
+            .await
+            .expect("dsh fake session/new failed");
+        assert_eq!(session_id, "dsh-fake-sess");
+        // The desktop model picker is driven entirely by this payload —
+        // assert it survives the round trip in the shape the picker reads.
+        let model_opts = extract_model_config_options(&raw);
+        assert_eq!(
+            model_opts.len(),
+            1,
+            "exactly one model-category config option is advertised"
+        );
+        assert_eq!(
+            model_opts[0]["id"].as_str(),
+            Some("model"),
+            "DSH's model configId is opaque to Buzz — pass through, never interpret"
+        );
+        assert_eq!(
+            model_opts[0]["currentValue"].as_str(),
+            Some("deepseek/deepseek-v4-flash"),
+            "template default model surfaces as the picker's current value"
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dsh_runtime_one_full_turn_with_model_switch_completes() {
+        // The full turn buzz-acp drives per persona: initialize →
+        // session/new → session/set_config_option (model switch — DSH's live
+        // catalog path) → session/prompt → {stopReason:"end_turn"}.
+        // The child streams a session/update before answering the prompt,
+        // exercising the update read-loop alongside the response matcher.
+        let script = r#"read -t 5 REQ
+echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentInfo":{"name":"deepseek-harness-acp","version":"0.0.1"},"agentCapabilities":{}}}'
+read -t 5 REQ
+echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"dsh-e2e-sess","configOptions":[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"deepseek/deepseek-v4-flash","options":[]}]}}'
+read -t 5 REQ
+echo '{"jsonrpc":"2.0","id":2,"result":{}}'
+read -t 5 REQ
+echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"dsh-e2e-sess","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"dsh says hello"}}}}'
+echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+"#;
+        let mut client = spawn_dsh_fake(script).await;
+        client
+            .initialize()
+            .await
+            .expect("dsh fake initialize failed");
+        let SessionNewResponse { session_id, .. } = client
+            .session_new_full("/tmp", Vec::new(), None, None)
+            .await
+            .expect("dsh fake session/new failed");
+        let switched = client
+            .session_set_config_option(&session_id, "model", "deepseek/deepseek-v4-pro")
+            .await
+            .expect("dsh fake set_config_option failed");
+        assert!(
+            switched.is_object(),
+            "DSH acks model switches with an object result"
+        );
+        let stop = client
+            .session_prompt_with_idle_timeout(
+                &session_id,
+                "hello dsh",
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .expect("dsh fake one-turn prompt failed");
+        assert_eq!(stop, StopReason::EndTurn);
+        client.shutdown().await;
+    }
+
+    /// The desktop knows `dsh` (its builtin catalog entry pins the profile and
+    /// stdin handling at spawn), but buzz-acp's own spawn-env defaults table
+    /// must NOT special-case it: no allowlist entry, no injected env — the
+    /// operator env is inherited as-is and the command identity is not mapped
+    /// to another runtime's standard-adapter behavior.
+    #[test]
+    fn dsh_takes_no_buzz_acp_spawn_env_defaults() {
+        use crate::config::default_agent_env;
+        assert_eq!(
+            default_agent_env("dsh"),
+            &[],
+            "dsh takes no spawn env defaults — operator env is inherited as-is"
+        );
+        assert_eq!(
+            default_agent_env("/usr/local/bin/dsh"),
+            &[],
+            "absolute-path dsh invocations are equally untouched"
+        );
+    }
 }

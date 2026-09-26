@@ -428,6 +428,40 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
+/// dsh's CLI refuses to boot without an explicit `--profile <name>` (it errors
+/// with `--profile <name> is required`), but Buzz's generic spawn passes the
+/// harness no CLI arguments — everything else flows through env vars, and the
+/// spawned process is the bundled `buzz-acp` relay, which is the one that
+/// actually execs the agent.
+///
+/// dsh is the one known runtime whose ACP entry point is a *named profile*, so
+/// the desktop pins that profile into `BUZZ_ACP_AGENT_ARGS` here: buzz-acp
+/// splits that env var on commas and execs `dsh --profile acp` — exactly the
+/// invocation the bundled ACP profile expects. A fresh install therefore works
+/// out of the box: default `buzz-acp` spawn, no per-agent pinning, no launcher
+/// binary to install.
+///
+/// Installs that route dsh through a `dsh-acp` launcher (see the builtin's
+/// alias) pin their profile themselves — the launcher sets
+/// `BUZZ_ACP_AGENT_ARGS` on the relay it execs. When the user's own agent args
+/// already carry a `--profile` flag we leave the env var untouched rather than
+/// double-injecting (and never clobbering a profile the user chose).
+pub(crate) fn apply_dsh_spawn_args(
+    command: &mut std::process::Command,
+    runtime: Option<&KnownAcpRuntime>,
+    agent_args: &[String],
+) {
+    if runtime.is_none_or(|r| r.id != "dsh") {
+        return;
+    }
+    let profile_pinned = agent_args
+        .iter()
+        .any(|arg| matches!(arg.trim(), "--profile" | "profile"));
+    if !profile_pinned {
+        command.env("BUZZ_ACP_AGENT_ARGS", "--profile,acp");
+    }
+}
+
 /// Proof token for the effort-application outer binding. `#[must_use]`;
 /// makes `let effort = apply_effort_to_spawn_command(…)` a compile-time
 /// requirement — deleting the binding is a compile error because
@@ -601,7 +635,6 @@ pub fn spawn_agent_child(
     if let Some(home) = super::default_agent_workdir() {
         command.current_dir(home);
     }
-    command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
     if let Some(ref path) = augmented_path {
@@ -649,6 +682,22 @@ pub fn spawn_agent_child(
     if let Some(max_dur) = record.max_turn_duration_seconds {
         command.env("BUZZ_ACP_MAX_TURN_DURATION", max_dur.to_string());
     }
+    // dsh (and any ACP harness that consumes stdin eagerly and exits on EOF)
+    // cannot be given a null stdin: dsh's ACP bridge enters `reader.read()` in
+    // a loop at boot, so a /dev/null stdin delivers EOF immediately and dsh's
+    // `exitOnStdinEnd` shuts it down before it serves a single request. Give
+    // such a harness a real (piped) stdin; the write end is captured from the
+    // spawned child (see `harness_stdin` below) and held for the child's whole
+    // life so the pipe never reaches EOF. buzz-acp talks to the harness over
+    // this pipe; Buzz itself never writes to it, but it must stay open. All
+    // other harnesses tolerate a null stdin and are left unchanged.
+    let harness_is_dsh = runtime_meta.is_some_and(|r| r.id == "dsh");
+    if harness_is_dsh {
+        command.stdin(std::process::Stdio::piped());
+    } else {
+        command.stdin(std::process::Stdio::null());
+    }
+
     let acp_n = super::acp_agents_value(effective_command, record.parallelism);
     command.env("BUZZ_ACP_AGENTS", acp_n);
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
@@ -799,6 +848,9 @@ pub fn spawn_agent_child(
         apply_claude_model_env(&mut command, effective_model.as_deref());
     }
     configure_runtime_cli(&mut command, runtime_meta);
+    // dsh's CLI needs an explicit --profile to boot (see
+    // apply_dsh_spawn_args); every other harness is spawned argument-free.
+    apply_dsh_spawn_args(&mut command, runtime_meta, agent_args);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
     // transport at spawn time and scrub any unrelated ambient OpenAI key.
@@ -852,13 +904,18 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let child = spawn_with_effort_proof(&mut command, effort).map_err(|error| {
+    let mut child = spawn_with_effort_proof(&mut command, effort).map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
             resolved_acp_command.display(),
             record.name
         )
     })?;
+
+    // Capture the harness's stdin write end (piped only for dsh) so it stays
+    // open for the child's whole life. `take()` empties the slot on `child`,
+    // so this must happen before `child` moves into `ManagedAgentProcess`.
+    let harness_stdin = if harness_is_dsh { child.stdin.take() } else { None };
 
     // Codex: stamp adapter availability for the Phase-2 badge drift check.
     // Cold cache returns `None` → drift check skipped until discovery warms it.
@@ -875,6 +932,7 @@ pub fn spawn_agent_child(
     #[cfg(windows)]
     return Ok(super::process_lifecycle::finish_spawn(
         child,
+        harness_stdin,
         log_path,
         spawn_config,
         spawned_setup_mode,
@@ -885,6 +943,7 @@ pub fn spawn_agent_child(
     #[cfg(not(windows))]
     Ok(crate::managed_agents::ManagedAgentProcess {
         child,
+        harness_stdin,
         log_path,
         spawn_config,
         setup_mode: spawned_setup_mode,
