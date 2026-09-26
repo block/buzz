@@ -36,8 +36,11 @@ buzz --demo                # offline preview, no relay writes
 The composer accepts a draft while setup is pending. Set `BUZZ_AGENT_PUBKEY`
 to an existing agent's exact hex key for immediate routing. Otherwise the
 client selects your sole discovered owned agent, or lets you choose with
-Ctrl+R when there are several. Discovery covers profiles in your recent
-channel rosters; a configured key also works outside that discovery window.
+Ctrl+R when there are several. Discovery reads your owner-authored agent
+directory as well as recent channel rosters, then verifies ownership from
+each agent's signed profile. Agents do not need to share a channel with you
+to appear. The recipient picker updates as profiles arrive without losing
+your search or draft. A configured key also works outside the discovery window.
 New channels invite the selected existing agent; this does not provision or
 start an agent runtime. The agent must already be running to respond.
 
@@ -164,6 +167,20 @@ loss, thread retention, observer completion, terminal injection, and plugin
 cleanup. The Rust integration test starts the real host against an isolated
 WebSocket fixture: NIP-42 auth, signature checks, subscription lifecycle,
 disconnect before acknowledgement, resubscribe, identical retry, and EOF exit.
+
+For a real-relay test, start a **disposable loopback dev relay** backed by its
+own Postgres and Redis (see `TESTING.md`; never use your desktop database).
+The test generates fresh human/agent identities, publishes owner policies and
+attested profiles without shared channels, drives the actual TUI and signing
+host through discovery/invitation/send, renders a signed test responder's
+thread reply, and reopens the channel. It does not invoke an LLM or use your
+credentials. The dev relay must admit these generated identities and NIP-OA
+authentication. Run:
+
+```sh
+BUZZ_TEST_RELAY_URL=ws://127.0.0.1:3037 \
+  cargo test -p buzz-terminal-host --test live_relay -- --ignored --nocapture
+```
 
 Before marking a PR ready, also test with a real Buzz community and two owned
 agents. Send to one, switch to the other, leave a draft, return, then reconnect.

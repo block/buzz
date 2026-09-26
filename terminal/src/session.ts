@@ -78,6 +78,7 @@ export class Session {
             "#p": [this.store.pubkey],
             limit: this.startup ? 99 : 100,
           },
+          { kinds: [30177], authors: [this.store.pubkey], limit: 1000 },
         ],
       ],
       ["observer", [{ kinds: [24200], "#p": [this.store.pubkey], limit: 0 }]],
@@ -104,6 +105,7 @@ export class Session {
     const people = [
       ...new Set([
         ...(this.startup?.launch.agent ? [this.startup.launch.agent] : []),
+        ...this.store.agentPolicies.keys(),
         ...channels
           .filter((channel) => channel.joined)
           .flatMap((channel) => channel.members),

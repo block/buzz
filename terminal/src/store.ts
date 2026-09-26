@@ -87,6 +87,7 @@ export class Store {
   notice = "Connecting to your community…";
   channels = new Map<string, Channel>();
   profiles = new Map<string, Profile>();
+  agentPolicies = new Map<string, RelayEvent>();
   views = new Map<string, Conversation>();
   messages = new Map<string, RelayEvent[]>();
   activity = new Map<string, Activity>();
@@ -214,6 +215,18 @@ export class Store {
     subscriptionId: string,
     owner?: string,
   ): void {
+    if (event.kind === 30177) {
+      const agent = tag(event, "d");
+      if (
+        event.pubkey === this.pubkey &&
+        agent &&
+        /^[0-9a-f]{64}$/.test(agent) &&
+        newer(event, this.agentPolicies.get(agent)) &&
+        (this.agentPolicies.has(agent) || this.agentPolicies.size < 1000)
+      )
+        this.agentPolicies.set(agent, event);
+      return;
+    }
     if (event.kind === 39000 || event.kind === 39002) {
       if (event.pubkey !== this.relayPubkey) return;
       const id = tag(event, "d");

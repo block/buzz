@@ -91,3 +91,24 @@ test("picker filters, navigates, selects, and recovers from zero results", () =>
     /No matches/,
   );
 });
+
+test("live picker updates retain the selected identity rather than its old row index", () => {
+  const items = [
+    { id: "a", label: "Aurora" },
+    { id: "b", label: "Borealis" },
+  ];
+  let selected = "";
+  const picker = new Picker({
+    title: "Recipients",
+    items: () => items,
+    onSelect: (item) => {
+      selected = item.id;
+    },
+    onCancel: () => {},
+    requestRender: () => {},
+  });
+  picker.handleInput("\x1b[B");
+  items.unshift({ id: "c", label: "Cygnus" });
+  picker.handleInput("\r");
+  assert.equal(selected, "b");
+});

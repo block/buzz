@@ -286,7 +286,7 @@ export class TerminalApp {
 
   private pick(
     title: string,
-    items: PickerItem[],
+    items: PickerItem[] | (() => PickerItem[]),
     select: (item: PickerItem) => void,
   ): void {
     this.overlay?.hide();
@@ -386,35 +386,35 @@ export class TerminalApp {
       this.contexts();
       return;
     }
-    const members = this.store.channels.get(view.channelId)?.members ?? [];
     const startup = this.session.startup;
     const canInvite =
       startup?.launch.mode === "new" &&
       startup.launch.channelId === view.channelId;
-    const candidates = [
-      ...new Set([
-        ...members,
-        ...(canInvite
-          ? [...this.store.profiles.values()]
-              .filter((profile) => profile.owner === this.store.pubkey)
-              .map((profile) => profile.pubkey)
-          : []),
-      ]),
-    ];
     this.pick(
       "Send as you · choose one recipient",
-      candidates
-        .filter((key) => key !== this.store.pubkey)
-        .map((key) => ({
-          id: key,
-          label: this.store.name(key),
-          detail: key,
-          badge: !members.includes(key)
-            ? "invite your agent"
-            : this.store.profiles.get(key)?.owner === this.store.pubkey
-              ? "your agent"
-              : "member",
-        })),
+      () => {
+        const members = this.store.channels.get(view.channelId)?.members ?? [];
+        const candidates = new Set([
+          ...members,
+          ...(canInvite
+            ? [...this.store.profiles.values()]
+                .filter((profile) => profile.owner === this.store.pubkey)
+                .map((profile) => profile.pubkey)
+            : []),
+        ]);
+        return [...candidates]
+          .filter((key) => key !== this.store.pubkey)
+          .map((key) => ({
+            id: key,
+            label: this.store.name(key),
+            detail: key,
+            badge: !members.includes(key)
+              ? "invite your agent"
+              : this.store.profiles.get(key)?.owner === this.store.pubkey
+                ? "your agent"
+                : "member",
+          }));
+      },
       (item) => {
         if (startup?.launch.channelId === view.channelId && !view.rootEventId)
           void startup

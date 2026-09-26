@@ -1,47 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Terminal } from "@earendil-works/pi-tui";
-import xterm from "@xterm/headless";
 import { TerminalApp } from "../src/app.ts";
 import { DemoTransport } from "../src/demo.ts";
 import { parseLaunch } from "../src/launch.ts";
 import type { Requests } from "../src/protocol.ts";
-
-class TestTerminal implements Terminal {
-  columns = 100;
-  rows = 32;
-  kittyProtocolActive = false;
-  screen = new xterm.Terminal({ cols: 100, rows: 32, allowProposedApi: true });
-  input: (data: string) => void = () => {};
-  resize: () => void = () => {};
-  start(input: (data: string) => void, resize: () => void): void {
-    this.input = input;
-    this.resize = resize;
-  }
-  stop(): void {}
-  async drainInput(): Promise<void> {}
-  write(data: string): void {
-    this.screen.write(data);
-  }
-  moveBy(): void {}
-  hideCursor(): void {}
-  showCursor(): void {}
-  clearLine(): void {}
-  clearFromCursor(): void {}
-  clearScreen(): void {}
-  setTitle(): void {}
-  setProgress(): void {}
-  async frame(): Promise<string> {
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    await new Promise<void>((resolve) => this.screen.write("", resolve));
-    const buffer = this.screen.buffer.active;
-    return Array.from(
-      { length: this.rows },
-      (_, row) =>
-        buffer.getLine(row + buffer.viewportY)?.translateToString(true) ?? "",
-    ).join("\n");
-  }
-}
+import { TestTerminal } from "./terminal.ts";
 
 test("real TUI keyboard path preserves multiline drafts and routes a send across contexts", async () => {
   const terminal = new TestTerminal();

@@ -17,7 +17,7 @@ export interface PickerItem {
 
 interface PickerOptions {
   title: string;
-  items: PickerItem[];
+  items: PickerItem[] | (() => PickerItem[]);
   onSelect: (item: PickerItem) => void;
   onCancel: () => void;
   requestRender: () => void;
@@ -28,22 +28,18 @@ interface PickerOptions {
 export class Picker implements Component, Focusable {
   focused = false;
   private readonly title: string;
-  private readonly items: PickerItem[];
+  private readonly items: PickerOptions["items"];
   private readonly input: Input;
   private readonly onSelect: (item: PickerItem) => void;
   private readonly onCancel: () => void;
   private readonly requestRender: () => void;
   private readonly availableRows: () => number;
   private selected = 0;
+  private selectedId?: string;
 
   constructor(options: PickerOptions) {
     this.title = singleLine(options.title);
-    this.items = options.items.map((item) => ({
-      id: item.id,
-      label: singleLine(item.label),
-      detail: item.detail === undefined ? undefined : singleLine(item.detail),
-      badge: item.badge === undefined ? undefined : singleLine(item.badge),
-    }));
+    this.items = options.items;
     this.onSelect = options.onSelect;
     this.onCancel = options.onCancel;
     this.requestRender = options.requestRender;
@@ -56,11 +52,21 @@ export class Picker implements Component, Focusable {
   }
 
   private filtered(): PickerItem[] {
-    return fuzzyFilter(
-      this.items,
+    const items = typeof this.items === "function" ? this.items() : this.items;
+    const filtered = fuzzyFilter(
+      items.map((item) => ({
+        ...item,
+        label: singleLine(item.label),
+        detail: item.detail === undefined ? undefined : singleLine(item.detail),
+        badge: item.badge === undefined ? undefined : singleLine(item.badge),
+      })),
       this.input.getValue(),
       (item) => `${item.label} ${item.detail ?? ""} ${item.badge ?? ""}`,
     );
+    const index = filtered.findIndex((item) => item.id === this.selectedId);
+    this.selected = index < 0 ? 0 : index;
+    this.selectedId = filtered[this.selected]?.id;
+    return filtered;
   }
 
   handleInput(data: string): void {
@@ -79,6 +85,7 @@ export class Picker implements Component, Focusable {
       const delta = key === "up" ? -1 : 1;
       this.selected =
         (this.selected + delta + filtered.length) % filtered.length;
+      this.selectedId = filtered[this.selected]?.id;
       this.requestRender();
       return;
     }
@@ -86,6 +93,7 @@ export class Picker implements Component, Focusable {
     this.input.handleInput(data);
     if (before !== this.input.getValue()) {
       this.selected = 0;
+      this.selectedId = undefined;
       this.requestRender();
     }
   }
