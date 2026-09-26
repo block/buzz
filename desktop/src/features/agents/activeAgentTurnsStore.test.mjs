@@ -13,6 +13,8 @@ import {
   clearSavedCommunitySnapshot,
   clearActiveTurnsForAgent,
   createActiveAgentTurnsObserverListener,
+  getWorkingAgentPubkeysForThread,
+  getActiveTurnCountForChannel,
 } from "./activeAgentTurnsStore.ts";
 import {
   injectObserverEventsForE2E,
@@ -2448,5 +2450,112 @@ describe("clearActiveTurnsForAgent", () => {
     );
 
     mock.timers.reset();
+  });
+});
+
+describe("getWorkingAgentPubkeysForThread", () => {
+  beforeEach(() => {
+    resetActiveAgentTurnsStore();
+  });
+
+  it("matches a turn whose sessionId prefixes the thread root id", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        sessionId: "aaaa000011112222",
+        turnId: "aaaa000011112222-1700000000000",
+      }),
+    ]);
+
+    assert.deepEqual(
+      [
+        ...getWorkingAgentPubkeysForThread(
+          "chan-1",
+          "aaaa000011112222deadbeefdeadbeef",
+        ),
+      ],
+      [AGENT],
+    );
+    assert.equal(
+      getWorkingAgentPubkeysForThread(
+        "chan-1",
+        "bbbb000011112222deadbeefdeadbeef",
+      ).length,
+      0,
+    );
+    assert.equal(
+      getWorkingAgentPubkeysForThread(
+        "chan-2",
+        "aaaa000011112222deadbeefdeadbeef",
+      ).length,
+      0,
+    );
+  });
+
+  it("ignores turns without a sessionId", () => {
+    syncAgentTurnsFromEvents(AGENT, [makeEvent({ sessionId: null })]);
+
+    assert.equal(
+      getWorkingAgentPubkeysForThread("chan-1", "any-root-id").length,
+      0,
+    );
+  });
+
+  it("drops the agent once its turn completes", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ sessionId: "aaaa000011112222" }),
+    ]);
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 2,
+        kind: "turn_completed",
+        timestamp: "2024-01-01T00:01:00Z",
+      }),
+    ]);
+
+    assert.equal(
+      getWorkingAgentPubkeysForThread(
+        "chan-1",
+        "aaaa000011112222deadbeefdeadbeef",
+      ).length,
+      0,
+    );
+  });
+});
+
+describe("getActiveTurnCountForChannel", () => {
+  beforeEach(() => {
+    resetActiveAgentTurnsStore();
+  });
+
+  it("counts only this agent's live turns in this channel", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t-a", sessionId: "aaaa" }),
+      makeEvent({ seq: 2, turnId: "t-b", sessionId: "bbbb" }),
+      makeEvent({ seq: 3, turnId: "t-c", channelId: "chan-2" }),
+    ]);
+    syncAgentTurnsFromEvents(AGENT_2, [
+      makeEvent({ seq: 1, turnId: "t-d", sessionId: "dddd" }),
+    ]);
+
+    assert.equal(getActiveTurnCountForChannel(AGENT, "chan-1"), 2);
+    assert.equal(getActiveTurnCountForChannel(AGENT, "chan-2"), 1);
+    assert.equal(getActiveTurnCountForChannel(AGENT_2, "chan-1"), 1);
+  });
+
+  it("returns 0 for missing inputs and completed turns", () => {
+    assert.equal(getActiveTurnCountForChannel(null, "chan-1"), 0);
+    assert.equal(getActiveTurnCountForChannel(AGENT, null), 0);
+
+    syncAgentTurnsFromEvents(AGENT, [makeEvent({ seq: 1, turnId: "t-a" })]);
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 2,
+        turnId: "t-a",
+        kind: "turn_completed",
+        timestamp: "2024-01-01T00:01:00Z",
+      }),
+    ]);
+
+    assert.equal(getActiveTurnCountForChannel(AGENT, "chan-1"), 0);
   });
 });
