@@ -215,6 +215,60 @@ test("tab stepping wraps and skips tabs whose select button is disabled", () => 
   assert.equal(stepSession([], 1), null);
 });
 
+test("Shift+Enter encodes as CSI u so agent composers insert a newline", () => {
+  assert.equal(
+    encodeTerminalKey({
+      key: "Enter",
+      ctrlKey: false,
+      altKey: false,
+      metaKey: false,
+      shiftKey: true,
+    }),
+    "\u001b[13;2u",
+  );
+  assert.equal(
+    encodeTerminalKeystroke({
+      key: "Enter",
+      ctrlKey: false,
+      altKey: false,
+      metaKey: false,
+      shiftKey: true,
+    }),
+    "\u001b[13;2u",
+  );
+  // Plain Enter still submits (CR) — do not change Enter-to-send.
+  assert.equal(
+    encodeTerminalKey({
+      key: "Enter",
+      ctrlKey: false,
+      altKey: false,
+      metaKey: false,
+    }),
+    "\r",
+  );
+  assert.equal(
+    encodeTerminalKey({
+      key: "Enter",
+      ctrlKey: false,
+      altKey: false,
+      metaKey: false,
+      shiftKey: false,
+    }),
+    "\r",
+  );
+  // Meta+Enter stays unclaimed (macOS shortcut space / no accidental submit).
+  assert.equal(
+    encodeTerminalKey({
+      key: "Enter",
+      ctrlKey: false,
+      altKey: false,
+      metaKey: true,
+      shiftKey: true,
+    }),
+    null,
+  );
+});
+
 test("encodeTerminalKeystroke forwards printable letters the textarea path would miss", () => {
   assert.equal(
     encodeTerminalKeystroke({
