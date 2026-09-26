@@ -1,4 +1,12 @@
-import { BookOpen, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  BookOpen,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Share2,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -39,12 +47,16 @@ import type {
 } from "../lib/types";
 import { pinRunbookRef } from "@/features/site-runbook/lib/keys";
 import { SiteRunbookDialog } from "@/features/site-runbook/ui/SiteRunbookDialog";
+import { exportBrowserShareFromRef } from "@/features/browser-share/lib/exportActions";
+import { ImportBrowserShareDialog } from "@/features/browser-share/ui/ImportBrowserShareDialog";
+import { BROWSER_SHARE_SECURITY_NOTE } from "@/features/browser-share/lib/types";
 
 export function PinnedSitesSettingsCard() {
   const { pins, canShareCommunity, isLoading, savePin, deletePin } =
     usePinnedSites();
   const [editing, setEditing] = React.useState<PinnedSite | null>(null);
   const [createOpen, setCreateOpen] = React.useState(false);
+  const [importShareOpen, setImportShareOpen] = React.useState(false);
   const [deleteTarget, setDeleteTarget] = React.useState<PinnedSite | null>(
     null,
   );
@@ -53,17 +65,30 @@ export function PinnedSitesSettingsCard() {
     <section className="min-w-0" data-testid="settings-pinned-sites">
       <SettingsSectionHeader
         action={
-          <Button
-            data-testid="pinned-sites-add"
-            disabled={isLoading}
-            onClick={() => setCreateOpen(true)}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            <Plus className="mr-1.5 h-4 w-4" />
-            Add
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              data-testid="pinned-sites-import-share"
+              disabled={isLoading}
+              onClick={() => setImportShareOpen(true)}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              <Upload className="mr-1.5 h-4 w-4" />
+              Import share
+            </Button>
+            <Button
+              data-testid="pinned-sites-add"
+              disabled={isLoading}
+              onClick={() => setCreateOpen(true)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <Plus className="mr-1.5 h-4 w-4" />
+              Add
+            </Button>
+          </div>
         }
         description="Put websites in the primary menu. Each pin opens in the main view with no address bar. Community pins are shared with everyone; logins stay on this device."
         title="Pinned sites"
@@ -106,6 +131,13 @@ export function PinnedSitesSettingsCard() {
           pin={null}
         />
       ) : null}
+
+      <ImportBrowserShareDialog
+        allowPin
+        defaultTarget="pin"
+        onOpenChange={setImportShareOpen}
+        open={importShareOpen}
+      />
 
       {editing ? (
         <PinFormDialog
@@ -226,6 +258,38 @@ function PinRow({
               <BookOpen className="mr-2 h-4 w-4" />
               How to use this site
             </DropdownMenuItem>
+            <DropdownMenuItem
+              data-testid={`pinned-site-export-${pin.id}`}
+              onClick={() =>
+                exportBrowserShareFromRef({
+                  url: pin.url,
+                  title: pin.name,
+                  source: "pin",
+                  runbookRef: pinRunbookRef(pin.id),
+                  mode: "download",
+                })
+              }
+              title={BROWSER_SHARE_SECURITY_NOTE}
+            >
+              <Share2 className="mr-2 h-4 w-4" />
+              Export share
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              data-testid={`pinned-site-export-copy-${pin.id}`}
+              onClick={() =>
+                exportBrowserShareFromRef({
+                  url: pin.url,
+                  title: pin.name,
+                  source: "pin",
+                  runbookRef: pinRunbookRef(pin.id),
+                  mode: "clipboard",
+                })
+              }
+              title={BROWSER_SHARE_SECURITY_NOTE}
+            >
+              <Share2 className="mr-2 h-4 w-4" />
+              Copy share JSON
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={onDelete}>
               <Trash2 className="mr-2 h-4 w-4" />
               Delete
@@ -234,6 +298,11 @@ function PinRow({
         </DropdownMenu>
       ) : null}
       <SiteRunbookDialog
+        exportShare={{
+          url: pin.url,
+          title: pin.name,
+          source: "pin",
+        }}
         onOpenChange={setRunbookOpen}
         open={runbookOpen}
         runbookRef={pinRunbookRef(pin.id)}
@@ -390,8 +459,8 @@ function PinFormDialog({
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">Open matching links here</p>
               <p className="text-xs text-muted-foreground/70">
-                When on, left-click links for this pin&apos;s domain open in this
-                pinned site, and right-click offers &quot;Open in Pinned
+                When on, left-click links for this pin&apos;s domain open in
+                this pinned site, and right-click offers &quot;Open in Pinned
                 Website&quot;. When off, this pin is skipped for domain routing
                 (other pins may still match).
               </p>

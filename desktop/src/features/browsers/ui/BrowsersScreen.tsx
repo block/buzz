@@ -1,4 +1,11 @@
-import { AppWindow, ExternalLink, Globe, Plus, Trash2 } from "lucide-react";
+import {
+  AppWindow,
+  ExternalLink,
+  Globe,
+  Plus,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import * as React from "react";
 import { useSyncExternalStore } from "react";
 import { toast } from "sonner";
@@ -62,6 +69,8 @@ import {
 import { disposeBrowserSession } from "../lib/disposeBrowserSession";
 import { sidRunbookRef } from "@/features/site-runbook/lib/keys";
 import { SiteRunbookOpenButton } from "@/features/site-runbook/ui/SiteRunbookDialog";
+import { ExportBrowserShareButton } from "@/features/browser-share/ui/ExportBrowserShareButton";
+import { ImportBrowserShareDialog } from "@/features/browser-share/ui/ImportBrowserShareDialog";
 import {
   type BrowserListRow,
   type DetachedBrowserHost,
@@ -148,7 +157,6 @@ function useConversationPinsEpoch(): number {
     getConversationPlaygroundPinsRevision,
   );
 }
-
 
 /** Poll native WKWebView existence; null until first check (avoids Cold flash on live). */
 function useBrowserRowWebviewOpen(
@@ -277,6 +285,7 @@ export function BrowsersScreen() {
     getEmbeddedWindowsStore,
   );
   const [addOpen, setAddOpen] = React.useState(false);
+  const [importOpen, setImportOpen] = React.useState(false);
   const [pendingRemoveKey, setPendingRemoveKey] = React.useState<string | null>(
     null,
   );
@@ -378,7 +387,9 @@ export function BrowsersScreen() {
   async function detachRow(row: BrowserListRow) {
     if (row.host === "windowed") return;
     try {
-      const session = playground.sessions.get(row.mainSurfaceId) ?? playground.sessions.get(row.surfaceId);
+      const session =
+        playground.sessions.get(row.mainSurfaceId) ??
+        playground.sessions.get(row.surfaceId);
       if (!session) return;
       await openPopoutWindow({
         kind: "playground",
@@ -408,15 +419,27 @@ export function BrowsersScreen() {
       >
         <PageHeader
           action={
-            <Button
-              data-testid="browsers-add"
-              onClick={() => setAddOpen(true)}
-              size="sm"
-              type="button"
-            >
-              <Plus className="mr-1 h-4 w-4" />
-              Add
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                data-testid="browsers-import-share"
+                onClick={() => setImportOpen(true)}
+                size="sm"
+                type="button"
+                variant="secondary"
+              >
+                <Upload className="mr-1 h-4 w-4" />
+                Import share
+              </Button>
+              <Button
+                data-testid="browsers-add"
+                onClick={() => setAddOpen(true)}
+                size="sm"
+                type="button"
+              >
+                <Plus className="mr-1 h-4 w-4" />
+                Add
+              </Button>
+            </div>
           }
           description="Playground and agent-driven browsers in this client, including detached windows."
           title="Browsers"
@@ -468,184 +491,196 @@ export function BrowsersScreen() {
                 >
                   {(agentToggle) => (
                     <div className="flex min-w-0 flex-col gap-2">
-                    <div className="flex min-w-0 items-start gap-3">
-                      <BrowserRowPreview
-                        key={`${row.mainSurfaceId}:${row.url}`}
-                        onOpen={() => void openRow(row)}
-                        sid={row.mainSurfaceId}
-                        title={row.title}
-                        url={row.url}
-                        windowLabel={row.windowLabel}
-                      />
-                      <div className="min-w-0 flex-1 text-left">
-                        <button
-                          className="min-w-0 w-full text-left"
-                          data-testid={`browser-row-main-${row.key}`}
-                          onClick={() => void openRow(row)}
-                          type="button"
-                        >
-                          <div className="flex min-w-0 flex-wrap items-center gap-2">
-                            <span className="truncate text-sm font-medium">
-                              {row.title}
-                            </span>
-                            <BrowserRowColdChip
-                              sid={row.mainSurfaceId}
-                              windowLabel={row.windowLabel}
-                            />
-                            {row.host === "windowed" ? (
-                              <Badge
-                                className="normal-case tracking-normal"
-                                variant="outline"
-                              >
-                                Window
-                              </Badge>
-                            ) : null}
-                          </div>
-                          <p className="mt-0.5 truncate text-2xs text-muted-foreground">
-                            {browserRowUrlLabel(row.url)}
-                          </p>
-                          <p
-                            className="mt-0.5 truncate text-2xs text-muted-foreground"
-                            data-testid={`browser-row-viewport-${row.key}`}
-                          >
-                            {playgroundViewportCaption(
-                              getPlaygroundViewport(row.mainSurfaceId),
-                            )}
-                          </p>
-                        </button>
-                        <BindingChips
-                          bindings={bindings}
-                          channelNames={channelNames}
-                          onOpenChannel={(channelId) => {
-                            void goChannel(channelId);
-                          }}
-                          onOpenThread={(channelId, threadRoot) => {
-                            void goChannel(channelId, {
-                              thread: threadRoot,
-                              threadRootId: threadRoot,
-                            });
-                          }}
+                      <div className="flex min-w-0 items-start gap-3">
+                        <BrowserRowPreview
+                          key={`${row.mainSurfaceId}:${row.url}`}
+                          onOpen={() => void openRow(row)}
+                          sid={row.mainSurfaceId}
+                          title={row.title}
+                          url={row.url}
+                          windowLabel={row.windowLabel}
                         />
-                      </div>
-                      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-                        {agentToggle}
-                        <SiteRunbookOpenButton
-                          label="Runbook"
-                          runbookRef={sidRunbookRef(row.mainSurfaceId)}
-                          testId={`browser-row-runbook-${row.key}`}
-                        />
-                        {browserRowShowsOpenButton(row) ? (
-                          <Button
-                            aria-label={
-                              row.host === "windowed"
-                                ? "Focus detached browser window"
-                                : "Open browser"
-                            }
-                            data-testid={`browser-row-open-${row.key}`}
+                        <div className="min-w-0 flex-1 text-left">
+                          <button
+                            className="min-w-0 w-full text-left"
+                            data-testid={`browser-row-main-${row.key}`}
                             onClick={() => void openRow(row)}
-                            size="xs"
                             type="button"
-                            variant="secondary"
                           >
-                            Open
-                          </Button>
-                        ) : null}
-                        {row.host === "main" ? (
-                          <Button
-                            data-testid={`browser-row-detach-${row.key}`}
-                            onClick={() => void detachRow(row)}
-                            size="xs"
-                            type="button"
-                            variant="ghost"
-                          >
-                            <ExternalLink className="mr-1 h-3 w-3" />
-                            Window
-                          </Button>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-2xs text-muted-foreground">
-                            <AppWindow className="h-3 w-3" />
-                            Detached
-                          </span>
-                        )}
-                        {pendingRemoveKey === row.key ? (
-                          <>
-                            <Button
-                              aria-label="Confirm remove browser"
-                              data-testid={`browser-row-remove-confirm-${row.key}`}
-                              onClick={() => {
-                                setPendingRemoveKey(null);
-                                void removeRow(row);
-                              }}
-                              size="xs"
-                              title="Confirm remove"
-                              type="button"
-                              variant="destructive"
+                            <div className="flex min-w-0 flex-wrap items-center gap-2">
+                              <span className="truncate text-sm font-medium">
+                                {row.title}
+                              </span>
+                              <BrowserRowColdChip
+                                sid={row.mainSurfaceId}
+                                windowLabel={row.windowLabel}
+                              />
+                              {row.host === "windowed" ? (
+                                <Badge
+                                  className="normal-case tracking-normal"
+                                  variant="outline"
+                                >
+                                  Window
+                                </Badge>
+                              ) : null}
+                            </div>
+                            <p className="mt-0.5 truncate text-2xs text-muted-foreground">
+                              {browserRowUrlLabel(row.url)}
+                            </p>
+                            <p
+                              className="mt-0.5 truncate text-2xs text-muted-foreground"
+                              data-testid={`browser-row-viewport-${row.key}`}
                             >
-                              Confirm?
-                            </Button>
+                              {playgroundViewportCaption(
+                                getPlaygroundViewport(row.mainSurfaceId),
+                              )}
+                            </p>
+                          </button>
+                          <BindingChips
+                            bindings={bindings}
+                            channelNames={channelNames}
+                            onOpenChannel={(channelId) => {
+                              void goChannel(channelId);
+                            }}
+                            onOpenThread={(channelId, threadRoot) => {
+                              void goChannel(channelId, {
+                                thread: threadRoot,
+                                threadRootId: threadRoot,
+                              });
+                            }}
+                          />
+                        </div>
+                        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                          {agentToggle}
+                          <SiteRunbookOpenButton
+                            exportShare={{
+                              url: row.url,
+                              title: row.title,
+                              source: "session",
+                            }}
+                            label="Runbook"
+                            runbookRef={sidRunbookRef(row.mainSurfaceId)}
+                            testId={`browser-row-runbook-${row.key}`}
+                          />
+                          <ExportBrowserShareButton
+                            runbookRef={sidRunbookRef(row.mainSurfaceId)}
+                            source="session"
+                            testId={`browser-row-export-${row.key}`}
+                            title={row.title}
+                            url={row.url}
+                          />
+                          {browserRowShowsOpenButton(row) ? (
                             <Button
-                              aria-label="Cancel remove browser"
-                              data-testid={`browser-row-remove-cancel-${row.key}`}
-                              onClick={() => setPendingRemoveKey(null)}
+                              aria-label={
+                                row.host === "windowed"
+                                  ? "Focus detached browser window"
+                                  : "Open browser"
+                              }
+                              data-testid={`browser-row-open-${row.key}`}
+                              onClick={() => void openRow(row)}
                               size="xs"
-                              title="Cancel"
+                              type="button"
+                              variant="secondary"
+                            >
+                              Open
+                            </Button>
+                          ) : null}
+                          {row.host === "main" ? (
+                            <Button
+                              data-testid={`browser-row-detach-${row.key}`}
+                              onClick={() => void detachRow(row)}
+                              size="xs"
                               type="button"
                               variant="ghost"
                             >
-                              Cancel
+                              <ExternalLink className="mr-1 h-3 w-3" />
+                              Window
                             </Button>
-                          </>
-                        ) : (
-                          <Button
-                            aria-label="Remove browser"
-                            data-testid={`browser-row-remove-${row.key}`}
-                            onClick={() => setPendingRemoveKey(row.key)}
-                            size="xs"
-                            title="Remove"
-                            type="button"
-                            variant="ghost"
-                          >
-                            <Trash2 className="h-3 w-3 text-destructive" />
-                            <span className="ml-1 text-destructive">
-                              Remove
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-2xs text-muted-foreground">
+                              <AppWindow className="h-3 w-3" />
+                              Detached
                             </span>
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                    {row.secondaryTabs.length > 0 ? (
-                      <ul
-                        className="ml-4 space-y-1 border-l border-border/60 pl-3"
-                        data-testid={`browser-row-tabs-${row.key}`}
-                      >
-                        {row.secondaryTabs.map((tab) => (
-                          <li key={tab.surfaceId}>
-                            <button
-                              className="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-muted/50"
-                              data-testid={`browser-row-tab-${tab.surfaceId}`}
-                              onClick={() =>
-                                void openSecondaryTab(row, tab.surfaceId)
-                              }
+                          )}
+                          {pendingRemoveKey === row.key ? (
+                            <>
+                              <Button
+                                aria-label="Confirm remove browser"
+                                data-testid={`browser-row-remove-confirm-${row.key}`}
+                                onClick={() => {
+                                  setPendingRemoveKey(null);
+                                  void removeRow(row);
+                                }}
+                                size="xs"
+                                title="Confirm remove"
+                                type="button"
+                                variant="destructive"
+                              >
+                                Confirm?
+                              </Button>
+                              <Button
+                                aria-label="Cancel remove browser"
+                                data-testid={`browser-row-remove-cancel-${row.key}`}
+                                onClick={() => setPendingRemoveKey(null)}
+                                size="xs"
+                                title="Cancel"
+                                type="button"
+                                variant="ghost"
+                              >
+                                Cancel
+                              </Button>
+                            </>
+                          ) : (
+                            <Button
+                              aria-label="Remove browser"
+                              data-testid={`browser-row-remove-${row.key}`}
+                              onClick={() => setPendingRemoveKey(row.key)}
+                              size="xs"
+                              title="Remove"
                               type="button"
+                              variant="ghost"
                             >
-                              <BrowserRowPreview
-                                key={`${tab.surfaceId}:${tab.url}`}
-                                onOpen={() =>
+                              <Trash2 className="h-3 w-3 text-destructive" />
+                              <span className="ml-1 text-destructive">
+                                Remove
+                              </span>
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      {row.secondaryTabs.length > 0 ? (
+                        <ul
+                          className="ml-4 space-y-1 border-l border-border/60 pl-3"
+                          data-testid={`browser-row-tabs-${row.key}`}
+                        >
+                          {row.secondaryTabs.map((tab) => (
+                            <li key={tab.surfaceId}>
+                              <button
+                                className="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-muted/50"
+                                data-testid={`browser-row-tab-${tab.surfaceId}`}
+                                onClick={() =>
                                   void openSecondaryTab(row, tab.surfaceId)
                                 }
-                                sid={tab.surfaceId}
-                                title={tab.title}
-                                url={tab.url}
-                                windowLabel={row.windowLabel}
-                              />
-                              <span className="min-w-0 flex-1 truncate text-2xs text-muted-foreground">
-                                {browserRowUrlLabel(tab.url)}
-                              </span>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
+                                type="button"
+                              >
+                                <BrowserRowPreview
+                                  key={`${tab.surfaceId}:${tab.url}`}
+                                  onOpen={() =>
+                                    void openSecondaryTab(row, tab.surfaceId)
+                                  }
+                                  sid={tab.surfaceId}
+                                  title={tab.title}
+                                  url={tab.url}
+                                  windowLabel={row.windowLabel}
+                                />
+                                <span className="min-w-0 flex-1 truncate text-2xs text-muted-foreground">
+                                  {browserRowUrlLabel(tab.url)}
+                                </span>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
                     </div>
                   )}
                 </BrowserAgentChrome>
@@ -659,6 +694,11 @@ export function BrowsersScreen() {
         onOpenChange={setAddOpen}
         onSubmit={openAddedBrowser}
         open={addOpen}
+      />
+      <ImportBrowserShareDialog
+        onImportedSession={openAddedBrowser}
+        onOpenChange={setImportOpen}
+        open={importOpen}
       />
     </div>
   );
