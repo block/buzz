@@ -131,6 +131,7 @@ class BlobDescriptor {
   final double? duration;
   final String? image;
   final String? filename;
+  final List<int>? waveform;
 
   const BlobDescriptor({
     required this.url,
@@ -144,6 +145,7 @@ class BlobDescriptor {
     this.duration,
     this.image,
     this.filename,
+    this.waveform,
   });
 
   factory BlobDescriptor.fromJson(Map<String, dynamic> json) => BlobDescriptor(
@@ -158,6 +160,11 @@ class BlobDescriptor {
     duration: (json['duration'] as num?)?.toDouble(),
     image: json['image'] as String?,
     filename: json['filename'] as String?,
+    waveform: (json['waveform'] as List<dynamic>?)
+        ?.whereType<num>()
+        .map((value) => value.toInt().clamp(0, 100))
+        .take(100)
+        .toList(growable: false),
   );
 
   BlobDescriptor withFilename(String value) => BlobDescriptor(
@@ -172,12 +179,14 @@ class BlobDescriptor {
     duration: duration,
     image: image,
     filename: value,
+    waveform: waveform,
   );
 
   /// Returns a descriptor carrying canonical packaged voice-note metadata.
   BlobDescriptor withVoiceNoteMetadata({
     required String filename,
     required double fallbackDurationSeconds,
+    required List<double> waveform,
   }) => BlobDescriptor(
     url: url,
     sha256: sha256,
@@ -190,6 +199,7 @@ class BlobDescriptor {
     duration: duration ?? fallbackDurationSeconds,
     image: image,
     filename: filename,
+    waveform: _encodeVoiceNoteWaveform(waveform),
   );
 
   /// Returns a descriptor with [value] as its NIP-71 video poster URL.
@@ -205,6 +215,7 @@ class BlobDescriptor {
     duration: duration,
     image: value,
     filename: filename,
+    waveform: waveform,
   );
 
   List<String> toImetaTag() => [
@@ -219,6 +230,8 @@ class BlobDescriptor {
     if (duration != null) 'duration $duration',
     if (image != null) 'image $image',
     if (filename != null) 'filename $filename',
+    if (waveform != null && waveform!.isNotEmpty)
+      'waveform ${waveform!.join(' ')}',
   ];
 
   String toMarkdownImage() {
@@ -468,6 +481,7 @@ class MediaUploadService {
   Future<BlobDescriptor> uploadVoiceNote(
     XFile voiceNote, {
     required Duration duration,
+    List<double> waveform = const [],
     ValueChanged<double>? onProgress,
     UploadCancellationToken? cancellationToken,
   }) async {
@@ -494,6 +508,7 @@ class MediaUploadService {
       return descriptor.withVoiceNoteMetadata(
         filename: _voiceNoteMp4Filename(voiceNote.name),
         fallbackDurationSeconds: duration.inMilliseconds / 1000,
+        waveform: waveform,
       );
     } finally {
       if (packagedPath != null && packagedPath != voiceNote.path) {
@@ -788,6 +803,29 @@ String _safeAttachmentFilename(String filename) {
 
   final safeBasename = sanitized.toString().trim();
   return safeBasename.isEmpty ? 'file' : safeBasename;
+}
+
+List<int>? _encodeVoiceNoteWaveform(List<double> samples) {
+  if (samples.isEmpty) return null;
+  const barCount = 48;
+  final outputCount = math.min(barCount, samples.length);
+  return List.generate(outputCount, (index) {
+    final start = (index * samples.length / outputCount).floor();
+    final end = math.max(
+      start + 1,
+      ((index + 1) * samples.length / outputCount).floor(),
+    );
+    var peak = 0.0;
+    for (
+      var sampleIndex = start;
+      sampleIndex < end && sampleIndex < samples.length;
+      sampleIndex++
+    ) {
+      final sample = samples[sampleIndex];
+      if (sample.isFinite) peak = math.max(peak, sample.abs());
+    }
+    return (peak.clamp(0.0, 1.0) * 100).round();
+  }, growable: false);
 }
 
 String _voiceNoteMp4Filename(String filename) {

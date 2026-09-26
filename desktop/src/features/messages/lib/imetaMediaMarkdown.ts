@@ -69,6 +69,11 @@ export function imetaMediaFromTags(
       ...(entry.duration != null ? { duration: entry.duration } : {}),
       ...(entry.image ? { image: entry.image } : {}),
       ...(entry.filename ? { filename: entry.filename } : {}),
+      ...(entry.waveform
+        ? {
+            waveform: entry.waveform.map((sample) => Math.round(sample * 100)),
+          }
+        : {}),
     });
   }
   return out;
@@ -103,6 +108,9 @@ export function buildImetaTags(
       ...(d.duration != null ? [`duration ${d.duration}`] : []),
       ...(d.image ? [`image ${d.image}`] : []),
       ...(d.filename ? [`filename ${d.filename}`] : []),
+      ...(d.waveform?.length
+        ? [`waveform ${d.waveform.slice(0, 100).join(" ")}`]
+        : []),
     ]);
 }
 

@@ -1345,6 +1345,7 @@ void main() {
         final descriptor = await service.uploadVoiceNote(
           XFile(source.path, mimeType: 'audio/mp4'),
           duration: const Duration(milliseconds: 3250),
+          waveform: const [0, 0.25, 0.8, 1],
         );
 
         expect(packagedSourcePath, source.path);
@@ -1352,6 +1353,7 @@ void main() {
         expect(descriptor.filename, 'voice-note-test.mp4');
         expect(descriptor.duration, 3.0);
         expect(descriptor.toImetaTag(), contains('duration 3.0'));
+        expect(descriptor.toImetaTag(), contains('waveform 0 25 80 100'));
         expect(
           descriptor.toMarkdownImage(),
           '[voice-note-test.mp4](${descriptor.url})',

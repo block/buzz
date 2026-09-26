@@ -409,13 +409,14 @@ class _FakeVoiceNoteUploadService extends MediaUploadService {
   Future<BlobDescriptor> uploadVoiceNote(
     XFile voiceNote, {
     required Duration duration,
+    List<double> waveform = const [],
     ValueChanged<double>? onProgress,
     UploadCancellationToken? cancellationToken,
   }) async {
     uploadedRecording = VoiceNoteRecording(
       file: voiceNote,
       duration: duration,
-      waveform: const [],
+      waveform: waveform,
     );
     final pending = pendingVoiceNoteUpload;
     if (pending != null) return pending.future;
@@ -429,6 +430,7 @@ class _FakeVoiceNoteUploadService extends MediaUploadService {
       uploaded: 1,
       duration: duration.inMilliseconds / 1000,
       filename: voiceNote.name.replaceFirst('.m4a', '.mp4'),
+      waveform: waveform.map((sample) => (sample * 100).round()).toList(),
     );
   }
 }
@@ -4826,6 +4828,12 @@ void main() {
         uploadService.uploadedRecording?.duration,
         const Duration(seconds: 3),
       );
+      expect(uploadService.uploadedRecording?.waveform, const [
+        0.2,
+        0.7,
+        0.4,
+        0.9,
+      ]);
       expect(
         sentContent,
         'Keep this draft\n'
@@ -4837,6 +4845,7 @@ void main() {
           'm video/mp4',
           'duration 3.0',
           'filename voice-note-test.mp4',
+          'waveform 20 70 40 90',
         ]),
       );
     });

@@ -181,6 +181,22 @@ test("buildImetaTags keeps media filenames in imeta", () => {
   );
 });
 
+test("voice-note waveform metadata round-trips through imeta", () => {
+  const media = {
+    url: "https://b/voice.mp4",
+    type: "video/mp4",
+    sha256: "abc",
+    size: 10,
+    uploaded: 1,
+    filename: "voice-note-123.mp4",
+    waveform: [0, 25, 80, 100],
+  };
+
+  const tags = buildImetaTags([media]);
+  assert.ok(tags[0].includes("waveform 0 25 80 100"));
+  assert.deepEqual(imetaMediaFromTags(tags)[0].waveform, [0, 25, 80, 100]);
+});
+
 test("formatImetaMediaLine: video mime → ![video] line (regardless of URL suffix)", () => {
   assert.equal(
     formatImetaMediaLine({ url: "https://cdn/blob/xyz", type: "video/mp4" }),

@@ -487,6 +487,8 @@ export type BlobDescriptor = {
   image?: string;
   /** Original filename captured client-side. */
   filename?: string;
+  /** NIP-A0/NIP-71 voice-note amplitudes, normalized to 0–100. */
+  waveform?: number[];
 };
 
 export async function uploadMedia(

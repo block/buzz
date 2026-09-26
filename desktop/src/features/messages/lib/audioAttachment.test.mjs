@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyVoiceNotePlaybackRate,
   formatVoiceNoteDuration,
   isAudioAttachment,
   isVoiceNoteAttachment,
@@ -14,6 +15,31 @@ import {
   waveformPeaks,
   WAVEFORM_SUMMARY_RESOLUTION,
 } from "./audioAttachment.ts";
+
+test("playback-rate changes restore a decoder-reset position", () => {
+  let currentTime = 12.5;
+  const media = {
+    defaultPlaybackRate: 1,
+    get currentTime() {
+      return currentTime;
+    },
+    set currentTime(value) {
+      currentTime = value;
+    },
+    get playbackRate() {
+      return this.defaultPlaybackRate;
+    },
+    set playbackRate(value) {
+      this.defaultPlaybackRate = value;
+      currentTime = 0;
+    },
+  };
+
+  applyVoiceNotePlaybackRate(media, 1.5);
+
+  assert.equal(media.playbackRate, 1.5);
+  assert.equal(media.currentTime, 12.5);
+});
 
 test("isVoiceNoteFile scopes deferred audio uploads to recorder output", () => {
   assert.equal(
