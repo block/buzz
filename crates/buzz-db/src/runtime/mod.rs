@@ -1211,6 +1211,35 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Begin an event-write transaction and guard its community against
+    /// concurrent deletion.
+    pub async fn begin_community_write_transaction(
+        &self,
+        community: CommunityId,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let mut tx = self.begin_event_write_transaction().await?;
+        self.deletion_store()
+            .guard_transaction(&mut tx, community)
+            .await?;
+        Ok(tx)
+    }
+
+    /// Begin an event-write transaction that takes the shared replica-floor
+    /// advisory lock.
+    ///
+    /// This is a lock-ordering foundation only. Floor correctness remains
+    /// authoritative at commit time via the existing trigger/GUC contract.
+    pub async fn begin_replica_floor_locked_event_write_transaction(
+        &self,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let mut tx = self.begin_event_write_transaction().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(replica_fence::REPLICA_FLOOR_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
+        Ok(tx)
+    }
+
     /// Begin an event-write transaction through the pre-operation API name.
     ///
     /// New callers should use [`Self::begin_event_write_transaction`] so the

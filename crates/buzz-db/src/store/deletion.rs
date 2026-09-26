@@ -1284,6 +1284,7 @@ impl DeletionStore {
         .bind(token.community_id.as_uuid())
         .fetch_one(&mut *tx)
         .await?;
+        verify_lease(&mut tx, token, DeletionStage::Approved).await?;
         sqlx::query(
             "UPDATE community_deletion_requests SET pre_quiesce_archived_at = $2, \
                     quiescing_started_at = now(), updated_at = now() \
@@ -2033,9 +2034,16 @@ impl DeletionStore {
         .await?
         .map(CommunityId::from_uuid)
         .ok_or_else(|| DbError::NotFound(format!("community deletion {request_id}")))?;
-        // Every lifecycle transition takes the community lock before any row lock.
-        // Inverting this order lets abort and the executor deadlock each other.
+        // Every lifecycle transition takes the community advisory lock before any
+        // row lock, then the community row before the request row. Inverting
+        // either order lets abort and the executor deadlock each other.
         lock_community_deletion(&mut tx, community_id).await?;
+        let (old_generation, current_archived_at): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT deletion_fence_generation, archived_at FROM communities WHERE id = $1 FOR UPDATE",
+        )
+        .bind(community_id.as_uuid())
+        .fetch_one(&mut *tx)
+        .await?;
         let row = sqlx::query("SELECT * FROM community_deletion_requests WHERE id = $1 FOR UPDATE")
             .bind(request_id)
             .fetch_optional(&mut *tx)
@@ -2068,12 +2076,6 @@ impl DeletionStore {
                 "deletion {request_id} cannot abort while {active_writes} serving write lease(s) remain active"
             )));
         }
-        let (old_generation, current_archived_at): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
-            "SELECT deletion_fence_generation, archived_at FROM communities WHERE id = $1 FOR UPDATE",
-        )
-        .bind(request.community_id.as_uuid())
-        .fetch_one(&mut *tx)
-        .await?;
         let new_generation = old_generation.checked_add(1).ok_or_else(|| {
             DbError::DeletionSafety("community deletion fence generation overflow".to_string())
         })?;
@@ -3755,6 +3757,12 @@ mod postgres_tests {
             .execute(&mut *gate)
             .await
             .expect("hold community lock");
+        let mut request_gate = db.pool.begin().await.expect("begin request gate");
+        sqlx::query("SELECT id FROM community_deletion_requests WHERE id = $1 FOR UPDATE")
+            .bind(request.id)
+            .execute(&mut *request_gate)
+            .await
+            .expect("hold request row gate");
 
         let abort_store = store.clone();
         let aborting = tokio::spawn(async move {
@@ -3776,25 +3784,67 @@ mod postgres_tests {
             "forward transition must queue on the same lock"
         );
         gate.commit().await.expect("release lock gate");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !aborting.is_finished(),
+            "abort must still be queued while the request row stays locked"
+        );
+        assert!(
+            !forwarding.is_finished(),
+            "quiescing must still be queued while the request row stays locked"
+        );
+        request_gate
+            .commit()
+            .await
+            .expect("release request row gate");
 
         let aborted = tokio::time::timeout(Duration::from_secs(5), aborting)
             .await
             .expect("abort must not deadlock")
-            .expect("abort task")
-            .expect("abort wins lock queue");
-        assert_eq!(aborted.stage, DeletionStage::Aborted);
-        let forward_error = tokio::time::timeout(Duration::from_secs(5), forwarding)
+            .expect("abort task");
+        let forwarding = tokio::time::timeout(Duration::from_secs(5), forwarding)
             .await
             .expect("forward transition must not deadlock")
-            .expect("forward task")
-            .expect_err("post-lock lease verification rejects aborted request");
+            .expect("forward task");
+
         assert!(
             !matches!(
-                &forward_error,
-                DbError::Sqlx(sqlx::Error::Database(error)) if error.code().as_deref() == Some("40P01")
+                &aborted,
+                Err(DbError::Sqlx(sqlx::Error::Database(error)))
+                    if error.code().as_deref() == Some("40P01")
+            ),
+            "abort must not report a PostgreSQL deadlock"
+        );
+        assert!(
+            !matches!(
+                &forwarding,
+                Err(DbError::Sqlx(sqlx::Error::Database(error)))
+                    if error.code().as_deref() == Some("40P01")
             ),
             "serialization must not report a PostgreSQL deadlock"
         );
+
+        match (aborted, forwarding) {
+            (Ok(aborted), Ok(())) => {
+                assert_eq!(aborted.stage, DeletionStage::Aborted);
+                let reloaded = store.get(request.id).await.expect("reload request");
+                assert_eq!(reloaded.stage, DeletionStage::Aborted);
+                assert!(
+                    reloaded.quiescing_started_at.is_some(),
+                    "successful quiescing should persist its durable intent before abort"
+                );
+            }
+            (Ok(aborted), Err(DbError::AccessDenied(message))) => {
+                assert_eq!(aborted.stage, DeletionStage::Aborted);
+                assert!(
+                    message.contains("stale deletion lease"),
+                    "post-lock quiescing must reject a stale aborted lease: {message}"
+                );
+            }
+            (aborted, forwarding) => panic!(
+                "unexpected abort/quiesce outcome: abort={aborted:?}, forward={forwarding:?}"
+            ),
+        }
     }
 
     #[tokio::test]
@@ -4073,6 +4123,155 @@ mod postgres_tests {
             store.mark_drained(&wrong_fence).await.is_err(),
             "wrong fence generation must reject"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn compliant_writer_shared_xact_lock_blocks_deletion_exclusive_xact_lock() {
+        let (db, _) = store().await;
+        let community = db
+            .ensure_configured_community(&format!(
+                "community-lock-contract-{}.example",
+                Uuid::new_v4().simple()
+            ))
+            .await
+            .expect("create community")
+            .id;
+
+        let writer = db
+            .begin_community_write_transaction(community)
+            .await
+            .expect("open writer transaction with community lock");
+
+        let mut shared_contender = db.pool.begin().await.expect("begin shared contender");
+        let shared_taken: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock_shared(community_deletion_lock_key($1))",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&mut *shared_contender)
+        .await
+        .expect("try shared deletion lock");
+        assert!(
+            shared_taken,
+            "compliant writer must allow another shared community deletion lock holder"
+        );
+
+        let mut deleter = db.pool.begin().await.expect("begin deletion contender");
+        let exclusive_taken: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
+                .bind(community.as_uuid())
+                .fetch_one(&mut *deleter)
+                .await
+                .expect("try deletion exclusive lock");
+        assert!(
+            !exclusive_taken,
+            "compliant writer must hold shared community lock that blocks deletion exclusive lock"
+        );
+        deleter
+            .rollback()
+            .await
+            .expect("rollback deletion contender");
+        shared_contender
+            .rollback()
+            .await
+            .expect("rollback shared contender");
+        writer
+            .rollback()
+            .await
+            .expect("rollback writer transaction");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_fence_rejects_fresh_begin_transaction_after_fence() {
+        let (db, store) = store().await;
+        let (request, _) = inventoried_request(&db, &store).await;
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        store.fence(&claim.lease).await.expect("fence");
+
+        let error = db
+            .begin_community_write_transaction(request.community_id)
+            .await
+            .expect_err("fenced community must reject fresh write admission");
+        assert!(
+            matches!(
+                &error,
+                DbError::AccessDenied(message)
+                    if message
+                        == &format!("community {} is write-fenced (fenced)", request.community_id)
+            ),
+            "expected write-fenced access denial, got: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn begin_quiescing_waits_for_open_admitted_writer_note_update() {
+        let (db, store) = store().await;
+        let (request, _) = inventoried_request(&db, &store).await;
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+
+        let pubkey = [7_u8; 32];
+        let added_by = [8_u8; 32];
+        assert!(
+            db.add_to_allowlist(request.community_id, &pubkey, &added_by, Some("before"))
+                .await
+                .expect("seed allowlist row"),
+            "seeded allowlist row must insert"
+        );
+
+        let mut admitted_writer = db
+            .begin_community_write_transaction(request.community_id)
+            .await
+            .expect("open admitted writer");
+        let updated = sqlx::query(
+            "UPDATE pubkey_allowlist SET note = $3 WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(request.community_id.as_uuid())
+        .bind(pubkey.to_vec())
+        .bind("during")
+        .execute(&mut *admitted_writer)
+        .await
+        .expect("update allowlist note")
+        .rows_affected();
+        assert_eq!(updated, 1, "note-only update must touch the seeded row");
+
+        let store_for_quiesce = store.clone();
+        let lease = claim.lease.clone();
+        let quiescing =
+            tokio::spawn(async move { store_for_quiesce.begin_quiescing(&lease).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !quiescing.is_finished(),
+            "begin_quiescing must wait for an admitted writer holding the shared deletion lock"
+        );
+
+        admitted_writer
+            .commit()
+            .await
+            .expect("release admitted writer");
+        quiescing
+            .await
+            .expect("quiesce task")
+            .expect("quiesce after writer release");
     }
 
     #[tokio::test]
