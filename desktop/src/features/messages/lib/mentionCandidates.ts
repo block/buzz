@@ -9,7 +9,7 @@ import type {
   UserProfileSummary,
   UserSearchResult,
 } from "@/shared/api/types";
-import { normalizePubkey, truncateNpub, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 
 export function formatSearchUserDisplayName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || null;
@@ -65,7 +65,7 @@ export function mentionCandidateLabel(candidate: MentionCandidate) {
 /**
  * Mention chip label for a current room member. Reuses the members-sidebar
  * community-bots catalog overlay, then member / kind-0 / NIP-05 names, then
- * the truncated pubkey so unnamed members still appear in autocomplete.
+ * the truncated npub so unnamed members still appear in autocomplete.
  */
 export function resolveMentionMemberDisplayName(input: {
   pubkey: string;
@@ -93,7 +93,7 @@ export function resolveMentionMemberDisplayName(input: {
     ) ||
     input.profileNip05?.trim() ||
     null;
-  return next || truncatePubkey(input.pubkey);
+  return next || truncateNpub(input.pubkey);
 }
 
 /** Build the identity candidate for one current channel member. */

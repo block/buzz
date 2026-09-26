@@ -1,12 +1,12 @@
 import { overlayCommunityBotDisplayName } from "@/features/community-bots/lib/displayName";
 import type { ManagedAgent, UserSearchResult } from "@/shared/api/types";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 
 export function formatAddCandidateName(user: UserSearchResult) {
   return (
     overlayCommunityBotDisplayName(user.displayName, user.pubkey) ||
     user.nip05Handle?.trim() ||
-    truncatePubkey(user.pubkey)
+    truncateNpub(user.pubkey)
   );
 }
 

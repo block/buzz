@@ -104,6 +104,23 @@ test("parseInviteInput_buzz_join_rejects_missing_code", () => {
   );
 });
 
+test("parseInviteInput_hulabuzz_join_deep_link_returns_relay_and_code", () => {
+  assert.deepEqual(
+    parseInviteInput(
+      "hulabuzz://join?relay=wss://relay.example.com&code=abc123",
+    ),
+    { relayWsUrl: "wss://relay.example.com", code: "abc123" },
+  );
+});
+
+test("parseInviteInput_hulabuzz_join_deep_link_rejects_missing_code", () => {
+  assert.equal(
+    parseInviteInput("hulabuzz://join?relay=wss://relay.example.com"),
+    null,
+  );
+});
+
+
 test("parseInviteInput_buzz_join_rejects_missing_relay", () => {
   assert.equal(parseInviteInput("buzz://join?code=abc123"), null);
 });
