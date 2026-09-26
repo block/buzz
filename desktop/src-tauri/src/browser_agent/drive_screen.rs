@@ -14,8 +14,14 @@ use super::grant::{now_ms, BrowserAgentMode};
 use super::observe::ObserveEvent;
 use super::BrowserAgentState;
 
-/// Settle delay after the last nav before capture (page paint / title).
-pub const DRIVE_SCREEN_SETTLE_MS: u64 = 1_200;
+/// Final paint settle after the page reports ready + network quiet.
+pub const DRIVE_SCREEN_SETTLE_MS: u64 = 400;
+/// How often to poll document.readyState / network quiet.
+pub const DRIVE_SCREEN_READY_POLL_MS: u64 = 200;
+/// Max wait for document complete + quiet before giving up on this nav.
+pub const DRIVE_SCREEN_READY_TIMEOUT_MS: u64 = 12_000;
+/// Consecutive quiet+complete probes required before capture.
+pub const DRIVE_SCREEN_READY_STREAK: u32 = 2;
 /// Ignore rapid re-posts for the same grant (defense in depth vs settle).
 pub const DRIVE_SCREEN_MIN_INTERVAL_MS: u64 = 2_500;
 /// Max path bullets in the chat caption.
@@ -309,17 +315,86 @@ pub fn schedule_drive_screen_post(app: &AppHandle, webview_label: &str, url: &st
     let label = webview_label.to_string();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(DRIVE_SCREEN_SETTLE_MS)).await;
         let Some(state) = app.try_state::<BrowserAgentState>() else {
             return;
         };
-        if state.drive_screens.generation(&label) != gen {
-            return; // superseded by a newer nav
+        if !wait_for_drive_screen_ready(&app, &state, &label, gen).await {
+            return; // superseded, timed out unfinished, or webview gone
         }
         if let Err(e) = post_drive_screen(&app, &state, &label, &key).await {
             eprintln!("buzz-desktop: drive screen post {label}: {e}");
         }
     });
+}
+
+/// Poll until document complete + network quiet (streak), then a short paint
+/// settle. Cancels when a newer nav bumps generation.
+async fn wait_for_drive_screen_ready(
+    app: &AppHandle,
+    state: &BrowserAgentState,
+    label: &str,
+    gen: u64,
+) -> bool {
+    let started = std::time::Instant::now();
+    let mut streak = 0u32;
+    let mut saw_complete = false;
+    loop {
+        if state.drive_screens.generation(label) != gen {
+            return false;
+        }
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        if elapsed_ms >= DRIVE_SCREEN_READY_TIMEOUT_MS {
+            // Do not post a half-loaded crop. Only proceed if we saw complete
+            // at least once and the last probe was settled enough to try.
+            return saw_complete && streak >= 1 && state.drive_screens.generation(label) == gen;
+        }
+
+        let label_owned = label.to_string();
+        let app_probe = app.clone();
+        let probe = match tokio::task::spawn_blocking(move || {
+            let webview = app_probe.get_webview(&label_owned)?;
+            crate::playground_webview::capture::probe_page_ready(&webview).ok()
+        })
+        .await
+        {
+            Ok(Some(p)) => Some(p),
+            Ok(None) => {
+                // Webview gone or eval failed this tick — keep waiting unless
+                // the label disappeared entirely.
+                if app.get_webview(label).is_none() {
+                    return false;
+                }
+                None
+            }
+            Err(_) => None,
+        };
+
+        match probe {
+            Some(p) if p.is_settled() => {
+                saw_complete = true;
+                streak = streak.saturating_add(1);
+                if streak >= DRIVE_SCREEN_READY_STREAK {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        DRIVE_SCREEN_SETTLE_MS,
+                    ))
+                    .await;
+                    return state.drive_screens.generation(label) == gen;
+                }
+            }
+            Some(p) => {
+                if p.ready == "complete" {
+                    saw_complete = true;
+                }
+                streak = 0;
+            }
+            None => {
+                streak = 0;
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(DRIVE_SCREEN_READY_POLL_MS))
+            .await;
+    }
 }
 
 async fn post_drive_screen(
@@ -405,20 +480,33 @@ fn capture_label_png(app: &AppHandle, label: &str) -> Result<Vec<u8>, String> {
     let webview = app
         .get_webview(label)
         .ok_or_else(|| "webview not open".to_string())?;
-    // Playground labels are validated inside capture_playground_png; pins use
-    // the generic child snapshot.
     if label.starts_with("playground-") {
-        crate::playground_webview::capture::capture_playground_png(&webview, label, false)
-            .map(|shot| shot.bytes)
-    } else {
-        crate::playground_webview::capture::snapshot_child_webview_png(&webview)
+        // Same label guard as capture_playground_png (reject non-playground).
+        if webview.label() != label {
+            return Err("screenshot must target the playground webview".into());
+        }
+        if !crate::playground_webview::inspect_target_is_safe(label) {
+            return Err("screenshot must target the playground webview".into());
+        }
     }
+    // Full WKWebView viewport after zoom reset + scroll-to-top — not a
+    // device-bezel crop or mid-load fragment.
+    crate::playground_webview::capture::snapshot_viewport_png_for_drive(&webview)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ready_wait_constants_prefer_probe_over_fixed_delay() {
+        assert!(DRIVE_SCREEN_READY_TIMEOUT_MS > DRIVE_SCREEN_SETTLE_MS);
+        assert!(DRIVE_SCREEN_READY_POLL_MS >= 100);
+        assert!(DRIVE_SCREEN_READY_STREAK >= 2);
+        // Old fixed 1.2s alone was too early for many pages.
+        assert!(DRIVE_SCREEN_SETTLE_MS <= 600);
+    }
 
     #[test]
     fn screen_url_key_strips_hash() {

@@ -323,10 +323,13 @@ fn pin_data_store_identifier(pin_id: &str) -> [u8; 16] {
     .as_bytes()
 }
 
-fn parse_https_url(raw: &str) -> Result<Url, String> {
+/// Link slide-out + pin webviews accept http(s). Pinned-site settings still
+/// require https at the TypeScript boundary; link panel / localhost http must
+/// reach create or the UI shows Failed to open link.
+fn parse_pin_url(raw: &str) -> Result<Url, String> {
     let url = Url::parse(raw).map_err(|error| format!("invalid url: {error}"))?;
-    if url.scheme() != "https" {
-        return Err("pin URL must use https".into());
+    if url.scheme() != "https" && url.scheme() != "http" {
+        return Err("pin URL must use http or https".into());
     }
     if url.host_str().is_none() {
         return Err("pin URL must include a host".into());
@@ -583,7 +586,7 @@ pub async fn pin_webview_show(
     window_label: Option<String>,
 ) -> Result<PinNavState, String> {
     let pin_id = sanitize_pin_id(&pin_id)?;
-    let start_url = parse_https_url(&start_url)?;
+    let start_url = parse_pin_url(&start_url)?;
     let window_label = normalize_window_label(window_label.as_deref());
     let profile_dir = pin_profile_dir(&app, &pin_id)?;
     std::fs::create_dir_all(&profile_dir).map_err(|error| error.to_string())?;
@@ -626,6 +629,7 @@ pub async fn pin_webview_show(
     let nav_pin = pin_id.clone();
     let load_app = app.clone();
     let load_pin = pin_id.clone();
+    let load_label = label.clone();
     let builder = WebviewBuilder::new(label, WebviewUrl::External(initial_url))
         .data_directory(profile_dir.clone())
         .data_store_identifier(pin_data_store_identifier(&pin_id))
@@ -653,6 +657,13 @@ pub async fn pin_webview_show(
                         classify_from_url(Some(payload.url())),
                     );
                 }
+                // Prefer Finished over on_navigation for Drive screen settle
+                // (title + real document complete), matching playground.
+                crate::browser_agent::ensure_instrumentation_for_label(
+                    &load_app,
+                    &load_label,
+                );
+                crate::browser_agent::record_nav_from_page(&load_app, &load_label);
             }
         });
 
@@ -869,7 +880,7 @@ pub async fn pin_webview_poll(
     window_label: Option<String>,
 ) -> Result<PinPollResult, String> {
     let pin_id = sanitize_pin_id(&pin_id)?;
-    let start_url = parse_https_url(&start_url)?;
+    let start_url = parse_pin_url(&start_url)?;
     let window_label = normalize_window_label(window_label.as_deref());
     let Some(webview) = app.get_webview(&pin_webview_label(&pin_id, &window_label)) else {
         return Ok(PinPollResult { changed: false });
@@ -1158,6 +1169,15 @@ mod tests {
         assert!(sanitize_pin_id("playground-pin-demo-1").is_ok());
         assert!(sanitize_pin_id("playground-pin:demo-1").is_err());
         assert!(sanitize_pin_id("hula-link-side-panel").is_ok());
+    }
+
+    #[test]
+    fn parse_pin_url_accepts_http_and_https() {
+        assert!(parse_pin_url("https://example.com/menus").is_ok());
+        assert!(parse_pin_url("http://www.hulasmoderntiki.com/menus").is_ok());
+        assert!(parse_pin_url("http://localhost:3000").is_ok());
+        assert!(parse_pin_url("ftp://example.com").is_err());
+        assert!(parse_pin_url("not-a-url").is_err());
     }
 
     #[test]

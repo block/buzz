@@ -381,9 +381,13 @@ function PinStageHost({
       }).catch((error) => {
         console.error("Failed to open link side panel", error);
         if (!cancelled) {
-          setLoadError(
-            error instanceof Error ? error.message : "Failed to open link.",
-          );
+          const message =
+            error instanceof Error
+              ? error.message
+              : typeof error === "string"
+                ? error
+                : "Failed to open link.";
+          setLoadError(message || "Failed to open link.");
         }
       });
     };

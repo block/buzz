@@ -41,6 +41,93 @@ pub const DOCUMENT_CONTENT_SIZE_JS: &str = r#"(function(){
   }
 })()"#;
 
+/// JS probe for Drive screen settle: document complete + network quiet + size.
+pub const PAGE_READY_PROBE_JS: &str = r#"(function(){
+  try {
+    var ready = document.readyState || '';
+    var now = performance.now();
+    var resources = performance.getEntriesByType('resource') || [];
+    var recent = 0;
+    for (var i = 0; i < resources.length; i++) {
+      var end = resources[i].responseEnd || 0;
+      if (end > 0 && (now - end) < 500) recent++;
+    }
+    var body = document.body;
+    var textLen = body ? String(body.innerText || '').trim().length : 0;
+    var e = document.documentElement;
+    var w = Math.max(
+      (e && e.clientWidth) || 0,
+      (window.innerWidth) || 0
+    );
+    var h = Math.max(
+      (e && e.scrollHeight) || 0,
+      (body && body.scrollHeight) || 0,
+      (window.innerHeight) || 0
+    );
+    return JSON.stringify({
+      ready: ready,
+      recent: recent,
+      textLen: textLen,
+      w: w || 0,
+      h: h || 0,
+      href: String(location.href || '')
+    });
+  } catch (err) {
+    return JSON.stringify({
+      ready: 'error',
+      recent: 99,
+      textLen: 0,
+      w: 0,
+      h: 0,
+      href: ''
+    });
+  }
+})()"#;
+
+/// Scroll to origin before a Drive viewport snapshot (full visible frame).
+pub const PREPARE_VIEWPORT_JS: &str = r#"(function(){
+  try {
+    window.scrollTo(0, 0);
+    if (document.documentElement) document.documentElement.scrollTop = 0;
+    if (document.body) document.body.scrollTop = 0;
+    return 'ok';
+  } catch (err) {
+    return String(err);
+  }
+})()"#;
+
+/// Parsed [`PAGE_READY_PROBE_JS`] payload.
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PageReadyProbe {
+    pub ready: String,
+    pub recent: u64,
+    pub text_len: u64,
+    pub w: f64,
+    pub h: f64,
+    pub href: String,
+}
+
+impl PageReadyProbe {
+    /// Document complete, no recent network, and a usable layout size.
+    pub fn is_settled(&self) -> bool {
+        self.ready == "complete"
+            && self.recent == 0
+            && self.w.is_finite()
+            && self.h.is_finite()
+            && self.w >= 32.0
+            && self.h >= 32.0
+            && !self.href.is_empty()
+            && self.href != "about:blank"
+    }
+}
+
+/// Parse [`PAGE_READY_PROBE_JS`] JSON (unit-tested).
+pub fn parse_page_ready_probe(raw: &str) -> Result<PageReadyProbe, String> {
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("page ready probe parse failed: {error}"))
+}
+
 /// Clamp document height for full-page thumbs: at least the viewport, at most the cap.
 pub fn clamp_full_page_capture_height(content_height: f64, viewport_height: f64) -> f64 {
     content_height
@@ -102,6 +189,12 @@ pub fn capture_playground_png(
 }
 
 pub fn snapshot_child_webview_png(webview: &Webview) -> Result<Vec<u8>, String> {
+    snapshot_playground_webview(webview)
+}
+
+/// Drive chat screenshots: reset page zoom + scroll, then full WKWebView bounds.
+pub fn snapshot_viewport_png_for_drive(webview: &Webview) -> Result<Vec<u8>, String> {
+    let _ = prepare_viewport_for_capture(webview);
     snapshot_playground_webview(webview)
 }
 
@@ -251,6 +344,92 @@ pub fn parse_content_size_payload(raw: &str) -> Result<(f64, f64), String> {
 }
 
 #[cfg(target_os = "macos")]
+fn eval_js_string(webview: &Webview, js: &str) -> Result<String, String> {
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_web_kit::WKWebView;
+
+    let script_owned = js.to_string();
+    let (tx, rx) = mpsc::channel();
+    webview
+        .with_webview(move |platform| {
+            let view: &WKWebView = unsafe { &*platform.inner().cast::<WKWebView>() };
+            let script = NSString::from_str(&script_owned);
+            let block = RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
+                if !error.is_null() {
+                    let _ = tx.send(Err("webview eval failed".into()));
+                    return;
+                }
+                if result.is_null() {
+                    let _ = tx.send(Ok(String::new()));
+                    return;
+                }
+                let raw = unsafe { &*result };
+                let Some(ns) = raw.downcast_ref::<NSString>() else {
+                    let _ = tx.send(Err("webview eval result was not a string".into()));
+                    return;
+                };
+                let _ = tx.send(Ok(ns.to_string()));
+            });
+            unsafe {
+                view.evaluateJavaScript_completionHandler(&script, Some(&*block));
+            }
+            std::mem::forget(block);
+        })
+        .map_err(|error| error.to_string())?;
+
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(result) => result,
+        Err(_) => Err("webview eval timed out".into()),
+    }
+}
+
+/// Probe document readiness for Drive screen settle (macOS WKWebView).
+pub fn probe_page_ready(webview: &Webview) -> Result<PageReadyProbe, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let raw = eval_js_string(webview, PAGE_READY_PROBE_JS)?;
+        return parse_page_ready_probe(&raw);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = webview;
+        Ok(PageReadyProbe {
+            ready: "complete".into(),
+            recent: 0,
+            text_len: 1,
+            w: 1280.0,
+            h: 800.0,
+            href: "https://example.invalid/".into(),
+        })
+    }
+}
+
+/// Reset pageZoom to 1 and scroll to (0,0) so the snapshot is the full frame.
+pub fn prepare_viewport_for_capture(webview: &Webview) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_web_kit::WKWebView;
+        webview
+            .with_webview(|platform| {
+                let view: &WKWebView = unsafe { &*platform.inner().cast::<WKWebView>() };
+                unsafe {
+                    view.setPageZoom(1.0);
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        let _ = eval_js_string(webview, PREPARE_VIEWPORT_JS)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = webview;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn take_wk_snapshot(webview: &Webview, snapshot_width: Option<f64>) -> Result<Vec<u8>, String> {
     use block2::RcBlock;
     use objc2::MainThreadMarker;
@@ -274,6 +453,11 @@ fn take_wk_snapshot(webview: &Webview, snapshot_width: Option<f64>) -> Result<Ve
             // capped document height before this call; snapshotWidth keeps
             // the PNG small for list rows.
             let config = unsafe { WKSnapshotConfiguration::new(mtm) };
+            // Full WKWebView bounds (null rect). Wait for paint so Drive
+            // screenshots are not mid-frame crops.
+            unsafe {
+                config.setAfterScreenUpdates(true);
+            }
             if let Some(width) = snapshot_width {
                 unsafe {
                     config.setSnapshotWidth(Some(&NSNumber::numberWithDouble(width)));
@@ -389,5 +573,32 @@ mod tests {
         );
         assert!(parse_content_size_payload("nope").is_err());
         assert!(parse_content_size_payload(r#"{"w":-1,"h":10}"#).is_err());
+    }
+
+    #[test]
+    fn page_ready_probe_settled_requires_complete_and_quiet() {
+        assert!(PAGE_READY_PROBE_JS.contains("readyState"));
+        assert!(PAGE_READY_PROBE_JS.contains("responseEnd"));
+        assert!(PREPARE_VIEWPORT_JS.contains("scrollTo"));
+        let settled = parse_page_ready_probe(
+            r#"{"ready":"complete","recent":0,"textLen":40,"w":1280,"h":800,"href":"https://ex.test/"}"#,
+        )
+        .expect("parse");
+        assert!(settled.is_settled());
+        let loading = parse_page_ready_probe(
+            r#"{"ready":"interactive","recent":0,"textLen":40,"w":1280,"h":800,"href":"https://ex.test/"}"#,
+        )
+        .expect("parse");
+        assert!(!loading.is_settled());
+        let busy = parse_page_ready_probe(
+            r#"{"ready":"complete","recent":3,"textLen":40,"w":1280,"h":800,"href":"https://ex.test/"}"#,
+        )
+        .expect("parse");
+        assert!(!busy.is_settled());
+        let blank = parse_page_ready_probe(
+            r#"{"ready":"complete","recent":0,"textLen":0,"w":1280,"h":800,"href":"about:blank"}"#,
+        )
+        .expect("parse");
+        assert!(!blank.is_settled());
     }
 }
