@@ -41,6 +41,53 @@ describe("channelScopedBotTypingPubkeyKey", () => {
     ]);
     assert.equal(key, `${AGENT},${AGENT_2}`);
   });
+
+  it("keeps only owned agents when an ownedPubkeys set is given", () => {
+    const key = channelScopedBotTypingPubkeyKey(
+      [
+        { pubkey: AGENT, threadHeadId: null },
+        { pubkey: AGENT_2, threadHeadId: null },
+      ],
+      new Set([AGENT]),
+    );
+    // AGENT_2 belongs to another member — it must not light the working timer.
+    assert.equal(key, AGENT);
+  });
+
+  it("matches ownership case-insensitively against the normalized set", () => {
+    const key = channelScopedBotTypingPubkeyKey(
+      [{ pubkey: AGENT.toUpperCase(), threadHeadId: null }],
+      new Set([AGENT]),
+    );
+    assert.equal(key, AGENT);
+  });
+
+  it("returns empty when no channel-scoped typer is owned", () => {
+    const key = channelScopedBotTypingPubkeyKey(
+      [{ pubkey: AGENT_2, threadHeadId: null }],
+      new Set([AGENT]),
+    );
+    assert.equal(key, "");
+  });
+
+  it("still applies the thread-scope filter alongside ownership", () => {
+    const key = channelScopedBotTypingPubkeyKey(
+      [
+        { pubkey: AGENT, threadHeadId: "thread-1" },
+        { pubkey: AGENT, threadHeadId: null },
+      ],
+      new Set([AGENT]),
+    );
+    assert.equal(key, AGENT);
+  });
+
+  it("an empty ownedPubkeys set narrows to nothing", () => {
+    const key = channelScopedBotTypingPubkeyKey(
+      [{ pubkey: AGENT, threadHeadId: null }],
+      new Set(),
+    );
+    assert.equal(key, "");
+  });
 });
 
 describe("thread-only bot typing regression", () => {
