@@ -13,7 +13,11 @@ import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { UserStatusInput } from "@/features/user-status/types";
 import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity";
 import type { Community } from "@/features/communities/types";
-import { CommunitySwitcher } from "@/features/communities/ui/CommunitySwitcher";
+import {
+  CommunityEmojiIcon,
+  CommunitySwitcher,
+} from "@/features/communities/ui/CommunitySwitcher";
+import { useActiveCommunityIcon } from "@/features/communities/useCommunityIcons";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import type { PresenceStatus, Profile, UserStatus } from "@/shared/api/types";
@@ -60,6 +64,7 @@ export function SidebarProfileCard({
   communities,
 }: SidebarProfileCardProps) {
   const selfProfileCache = useSelfProfileCache();
+  const activeIconQuery = useActiveCommunityIcon(activeCommunity?.relayUrl);
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const activeRole = myMembershipQuery.data?.membership?.role;
   const canInvite = activeRole === "owner" || activeRole === "admin";
@@ -89,12 +94,10 @@ export function SidebarProfileCard({
       className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70"
       data-buzz-sidebar-secondary
     >
-      <span
-        aria-hidden="true"
-        className="flex w-3.5 shrink-0 items-center justify-center text-2xs"
-      >
-        <span className="-translate-y-px leading-normal">🐝</span>
-      </span>
+      <CommunityEmojiIcon
+        className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm text-2xs"
+        iconUrl={activeIconQuery.data}
+      />
       <span className="truncate">{communityLabel}</span>
     </span>
   );
