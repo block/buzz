@@ -52,4 +52,17 @@ impl AppState {
             set.remove(&(my_pubkey.to_string(), channel_id.to_string()));
         }
     }
+
+    /// Drop every identity's pending-owner entry for `channel_id`. For when
+    /// the channel itself is destroyed (a huddle's ephemeral channel is
+    /// archived on end/rollback): the mark must not outlive the channel, and
+    /// keying the clear off the *current* signing identity would leak the
+    /// creator's entry after an in-process identity swap or in recovery
+    /// mode. Only the creating identity ever holds an entry for a given
+    /// channel id, so this removes exactly the creator's mark.
+    pub fn clear_pending_owned_channel_all_identities(&self, channel_id: &str) {
+        if let Ok(mut set) = self.pending_owned_channels.lock() {
+            set.retain(|(_, id)| id != channel_id);
+        }
+    }
 }
