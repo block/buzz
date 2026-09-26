@@ -21,6 +21,7 @@ import type {
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 
 export const WELCOME_GUIDE_AGENT_NAME = "Fizz";
 export const WELCOME_GUIDE_PERSONA_ID = "builtin:fizz";
@@ -51,11 +52,10 @@ export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
 
 const welcomeTeamPromises = new Map<string, Promise<WelcomeTeamAgents>>();
 
-function normalizeRelayUrl(relayUrl: string | null | undefined) {
-  return relayUrl?.trim().replace(/\/+$/, "") ?? null;
-}
-
 function isAgentScopedToRelay(agent: ManagedAgent, relayUrl?: string | null) {
+  if (!relayUrl) {
+    return true;
+  }
   const targetRelayUrl = normalizeRelayUrl(relayUrl);
   if (!targetRelayUrl) {
     return true;
@@ -396,7 +396,7 @@ export function ensureWelcomeTeam(
   channelId: string,
   relayUrl?: string | null,
 ): Promise<WelcomeTeamAgents> {
-  const key = `${normalizeRelayUrl(relayUrl) ?? ""}:${channelId}`;
+  const key = `${relayUrl ? normalizeRelayUrl(relayUrl) : ""}:${channelId}`;
   const current = welcomeTeamPromises.get(key);
   if (current) return current;
 
