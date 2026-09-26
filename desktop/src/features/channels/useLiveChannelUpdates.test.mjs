@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { JSDOM } from "jsdom";
-import { HOME_MENTION_EVENT_KINDS } from "@/shared/constants/kinds";
+import {
+  HOME_MENTION_EVENT_KINDS,
+  KIND_HUDDLE_STARTED,
+  KIND_REACTION,
+  KIND_STREAM_MESSAGE_DIFF,
+  KIND_SYSTEM_MESSAGE,
+} from "@/shared/constants/kinds";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost",
@@ -42,7 +48,12 @@ function message(id, overrides = {}) {
   };
 }
 
-async function mount(initialChannels, options = {}, subscribeImpl) {
+async function mount(
+  initialChannels,
+  options = {},
+  subscribeImpl,
+  activeChannelId = null,
+) {
   const { act, cleanup, renderHook } = await import("@testing-library/react");
   const React = await import("react");
   const { QueryClient, QueryClientProvider } = await import(
@@ -50,7 +61,7 @@ async function mount(initialChannels, options = {}, subscribeImpl) {
   );
   const { relayClient } = await import("@/shared/api/relayClient");
   const { useLiveChannelUpdates } = await import("./useLiveChannelUpdates.ts");
-  const { channelMessagesKey } = await import(
+  const { channelMessagesKey, channelWindowKey } = await import(
     "@/features/messages/lib/messageQueryKeys"
   );
   const originalLive = relayClient.subscribeLive;
@@ -79,7 +90,8 @@ async function mount(initialChannels, options = {}, subscribeImpl) {
   const wrapper = ({ children }) =>
     React.createElement(QueryClientProvider, { client: queryClient }, children);
   const hook = renderHook(
-    ({ members, opts }) => useLiveChannelUpdates(members, null, opts),
+    ({ members, opts }) =>
+      useLiveChannelUpdates(members, activeChannelId, opts),
     {
       wrapper,
       initialProps: {
@@ -101,6 +113,7 @@ async function mount(initialChannels, options = {}, subscribeImpl) {
     mentionSubscriptions,
     queryClient,
     channelMessagesKey,
+    channelWindowKey,
     rerender(members, opts = options) {
       hook.rerender({ members, opts: { currentPubkey: VIEWER, ...opts } });
     },
@@ -175,6 +188,31 @@ test("live channel stream drives mention, unread and DM callbacks once across re
     assert.deepEqual(mentions, ["mention"]);
     assert.deepEqual(unreads, [["channel-0", "mention"]]);
     assert.deepEqual(dms, [["channel-0", "mention"]]);
+    assert.deepEqual(
+      h.queryClient
+        .getQueryData(h.channelWindowKey("channel-0"))
+        .liveOverlay.map((item) => item.id),
+      ["mention"],
+    );
+  } finally {
+    h.restore();
+  }
+});
+
+test("notify while viewing permits DM notifications for the active channel", async () => {
+  const dms = [];
+  const h = await mount(
+    channels(1),
+    {
+      notifyForActiveChannel: true,
+      onDmMessage: (event, channel) => dms.push([channel.id, event.id]),
+    },
+    undefined,
+    "channel-0",
+  );
+  try {
+    await h.deliver(h.subscriptions[0], message("active-dm"));
+    assert.deepEqual(dms, [["channel-0", "active-dm"]]);
   } finally {
     h.restore();
   }
@@ -319,6 +357,80 @@ test("untagged auxiliary event keeps its single-channel context in the timeline 
     assert.ok(reaction);
     assert.deepEqual(reaction.tags.at(-1), ["h", "channel-1"]);
     assert.equal(mentions, 0);
+  } finally {
+    h.restore();
+  }
+});
+
+test("live rows and auxiliary events survive authoritative window projection", async () => {
+  const h = await mount(channels(1));
+  try {
+    const channelId = "channel-0";
+    const parent = message("parent", {
+      created_at: Math.floor(Date.now() / 1000) - 10,
+    });
+    h.queryClient.setQueryData(h.channelWindowKey(channelId), {
+      pages: [
+        {
+          startCursor: null,
+          rows: [{ event: parent, thread: null }],
+          aux: [],
+          nextCursor: null,
+          hasMore: false,
+        },
+      ],
+      liveOverlay: [],
+      liveAux: [],
+      liveSummaries: {},
+    });
+    h.queryClient.setQueryData(h.channelMessagesKey(channelId), [parent]);
+
+    const sub = h.subscriptions[0];
+    for (const [id, kind] of [
+      ["diff", KIND_STREAM_MESSAGE_DIFF],
+      ["system", KIND_SYSTEM_MESSAGE],
+      ["huddle", KIND_HUDDLE_STARTED],
+      ["reaction", KIND_REACTION],
+    ]) {
+      await h.deliver(sub, message(id, { kind }));
+    }
+    await h.deliver(
+      sub,
+      message("thread-only", {
+        tags: [
+          ["h", channelId],
+          ["e", "parent", "", "root"],
+          ["e", "parent", "", "reply"],
+        ],
+      }),
+    );
+    await h.deliver(sub, message("next-row"));
+
+    const window = h.queryClient.getQueryData(h.channelWindowKey(channelId));
+    assert.deepEqual(
+      new Set(window.liveOverlay.map((event) => event.id)),
+      new Set(["diff", "system", "huddle", "next-row"]),
+    );
+    assert.deepEqual(
+      window.liveAux.map((event) => event.id),
+      ["reaction"],
+    );
+    assert.deepEqual(
+      new Set(
+        h.queryClient
+          .getQueryData(h.channelMessagesKey(channelId))
+          .map((event) => event.id),
+      ),
+      new Set([
+        "parent",
+        "diff",
+        "system",
+        "huddle",
+        "reaction",
+        "thread-only",
+        "next-row",
+      ]),
+    );
   } finally {
     h.restore();
   }

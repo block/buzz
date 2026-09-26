@@ -22,6 +22,7 @@ type ChannelRouteSearch = {
    */
   autoSend?: string;
   messageId?: string;
+  messageView?: "timeline";
   profile?: string;
   profileTab?: ProfilePanelTab;
   profileView?: ProfilePanelView;
@@ -40,6 +41,7 @@ function validateChannelSearch(
     agentSession: nonEmptyString(search.agentSession),
     autoSend: nonEmptyString(search.autoSend),
     messageId: nonEmptyString(search.messageId),
+    messageView: search.messageView === "timeline" ? "timeline" : undefined,
     profile: nonEmptyString(search.profile),
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,
     profileView: parseProfilePanelView(search.profileView) ?? undefined,
@@ -82,6 +84,7 @@ function ChannelRouteComponent() {
         searchHighlight={searchHighlight}
         selectedPostId={null}
         targetMessageId={search.messageId ?? null}
+        targetMessageView={search.messageView ?? null}
         targetReplyId={null}
         targetThreadRootId={search.threadRootId ?? search.thread ?? null}
       />

@@ -11,6 +11,7 @@ export const CHANNEL_SEARCH_KEYS = [
   "autoSend",
   "channelManagement",
   "messageId",
+  "messageView",
   "profile",
   "profileTab",
   "profileView",
@@ -34,4 +35,11 @@ export function buildAutoSendClearPatch(): Partial<
   Record<ChannelSearchKey, string | null>
 > {
   return { autoSend: null };
+}
+
+/** Clear every URL field that belongs to a targeted message navigation. */
+export function buildMessageRouteTargetClearPatch(): Partial<
+  Record<ChannelSearchKey, string | null>
+> {
+  return { messageId: null, messageView: null, threadRootId: null };
 }

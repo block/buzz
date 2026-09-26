@@ -36,6 +36,7 @@ type ChannelRouteScreenProps = {
   searchHighlight: SearchHighlightNavigation | null | undefined;
   selectedPostId: string | null;
   targetMessageId: string | null;
+  targetMessageView?: "timeline" | null;
   targetReplyId: string | null;
   targetThreadRootId: string | null;
 };
@@ -117,6 +118,7 @@ export function ChannelRouteScreen({
   searchHighlight,
   selectedPostId,
   targetMessageId,
+  targetMessageView = null,
   targetReplyId,
   targetThreadRootId,
 }: ChannelRouteScreenProps) {
@@ -304,6 +306,7 @@ export function ChannelRouteScreen({
         projects={projectsQuery.data ?? [projectHome]}
         targetMessageEvents={targetMessageEvents}
         targetMessageId={targetMessageId}
+        targetMessageView={targetMessageView}
       />
     );
   }
@@ -324,6 +327,7 @@ export function ChannelRouteScreen({
       targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
+      targetMessageView={targetMessageView}
       targetSearchMessageId={activeSearchHighlight?.messageId}
       targetSearchQuery={activeSearchHighlight?.query}
     />
