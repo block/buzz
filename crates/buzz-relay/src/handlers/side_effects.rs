@@ -952,7 +952,7 @@ pub fn emit_live_thread_summary(
             warn!(root = %root_hex, "live thread summary Redis publish failed: {e}");
         }
         let stored = StoredEvent::new(event, Some(channel_id));
-        crate::handlers::event::fan_out_event_to_local_subscribers(
+        let _ = crate::handlers::event::fan_out_event_to_local_subscribers(
             &state,
             tenant.community(),
             &stored,
@@ -1038,7 +1038,7 @@ pub async fn emit_membership_notification(
 
     // Routed through the guarded send path for uniformity; the access gate no-ops
     // for these globally-scoped (channel_id = None) events.
-    crate::handlers::event::fan_out_event_to_local_subscribers(state, tenant.community(), &stored)
+    let _ = crate::handlers::event::fan_out_event_to_local_subscribers(state, tenant.community(), &stored)
         .await;
 
     info!(
@@ -3076,7 +3076,7 @@ async fn emit_initial_ref_state(
     if was_inserted {
         // Routed through the guarded send path for uniformity; the access gate
         // no-ops for this globally-scoped (channel_id = None) ref-state event.
-        crate::handlers::event::fan_out_event_to_local_subscribers(
+        let _ = crate::handlers::event::fan_out_event_to_local_subscribers(
             state,
             tenant.community(),
             &stored,
@@ -3266,7 +3266,7 @@ async fn publish_nip43_delta(
 
     // Routed through the guarded send path for uniformity; the access gate
     // no-ops for this globally-scoped (channel_id = None) NIP-43 event.
-    crate::handlers::event::fan_out_event_to_local_subscribers(state, tenant.community(), &stored)
+    let _ = crate::handlers::event::fan_out_event_to_local_subscribers(state, tenant.community(), &stored)
         .await;
 
     info!(

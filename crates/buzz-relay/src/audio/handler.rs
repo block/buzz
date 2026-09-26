@@ -1469,7 +1469,7 @@ async fn emit_participant_event(
     //    path so a stale subscription on a removed/non-member connection cannot
     //    receive this channel's audio lifecycle event (same gate as
     //    dispatch_persistent_event in the ingest handler).
-    crate::handlers::event::fan_out_event_to_local_subscribers(state, tenant.community(), &stored)
+    let _ = crate::handlers::event::fan_out_event_to_local_subscribers(state, tenant.community(), &stored)
         .await;
 
     // 4. Cross-node broadcast via Redis pub/sub.

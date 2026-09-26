@@ -9,6 +9,41 @@ use crate::error::CliError;
 use crate::validate::{read_or_stdin, validate_hex64};
 use crate::{AgentsCmd, RespondToArg};
 
+/// The copy an owner sees after a successful draft publish.
+struct DraftAdvisory {
+    message: String,
+    /// Relay-reported count of locally-connected subscribers (None on older
+    /// relays that send no advisory).
+    delivered_to_local: Option<u64>,
+}
+
+/// Honest-delivery advisory for ephemeral agent-management drafts (#3791).
+///
+/// Drafts are kind-24200 ephemeral frames and are **never stored** by the
+/// relay, so `{"accepted": true}` means only "fanned out to whoever was
+/// connected right now," not "Desktop received it." When the relay reports it
+/// reached 0 local subscribers, replace the unconditional success copy with a
+/// delivery warning instead of telling the owner the draft is waiting for
+/// review. The count is advisory on multi-node relays (the Desktop may be
+/// attached to a different pod via pubsub), so we surface it rather than
+/// error.
+fn draft_delivery_advisory(relay_message: Option<&str>) -> DraftAdvisory {
+    let delivered_to_local = relay_message.and_then(|m| {
+        m.strip_prefix("delivered_to_local=")
+            .and_then(|n| n.trim().parse::<u64>().ok())
+    });
+    let message = match delivered_to_local {
+        Some(0) => "Accepted by the relay but reached 0 connected Buzz Desktop instances. Agent drafts are ephemeral and never stored — if Desktop was offline, this draft is lost. Reopen Buzz Desktop and re-run the command.".to_string(),
+        Some(n) => format!("Draft sent to Buzz Desktop for owner review (reached {n} connected instance(s)). Nothing changes until the owner saves it."),
+        // Older relays send an empty message; keep the legacy copy.
+        None => "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it.".to_string(),
+    };
+    DraftAdvisory {
+        message,
+        delivered_to_local,
+    }
+}
+
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
         AgentsCmd::DraftCreate {
@@ -29,15 +64,16 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             let response = client.publish_ephemeral_event(built.event).await?;
             let mut output: serde_json::Value = serde_json::from_str(&response)
                 .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            let advisory =
+                draft_delivery_advisory(output.get("message").and_then(serde_json::Value::as_str));
             if let Some(obj) = output.as_object_mut() {
                 obj.insert("request_id".into(), built.request_id.into());
                 obj.insert("action".into(), built.action.into());
                 obj.insert("saved".into(), false.into());
-                obj.insert(
-                    "message".into(),
-                    "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it."
-                        .into(),
-                );
+                if let Some(n) = advisory.delivered_to_local {
+                    obj.insert("delivered_to_local".into(), n.into());
+                }
+                obj.insert("message".into(), advisory.message.into());
             }
             println!("{output}");
             Ok(())
@@ -71,15 +107,16 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             let response = client.publish_ephemeral_event(built.event).await?;
             let mut output: serde_json::Value = serde_json::from_str(&response)
                 .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            let advisory =
+                draft_delivery_advisory(output.get("message").and_then(serde_json::Value::as_str));
             if let Some(obj) = output.as_object_mut() {
                 obj.insert("request_id".into(), built.request_id.into());
                 obj.insert("action".into(), built.action.into());
                 obj.insert("saved".into(), false.into());
-                obj.insert(
-                    "message".into(),
-                    "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it."
-                        .into(),
-                );
+                if let Some(n) = advisory.delivered_to_local {
+                    obj.insert("delivered_to_local".into(), n.into());
+                }
+                obj.insert("message".into(), advisory.message.into());
             }
             println!("{output}");
             Ok(())
@@ -1273,5 +1310,41 @@ mod tests {
             .expect("sign");
         let result = verify_archived_event(&event, &self_hex).expect("should pass");
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn draft_advisory_warns_when_zero_delivered() {
+        let advisory = draft_delivery_advisory(Some("delivered_to_local=0"));
+        assert_eq!(advisory.delivered_to_local, Some(0));
+        assert!(
+            advisory.message.contains("reached 0 connected"),
+            "zero-delivery must warn: {}",
+            advisory.message
+        );
+        assert!(
+            advisory.message.contains("ephemeral"),
+            "warning should explain why the draft may be lost"
+        );
+    }
+
+    #[test]
+    fn draft_advisory_reports_count_when_delivered() {
+        let advisory = draft_delivery_advisory(Some("delivered_to_local=1"));
+        assert_eq!(advisory.delivered_to_local, Some(1));
+        assert!(
+            advisory.message.contains("reached 1 connected instance(s)"),
+            "delivered drafts keep success copy with the count: {}",
+            advisory.message
+        );
+    }
+
+    #[test]
+    fn draft_advisory_handles_advisory_less_relay() {
+        let advisory = draft_delivery_advisory(Some(""));
+        assert_eq!(advisory.delivered_to_local, None);
+        assert!(
+            advisory.message.starts_with("Draft sent to Buzz Desktop"),
+            "advisory-less relays keep the legacy copy"
+        );
     }
 }
