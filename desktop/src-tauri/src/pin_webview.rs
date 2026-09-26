@@ -626,6 +626,7 @@ pub async fn pin_webview_show(
     let nav_pin = pin_id.clone();
     let load_app = app.clone();
     let load_pin = pin_id.clone();
+    let load_label = label.clone();
     let builder = WebviewBuilder::new(label, WebviewUrl::External(initial_url))
         .data_directory(profile_dir.clone())
         .data_store_identifier(pin_data_store_identifier(&pin_id))
@@ -653,6 +654,13 @@ pub async fn pin_webview_show(
                         classify_from_url(Some(payload.url())),
                     );
                 }
+                // Prefer Finished over on_navigation for Drive screen settle
+                // (title + real document complete), matching playground.
+                crate::browser_agent::ensure_instrumentation_for_label(
+                    &load_app,
+                    &load_label,
+                );
+                crate::browser_agent::record_nav_from_page(&load_app, &load_label);
             }
         });
 
