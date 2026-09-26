@@ -231,6 +231,10 @@ pub struct RelayAgentInfo {
     pub pubkey: String,
     #[serde(default)]
     pub owner_pubkey: Option<String>,
+    /// Persona declared by the owner-authenticated managed-agent policy.
+    /// Legacy and persona-less agents leave this unset.
+    #[serde(default)]
+    pub persona_id: Option<String>,
     pub name: String,
     pub agent_type: String,
     pub channels: Vec<String>,
