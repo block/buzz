@@ -749,9 +749,18 @@ Subcommands:
 | `remove-member` | Remove a pubkey from the relay membership list (`--pubkey`, optional `--role` guard); publishes kind:13534 roster |
 | `list-members` | List all relay members |
 | `generate-key` | Generate a new Nostr keypair (for bootstrapping) |
+| `deletions` | Submit, inspect, approve, abort, unblock, run, or drain durable whole-community deletion requests |
+| `storage-snapshot` | Run one isolated S3 accounting scan and publish its complete Postgres snapshot |
 | `reconcile-channels` | Emit kind:39000/39002 discovery events for channels missing them (idempotent) |
 
 The `buzz-admin` binary is shipped in the relay Docker image (`/usr/local/bin/buzz-admin`) and is the recommended way to manage relay membership in production. Use `./run.sh add-member`, `./run.sh remove-member`, and `./run.sh list-members` in Docker Compose deployments.
+
+Kubernetes deployments may schedule the typed one-shot
+`buzz-admin deletions drain` command directly. The pod owns its bounded
+Postgres/Redis clients and S3 client; it does not call relay HTTP. Durable
+requests, leases, retry timing, and checkpoints in Postgres are the handoff and
+execution authority, so Kubernetes uses `Forbid` concurrency and zero Job
+retries rather than introducing a second retry system.
 
 ---
 

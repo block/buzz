@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.8 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.10 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \
@@ -114,6 +114,26 @@ startup-fatal, so Kubernetes readiness never opens. If an operator explicitly
 disables that probe through `relay.extraEnv`, `/_readiness` does not test object
 storage; configuration is still parsed strictly, but reachability and addressing
 errors surface on the first storage operation.
+
+## Community deletion operator job
+
+`operatorJobs.deletionDrain` is a disabled-by-default, typed CronJob for
+`/usr/local/bin/buzz-admin deletions drain`. It runs inside the relay image with
+bounded Job lifetime/history, `concurrencyPolicy: Forbid`, `backoffLimit: 0`,
+and no relay HTTP call. Postgres deletion requests, leases, retries, and
+checkpoints remain the execution authority.
+
+The pod receives only `DATABASE_URL`, `REDIS_URL`, and required S3
+configuration/credential variables. It does not receive the relay private key,
+git-hook secret, relay URL, service-account token, service links, or a generic
+environment registry. Schedule,
+deadline, history, termination grace, resources, service account, pod labels,
+and pod annotations are independently configurable under
+`operatorJobs.deletionDrain`.
+
+See [`docs/operator-community-deletion.md`](../../../docs/operator-community-deletion.md)
+for enablement, permissions, the staffed first-run procedure, failure recovery,
+and the current explicit approval/alerting boundaries.
 
 ### Early-startup telemetry contract
 
