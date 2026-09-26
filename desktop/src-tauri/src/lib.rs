@@ -733,6 +733,7 @@ pub fn run() {
             mesh_serving_usage,
             mesh_installed_models,
             mesh_model_catalog,
+            mesh_feature_enabled,
             update_managed_agent,
             discover_acp_commands,
             discover_backend_providers,
