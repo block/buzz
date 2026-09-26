@@ -167,6 +167,7 @@ export function HuddleBar({
     setSelectedDeviceId,
     micGain,
     setMicGain,
+    refreshAudioDevices,
     outputDevices,
     selectedOutputDevice,
     setSelectedOutputDevice,
@@ -669,6 +670,7 @@ export function HuddleBar({
             audioDevices={audioDevices}
             selectedDeviceId={selectedDeviceId}
             onSelectDevice={setSelectedDeviceId}
+            onPickerOpen={refreshAudioDevices}
             micGain={micGain}
             onGainChange={setMicGain}
           />
