@@ -305,12 +305,14 @@ mod windows {
         let properties: IPropertyStore = link
             .QueryInterface()
             .map_err(|error| format!("could not query shortcut property store: {error}"))?;
-        properties
-            .SetValue(
-                &co::PKEY::AppUserModel_ID,
-                &winsafe::PropVariant::from_str(app_id),
-            )
-            .map_err(|error| format!("could not set shortcut AUMID: {error}"))?;
+        // SetValue returns S_FALSE when the shortcut already carries this AUMID.
+        match properties.SetValue(
+            &co::PKEY::AppUserModel_ID,
+            &winsafe::PropVariant::from_str(app_id),
+        ) {
+            Ok(()) | Err(co::HRESULT::S_FALSE) => {}
+            Err(error) => return Err(format!("could not set shortcut AUMID: {error}")),
+        }
         properties
             .Commit()
             .map_err(|error| format!("could not commit shortcut properties: {error}"))?;
