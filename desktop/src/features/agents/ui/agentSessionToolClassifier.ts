@@ -356,12 +356,12 @@ function classifyDeveloperToolName(value: string | null | undefined) {
 export function parseBuzzCliCommand(
   command: string,
 ): AgentActivityDescriptor | null {
-  const tokens = tokenizeShellCommand(command);
+  const tokens = tokenizeShellCommandTokens(command);
   const range = findBuzzCommand(tokens);
   if (!range) return null;
 
-  const group = tokens[range.groupIndex];
-  const verb = tokens[range.verbIndex] ?? "run";
+  const group = tokens[range.groupIndex].value;
+  const verb = tokens[range.verbIndex]?.value ?? "run";
   const operation = `${group}.${verb}`;
   const isSend = group === "messages" && verb === "send";
   const preview = isSend
@@ -451,17 +451,20 @@ function buzzCliTone(group: string, verb: string): AgentActivityTone {
 }
 
 function extractBuzzCliInlineContent(
-  tokens: string[],
+  tokens: ShellToken[],
   range: BuzzCommandRange,
 ): string | null {
   const content = getFlagValue(tokens, range.verbIndex + 1, "--content");
-  if (!content || content === "-") return null;
-  if (content.includes("$") || content.includes("`")) return null;
-  return content;
+  if (!content || content.value === "-") return null;
+  // Quoting decides this, not the characters: a single-quoted or escaped `$` /
+  // backtick is literal text the shell never touched, so it is safe to show.
+  // Anything the shell could have expanded is dropped, as #2201 intended.
+  if (content.hasSubstitution) return null;
+  return content.value;
 }
 
 function extractBuzzCliObjectPreview(
-  tokens: string[],
+  tokens: ShellToken[],
   range: BuzzCommandRange,
 ): string | null {
   const flagPreview =
@@ -470,11 +473,11 @@ function extractBuzzCliObjectPreview(
     getFlagValue(tokens, range.verbIndex + 1, "--query") ??
     getFlagValue(tokens, range.verbIndex + 1, "--name") ??
     getFlagValue(tokens, range.verbIndex + 1, "--file");
-  if (flagPreview) return flagPreview;
+  if (flagPreview) return flagPreview.value;
 
   const next = tokens[range.verbIndex + 1];
-  return next && !isCommandSeparator(next) && !next.startsWith("-")
-    ? next
+  return next && !isCommandSeparator(next.value) && !next.value.startsWith("-")
+    ? next.value
     : null;
 }
 
@@ -484,24 +487,25 @@ type BuzzCommandRange = {
   verbIndex: number;
 };
 
-function findBuzzCommand(tokens: string[]): BuzzCommandRange | null {
+function findBuzzCommand(tokens: ShellToken[]): BuzzCommandRange | null {
   for (let i = 0; i < tokens.length; i++) {
-    if (!isBuzzExecutable(tokens[i])) continue;
+    if (!isBuzzExecutable(tokens[i].value)) continue;
 
     for (let j = i + 1; j < tokens.length; j++) {
-      if (isCommandSeparator(tokens[j])) break;
-      if (tokens[j].startsWith("-")) {
+      const token = tokens[j].value;
+      if (isCommandSeparator(token)) break;
+      if (token.startsWith("-")) {
         if (
-          !tokens[j].includes("=") &&
-          tokens[j + 1]?.startsWith("-") === false
+          !token.includes("=") &&
+          tokens[j + 1]?.value.startsWith("-") === false
         ) {
           j += 1;
         }
         continue;
       }
-      if (!BUZZ_CLI_GROUPS.has(tokens[j])) continue;
+      if (!BUZZ_CLI_GROUPS.has(token)) continue;
       const verbIndex = j + 1;
-      if (!tokens[verbIndex] || isCommandSeparator(tokens[verbIndex])) {
+      if (!tokens[verbIndex] || isCommandSeparator(tokens[verbIndex].value)) {
         return null;
       }
       return { buzzIndex: i, groupIndex: j, verbIndex };
@@ -510,21 +514,60 @@ function findBuzzCommand(tokens: string[]): BuzzCommandRange | null {
   return null;
 }
 
+/**
+ * A token plus whether the shell could have substituted anything into it.
+ *
+ * `hasSubstitution` is what quote context buys us: `$` and a backtick mean
+ * expansion when they are unquoted or inside double quotes, and mean nothing at
+ * all inside single quotes. Without this distinction a markdown code span in
+ * `--content 'use `pnpm test`'` is indistinguishable from a real
+ * `--content "$(cat file)"`, and both have to be discarded.
+ *
+ * Only single quoting is trusted, because only single quoting is literal in
+ * every shell `BUZZ_SHELL` supports. A backslash escape is not: PowerShell
+ * keeps the backslash and still expands `"literal \$MESSAGE"`. So escaped
+ * substitution characters stay flagged even though bash would treat them as
+ * literal text.
+ *
+ * The `$` rule is deliberately conservative in the same direction — any `$`
+ * outside single quotes flags the token, even where bash would leave it literal
+ * (a trailing `$`, or `$` before a space). Displaying an unexpanded shell
+ * expression as if it were the sent text is the failure this guard exists to
+ * prevent, so it errs towards dropping the preview.
+ */
+export type ShellToken = {
+  value: string;
+  hasSubstitution: boolean;
+};
+
 export function tokenizeShellCommand(command: string): string[] {
-  const tokens: string[] = [];
+  return tokenizeShellCommandTokens(command).map((token) => token.value);
+}
+
+export function tokenizeShellCommandTokens(command: string): ShellToken[] {
+  const tokens: ShellToken[] = [];
   let current = "";
+  let hasSubstitution = false;
   let quote: "'" | '"' | null = null;
   let escaping = false;
 
   const pushCurrent = () => {
     if (current.length > 0) {
-      tokens.push(current);
+      tokens.push({ value: current, hasSubstitution });
       current = "";
     }
+    hasSubstitution = false;
   };
 
   for (const char of command) {
     if (escaping) {
+      // The value is built as bash would build it, but a backslash escape does
+      // not earn substitution credit: backslash is not an escape character in
+      // PowerShell (`"literal \$MESSAGE"` keeps the backslash AND expands the
+      // variable) or cmd, and `BUZZ_SHELL` explicitly supports both. Only
+      // single quoting is literal across all of them, so escape forms stay
+      // conservative and keep #2201's behaviour.
+      if (isSubstitutionChar(char)) hasSubstitution = true;
       current += char;
       escaping = false;
       continue;
@@ -534,8 +577,12 @@ export function tokenizeShellCommand(command: string): string[] {
       continue;
     }
     if (quote) {
-      if (char === quote) quote = null;
-      else current += char;
+      if (char === quote) {
+        quote = null;
+      } else {
+        if (quote === '"' && isSubstitutionChar(char)) hasSubstitution = true;
+        current += char;
+      }
       continue;
     }
     if (char === "'" || char === '"') {
@@ -548,15 +595,20 @@ export function tokenizeShellCommand(command: string): string[] {
     }
     if (char === "|" || char === ";" || char === "&") {
       pushCurrent();
-      tokens.push(char);
+      tokens.push({ value: char, hasSubstitution: false });
       continue;
     }
+    if (isSubstitutionChar(char)) hasSubstitution = true;
     current += char;
   }
 
   if (escaping) current += "\\";
   pushCurrent();
   return tokens;
+}
+
+function isSubstitutionChar(char: string) {
+  return char === "$" || char === "`";
 }
 
 function isBuzzExecutable(token: string) {
@@ -567,16 +619,27 @@ function isCommandSeparator(token: string) {
   return token === "|" || token === ";" || token === "&";
 }
 
-function getFlagValue(tokens: string[], start: number, flag: string) {
+function getFlagValue(
+  tokens: ShellToken[],
+  start: number,
+  flag: string,
+): ShellToken | null {
   for (let i = start; i < tokens.length; i++) {
     const token = tokens[i];
-    if (isCommandSeparator(token)) return null;
-    if (token === flag) {
-      return tokens[i + 1] && !isCommandSeparator(tokens[i + 1])
+    if (isCommandSeparator(token.value)) return null;
+    if (token.value === flag) {
+      return tokens[i + 1] && !isCommandSeparator(tokens[i + 1].value)
         ? tokens[i + 1]
         : null;
     }
-    if (token.startsWith(`${flag}=`)) return token.slice(flag.length + 1);
+    if (token.value.startsWith(`${flag}=`)) {
+      // The substitution flag is per token, so `--content=$X` carries it here
+      // too; slicing the value off must not lose it.
+      return {
+        value: token.value.slice(flag.length + 1),
+        hasSubstitution: token.hasSubstitution,
+      };
+    }
   }
   return null;
 }
