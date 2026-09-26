@@ -593,6 +593,11 @@ impl InnerWebView {
             let for_nav = {
               let handler = handler.clone();
               let opener_webview = webview.clone();
+              // Capture configuration once at build time. Calling
+              // configuration() inside decidePolicy has been observed to
+              // fail closed for child WKWebViews and skip the emit, which
+              // makes left-click target=_blank a no-op after Cancel.
+              let opener_configuration = opener_webview.configuration();
               Rc::new(move |url: String| {
                 // Features unused for Deny (sibling-tab) consumers; opener is
                 // only required for Allow/Create which we do not take here.
@@ -603,7 +608,7 @@ impl InnerWebView {
                     position: None,
                     opener: crate::NewWindowOpener {
                       webview: (&*opener_webview).into(),
-                      target_configuration: opener_webview.configuration(),
+                      target_configuration: opener_configuration.clone(),
                     },
                   },
                 );

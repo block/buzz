@@ -65,3 +65,26 @@ test("new-tab request adds sibling tab and preserves side-panel host", async () 
     null,
   );
 });
+
+test("new-tab request ignores empty and about:blank (wry may Allow those so createWebView can run)", async () => {
+  const { addPlaygroundSession, configurePlaygroundScope, listPlaygroundSessions } =
+    await import("./sessions.ts");
+  const { handlePlaygroundNewTabRequest } = await import("./runtime.ts");
+  configurePlaygroundScope("pub", "wss://relay.example.com");
+  addPlaygroundSession({
+    hula: "playground",
+    v: 1,
+    name: "Demo",
+    url: "https://app.example.com",
+    sid: "demo-blank",
+  });
+  assert.equal(
+    handlePlaygroundNewTabRequest({ openerSid: "demo-blank", url: "" }),
+    null,
+  );
+  assert.equal(
+    handlePlaygroundNewTabRequest({ openerSid: "demo-blank", url: "about:blank" }),
+    null,
+  );
+  assert.equal(listPlaygroundSessions().length, 1);
+});

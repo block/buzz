@@ -675,6 +675,7 @@ fn build_managed_agent_channel_message(
     content: &str,
     thread_ref: Option<&events::ThreadRef>,
     mention_pubkeys: &[String],
+    media_tags: &[Vec<String>],
     client_tags: &[Vec<String>],
 ) -> Result<nostr::EventBuilder, String> {
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
@@ -683,7 +684,7 @@ fn build_managed_agent_channel_message(
         content,
         thread_ref,
         &mention_refs,
-        &[],
+        media_tags,
         &[],
         &[],
         &[],
@@ -795,6 +796,7 @@ pub async fn send_managed_agent_channel_message(
         trimmed,
         thread_ref.as_ref(),
         &mentions,
+        &[],
         &client_tags,
     )?;
     // Same contract as `send_channel_message`: `created_at` is the signed
@@ -969,3 +971,73 @@ fn feed_item_from_event(ev: &nostr::Event, category: FeedItemCategory) -> FeedIt
 #[cfg(test)]
 #[path = "messages_tests.rs"]
 mod tests;
+
+
+/// Host-side Drive screen posts: agent-signed channel/thread message with imeta.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn post_managed_agent_message_with_media(
+    app: &AppHandle,
+    state: &AppState,
+    agent_pubkey: &str,
+    channel_id: &str,
+    content: &str,
+    parent_event_id: Option<&str>,
+    media_tags: &[Vec<String>],
+    client_marker: Option<&str>,
+) -> Result<String, String> {
+    let channel_uuid = uuid::Uuid::parse_str(channel_id)
+        .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err("message content is required".into());
+    }
+    let requested_pubkey = agent_pubkey.trim().to_ascii_lowercase();
+    let record = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_managed_agents(app)?;
+        find_managed_agent_mut(&mut records, &requested_pubkey)?.clone()
+    };
+    let keys = Keys::parse(record.private_key_nsec.trim())
+        .map_err(|error| format!("failed to parse managed agent key: {error}"))?;
+    let key_pubkey = keys.public_key().to_hex();
+    if key_pubkey != record.pubkey.to_ascii_lowercase() {
+        return Err(format!(
+            "managed agent key does not match stored pubkey {}",
+            record.pubkey
+        ));
+    }
+    let submission_auth_tag =
+        managed_agent_submission_auth_tag(&record, state, &keys.public_key())?;
+    let thread_ref = match parent_event_id {
+        Some(parent_id) if !parent_id.trim().is_empty() => Some(
+            resolve_thread_ref(
+                parent_id,
+                state,
+                &crate::relay::relay_api_base_url_with_override(state),
+                None,
+            )
+            .await?,
+        ),
+        _ => None,
+    };
+    let client_tags = client_marker
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| vec![vec!["client".to_string(), m.to_string()]])
+        .unwrap_or_default();
+    let builder = build_managed_agent_channel_message(
+        channel_uuid,
+        trimmed,
+        thread_ref.as_ref(),
+        &[],
+        media_tags,
+        &client_tags,
+    )?;
+    let (result, _created_at) =
+        submit_event_with_keys_created_at(builder, state, &keys, submission_auth_tag.as_deref())
+            .await?;
+    Ok(result.event_id)
+}
