@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
+    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -631,11 +631,10 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     )
     .increment(1);
 
-    let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
+    let (conn_id, auth_pubkey, scopes, channel_ids) = {
         match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => (
                 conn.conn_id,
-                ctx.pubkey.to_bytes().to_vec(),
                 ctx.pubkey,
                 ctx.scopes.clone(),
                 ctx.channel_ids.clone(),
@@ -690,55 +689,14 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
-    // Scope enforcement for ephemeral kinds: require MessagesWrite.
-    // Persistent events skip this gate and rely on
-    // ingest_event()'s per-kind scope allowlist instead, so a token with
-    // only ChannelsWrite can still submit kind:9002 via WS.
+    let ingest_auth = IngestAuth::Nip42 {
+        pubkey: auth_pubkey,
+        scopes,
+        channel_ids,
+        conn_id,
+    };
     if is_ephemeral(kind_u32) {
-        if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
-            reject("scope");
-            conn.send(RelayMessage::ok(
-                &event_id_hex,
-                false,
-                "restricted: insufficient scope for ephemeral events",
-            ));
-            return;
-        }
-        match buzz_deletion::store(&state.db)
-            .is_serving_active(conn.tenant.community())
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                reject("restricted");
-                conn.send(RelayMessage::ok(
-                    &event_id_hex,
-                    false,
-                    "restricted: community writes are fenced",
-                ));
-                return;
-            }
-            Err(error) => {
-                reject("error");
-                tracing::warn!(%error, event_id = %event_id_hex, "failed to check ephemeral-event community lifecycle");
-                conn.send(RelayMessage::ok(
-                    &event_id_hex,
-                    false,
-                    "error: internal server error",
-                ));
-                return;
-            }
-        }
-        match handle_ephemeral_event(
-            event,
-            conn_id,
-            pubkey_bytes,
-            auth_pubkey,
-            Arc::clone(&conn),
-            state,
-        )
-        .await
-        {
+        match super::ephemeral::submit(&state, &conn.tenant, event, &ingest_auth).await {
             Ok(()) => {
                 conn.send(RelayMessage::ok(&event_id_hex, true, ""));
             }
@@ -763,13 +721,6 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         }
         return;
     }
-
-    let ingest_auth = IngestAuth::Nip42 {
-        pubkey: auth_pubkey,
-        scopes,
-        channel_ids,
-        conn_id,
-    };
 
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
         Ok(result) => {
@@ -803,159 +754,6 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             conn.send(RelayMessage::ok(&event_id_hex, false, &msg));
         }
     }
-}
-
-/// Handle ephemeral events (kind 20000–29999) — WS-only, never stored.
-///
-/// Rejections are typed with the ingest taxonomy: [`IngestError::Rejected`]
-/// is a client-input refusal (stays `invalid` in the rejection counter),
-/// while [`IngestError::Internal`] is a backend failure — e.g. a Redis
-/// presence-storage outage — which the dispatcher counts as `error`. Every
-/// message is a fixed, sanitized string that is forwarded verbatim.
-async fn handle_ephemeral_event(
-    event: Event,
-    conn_id: uuid::Uuid,
-    pubkey_bytes: Vec<u8>,
-    auth_pubkey: nostr::PublicKey,
-    conn: Arc<ConnectionState>,
-    state: Arc<AppState>,
-) -> Result<(), IngestError> {
-    let event_clone = event.clone();
-    let event_id = event.id.to_hex();
-    let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
-
-    match verify_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
-        Err(_) => return Err(IngestError::Internal("error: internal error".to_string())),
-    }
-
-    // Special handling for presence events (kind:20001).
-    if event_kind_u32(&event) == KIND_PRESENCE_UPDATE {
-        // Accept both bare strings ("online") and legacy JSON ({"status":"online"}).
-        let raw = event.content.to_string();
-        let status = if raw.starts_with('{') {
-            serde_json::from_str::<serde_json::Value>(&raw)
-                .ok()
-                .and_then(|v| v.get("status")?.as_str().map(String::from))
-                .unwrap_or(raw)
-        } else if raw.len() > 128 {
-            let mut end = 128;
-            while !raw.is_char_boundary(end) {
-                end -= 1;
-            }
-            raw[..end].to_string()
-        } else {
-            raw
-        };
-
-        // Presence mutation is the inclusion contract for the live fan-out
-        // below: a client that observes the fanned-out event treats a later
-        // snapshot as reflecting it (see `synthesize_presence` in
-        // `api/bridge.rs`, which reads Redis). If the mutation failed we
-        // published nothing — so we must also fan out nothing and reject the
-        // ACK, or a snapshot later "confirms" stale storage over a live event
-        // the sender believes was delivered.
-        if status == "offline" {
-            if let Err(e) = state
-                .pubsub
-                .clear_presence(&conn.tenant, &auth_pubkey)
-                .await
-            {
-                warn!(
-                    conn_id = %conn_id,
-                    event_id = %event_id,
-                    "Presence clear failed, refusing publish and fan-out: {e}"
-                );
-                // Internal, not Rejected: a storage outage is a server
-                // failure, so the dispatcher must count it under the
-                // `error` reason, not as client-invalid input.
-                return Err(IngestError::Internal(
-                    "error: presence storage unavailable".to_string(),
-                ));
-            }
-        } else if let Err(e) = state
-            .pubsub
-            .set_presence(&conn.tenant, &auth_pubkey, &status)
-            .await
-        {
-            warn!(
-                conn_id = %conn_id,
-                event_id = %event_id,
-                "Presence set failed, refusing publish and fan-out: {e}"
-            );
-            // Internal for the same reason as the clear arm above.
-            return Err(IngestError::Internal(
-                "error: presence storage unavailable".to_string(),
-            ));
-        }
-
-        // Presence is a channel-less ephemeral event. After updating Redis
-        // presence state, let it fall through to the shared global ephemeral
-        // publish/fan-out path below so other relay nodes receive the live delta.
-    }
-
-    // Check channel membership before publishing other ephemeral events.
-    if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
-        // Membership refusals are client-input rejections, and the shared
-        // gate's message text is surfaced verbatim exactly as before this
-        // typed classification; no behavior change on this path.
-        super::ingest::check_channel_membership(&conn.tenant, &state, ch_id, &pubkey_bytes, None)
-            .await
-            .map_err(IngestError::Rejected)?;
-
-        // Mark as local before Redis publish to prevent double-delivery when
-        // the event comes back through the Redis subscriber loop.
-        state.mark_local_event(conn.tenant.community(), &event.id);
-
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&conn.tenant, EventTopic::Channel(ch_id), &event)
-            .await
-        {
-            state
-                .local_event_ids
-                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral publish failed: {e}");
-        }
-
-        // Direct fan-out to local WS subscribers, through the guarded send path
-        // so a stale subscription on a removed/non-member connection cannot
-        // receive this private-channel ephemeral event.
-        // Pass the channel_id so fan_out() uses the channel-kind index.
-        let stored_event = StoredEvent::new(event.clone(), Some(ch_id));
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
-    } else {
-        // Channel-less ephemeral events (e.g., NIP-AB pairing kind:24134).
-        //
-        // Sentinel pattern: we use `Uuid::nil()` (all-zeros UUID) as a
-        // "global channel" routing key in Redis pub/sub. This lets other relay
-        // nodes receive and fan out these events without any real channel_id.
-        // The nil UUID is ONLY a Redis routing key — it never reaches the DB.
-        // On the receiving end (main.rs subscriber loop), `is_nil()` is checked
-        // and converted back to `None` so `fan_out()` uses the global index.
-        state.mark_local_event(conn.tenant.community(), &event.id);
-
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&conn.tenant, EventTopic::Global, &event)
-            .await
-        {
-            state
-                .local_event_ids
-                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral global publish failed: {e}");
-        }
-
-        // Direct fan-out to local WS subscribers through the guarded send path.
-        // Pass channel_id=None so fan_out() uses the global subscriber index;
-        // filter_fanout_by_access no-ops for channel-less events except the
-        // author-only-kind gate.
-        let stored_event = StoredEvent::new(event.clone(), None);
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

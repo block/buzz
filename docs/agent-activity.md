@@ -60,9 +60,10 @@ root before presenting the run; an unavailable request is not authority to
 attach activity to another message. Resolve missing requests with bounded
 conversation-authorized reads, never by dispatching work.
 
-Publishers MUST validate the envelope before signing. In the current generic
-ephemeral relay path, a missing or malformed `h` can route globally; correct
-conversation scoping cannot be inferred from JSON content.
+Publishers MUST validate the envelope before signing. Generic ephemeral events
+without `h` use global routing; the shared submission path rejects malformed or
+duplicate `h` tags. Activity always requires `h`: correct conversation scoping
+cannot be inferred from JSON content.
 
 Subscribe using explicit `kinds: [24201]`, `authors: [trusted_agent_key]` and
 `#h: [conversation_id]`. A thread observer may also filter `#e: [root_id]`,
