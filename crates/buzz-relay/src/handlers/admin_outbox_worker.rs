@@ -273,10 +273,15 @@ async fn deliver_reporter_notice(state: &Arc<AppState>, row: &OutboxRecord) -> R
         .map_err(|e| format!("reporter_notice: action lookup failed: {e}"))?
         .ok_or_else(|| "reporter_notice: action not found".to_string())?;
 
+    // Only report actions enqueue a reporter notice; a direct action has none.
+    let report_id = action
+        .report_id
+        .ok_or("reporter_notice: action has no report")?;
+
     // Load the report to find reporter_pubkey (hex string in AdminReportDetail).
     let report = state
         .db
-        .admin_get_report(action.report_id)
+        .admin_get_report(report_id)
         .await
         .map_err(|e| format!("reporter_notice: report lookup failed: {e}"))?
         .ok_or_else(|| "reporter_notice: report not found".to_string())?;
@@ -297,7 +302,7 @@ async fn deliver_reporter_notice(state: &Arc<AppState>, row: &OutboxRecord) -> R
         state,
         &reporter_bytes,
         ModerationNotice::ReportResolved {
-            report_id: action.report_id,
+            report_id,
             status: "resolved".to_string(),
             summary,
         },

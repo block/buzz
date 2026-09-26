@@ -23,8 +23,8 @@ use crate::CommunityId;
 pub struct AdminActionRecord {
     /// Action UUID.
     pub id: Uuid,
-    /// Report this action targets.
-    pub report_id: Uuid,
+    /// Report this action targets; `None` for a report-less direct action.
+    pub report_id: Option<Uuid>,
     /// Community the report belongs to.
     pub report_community_id: Uuid,
     /// Client-generated idempotency key.
@@ -53,6 +53,8 @@ pub struct AdminActionRecord {
     /// Authoritative channel persisted at claim time (kick actions).
     /// `None` for community-wide actions.
     pub enforcement_channel_id: Option<Uuid>,
+    /// Deleted event persisted at acceptance (direct delete only).
+    pub enforcement_target_event_id: Option<Vec<u8>>,
     /// Row creation time.
     pub created_at: DateTime<Utc>,
     /// Row last-updated time.
@@ -247,7 +249,7 @@ pub async fn claim_report(
             r#"
             SELECT id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                    action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
-                   enforcement_target_pubkey, enforcement_channel_id,
+                   enforcement_target_pubkey, enforcement_channel_id, enforcement_target_event_id,
                    created_at, updated_at
             FROM relay_admin_actions
             WHERE report_community_id = $1 AND report_id = $2 AND request_id = $3
@@ -280,7 +282,7 @@ pub async fn claim_report(
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
         RETURNING id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                   action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
-                  enforcement_target_pubkey, enforcement_channel_id,
+                  enforcement_target_pubkey, enforcement_channel_id, enforcement_target_event_id,
                   created_at, updated_at
         "#,
     )
@@ -838,7 +840,7 @@ pub async fn finalize_success(
     pool: &PgPool,
     action_id: Uuid,
     community_id: CommunityId,
-    report_id: Uuid,
+    report_id: Option<Uuid>,
     terminal_status: &str,
     actor_pubkey: &[u8],
     action_name: &str,
@@ -868,9 +870,11 @@ pub async fn finalize_success(
     }
 
     // Transition report to terminal status. Requires active_action_id = this action,
-    // which prevents a stale or wrong action from closing the report.
-    let updated_report = sqlx::query(
-        r#"
+    // which prevents a stale or wrong action from closing the report. A direct
+    // action has no report: no report CAS and, below, no reporter notice.
+    if let Some(report_id) = report_id {
+        let updated_report = sqlx::query(
+            r#"
         UPDATE moderation_reports
         SET status = $3, resolved_by = $4, resolved_at = now(),
             active_action_id = NULL
@@ -878,20 +882,21 @@ pub async fn finalize_success(
           AND status = 'processing'
           AND active_action_id = $5
         "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(report_id)
-    .bind(terminal_status)
-    .bind(actor_pubkey)
-    .bind(action_id)
-    .execute(&mut *tx)
-    .await?;
+        )
+        .bind(community_id.as_uuid())
+        .bind(report_id)
+        .bind(terminal_status)
+        .bind(actor_pubkey)
+        .bind(action_id)
+        .execute(&mut *tx)
+        .await?;
 
-    if updated_report.rows_affected() == 0 {
-        // The report CAS failed: either the report moved to a different state
-        // or active_action_id no longer matches. Roll back the action update too.
-        tx.rollback().await?;
-        return Ok(false);
+        if updated_report.rows_affected() == 0 {
+            // The report CAS failed: either the report moved to a different state
+            // or active_action_id no longer matches. Roll back the action update too.
+            tx.rollback().await?;
+            return Ok(false);
+        }
     }
 
     // Enqueue outbox delivery rows in the same finalization transaction.
@@ -948,24 +953,26 @@ pub async fn finalize_success(
         }
     }
 
-    // Always enqueue a reporter notice. Payload carries action_id; the worker
-    // looks up report_id → reporter_pubkey at delivery time.
-    let notice_payload = serde_json::json!({
-        "action_id": action_str,
-        "community_id": community_str,
-    });
-    sqlx::query(
-        r#"
+    // Report actions enqueue a reporter notice. Payload carries action_id; the
+    // worker looks up report_id → reporter_pubkey at delivery time.
+    if report_id.is_some() {
+        let notice_payload = serde_json::json!({
+            "action_id": action_str,
+            "community_id": community_str,
+        });
+        sqlx::query(
+            r#"
         INSERT INTO relay_admin_outbox (action_id, task_type, payload, dedup_key)
         VALUES ($1, 'reporter_notice', $2, $3)
         ON CONFLICT (dedup_key) DO NOTHING
         "#,
-    )
-    .bind(action_id)
-    .bind(notice_payload)
-    .bind(format!("reporter_notice:{action_str}"))
-    .execute(&mut *tx)
-    .await?;
+        )
+        .bind(action_id)
+        .bind(notice_payload)
+        .bind(format!("reporter_notice:{action_str}"))
+        .execute(&mut *tx)
+        .await?;
+    }
 
     // Enqueue a recipient-specific notice to the actioned user so the restricted
     // party hears the truth (VISION_MODERATION: "Reasons travel … to the
@@ -1300,7 +1307,7 @@ pub async fn get_action(pool: &PgPool, action_id: Uuid) -> Result<Option<AdminAc
         r#"
         SELECT id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
-               enforcement_target_pubkey, enforcement_channel_id,
+               enforcement_target_pubkey, enforcement_channel_id, enforcement_target_event_id,
                created_at, updated_at
         FROM relay_admin_actions WHERE id = $1
         "#,
@@ -1322,7 +1329,7 @@ pub async fn get_action_by_request(
         r#"
         SELECT id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
-               enforcement_target_pubkey, enforcement_channel_id,
+               enforcement_target_pubkey, enforcement_channel_id, enforcement_target_event_id,
                created_at, updated_at
         FROM relay_admin_actions
         WHERE report_community_id = $1 AND report_id = $2 AND request_id = $3
@@ -1581,7 +1588,7 @@ pub async fn claim_stranded_action_batch(
             RETURNING id, report_id, report_community_id, request_id, actor_pubkey,
                       actor_role, action, reason, timeout_until, state, step_marker,
                       cancelled_by, error_message, enforcement_target_pubkey,
-                      enforcement_channel_id, created_at, updated_at
+                      enforcement_channel_id, enforcement_target_event_id, created_at, updated_at
             "#,
         )
         .bind(id)
@@ -1664,6 +1671,155 @@ pub async fn update_feedback_status(pool: &PgPool, id: Uuid, status: &str) -> Re
     Ok(result.rows_affected() > 0)
 }
 
+/// Immutable input of a report-less ("direct") staff action.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectActionInput<'a> {
+    /// Tenant the action applies to.
+    pub community_id: CommunityId,
+    /// Client idempotency key, unique per community.
+    pub request_id: Uuid,
+    /// Acting staff pubkey.
+    pub actor_pubkey: &'a [u8],
+    /// `"operator"` | `"moderator"`.
+    pub actor_role: &'a str,
+    /// `"relay_operator"` | `"relay_moderator"` (decision audit authority).
+    pub actor_authority: &'a str,
+    /// `"ban"` | `"timeout"` | `"delete"`.
+    pub action: &'a str,
+    /// Public reason.
+    pub reason: Option<&'a str>,
+    /// Requested timeout duration (timeout only).
+    pub timeout_secs: Option<i64>,
+    /// Expiry derived at acceptance (timeout only); never compared on retry.
+    pub timeout_until: Option<DateTime<Utc>>,
+    /// Ban/timeout: the client-supplied target. Delete: the event author.
+    pub target_pubkey: Option<&'a [u8]>,
+    /// Delete: the client-supplied event.
+    pub target_event_id: Option<&'a [u8]>,
+    /// Delete: the event's channel, when it has one.
+    pub channel_id: Option<Uuid>,
+}
+
+/// Outcome of accepting or looking up a direct action.
+#[derive(Debug)]
+pub enum DirectClaim {
+    /// This call durably accepted the action.
+    Claimed(AdminActionRecord),
+    /// The same request was already accepted with the same intent.
+    Existing(AdminActionRecord),
+    /// The request id was already used for a different intent.
+    Conflict,
+}
+
+/// Retry comparison: actor, action, reason, duration, and the target the
+/// client names (event for delete, pubkey otherwise). Derived context (event
+/// author, channel, expiry) is enforcement data, not client input.
+fn classify_direct(
+    row: sqlx::postgres::PgRow,
+    input: &DirectActionInput<'_>,
+) -> Result<DirectClaim> {
+    let timeout_secs: Option<i64> = row.try_get("timeout_secs")?;
+    let rec = row_to_action(row)?;
+    let target_matches = if input.action == "delete" {
+        rec.enforcement_target_event_id.as_deref() == input.target_event_id
+    } else {
+        rec.enforcement_target_pubkey.as_deref() == input.target_pubkey
+    };
+    let same = rec.actor_pubkey == input.actor_pubkey
+        && rec.action == input.action
+        && rec.reason.as_deref() == input.reason
+        && timeout_secs == input.timeout_secs
+        && target_matches;
+    Ok(if same {
+        DirectClaim::Existing(rec)
+    } else {
+        DirectClaim::Conflict
+    })
+}
+
+/// Look up an accepted direct action by `(community, request_id)`.
+pub async fn find_direct_action(
+    pool: &PgPool,
+    input: &DirectActionInput<'_>,
+) -> Result<Option<DirectClaim>> {
+    let row = sqlx::query(
+        "SELECT * FROM relay_admin_actions \
+         WHERE report_community_id = $1 AND request_id = $2 AND report_id IS NULL",
+    )
+    .bind(input.community_id.as_uuid())
+    .bind(input.request_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| classify_direct(row, input)).transpose()
+}
+
+/// Accept a direct action: the action row and its decision audit row commit
+/// together, or neither does. A concurrent same-key request waits on the
+/// unique index and is then classified against the winner.
+pub async fn claim_direct_action(
+    pool: &PgPool,
+    input: &DirectActionInput<'_>,
+) -> Result<DirectClaim> {
+    let mut tx = pool.begin().await?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO relay_admin_actions (
+            report_community_id, request_id, actor_pubkey, actor_role, action, reason,
+            timeout_secs, timeout_until, state, enforcement_target_pubkey,
+            enforcement_target_event_id, enforcement_channel_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11)
+        ON CONFLICT (report_community_id, request_id) WHERE report_id IS NULL DO NOTHING
+        RETURNING *
+        "#,
+    )
+    .bind(input.community_id.as_uuid())
+    .bind(input.request_id)
+    .bind(input.actor_pubkey)
+    .bind(input.actor_role)
+    .bind(input.action)
+    .bind(input.reason)
+    .bind(input.timeout_secs)
+    .bind(input.timeout_until)
+    .bind(input.target_pubkey)
+    .bind(input.target_event_id)
+    .bind(input.channel_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(row) = inserted else {
+        tx.rollback().await?;
+        return find_direct_action(pool, input)
+            .await?
+            .ok_or_else(|| sqlx::Error::RowNotFound.into());
+    };
+    let audit_action = if input.action == "delete" {
+        "delete_message"
+    } else {
+        input.action
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO moderation_actions (
+            community_id, actor_pubkey, action, target_pubkey, target_event_id,
+            channel_id, public_reason, actor_authority
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(input.community_id.as_uuid())
+    .bind(input.actor_pubkey)
+    .bind(audit_action)
+    .bind(input.target_pubkey)
+    .bind(input.target_event_id)
+    .bind(input.channel_id)
+    .bind(input.reason)
+    .bind(input.actor_authority)
+    .execute(&mut *tx)
+    .await?;
+    let rec = row_to_action(row)?;
+    tx.commit().await?;
+    Ok(DirectClaim::Claimed(rec))
+}
+
 fn row_to_action(row: sqlx::postgres::PgRow) -> Result<AdminActionRecord> {
     Ok(AdminActionRecord {
         id: row.try_get("id")?,
@@ -1681,6 +1837,7 @@ fn row_to_action(row: sqlx::postgres::PgRow) -> Result<AdminActionRecord> {
         error_message: row.try_get("error_message")?,
         enforcement_target_pubkey: row.try_get("enforcement_target_pubkey")?,
         enforcement_channel_id: row.try_get("enforcement_channel_id")?,
+        enforcement_target_event_id: row.try_get("enforcement_target_event_id")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -1789,6 +1946,32 @@ impl crate::Db {
         .await
     }
 
+    /// Accept a report-less direct action (see [`claim_direct_action`]).
+    #[datastore_span(name = "claim_direct_action", system = "postgresql")]
+    pub async fn claim_direct_action(&self, input: &DirectActionInput<'_>) -> Result<DirectClaim> {
+        claim_direct_action(&self.pool, input).await
+    }
+
+    /// Look up a report action by its idempotency key (see [`get_action_by_request`]).
+    #[datastore_span(name = "get_action_by_request", system = "postgresql")]
+    pub async fn get_action_by_request(
+        &self,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+    ) -> Result<Option<AdminActionRecord>> {
+        get_action_by_request(&self.pool, community_id, report_id, request_id).await
+    }
+
+    /// Look up an accepted direct action (see [`find_direct_action`]).
+    #[datastore_span(name = "find_direct_action", system = "postgresql")]
+    pub async fn find_direct_action(
+        &self,
+        input: &DirectActionInput<'_>,
+    ) -> Result<Option<DirectClaim>> {
+        find_direct_action(&self.pool, input).await
+    }
+
     /// Advance an action from 'pending' to 'enforcing'.
     #[datastore_span(name = "begin_enforcing_action", system = "postgresql")]
     pub async fn begin_enforcing_action(&self, action_id: uuid::Uuid) -> Result<bool> {
@@ -1809,7 +1992,7 @@ impl crate::Db {
         &self,
         action_id: uuid::Uuid,
         community_id: CommunityId,
-        report_id: uuid::Uuid,
+        report_id: Option<uuid::Uuid>,
         terminal_status: &str,
         actor_pubkey: &[u8],
         action_name: &str,
@@ -2209,7 +2392,7 @@ mod postgres_tests {
             pool,
             action_id,
             CommunityId::from_uuid(community_id),
-            report_id,
+            Some(report_id),
             "resolved",
             &actor,
             "ban",
@@ -2606,7 +2789,7 @@ mod postgres_tests {
             &pool,
             action_id,
             CommunityId::from_uuid(community_id),
-            report_id,
+            Some(report_id),
             "resolved",
             &actor(),
             "timeout",
@@ -2669,7 +2852,7 @@ mod postgres_tests {
                 &pool,
                 action_id,
                 CommunityId::from_uuid(community_id),
-                report_id,
+                Some(report_id),
                 "resolved",
                 &actor(),
                 verb,
@@ -2733,7 +2916,7 @@ mod postgres_tests {
             &pool,
             action_id,
             CommunityId::from_uuid(community_id),
-            report_id,
+            Some(report_id),
             "resolved",
             &actor(),
             "delete",

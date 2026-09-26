@@ -337,7 +337,7 @@ pub async fn resolve_report_with_enforcement(
         state,
         tenant,
         community_id,
-        report_id,
+        Some(report_id),
         &action_record.action,
         action_record.reason.as_deref(),
         action_record.timeout_until,
@@ -381,7 +381,7 @@ async fn drive_enforcement(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     community_id: buzz_core::tenant::CommunityId,
-    report_id: Uuid,
+    report_id: Option<Uuid>,
     action: &str,
     reason: Option<&str>,
     timeout_until: Option<DateTime<Utc>>,
@@ -705,7 +705,7 @@ async fn drive_enforcement(
             )));
         }
 
-        info!(action_id = %action_id, report_id = %report_id, action = %action, "enforcement resolved");
+        info!(action_id = %action_id, report_id = ?report_id, action = %action, "enforcement resolved");
         return Ok(EnforcementResolved { action_id });
     }
 }
@@ -944,7 +944,7 @@ pub async fn drive_enforcement_pub(
         state,
         tenant,
         community_id,
-        report_id,
+        Some(report_id),
         action,
         reason,
         timeout_until,
@@ -953,6 +953,33 @@ pub async fn drive_enforcement_pub(
         target_event_id,
         channel_id,
         initial_record,
+        held_lease,
+    )
+    .await
+}
+
+/// Drive an accepted report-less direct action from its persisted record (HTTP
+/// path with `held_lease = None`, recovery worker with its batch lease). The
+/// staff check ran once, at acceptance; an accepted action always completes.
+pub async fn drive_direct_action(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    rec: &AdminActionRecord,
+    held_lease: Option<Uuid>,
+) -> Result<EnforcementResolved, ResolutionError> {
+    drive_enforcement(
+        state,
+        tenant,
+        tenant.community(),
+        None,
+        &rec.action,
+        rec.reason.as_deref(),
+        rec.timeout_until,
+        &rec.actor_pubkey,
+        rec.enforcement_target_pubkey.as_deref(),
+        rec.enforcement_target_event_id.as_deref(),
+        rec.enforcement_channel_id,
+        rec,
         held_lease,
     )
     .await
