@@ -284,23 +284,30 @@ fn server_authority(url: &reqwest::Url) -> Option<String> {
 }
 
 /// Mint a `t=get` Authorization header for `url` when it is relay-hosted
-/// media and `BUZZ_PRIVATE_KEY` is available; `None` otherwise.
+/// media and `BUZZ_PRIVATE_KEY_FILE` resolves to a valid key; `None` otherwise.
 ///
 /// Fail-open by design: while the relay's media-read-auth flag is off, an
 /// unauthenticated request still succeeds, so a missing/invalid key degrades
 /// to an unsigned fetch instead of an error. Once the flag is on, the fetch
 /// 403s and the error path below names the missing key.
+///
+/// Reads the key from the file at `BUZZ_PRIVATE_KEY_FILE` (written by
+/// buzz-acp's git-environment setup — see `buzz-acp/src/git.rs`), never from
+/// a raw `BUZZ_PRIVATE_KEY` env var, which this process never receives.
 fn relay_media_get_auth(url: &reqwest::Url) -> Option<String> {
     let relay = std::env::var("BUZZ_RELAY_URL").ok()?;
     let relay = reqwest::Url::parse(&relay).ok()?;
     if !is_relay_media_url(url, &relay) {
         return None;
     }
-    let key = std::env::var("BUZZ_PRIVATE_KEY").ok()?;
-    let keys = match nostr::Keys::parse(&key) {
+    let keyfile = std::env::var("BUZZ_PRIVATE_KEY_FILE").ok()?;
+    let key = std::fs::read_to_string(&keyfile).ok()?;
+    let keys = match nostr::Keys::parse(key.trim()) {
         Ok(k) => k,
         Err(e) => {
-            tracing::warn!("BUZZ_PRIVATE_KEY invalid; fetching relay media unauthenticated: {e}");
+            tracing::warn!(
+                "BUZZ_PRIVATE_KEY_FILE content invalid; fetching relay media unauthenticated: {e}"
+            );
             return None;
         }
     };
@@ -317,7 +324,7 @@ fn relay_media_get_auth(url: &reqwest::Url) -> Option<String> {
 /// Fetch an http(s) URL with a streaming read and a hard byte cap.
 /// Refuses up-front if `Content-Length` advertises more than the cap.
 /// Relay-hosted `/media/` URLs get a signed Blossom `t=get` header when
-/// `BUZZ_RELAY_URL` + `BUZZ_PRIVATE_KEY` are configured.
+/// `BUZZ_RELAY_URL` is set and `BUZZ_PRIVATE_KEY_FILE` resolves to a valid key.
 async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| invalid_params(format!("invalid URL: {url} ({e})")))?;
@@ -353,7 +360,7 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
         if matches!(status.as_u16(), 401 | 403) && !authed {
             return Err(invalid_params(format!(
                 "fetch {url} returned HTTP {status} — this relay requires authenticated media \
-                 reads; set BUZZ_PRIVATE_KEY (and BUZZ_RELAY_URL) to a member identity"
+                 reads; set BUZZ_PRIVATE_KEY_FILE (and BUZZ_RELAY_URL) to a member identity"
             )));
         }
         return Err(invalid_params(format!(

@@ -46,7 +46,7 @@ use config::{
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
-use nostr::{PublicKey, ToBech32};
+use nostr::PublicKey;
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
     PromptResult, PromptSource, SessionState, TimeoutKind,
@@ -5875,23 +5875,19 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         command: config.mcp_command.clone(),
         args: vec![],
         env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
+            let mut env = vec![EnvVar {
+                name: "BUZZ_RELAY_URL".into(),
+                value: config.relay_url.clone(),
+            }];
+            // BUZZ_PRIVATE_KEY_FILE (not a raw BUZZ_PRIVATE_KEY value) is
+            // supplied by the git-environment merge below via
+            // config.persona_env_vars, which is unconditionally populated
+            // from git::GitEnvironment::for_config()/install() before any
+            // session starts. Putting the raw key here would defeat that —
+            // a shell tool spawned by the MCP server inherits this list
+            // without env_clear() and could read it straight out via
+            // `env`/`/proc/self/environ`.
+            //
             // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
             // so the MCP server can attach it to every signed event.
             if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
@@ -9220,7 +9216,18 @@ mod build_mcp_servers_tests {
 
     #[test]
     fn session_new_mcp_server_has_required_fields() {
-        let config = test_config();
+        let mut config = test_config();
+        // BUZZ_PRIVATE_KEY_FILE arrives via the git-environment merge, exactly
+        // as it does for a real session — mirrors
+        // session_new_forwards_complete_git_block_without_duplicate_names.
+        let git = git::GitEnvironment::install(
+            &config.keys,
+            &config.relay_url,
+            &std::env::current_exe().unwrap(),
+        )
+        .unwrap();
+        config.persona_env_vars.extend(git.env.iter().cloned());
+
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         let server = &servers[0];
@@ -9232,8 +9239,12 @@ mod build_mcp_servers_tests {
             "missing BUZZ_RELAY_URL; got {names:?}"
         );
         assert!(
-            names.contains(&"BUZZ_PRIVATE_KEY"),
-            "missing BUZZ_PRIVATE_KEY; got {names:?}"
+            names.contains(&"BUZZ_PRIVATE_KEY_FILE"),
+            "missing BUZZ_PRIVATE_KEY_FILE; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"BUZZ_PRIVATE_KEY"),
+            "raw BUZZ_PRIVATE_KEY must never reach the MCP server env; got {names:?}"
         );
     }
 
