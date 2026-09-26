@@ -28,6 +28,11 @@ test("slash and both navigation shortcuts share live channel and command search 
     assert.match(frame, /Commands & channels/);
     assert.match(frame, /#platform/);
     assert.match(frame, /Switch agent\s+Ctrl\+R/);
+    assert.equal(frame.match(/CHANNELS/g)?.length, 1);
+    assert.equal(frame.match(/ACTIONS/g)?.length, 1);
+    assert.match(frame, /Agent activity\s+Alt\+A/);
+    assert.match(frame, /Reconnect/);
+    assert.match(frame, /1–6 of 15/);
     assert.equal(app.editor.getExpandedText(), "");
     terminal.input("/activity");
     frame = await terminal.frame();
@@ -130,6 +135,8 @@ test("agent color matches chat, the palette dims only its backdrop, and closing 
     assert.ok(selectedRow > titleRow);
     const left = paletteRows[titleRow].indexOf("┌") + 2;
     const right = paletteRows[selectedRow].lastIndexOf("│") - 2;
+    assert.equal(left - 2, 18);
+    assert.equal(right + 2, 81);
     const bottom = paletteRows.findIndex((line) => line[left - 2] === "└");
     assert.ok(bottom > selectedRow);
     for (let row = titleRow + 1; row < bottom; row++) {
@@ -154,7 +161,14 @@ test("agent color matches chat, the palette dims only its backdrop, and closing 
     terminal.resize();
     palette = await terminal.frame();
     assert.match(palette, /Commands & channels/);
-    assert.match(palette, /Esc back/);
+    assert.match(palette, /Enter · Esc/);
+    assert.match(palette, /CHANNELS/);
+    assert.match(palette, /ACTIONS/);
+    const narrowTitle = palette
+      .split("\n")
+      .find((line) => line.includes("┌ Commands"));
+    assert.equal(narrowTitle?.indexOf("┌"), 2);
+    assert.equal(narrowTitle?.indexOf("┐"), 39);
     terminal.input("/activity");
     assert.match(await terminal.frame(), /Agent activity\s+Alt\+A/);
     terminal.input("\x1b");
@@ -163,6 +177,49 @@ test("agent color matches chat, the palette dims only its backdrop, and closing 
     assert.equal(cell(0, restored.indexOf("Atlas")).getFgColor(), color);
     assert.equal(cell(0, restored.indexOf("Atlas")).isDim(), 0);
     assert.equal(app.editor.getExpandedText(), "");
+  } finally {
+    app.stop();
+    terminal.screen.dispose();
+  }
+});
+
+test("the quiet footer retains notices and help exposes the current channel's resume command", async () => {
+  const terminal = new TestTerminal();
+  const app = new TerminalApp(
+    terminal,
+    new DemoTransport(),
+    () => {},
+    parseLaunch(["join", engineering]),
+  );
+  try {
+    app.start();
+    let frame = await terminal.frame();
+    assert.match(
+      frame.split("\n").at(-1) ?? "",
+      /Commands & channels\s+DEMO \/ OFFLINE/,
+    );
+    assert.doesNotMatch(frame, /Resume with buzz join/);
+    app.store.handle({
+      type: "notice",
+      message: "Delivery blocked: reconnect to retry",
+    });
+    frame = await terminal.frame();
+    assert.match(
+      frame.split("\n").at(-1) ?? "",
+      /Delivery blocked: reconnect to retry/,
+    );
+    app.store.handle({ type: "connection", status: "connected" });
+    frame = await terminal.frame();
+    assert.match(frame.split("\n").at(-1) ?? "", /Commands & channels/);
+    assert.doesNotMatch(frame, /Delivery blocked/);
+    app.store.open(platform);
+    terminal.input("/");
+    terminal.input("/help");
+    terminal.input("\r");
+    frame = await terminal.frame();
+    assert.match(frame, /Resume this channel/);
+    assert.ok(frame.includes(`buzz join ${platform}`));
+    assert.ok(!frame.includes(`buzz join ${engineering}`));
   } finally {
     app.stop();
     terminal.screen.dispose();

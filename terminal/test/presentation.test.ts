@@ -133,13 +133,49 @@ test("compact picker aligns Unicode rows and keeps selection visible without col
   for (const width of [12, 39, 40, 80]) {
     const lines = picker.render(width);
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
-    assert.equal(lines.filter((line) => line.startsWith("›")).length, 2);
-    assert.equal(lines.length, 5);
+    assert.equal(lines.filter((line) => line.startsWith("›")).length, 1);
+    assert.equal(lines.length, 8);
     assert.deepEqual(
       lines.slice(3).map(stripTerminalSequences),
       lines.slice(3).map((line) => line.replaceAll("\x1b[0m", "")),
     );
   }
   picker.handleInput("\x1b[B");
-  assert.match(picker.render(80)[4], /^›\s+buzz\s+Switch agent\s+Ctrl\+R\s*$/);
+  assert.match(picker.render(80)[7], /^›\s+Switch agent\s+Ctrl\+R\s*$/);
+});
+
+test("group headings are not selectable and every result remains reachable in a short viewport", () => {
+  const items = Array.from({ length: 9 }, (_, index) => ({
+    id: String(index),
+    label: `Result ${index}`,
+    category: index < 2 ? "Channels" : "Actions",
+  }));
+  let selected = "";
+  const picker = new Picker({
+    title: "Search",
+    items,
+    availableRows: () => 10,
+    onSelect: (item) => {
+      selected = item.id;
+    },
+    onCancel: () => {},
+    requestRender: () => {},
+  });
+  for (let index = 0; index < items.length; index++) {
+    const lines = picker.render(34).map(stripTerminalSequences);
+    assert.ok(lines.length <= 10);
+    assert.ok(lines.some((line) => line.startsWith(`› Result ${index}`)));
+    assert.ok(lines.filter((line) => line.includes("CHANNELS")).length <= 1);
+    assert.ok(lines.filter((line) => line.includes("ACTIONS")).length <= 1);
+    assert.match(lines.at(-1) ?? "", /of 9/);
+    picker.handleInput("\r");
+    assert.equal(selected, String(index));
+    picker.handleInput("\x1b[B");
+  }
+  picker.handleInput("\r");
+  assert.equal(selected, "0");
+  picker.handleInput("Result 8");
+  const filtered = picker.render(34).map(stripTerminalSequences).join("\n");
+  assert.match(filtered, /› Result 8/);
+  assert.doesNotMatch(filtered, /CHANNELS|ACTIONS|of 9/);
 });

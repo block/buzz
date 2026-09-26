@@ -44,7 +44,7 @@ export class Startup {
     if (channel?.joined && !this.opened) {
       this.opened = true;
       this.store.open(channel.id);
-      this.store.notice = `Resume with buzz join ${channel.id}`;
+      this.store.notice = "";
       this.store.changed();
     }
     const view = this.store.views.get(`${this.launch.channelId}:`);

@@ -112,7 +112,6 @@ export class DemoTransport implements Transport {
     receive({
       type: "connection",
       status: "connected",
-      message: "DEMO · offline fixtures · no messages leave this terminal",
     });
     this.later(
       () =>
@@ -213,7 +212,6 @@ export class DemoTransport implements Transport {
           this.receive?.({
             type: "connection",
             status: "connected",
-            message: "DEMO · reconnected · no network used",
           }),
         500,
       );

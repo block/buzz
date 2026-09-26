@@ -47,7 +47,7 @@ export class Picker implements Component, Focusable {
     this.requestRender = options.requestRender;
     this.availableRows = options.availableRows ?? (() => 20);
     this.input = new Input({
-      prompt: "› ",
+      prompt: "/ ",
       placeholder: "Search",
       placeholderStyle: style.secondary,
     });
@@ -123,12 +123,17 @@ export class Picker implements Component, Focusable {
     }
 
     const compact = filtered.every((item) => item.category !== undefined);
+    const grouped = compact && this.input.getValue() === "";
+    const groups = new Set(filtered.map((item) => item.category));
+    const groupRows = grouped ? groups.size * 2 - 1 : 0;
+    const limit = compact ? 6 : 7;
     const maxRows = Math.max(
       1,
       Math.min(
-        compact ? 14 : 7,
+        limit,
         Math.floor(
-          (this.availableRows() - 3) / (!compact && available >= 24 ? 2 : 1),
+          (this.availableRows() - 4 - groupRows) /
+            (!compact && available >= 24 ? 2 : 1),
         ),
       ),
     );
@@ -139,6 +144,7 @@ export class Picker implements Component, Focusable {
         filtered.length - maxRows,
       ),
     );
+    let category: string | undefined;
     for (
       let index = start;
       index < Math.min(filtered.length, start + maxRows);
@@ -146,33 +152,40 @@ export class Picker implements Component, Focusable {
     ) {
       const item = filtered[index];
       if (!item) continue;
+      if (grouped && item.category !== category) {
+        if (category !== undefined) lines.push("");
+        lines.push(
+          style.secondary(fit(`  ${item.category?.toUpperCase()}`, available)),
+        );
+        category = item.category;
+      }
       const selected = index === this.selected;
       const marker = selected ? "›" : " ";
-      const group = fit(item.category ?? "", 7);
-      const category =
-        item.category && available >= 40
-          ? `${" ".repeat(7 - visibleWidth(group))}${group}  `
-          : "";
       const badge = fit(item.badge ?? "", Math.floor(available / 3));
-      const label = fit(
-        item.label,
-        available - visibleWidth(category) - visibleWidth(badge) - 4,
-      );
+      const label = fit(item.label, available - visibleWidth(badge) - 4);
       const gap = " ".repeat(
-        Math.max(1, available - visibleWidth(category + label + badge) - 3),
+        Math.max(1, available - visibleWidth(label + badge) - 3),
       );
       lines.push(
         selected
-          ? style.selected(
-              fit(`${marker} ${category}${label}${gap}${badge} `, available),
-            )
+          ? style.selected(fit(`${marker} ${label}${gap}${badge} `, available))
           : fit(
-              `  ${style.secondary(category)}${style.bold(label)}${gap}${style.secondary(badge)} `,
+              `  ${style.bold(label)}${gap}${style.secondary(badge)} `,
               available,
             ),
       );
       if (!item.category && item.detail && available >= 24)
         lines.push(fit(`    ${style.muted(item.detail)}`, available));
+    }
+    if (filtered.length > maxRows) {
+      lines.push(
+        style.secondary(
+          fit(
+            `  ${start + 1}–${Math.min(filtered.length, start + maxRows)} of ${filtered.length} · type to filter`,
+            available,
+          ),
+        ),
+      );
     }
     return lines;
   }

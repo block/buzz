@@ -92,6 +92,10 @@ default `target/debug/buzz-terminal-host` executable.
 All commands are available in the combined palette. The selected agent appears
 at the top-right in the same identity color used in chat. Opening a picker dims
 the conversation behind it; Escape restores the colors and your draft.
+The compact, centered palette groups channels and actions, with common actions
+first. Scroll or search to reach every command; recovery actions are never hidden.
+The footer uses one status row. Find the current channel's `buzz join` command
+in `/help`; the launch channel's resume command is also printed when you detach.
 Typing `/` in an empty prompt opens search rather than inserting a slash.
 Slashes within a draft and pasted slash-leading text remain literal message text.
 `/retry` resends the **identical signed event** after an uncertain result.

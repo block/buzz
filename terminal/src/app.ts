@@ -310,7 +310,7 @@ export class TerminalApp {
       items,
       onCancel: close,
       availableRows: () =>
-        Math.max(3, Math.floor(this.tui.terminal.rows * 0.9) - 5),
+        Math.max(3, Math.floor(this.tui.terminal.rows * 0.9) - 3),
       requestRender: () => this.tui.requestRender(),
       onSelect: (item) => {
         close();
@@ -348,9 +348,7 @@ export class TerminalApp {
           style.border("│") +
             style.secondary(
               fit(
-                width >= 40
-                  ? " ↑↓ select · Enter open · Esc back"
-                  : " ↑↓ · Enter · Esc back",
+                width >= 40 ? " Enter open · Esc back" : " Enter · Esc",
                 Math.max(1, width - 2),
               ).padEnd(Math.max(1, width - 2)),
             ) +
@@ -363,10 +361,10 @@ export class TerminalApp {
     };
     picker.focused = true;
     this.overlay = this.tui.showOverlay(framed, {
-      width: "85%",
+      width: 64,
       maxHeight: "90%",
       anchor: "center",
-      margin: 1,
+      margin: { left: 2, right: 2, top: 1, bottom: 1 },
     });
   }
 
@@ -379,7 +377,7 @@ export class TerminalApp {
         detail: view.recipient
           ? `To ${this.store.name(view.recipient)} · ${view.recipient.slice(0, 12)}`
           : "Choose a recipient with Ctrl+R",
-        category: "channel",
+        category: "Channels",
         badge: [
           view.key === this.store.activeKey ? "current" : "",
           view.unread ? `${view.unread} new` : "",
@@ -395,7 +393,7 @@ export class TerminalApp {
           id: `context:${channel.id}`,
           label: `#${channel.name}`,
           detail: `${channel.members.length} members · ${channel.id}`,
-          category: "channel",
+          category: "Channels",
         });
     }
     return items;
@@ -478,17 +476,29 @@ export class TerminalApp {
   }
 
   private commandPalette(): void {
+    const primary = new Map(
+      ["to", "threads", "activity", "reconnect"].map((name, index) => [
+        name,
+        index,
+      ]),
+    );
     this.pick(
       "Commands & channels",
       () => [
         ...this.contextItems(),
-        ...[...this.plugins.commands.values()].map((command) => ({
-          id: `command:${command.name}`,
-          label: command.description.split(" · ")[0],
-          detail: `/${command.name}`,
-          badge: command.description.split(" · ")[1],
-          category: "buzz",
-        })),
+        ...[...this.plugins.commands.values()]
+          .sort(
+            (a, b) =>
+              (primary.get(a.name) ?? primary.size) -
+              (primary.get(b.name) ?? primary.size),
+          )
+          .map((command) => ({
+            id: `command:${command.name}`,
+            label: command.description.split(" · ")[0],
+            detail: `/${command.name}`,
+            badge: command.description.split(" · ")[1],
+            category: "Actions",
+          })),
       ],
       (item) => {
         if (item.id.startsWith("command:")) {
@@ -509,6 +519,15 @@ export class TerminalApp {
     this.pick(
       "Buzz · keyboard guide",
       [
+        ...(this.store.current
+          ? [
+              {
+                id: "resume",
+                label: "Resume this channel",
+                detail: `buzz join ${this.store.current.channelId}`,
+              },
+            ]
+          : []),
         {
           id: "switch",
           label: "Ctrl+K  Conversations",
@@ -714,12 +733,19 @@ export class TerminalApp {
       ? "DEMO / OFFLINE"
       : this.store.connection;
     const activity = `${status}${working ? ` · ${working} working` : ""}${unread ? ` · ${unread} new` : ""}`;
+    if (this.store.notice)
+      return [fit(` ${style.muted(singleLine(this.store.notice))}`, width)];
+    const right = ` ${fit(activity, Math.floor(width / 2))} `;
+    const left = fit(
+      " / Commands & channels",
+      Math.max(0, width - visibleWidth(right)),
+    );
     return [
-      fit(
-        ` ${style.muted("/ Commands & channels")}  ${style.muted(activity)}`,
-        width,
+      style.muted(
+        left +
+          " ".repeat(Math.max(0, width - visibleWidth(left + right))) +
+          right,
       ),
-      fit(` ${style.muted(singleLine(this.store.notice))}`, width),
     ];
   }
 

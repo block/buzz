@@ -202,7 +202,7 @@ export class Store {
       this.notice =
         message.message ??
         (message.status === "connected"
-          ? "Connected · history is a recent window; activity is live only"
+          ? ""
           : "Reconnecting · agents keep working independently");
       if (message.status !== "connected") {
         this.live.clear();
