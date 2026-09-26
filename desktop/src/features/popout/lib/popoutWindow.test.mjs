@@ -97,7 +97,6 @@ test("embed path does not call OS window create for playground", async () => {
   const { openPopoutWindow } = await import("./popoutWindow.ts");
   settings.resetPopoutSettingsForTests();
   embedded.resetEmbeddedWindowsForTests();
-  settings.setShowWindowsSection(true);
   settings.setEmbedInMain(true);
 
   const invokes = [];
@@ -142,7 +141,6 @@ test("channel/thread opens OS window even when embed-in-main is on", async () =>
   const { openPopoutWindow } = await import("./popoutWindow.ts");
   settings.resetPopoutSettingsForTests();
   embedded.resetEmbeddedWindowsForTests();
-  settings.setShowWindowsSection(true);
   settings.setEmbedInMain(true);
 
   const invokes = installTauriInvoke();
@@ -172,7 +170,6 @@ test("link Detach opens OS window even when embed-in-main is on", async () => {
   const { openPopoutWindow } = await import("./popoutWindow.ts");
   settings.resetPopoutSettingsForTests();
   embedded.resetEmbeddedWindowsForTests();
-  settings.setShowWindowsSection(true);
   settings.setEmbedInMain(true);
 
   const invokes = installTauriInvoke();

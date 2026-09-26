@@ -142,8 +142,6 @@ test("parkPlaygroundHost parks overlay and embed-only split", async () => {
   assert.equal(getActivePlaygroundSid(), "demo-1");
   parkPlaygroundHost();
   assert.equal(getActivePlaygroundSid(), null);
-
-  settings.setShowWindowsSection(true);
   settings.setEmbedInMain(true);
   embedded.openEmbeddedWindow({
     label: "popout-split-aaa",
@@ -175,7 +173,6 @@ test("dismissPlayground parks embed-only host like parkPlaygroundHost", async ()
   const embedded = await import("../../popout/lib/embeddedWindows.ts");
 
   configurePlaygroundScope("pub", "wss://relay.example.com");
-  settings.setShowWindowsSection(true);
   settings.setEmbedInMain(true);
   embedded.openEmbeddedWindow({
     label: "popout-playground-bbb",
@@ -208,7 +205,6 @@ test("dismissPlayground is an alias of parkPlaygroundHost for chrome X", async (
 
   configurePlaygroundScope("pub", "wss://relay.example.com");
   addPlaygroundSession(card);
-  settings.setShowWindowsSection(true);
   settings.setEmbedInMain(true);
   embedded.openEmbeddedWindow({
     label: "popout-split-ccc",

@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 
 import type { AppView } from "@/app/AppShell.helpers";
-import { WindowsSection } from "@/features/popout/ui/WindowsSection";
 import {
   parkPlaygroundHost,
   parkPlaygroundThen,
@@ -281,7 +280,6 @@ export function AppSidebarPrimaryMenu({
             />
           ))}
         </SidebarMenu>
-        <WindowsSection />
       </SidebarHeader>
       <SidebarProjectsSection />
     </>

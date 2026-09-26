@@ -22,10 +22,7 @@ test("opening the same label focuses the existing embedded window", async () => 
     listEmbeddedWindows,
     openEmbeddedWindow,
     setEmbedInMain,
-    setShowWindowsSection,
   } = await importPair();
-
-  setShowWindowsSection(true);
   setEmbedInMain(true);
   const first = openEmbeddedWindow({
     label: "popout-thread-aaa",
@@ -54,34 +51,6 @@ test("opening the same label focuses the existing embedded window", async () => 
   assert.equal(getActiveEmbeddedWindow(), null);
 });
 
-test("active embed is gated off when show-windows is off", async () => {
-  const {
-    getActiveEmbeddedWindow,
-    openEmbeddedWindow,
-    setEmbedInMain,
-    setShowWindowsSection,
-  } = await importPair();
-
-  setShowWindowsSection(true);
-  setEmbedInMain(true);
-  openEmbeddedWindow({
-    label: "popout-playground-bbb",
-    payload: {
-      kind: "playground",
-      title: "Demo",
-      playground: {
-        hula: "playground",
-        v: 1,
-        name: "Demo",
-        url: "https://app.example.com",
-        sid: "demo-1",
-      },
-    },
-  });
-  assert.equal(getActiveEmbeddedWindow()?.label, "popout-playground-bbb");
-  setShowWindowsSection(false);
-  assert.equal(getActiveEmbeddedWindow(), null);
-});
 
 async function importPair() {
   const settings = await import("./popoutSettings.ts");
@@ -96,11 +65,8 @@ test("dismissing and closing an embed split parks the playground host", async ()
     getActiveEmbeddedWindow,
     openEmbeddedWindow,
     setEmbedInMain,
-    setShowWindowsSection,
     showEmbeddedWindow,
   } = await importPair();
-
-  setShowWindowsSection(true);
   setEmbedInMain(true);
   const playground = {
     hula: "playground",
@@ -144,8 +110,6 @@ test("closeEmbeddedWindow removes inactive rows and parks active sid", async () 
     openEmbeddedWindow,
     showEmbeddedWindow,
   } = await import("./embeddedWindows.ts");
-
-  settings.setShowWindowsSection(true);
   settings.setEmbedInMain(true);
   openEmbeddedWindow({
     label: "popout-playground-one",

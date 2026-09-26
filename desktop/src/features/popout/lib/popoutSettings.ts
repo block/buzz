@@ -2,7 +2,6 @@ import * as React from "react";
 
 import { getStorageItem, setStorageItem } from "@/shared/lib/safeStorage";
 
-export const SHOW_WINDOWS_SECTION_KEY = "hula.popout.showWindowsSection";
 export const START_FULLSCREEN_KEY = "hula.popout.startFullscreen";
 export const EMBED_IN_MAIN_KEY = "hula.popout.embedInMain";
 
@@ -19,7 +18,6 @@ function writeBool(key: string, value: boolean): void {
   setStorageItem(key, value ? "true" : "false");
 }
 
-let showWindowsSection = readBool(SHOW_WINDOWS_SECTION_KEY, true);
 let startFullscreen = readBool(START_FULLSCREEN_KEY, false);
 let embedInMain = readBool(EMBED_IN_MAIN_KEY, false);
 
@@ -31,20 +29,17 @@ if (startFullscreen && embedInMain) {
 }
 
 export type PopoutSettings = {
-  showWindowsSection: boolean;
   startFullscreen: boolean;
   embedInMain: boolean;
 };
 
 let cachedSnapshot: PopoutSettings = {
-  showWindowsSection,
   startFullscreen,
   embedInMain,
 };
 
 function emit() {
   cachedSnapshot = {
-    showWindowsSection,
     startFullscreen,
     embedInMain,
   };
@@ -62,27 +57,12 @@ export function getPopoutSettings(): PopoutSettings {
   return cachedSnapshot;
 }
 
-export function isShowWindowsSectionEnabled(): boolean {
-  return showWindowsSection;
-}
-
 export function isStartFullscreenEnabled(): boolean {
   return startFullscreen;
 }
 
-/** Embed is only effective while the Windows section is visible. */
 export function isEmbedInMainEnabled(): boolean {
-  return showWindowsSection && embedInMain;
-}
-
-export function setShowWindowsSection(enabled: boolean): void {
-  showWindowsSection = enabled;
-  writeBool(SHOW_WINDOWS_SECTION_KEY, enabled);
-  if (!enabled && embedInMain) {
-    embedInMain = false;
-    writeBool(EMBED_IN_MAIN_KEY, false);
-  }
-  emit();
+  return embedInMain;
 }
 
 export function setStartFullscreen(enabled: boolean): void {
@@ -96,7 +76,7 @@ export function setStartFullscreen(enabled: boolean): void {
 }
 
 export function setEmbedInMain(enabled: boolean): void {
-  embedInMain = enabled && showWindowsSection;
+  embedInMain = enabled;
   writeBool(EMBED_IN_MAIN_KEY, embedInMain);
   if (embedInMain && startFullscreen) {
     startFullscreen = false;
@@ -113,21 +93,15 @@ export function usePopoutSettings(): PopoutSettings {
   );
 }
 
-export function useShowWindowsSection(): boolean {
-  return usePopoutSettings().showWindowsSection;
-}
-
 export function useStartFullscreen(): boolean {
   return usePopoutSettings().startFullscreen;
 }
 
 export function useEmbedInMainEnabled(): boolean {
-  const settings = usePopoutSettings();
-  return settings.showWindowsSection && settings.embedInMain;
+  return usePopoutSettings().embedInMain;
 }
 
 export function resetPopoutSettingsForTests(): void {
-  showWindowsSection = true;
   startFullscreen = false;
   embedInMain = false;
   emit();
