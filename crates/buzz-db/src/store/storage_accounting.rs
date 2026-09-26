@@ -3,6 +3,7 @@
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnection;
+use sqlx::Connection;
 
 use crate::{observability, Db, Result};
 
@@ -30,7 +31,13 @@ pub struct StoredStorageSnapshot {
 }
 
 impl StorageAccountingLeader {
-    /// Atomically replace the singleton through the lock-owning session.
+    /// Atomically replace the singleton through the lock-owning session and
+    /// append the run's per-community history rows in the same transaction.
+    ///
+    /// History rows are derived in SQL from the snapshot's `per_community`
+    /// object, so they always describe exactly the snapshot that published;
+    /// a worker whose lock session died cannot write either. Snapshots
+    /// without a `per_community` object append no history.
     #[datastore_span(name = "save_storage_accounting_snapshot", system = "postgresql")]
     pub async fn save_snapshot(
         &mut self,
@@ -39,6 +46,7 @@ impl StorageAccountingLeader {
         max_objects: i64,
         code_sha: &str,
     ) -> Result<()> {
+        let mut tx = self.connection.begin().await?;
         sqlx::query(
             "INSERT INTO storage_accounting_snapshots \
              (singleton, snapshot, completed_at, duration_ms, max_objects, code_sha) \
@@ -54,8 +62,20 @@ impl StorageAccountingLeader {
         .bind(duration_ms)
         .bind(max_objects)
         .bind(code_sha)
-        .execute(&mut self.connection)
+        .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "INSERT INTO storage_accounting_history \
+             (completed_at, community_id, logical_bytes, logical_objects, code_sha) \
+             SELECT transaction_timestamp(), (entry.key)::uuid, \
+                    (entry.value->>'bytes')::bigint, (entry.value->>'objects')::bigint, $2 \
+             FROM jsonb_each($1->'per_community') AS entry",
+        )
+        .bind(snapshot)
+        .bind(code_sha)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -152,12 +172,35 @@ mod postgres_tests {
             "overlapping worker must not start"
         );
 
+        let community_a = Uuid::new_v4();
+        let community_b = Uuid::new_v4();
         leader
-            .save_snapshot(&serde_json::json!({"version": 1}), 10, 100, "a")
+            .save_snapshot(
+                &serde_json::json!({
+                    "version": 1,
+                    "per_community": {
+                        community_a.to_string(): {"bytes": 100, "objects": 2},
+                    },
+                }),
+                10,
+                100,
+                "a",
+            )
             .await
             .expect("save first snapshot");
         leader
-            .save_snapshot(&serde_json::json!({"version": 2}), 20, 200, "b")
+            .save_snapshot(
+                &serde_json::json!({
+                    "version": 2,
+                    "per_community": {
+                        community_a.to_string(): {"bytes": 150, "objects": 3},
+                        community_b.to_string(): {"bytes": 7, "objects": 1},
+                    },
+                }),
+                20,
+                200,
+                "b",
+            )
             .await
             .expect("replace snapshot");
         let stored = second
@@ -165,10 +208,29 @@ mod postgres_tests {
             .await
             .expect("load snapshot")
             .expect("snapshot exists");
-        assert_eq!(stored.snapshot, serde_json::json!({"version": 2}));
+        assert_eq!(stored.snapshot["version"], serde_json::json!(2));
         assert_eq!(stored.duration_ms, 20);
         assert_eq!(stored.max_objects, 200);
         assert_eq!(stored.code_sha, "b");
+
+        // The singleton was replaced, but history is append-only: one row per
+        // community per completed run, in the same transaction as its snapshot.
+        let history: Vec<(Option<Uuid>, i64, i64, String)> = sqlx::query_as(
+            "SELECT community_id, logical_bytes, logical_objects, code_sha \
+             FROM storage_accounting_history \
+             ORDER BY completed_at, community_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load history");
+        assert_eq!(
+            history.len(),
+            3,
+            "history must retain both runs: {history:?}"
+        );
+        assert!(history.contains(&(Some(community_a), 100, 2, "a".to_owned())));
+        assert!(history.contains(&(Some(community_a), 150, 3, "b".to_owned())));
+        assert!(history.contains(&(Some(community_b), 7, 1, "b".to_owned())));
 
         drop(leader);
         drop(first);
@@ -225,11 +287,31 @@ mod postgres_tests {
         .expect("successor acquires released lock");
 
         fresh_leader
-            .save_snapshot(&serde_json::json!({"worker": "fresh"}), 20, 200, "b")
+            .save_snapshot(
+                &serde_json::json!({
+                    "worker": "fresh",
+                    "per_community": {
+                        Uuid::new_v4().to_string(): {"bytes": 1, "objects": 1},
+                    },
+                }),
+                20,
+                200,
+                "b",
+            )
             .await
             .expect("successor publishes fresh snapshot");
         stale_leader
-            .save_snapshot(&serde_json::json!({"worker": "stale"}), 30, 100, "a")
+            .save_snapshot(
+                &serde_json::json!({
+                    "worker": "stale",
+                    "per_community": {
+                        Uuid::new_v4().to_string(): {"bytes": 9, "objects": 9},
+                    },
+                }),
+                30,
+                100,
+                "a",
+            )
             .await
             .expect_err("worker that lost its lock session cannot publish");
 
@@ -238,10 +320,22 @@ mod postgres_tests {
             .await
             .expect("load snapshot")
             .expect("snapshot exists");
-        assert_eq!(stored.snapshot, serde_json::json!({"worker": "fresh"}));
+        assert_eq!(stored.snapshot["worker"], serde_json::json!("fresh"));
         assert_eq!(stored.duration_ms, 20);
         assert_eq!(stored.max_objects, 200);
         assert_eq!(stored.code_sha, "b");
+        // The stale leader's history insert shares the dead session's
+        // transaction, so exactly one run reached history.
+        let history_shas: Vec<String> =
+            sqlx::query_scalar("SELECT code_sha FROM storage_accounting_history")
+                .fetch_all(&pool)
+                .await
+                .expect("load history");
+        assert_eq!(
+            history_shas,
+            vec!["b".to_owned()],
+            "stale leader must not append history"
+        );
 
         drop(stale_leader);
         drop(fresh_leader);

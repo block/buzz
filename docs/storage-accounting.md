@@ -5,6 +5,15 @@ logical usage, and atomically replaces the completed snapshot in PostgreSQL.
 The relay reads that snapshot and exposes the existing storage gauges on its
 metrics endpoint for collection by Datadog or another metrics collector.
 
+The same transaction appends one `storage_accounting_history` row per
+community (`completed_at`, `community_id`, `logical_bytes`,
+`logical_objects`, `code_sha`), so usage over time is queryable directly from
+the relay database. History is append-only, is never read on the serving
+path, and rows always correspond to a snapshot that actually published — a
+worker whose lease session died can write neither. `community_id` is
+provenance only: community deletion severs it to NULL instead of deleting
+fleet accounting evidence.
+
 ## Independent rollout
 
 Deploy the snapshot-reading relay version through the usual release process.

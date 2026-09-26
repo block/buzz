@@ -261,6 +261,23 @@ async fn storage_snapshot_retries_then_connects_after_the_old_three_second_budge
     assert_eq!(snapshot["physical_bytes"], 140);
     assert_eq!(snapshot["logical_bytes"], 110);
     assert_eq!(snapshot["logical_objects"], 1);
+    // The same transaction appended the run's per-community history row.
+    let history: Vec<(String, i64, i64, String)> = sqlx::query_as(
+        "SELECT community_id::text, logical_bytes, logical_objects, code_sha \
+         FROM storage_accounting_history",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("saved history");
+    assert_eq!(
+        history,
+        vec![(
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+            110,
+            1,
+            "startup-test".to_owned()
+        )]
+    );
 }
 
 #[tokio::test]
@@ -289,4 +306,10 @@ async fn storage_snapshot_exhaustion_never_lists_s3_or_replaces_the_last_good_sn
     .expect("last good snapshot");
     assert_eq!(snapshot, json!({"previous": "complete"}));
     assert_eq!(revision, "before");
+    // A run that never listed S3 must not fabricate history either.
+    let history_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM storage_accounting_history")
+        .fetch_one(&pool)
+        .await
+        .expect("count history");
+    assert_eq!(history_rows, 0, "failed run must append no history");
 }
