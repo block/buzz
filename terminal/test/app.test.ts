@@ -64,7 +64,7 @@ test("real TUI keyboard path preserves multiline drafts and routes a send across
   }
 });
 
-test("typing during channel creation survives activation and sends to the configured agent", async () => {
+test("typing during channel creation survives activation and sends to the default agent without a picker", async () => {
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => {
     release = resolve;
@@ -79,7 +79,7 @@ test("typing during channel creation survives activation and sends to the config
     }
   }
   const terminal = new TestTerminal();
-  const launch = parseLaunch([], "3".repeat(64));
+  const launch = parseLaunch([]);
   const app = new TerminalApp(terminal, new DelayedRelay(), () => {}, launch);
   try {
     app.start();

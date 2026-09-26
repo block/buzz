@@ -175,7 +175,7 @@ test("uncertain creation retains channel and request identity for manual retry",
   }
 });
 
-test("multiple owned agents require selection instead of arbitrarily inviting one", async () => {
+test("multiple owned agents default to the first agent without opening a picker", async () => {
   const store = new Store(),
     wire = new Wire(),
     launch = parseLaunch([]);
@@ -185,15 +185,16 @@ test("multiple owned agents require selection instead of arbitrarily inviting on
     await settle();
     const view = store.current;
     assert.ok(view);
-    assert.equal(view.recipient, undefined);
+    assert.equal(view.recipient, atlas);
     assert.deepEqual(
       wire.writes().map((call) => call.method),
-      ["createChannel"],
+      ["createChannel", "addMember"],
     );
-    assert.ok(session.startup);
-    await session.startup.selectAgent(view, atlas);
-    await settle();
-    assert.equal(view.recipient, atlas);
+    assert.equal(
+      store.preferredAgent,
+      undefined,
+      "automatic defaults are not manual choices",
+    );
   } finally {
     session.close();
   }

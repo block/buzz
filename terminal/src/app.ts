@@ -13,6 +13,7 @@ import {
 import type { Launch } from "./launch.ts";
 import { Picker, type PickerItem } from "./picker.ts";
 import { activityPlugin, type Command, Plugins } from "./plugins.ts";
+import type { AgentPreferences } from "./preferences.ts";
 import { Session } from "./session.ts";
 import { type Conversation, Store } from "./store.ts";
 import { editorTheme, fit, singleLine, style } from "./theme.ts";
@@ -21,7 +22,7 @@ import type { Transport } from "./transport.ts";
 
 /** Editor-centered terminal shell. Remote execution is owned by Session's relay. */
 export class TerminalApp {
-  readonly store = new Store();
+  readonly store: Store;
   readonly tui: TuiAltScreen;
   readonly editor: Editor;
   readonly session: Session;
@@ -45,7 +46,9 @@ export class TerminalApp {
     transport: Transport,
     onExit: () => void,
     launch?: Launch,
+    preferences?: AgentPreferences,
   ) {
+    this.store = new Store(preferences);
     this.onExit = onExit;
     this.tui = new TuiAltScreen(terminal, true, undefined, {
       scrollToEndIndicator: () => style.accent(" ↓ Latest · Ctrl+L "),
@@ -397,9 +400,7 @@ export class TerminalApp {
         const candidates = new Set([
           ...members,
           ...(canInvite
-            ? [...this.store.profiles.values()]
-                .filter((profile) => profile.owner === this.store.pubkey)
-                .map((profile) => profile.pubkey)
+            ? this.store.ownedAgents().map((profile) => profile.pubkey)
             : []),
         ]);
         return [...candidates]
@@ -413,14 +414,18 @@ export class TerminalApp {
               : this.store.profiles.get(key)?.owner === this.store.pubkey
                 ? "your agent"
                 : "member",
-          }));
+          }))
+          .sort(
+            (a, b) =>
+              a.label.localeCompare(b.label) || a.id.localeCompare(b.id),
+          );
       },
       (item) => {
         if (startup?.launch.channelId === view.channelId && !view.rootEventId)
           void startup
             .selectAgent(view, item.id)
             .catch((error) => this.report(error));
-        else this.store.selectRecipient(view, item.id);
+        else this.store.selectRecipient(view, item.id, true);
       },
     );
   }

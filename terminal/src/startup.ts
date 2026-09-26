@@ -17,6 +17,7 @@ export class Startup {
   private profilesReady = false;
   private autoSelected = false;
   private selectedAgent?: string;
+  private rememberSelection = false;
   private adding = false;
   private awaitingMembership = false;
 
@@ -48,20 +49,27 @@ export class Startup {
     }
     const view = this.store.views.get(`${this.launch.channelId}:`);
     if (view && !view.recipient && !this.selectedAgent && !this.autoSelected) {
-      const owned = [...this.store.profiles.values()].filter(
-        (profile) =>
-          profile.owner === this.store.pubkey &&
-          (this.launch.mode === "new" ||
-            channel?.members.includes(profile.pubkey)),
-      );
+      const owned = this.store
+        .ownedAgents()
+        .filter(
+          (profile) =>
+            this.launch.mode === "new" ||
+            channel?.members.includes(profile.pubkey),
+        );
       const agent =
         this.launch.agent ??
-        (!this.discovering && this.profilesReady && owned.length === 1
-          ? owned[0].pubkey
+        (!this.discovering && this.profilesReady
+          ? (
+              owned.find(
+                (profile) => profile.pubkey === this.store.preferredAgent,
+              ) ?? owned[0]
+            )?.pubkey
           : undefined);
       if (agent) {
         this.autoSelected = true;
-        void this.selectAgent(view, agent).catch((error) => this.report(error));
+        void this.selectAgent(view, agent, false).catch((error) =>
+          this.report(error),
+        );
       }
     }
     if (
@@ -94,14 +102,22 @@ export class Startup {
       this.refreshRoster();
       const view = this.store.views.get(`${this.launch.channelId}:`);
       if (view && this.selectedAgent && !view.recipient && !this.adding)
-        await this.selectAgent(view, this.selectedAgent);
+        await this.selectAgent(
+          view,
+          this.selectedAgent,
+          this.rememberSelection,
+        );
     } finally {
       this.busy = false;
     }
   }
 
   /** Attach an exact existing agent to a newly created channel, then await its roster. */
-  async selectAgent(view: Conversation, pubkey: string): Promise<void> {
+  async selectAgent(
+    view: Conversation,
+    pubkey: string,
+    remember = true,
+  ): Promise<void> {
     if (view.pending || view.sending)
       throw new Error(
         "Resolve the pending send before changing its recipient.",
@@ -112,8 +128,9 @@ export class Startup {
       );
     if (this.store.channels.get(view.channelId)?.members.includes(pubkey)) {
       this.selectedAgent = pubkey;
+      this.rememberSelection = remember;
       this.awaitingMembership = false;
-      this.store.selectRecipient(view, pubkey);
+      this.store.selectRecipient(view, pubkey, remember);
       return;
     }
     if (this.launch.mode !== "new" || view.channelId !== this.launch.channelId)
@@ -131,6 +148,7 @@ export class Startup {
         "Resolve the current agent invitation with /retry-setup first.",
       );
     this.selectedAgent = pubkey;
+    this.rememberSelection = remember;
     this.adding = true;
     this.awaitingMembership = true;
     view.recipient = undefined;
@@ -163,7 +181,15 @@ export class Startup {
         ?.members.includes(this.selectedAgent)
     ) {
       this.awaitingMembership = false;
-      this.store.selectRecipient(view, this.selectedAgent);
+      try {
+        this.store.selectRecipient(
+          view,
+          this.selectedAgent,
+          this.rememberSelection,
+        );
+      } catch (error) {
+        this.report(error);
+      }
     }
   }
 

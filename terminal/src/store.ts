@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { AgentPreferences } from "./preferences.ts";
 import type {
   HostMessage,
   MessageRequest,
@@ -95,6 +96,23 @@ export class Store {
   private listeners = new Set<() => void>();
   private live = new Set<string>();
   private observerIds = new Set<string>();
+  private readonly preferences?: AgentPreferences;
+  preferredAgent?: string;
+
+  constructor(preferences?: AgentPreferences) {
+    this.preferences = preferences;
+  }
+
+  /** Stable default order, independent of relay profile arrival order. */
+  ownedAgents(): Profile[] {
+    return [...this.profiles.values()]
+      .filter((profile) => profile.owner === this.pubkey)
+      .sort(
+        (a, b) =>
+          this.name(a.pubkey).localeCompare(this.name(b.pubkey)) ||
+          a.pubkey.localeCompare(b.pubkey),
+      );
+  }
 
   /** Register a state listener; the returned disposer removes it. */
   subscribe(listener: () => void): () => void {
@@ -149,13 +167,17 @@ export class Store {
   }
 
   /** Select an exact roster member, never a potentially ambiguous display name. */
-  selectRecipient(view: Conversation, pubkey: string): void {
+  selectRecipient(view: Conversation, pubkey: string, remember = false): void {
     if (view.sending || view.pending)
       throw new Error(
         "Resolve the pending send before changing its recipient.",
       );
     if (!this.channels.get(view.channelId)?.members.includes(pubkey))
       throw new Error("This identity is not a member of the conversation.");
+    if (remember && this.profiles.get(pubkey)?.owner === this.pubkey) {
+      this.preferences?.write(this.relayUrl, this.pubkey, pubkey);
+      this.preferredAgent = pubkey;
+    }
     view.recipient = pubkey;
     this.changed();
   }
@@ -174,6 +196,7 @@ export class Store {
       this.pubkey = message.pubkey;
       this.relayPubkey = message.relayPubkey;
       this.relayUrl = message.relayUrl;
+      this.preferredAgent = this.preferences?.read(this.relayUrl, this.pubkey);
     } else if (message.type === "connection") {
       this.connection = message.status;
       this.notice =

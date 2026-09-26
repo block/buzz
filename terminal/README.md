@@ -35,8 +35,14 @@ buzz --demo                # offline preview, no relay writes
 
 The composer accepts a draft while setup is pending. Set `BUZZ_AGENT_PUBKEY`
 to an existing agent's exact hex key for immediate routing. Otherwise the
-client selects your sole discovered owned agent, or lets you choose with
-Ctrl+R when there are several. Discovery reads your owner-authored agent
+client selects your last chosen owned agent, or the first owned agent sorted
+by name (public key breaks ties). You can send without opening Ctrl+R; use it
+only to switch recipients. A confirmed manual agent choice is remembered
+across launches, separately for each relay URL and human identity, under
+`~/.buzz/terminal/agents/`. These files contain public keys, never credentials.
+Automatic defaults and environment overrides do not overwrite your last
+manual choice. If that agent is no longer discovered with verified ownership,
+the client falls back to the first owned agent. Discovery reads your owner-authored agent
 directory as well as recent channel rosters, then verifies ownership from
 each agent's signed profile. Agents do not need to share a channel with you
 to appear. The recipient picker updates as profiles arrive without losing
@@ -48,6 +54,7 @@ start an agent runtime. The agent must already be running to respond.
 in an open channel. Private channels require an invitation. Missing channels,
 denied access, and malformed IDs never fall back to creating a channel.
 Joining does not invite a configured agent that is absent from that channel.
+Automatic selection when joining only considers owned agents already in the channel.
 `/retry-setup` retries the same channel and signed operation after a setup error.
 Reconnects do not create channels. The resume command is shown on detach;
 it restores relay history, not unsaved local drafts.

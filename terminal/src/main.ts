@@ -3,6 +3,7 @@ import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { TerminalApp } from "./app.ts";
 import { DemoTransport } from "./demo.ts";
 import { type Launch, parseLaunch } from "./launch.ts";
+import { AgentPreferences } from "./preferences.ts";
 import { safeText } from "./theme.ts";
 import { HostTransport } from "./transport.ts";
 
@@ -53,6 +54,7 @@ Drafts are local to this terminal session. Agents run independently.`);
       if (launch) console.log(`Resume with buzz join ${launch.channelId}`);
     },
     launch,
+    demo ? undefined : new AgentPreferences(),
   );
   const fail = (error: unknown) => {
     app.stop();

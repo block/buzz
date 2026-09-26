@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { TerminalApp } from "../src/app.ts";
 import { parseLaunch } from "../src/launch.ts";
+import { AgentPreferences } from "../src/preferences.ts";
 import { HostTransport } from "../src/transport.ts";
 import { TestTerminal } from "./terminal.ts";
 
@@ -8,6 +12,8 @@ const key = process.env.BUZZ_PRIVATE_KEY;
 const agent = process.env.BUZZ_TEST_AGENT;
 const host = process.env.BUZZ_TERMINAL_HOST;
 assert.ok(key && agent && host);
+const directory = mkdtempSync(join(tmpdir(), "buzz-live-preferences-"));
+process.once("exit", () => rmSync(directory, { recursive: true, force: true }));
 const launch = parseLaunch([]);
 const terminal = new TestTerminal();
 const app = new TerminalApp(
@@ -15,6 +21,7 @@ const app = new TerminalApp(
   new HostTransport(host),
   () => {},
   launch,
+  new AgentPreferences(directory),
 );
 
 async function waitFor(check: () => boolean, label: string): Promise<void> {
@@ -28,7 +35,13 @@ async function waitFor(check: () => boolean, label: string): Promise<void> {
 
 try {
   app.start();
-  await waitFor(() => !!app.store.current, "new channel opens");
+  await waitFor(
+    () => !!app.store.current?.recipient,
+    "first agent selected automatically",
+  );
+  assert.ok(app.store.current?.recipient);
+  assert.equal(app.store.name(app.store.current.recipient), "Aurora");
+  assert.equal(app.tui.hasOverlay(), false);
   terminal.input("\x12");
   terminal.input("Borealis");
   await waitFor(
@@ -37,7 +50,6 @@ try {
   );
   assert.match(await terminal.frame(), /Borealis/);
   assert.match(await terminal.frame(), /invite your agent/);
-  assert.equal(app.store.current?.recipient, undefined);
   terminal.input("\r");
   await waitFor(
     () => app.store.current?.recipient === agent,
@@ -80,33 +92,42 @@ try {
   terminal.screen.dispose();
 }
 
-process.env.BUZZ_PRIVATE_KEY = key;
-const resumedTerminal = new TestTerminal();
-const resumed = new TerminalApp(
-  resumedTerminal,
-  new HostTransport(host),
-  () => {},
-  parseLaunch(["join", launch.channelId]),
-);
-try {
-  resumed.start();
-  const deadline = Date.now() + 15_000;
-  while (resumed.store.current?.history !== "ready") {
-    assert.ok(Date.now() < deadline, `join: ${resumed.store.notice}`);
-    await resumedTerminal.frame();
+for (const next of [parseLaunch(["join", launch.channelId]), parseLaunch([])]) {
+  process.env.BUZZ_PRIVATE_KEY = key;
+  const resumedTerminal = new TestTerminal();
+  const resumed: TerminalApp = new TerminalApp(
+    resumedTerminal,
+    new HostTransport(host),
+    () => {},
+    next,
+    new AgentPreferences(directory),
+  );
+  try {
+    resumed.start();
+    const deadline = Date.now() + 15_000;
+    while (
+      resumed.store.current?.history !== "ready" ||
+      resumed.store.current.recipient !== agent
+    ) {
+      assert.ok(Date.now() < deadline, `join: ${resumed.store.notice}`);
+      await resumedTerminal.frame();
+    }
+    assert.equal(resumed.store.current.channelId, next.channelId);
+    assert.equal(resumed.tui.hasOverlay(), false);
+    if (next.mode === "join")
+      assert.ok(
+        resumed.store
+          .events(resumed.store.current)
+          .some(
+            (event) =>
+              event.content === "Reply to the terminal integration probe",
+          ),
+      );
+    process.stdout.write(
+      `PASS: ${next.mode} restored the remembered agent without a picker${next.mode === "join" ? " and message history" : " in a fresh channel"}\n`,
+    );
+  } finally {
+    resumed.stop();
+    resumedTerminal.screen.dispose();
   }
-  assert.equal(resumed.store.current.channelId, launch.channelId);
-  assert.ok(
-    resumed.store
-      .events(resumed.store.current)
-      .some(
-        (event) => event.content === "Reply to the terminal integration probe",
-      ),
-  );
-  process.stdout.write(
-    "PASS: buzz join restored the same channel and message history\n",
-  );
-} finally {
-  resumed.stop();
-  resumedTerminal.screen.dispose();
 }

@@ -82,7 +82,11 @@ test("directory-only agents arrive in an open picker without losing its search o
     release();
     const loaded = await terminal.frame();
     assert.match(loaded, /invite your agent/);
-    assert.doesNotMatch(loaded, /Atlas/);
+    assert.doesNotMatch(
+      loaded.slice(loaded.indexOf("┌"), loaded.indexOf("└")),
+      /Atlas/,
+    );
+    assert.equal(app.store.current?.recipient, atlas);
     assert.equal(app.store.agentPolicies.size, 2);
     terminal.input("\r");
     await terminal.frame();
