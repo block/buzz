@@ -42,6 +42,12 @@ pub enum TriggerDef {
         #[serde(default)]
         filter: Option<String>,
     },
+    /// Fires when a forum thread root is posted in the workflow's channel.
+    ForumPosted {
+        /// Optional evalexpr filter (flat var names, e.g. `trigger_text`).
+        #[serde(default)]
+        filter: Option<String>,
+    },
     /// Fires when an emoji reaction is added to a message.
     ReactionAdded {
         /// Optional: only fire for this specific emoji.
@@ -219,6 +225,7 @@ impl WorkflowDef {
         let trigger_has_message = matches!(
             self.trigger,
             TriggerDef::MessagePosted { .. }
+                | TriggerDef::ForumPosted { .. }
                 | TriggerDef::ReactionAdded { .. }
                 | TriggerDef::DiffPosted { .. }
         );
@@ -233,7 +240,7 @@ impl WorkflowDef {
                 ) {
                     return Err(WorkflowError::InvalidDefinition(format!(
                         "step '{}': reply_in_thread requires a message-based trigger \
-                         (message_posted, reaction_added, or diff_posted); \
+                         (message_posted, forum_posted, reaction_added, or diff_posted); \
                          schedule and webhook triggers have no message to reply to",
                         step.id
                     )));
@@ -525,7 +532,12 @@ mod tests {
 
     #[test]
     fn validate_accepts_reply_in_thread_on_message_triggers() {
-        for on in ["message_posted", "reaction_added", "diff_posted"] {
+        for on in [
+            "message_posted",
+            "forum_posted",
+            "reaction_added",
+            "diff_posted",
+        ] {
             let yaml = format!(
                 "name: Auto Reply\ntrigger:\n  on: {on}\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n    reply_in_thread: true\n"
             );
@@ -611,6 +623,18 @@ mod tests {
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         match &def.trigger {
             TriggerDef::MessagePosted { filter } => {
+                assert!(filter.is_none(), "filter should default to None");
+            }
+            other => panic!("unexpected trigger: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_forum_posted_without_filter_defaults_to_none() {
+        let yaml = "name: Forum triage\ntrigger:\n  on: forum_posted\nsteps:\n  - id: triage\n    action: send_message\n    text: '@hermes-dev triage this error'\n    reply_in_thread: true\n";
+        let (def, _) = parse_yaml(yaml).expect("parse failed");
+        match &def.trigger {
+            TriggerDef::ForumPosted { filter } => {
                 assert!(filter.is_none(), "filter should default to None");
             }
             other => panic!("unexpected trigger: {other:?}"),
