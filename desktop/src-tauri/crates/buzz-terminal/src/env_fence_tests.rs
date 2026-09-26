@@ -241,6 +241,52 @@ fn resolve_shell_falls_through_to_passwd_not_the_default() {
     );
 }
 
+/// Concurrent callers of the passwd lookup must agree with each other and
+/// with a serial read (`#7589`).
+///
+/// The old `getpwuid` implementation returned libc-owned static storage that
+/// any thread's passwd-database call could rewrite mid-copy, so two reads of
+/// the same uid could disagree — the observed CI failure (run 34631406730)
+/// was exactly this shape: `passwd_shell()` and `resolve_shell(None)`
+/// disagreeing (`"/bin/bash"` vs `"/back"`) in a concurrently running test
+/// binary. With `getpwuid_r` every call owns its storage, so this guard
+/// cannot false-fail; under the old code it is the same interleaving that
+/// flaked CI, at higher intensity. macOS `getpwuid` returns thread-specific
+/// storage, so a green pass here does not clear the Linux defect — Linux CI
+/// is the authoritative arm.
+#[test]
+fn passwd_shell_concurrent_reads_agree() {
+    let reference = crate::shell::passwd_shell();
+    let Some(reference) = reference else {
+        panic!("no usable passwd shell; this gate cannot run on this machine");
+    };
+    assert_ne!(
+        reference, FALLBACK_SHELL,
+        "passwd shell equals the fallback, so this test cannot tell a torn \
+         read from a correct one; it must not report success"
+    );
+
+    let readers: Vec<_> = (0..8)
+        .map(|_| std::thread::spawn(|| crate::shell::passwd_shell()))
+        .collect();
+    for reader in readers {
+        let read = reader.join().expect("passwd reader thread");
+        assert_eq!(
+            read.as_deref(),
+            Some(reference.as_str()),
+            "concurrent passwd reads disagree with the serial reference"
+        );
+    }
+    // The CI failure compared a direct read against `resolve_shell`'s second
+    // lookup; keep that arm so the guard covers the production resolution
+    // path, not just the raw lookup.
+    assert_eq!(
+        resolve_shell(None),
+        reference,
+        "resolve_shell's passwd lookup disagrees with the serial reference"
+    );
+}
+
 /// `access(X_OK)` returns 0 for a directory, so a `$SHELL` pointing at one
 /// passes portable-pty's own check and produces a child that dies with a Rust
 /// runtime panic. Requiring an executable *regular file* is what closes it.
