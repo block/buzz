@@ -75,3 +75,16 @@ test("primary respond-to copy does not expose implementation jargon", () => {
     assert.doesNotMatch(primaryFieldSource, new RegExp(jargon));
   }
 });
+
+test("allowlist search fetches a larger page so exact human matches are not crowded out", () => {
+  assert.match(respondToFieldSource, /ALLOWLIST_SEARCH_LIMIT = 50/);
+  assert.match(
+    respondToFieldSource,
+    /useUserSearchQuery\(deferredQuery, \{[\s\S]*limit: ALLOWLIST_SEARCH_LIMIT/,
+  );
+});
+
+test("allowlist search hides agents and re-ranks humans like persona share recipients", () => {
+  assert.match(respondToFieldSource, /!user\.isAgent/);
+  assert.match(respondToFieldSource, /rankUserCandidatesBySearch\(/);
+});
