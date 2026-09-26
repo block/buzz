@@ -38,6 +38,13 @@ keypair.
   migrations.
 - The stack uses Postgres, Redis, MinIO, and a git data volume because
   those are real Buzz dependencies today. Minimal mode can simplify this later.
+- Mobile QR pairing needs the `pairing-relay` sidecar. Compose stands it up on
+  port 5000 and advertises `BUZZ_PAIRING_RELAY_URL` in NIP-11. With
+  `BUZZ_COMPOSE_TLS=true`, Caddy proxies `/pair*` to that sidecar — set
+  `BUZZ_PAIRING_RELAY_URL=wss://<domain>/pair`. Without Caddy, point
+  `BUZZ_PAIRING_RELAY_URL` at the published pairing port instead
+  (e.g. `ws://<host>:5000`). Skipping this leaves membership-enforcing relays
+  advertising a pairing path they cannot serve.
 - Mobile push remains off by default. To use the public gateway, keep the
   template's explicit `BUZZ_PUSH_GATEWAY_DELIVERY_URL` and set
   `BUZZ_PUSH_ENABLED=true`. To use another gateway, replace the exact HTTPS
