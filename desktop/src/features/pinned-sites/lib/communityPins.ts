@@ -3,6 +3,12 @@ import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
 
+import {
+  parseCommunityRunbookPayload,
+  shapeRunbookForCommunity,
+} from "@/features/site-runbook/lib/serialize";
+import type { SiteRunbook } from "@/features/site-runbook/lib/types";
+
 import { isPinnedSiteIconId } from "./icons";
 import type { PinnedSite, PinnedSiteIconId } from "./types";
 import { normalizePinnedSiteName, normalizePinnedSiteUrl } from "./url";
@@ -18,10 +24,17 @@ export type CommunityPinnedSitesPayload = {
     icon: PinnedSiteIconId;
     pollForChanges?: boolean;
     openMatchingLinks?: boolean;
+    /** Optional site runbook (agent brief + active procedures). */
+    runbook?: ReturnType<typeof shapeRunbookForCommunity>;
   }>;
 };
 
-function parseCommunityPin(value: unknown): PinnedSite | null {
+export type CommunityPinWithRunbook = {
+  pin: PinnedSite;
+  runbook: SiteRunbook | null;
+};
+
+function parseCommunityPin(value: unknown): CommunityPinWithRunbook | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
   }
@@ -34,7 +47,7 @@ function parseCommunityPin(value: unknown): PinnedSite | null {
   if (!name || !url || !isPinnedSiteIconId(candidate.icon)) {
     return null;
   }
-  return {
+  const pin: PinnedSite = {
     id: candidate.id,
     name,
     url,
@@ -43,11 +56,19 @@ function parseCommunityPin(value: unknown): PinnedSite | null {
     openMatchingLinks: candidate.openMatchingLinks !== false,
     scope: "community",
   };
+  const runbook = parseCommunityRunbookPayload(candidate.runbook);
+  return { pin, runbook };
 }
 
 export function parseCommunityPinnedSitesPayload(
   content: string,
 ): PinnedSite[] {
+  return parseCommunityPinnedSitesWithRunbooks(content).map((row) => row.pin);
+}
+
+export function parseCommunityPinnedSitesWithRunbooks(
+  content: string,
+): CommunityPinWithRunbook[] {
   try {
     const parsed = JSON.parse(content) as unknown;
     if (
@@ -61,13 +82,13 @@ export function parseCommunityPinnedSitesPayload(
     if (candidate.version !== 1 || !Array.isArray(candidate.pins)) {
       return [];
     }
-    const pins: PinnedSite[] = [];
+    const pins: CommunityPinWithRunbook[] = [];
     const seen = new Set<string>();
     for (const entry of candidate.pins) {
-      const pin = parseCommunityPin(entry);
-      if (!pin || seen.has(pin.id)) continue;
-      seen.add(pin.id);
-      pins.push(pin);
+      const row = parseCommunityPin(entry);
+      if (!row || seen.has(row.pin.id)) continue;
+      seen.add(row.pin.id);
+      pins.push(row);
     }
     return pins;
   } catch {
@@ -79,6 +100,12 @@ export function parseCommunityPinnedSitesPayload(
 export function selectLatestCommunityPins(
   events: ReadonlyArray<RelayEvent>,
 ): PinnedSite[] {
+  return selectLatestCommunityPinsWithRunbooks(events).map((row) => row.pin);
+}
+
+export function selectLatestCommunityPinsWithRunbooks(
+  events: ReadonlyArray<RelayEvent>,
+): CommunityPinWithRunbook[] {
   let latest: RelayEvent | null = null;
   for (const event of events) {
     if (event.kind !== KIND_COMMUNITY_PINNED_SITES) continue;
@@ -86,31 +113,49 @@ export function selectLatestCommunityPins(
       latest = event;
     }
   }
-  return latest ? parseCommunityPinnedSitesPayload(latest.content) : [];
+  return latest
+    ? parseCommunityPinnedSitesWithRunbooks(latest.content)
+    : [];
 }
 
 export async function fetchCommunityPinnedSites(): Promise<PinnedSite[]> {
+  const rows = await fetchCommunityPinnedSitesWithRunbooks();
+  return rows.map((row) => row.pin);
+}
+
+export async function fetchCommunityPinnedSitesWithRunbooks(): Promise<
+  CommunityPinWithRunbook[]
+> {
   const events = await relayClient.fetchEvents({
     kinds: [KIND_COMMUNITY_PINNED_SITES],
     "#d": [COMMUNITY_PINNED_SITES_D_TAG],
     limit: 50,
   });
-  return selectLatestCommunityPins(events);
+  return selectLatestCommunityPinsWithRunbooks(events);
 }
 
 export async function publishCommunityPinnedSites(
   pins: ReadonlyArray<PinnedSite>,
+  runbooksByPinId?: ReadonlyMap<string, SiteRunbook | null | undefined>,
 ): Promise<void> {
   const payload: CommunityPinnedSitesPayload = {
     version: 1,
-    pins: pins.map((pin) => ({
-      id: pin.id,
-      name: pin.name,
-      url: pin.url,
-      icon: pin.icon,
-      pollForChanges: pin.pollForChanges,
-      openMatchingLinks: pin.openMatchingLinks !== false,
-    })),
+    pins: pins.map((pin) => {
+      const entry: CommunityPinnedSitesPayload["pins"][number] = {
+        id: pin.id,
+        name: pin.name,
+        url: pin.url,
+        icon: pin.icon,
+        pollForChanges: pin.pollForChanges,
+        openMatchingLinks: pin.openMatchingLinks !== false,
+      };
+      const runbook = runbooksByPinId?.get(pin.id);
+      if (runbook) {
+        const shaped = shapeRunbookForCommunity(runbook);
+        if (shaped) entry.runbook = shaped;
+      }
+      return entry;
+    }),
   };
   const event = await signRelayEvent({
     kind: KIND_COMMUNITY_PINNED_SITES,

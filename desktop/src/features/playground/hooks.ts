@@ -3,6 +3,8 @@ import * as React from "react";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
 
+import { configureSiteRunbooksScope } from "@/features/site-runbook/lib/store";
+
 import {
   configurePlaygroundScope,
   getPlaygroundStore,
@@ -18,6 +20,7 @@ export function usePlaygroundSessions() {
   React.useEffect(() => {
     if (!pubkey || !relayUrl) return;
     configurePlaygroundScope(pubkey, relayUrl);
+    configureSiteRunbooksScope(pubkey, relayUrl);
   }, [pubkey, relayUrl]);
 
   return React.useSyncExternalStore(

@@ -23,6 +23,8 @@ import {
 import { browserWebviewLabel } from "../lib/labels";
 import type { PlaygroundCard } from "@/features/playground/lib/types";
 
+import { useRunbookGrantBridge } from "@/features/site-runbook/lib/useRunbookGrantBridge";
+
 import { useDriveActivity } from "../lib/useDriveActivity";
 import type { BrowserAgentGrant, BrowserAgentMode, BrowserAgentSurface } from "../lib/types";
 import {
@@ -91,6 +93,8 @@ export function BrowserAgentChrome({
     if (name) return name;
     return grant.agentPubkey.slice(0, 8);
   }, [agentsQuery.data, grant]);
+
+  useRunbookGrantBridge(grant, webviewLabel);
 
   const modeForActivity: BrowserAgentMode | "off" = grant?.mode ?? "off";
   const activityText = useDriveActivity(

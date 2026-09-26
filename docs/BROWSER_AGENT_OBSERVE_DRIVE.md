@@ -46,6 +46,15 @@ Playground sessions live in a **browser group** (`browserId`, `tabSids[]`, `acti
 - **Agent tabs:** MCP `browser_tabs` lists the group (`mainTabSid`, `activeTabSid`, `tabs[]` with `isMain`). `browser_switch_tab` focuses a `surface_id` (Desktop rebinds). Observe events `tab_opened` / `tab_switched` announce changes. Prefer returning to the main tab for primary work.
 - Existing sessions migrate to one-tab groups (`browserId` may equal `sid`).
 
+### Site runbook
+
+Learned how-to knowledge for a **playground session** (`sid:…`) or **pinned site** (`pin:…`) survives agent sessions:
+
+- **Agent brief** — short imperative instructions mirrored into grant context / `browser_observe_poll.runbook`.
+- **Procedures** — engineer-readable steps (`active` | `pending` | `archived`). Agents propose via `browser_runbook_propose` (pending until Accept). UI: Settings → Pinned sites → **How to use this site**, and Browsers row **Runbook**.
+- Inject is brief + active titles/summaries only; full steps via `browser_runbook_get`.
+- Community pins sync brief + active procedures in the pin payload.
+
 ### Non-goals
 
 - Observe/Drive on pinned sites (sidebar pins / link pin hosts).
@@ -152,6 +161,8 @@ Prefer **Desktop-managed / local ACP** agents that can call Desktop-side tools:
 | `browser_agent_grants` | List grants (`surfaceId` + live `webviewLabel`) for this agent |
 | `browser_tabs` | List tabs in the granted browser group (`mainTabSid` primary; extras from in-page open). Prefer `surface_id`. |
 | `browser_switch_tab` | Focus a tab by `surface_id` (rebinds grant). Poll `tab_switched` or re-call `browser_tabs`. |
+| `browser_runbook_get` | Site runbook for the granted browser: brief + procedure index, or full steps for `procedure_id`. |
+| `browser_runbook_propose` | Queue a pending how-to procedure (title + steps). Human Accept in Desktop required. |
 
 Remote Gateway agents: no CDP bridge in this change — document follow-up consent channel if remote needs the same stream.
 

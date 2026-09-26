@@ -10,9 +10,17 @@ import { canManageCommunityMembers } from "@/shared/api/relayMembers";
 
 import {
   COMMUNITY_PINNED_SITES_D_TAG,
-  fetchCommunityPinnedSites,
+  fetchCommunityPinnedSitesWithRunbooks,
   publishCommunityPinnedSites,
 } from "./lib/communityPins";
+import { pinRunbookRef } from "@/features/site-runbook/lib/keys";
+import { mergeCommunityRunbook } from "@/features/site-runbook/lib/mutations";
+import {
+  clearSiteRunbook,
+  configureSiteRunbooksScope,
+  getSiteRunbook,
+  setSiteRunbook,
+} from "@/features/site-runbook/lib/store";
 import { mergePinnedSites } from "./lib/mergePins";
 import { closePinWebview } from "./lib/pinWebview";
 import {
@@ -81,9 +89,22 @@ export function usePersonalPinnedSitesQuery() {
 }
 
 export function useCommunityPinnedSitesQuery() {
+  const { pubkey, relayUrl } = usePinnedSitesScope();
   return useQuery({
     queryKey: communityPinnedSitesQueryKey,
-    queryFn: fetchCommunityPinnedSites,
+    queryFn: async () => {
+      if (pubkey && relayUrl) {
+        configureSiteRunbooksScope(pubkey, relayUrl);
+      }
+      const rows = await fetchCommunityPinnedSitesWithRunbooks();
+      for (const row of rows) {
+        if (!row.runbook) continue;
+        const ref = pinRunbookRef(row.pin.id);
+        const merged = mergeCommunityRunbook(getSiteRunbook(ref), row.runbook);
+        setSiteRunbook(ref, merged);
+      }
+      return rows.map((row) => row.pin);
+    },
     staleTime: 30_000,
   });
 }
@@ -165,12 +186,18 @@ export function usePinnedSites() {
 
   const persistCommunity = React.useCallback(
     async (next: PinnedSite[]) => {
-      await publishCommunityPinnedSites(next);
+      if (pubkey && relayUrl) {
+        configureSiteRunbooksScope(pubkey, relayUrl);
+      }
+      const runbooks = new Map(
+        next.map((pin) => [pin.id, getSiteRunbook(pinRunbookRef(pin.id))]),
+      );
+      await publishCommunityPinnedSites(next, runbooks);
       void queryClient.invalidateQueries({
         queryKey: communityPinnedSitesQueryKey,
       });
     },
-    [queryClient],
+    [pubkey, queryClient, relayUrl],
   );
 
   const saveMutation = useMutation({
@@ -229,6 +256,7 @@ export function usePinnedSites() {
         }
         persistPersonal(removePersonalPin(personal, pin.id));
       }
+      clearSiteRunbook(pinRunbookRef(pin.id));
       await closePinWebview(pin.id);
     },
   });

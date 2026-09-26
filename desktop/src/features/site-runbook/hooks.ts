@@ -1,0 +1,111 @@
+import * as React from "react";
+
+import { useIdentityQuery } from "@/shared/api/hooks";
+
+import { pinRunbookRef, sidRunbookRef } from "./lib/keys";
+import {
+  acceptProcedure,
+  archiveProcedure,
+  deleteProcedure,
+  proposeProcedure,
+  rejectProcedure,
+  setAgentBrief,
+  updateProcedure,
+} from "./lib/mutations";
+import { emptyRunbook, shapeRunbookInject } from "./lib/serialize";
+import {
+  clearSiteRunbook,
+  configureSiteRunbooksScope,
+  getSiteRunbookOrEmpty,
+  setSiteRunbook,
+  subscribeSiteRunbooks,
+} from "./lib/store";
+import type { SiteRunbook, SiteRunbookRef } from "./lib/types";
+
+function useSiteRunbooksConfigured(): void {
+  const identity = useIdentityQuery();
+  const pubkey = identity.data?.pubkey ?? "";
+  const relayUrl = identity.data?.relayUrl ?? "";
+  React.useEffect(() => {
+    if (!pubkey || !relayUrl) return;
+    configureSiteRunbooksScope(pubkey, relayUrl);
+  }, [pubkey, relayUrl]);
+}
+
+function useRunbookSnapshot(ref: SiteRunbookRef | null): SiteRunbook {
+  useSiteRunbooksConfigured();
+  const [epoch, bump] = React.useReducer((n: number) => n + 1, 0);
+  React.useEffect(() => subscribeSiteRunbooks(bump), []);
+  return React.useMemo(() => {
+    if (!ref) return emptyRunbook();
+    return getSiteRunbookOrEmpty(ref);
+    // epoch forces re-read after store emits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ref, epoch]);
+}
+
+export function useSiteRunbook(ref: SiteRunbookRef | null): {
+  runbook: SiteRunbook;
+  setBrief: (brief: string) => void;
+  accept: (procedureId: string) => void;
+  reject: (procedureId: string) => void;
+  archive: (procedureId: string) => void;
+  remove: (procedureId: string) => void;
+  update: (
+    procedureId: string,
+    patch: { title?: string; steps?: string },
+  ) => void;
+  addManual: (title: string, steps: string) => void;
+  clear: () => void;
+  inject: ReturnType<typeof shapeRunbookInject>;
+} {
+  const runbook = useRunbookSnapshot(ref);
+
+  const mutate = React.useCallback(
+    (next: SiteRunbook) => {
+      if (!ref) return;
+      setSiteRunbook(ref, next);
+    },
+    [ref],
+  );
+
+  return {
+    runbook,
+    setBrief: (brief) => {
+      if (!ref) return;
+      mutate(setAgentBrief(runbook, brief));
+    },
+    accept: (procedureId) => mutate(acceptProcedure(runbook, procedureId)),
+    reject: (procedureId) => mutate(rejectProcedure(runbook, procedureId)),
+    archive: (procedureId) => mutate(archiveProcedure(runbook, procedureId)),
+    remove: (procedureId) => mutate(deleteProcedure(runbook, procedureId)),
+    update: (procedureId, patch) =>
+      mutate(updateProcedure(runbook, procedureId, patch)),
+    addManual: (title, steps) => {
+      // Engineer-authored entries activate immediately.
+      const { runbook: withPending, procedure } = proposeProcedure(runbook, {
+        title,
+        steps,
+      });
+      mutate(acceptProcedure(withPending, procedure.id));
+    },
+    clear: () => {
+      if (!ref) return;
+      clearSiteRunbook(ref);
+    },
+    inject: shapeRunbookInject(runbook),
+  };
+}
+
+export function usePinSiteRunbook(pinId: string | null | undefined) {
+  const ref = React.useMemo(
+    () => (pinId ? pinRunbookRef(pinId) : null),
+    [pinId],
+  );
+  return useSiteRunbook(ref);
+}
+
+export function useSidSiteRunbook(sid: string | null | undefined) {
+  const ref = React.useMemo(() => (sid ? sidRunbookRef(sid) : null), [sid]);
+  return useSiteRunbook(ref);
+}

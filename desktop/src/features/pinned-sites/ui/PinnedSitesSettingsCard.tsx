@@ -1,4 +1,4 @@
-import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { BookOpen, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -37,6 +37,8 @@ import type {
   PinnedSiteDraft,
   PinnedSiteIconId,
 } from "../lib/types";
+import { pinRunbookRef } from "@/features/site-runbook/lib/keys";
+import { SiteRunbookDialog } from "@/features/site-runbook/ui/SiteRunbookDialog";
 
 export function PinnedSitesSettingsCard() {
   const { pins, canShareCommunity, isLoading, savePin, deletePin } =
@@ -175,6 +177,7 @@ function PinRow({
   pin: PinnedSite;
 }) {
   const Icon = getPinnedSiteIcon(pin.icon);
+  const [runbookOpen, setRunbookOpen] = React.useState(false);
 
   return (
     <div
@@ -216,6 +219,13 @@ function PinRow({
               <Pencil className="mr-2 h-4 w-4" />
               Edit
             </DropdownMenuItem>
+            <DropdownMenuItem
+              data-testid={`pinned-site-runbook-${pin.id}`}
+              onClick={() => setRunbookOpen(true)}
+            >
+              <BookOpen className="mr-2 h-4 w-4" />
+              How to use this site
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={onDelete}>
               <Trash2 className="mr-2 h-4 w-4" />
               Delete
@@ -223,6 +233,12 @@ function PinRow({
           </DropdownMenuContent>
         </DropdownMenu>
       ) : null}
+      <SiteRunbookDialog
+        onOpenChange={setRunbookOpen}
+        open={runbookOpen}
+        runbookRef={pinRunbookRef(pin.id)}
+        title={`How to use ${pin.name}`}
+      />
     </div>
   );
 }

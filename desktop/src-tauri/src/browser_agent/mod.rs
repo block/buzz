@@ -1257,6 +1257,146 @@ fn process_tab_switch_request(
     let _ = app.emit("browser-agent-switch-tab", payload);
 }
 
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunbookInjectProcedure {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunbookInjectPayload {
+    pub agent_brief: String,
+    pub procedures: Vec<RunbookInjectProcedure>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunbookFullProcedure {
+    pub id: String,
+    pub title: String,
+    pub steps: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_channel: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunbookFullPayload {
+    pub agent_brief: String,
+    pub procedures: Vec<RunbookFullProcedure>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MirrorRunbookInput {
+    pub webview_label: String,
+    pub inject: RunbookInjectPayload,
+    pub full: RunbookFullPayload,
+}
+
+fn write_json_file(path: &PathBuf, value: &impl Serialize) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(value) {
+        if let Ok(mut f) = File::create(path) {
+            let _ = f.write_all(&bytes);
+        }
+    }
+}
+
+/// Write grant-adjacent runbook files for MCP inject + on-demand get.
+#[tauri::command]
+pub async fn browser_agent_mirror_runbook(
+    app: AppHandle,
+    state: State<'_, BrowserAgentState>,
+    input: MirrorRunbookInput,
+) -> Result<(), String> {
+    let label = input.webview_label.trim().to_string();
+    if label.is_empty() {
+        return Err("webviewLabel is required".into());
+    }
+    let root = ensure_data_root(&app, &state)?;
+    let dir = root.join(&label);
+    create_dir_all(&dir).map_err(|e| e.to_string())?;
+    write_json_file(&dir.join("runbook.json"), &input.inject);
+    write_json_file(&dir.join("runbook-full.json"), &input.full);
+    Ok(())
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunbookProposeLine {
+    pub title: String,
+    pub steps: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
+}
+
+fn take_runbook_propose_inbox(path: &std::path::Path) -> Result<String, String> {
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = parent.join(format!(
+        "runbook-propose-{}.taking",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    match std::fs::rename(path, &tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(e.to_string()),
+    }
+    let raw = std::fs::read_to_string(&tmp).unwrap_or_default();
+    let _ = std::fs::remove_file(&tmp);
+    Ok(raw)
+}
+
+/// Drain MCP `browser_runbook_propose` lines for Desktop to apply as pending.
+#[tauri::command]
+pub async fn browser_agent_take_runbook_proposes(
+    app: AppHandle,
+    state: State<'_, BrowserAgentState>,
+    webview_label: String,
+) -> Result<Vec<RunbookProposeLine>, String> {
+    let label = webview_label.trim().to_string();
+    if label.is_empty() {
+        return Err("webviewLabel is required".into());
+    }
+    let root = ensure_data_root(&app, &state)?;
+    let path = root.join(&label).join("runbook-propose.jsonl");
+    let raw = take_runbook_propose_inbox(&path)?;
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(parsed) = serde_json::from_str::<RunbookProposeLine>(line) {
+            if !parsed.title.trim().is_empty() {
+                out.push(parsed);
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn base64_encode(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
