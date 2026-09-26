@@ -206,7 +206,12 @@ let startPromise: Promise<void> | null = null;
 let eventProcessingQueue: Promise<void> = Promise.resolve();
 let generation = 0;
 
+// Monotonic notify-cycle counter; cheap cache-invalidation key for derived
+// whole-store snapshots (e.g. getObservedAgentPubkeys).
+let storeVersion = 0;
+
 function notifyListeners(update?: AgentObserverStoreUpdate) {
+  storeVersion += 1;
   for (const listener of listeners) {
     listener(update);
   }
@@ -759,6 +764,34 @@ export function getAgentObserverSnapshot(
   snapshotByAgent.set(key, snapshot);
   return snapshot;
 }
+
+/**
+ * Pubkeys of every agent with observer data in the store — live frames,
+ * channel-scoped archive windows, or both. Cached by store notify-cycle via
+ * the version counter so useSyncExternalStore callers get a stable snapshot.
+ */
+export function getObservedAgentPubkeys(): string[] {
+  if (observedAgentsCacheVersion === storeVersion && observedAgentsCache) {
+    return observedAgentsCache;
+  }
+  const pubkeys = new Set<string>();
+  for (const [key, events] of eventsByAgent) {
+    if (events.length > 0) pubkeys.add(key);
+  }
+  for (const [key, events] of archiveEventsByChannel) {
+    if (events.length === 0) continue;
+    // archiveChannelKey shape: `${normalizedPubkey}:${channelId}` — hex
+    // pubkeys never contain ":", so the first separator is unambiguous.
+    const separator = key.indexOf(":");
+    if (separator > 0) pubkeys.add(key.slice(0, separator));
+  }
+  observedAgentsCache = [...pubkeys].sort();
+  observedAgentsCacheVersion = storeVersion;
+  return observedAgentsCache;
+}
+
+let observedAgentsCache: string[] | null = null;
+let observedAgentsCacheVersion = -1;
 
 export function getAgentTranscript(
   agentPubkey?: string | null,
