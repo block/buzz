@@ -2678,7 +2678,7 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
 }
 
 #[cfg(test)]
-mod postgres_tests {
+pub(crate) mod postgres_tests {
     use super::*;
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
     use std::sync::Mutex;
@@ -4057,7 +4057,7 @@ mod postgres_tests {
     /// - Redis pool points at the local dev instance for the admission check.
     ///
     /// Returns `None` when local Postgres is not reachable.
-    pub(super) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+    pub(crate) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.
