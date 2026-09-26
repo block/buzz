@@ -2771,9 +2771,9 @@ mod postgres_tests {
     }
 
     /// Migration 0050's `relay_admin_actions_direct_shape` rejects a direct
-    /// timeout carrying only one of duration and expiry. Asserted on the
-    /// migrated schema: pgschema does not reproduce multi-column CHECKs, so
-    /// the schema.sql-bootstrapped test template cannot prove it.
+    /// timeout carrying only one of duration and expiry on the migrated
+    /// schema. The desired-state (pgschema + reconcile) path is covered by
+    /// `direct_timeout_shape_check_holds_on_desired_state_schema` in buzz-relay.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn migration_0050_rejects_half_filled_direct_timeout() {

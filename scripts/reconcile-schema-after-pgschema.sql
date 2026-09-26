@@ -197,6 +197,29 @@ BEGIN
     END IF;
 END $$;
 
+-- pgschema drops multi-column CHECK constraints. Restore the direct-action
+-- shape CHECK from schema/schema.sql (and migration 0050) verbatim.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'relay_admin_actions'::regclass
+          AND conname = 'relay_admin_actions_direct_shape'
+    ) THEN
+        ALTER TABLE relay_admin_actions
+            ADD CONSTRAINT relay_admin_actions_direct_shape CHECK (
+                report_id IS NOT NULL
+                OR (action = 'ban' AND enforcement_target_pubkey IS NOT NULL
+                    AND timeout_secs IS NULL AND timeout_until IS NULL)
+                OR (action = 'timeout' AND enforcement_target_pubkey IS NOT NULL
+                    AND timeout_secs IS NOT NULL AND timeout_until IS NOT NULL)
+                OR (action = 'delete' AND enforcement_target_event_id IS NOT NULL
+                    AND enforcement_target_pubkey IS NOT NULL
+                    AND timeout_secs IS NULL AND timeout_until IS NULL)
+            );
+    END IF;
+END $$;
+
 -- pgschema reconciles DDL but does not apply seed DML or table storage
 -- parameters from schema/schema.sql. Restore those parts of the desired-state
 -- contract explicitly and fail the bootstrap if the live catalog disagrees.

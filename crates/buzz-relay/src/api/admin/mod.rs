@@ -11045,6 +11045,32 @@ mod postgres_tests {
         (pool, community, host, state)
     }
 
+    /// The desired-state schema (pgschema + reconcile script) keeps
+    /// `relay_admin_actions_direct_shape`: a half-filled direct timeout fails.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn direct_timeout_shape_check_holds_on_desired_state_schema() {
+        let (pool, community, _, _) = direct_fixture().await;
+        for (secs, until) in [(Some(60i64), None), (None, Some(chrono::Utc::now()))] {
+            let err = sqlx::query(
+                "INSERT INTO relay_admin_actions (report_community_id, request_id, actor_pubkey, \
+                 actor_role, action, timeout_secs, timeout_until, enforcement_target_pubkey) \
+                 VALUES ($1, gen_random_uuid(), $2, 'operator', 'timeout', $3, $4, $2)",
+            )
+            .bind(community.as_uuid())
+            .bind([9u8; 32].as_slice())
+            .bind(secs)
+            .bind(until)
+            .execute(&pool)
+            .await
+            .expect_err("half-filled timeout must violate the CHECK");
+            assert!(
+                err.to_string().contains("relay_admin_actions_direct_shape"),
+                "{err}"
+            );
+        }
+    }
+
     /// POST on the admin API where the NIP-98 credential (`signed` path and
     /// body) may differ from what is sent; `keys: None` sends no credential.
     async fn direct_send(
