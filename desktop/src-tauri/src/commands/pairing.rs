@@ -11,7 +11,10 @@ use nostr::ToBech32;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Error as WebSocketError, Message},
+};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -129,8 +132,19 @@ async fn start_pairing_session(
 
     let ws_url = relay_ws_url_with_override(&state);
     let http_url = relay_api_base_url_with_override(&state);
-    let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
-    let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
+    // NIP-43 relays gate connections on membership, so an unpaired peer can't
+    // reach the main relay yet — it must go through the /pair sidecar. Open
+    // relays (no NIP-43) accept the peer directly. We key off the relay's
+    // own NIP-11 declaration of NIP-43 support rather than `auth_required`,
+    // which is also true for plain NIP-42 / NIP-OA relays where the main
+    // relay is reachable.
+    let pairing_relay = probe_pairing_relay(&ws_url).await;
+    let pairing_endpoint = PairingEndpoint {
+        source: PairingEndpointSource::from(&pairing_relay),
+        url: resolve_pairing_relay_url(&ws_url, pairing_relay)?,
+    };
+
+    let (session, qr_payload) = PairingSession::new_source(pairing_endpoint.url.clone());
     let mut qr_uri = encode_qr(&qr_payload);
     if mode == PairingMode::RecoverIdentity {
         qr_uri.push_str("&mode=recover");
@@ -162,7 +176,7 @@ async fn start_pairing_session(
     *pairing.cancel.lock().map_err(|e| e.to_string())? = Some(cancel.clone());
 
     tauri::async_runtime::spawn(pairing_ws_task(
-        pairing_relay_url,
+        pairing_endpoint,
         Arc::clone(&pairing.session),
         PairingTaskContext {
             mode,
@@ -271,7 +285,7 @@ pub async fn cancel_pairing(pairing: State<'_, PairingHandle>) -> Result<(), Str
 }
 
 async fn pairing_ws_task(
-    relay_url: String,
+    pairing_endpoint: PairingEndpoint,
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     context: PairingTaskContext,
     cancel: CancellationToken,
@@ -279,7 +293,7 @@ async fn pairing_ws_task(
     app: AppHandle,
 ) {
     if let Err(e) = pairing_ws_task_inner(
-        &relay_url,
+        &pairing_endpoint,
         &session,
         &context,
         &cancel,
@@ -296,19 +310,21 @@ async fn pairing_ws_task(
 }
 
 async fn pairing_ws_task_inner(
-    relay_url: &str,
+    pairing_endpoint: &PairingEndpoint,
     session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     context: &PairingTaskContext,
     cancel: &CancellationToken,
     outbound_rx: &mut mpsc::Receiver<String>,
     app: &AppHandle,
 ) -> Result<(), String> {
-    let (ws, _) = connect_async(relay_url)
+    let (ws, _) = connect_async(&pairing_endpoint.url)
         .await
-        .map_err(|e| format!("WebSocket connection failed: {e}"))?;
+        .map_err(|error| {
+            pairing_connection_error(&pairing_endpoint.url, pairing_endpoint.source, &error)
+        })?;
     let (mut write, mut read) = ws.split();
 
-    handle_nip42_auth(&mut read, &mut write, session, relay_url).await?;
+    handle_nip42_auth(&mut read, &mut write, session, &pairing_endpoint.url).await?;
 
     let our_pk = {
         let guard = session.lock().await;
@@ -669,6 +685,67 @@ enum PairingRelay {
     Configured(String),
     LegacyPath,
     MainRelay,
+}
+
+struct PairingEndpoint {
+    url: String,
+    source: PairingEndpointSource,
+}
+
+#[derive(Clone, Copy)]
+enum PairingEndpointSource {
+    Configured,
+    LegacyPath,
+    MainRelay,
+}
+
+impl From<&PairingRelay> for PairingEndpointSource {
+    fn from(relay: &PairingRelay) -> Self {
+        match relay {
+            PairingRelay::Configured(_) => Self::Configured,
+            PairingRelay::LegacyPath => Self::LegacyPath,
+            PairingRelay::MainRelay => Self::MainRelay,
+        }
+    }
+}
+
+fn pairing_connection_error(
+    relay_url: &str,
+    source: PairingEndpointSource,
+    error: &WebSocketError,
+) -> String {
+    if matches!(source, PairingEndpointSource::LegacyPath) {
+        if let WebSocketError::Http(response) = error {
+            if response.status() == tokio_tungstenite::tungstenite::http::StatusCode::NOT_FOUND {
+                let endpoint = pairing_endpoint_for_display(relay_url, "/pair");
+                return format!(
+                    "Pairing endpoint {endpoint} returned 404. This relay advertises NIP-43 \
+                     without a pairing_relay_url, but nothing serves /pair. Set \
+                     BUZZ_PAIRING_RELAY_URL or route /pair to buzz-pair-relay, then try again."
+                );
+            }
+        }
+    }
+
+    if matches!(source, PairingEndpointSource::Configured) {
+        let endpoint = pairing_endpoint_for_display(relay_url, "the configured endpoint");
+        return format!(
+            "Connection to configured pairing endpoint {endpoint} failed: {error}. Check the \
+             relay's pairing_relay_url and that the pairing service is reachable, then try again."
+        );
+    }
+
+    format!("WebSocket connection failed: {error}")
+}
+
+fn pairing_endpoint_for_display(relay_url: &str, fallback: &str) -> String {
+    url::Url::parse(relay_url)
+        .map(|mut url| {
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        })
+        .unwrap_or_else(|_| fallback.to_string())
 }
 
 /// Prefer the relay-advertised dedicated pairing URL. The legacy `/pair`
