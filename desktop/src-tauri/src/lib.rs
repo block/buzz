@@ -236,7 +236,9 @@ pub fn run() {
         .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
-            commands::ensure_startup_registration(&app_handle).map_err(std::io::Error::other)?;
+            if let Err(error) = commands::ensure_startup_registration(&app_handle) {
+                eprintln!("buzz-desktop: notification registration failed: {error}");
+            }
             #[cfg(target_os = "macos")]
             {
                 tray_menu::init(&app_handle)?;
