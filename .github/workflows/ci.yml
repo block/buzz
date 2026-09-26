@@ -116,6 +116,10 @@ jobs:
         run: scripts/test-desktop-instance-detection.sh
       - name: Mobile worktree identity contract
         run: scripts/test-mobile-worktree-overrides.sh
+      - name: Desktop dev-state reset contract
+        run: |
+          scripts/test-reset-desktop-dev-state.sh
+          scripts/test-reset-desktop-standalone-state.sh
       - name: Codex security review contract
         run: just security-review-check
       - name: Rust cache contract
