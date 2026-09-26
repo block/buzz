@@ -53,6 +53,7 @@ function draftToPin(draft: PinnedSiteDraft, id = createPinId()): PinnedSite {
     url,
     icon: draft.icon,
     pollForChanges: draft.pollForChanges,
+    openMatchingLinks: draft.openMatchingLinks !== false,
     scope: draft.community ? "community" : "personal",
   };
 }

@@ -2,8 +2,11 @@
 //!
 //! Desktop holds the signed-in user's keys. This process is keyless: it writes
 //! request files under `BUZZ_USER_SIGNER_DIR` and polls for responses.
-//! Writes are **draft-only** (`buzz_draft_message`) — Desktop shows a draft;
-//! JM clicks Send. Never requires `BUZZ_PRIVATE_KEY` in the PTY.
+//! Reads (`buzz_read_*`) are fine for context. Writes are **draft-only**
+//! (`buzz_draft_message`) — Desktop shows a draft JM must click Send on.
+//! Use drafts only for content the human asked to post; never for agent
+//! progress/status (that stays in the Term TUI). Never requires
+//! `BUZZ_PRIVATE_KEY` in the PTY.
 
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData;
@@ -149,7 +152,8 @@ pub struct ReadChannelParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DraftMessageParams {
     pub channel_id: String,
-    /// Message body for the Desktop composer draft (not published).
+    /// Message body the human asked to prepare for them to Send (not published;
+    /// not for agent progress/status).
     pub content: String,
     /// When set, draft key is `thread:{thread_id}` and UI opens that thread.
     #[serde(default)]

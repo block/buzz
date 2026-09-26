@@ -19,6 +19,8 @@ test("slim handoff points at term_session_card and keeps context", () => {
   assert.doesNotMatch(text, /"hula": "term-session"/);
   assert.doesNotMatch(text, /"v": 1/);
   assert.match(text, /paste the tool output exactly/);
+  assert.match(text, /progress stays in the TUI/);
+  assert.match(text, /buzz_draft_message/);
 });
 
 test("openclaw flag asks for boolean true only", () => {

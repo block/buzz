@@ -14,6 +14,10 @@ import {
   traverseHistory,
 } from "@/app/navigation/navigationGuard";
 import { botsDirectorySearch } from "@/features/community-bots/lib/directory";
+import {
+  clearPinnedSiteOpenUrl,
+  queuePinnedSiteOpenUrl,
+} from "@/features/pinned-sites/lib/pendingPinOpen";
 import type { SearchHit } from "@/shared/api/types";
 
 type NavigationBehavior = {
@@ -112,6 +116,13 @@ export function useAppNavigation() {
       options?: { openUrl?: string },
     ) => {
       const openUrl = options?.openUrl?.trim() ?? "";
+      // Keep module queue aligned with navigation intent before router state
+      // lands (Strict Mode remount / already-on-pin subscribe).
+      if (openUrl) {
+        queuePinnedSiteOpenUrl(pinId, openUrl);
+      } else {
+        clearPinnedSiteOpenUrl(pinId);
+      }
       return commitNavigation(
         {
           to: "/pins/$pinId",

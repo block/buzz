@@ -12,6 +12,7 @@ test("mergePinnedSites puts community pins first and drops personal id collision
         url: "https://docs.example.com/",
         icon: "book-open",
         pollForChanges: false,
+        openMatchingLinks: true,
         scope: "personal",
       },
       {
@@ -20,6 +21,7 @@ test("mergePinnedSites puts community pins first and drops personal id collision
         url: "https://me.example.com/",
         icon: "house",
         pollForChanges: false,
+        openMatchingLinks: true,
         scope: "personal",
       },
     ],
@@ -30,6 +32,7 @@ test("mergePinnedSites puts community pins first and drops personal id collision
         url: "https://team.example.com/",
         icon: "book-open",
         pollForChanges: true,
+        openMatchingLinks: true,
         scope: "community",
       },
     ],

@@ -180,7 +180,7 @@ impl DevMcp {
 
     #[tool(
         name = "buzz_draft_message",
-        description = "Create a Desktop composer draft for the signed-in user (draft-only — never auto-publishes). JM must click Send in Buzz Desktop. Pass channel_id, content, optional thread_id. Requires BUZZ_USER_SIGNER_DIR."
+        description = "Prepare a Desktop composer draft of content the **human asked you to write for them to send** (draft-only — never auto-publishes; JM clicks Send). Do NOT use for agent progress/status, acknowledgements, or chatting with the user — those belong in the Term TUI. Pass channel_id, content, optional thread_id. Requires BUZZ_USER_SIGNER_DIR."
     )]
     async fn buzz_draft_message(
         &self,
