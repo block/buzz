@@ -82,7 +82,10 @@ export type AppSidebarProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
+  onRemoveCommunity: (
+    id: string,
+    mode?: "leave" | "local-only",
+  ) => Promise<LeaveCommunityResult | undefined>;
   onCreateAgent: () => void;
   onSelectAgents: () => void;
   onSelectProjects: () => void;

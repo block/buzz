@@ -3,8 +3,25 @@ import { ReadOnlyRelayClient } from "@/shared/api/readOnlyRelayClient";
 import { relayRequiresMembership } from "@/shared/api/relayMembers";
 import { signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
+import { isRelayUnreachableError } from "@/shared/lib/relayError";
 
 export const KIND_NIP43_LEAVE_REQUEST = 28936;
+
+/** Offer a device-only fallback for unavailable relays, not permission failures. */
+export function canRemoveCommunityLocally(error: unknown): boolean {
+  if (isRelayUnreachableError(error)) return true;
+  const message = error instanceof Error ? error.message : error;
+  return (
+    typeof message === "string" &&
+    (/^relay returned (?:404|410|5\d\d)\b/.test(message) ||
+      message === "Relay connection closed." ||
+      message === "Relay connection errored." ||
+      message === "Failed to connect to relay." ||
+      message === "Relay authentication timed out." ||
+      message.startsWith("Timed out while leaving the community.") ||
+      message.startsWith("Couldn't send the leave request."))
+  );
+}
 
 type LeaveCommunityDependencies = {
   requiresMembership: (relayUrl: string) => Promise<boolean>;
