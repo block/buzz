@@ -369,6 +369,30 @@ Migration 0032 is a hard compatibility boundary for relay versions that publish 
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 
+### Rollout strategy
+
+The relay Deployment defaults to a zero-downtime rolling update (`maxSurge: 1`,
+`maxUnavailable: 0`), which briefly runs old and new pods side by side. Two
+setups cannot afford that overlap:
+
+- **Client-capped Postgres poolers.** Each relay pod holds its own writer,
+  audit, and search pools, so a rollout doubles connection demand. Behind a
+  pooler with a hard client limit (for example a session-mode pooler on a small
+  managed instance) the surge pod can push the total over the cap, and requests
+  fail until the old pod drains.
+- **A ReadWriteOnce git PVC on a multi-node cluster.** The surge pod may land on
+  another node and wait on a volume the old pod still holds.
+
+For those, trade the overlap for a short outage per rollout:
+
+```yaml
+strategy:
+  type: Recreate
+```
+
+`strategy.rollingUpdate` is ignored when `type` is `Recreate`, so no other
+change is needed.
+
 ## Backups
 
 Save these. Losing any of them is data loss. See NOTES.txt printed by `helm install` for the live list:
