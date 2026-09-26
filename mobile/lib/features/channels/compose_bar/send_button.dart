@@ -45,5 +45,14 @@ class _SendButton extends StatelessWidget {
 }
 
 String _formatUploadError(Object error) {
+  if (error is MediaUploadCancelledException) {
+    return '';
+  }
+  if (error is MediaUploadTimeoutException) {
+    return error.toString();
+  }
   return error.toString().replaceFirst('Exception: ', '');
 }
+
+bool _shouldSurfaceUploadError(Object error) =>
+    error is! MediaUploadCancelledException;
