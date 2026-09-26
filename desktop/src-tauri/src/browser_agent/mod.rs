@@ -6,9 +6,11 @@ pub mod drive_screen;
 pub mod grant;
 pub mod observe;
 
+use std::collections::HashSet;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -24,8 +26,8 @@ use grant::{
     BrowserAgentMode, BrowserAgentSurface,
 };
 use observe::{
-    drain_page_queue_js, instrumentation_js, snapshot_to_cookie_js, BrowserObserveBuffer,
-    ObserveEvent, PageDrainEvent, SNAPSHOT_COOKIE,
+    drain_page_queue_js, instrumentation_js, snapshot_collect_js, BrowserObserveBuffer,
+    ObserveEvent, PageDrainEvent,
 };
 
 #[derive(Default)]
@@ -33,6 +35,8 @@ pub struct BrowserAgentState {
     pub grants: BrowserAgentGrantStore,
     pub observe: BrowserObserveBuffer,
     pub drive_screens: drive_screen::DriveScreenTracker,
+    /// Playground labels currently `hide()`d (parked). Theater cursor skips.
+    pub webview_hidden: Mutex<HashSet<String>>,
 }
 
 fn ensure_data_root(app: &AppHandle, state: &BrowserAgentState) -> Result<PathBuf, String> {
@@ -114,6 +118,34 @@ fn eval_on_label(app: &AppHandle, label: &str, js: &str) -> Result<(), String> {
     webview.eval(js).map_err(|e| e.to_string())
 }
 
+/// Mark a playground label as user-visible or parked/hidden for Drive theater.
+pub fn set_webview_hidden(state: &BrowserAgentState, label: &str, hidden: bool) {
+    let Ok(mut set) = state.webview_hidden.lock() else {
+        return;
+    };
+    if hidden {
+        set.insert(label.to_string());
+    } else {
+        set.remove(label);
+    }
+}
+
+fn webview_is_hidden(state: &BrowserAgentState, label: &str) -> bool {
+    state
+        .webview_hidden
+        .lock()
+        .map(|set| set.contains(label))
+        .unwrap_or(false)
+}
+
+fn sync_drive_theater_flag(app: &AppHandle, state: &BrowserAgentState, label: &str) {
+    let fast = webview_is_hidden(state, label);
+    let _ = eval_on_label(
+        app,
+        label,
+        &format!("try{{window.__buzzDriveFast={fast};}}catch(e){{}}"),
+    );
+}
 
 fn install_instrumentation(app: &AppHandle, label: &str, drive: bool) -> Result<(), String> {
     eval_on_label(app, label, &instrumentation_js(label, drive))
@@ -689,6 +721,7 @@ async fn eval_drive_action(
         return r;
     }
 
+    sync_drive_theater_flag(app, state, label);
     let js = match action_js(&action) {
         Ok(js) => js,
         Err(e) => {
@@ -704,7 +737,7 @@ async fn eval_drive_action(
     }
 
     // Page actions are async (cursor/type animation). Poll cookie until id matches.
-    let timeout_ms = drive_result_timeout_ms(&kind, &action);
+    let timeout_ms = drive_result_timeout_ms(&kind, &action, webview_is_hidden(state, label));
     let r = wait_page_drive_result(app, label, &id, timeout_ms)
         .await
         .unwrap_or_else(|| DriveActionResult {
@@ -720,7 +753,7 @@ async fn eval_drive_action(
     r
 }
 
-fn drive_result_timeout_ms(kind: &str, action: &DriveAction) -> u64 {
+fn drive_result_timeout_ms(kind: &str, action: &DriveAction, theater_fast: bool) -> u64 {
     match kind {
         "type" => {
             let n = action
@@ -728,9 +761,19 @@ fn drive_result_timeout_ms(kind: &str, action: &DriveAction) -> u64 {
                 .as_deref()
                 .map(|s| s.chars().count())
                 .unwrap_or(0) as u64;
-            (1_200 + n * 70).min(30_000)
+            if theater_fast {
+                (400 + n * 5).min(10_000)
+            } else {
+                (1_200 + n * 70).min(30_000)
+            }
         }
-        "click" | "hover" => 2_500,
+        "click" | "hover" => {
+            if theater_fast {
+                800
+            } else {
+                2_500
+            }
+        }
         _ => 1_500,
     }
 }
@@ -1118,14 +1161,37 @@ async fn process_snapshot_request(
         return 0;
     };
     install_instrumentation(app, label, drive_lock_enabled(&grant)).ok();
-    let _ = eval_on_label(app, label, &snapshot_to_cookie_js());
+
     let mut payload = serde_json::json!({
         "ok": false,
-        "error": "no snapshot cookie",
+        "error": "no snapshot",
     });
-    if let Some(decoded) = read_cookie_value(app, label, SNAPSHOT_COOKIE).await {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&decoded) {
-            payload = value;
+    if let Some(webview) = app.get_webview(label) {
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let tx = std::sync::Mutex::new(Some(tx));
+        let js = snapshot_collect_js();
+        if webview
+            .eval_with_callback(js, move |result| {
+                if let Ok(mut slot) = tx.lock() {
+                    if let Some(sender) = slot.take() {
+                        let _ = sender.send(result);
+                    }
+                }
+            })
+            .is_ok()
+        {
+            let raw = match tokio::time::timeout(std::time::Duration::from_millis(800), rx).await {
+                Ok(Ok(s)) => s,
+                _ => String::new(),
+            };
+            if !raw.is_empty() && raw != "null" {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    payload = value;
+                    if let Some(m) = payload.as_object_mut() {
+                        m.entry("ok".to_string()).or_insert(json!(true));
+                    }
+                }
+            }
         }
     }
     if want_shot {
@@ -1320,6 +1386,9 @@ pub struct RunbookInjectProcedure {
 pub struct RunbookInjectPayload {
     pub agent_brief: String,
     pub procedures: Vec<RunbookInjectProcedure>,
+    /// Host-owned Drive protocol lines (agents must not rewrite).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drive_protocol: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

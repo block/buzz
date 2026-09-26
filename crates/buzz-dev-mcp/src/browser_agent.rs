@@ -362,7 +362,7 @@ pub fn observe_poll(p: ObservePollParams) -> Result<CallToolResult, ErrorData> {
         "surfaceId": grant_surface_id(&grant),
         "runbook": runbook,
         "events": events,
-        "runbookNote": "runbook.agentBrief + active procedure titles/summaries. Use browser_runbook_get for full steps; browser_runbook_propose to add a pending procedure (human Accept required)."
+        "runbookNote": "runbook.agentBrief + active procedure titles/summaries + driveProtocol. Prefer surfaceId; snapshot then one act; waitFor after nav; click by selector/ref or snapshot center; no screenshot every step; on no element/no snapshot retry once then stop. Use browser_runbook_get for full steps; browser_runbook_propose to add a pending procedure (human Accept required)."
     });
     Ok(CallToolResult::success(vec![Content::text(
         body.to_string(),
@@ -555,6 +555,10 @@ pub struct DriveActionParam {
     pub text: Option<String>,
     #[serde(default)]
     pub selector: Option<String>,
+    /// Snapshot interactive ref (e.g. "e0") from browser_snapshot.
+    #[serde(default, rename = "ref")]
+    #[schemars(description = "Snapshot interactive ref from browser_snapshot (e.g. e0)")]
+    pub ref_id: Option<String>,
     #[serde(default)]
     pub dx: Option<f64>,
     #[serde(default)]
@@ -583,8 +587,21 @@ fn validate_drive_action(action: &DriveActionParam) -> Result<String, String> {
     let kind = action.kind.trim().to_ascii_lowercase();
     match kind.as_str() {
         "click" | "hover" => {
-            if action.x.is_none() || action.y.is_none() {
-                return Err(format!("{kind} requires x and y"));
+            let has_xy = action.x.is_some() && action.y.is_some();
+            let has_sel = action
+                .selector
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            let has_ref = action
+                .ref_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            if !has_xy && !has_sel && !has_ref {
+                return Err(format!("{kind} requires x,y or selector or ref"));
             }
         }
         "type" => {
@@ -679,7 +696,7 @@ pub struct DriveParams {
     #[serde(default)]
     pub surface_id: Option<String>,
     /// Single Drive action object, or a JSON string of that object.
-    /// Shape: { kind, id?, url?, x?, y?, text?, selector?, dx?, dy?, key?, urlContains?, timeoutMs? }.
+    /// Shape: { kind, id?, url?, x?, y?, text?, selector?, ref?, dx?, dy?, key?, urlContains?, timeoutMs? }.
     /// Use `kind` (not `type`): navigate | click | type | scroll | hover | key | waitFor.
     #[schemars(description = "DriveAction object or JSON string. Field is kind (not type).")]
     pub action: Value,

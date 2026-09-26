@@ -34,6 +34,8 @@ export type SiteRunbookInject = {
     /** Short plain summary of steps for the index. */
     summary: string;
   }>;
+  /** Host-owned Drive protocol; agents must not rewrite. */
+  driveProtocol: string[];
 };
 
 /** Community pin payload fragment (active procedures only). */

@@ -14,6 +14,16 @@ const STATUSES: ReadonlySet<string> = new Set([
   "archived",
 ]);
 
+/** Fixed Drive protocol injected with every grant runbook (host-owned). */
+export const DRIVE_PROTOCOL: string[] = [
+  "Prefer surfaceId. One browser group only.",
+  "Snapshot before each click. Prefer selector or interactive ref; else center from this snapshot only.",
+  "After navigate/click that changes URL: waitFor urlContains or text before next act.",
+  "Do not call browser_snapshot(screenshot=true) every step.",
+  "On no element / no snapshot: waitFor once, re-snapshot once, then stop.",
+  "Keep goals inside agentBrief + active procedures. Propose new procedures; do not invent sprawl.",
+];
+
 export function emptyRunbook(now = Date.now()): SiteRunbook {
   return {
     agentBrief: "",
@@ -159,6 +169,7 @@ export function shapeRunbookInject(runbook: SiteRunbook): SiteRunbookInject {
   return {
     agentBrief: runbook.agentBrief.trim(),
     procedures,
+    driveProtocol: [...DRIVE_PROTOCOL],
   };
 }
 

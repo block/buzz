@@ -452,7 +452,26 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
   lock.addEventListener('wheel', blockHumanScroll, {{ passive: false }});
   lock.addEventListener('touchmove', blockHumanScroll, {{ passive: false }});
   var cursorChain = Promise.resolve();
+  function theaterFast() {{
+    try {{
+      if (window.__buzzDriveFast === true) return true;
+      if (typeof document.hidden === 'boolean' && document.hidden) return true;
+    }} catch (e) {{}}
+    return false;
+  }}
   function moveCursor(x, y, flash) {{
+    if (theaterFast()) {{
+      cursor.style.transition = 'none';
+      cursor.style.left = x + 'px';
+      cursor.style.top = y + 'px';
+      cursor.style.display = 'block';
+      if (flash) {{
+        cursor.style.opacity = '1';
+        cursor.style.transform = 'scale(1.15)';
+        setTimeout(function(){{ cursor.style.transform = 'scale(1)'; }}, 40);
+      }}
+      return Promise.resolve();
+    }}
     var dur = 300 + Math.floor(Math.random() * 301);
     cursor.style.transition = 'left ' + dur + 'ms ease-out, top ' + dur + 'ms ease-out, opacity 120ms, transform 120ms';
     cursor.style.left = x + 'px';
@@ -582,41 +601,70 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
     if (desc && desc.set) desc.set.call(el, value);
     else el.value = value;
   }}
-  function clickAt(x, y, id) {{
+  function resolveTarget(x, y, selector, ref) {{
+    if (selector) {{
+      try {{
+        var bySel = document.querySelector(selector);
+        if (bySel) return bySel;
+      }} catch (e) {{}}
+    }}
+    if (ref) {{
+      try {{
+        var last = window.__buzzSnapshotLast;
+        if (typeof last === 'string') last = JSON.parse(last);
+        var list = last && last.interactives ? last.interactives : [];
+        for (var i = 0; i < list.length; i++) {{
+          if (list[i] && list[i].ref === ref && list[i].center) {{
+            return hitTest(list[i].center.x, list[i].center.y) || hitTestGeometry(list[i].center.x, list[i].center.y);
+          }}
+        }}
+      }} catch (e2) {{}}
+    }}
+    if (typeof x === 'number' && typeof y === 'number') return hitTest(x, y);
+    return null;
+  }}
+  function centerOf(el, x, y) {{
+    if (typeof x === 'number' && typeof y === 'number') return {{ x: x, y: y }};
+    var rect = el.getBoundingClientRect();
+    return {{ x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) }};
+  }}
+  function clickAt(x, y, id, selector, ref) {{
     id = id || ('d' + Date.now());
     return enqueueAction(async function() {{
-      await moveCursor(x, y, true);
-      var el = hitTest(x, y);
+      var el = resolveTarget(x, y, selector, ref);
       if (!el) return makeResult(id, 'click', false, null, 'no element');
+      var pt = centerOf(el, x, y);
+      await moveCursor(pt.x, pt.y, true);
       var hit = describeHit(el);
       try {{
-        dispatchPointer(el, 'pointerover', x, y, {{ buttons: 0 }});
-        el.dispatchEvent(new MouseEvent('mouseover', {{ bubbles:true, cancelable:true, clientX:x, clientY:y, view:window }}));
-        dispatchPointer(el, 'pointerdown', x, y, {{ buttons: 1 }});
-        el.dispatchEvent(new MouseEvent('mousedown', {{ bubbles:true, cancelable:true, clientX:x, clientY:y, buttons:1, view:window }}));
+        dispatchPointer(el, 'pointerover', pt.x, pt.y, {{ buttons: 0 }});
+        el.dispatchEvent(new MouseEvent('mouseover', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
+        dispatchPointer(el, 'pointerdown', pt.x, pt.y, {{ buttons: 1 }});
+        el.dispatchEvent(new MouseEvent('mousedown', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, buttons:1, view:window }}));
         if (isFocusable(el) && typeof el.focus === 'function') {{
           try {{ el.focus(); }} catch (e) {{}}
         }}
-        dispatchPointer(el, 'pointerup', x, y, {{ buttons: 0 }});
-        el.dispatchEvent(new MouseEvent('mouseup', {{ bubbles:true, cancelable:true, clientX:x, clientY:y, view:window }}));
-        el.dispatchEvent(new MouseEvent('click', {{ bubbles:true, cancelable:true, clientX:x, clientY:y, view:window }}));
+        dispatchPointer(el, 'pointerup', pt.x, pt.y, {{ buttons: 0 }});
+        el.dispatchEvent(new MouseEvent('mouseup', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
+        el.dispatchEvent(new MouseEvent('click', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
       }} catch (e) {{
         return makeResult(id, 'click', false, hit, e);
       }}
       return makeResult(id, 'click', true, hit, null);
     }});
   }}
-  function hoverAt(x, y, id) {{
+  function hoverAt(x, y, id, selector, ref) {{
     id = id || ('d' + Date.now());
     return enqueueAction(async function() {{
-      await moveCursor(x, y, false);
-      var el = hitTest(x, y);
+      var el = resolveTarget(x, y, selector, ref);
       if (!el) return makeResult(id, 'hover', false, null, 'no element');
+      var pt = centerOf(el, x, y);
+      await moveCursor(pt.x, pt.y, false);
       var hit = describeHit(el);
       try {{
-        dispatchPointer(el, 'pointerover', x, y, {{ buttons: 0 }});
-        el.dispatchEvent(new MouseEvent('mouseover', {{ bubbles:true, cancelable:true, clientX:x, clientY:y, view:window }}));
-        el.dispatchEvent(new MouseEvent('mousemove', {{ bubbles:true, cancelable:true, clientX:x, clientY:y, view:window }}));
+        dispatchPointer(el, 'pointerover', pt.x, pt.y, {{ buttons: 0 }});
+        el.dispatchEvent(new MouseEvent('mouseover', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
+        el.dispatchEvent(new MouseEvent('mousemove', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
       }} catch (e) {{
         return makeResult(id, 'hover', false, hit, e);
       }}
@@ -631,6 +679,7 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
       if (!el) return makeResult(id, 'type', false, null, 'no target');
       try {{ el.focus(); }} catch (e) {{}}
       var hit = describeHit(el);
+      var delay = theaterFast() ? 0 : (30 + Math.floor(Math.random() * 31));
       try {{
         if ('value' in el) {{
           var base = el.value || '';
@@ -641,14 +690,14 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
             try {{
               el.dispatchEvent(new InputEvent('input', {{ bubbles:true, data: text.charAt(i), inputType: 'insertText' }}));
             }} catch (e) {{}}
-            await new Promise(function(r) {{ setTimeout(r, 30 + Math.floor(Math.random() * 31)); }});
+            if (delay > 0) await new Promise(function(r) {{ setTimeout(r, delay); }});
           }}
           el.dispatchEvent(new Event('change', {{ bubbles:true }}));
         }} else if (el.isContentEditable) {{
           for (var j = 0; j < text.length; j++) {{
             el.textContent = (el.textContent || '') + text.charAt(j);
             el.dispatchEvent(new Event('input', {{ bubbles:true }}));
-            await new Promise(function(r) {{ setTimeout(r, 30 + Math.floor(Math.random() * 31)); }});
+            if (delay > 0) await new Promise(function(r) {{ setTimeout(r, delay); }});
           }}
         }} else {{
           return makeResult(id, 'type', false, hit, 'target not editable');
@@ -800,6 +849,7 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
       var value = null;
       if ('value' in n && n.value != null && String(n.value).length) value = String(n.value).slice(0, 120);
       interactives.push({{
+        ref: 'e' + interactives.length,
         tag: hit.tag, role: hit.role, name: hit.name, value: value,
         center: {{ x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) }}
       }});
@@ -854,19 +904,27 @@ pub fn drain_page_queue_js(after_id: u64, limit: usize) -> String {
 
 pub const SNAPSHOT_COOKIE: &str = "__buzz_ba_snapshot";
 
-/// Collect a11y/DOM snapshot into a cookie for host readback.
-pub fn snapshot_to_cookie_js() -> String {
-    format!(
-        r#"(function(){{
+/// Collect a11y/DOM snapshot and return JSON for `eval_with_callback`.
+/// Also mirrors into `__buzzSnapshotLast` (and a best-effort cookie for legacy).
+pub fn snapshot_collect_js() -> String {
+    r#"(function(){
   var agent = window.__buzzBrowserAgent;
-  if (!agent || !agent.snapshotCollect) return;
+  if (!agent || !agent.snapshotCollect) {
+    return JSON.stringify({ ok: false, error: 'no agent instrumentation' });
+  }
   var raw = agent.snapshotCollect();
-  try {{
+  try { window.__buzzSnapshotLast = raw; } catch (e) {}
+  try {
     document.cookie = '__buzz_ba_snapshot=' + encodeURIComponent(raw) + '; path=/; SameSite=Lax';
-  }} catch (e) {{}}
-  try {{ window.__buzzSnapshotLast = raw; }} catch (e) {{}}
-}})();"#
-    )
+  } catch (e2) {}
+  return raw;
+})();"#
+    .to_string()
+}
+
+/// Legacy cookie-only path (kept for callers that only eval fire-and-forget).
+pub fn snapshot_to_cookie_js() -> String {
+    snapshot_collect_js()
 }
 
 #[cfg(test)]
