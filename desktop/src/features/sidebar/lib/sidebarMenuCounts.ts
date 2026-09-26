@@ -1,6 +1,7 @@
 /**
  * Pure helpers for primary left-nav menu counts.
  * Inbox = unread; Browsers / Bots = roster sizes; Agents = running/total.
+ * Browsers counts browser groups (BrowsersScreen rows), not tabs/sessions.
  */
 
 export type SidebarAgentsCount = {
@@ -76,14 +77,15 @@ export function shouldShowSidebarMenuCount(input: {
 
 export function deriveSidebarMenuCounts(input: {
   inboxUnread: number | undefined | null;
-  browserSessionCount: number | undefined | null;
+  /** Browser groups / BrowsersScreen rows (not tab/session count). */
+  browserGroupCount: number | undefined | null;
   agentRunningCount: number | undefined | null;
   agentTotalCount: number | undefined | null;
   botCount: number | undefined | null;
 }): SidebarMenuCounts {
   return {
     inbox: resolveSidebarMenuCount(input.inboxUnread),
-    browsers: resolveSidebarMenuCount(input.browserSessionCount),
+    browsers: resolveSidebarMenuCount(input.browserGroupCount),
     agents: formatSidebarAgentsCount(
       input.agentRunningCount,
       input.agentTotalCount,

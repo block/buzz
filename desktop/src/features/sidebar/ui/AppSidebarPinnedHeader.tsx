@@ -128,7 +128,7 @@ export function AppSidebarPrimaryMenu({
   selectedView,
 }: AppSidebarPrimaryMenuProps) {
   const { pins } = usePinnedSites();
-  const { preferenceEnabled, counts } = useSidebarMenuCounts();
+  const { preferences, counts } = useSidebarMenuCounts();
   const terminalPanel = useTerminalPanel();
   const buzzTermActive = isLeftNavBuzzTermActive(terminalPanel);
   return (
@@ -153,7 +153,7 @@ export function AppSidebarPrimaryMenu({
             <SidebarMenuCountBadge
               count={counts.inbox}
               legacyWhenPositive
-              preferenceEnabled={preferenceEnabled}
+              preferenceEnabled={preferences.inbox}
               testId="sidebar-home-count"
             />
           </SidebarMenuItem>
@@ -199,7 +199,7 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuButton>
             <SidebarMenuCountBadge
               count={counts.browsers}
-              preferenceEnabled={preferenceEnabled}
+              preferenceEnabled={preferences.browsers}
               testId="sidebar-browsers-count"
             />
           </SidebarMenuItem>
@@ -217,7 +217,7 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuButton>
             <SidebarMenuCountBadge
               count={counts.agents}
-              preferenceEnabled={preferenceEnabled}
+              preferenceEnabled={preferences.agents}
               testId="sidebar-agents-count"
             />
           </SidebarMenuItem>
@@ -235,7 +235,7 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuButton>
             <SidebarMenuCountBadge
               count={counts.bots}
-              preferenceEnabled={preferenceEnabled}
+              preferenceEnabled={preferences.bots}
               testId="sidebar-bots-count"
             />
           </SidebarMenuItem>
