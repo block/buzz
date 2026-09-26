@@ -40,9 +40,26 @@ use crate::state::AppState;
 /// - **Ambiguous names wake no one.** If two or more members share the matched
 ///   display name, no `p` tag is emitted for it — arbitrary selection would
 ///   silently misroute and tagging all of them is a false-wake firehose.
+/// - **Code regions are not mentions.** Workflow text is machine-rendered
+///   markdown and agents emit code constantly — an `@name` inside an inline
+///   code span or fenced block is documentation, not an address. Both the
+///   rendered output and the owner's authored template are masked with
+///   [`buzz_sdk::mentions::strip_code_regions`] before scanning, matching the
+///   CLI compose path, which already strips code regions before extracting
+///   `@name` mentions (the #2526 TS/Rust drift pattern: the CLI moved, the
+///   relay sink did not).
 ///
 /// Returns deduplicated pubkey hexes, in first-appearance order in `text`.
 fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<String> {
+    // Mask code regions before scanning. `strip_code_regions` is NOT
+    // length-preserving ("a `code` b" shrinks), so nothing downstream in this
+    // function may map positions from the scanned copy back onto the original
+    // `text`: `at`/`consumed`/`hits` coordinates are internal to `masked` and
+    // only the returned pubkeys (in first-appearance order, which masking does
+    // not reorder for surviving prose) escape. If a future change needs
+    // original-string offsets, switch to a position-preserving mask.
+    let masked = buzz_sdk::mentions::strip_code_regions(text);
+    let text: &str = &masked;
     // Name → pubkey, folding case (client matches case-insensitively). A name
     // that maps to more than one distinct pubkey is ambiguous → wake no one.
     let mut by_name: std::collections::HashMap<String, Option<String>> =
@@ -533,6 +550,42 @@ mod tests {
         // or mid-token `@` (`alice@Robby`) must not wake Robby.
         let members = vec![m("Robby", &pk('a'))];
         assert!(resolve_mention_pubkeys("alice@Robby", &members).is_empty());
+    }
+
+    #[test]
+    fn mention_inside_inline_code_span_does_not_wake() {
+        // Workflow text is machine-rendered markdown; an `@name` inside a code
+        // span is documentation, not an address (issue #7660).
+        let members = vec![m("Robby", &pk('a'))];
+        assert!(resolve_mention_pubkeys("see `ping @Robby` for syntax", &members).is_empty());
+    }
+
+    #[test]
+    fn mention_inside_fenced_code_block_does_not_wake() {
+        let members = vec![m("Robby", &pk('a'))];
+        assert!(resolve_mention_pubkeys("```\nping @Robby\n```", &members).is_empty());
+    }
+
+    #[test]
+    fn code_span_masking_keeps_surrounding_prose_mentions() {
+        // Masking must not swallow prose on either side of the span.
+        let members = vec![m("Robby", &pk('a'))];
+        assert_eq!(
+            resolve_mention_pubkeys("`code` then @Robby please", &members),
+            vec![pk('a')]
+        );
+    }
+
+    #[test]
+    fn mid_line_fence_is_left_intact_by_current_masking() {
+        // `strip_code_regions` only opens a fence at a line start (or after
+        // whitespace), so a mid-line fence is prose today. Pin the behavior so
+        // a future SDK change that starts masking it is a visible decision.
+        let members = vec![m("Robby", &pk('a'))];
+        assert_eq!(
+            resolve_mention_pubkeys("pre ```\nblk @Robby\n``` post", &members),
+            vec![pk('a')]
+        );
     }
 
     #[test]
