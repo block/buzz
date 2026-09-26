@@ -154,7 +154,7 @@ mod windows {
     use tauri::Emitter;
     use tauri_winrt_notification::{Duration, Toast};
     use windows::{
-        core::HSTRING,
+        core::{HRESULT, HSTRING},
         UI::Notifications::{NotificationSetting, ToastNotificationManager},
     };
     use winsafe::{co, prelude::*, IPersistFile, IPropertyStore, IShellLink, RegistryValue, HKEY};
@@ -352,19 +352,27 @@ mod windows {
         }
     }
 
+    // Windows has no toast settings for an unpackaged AUMID until it posts its first toast.
+    const ERROR_NOT_FOUND: HRESULT = HRESULT(0x8007_0490_u32 as i32);
+
+    fn query_permission_state(app_id: &str) -> Result<&'static str, String> {
+        match ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))
+            .and_then(|notifier| notifier.Setting())
+        {
+            Ok(setting) => Ok(permission_state_label(setting)),
+            Err(error) if error.code() == ERROR_NOT_FOUND => Ok("granted"),
+            Err(error) => Err(format!(
+                "failed to query Windows notification setting: {error}"
+            )),
+        }
+    }
+
     pub async fn permission_state(app: tauri::AppHandle) -> Result<&'static str, String> {
         let app_id = app.config().identifier.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
 
         app.run_on_main_thread(move || {
-            let result =
-                ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))
-                    .and_then(|notifier| notifier.Setting())
-                    .map(permission_state_label)
-                    .map_err(|error| {
-                        format!("failed to query Windows notification setting: {error}")
-                    });
-            let _ = sender.send(result);
+            let _ = sender.send(query_permission_state(&app_id));
         })
         .map_err(|error| format!("failed to schedule Windows notification query: {error}"))?;
 
@@ -550,6 +558,12 @@ mod windows {
                 "buzz.test"
             )
             .is_err());
+        }
+
+        #[test]
+        fn aumid_without_windows_toast_history_is_granted() {
+            let app_id = format!("buzz.test.{}", uuid::Uuid::new_v4().simple());
+            assert_eq!(query_permission_state(&app_id), Ok("granted"));
         }
 
         #[test]
