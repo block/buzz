@@ -91,11 +91,20 @@ Buzz Term Claude sessions wire **buzz-dev-mcp** into a per-sid `CLAUDE_CONFIG_DI
 with `BUZZ_USER_SIGNER_DIR` pointing at `{app_data}/user-signer`. The PTY never
 receives `BUZZ_PRIVATE_KEY` / nsec (`buzz_terminal::env_fence` allowlist).
 
+`prepare_term_session_launch` prepends `USER_SIGNER_STANDING_INSTRUCTIONS` so Term
+sessions know:
+
+1. **Do not** message/chat with the human via Buzz drafts or `@` mentions of the user.
+2. `buzz_draft_message` is **only** for content the **user** will send (they press
+   Send) — not for the agent talking about its own progress.
+3. Progress/status stays in the Term TUI / stdout; `buzz_read_*` is fine; drafts
+   only when the human asked for a message to post.
+
 | MCP tool | Behavior |
 |----------|----------|
 | `buzz_read_thread` | Desktop queries the relay **as the signed-in user** via file IPC |
 | `buzz_read_channel` | Same for recent top-level channel history |
-| `buzz_draft_message` | Emits `user-signer-draft`; Desktop saves a composer draft — **JM clicks Send** |
+| `buzz_draft_message` | Emits `user-signer-draft`; Desktop saves a composer draft — **JM clicks Send**. Use only when JM asked for content to post; never for agent status |
 
 IPC layout:
 
@@ -110,7 +119,7 @@ IPC layout:
 1. Build Desktop + sidecars (`buzz-dev-mcp` next to the app / target debug).
 2. Open a thread → **Term** → pick Claude → **Go** → agent posts a `term-session` card → **Open**.
 3. In the Term Claude session, call `buzz_read_thread` with the thread id (and channel id). Expect JSON events with `"asUser": true`.
-4. Call `buzz_draft_message` with a short body. Desktop should toast **Buzz Term draft ready**, open the channel/thread composer with the draft — click **Send** yourself.
+4. Only if you intentionally asked Term to prepare a message: call `buzz_draft_message` with that body. Desktop should toast **Buzz Term draft ready**, open the channel/thread composer with the draft — click **Send** yourself. Do **not** expect Term to draft “I’m working” / progress notes.
 5. In the PTY: `echo $BUZZ_PRIVATE_KEY` / `env | rg PRIVATE` must be empty; `echo $BUZZ_USER_SIGNER_DIR` should show the IPC path.
 
 ## Files
