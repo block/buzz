@@ -1518,6 +1518,108 @@ void main() {
     expect(session.directoryQueryFilters, isNotEmpty);
   });
 
+  test(
+    'pending-owner overlay keeps a just-created channel visible (#7780)',
+    () async {
+      final session = _FakeRelaySession(
+        // The relay's async kind:39002 provisioning has not landed yet: the
+        // membership query returns nothing for the new channel.
+        memberships: const [],
+        metadata: [_meta(id: _channelA, name: 'project-channel')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      expect(await container.read(channelsProvider.future), isEmpty);
+
+      container
+          .read(channelsProvider.notifier)
+          .markPendingOwnedChannel(_channelA);
+      await container.read(channelsProvider.notifier).refresh();
+
+      final channels = container.read(channelsProvider).requireValue;
+      expect(channels, hasLength(1));
+      expect(channels.single.id, _channelA);
+      expect(channels.single.isMember, isTrue);
+      // The overlay must extend the membership query so the channel's metadata
+      // is fetched even though no kind:39002 lists it yet.
+      expect(
+        session.historyFilters,
+        anyElement(
+          predicate<NostrFilter>(
+            (filter) =>
+                filter.kinds.contains(39000) &&
+                (filter.tags['#d'] ?? const []).contains(_channelA),
+            'member metadata filter covering the pending channel',
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'pending-owner overlay clears once real kind:39002 membership lands',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: const [],
+        metadata: [_meta(id: _channelA, name: 'project-channel')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      notifier.markPendingOwnedChannel(_channelA);
+      await notifier.refresh();
+      expect(
+        container.read(channelsProvider).requireValue.single.isMember,
+        isTrue,
+      );
+
+      // Provisioning completes: the membership query now lists the channel.
+      session.memberships = [_membership(_channelA, myPk)];
+      await notifier.refresh();
+
+      final channels = container.read(channelsProvider).requireValue;
+      expect(channels.single.id, _channelA);
+      expect(channels.single.isMember, isTrue);
+
+      // The membership entry disappeared again (e.g. the user left) — the
+      // overlay must NOT re-classify the channel as a member.
+      session.memberships = const [];
+      await notifier.refresh();
+      final afterLeave = container.read(channelsProvider).requireValue;
+      // The open directory no longer applies (fetchDirectory was never
+      // fetched), so the channel drops from the member-only list.
+      expect(afterLeave, isEmpty);
+    },
+  );
+
+  test(
+    'pending-owner overlay does not leak across an identity switch',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: const [],
+        metadata: [_meta(id: _channelA, name: 'project-channel')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      container
+          .read(channelsProvider.notifier)
+          .markPendingOwnedChannel(_channelA);
+
+      container.read(_testPubkeyProvider.notifier).set('someone-else');
+      await _waitUntil(() => container.read(channelsProvider).hasValue);
+      await container.read(channelsProvider.notifier).refresh();
+
+      // The new identity never created the channel; the overlay scoped to the
+      // old identity must not classify it as theirs.
+      expect(container.read(channelsProvider).requireValue, isEmpty);
+    },
+  );
+
   test('deduplicates joined channels from directory discovery', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
