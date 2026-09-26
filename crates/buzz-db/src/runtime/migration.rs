@@ -705,7 +705,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 51);
+        assert_eq!(migrations.len(), 52);
         assert_eq!(migrations[48].version, 49);
         assert_eq!(migrations[50].version, 51);
         assert!(migrations[48]
@@ -1363,6 +1363,11 @@ mod postgres_tests {
                 .contains("'rate_limit_violations', 'operator_listener_outbox'\n    ]::TEXT[])"),
             "schema.sql must exclude the deployment-global listener outbox from tenant fencing"
         );
+        assert_eq!(migrations[51].version, 52);
+        assert!(migrations[51]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE artifact_heads"));
     }
 
     #[test]
@@ -1934,6 +1939,7 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -2880,6 +2886,11 @@ mod postgres_tests {
             "all NIP-FI tables must be absent after migration 0044: {present:?}"
         );
 
+        // Complete later additive migrations before comparing to the current
+        // binary's complete tenant-table inventory.
+        run_migrations(&pool)
+            .await
+            .expect("complete current migrations");
         // The deletion catalog must validate with ledger relations gone.
         crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()

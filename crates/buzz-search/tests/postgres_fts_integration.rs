@@ -1,10 +1,9 @@
 //! Integration tests for community-scoped Postgres FTS.
 //!
-//! Run with a local PG: `BUZZ_TEST_DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz cargo test -p buzz-search --tests -- --include-ignored`
-//!
-//! Each test creates a uniquely-named schema, applies every FTS-affecting
-//! migration in order, exercises a scenario, and drops it. Tests are
-//! parallel-safe.
+//! Run through `scripts/postgres-test-run.sh -p buzz-search --tests` for a
+//! fresh desired-state database per test. Outside that lane, point
+//! BUZZ_TEST_DATABASE_URL at a disposable dedicated database; fixtures use
+//! the production migrator and unique community IDs.
 
 use buzz_core::{
     kind::{
@@ -14,96 +13,30 @@ use buzz_core::{
     CommunityId,
 };
 use buzz_search::{ChannelScope, SearchQuery, SearchService};
-use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
 const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
-const MIGRATION_0001_SQL: &str = include_str!("../../../migrations/0001_initial_schema.sql");
-const MIGRATION_0002_SQL: &str = include_str!("../../../migrations/0002_git_repo_names.sql");
-const MIGRATION_0003_SQL: &str = include_str!("../../../migrations/0003_community_icon.sql");
-const MIGRATION_0004_SQL: &str = include_str!("../../../migrations/0004_events_tags_gin.sql");
-const MIGRATION_0005_SQL: &str = include_str!("../../../migrations/0005_agent_turn_metric_fts.sql");
-const MIGRATION_0006_SQL: &str = include_str!("../../../migrations/0006_moderation.sql");
-const MIGRATION_0007_SQL: &str = include_str!("../../../migrations/0007_nip_rs_retention.sql");
-const MIGRATION_0008_SQL: &str =
-    include_str!("../../../migrations/0008_fresh_install_search_allowlist.sql");
-const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lease_fts.sql");
-const MIGRATION_0033_SQL: &str =
-    include_str!("../../../migrations/0033_private_managed_agent_fts.sql");
-
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
-    let schema = format!("fts_test_{}", Uuid::new_v4().simple());
-    // Connect to the default schema first to create the test schema.
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
+    // The PostgreSQL lane supplies an isolated desired-state database. Outside
+    // that lane use a dedicated database with the production migrations.
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
         .connect(&url)
         .await
-        .expect("connect");
-    let create_sql = format!("CREATE SCHEMA \"{schema}\"");
-    sqlx::query(sqlx::AssertSqlSafe(create_sql))
-        .execute(&admin_pool)
-        .await
-        .expect("create schema");
-    admin_pool.close().await;
-
-    // Connect with search_path set so the migration's CREATE TABLE lands here.
-    let url_with_search_path = format!("{url}?options=-c%20search_path%3D{schema}");
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url_with_search_path)
-        .await
-        .expect("connect with search_path");
-    // Apply the full migration chain in order so the test schema exactly matches
-    // production. Future FTS-affecting migrations must be added here.
-    pool.execute(MIGRATION_0001_SQL)
-        .await
-        .expect("apply 0001 migration");
-    pool.execute(MIGRATION_0002_SQL)
-        .await
-        .expect("apply 0002 migration");
-    pool.execute(MIGRATION_0003_SQL)
-        .await
-        .expect("apply 0003 migration");
-    pool.execute(MIGRATION_0004_SQL)
-        .await
-        .expect("apply 0004 migration");
-    pool.execute(MIGRATION_0005_SQL)
-        .await
-        .expect("apply 0005 migration");
-    pool.execute(MIGRATION_0006_SQL)
-        .await
-        .expect("apply 0006 migration");
-    pool.execute(MIGRATION_0007_SQL)
-        .await
-        .expect("apply 0007 migration");
-    pool.execute(MIGRATION_0008_SQL)
-        .await
-        .expect("apply 0008 migration");
-    pool.execute(MIGRATION_0014_SQL)
-        .await
-        .expect("apply 0014 migration");
-    pool.execute(MIGRATION_0033_SQL)
-        .await
-        .expect("apply 0033 migration");
-    (pool, schema)
+        .expect("connect test database");
+    if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+        buzz_db::migration::run_migrations(&pool)
+            .await
+            .expect("apply production migrations");
+    }
+    (pool, String::new())
 }
 
-async fn teardown(pool: PgPool, schema: &str) {
+async fn teardown(pool: PgPool, _schema: &str) {
     pool.close().await;
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(
-            &std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string()),
-        )
-        .await
-        .expect("reconnect for drop");
-    let drop_sql = format!("DROP SCHEMA \"{schema}\" CASCADE");
-    sqlx::query(sqlx::AssertSqlSafe(drop_sql))
-        .execute(&admin_pool)
-        .await
-        .expect("drop schema");
-    admin_pool.close().await;
+    // The test runner owns database cleanup.
 }
 
 /// Insert a community row, return its id.
@@ -1510,5 +1443,65 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
         result.hits.len(),
     );
 
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn artifact_search_uses_only_live_current_head() {
+    let (pool, schema) = setup().await;
+    let community = mk_community(&pool, "artifact-search.example").await;
+    let pk = rand_bytes32();
+    let old = rand_bytes32();
+    let head = rand_bytes32();
+    let artifact = Uuid::new_v4();
+    insert_event(
+        &pool,
+        community,
+        old,
+        pk,
+        45010,
+        "artifactneedle old",
+        None,
+        1700000000,
+    )
+    .await;
+    insert_event(
+        &pool,
+        community,
+        head,
+        pk,
+        45010,
+        "artifactneedle current",
+        None,
+        1700000001,
+    )
+    .await;
+    sqlx::query("INSERT INTO artifact_heads(community_id,artifact_id,event_id,channel_id,artifact_type) VALUES($1,$2,$3,$4,'buzz.task')")
+        .bind(community.as_uuid()).bind(artifact).bind(head.as_slice()).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+    let svc = SearchService::new(pool.clone());
+    let query = SearchQuery {
+        community,
+        q: "artifactneedle".into(),
+        channel_scope: ChannelScope::Any,
+        kinds: Some(vec![45010]),
+        authors: None,
+        since: None,
+        until: None,
+        page: 1,
+        per_page: 10,
+        mode: buzz_search::SearchMode::FullText,
+    };
+    let result = svc.search(&query).await.unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].event_id, head);
+    sqlx::query("UPDATE artifact_heads SET deleted=true WHERE community_id=$1 AND artifact_id=$2")
+        .bind(community.as_uuid())
+        .bind(artifact)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let result = svc.search(&query).await.unwrap();
+    assert!(result.hits.is_empty());
     teardown(pool, &schema).await;
 }

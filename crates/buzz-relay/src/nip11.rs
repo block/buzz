@@ -34,6 +34,8 @@ pub struct RelayInfo {
     /// Host-bound atomic read-state snapshot capability; absent on unresolved hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_state_snapshot: Option<serde_json::Value>,
+    /// NIP-AR artifact query transport and enforced resource limits.
+    pub artifacts: serde_json::Value,
     /// Relay operator's public key (hex), if published.
     pub pubkey: Option<String>,
     /// Contact address for the relay operator.
@@ -192,7 +194,7 @@ impl RelayInfo {
             supported_nips.push(NIP_RELAY_MEMBERSHIP);
         }
 
-        let mut supported_extensions = vec!["nip-er".to_string()];
+        let mut supported_extensions = vec!["nip-er".to_string(), "nip-ar".to_string()];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
             GifDescriptor {
@@ -207,6 +209,20 @@ impl RelayInfo {
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             read_state_snapshot: None,
+            artifacts: serde_json::json!({
+                "version": 1, "revision_kind": 45010, "removal_kind": 45011,
+                "query": "/query", "count": "/count",
+                "modes": ["current", "history"],
+                "websocket_query_extensions": false,
+                "max_tags": buzz_core::artifact::MAX_TAGS,
+                "max_tag_name_bytes": buzz_core::artifact::MAX_TAG_NAME_BYTES,
+                "max_tag_value_bytes": buzz_core::artifact::MAX_TAG_VALUE_BYTES,
+                "max_tag_bytes": buzz_core::artifact::MAX_TAG_BYTES,
+                "max_predicates": buzz_core::artifact::MAX_PREDICATES,
+                "max_values": buzz_core::artifact::MAX_QUERY_VALUES,
+                "max_page_size": buzz_core::artifact::MAX_PAGE_SIZE,
+                "max_offset": buzz_core::artifact::MAX_OFFSET, "max_filters": 1, "query_timeout_ms": 2000
+            }),
             pubkey: None,
             contact: None,
             supported_nips,

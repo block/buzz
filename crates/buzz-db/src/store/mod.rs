@@ -62,3 +62,11 @@ pub mod usage;
 pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
+
+/// NIP-AR artifact lifecycle and durable delivery.
+pub mod artifact;
+
+mod artifact_query;
+
+#[cfg(test)]
+mod artifact_postgres_tests;

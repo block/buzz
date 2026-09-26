@@ -1330,6 +1330,10 @@ async fn query_events_authed(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw_filters, false).await
+    {
+        return result;
+    }
     let thread_windows = thread_window::parse(&raw_filters)?;
     let filters: Vec<nostr::Filter> = raw_filters
         .iter()
@@ -1951,6 +1955,11 @@ async fn count_events_authed(
     )
     .await?;
 
+    let raw: Vec<Value> = serde_json::from_slice(body)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw, true).await {
+        return result;
+    }
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
@@ -2885,6 +2894,10 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
         "updated_at": b.updated_at,
     })
 }
+
+#[cfg(test)]
+#[path = "artifact_postgres_tests.rs"]
+mod artifact_postgres_tests;
 
 #[cfg(test)]
 mod postgres_tests {

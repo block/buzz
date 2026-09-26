@@ -59,6 +59,8 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "api_tokens",
     "archived_identities",
+    "artifact_heads",
+    "artifact_revisions",
     "audit_log",
     "channel_members",
     "channels",
@@ -107,6 +109,8 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "push_leases",
     "relay_invites",
     "delivery_log",
+    "artifact_heads",
+    "artifact_revisions",
     "events",
     "parameterized_event_watermarks",
     "git_repo_names",

@@ -19,6 +19,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p_past;
         DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p_past;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p_past;
+        DROP TRIGGER IF EXISTS retain_current_artifact ON events_p_past;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p_past;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p_past;
         ALTER TABLE events ATTACH PARTITION events_p_past
@@ -33,6 +34,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_01;
         DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_01;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_01;
+        DROP TRIGGER IF EXISTS retain_current_artifact ON events_p2026_01;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_01;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_01;
         ALTER TABLE events ATTACH PARTITION events_p2026_01
@@ -47,6 +49,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_02;
         DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_02;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_02;
+        DROP TRIGGER IF EXISTS retain_current_artifact ON events_p2026_02;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_02;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_02;
         ALTER TABLE events ATTACH PARTITION events_p2026_02
@@ -61,6 +64,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_03;
         DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_03;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_03;
+        DROP TRIGGER IF EXISTS retain_current_artifact ON events_p2026_03;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_03;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_03;
         ALTER TABLE events ATTACH PARTITION events_p2026_03
@@ -75,6 +79,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_04;
         DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_04;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_04;
+        DROP TRIGGER IF EXISTS retain_current_artifact ON events_p2026_04;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_04;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_04;
         ALTER TABLE events ATTACH PARTITION events_p2026_04
@@ -89,6 +94,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_05;
         DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_05;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_05;
+        DROP TRIGGER IF EXISTS retain_current_artifact ON events_p2026_05;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_05;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_05;
         ALTER TABLE events ATTACH PARTITION events_p2026_05
@@ -103,6 +109,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_06;
         DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_06;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_06;
+        DROP TRIGGER IF EXISTS retain_current_artifact ON events_p2026_06;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_06;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_06;
         ALTER TABLE events ATTACH PARTITION events_p2026_06
@@ -117,6 +124,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p_future;
         DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p_future;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p_future;
+        DROP TRIGGER IF EXISTS retain_current_artifact ON events_p_future;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p_future;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p_future;
         ALTER TABLE events ATTACH PARTITION events_p_future

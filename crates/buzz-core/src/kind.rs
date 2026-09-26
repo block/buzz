@@ -550,6 +550,10 @@ pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
 pub const KIND_FORUM_POST: u32 = 45001;
+/// NIP-AR complete artifact revision.
+pub const KIND_ARTIFACT: u32 = 45010;
+/// Relay-authenticated artifact removal.
+pub const KIND_ARTIFACT_REMOVAL: u32 = 45011;
 /// A vote on a forum post.
 pub const KIND_FORUM_VOTE: u32 = 45002;
 /// A comment reply on a forum post.
@@ -735,6 +739,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_USER_STATUS,
     KIND_READ_STATE,
     KIND_FORUM_POST,
+    KIND_ARTIFACT,
+    KIND_ARTIFACT_REMOVAL,
     KIND_FORUM_VOTE,
     KIND_FORUM_COMMENT,
     KIND_WORKFLOW_TRIGGER,
@@ -836,7 +842,8 @@ pub const fn is_command_kind(kind: u32) -> bool {
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_NIP43_MEMBERSHIP_LIST
+        KIND_ARTIFACT_REMOVAL
+            | KIND_NIP43_MEMBERSHIP_LIST
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
