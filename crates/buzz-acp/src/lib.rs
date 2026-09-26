@@ -14,6 +14,7 @@ mod pool;
 mod pool_lifecycle;
 mod prompt_framing;
 mod prompt_project;
+mod public_status;
 mod queue;
 mod relay;
 mod run_task;
@@ -2583,9 +2584,8 @@ async fn run_harness(
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
-    let observer = config
-        .relay_observer
-        .then(observer::ObserverHandle::in_process);
+    let observer =
+        (config.relay_observer || config.public_status).then(observer::ObserverHandle::in_process);
     if let Some(handle) = &observer {
         handle.emit(
             "harness_started",
@@ -2803,6 +2803,17 @@ async fn run_harness(
             owner_pubkey,
             owner,
         ));
+    }
+
+    let mut public_status_task = None;
+    if config.public_status {
+        if let Some(observer) = observer.clone() {
+            public_status_task = Some(public_status::spawn_public_status_publisher(
+                observer,
+                relay.rest_client(),
+            ));
+            tracing::info!("public work status enabled");
+        }
     }
 
     let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
@@ -4150,6 +4161,9 @@ async fn run_harness(
     }
 
     if let Some(handle) = relay_observer_publisher_task.take() {
+        handle.abort();
+    }
+    if let Some(handle) = public_status_task.take() {
         handle.abort();
     }
 
@@ -9170,6 +9184,7 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            public_status: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
@@ -9434,6 +9449,7 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            public_status: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
