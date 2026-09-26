@@ -21,9 +21,9 @@
 //! { "host": "acme.communities.buzz.xyz", "initial_owner_pubkey": "<hex>" }
 //! ```
 //!
-//! `initial_owner_pubkey` is optional. When present for an existing community,
-//! it rotates that community owner through the same bootstrap path used by
-//! `RELAY_OWNER_PUBKEY`; relay operators are deployment-root authorities.
+//! `initial_owner_pubkey` is optional. Existing-community convergence may
+//! rotate ownership only while the community is active and has no durable
+//! deletion intent. Archive freezes ownership.
 
 use std::sync::Arc;
 
@@ -238,14 +238,9 @@ async fn publish_membership_snapshot_if_required(
 /// signer here for the deployment-level `RELAY_OPERATOR_PUBKEYS` allowlist.
 ///
 /// Idempotency and owner semantics: the request is idempotent on the host row
-/// (re-sending it never duplicates a community). When `initial_owner_pubkey` is
-/// present, the owner is (re)bootstrapped via [`buzz_db::Db::bootstrap_owner`]
-/// even if the community already existed — any previous owner is demoted to
-/// admin, exactly like rotating `RELAY_OWNER_PUBKEY` for the deployment
-/// community. This makes a retry after a partial failure (row created, owner
-/// bootstrap crashed) converge, at the cost that an operator-signed request can
-/// rotate an existing community's owner. The operator allowlist is therefore
-/// documented as deployment-root authority, not create-only authority.
+/// (re-sending it never duplicates a community). Initial owner bootstrap still
+/// converges after a partial create, but rotating an existing owner requires an
+/// active, non-archived community with no non-aborted deletion request.
 pub async fn provision_community(
     state: &Arc<AppState>,
     operator_pubkey: &nostr::PublicKey,
@@ -325,11 +320,22 @@ pub async fn provision_community(
         .map_err(|e| format!("failed to create community: {e}"))?;
 
     if let Some(owner_hex) = &initial_owner {
-        state
+        match state
             .db
             .provision_owner(record.id, owner_hex)
             .await
-            .map_err(|e| format!("community provisioned but owner bootstrap failed: {e}"))?;
+            .map_err(|e| format!("community provisioned but owner bootstrap failed: {e}"))?
+        {
+            buzz_db::relay_members::ProvisionOwnerResult::Applied => {}
+            buzz_db::relay_members::ProvisionOwnerResult::LifecycleConflict => {
+                return Err(
+                    "owner_conflict: community must be active to rotate ownership".to_string(),
+                );
+            }
+            buzz_db::relay_members::ProvisionOwnerResult::DeletionPending => {
+                return Err("owner_conflict: community deletion is pending".to_string());
+            }
+        }
         publish_membership_snapshot_if_required(state, record.id, &record.host).await;
     }
 

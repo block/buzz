@@ -1232,6 +1232,11 @@ CREATE TABLE community_deletion_requests (
         'logically_verified', 'retention_pending', 'aborted'
     )),
     requested_by TEXT NOT NULL,
+    request_origin TEXT NOT NULL DEFAULT 'operator'
+        CHECK (request_origin IN ('operator', 'owner')),
+    owner_pubkey TEXT,
+    mediating_operator_pubkey TEXT,
+    acknowledgement_version INTEGER,
     reason TEXT,
     schema_manifest JSONB,
     storage_manifest JSONB,
@@ -1268,6 +1273,21 @@ CREATE TABLE community_deletion_requests (
     CHECK ((aborted_at IS NULL) = (aborted_by IS NULL)),
     CHECK ((aborted_at IS NULL) = (abort_reason IS NULL)),
     CHECK ((inventory_frozen_at IS NULL) = (inventory_digest IS NULL)),
+    CONSTRAINT community_deletion_owner_provenance CHECK (
+        (request_origin = 'operator'
+            AND owner_pubkey IS NULL
+            AND mediating_operator_pubkey IS NULL
+            AND acknowledgement_version IS NULL)
+        OR
+        (request_origin = 'owner'
+            AND NOT (owner_pubkey IS NULL)
+            AND NOT (mediating_operator_pubkey IS NULL)
+            AND NOT (acknowledgement_version IS NULL)
+            AND owner_pubkey ~ '^[0-9a-f]{64}$'
+            AND mediating_operator_pubkey ~ '^[0-9a-f]{64}$'
+            AND acknowledgement_version BETWEEN 1 AND 32767
+            AND requested_by = owner_pubkey)
+    ),
     UNIQUE (id, community_id, inventory_digest)
 );
 CREATE UNIQUE INDEX community_deletion_requests_active_community
@@ -1293,7 +1313,7 @@ CREATE TABLE community_deletion_approvals (
         ON DELETE RESTRICT
 );
 
-CREATE FUNCTION prevent_community_deletion_request_retargeting()
+CREATE OR REPLACE FUNCTION prevent_community_deletion_request_retargeting()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -1302,6 +1322,14 @@ BEGIN
         OR NEW.community_host IS DISTINCT FROM OLD.community_host
     THEN
         RAISE EXCEPTION 'community deletion target identity is immutable'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF NEW.request_origin IS DISTINCT FROM OLD.request_origin
+        OR NEW.owner_pubkey IS DISTINCT FROM OLD.owner_pubkey
+        OR NEW.mediating_operator_pubkey IS DISTINCT FROM OLD.mediating_operator_pubkey
+        OR NEW.acknowledgement_version IS DISTINCT FROM OLD.acknowledgement_version
+    THEN
+        RAISE EXCEPTION 'community deletion request provenance is immutable'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     IF OLD.inventory_frozen_at IS NOT NULL AND (

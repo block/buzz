@@ -81,6 +81,17 @@ pub struct UnarchivedCommunityRecord {
     pub host: String,
 }
 
+/// Result of an owner-authorized unarchive attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnarchiveCommunityResult {
+    /// The community is active, with archive state cleared idempotently.
+    Unarchived(UnarchivedCommunityRecord),
+    /// Durable deletion intent exists and wins over restoration.
+    DeletionPending,
+    /// The host is absent, unavailable, or not owned by the asserted pubkey.
+    NotFound,
+}
+
 impl Db {
     /// Returns the community mapped to a normalized request host, if one exists.
     ///
@@ -209,6 +220,10 @@ impl Db {
             JOIN relay_members rm ON rm.community_id = c.id
             WHERE rm.pubkey = $1
               AND rm.role = 'owner'
+              AND NOT EXISTS (
+                  SELECT 1 FROM community_deletion_requests request
+                  WHERE request.community_id = c.id AND request.stage <> 'aborted'
+              )
             ORDER BY c.created_at ASC, c.host ASC
             "#,
         )
@@ -531,40 +546,69 @@ impl Db {
     }
 
     /// Idempotently restores a community when the asserted pubkey is its current owner.
+    ///
+    /// Locks the community row so owner-deletion admission and restoration have
+    /// one serial order. A non-aborted deletion request returns
+    /// [`UnarchiveCommunityResult::DeletionPending`] without clearing archive state.
     #[datastore_span(name = "unarchive_community_owned_by", system = "postgresql")]
     pub async fn unarchive_community_owned_by(
         &self,
         normalized_host: &str,
         owner_pubkey: &str,
-    ) -> Result<Option<UnarchivedCommunityRecord>> {
-        let mut connection = crate::observability::acquire_writer(
+    ) -> Result<UnarchiveCommunityResult> {
+        let connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        let row = sqlx::query(
-            r#"UPDATE communities c
-               SET archived_at = NULL
-               FROM relay_members rm
-               WHERE lower(c.host) = lower($1)
-                 AND rm.community_id = c.id
-                 AND lower(rm.pubkey) = lower($2)
-                 AND rm.role = 'owner'
-                 AND c.deletion_state = 'active'
-                 AND c.deleted_at IS NULL
-               RETURNING c.id, c.host"#,
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
+        let target = sqlx::query(
+            "SELECT id, host FROM communities \
+             WHERE lower(host) = lower($1) AND deletion_state = 'active' \
+               AND deleted_at IS NULL FOR UPDATE",
         )
         .bind(normalized_host)
-        .bind(owner_pubkey)
-        .fetch_optional(&mut *connection)
+        .fetch_optional(&mut *tx)
         .await?;
-        row.map(|row| {
-            Ok(UnarchivedCommunityRecord {
-                id: CommunityId::from_uuid(row.try_get("id")?),
-                host: row.try_get("host")?,
-            })
-        })
-        .transpose()
+        let Some(target) = target else {
+            tx.rollback().await?;
+            return Ok(UnarchiveCommunityResult::NotFound);
+        };
+        let community_id: Uuid = target.try_get("id")?;
+        let is_owner: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM relay_members \
+             WHERE community_id = $1 AND lower(pubkey) = lower($2) AND role = 'owner')",
+        )
+        .bind(community_id)
+        .bind(owner_pubkey)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !is_owner {
+            tx.rollback().await?;
+            return Ok(UnarchiveCommunityResult::NotFound);
+        }
+        let deletion_pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
+             WHERE community_id = $1 AND stage <> 'aborted')",
+        )
+        .bind(community_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if deletion_pending {
+            tx.rollback().await?;
+            return Ok(UnarchiveCommunityResult::DeletionPending);
+        }
+        sqlx::query("UPDATE communities SET archived_at = NULL WHERE id = $1")
+            .bind(community_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(UnarchiveCommunityResult::Unarchived(
+            UnarchivedCommunityRecord {
+                id: CommunityId::from_uuid(community_id),
+                host: target.try_get("host")?,
+            },
+        ))
     }
 
     /// Returns the community that owns a channel, if the channel exists.
@@ -900,22 +944,26 @@ mod postgres_tests {
                 .is_none(),
             "archived communities must fail admission"
         );
-        assert!(db
-            .unarchive_community_owned_by(&host, &outsider)
-            .await
-            .expect("wrong-owner unarchive")
-            .is_none());
-        assert!(db
-            .unarchive_community_owned_by("missing.example", &owner)
-            .await
-            .expect("unknown-host unarchive")
-            .is_none());
+        assert_eq!(
+            db.unarchive_community_owned_by(&host, &outsider)
+                .await
+                .expect("wrong-owner unarchive"),
+            UnarchiveCommunityResult::NotFound
+        );
+        assert_eq!(
+            db.unarchive_community_owned_by("missing.example", &owner)
+                .await
+                .expect("unknown-host unarchive"),
+            UnarchiveCommunityResult::NotFound
+        );
 
         let restored = db
             .unarchive_community_owned_by(&host.to_ascii_uppercase(), &owner)
             .await
-            .expect("unarchive community")
-            .expect("owned community");
+            .expect("unarchive community");
+        let UnarchiveCommunityResult::Unarchived(restored) = restored else {
+            panic!("expected owned community")
+        };
         assert_eq!(restored.id, created.id);
         assert_eq!(restored.host, host);
         assert_eq!(
@@ -938,9 +986,8 @@ mod postgres_tests {
         let retry = db
             .unarchive_community_owned_by(&host, &owner)
             .await
-            .expect("idempotent retry")
-            .expect("owned community");
-        assert_eq!(retry, restored);
+            .expect("idempotent retry");
+        assert_eq!(retry, UnarchiveCommunityResult::Unarchived(restored));
     }
 
     #[tokio::test]

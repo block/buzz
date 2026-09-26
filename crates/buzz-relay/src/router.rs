@@ -326,6 +326,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(api::operator::unarchive_community),
         )
         .route(
+            "/operator/communities/delete",
+            post(api::operator::delete_community),
+        )
+        .route(
             "/operator/communities/availability",
             get(api::operator::community_availability),
         )
@@ -943,7 +947,7 @@ mod tests {
     async fn readiness_state(evaluator: Arc<dyn readiness::ReadinessEvaluator>) -> Arc<AppState> {
         let mut config = crate::config::Config::from_env().expect("default config loads");
         config.require_relay_membership = false;
-        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
+        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string(); // sadscan:disable np.postgres.1 -- local test-only credentials
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
