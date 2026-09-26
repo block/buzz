@@ -1,7 +1,12 @@
+import { MICROPHONE_UNAVAILABLE_ERROR } from "./mediaDevices";
+
 export type HuddleAction = "join" | "start";
 
 const HUDDLE_AUDIO_UNAVAILABLE_MESSAGE =
   "Huddle audio isn’t available on this server. Ask an administrator to turn it on.";
+
+const MICROPHONE_UNAVAILABLE_MESSAGE =
+  "Microphone access isn’t available in this window. Try restarting Buzz.";
 
 function rawErrorMessage(error: unknown): string | null {
   if (error instanceof Error) {
@@ -25,6 +30,10 @@ export function formatHuddleActionError(
     normalized?.includes("huddle audio unavailable in this deployment")
   ) {
     return HUDDLE_AUDIO_UNAVAILABLE_MESSAGE;
+  }
+
+  if (normalized?.includes(MICROPHONE_UNAVAILABLE_ERROR)) {
+    return MICROPHONE_UNAVAILABLE_MESSAGE;
   }
 
   if (message) {
