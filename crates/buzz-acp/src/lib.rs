@@ -2854,6 +2854,10 @@ async fn run_harness(
         None
     };
     let mut heartbeat_in_flight = false;
+    // A heartbeat tick that lands while a lazy pool is asleep must wake it:
+    // otherwise heartbeats only fire inside message-woken windows and the
+    // configured interval silently never runs on quiet agents.
+    let mut heartbeat_wake_pending = false;
 
     let mut presence_heartbeat = if config.presence_enabled {
         let interval = Duration::from_secs(60);
@@ -3007,7 +3011,7 @@ async fn run_harness(
         // busy spin — whenever the queued work drained after a failed wake.
         let mut lazy_wake_work_pending = false;
         if config.lazy_pool && !pool_ready {
-            lazy_wake_work_pending = queue.has_flushable_work();
+            lazy_wake_work_pending = queue.has_flushable_work() || heartbeat_wake_pending;
             if let Some(attempt) = pool_lifecycle
                 .start_wake_if_due(lazy_wake_work_pending, tokio::time::Instant::now())
             {
@@ -3671,7 +3675,15 @@ async fn run_harness(
                 } => {
                     let _ = result_rx;
                     if !pool_ready {
-                        tracing::debug!("heartbeat_skipped_pool_not_ready");
+                        if config.lazy_pool {
+                            // Request a pool wake; the lazy-wake gate at the top
+                            // of the loop consumes this flag, and the Wake(Ok)
+                            // handler dispatches the deferred heartbeat.
+                            heartbeat_wake_pending = true;
+                            tracing::info!("heartbeat_wake_requested (lazy pool asleep)");
+                        } else {
+                            tracing::debug!("heartbeat_skipped_pool_not_ready");
+                        }
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (scope, thread_tags) in
@@ -4003,6 +4015,15 @@ async fn run_harness(
                             observer.as_ref(),
                         ) {
                             typing_channels.insert(scope, thread_tags);
+                        }
+                        if heartbeat_wake_pending {
+                            heartbeat_wake_pending = false;
+                            // Deliver the heartbeat this wake was requested for;
+                            // if real work grabbed every slot, the pool is awake
+                            // now and the next tick fires normally.
+                            if !queue.has_flushable_work() && pool.any_idle() {
+                                dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
+                            }
                         }
                     }
                     Err(error) => {
