@@ -380,6 +380,11 @@ storageAccounting:
   failedJobsHistoryLimit: 3
   relayMode: external            # external | off; inline is a legacy alias
   serviceAccountName: ""         # defaults to the main Buzz service account
+  # Extra Pod labels, e.g. Datadog unified service tagging. The chart owns
+  # `tags.datadoghq.com/version` and derives it from image.digest/image.tag so
+  # the telemetry version always names the binary that wrote the snapshot rows
+  # (the same identity as BUZZ_STORAGE_SNAPSHOT_CODE_SHA). A value supplied
+  # here for that one key is ignored; every other key passes through.
   podLabels: {}
   podAnnotations:
     sidecar.istio.io/inject: "false"
