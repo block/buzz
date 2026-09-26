@@ -703,7 +703,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 49);
+        assert_eq!(migrations.len(), 50);
+        assert_eq!(migrations[49].version, 50);
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE personal_read_accounts"));
         assert_eq!(migrations[48].version, 49);
         assert!(migrations[48]
             .sql
@@ -1833,6 +1838,22 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        let personal = surface(
+            MIGRATOR
+                .iter()
+                .find(|m| m.version == 50)
+                .expect("personal read migration")
+                .sql
+                .as_ref(),
+        );
+        for (table, definition) in personal.tables {
+            assert_eq!(
+                schema.tables.get(&table),
+                Some(&definition),
+                "personal read table {table} differs"
+            );
+        }
+        expected_fences.extend(personal.fence_attachments);
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -2763,7 +2784,12 @@ mod postgres_tests {
             "all NIP-FI tables must be absent after migration 0044: {present:?}"
         );
 
-        // The deletion catalog must validate with ledger relations gone.
+        // Current binaries validate the current catalog, after subsequent additive
+        // migrations. The exact 0044 removal is asserted above.
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("complete current schema upgrade");
         crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await

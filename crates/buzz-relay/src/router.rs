@@ -289,6 +289,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let admin_router = admin_enabled
         .then(|| Router::new().nest("/api/admin/v1", api::admin::router(state.clone())));
 
+    let accessory_router = Router::new().nest("/buzz/v1", api::buzz_v1::router(state.clone()));
+
     let api_router = Router::new()
         // WebSocket + NIP-11
         .route("/", get(nip11_or_ws_handler))
@@ -376,6 +378,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // Metrics → Trace → CORS applied once over the combined router.
     let mut merged = api_router
         .merge(media_router)
+        .merge(accessory_router)
         .merge(git_router)
         .merge(git_policy_router);
     if let Some(admin_router) = admin_router {
@@ -943,7 +946,7 @@ mod tests {
     async fn readiness_state(evaluator: Arc<dyn readiness::ReadinessEvaluator>) -> Arc<AppState> {
         let mut config = crate::config::Config::from_env().expect("default config loads");
         config.require_relay_membership = false;
-        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
+        config.database_url = "postgres://127.0.0.1:1/buzz".to_string();
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
