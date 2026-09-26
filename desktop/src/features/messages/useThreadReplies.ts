@@ -11,6 +11,7 @@ import {
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
 import { getThreadReplies } from "@/shared/api/tauri";
+import { isQueryDeadlineError } from "@/shared/lib/relayError";
 import type {
   Channel,
   RelayEvent,
@@ -163,7 +164,10 @@ export function useThreadReplies(
     // throws on attempts 1 and 2; attempt 3 records exhaustion first so
     // loadThreadReplies returns data directly — the terminal attempt always
     // resolves to success.
-    retry: 3,
+    // A read that hit a query deadline (client or relay) is not retried:
+    // each retry would re-run the same slow server-side query.
+    retry: (failureCount, error) =>
+      failureCount < 3 && !isQueryDeadlineError(error),
     retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 30_000),
   });
 

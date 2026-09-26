@@ -11,8 +11,8 @@ use sqlx::{PgConnection, PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
-    event::row_to_stored_event, Db, DbError, ReadSession, ReadSessionInner, Result, RouteDecision,
-    RoutePredicate,
+    event::{push_e_tag_filter, row_to_stored_event},
+    Db, DbError, ReadSession, ReadSessionInner, Result, RouteDecision, RoutePredicate,
 };
 use buzz_datastore_tracing::datastore_span;
 
@@ -333,36 +333,31 @@ pub struct AuxPage {
     pub next_cursor: Option<Cursor>,
 }
 
-async fn select_aux(
-    conn: &mut PgConnection,
-    query: &AuxQuery<'_>,
-    budget: &mut ScanBudget,
-) -> Result<AuxPage> {
-    if query.targets.is_empty() || query.targets.len() > 200 {
-        return Err(invalid("invalid thread auxiliary target batch"));
-    }
-    budget.query()?;
+/// SQL for [`select_aux`]. The target set is one array-bound containment
+/// filtered inside a MATERIALIZED CTE, with ORDER BY/LIMIT outside: in the
+/// same scope the planner walks the pkey backward over the whole community.
+/// The fence materializes all matching rows before the outer sort/limit. The
+/// 200-target cap and 1,000-row page do not bound match cardinality; the
+/// statement deadline limits execution time, while `ScanBudget` limits the
+/// rows/bytes the application consumes.
+fn build_aux_sql(query: &AuxQuery<'_>) -> Result<QueryBuilder<sqlx::Postgres>> {
     let mut q = QueryBuilder::new(
-        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, deleted_at, \
+        "WITH m AS MATERIALIZED (SELECT id, pubkey, created_at, kind, tags, content, sig, \
+         received_at, channel_id, deleted_at, \
          octet_length(content) + octet_length(tags::text) AS payload_bytes \
-         FROM events WHERE community_id = ");
+         FROM events WHERE community_id = ",
+    );
     q.push_bind(query.community.as_uuid())
         .push(" AND ((channel_id IS NULL AND kind IN (5, 9005)) OR channel_id = ANY(")
         .push_bind(query.accessible)
         .push("))")
         .push(" AND kind = ANY(")
         .push_bind(query.kinds.iter().map(|k| *k as i32).collect::<Vec<_>>())
-        .push(") AND (");
-    for (index, target) in query.targets.iter().enumerate() {
-        if index != 0 {
-            q.push(" OR ");
-        }
-        q.push("tags @> ")
-            .push_bind(serde_json::json!([["e", target]]));
-    }
+        .push(")");
     // JSONB containment is an indexable prefilter, not a positional tag match.
+    push_e_tag_filter(&mut q, "", query.targets);
     q.push(
-        ") AND EXISTS (SELECT 1 FROM jsonb_array_elements(tags) tag \
+        " AND EXISTS (SELECT 1 FROM jsonb_array_elements(tags) tag \
         WHERE tag->>0 = 'e' AND tag->>1 = ANY(",
     )
     .push_bind(query.targets)
@@ -377,8 +372,21 @@ async fn select_aux(
             .push_bind(id)
             .push("))");
     }
-    q.push(" ORDER BY created_at DESC, id ASC LIMIT ")
+    q.push(") SELECT * FROM m ORDER BY created_at DESC, id ASC LIMIT ")
         .push_bind(AUX_LIMIT as i64 + 1);
+    Ok(q)
+}
+
+async fn select_aux(
+    conn: &mut PgConnection,
+    query: &AuxQuery<'_>,
+    budget: &mut ScanBudget,
+) -> Result<AuxPage> {
+    if query.targets.is_empty() || query.targets.len() > 200 {
+        return Err(invalid("invalid thread auxiliary target batch"));
+    }
+    budget.query()?;
+    let mut q = build_aux_sql(query)?;
     // Never collect a full raw page: 1,001 ingest-valid edits can contain
     // 250 MiB. Charge each row (including tombstones and the probe) before
     // reconstruction, and preserve this request-wide ledger across retries.
@@ -463,3 +471,34 @@ impl ReadSession {
 
 #[cfg(test)]
 mod postgres_tests;
+
+#[cfg(test)]
+mod aux_sql_shape_tests {
+    use super::*;
+
+    /// The reply-closure target set must be one array-bound containment inside
+    /// the fence, never an N-way `OR`, with ORDER BY/LIMIT outside it.
+    #[test]
+    fn aux_query_filters_in_materialized_fence_before_order_limit() {
+        let targets: Vec<String> = (0..200).map(|i| format!("{i:064x}")).collect();
+        let accessible = [Uuid::nil()];
+        let query = AuxQuery {
+            community: CommunityId::from_uuid(Uuid::nil()),
+            targets: &targets,
+            kinds: &[7],
+            accessible: &accessible,
+            cursor: None,
+        };
+        let qb = build_aux_sql(&query).expect("valid aux query");
+        let sql = qb.sql().as_str().to_owned();
+
+        assert!(sql.starts_with("WITH m AS MATERIALIZED (SELECT "));
+        assert_eq!(sql.matches("tags @> ANY(").count(), 1);
+        assert!(!sql.contains("tags @> $"));
+        let fence_end = sql.find(") SELECT * FROM m ").expect("fence closes");
+        assert!(!sql[..fence_end].contains("ORDER BY"));
+        assert!(!sql[..fence_end].contains("LIMIT"));
+        assert!(sql[..fence_end].contains("payload_bytes"));
+        assert!(sql[fence_end..].contains("ORDER BY created_at DESC, id ASC LIMIT "));
+    }
+}

@@ -730,7 +730,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final liveSub = _liveSubscriptions[subId];
     if (liveSub == null) return;
     final readyCompleter = liveSub.readyCompleter;
-    if (closedClass == RelayClosedClass.terminal) {
+    // A deadline is terminal for one-shot history, but a live subscription's
+    // small backfill may succeed later: retry it rather than go silent.
+    if (closedClass == RelayClosedClass.terminal &&
+        !isRelayDeadlineError(message)) {
       if (readyCompleter != null && !readyCompleter.isCompleted) {
         readyCompleter.completeError(Exception(message));
       }

@@ -16,7 +16,6 @@ use uuid::Uuid;
 
 use buzz_auth::{generate_challenge, AuthContext};
 use buzz_core::tenant::TenantContext;
-use nostr::Filter;
 
 use crate::handlers;
 use crate::metrics::AuthOutcome;
@@ -34,8 +33,9 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// This stays well inside the process-wide 30-second hard drain.
 const WS_TERMINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Shared mutable subscription map for a single WebSocket connection.
-pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
+/// Shared mutable subscription map for a single WebSocket connection: sub ID →
+/// owner token of the request that currently holds it (see `close::next_owner`).
+pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, u64>>>;
 
 /// Request for the writer to flush a restart close and report the result.
 pub(crate) struct RestartClose {
@@ -447,20 +447,7 @@ async fn handle_active_connection(
     let _ = auth_timeout_task.await;
     let _ = auth_cancel_task.await;
 
-    for removed in state.sub_registry.remove_connection(conn.conn_id) {
-        if removed.scope.is_global() {
-            state
-                .pubsub
-                .release_topic(&conn.tenant, buzz_pubsub::EventTopic::Global)
-                .await;
-        }
-        for &channel_id in removed.scope.channel_ids() {
-            state
-                .pubsub
-                .release_topic(&conn.tenant, buzz_pubsub::EventTopic::Channel(channel_id))
-                .await;
-        }
-    }
+    crate::handlers::close::release_connection_subscriptions(&conn, &state).await;
     state.conn_manager.deregister(conn.conn_id);
     if let Some(auth_ctx) = authenticated {
         let remaining = state.conn_manager.connection_ids_for_pubkey_in_community(

@@ -332,7 +332,8 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       }
     } catch (error) {
       if (!current()) return;
-      if (attempt < 2) {
+      // Re-sending a timed-out recount re-runs the same slow scan.
+      if (attempt < 2 && !isRelayDeadlineError(error)) {
         // Retain this active queue slot during backoff, so retries share the
         // same concurrency budget and stop when newer work supersedes them.
         await Future<void>.delayed(Duration(milliseconds: 500 << attempt));

@@ -7,6 +7,7 @@ import type { Channel } from "@/shared/api/types";
 import {
   collectRenderScopedReactionMessageIds,
   hydrateRenderScopedReactions,
+  releaseDeadlineClaimedReactionIds,
 } from "./renderScopedReactions";
 
 export function useRenderScopedReactionHydration(input: {
@@ -16,6 +17,13 @@ export function useRenderScopedReactionHydration(input: {
   threadMessages: MainTimelineEntry[];
 }) {
   const queryClient = useQueryClient();
+  const channelId = input.activeChannel?.id;
+
+  // Opening a channel is the explicit retry for reactions a relay deadline
+  // held back. Declared first so it runs before this render's hydration.
+  React.useEffect(() => {
+    if (channelId) releaseDeadlineClaimedReactionIds(channelId);
+  }, [channelId]);
 
   React.useEffect(() => {
     const channelId = input.activeChannel?.id;

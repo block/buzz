@@ -231,41 +231,42 @@ async fn disable_departed_member_workflows(
 }
 
 /// Close every live channel-scoped subscription on `conn_id`, removing them from
-/// the connection's local map and sending `CLOSED restricted` for each.
-async fn evict_conn_channel_subscriptions(
+/// the connection's local map and sending `CLOSED restricted` for each. Runs
+/// under the connection's lifecycle lock so a concurrent same-ID claim is
+/// either fully before (and revoked) or fully after (and untouched).
+pub(crate) async fn evict_conn_channel_subscriptions(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
     conn_id: uuid::Uuid,
 ) {
+    // No map means the connection already ran its final cleanup, which
+    // removed its registry entries under this same lock.
+    let Some(subscriptions) = state.conn_manager.subscriptions_for(conn_id) else {
+        return;
+    };
+    let mut conn_subscriptions = subscriptions.lock().await;
     let removed = state.sub_registry.remove_channel_subscriptions_scoped(
         tenant.community(),
         conn_id,
         channel_id,
     );
-    if removed.is_empty() {
-        return;
-    }
-
-    if let Some(subscriptions) = state.conn_manager.subscriptions_for(conn_id) {
-        let mut conn_subscriptions = subscriptions.lock().await;
-        for update in &removed {
-            if update.removed {
-                conn_subscriptions.remove(&update.sub_id);
-            }
-        }
-    }
-
     for update in removed {
+        // A multi-channel sub keeps its other channels (and its map token).
         state
             .pubsub
             .release_topic(tenant, buzz_pubsub::EventTopic::Channel(channel_id))
             .await;
         if update.removed {
-            let _ = state.conn_manager.send_to(
+            conn_subscriptions.remove(&update.sub_id);
+            if !state.conn_manager.send_to(
                 conn_id,
                 RelayMessage::closed(&update.sub_id, "restricted: channel access revoked"),
-            );
+            ) {
+                // Terminal frame lost — cancel so the subscription is not
+                // silently orphaned on a congested connection.
+                state.conn_manager.cancel_conn(conn_id);
+            }
         }
     }
 }

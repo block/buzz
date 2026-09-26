@@ -350,6 +350,14 @@ impl ConnectionManager {
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
     }
 
+    /// Cancel a single connection by ID. A no-op if the connection is not
+    /// registered (already deregistered or never known).
+    pub(crate) fn cancel_conn(&self, conn_id: Uuid) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            entry.cancel.cancel();
+        }
+    }
+
     /// Disconnect every live connection authenticated as `pubkey` **in
     /// `community`**, delivering a final `OK false` frame carrying `reason`
     /// before closing.

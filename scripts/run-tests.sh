@@ -169,6 +169,20 @@ run_unit_tests() {
 
   run_test_step "buzz-relay storage snapshot tests" \
     cargo test -p buzz-relay --lib storage_sweep::tests:: -- --nocapture
+
+  # Infra-free REQ subscription-lifecycle tests, by exact name: the rest of
+  # handlers::req needs a database.
+  run_test_step "buzz-relay REQ subscription lifecycle tests" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      handlers::req::tests::timed_out_historical_read_deregisters_before_closed \
+      handlers::req::tests::superseded_timeout_leaves_replacement_intact \
+      handlers::req::tests::search_claim_retires_live_and_yields_to_replacement \
+      handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner \
+      handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim \
+      handlers::req::tests::revoke_then_replacement_keeps_replacement_whole \
+      handlers::req::tests::claims_after_connection_cleanup_are_refused \
+      handlers::req::tests::dropped_terminal_frame_cancels_connection \
+      handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

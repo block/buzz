@@ -27,6 +27,24 @@ pub(crate) fn internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>)
     api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
 }
 
+/// Stable client-visible body for a read cancelled by its server-side
+/// statement deadline. Clients match this string to skip retrying: a retry
+/// would re-run the same expensive query.
+pub(crate) const QUERY_TIMED_OUT: &str = "query timed out";
+
+/// Map a DB read failure: a statement-deadline cancel becomes a distinct
+/// 503 `query timed out`; anything else stays a generic 500.
+pub(crate) fn db_read_error(
+    context: &str,
+    e: &buzz_db::DbError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if e.is_statement_cancelled() {
+        tracing::warn!("{context}: {e}");
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, QUERY_TIMED_OUT);
+    }
+    internal_error(&format!("{context}: {e}"))
+}
+
 #[allow(dead_code)]
 pub(crate) fn not_found(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     api_error(StatusCode::NOT_FOUND, msg)
@@ -403,6 +421,46 @@ pub mod relay_members {
 
             assert_eq!(result, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod db_read_error_tests {
+    use super::*;
+
+    #[test]
+    fn non_cancel_db_error_stays_generic_500() {
+        let (status, body) = db_read_error("ctx", &buzz_db::DbError::NotFound("x".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.0["error"], "internal server error");
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn statement_timeout_maps_to_distinct_503() {
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to test DB");
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("SET LOCAL statement_timeout = '10ms'")
+            .execute(&mut *tx)
+            .await
+            .expect("set timeout");
+        let err: buzz_db::DbError = sqlx::query("SELECT pg_sleep(1)")
+            .execute(&mut *tx)
+            .await
+            .expect_err("statement must be cancelled")
+            .into();
+        assert!(err.is_statement_cancelled());
+
+        let (status, body) = db_read_error("ctx", &err);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["error"], QUERY_TIMED_OUT);
     }
 }
 

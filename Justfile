@@ -461,7 +461,8 @@ test-unit:
         # `handlers::`: the wider set is mostly Postgres-backed, and five of its
         # non-postgres_tests cases only "pass" without a database by waiting out
         # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
-        # unit job either.
+        # unit job either. The REQ subscription-lifecycle tests are picked by
+        # exact name for the same reason: the rest of handlers::req needs a DB.
         # The third clause adds the NIP-FI HTTP ingress and its router/config
         # neighbours: nip_fi_http, nip_fi_config, router, api::parse_query_tests,
         # and the Git transport off_mode_precedence_tests. All are infra-free
@@ -472,7 +473,7 @@ test-unit:
         # because they live in the binary target; the nested
         # `tests::postgres_tests::` stays in the PostgreSQL lane.
         cargo nextest run -p buzz-relay --lib --bin buzz-relay \
-            -E 'test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/)) - test(/^tests::postgres_tests::/))'
+            -E 'test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + test(=handlers::req::tests::timed_out_historical_read_deregisters_before_closed) + test(=handlers::req::tests::superseded_timeout_leaves_replacement_intact) + test(=handlers::req::tests::search_claim_retires_live_and_yields_to_replacement) + test(=handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner) + test(=handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim) + test(=handlers::req::tests::revoke_then_replacement_keeps_replacement_whole) + test(=handlers::req::tests::claims_after_connection_cleanup_are_refused) + test(=handlers::req::tests::dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/)) - test(/^tests::postgres_tests::/))'
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
@@ -564,6 +565,10 @@ relay: bootstrap _ensure-migrations
     source .env
     set +o allexport
     cargo run -p buzz-relay
+
+# Post one root + N replies (and a few reactions) to the local dev relay, for eyeballing long threads
+seed-long-thread replies="187":
+    ./scripts/seed-long-thread.sh {{replies}}
 
 # Start the relay with the built web UI served from it
 relay-web: bootstrap _ensure-migrations

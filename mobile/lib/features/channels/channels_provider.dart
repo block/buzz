@@ -338,8 +338,18 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         _fetchLastMessageEvents(session, activeChannels),
       );
       final lastMessageMap = <String, int>{};
+      // An unavailable batch keeps the timestamps already known rather than
+      // installing channels whose latest message looks absent.
+      if (events == null) {
+        for (final channel in state.value ?? const <Channel>[]) {
+          final at = channel.lastMessageAt;
+          if (at != null) {
+            lastMessageMap[channel.id] = at.millisecondsSinceEpoch ~/ 1000;
+          }
+        }
+      }
       final mutedChannelIds = _mutedChannelIds();
-      for (final event in events) {
+      for (final event in events ?? const <NostrEvent>[]) {
         final channelId = event.channelId;
         if (channelId == null) continue;
         final channel = channelById[channelId];
@@ -423,7 +433,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   /// bridge request. The relay preserves NIP-01 per-filter limits while
   /// executing the filters with bounded concurrency, avoiding an unbounded
   /// burst of websocket REQs on communities with many channels.
-  Future<List<NostrEvent>> _fetchLastMessageEvents(
+  Future<List<NostrEvent>?> _fetchLastMessageEvents(
     RelaySessionNotifier session,
     List<Channel> channels,
   ) async {
@@ -447,7 +457,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     );
   }
 
-  Future<List<NostrEvent>> _fetchChannelHistoryBatch(
+  /// Returns null when the batch is unavailable: it hit a relay deadline.
+  Future<List<NostrEvent>?> _fetchChannelHistoryBatch(
     RelaySessionNotifier session,
     List<NostrFilter> filters, {
     required String operation,
@@ -457,6 +468,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     try {
       return await session.queryRelay(filters);
     } catch (error) {
+      // Per-filter fallback would re-run the timed-out work another way.
+      if (isRelayDeadlineError(error)) {
+        debugPrint('[ChannelsNotifier] batched $operation hit the deadline');
+        return null;
+      }
       debugPrint(
         '[ChannelsNotifier] batched $operation failed; '
         'using bounded websocket fallback: $error',
@@ -465,13 +481,19 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
     const fallbackConcurrency = 4;
     final events = <NostrEvent>[];
+    var deadline = false;
     for (var start = 0; start < filters.length; start += fallbackConcurrency) {
+      // Stop sending once a filter hit the deadline; partial events are not
+      // a result.
+      if (deadline) return null;
       final end = min(start + fallbackConcurrency, filters.length);
       final results = await Future.wait(
         filters.sublist(start, end).map((filter) async {
           try {
             return await session.fetchHistory(filter);
-          } catch (_) {
+          } catch (error) {
+            // A timed-out filter makes the batch unavailable, not empty.
+            if (isRelayDeadlineError(error)) deadline = true;
             return const <NostrEvent>[];
           }
         }),
@@ -480,6 +502,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         events.addAll(result);
       }
     }
+    if (deadline) return null;
     return events;
   }
 
@@ -592,6 +615,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         filters,
         operation: 'unread catch-up',
       );
+      // Unavailable: keep the unread state already observed.
+      if (events == null) return;
       // The relay round-trip above is the window Jed's probes park in: a newer
       // refresh, a community switch or an identity switch here means every
       // write below belongs to a channel list the user has left.
@@ -605,7 +630,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         }
       }
 
-      var recorded = false;
+      final recordedAtByChannel = <String, int>{};
       for (final event in events) {
         final channelId = event.channelId;
         if (channelId == null) continue;
@@ -626,20 +651,41 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           continue;
         }
         _recordUnreadEvent(channel, event, myPk);
-        recorded = true;
+        recordedAtByChannel[channelId] = max(
+          recordedAtByChannel[channelId] ?? 0,
+          event.createdAt,
+        );
       }
       // Republish only when this catch-up actually changed unread state. A
       // batch that recorded nothing has nothing to show, and a failed or
       // superseded batch must not repaint another refresh's list: the retired
       // check above already returned in that case, and no await separates it
       // from here, so a second check would be dead code.
-      if (recorded) {
-        state = state.whenData((channels) => List<Channel>.of(channels));
+      // Recorded events also advance `lastMessageAt`, as live events do: a
+      // deadline-unavailable latest-message batch leaves it unset.
+      if (recordedAtByChannel.isNotEmpty) {
+        state = state.whenData(
+          (channels) => [
+            for (final channel in channels)
+              _advanceLastMessageAt(channel, recordedAtByChannel[channel.id]),
+          ],
+        );
       }
     } catch (error) {
       if (!ref.mounted) return;
       debugPrint('[ChannelsNotifier] unread catch-up failed: $error');
     }
+  }
+
+  static Channel _advanceLastMessageAt(Channel channel, int? createdAt) {
+    if (createdAt == null) return channel;
+    final at = DateTime.fromMillisecondsSinceEpoch(
+      createdAt * 1000,
+      isUtc: true,
+    );
+    final current = channel.lastMessageAt;
+    if (current != null && !at.isAfter(current)) return channel;
+    return channel.copyWith(lastMessageAt: at);
   }
 
   void _handleLiveEvent(NostrEvent event) {

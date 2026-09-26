@@ -247,6 +247,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     } catch (error) {
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
+      // Legacy history would re-run the timed-out work another way.
+      if (isRelayDeadlineError(error)) rethrow;
       debugPrint(
         '[ChannelMessagesNotifier] channel window unavailable for $channelId, falling back to WS history: $error',
       );

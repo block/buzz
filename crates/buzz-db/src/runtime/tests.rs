@@ -3293,5 +3293,302 @@ async fn floor_guard_blocks_updates_that_move_rows_below_the_fence() {
     drop_scratch_db(&admin, pool, &name).await;
 }
 
+// ---- Statement-deadline cancellation vs. replica fallback ----------------
+//
+// A replica read cancelled by `statement_timeout` (SQLSTATE 57014) must be
+// surfaced, not re-run on the writer: the writer would be just as slow and
+// the relay maps it to a distinct non-retried "query timed out". Every other
+// replica failure keeps failing closed to the writer.
+
+/// Writer and replica scratch DBs holding one root plus an `e`-tagged reply
+/// that mentions `mentioned` — the writer copy says "writer-reply" so a
+/// writer re-run is observable. Returns the reply-targeted query shape.
+struct EtagFixture {
+    admin: PgPool,
+    writer: PgPool,
+    wname: String,
+    replica: PgPool,
+    rname: String,
+    cid: CommunityId,
+    root_hex: String,
+    mentioned_hex: String,
+}
+
+async fn e_tag_fixture(prefix: &str) -> EtagFixture {
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (writer, wname) = create_scratch_db(&admin, &format!("{prefix}_w")).await;
+    let (replica, rname) = create_scratch_db(&admin, &format!("{prefix}_r")).await;
+    let author = nostr::Keys::generate();
+    let mentioned = nostr::Keys::generate();
+    let community = Uuid::new_v4();
+    let channel = Uuid::new_v4();
+    let base = 1_700_000_000u64;
+    let root = signed_event_at(&author, "root", base);
+    for (pool, content) in [(&writer, "writer-reply"), (&replica, "replica-reply")] {
+        seed_community_channel(pool, community, channel, &author).await;
+        insert_top_level(pool, community, channel, &root).await;
+        let reply = nostr::EventBuilder::new(nostr::Kind::Custom(9), content)
+            .tags([
+                nostr::Tag::event(root.id),
+                nostr::Tag::public_key(mentioned.public_key()),
+            ])
+            .custom_created_at(nostr::Timestamp::from(base + 10))
+            .sign_with_keys(&author)
+            .expect("sign reply");
+        insert_top_level(pool, community, channel, &reply).await;
+        crate::insert_mentions(
+            pool,
+            CommunityId::from_uuid(community),
+            &reply,
+            Some(channel),
+        )
+        .await
+        .expect("insert mentions");
+    }
+    EtagFixture {
+        admin,
+        writer,
+        wname,
+        replica,
+        rname,
+        cid: CommunityId::from_uuid(community),
+        root_hex: root.id.to_hex(),
+        mentioned_hex: mentioned.public_key().to_hex(),
+    }
+}
+
+impl EtagFixture {
+    fn e_tag_query(&self) -> EventQuery {
+        let mut q = EventQuery::for_community(self.cid);
+        q.e_tags = Some(vec![self.root_hex.clone(), "00".repeat(32)]);
+        q
+    }
+
+    /// A routed `Db` whose reader pool connects fresh (so it picks up any
+    /// `ALTER DATABASE` settings made on the replica), with the fence open
+    /// and a bounded budget so unpinned reads route to the replica.
+    async fn routed_db(&self) -> Db {
+        let base = admin_url().await;
+        let url = format!("{}/{}", &base[..base.rfind('/').expect("path")], self.rname);
+        let reader = PgPool::connect(&url).await.expect("connect reader");
+        let mut db = Db::from_pools(self.writer.clone(), reader);
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        db
+    }
+
+    async fn drop(self) {
+        drop_scratch_db(&self.admin, self.replica, &self.rname).await;
+        drop_scratch_db(&self.admin, self.writer, &self.wname).await;
+    }
+}
+
+fn contents(rows: &[StoredEvent]) -> Vec<&str> {
+    rows.iter().map(|e| e.event.content.as_str()).collect()
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn replica_statement_cancel_propagates_without_writer_rerun() {
+    let fx = e_tag_fixture("cxl").await;
+    // A short operator cap on the replica (kept, not raised, by the e-tag
+    // deadline), plus a lock that parks every `events` read past it: the
+    // heartbeat proof still succeeds, then the routed read is cancelled.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER DATABASE {} SET statement_timeout = '300ms'",
+        fx.rname
+    )))
+    .execute(&fx.admin)
+    .await
+    .expect("set replica statement_timeout");
+    let db = fx.routed_db().await;
+    let q = fx.e_tag_query();
+
+    // Healthy control: the replica serves before it is locked.
+    let rows = db.query_events_routed("t_cxl", &q).await.expect("healthy");
+    assert!(
+        contents(&rows).contains(&"replica-reply"),
+        "fixture must route to replica"
+    );
+
+    let mut locker = fx.replica.begin().await.expect("begin locker");
+    sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *locker)
+        .await
+        .expect("lock replica events");
+
+    let cancelled = |r: crate::Result<()>, what: &str| match r {
+        Err(e) => assert!(e.is_statement_cancelled(), "{what}: want 57014, got {e}"),
+        Ok(()) => panic!("{what}: replica cancel was re-run on the writer"),
+    };
+    cancelled(
+        db.query_events_routed("t_cxl", &q).await.map(drop),
+        "query_events_routed",
+    );
+    cancelled(
+        db.query_events_routed_bounded("t_cxl", &q).await.map(drop),
+        "query_events_routed_bounded",
+    );
+    cancelled(
+        db.count_events_routed("t_cxl", &q).await.map(drop),
+        "count_events_routed",
+    );
+    let root_id = hex::decode(&fx.root_hex).expect("hex");
+    cancelled(
+        db.get_events_by_ids_routed("t_cxl", fx.cid, &[root_id.as_slice()])
+            .await
+            .map(drop),
+        "get_events_by_ids_routed",
+    );
+
+    locker.rollback().await.expect("unlock");
+    drop(db);
+    fx.drop().await;
+}
+
+/// [`replica_statement_cancel_propagates_without_writer_rerun`] for the
+/// request-scoped [`ReadSession`]: a cancelled aux read inside the proved
+/// replica transaction surfaces 57014 and does not degrade to the writer.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn read_session_statement_cancel_propagates_without_writer_rerun() {
+    let fx = e_tag_fixture("scxl").await;
+    let db = fx.routed_db().await;
+    let reader_tx = db
+        .read_pool
+        .as_ref()
+        .expect("reader pool")
+        .begin()
+        .await
+        .expect("begin reader tx");
+    let mut session = ReadSession {
+        inner: ReadSessionInner::Replica {
+            tx: reader_tx,
+            writer: fx.writer.clone(),
+        },
+    };
+    let rows = session
+        .query_events(&fx.e_tag_query())
+        .await
+        .expect("healthy");
+    assert_eq!(contents(&rows), vec!["replica-reply"]);
+
+    // Force the next statement in the session over a short cap.
+    let ReadSessionInner::Replica { tx, .. } = &mut session.inner else {
+        unreachable!()
+    };
+    sqlx::query("SET LOCAL statement_timeout = '50ms'")
+        .execute(&mut **tx)
+        .await
+        .expect("cap session");
+    let mut locker = fx.replica.begin().await.expect("begin locker");
+    sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *locker)
+        .await
+        .expect("lock replica events");
+
+    match session.query_events(&fx.e_tag_query()).await {
+        Err(e) => assert!(e.is_statement_cancelled(), "want 57014, got {e}"),
+        Ok(rows) => panic!("cancel re-ran on the writer: {:?}", contents(&rows)),
+    }
+    assert!(
+        session.is_replica(),
+        "a cancel must not degrade the session"
+    );
+
+    locker.rollback().await.expect("unlock");
+    drop(session);
+    drop(db);
+    fx.drop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn replica_non_cancel_failure_still_falls_back_to_writer() {
+    let fx = e_tag_fixture("nfb").await;
+    let db = fx.routed_db().await;
+    let q = fx.e_tag_query();
+    let rows = db.query_events_routed("t_nfb", &q).await.expect("healthy");
+    assert!(
+        contents(&rows).contains(&"replica-reply"),
+        "fixture must route to replica"
+    );
+
+    // Break the replica after the proof point (heartbeat table intact).
+    sqlx::query("DROP TABLE events CASCADE")
+        .execute(&fx.replica)
+        .await
+        .expect("drop replica events");
+
+    for rows in [
+        db.query_events_routed("t_nfb", &q).await,
+        db.query_events_routed_bounded("t_nfb", &q).await,
+    ] {
+        let rows = rows.expect("non-cancel failure must fall back");
+        assert!(
+            contents(&rows).contains(&"writer-reply"),
+            "{:?}",
+            contents(&rows)
+        );
+    }
+    assert_eq!(
+        db.count_events_routed("t_nfb", &q)
+            .await
+            .expect("count falls back"),
+        1
+    );
+
+    drop(db);
+    fx.drop().await;
+}
+
+/// The `#p`-joined SELECT (fenced, `e.` column prefix) and the COUNT `ANY`
+/// path, executed with real bound values rather than only rendered SQL.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn e_tag_any_runs_with_real_binds_on_p_join_and_count() {
+    let fx = e_tag_fixture("pjn").await;
+    let mut q = fx.e_tag_query();
+
+    let rows = event::query_events(&fx.writer, &q)
+        .await
+        .expect("e-tag select");
+    assert_eq!(contents(&rows), vec!["writer-reply"]);
+    assert_eq!(
+        event::count_events(&fx.writer, &q)
+            .await
+            .expect("e-tag count"),
+        1
+    );
+
+    q.p_tag_hex = Some(fx.mentioned_hex.clone());
+    let rows = event::query_events(&fx.writer, &q)
+        .await
+        .expect("#p + e-tag select");
+    assert_eq!(contents(&rows), vec!["writer-reply"]);
+    assert_eq!(
+        event::count_events(&fx.writer, &q)
+            .await
+            .expect("#p + e-tag count"),
+        1
+    );
+
+    q.p_tag_hex = Some("11".repeat(32));
+    assert!(event::query_events(&fx.writer, &q)
+        .await
+        .expect("miss")
+        .is_empty());
+    assert_eq!(
+        event::count_events(&fx.writer, &q)
+            .await
+            .expect("miss count"),
+        0
+    );
+
+    fx.drop().await;
+}
+
 #[path = "tests/thread_window_postgres_tests.rs"]
 mod thread_window_postgres_tests;

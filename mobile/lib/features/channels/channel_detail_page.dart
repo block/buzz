@@ -25,6 +25,7 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/flapping_bee.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/message_author_meta.dart';
@@ -715,12 +716,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                                 titleContentHeight: appBarTitleContentHeight,
                               ),
                             ),
-                            child: Center(
-                              child: Text(
-                                'Failed to load messages',
-                                style: context.textTheme.bodyMedium?.copyWith(
-                                  color: context.colors.error,
-                                ),
+                            child: LoadErrorView(
+                              message: 'Failed to load messages',
+                              onRetry: () => ref.invalidate(
+                                channelMessagesProvider(channel.id),
                               ),
                             ),
                           ),

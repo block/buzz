@@ -760,6 +760,11 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE INDEX idx_events_tags_gin"));
         assert!(!migrations[0].sql.as_str().contains("idx_events_tags_gin"));
+        // schema.sql (CI / isolated relay bootstrap) must carry the same index,
+        // or e-tag reads there run on plans prod never sees.
+        assert!(include_str!("../../../../schema/schema.sql").contains(
+            "CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops)"
+        ));
 
         // NIP-AM (kind 44200) FTS exclusion: additive migration, never folded
         // into 0001 — folding would change 0001's checksum and break brownfield

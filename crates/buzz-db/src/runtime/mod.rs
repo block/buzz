@@ -201,6 +201,8 @@ impl ReadSession {
     ///
     /// If the proved replica transaction fails mid-request, the session
     /// permanently degrades to the writer and the query is re-run there.
+    /// Exception: a statement cancelled by `statement_timeout` (57014) is
+    /// returned as-is, since the writer would run the same slow statement.
     /// The writer is always at or ahead of any replica replay position, so
     /// the degraded follow-up can only observe *more* than the proof-time
     /// snapshot, never less — fresher aux rows, the same failure semantics
@@ -211,6 +213,9 @@ impl ReadSession {
             ReadSessionInner::Replica { tx, writer } => {
                 match event::query_events_on(tx, q).await {
                     Ok(rows) => return Ok(rows),
+                    // A cancelled statement (timeout) would be just as slow on
+                    // the writer; surface it instead of doubling the cost.
+                    Err(e) if e.is_statement_cancelled() => return Err(e),
                     Err(e) => {
                         tracing::warn!(
                             error = %e,

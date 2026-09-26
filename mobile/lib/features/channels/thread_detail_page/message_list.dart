@@ -10,6 +10,7 @@ class _ThreadMessageList extends StatelessWidget {
   final double bottomInset;
   final List<TimelineMessage> replies;
   final AsyncValue<List<NostrEvent>> relayReplyState;
+  final VoidCallback onRetryReplies;
   final Map<String, DateTime> localSendAnimations;
   final Widget Function(Widget child) trackActiveScrollPosition;
   final bool headIsDeleted;
@@ -36,6 +37,7 @@ class _ThreadMessageList extends StatelessWidget {
     required this.bottomInset,
     required this.replies,
     required this.relayReplyState,
+    required this.onRetryReplies,
     required this.localSendAnimations,
     required this.trackActiveScrollPosition,
     required this.headIsDeleted,
@@ -164,6 +166,17 @@ class _ThreadMessageList extends StatelessWidget {
                                     ),
                                   ),
                                 ),
+                                if (relayReplyState.hasError &&
+                                    !relayReplyState.isLoading)
+                                  IconButton(
+                                    key: const ValueKey('thread-replies-retry'),
+                                    onPressed: onRetryReplies,
+                                    tooltip: 'Retry',
+                                    icon: const Icon(
+                                      LucideIcons.refreshCcw,
+                                      size: 16,
+                                    ),
+                                  ),
                                 const SizedBox(width: Grid.xxs),
                                 Expanded(
                                   child: Divider(

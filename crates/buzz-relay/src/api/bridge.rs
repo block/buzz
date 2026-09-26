@@ -22,7 +22,7 @@ use crate::handlers::ingest::{IngestAuth, IngestError};
 use crate::nip_fi_http::{admit_nip_fi_http_on_state, Nip98Proof};
 use crate::state::AppState;
 
-use super::{api_error, internal_error, not_found, parse_query_or_400};
+use super::{api_error, db_read_error, internal_error, not_found, parse_query_or_400};
 
 mod thread_roots;
 mod thread_window;
@@ -772,7 +772,7 @@ async fn handle_channel_window_filter(
                 &mut AuxReader::Session(&mut session),
             )
             .await
-            .map_err(|e| internal_error(&format!("window aux error: {e}")))?;
+            .map_err(|e| db_read_error("window aux error", &e))?;
             for se in aux_events {
                 if !seen_aux.insert(se.event.id) {
                     continue;
@@ -1635,7 +1635,7 @@ async fn query_events_authed(
                     &mut AuxReader::Routed(&state.db, "bridge_thread_aux"),
                 )
                 .await
-                .map_err(|e| internal_error(&format!("thread aux query error: {e}")))?;
+                .map_err(|e| db_read_error("thread aux query error", &e))?;
                 for se in aux_events {
                     if !seen_aux.insert(se.event.id)
                         || !event_in_accessible_channel(&se, &accessible_channels)
@@ -1792,7 +1792,7 @@ async fn query_events_authed(
                 }
             }
             Err(e) => {
-                return Err(internal_error(&format!("query error: {e}")));
+                return Err(db_read_error("query error", &e));
             }
         }
     }
@@ -2058,7 +2058,7 @@ async fn count_events_authed(
                 match state.db.count_events_routed("bridge_count", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
-                        return Err(internal_error(&format!("count error: {e}")));
+                        return Err(db_read_error("count error", &e));
                     }
                 }
             } else {
@@ -2093,7 +2093,7 @@ async fn count_events_authed(
                         }
                     }
                     Err(e) => {
-                        return Err(internal_error(&format!("count error: {e}")));
+                        return Err(db_read_error("count error", &e));
                     }
                 }
             }
@@ -2129,7 +2129,7 @@ async fn count_events_authed(
                 match state.db.count_events_routed("bridge_count", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
-                        return Err(internal_error(&format!("count error: {e}")));
+                        return Err(db_read_error("count error", &e));
                     }
                 }
             } else {
@@ -2163,7 +2163,7 @@ async fn count_events_authed(
                         }
                     }
                     Err(e) => {
-                        return Err(internal_error(&format!("count error: {e}")));
+                        return Err(db_read_error("count error", &e));
                     }
                 }
             }
@@ -2314,7 +2314,7 @@ async fn handle_bridge_search(
             .db
             .get_events_by_ids_routed("bridge_search_hydrate", tenant.community(), &id_refs)
             .await
-            .map_err(|e| internal_error(&format!("search fetch error: {e}")))?;
+            .map_err(|e| db_read_error("search fetch error", &e))?;
 
         // Build lookup map to preserve FTS relevance ordering.
         let event_map: std::collections::HashMap<[u8; 32], &buzz_core::StoredEvent> = stored_events
@@ -7605,5 +7605,460 @@ mod postgres_tests {
             drop_scratch(&admin2, writer_pool, &writer_name).await;
             drop_scratch(&admin2, replica_pool, &replica_name).await;
         });
+    }
+
+    // ── Statement-cancel propagation through every routed-read caller ─────────
+    //
+    // A replica whose `events` table is locked past its 300ms operator
+    // `statement_timeout` cancels every routed read with 57014, which the
+    // routed helpers now propagate instead of re-running on the writer. Every
+    // COUNT arm (fast/fallback × with/without `#h`) and search hydrate must
+    // then answer with the stable timeout contract on both transports:
+    // HTTP 503 `query timed out`, WS CLOSED `error: query timed out`. The
+    // ordinary-error controls rename `events` so reads fail with 42P01 and
+    // must stay a generic 500 / raw WS error.
+
+    struct CancelFixture {
+        admin: sqlx::PgPool,
+        writer: sqlx::PgPool,
+        replica: sqlx::PgPool,
+        names: [String; 2],
+        state: Arc<crate::state::AppState>,
+        host: String,
+        community: buzz_core::CommunityId,
+        channel: String,
+        root: String,
+        reader: Keys,
+    }
+
+    async fn cancel_fixture() -> CancelFixture {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        let admin_url = crate::test_support::database_url();
+        let admin = sqlx::PgPool::connect(&admin_url).await.expect("admin pool");
+        let base = &admin_url[..admin_url.rfind('/').expect("db path")];
+        let community = uuid::Uuid::new_v4();
+        let channel = uuid::Uuid::new_v4();
+        let host = format!("cancel-{}.local", community.simple());
+        let author = Keys::generate();
+        let root = EventBuilder::new(Kind::Custom(9), "root needle")
+            .tag(Tag::parse(["h", &channel.to_string()]).expect("h"))
+            .sign_with_keys(&author)
+            .expect("sign root");
+        let mut pools = Vec::new();
+        let mut names = Vec::new();
+        for role in ["w", "r"] {
+            let name = format!("cancel_{role}_{}", uuid::Uuid::new_v4().simple());
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+                .execute(&admin)
+                .await
+                .expect("create scratch db");
+            if role == "r" {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "ALTER DATABASE {name} SET statement_timeout = '300ms'"
+                )))
+                .execute(&admin)
+                .await
+                .expect("replica statement_timeout");
+            }
+            let pool = sqlx::PgPool::connect(&format!("{base}/{name}"))
+                .await
+                .expect("connect scratch");
+            buzz_db::migration::run_migrations(&pool)
+                .await
+                .expect("migrate");
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community)
+                .bind(&host)
+                .execute(&pool)
+                .await
+                .expect("seed community");
+            let cid = buzz_core::CommunityId::from_uuid(community);
+            buzz_db::channel::create_channel_with_id(
+                &pool,
+                cid,
+                channel,
+                &format!("cancel-{}", channel.simple()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                author.public_key().to_bytes().as_slice(),
+                None,
+            )
+            .await
+            .expect("create channel");
+            buzz_db::Db::from_pool(pool.clone())
+                .insert_event(cid, &root, Some(channel))
+                .await
+                .expect("insert root");
+            pools.push(pool);
+            names.push(name);
+        }
+        let replica = pools.pop().expect("replica");
+        let writer = pools.pop().expect("writer");
+
+        let mut config = crate::config::Config::from_env().expect("config");
+        config.redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        config.relay_url = "wss://cancel-test.local".to_string();
+        config.require_auth_token = false;
+        config.require_relay_membership = false;
+        let mut db = buzz_db::Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub"),
+        );
+        let (mut state, _audit_shutdown) = crate::state::AppState::new(
+            config.clone(),
+            db.clone(),
+            redis_pool,
+            buzz_audit::AuditService::new(writer.clone()),
+            pubsub,
+            buzz_auth::AuthService::new(config.auth.clone()),
+            buzz_search::SearchService::new(writer.clone()),
+            Arc::new(buzz_workflow::WorkflowEngine::new(
+                db,
+                buzz_workflow::WorkflowConfig::default(),
+            )),
+            Keys::generate(),
+            buzz_media::MediaStorage::new(&config.media).expect("media storage"),
+        );
+        state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
+        CancelFixture {
+            admin,
+            writer,
+            replica,
+            names: [names[0].clone(), names[1].clone()],
+            state: Arc::new(state),
+            host,
+            community: buzz_core::CommunityId::from_uuid(community),
+            channel: channel.to_string(),
+            root: root.id.to_hex(),
+            reader: Keys::generate(),
+        }
+    }
+
+    impl CancelFixture {
+        /// The four COUNT arms: fast (fully pushable) and fallback (`#t` is
+        /// not pushable, `#e` still reaches SQL), each with and without `#h`.
+        fn count_cases(&self) -> Vec<(&'static str, serde_json::Value)> {
+            let e = [&self.root];
+            let h = [&self.channel];
+            vec![
+                (
+                    "fast #h",
+                    serde_json::json!({"kinds": [9], "#h": h, "#e": e}),
+                ),
+                (
+                    "fallback #h",
+                    serde_json::json!({"kinds": [9], "#h": h, "#e": e, "#t": ["x"]}),
+                ),
+                ("fast no-#h", serde_json::json!({"kinds": [9], "#e": e})),
+                (
+                    "fallback no-#h",
+                    serde_json::json!({"kinds": [9], "#e": e, "#t": ["x"]}),
+                ),
+            ]
+        }
+
+        fn search_filter(&self) -> serde_json::Value {
+            serde_json::json!({"kinds": [9], "#h": [&self.channel], "search": "needle"})
+        }
+
+        async fn http(&self, uri: &str, filter: &serde_json::Value) -> (StatusCode, Value) {
+            use axum::body::Body;
+            use axum::http::{header, Request};
+            use tower::ServiceExt;
+            let resp = crate::router::build_router(self.state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(header::HOST, &self.host)
+                        .header("x-pubkey", self.reader.public_key().to_hex())
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&[filter]).expect("json")))
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        /// Drive a WS frame handler and return the first frame it sends.
+        async fn ws<F, Fut>(&self, drive: F) -> String
+        where
+            F: FnOnce(Arc<crate::connection::ConnectionState>) -> Fut,
+            Fut: std::future::Future<Output = ()>,
+        {
+            let (conn, mut send_rx) = self.ws_conn();
+            drive(conn).await;
+            match send_rx.try_recv().expect("handler sent a frame") {
+                axum::extract::ws::Message::Text(t) => t.to_string(),
+                other => panic!("expected text frame, got {other:?}"),
+            }
+        }
+
+        /// An authenticated reader connection and its outbound frame queue.
+        fn ws_conn(
+            &self,
+        ) -> (
+            Arc<crate::connection::ConnectionState>,
+            tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+        ) {
+            let (send_tx, send_rx) = tokio::sync::mpsc::channel(64);
+            let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(4);
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: uuid::Uuid::new_v4(),
+                tenant: TenantContext::resolved(self.community, self.host.clone()),
+                remote_addr: "127.0.0.1:1234".parse().expect("addr"),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: self.reader.public_key(),
+                        scopes: Vec::new(),
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: Arc::new(tokio::sync::Mutex::new(Default::default())),
+                send_tx,
+                ctrl_tx,
+                cancel: tokio_util::sync::CancellationToken::new(),
+                backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+            });
+            (conn, send_rx)
+        }
+
+        async fn ws_count(&self, filter: &serde_json::Value) -> String {
+            let filter: nostr::Filter = serde_json::from_value(filter.clone()).expect("filter");
+            let state = self.state.clone();
+            self.ws(|conn| {
+                crate::handlers::count::handle_count("c".into(), vec![filter], conn, state)
+            })
+            .await
+        }
+
+        async fn ws_search(&self) -> String {
+            let filter: nostr::Filter =
+                serde_json::from_value(self.search_filter()).expect("filter");
+            let state = self.state.clone();
+            self.ws(|conn| {
+                crate::handlers::req::handle_req("s".into(), vec![filter], vec![None], conn, state)
+            })
+            .await
+        }
+
+        async fn drop(self) {
+            drop(self.state);
+            for (pool, name) in [
+                (self.writer, &self.names[0]),
+                (self.replica, &self.names[1]),
+            ] {
+                pool.close().await;
+                let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+                )))
+                .execute(&self.admin)
+                .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn routed_read_cancel_maps_to_timeout_contract_on_count_and_search() {
+        let fx = cancel_fixture().await;
+
+        // Healthy controls: every arm and search hydrate serve before the lock.
+        for (arm, filter) in fx.count_cases() {
+            let (status, body) = fx.http("/count", &filter).await;
+            assert_eq!(status, StatusCode::OK, "healthy HTTP COUNT {arm}: {body}");
+            let frame = fx.ws_count(&filter).await;
+            assert!(
+                frame.starts_with(r#"["COUNT""#),
+                "healthy WS COUNT {arm}: {frame}"
+            );
+        }
+        let (status, body) = fx.http("/query", &fx.search_filter()).await;
+        assert_eq!(status, StatusCode::OK, "healthy HTTP search: {body}");
+        assert!(
+            body.to_string().contains("root needle"),
+            "search hit: {body}"
+        );
+        let frame = fx.ws_search().await;
+        assert!(frame.contains("root needle"), "healthy WS search: {frame}");
+
+        let mut locker = fx.replica.begin().await.expect("begin locker");
+        sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locker)
+            .await
+            .expect("lock replica events");
+
+        let closed = |sub: &str| {
+            format!(
+                r#"["CLOSED","{sub}","{}"]"#,
+                crate::handlers::req::QUERY_TIMED_OUT_CLOSED
+            )
+        };
+        for (arm, filter) in fx.count_cases() {
+            let (status, body) = fx.http("/count", &filter).await;
+            assert_eq!(
+                (status, body["error"].as_str()),
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some(super::super::QUERY_TIMED_OUT)
+                ),
+                "HTTP COUNT {arm}"
+            );
+            assert_eq!(fx.ws_count(&filter).await, closed("c"), "WS COUNT {arm}");
+        }
+        let (status, body) = fx.http("/query", &fx.search_filter()).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some(super::super::QUERY_TIMED_OUT)
+            ),
+            "HTTP search hydrate"
+        );
+        assert_eq!(fx.ws_search().await, closed("s"), "WS search hydrate");
+        locker.rollback().await.expect("unlock");
+
+        // Ordinary-error controls: `events` gone on both pools → 42P01 on the
+        // replica, writer re-run, 42P01 again. Not a timeout.
+        for pool in [&fx.writer, &fx.replica] {
+            sqlx::query("ALTER TABLE events RENAME TO events_gone")
+                .execute(pool)
+                .await
+                .expect("rename events");
+        }
+        let (arm, filter) = fx.count_cases().swap_remove(0);
+        let (status, body) = fx.http("/count", &filter).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some("internal server error")
+            ),
+            "HTTP COUNT {arm} ordinary error"
+        );
+        let frame = fx.ws_count(&filter).await;
+        assert!(
+            frame.starts_with(r#"["CLOSED","c","error: "#) && !frame.contains("query timed out"),
+            "WS COUNT {arm} ordinary error: {frame}"
+        );
+
+        fx.drop().await;
+    }
+
+    /// A search REQ reusing a live subscription's ID retires it (NIP-01
+    /// replacement) before its hydrate is cancelled, so the timeout CLOSED
+    /// leaves nothing registered under the ID.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_reusing_live_id_retires_it_before_timeout_closed() {
+        use crate::handlers::req::handle_req;
+        let fx = cancel_fixture().await;
+        let (conn, mut rx) = fx.ws_conn();
+        let frames = |rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|msg| match msg {
+                    axum::extract::ws::Message::Text(t) => t.to_string(),
+                    other => panic!("expected text frame, got {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let channel: uuid::Uuid = fx.channel.parse().expect("channel uuid");
+        let topic = buzz_pubsub::EventTopic::Channel(channel);
+        let tenant = TenantContext::resolved(fx.community, fx.host.clone());
+        let live: nostr::Filter =
+            serde_json::from_value(serde_json::json!({"kinds": [9], "#h": [&fx.channel]}))
+                .expect("live filter");
+        handle_req(
+            "x".into(),
+            vec![live],
+            vec![None],
+            conn.clone(),
+            fx.state.clone(),
+        )
+        .await;
+        assert!(
+            frames(&mut rx)
+                .last()
+                .is_some_and(|f| f == r#"["EOSE","x"]"#),
+            "live x served"
+        );
+        assert!(conn.subscriptions.lock().await.contains_key("x"));
+        assert!(fx
+            .state
+            .sub_registry
+            .get_filters(conn.conn_id, "x")
+            .is_some());
+        assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 1);
+
+        let mut locker = fx.replica.begin().await.expect("begin locker");
+        sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locker)
+            .await
+            .expect("lock replica events");
+        let search: nostr::Filter =
+            serde_json::from_value(fx.search_filter()).expect("search filter");
+        let live_owner = *conn.subscriptions.lock().await.get("x").expect("x owned");
+        let task = tokio::spawn(handle_req(
+            "x".into(),
+            vec![search],
+            vec![None],
+            conn.clone(),
+            fx.state.clone(),
+        ));
+        // Once search has claimed `x` its hydrate blocks on the lock. The old
+        // live fan-out must already be retired then, not only at final cleanup.
+        while conn.subscriptions.lock().await.get("x") == Some(&live_owner) {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            fx.state
+                .sub_registry
+                .get_filters(conn.conn_id, "x")
+                .is_none(),
+            "accepting search must retire live fan-out"
+        );
+        assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 0);
+        task.await.expect("search task");
+        locker.rollback().await.expect("unlock");
+
+        assert_eq!(
+            frames(&mut rx),
+            vec![format!(
+                r#"["CLOSED","x","{}"]"#,
+                crate::handlers::req::QUERY_TIMED_OUT_CLOSED
+            )]
+        );
+        assert!(conn.subscriptions.lock().await.is_empty(), "conn map");
+        assert!(
+            fx.state
+                .sub_registry
+                .get_filters(conn.conn_id, "x")
+                .is_none(),
+            "fan-out registration must be retired"
+        );
+        assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 0);
+
+        drop(conn);
+        fx.drop().await;
     }
 }

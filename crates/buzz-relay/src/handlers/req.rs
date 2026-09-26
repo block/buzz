@@ -267,8 +267,12 @@ pub async fn handle_req(
             ));
             return;
         }
+        let Some(owner) = claim_search_subscription(&sub_id, &conn, &state).await else {
+            return;
+        };
         handle_search_req(
             &sub_id,
+            owner,
             &filters,
             &accessible_channels,
             token_channel_ids.is_none(),
@@ -279,47 +283,22 @@ pub async fn handle_req(
             trace_state.as_ref(),
         )
         .await;
+        // One-shot: drop the claim unless a newer REQ already took the ID.
+        super::close::close_if_owner(&sub_id, owner, None, &conn, &state).await;
         return;
     }
 
-    {
-        let mut subs = conn.subscriptions.lock().await;
-        subs.insert(sub_id.clone(), filters.clone());
-    }
-
-    let replaced = if let Some(channel_ids) = authorized_requested_channels.as_ref() {
-        state.sub_registry.register_channels_scoped(
-            conn.tenant.community(),
-            conn_id,
-            sub_id.clone(),
-            filters.clone(),
-            channel_ids.clone(),
-        )
-    } else {
-        state.sub_registry.register_scoped(
-            conn.tenant.community(),
-            conn_id,
-            sub_id.clone(),
-            filters.clone(),
-            None,
-        )
+    let Some(owner) = claim_live_subscription(
+        &sub_id,
+        &filters,
+        authorized_requested_channels.as_deref(),
+        &conn,
+        &state,
+    )
+    .await
+    else {
+        return;
     };
-    if let Some(replaced) = replaced {
-        release_subscription_topics(&state, &conn.tenant, &replaced.scope).await;
-    }
-    if let Some(channel_ids) = authorized_requested_channels.as_ref() {
-        for &channel_id in channel_ids {
-            state
-                .pubsub
-                .retain_topic(&conn.tenant, EventTopic::Channel(channel_id))
-                .await;
-        }
-    } else {
-        state
-            .pubsub
-            .retain_topic(&conn.tenant, EventTopic::Global)
-            .await;
-    }
 
     debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
 
@@ -396,7 +375,11 @@ pub async fn handle_req(
             Ok(evs) => evs,
             Err(e) => {
                 warn!(conn_id = %conn_id, sub_id = %sub_id, "Historical query failed: {e}");
-                conn.send(RelayMessage::eose(&sub_id));
+                if e.is_statement_cancelled() {
+                    close_timed_out_subscription(&sub_id, owner, &conn, &state).await;
+                } else {
+                    conn.send(RelayMessage::eose(&sub_id));
+                }
                 return;
             }
         };
@@ -597,6 +580,7 @@ pub(crate) fn build_search_channel_scope_filter(
 #[allow(clippy::too_many_arguments)]
 async fn handle_search_req(
     sub_id: &str,
+    owner: u64,
     filters: &[Filter],
     accessible_channels: &[uuid::Uuid],
     include_global: bool,
@@ -724,6 +708,12 @@ async fn handle_search_req(
                     .await
                 {
                     Ok(evs) => evs,
+                    Err(e) if e.is_statement_cancelled() => {
+                        // CLOSED (not EOSE) keeps partial results from reading as complete.
+                        warn!(sub_id = %sub_id, "NIP-50 batch fetch timed out: {e}");
+                        close_timed_out_subscription(sub_id, owner, conn, state).await;
+                        return;
+                    }
                     Err(e) => {
                         warn!(sub_id = %sub_id, "NIP-50 batch fetch failed: {e}");
                         break;
@@ -1269,20 +1259,106 @@ async fn handle_huddle_liveness_req(
     conn.send(RelayMessage::eose(sub_id));
 }
 
-async fn release_subscription_topics(
+/// Claim `sub_id` for a live REQ under the lifecycle lock: record a fresh
+/// owner token, register for fan-out (replacing any same-ID entry), retain its
+/// topics, and release the replaced scope's. Returns the owner token, or
+/// `None` once the connection is closing — the caller then exits silently.
+async fn claim_live_subscription(
+    sub_id: &str,
+    filters: &[Filter],
+    channel_ids: Option<&[uuid::Uuid]>,
+    conn: &ConnectionState,
     state: &AppState,
-    tenant: &TenantContext,
-    scope: &crate::subscription::SubscriptionScope,
-) {
-    if scope.is_global() {
-        state.pubsub.release_topic(tenant, EventTopic::Global).await;
-    } else {
-        for &channel_id in scope.channel_ids() {
+) -> Option<u64> {
+    let mut subs = conn.subscriptions.lock().await;
+    if conn.cancel.is_cancelled() {
+        return None;
+    }
+    let owner = super::close::next_owner();
+    subs.insert(sub_id.to_string(), owner);
+    let community = conn.tenant.community();
+    let replaced = match channel_ids {
+        Some(ids) => state.sub_registry.register_channels_scoped(
+            community,
+            conn.conn_id,
+            sub_id.to_string(),
+            filters.to_vec(),
+            ids.to_vec(),
+        ),
+        None => state.sub_registry.register_scoped(
+            community,
+            conn.conn_id,
+            sub_id.to_string(),
+            filters.to_vec(),
+            None,
+        ),
+    };
+    match channel_ids {
+        Some(ids) => {
+            for &channel_id in ids {
+                state
+                    .pubsub
+                    .retain_topic(&conn.tenant, EventTopic::Channel(channel_id))
+                    .await;
+            }
+        }
+        None => {
             state
                 .pubsub
-                .release_topic(tenant, EventTopic::Channel(channel_id))
+                .retain_topic(&conn.tenant, EventTopic::Global)
                 .await;
         }
+    }
+    if let Some(replaced) = replaced {
+        super::close::release_scope_topics(state, &conn.tenant, &replaced.scope).await;
+    }
+    Some(owner)
+}
+
+/// Claim `sub_id` for a one-shot search REQ under the lifecycle lock.
+/// Accepting it retires whatever holds the ID (NIP-01 replacement), even
+/// though search never registers for fan-out. `None` once the connection is
+/// closing.
+async fn claim_search_subscription(
+    sub_id: &str,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> Option<u64> {
+    let mut subs = conn.subscriptions.lock().await;
+    if conn.cancel.is_cancelled() {
+        return None;
+    }
+    super::close::retire_locked(&mut subs, sub_id, conn, state).await;
+    let owner = super::close::next_owner();
+    subs.insert(sub_id.to_string(), owner);
+    Some(owner)
+}
+
+/// A read hit the server statement deadline. Sends `CLOSED` rather than `EOSE`
+/// so clients don't treat the empty result as complete. CLOSED means the relay
+/// dropped the sub (NIP-01) and clients won't `CLOSE` it, so it is retired in
+/// the same lifecycle-lock critical section. A request a newer same-ID REQ
+/// superseded owns nothing and says nothing.
+async fn close_timed_out_subscription(
+    sub_id: &str,
+    owner: u64,
+    conn: &ConnectionState,
+    state: &AppState,
+) {
+    super::close::close_if_owner(sub_id, owner, Some(QUERY_TIMED_OUT_CLOSED), conn, state).await;
+}
+
+/// Stable CLOSED reason for a read cancelled by its server statement deadline.
+/// Clients match it to skip retrying the same expensive query.
+pub(crate) const QUERY_TIMED_OUT_CLOSED: &str = "error: query timed out";
+
+/// CLOSED reason for a failed one-shot DB read (COUNT): a statement cancel gets
+/// the stable timeout reason; anything else keeps the raw error.
+pub(crate) fn db_read_closed_reason(e: &buzz_db::DbError) -> String {
+    if e.is_statement_cancelled() {
+        QUERY_TIMED_OUT_CLOSED.to_string()
+    } else {
+        format!("error: {e}")
     }
 }
 
@@ -1553,6 +1629,491 @@ pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_h
 mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
+
+    fn lifecycle_conn() -> (
+        ConnectionState,
+        tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    ) {
+        use std::sync::atomic::AtomicU8;
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel(8);
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(1);
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let conn = ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
+            remote_addr: "127.0.0.1:1234".parse().expect("addr"),
+            auth_state: std::sync::Mutex::new(AuthState::Failed),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        };
+        (conn, send_rx)
+    }
+
+    fn text_filters() -> Vec<Filter> {
+        vec![Filter::new().kind(nostr::Kind::TextNote)]
+    }
+
+    fn registered(state: &AppState, conn: &ConnectionState, sub_id: &str) -> bool {
+        state
+            .sub_registry
+            .get_filters(conn.conn_id, sub_id)
+            .is_some()
+    }
+
+    fn closed_frames(
+        rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    ) -> Vec<String> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|msg| match msg {
+                axum::extract::ws::Message::Text(t) => t.to_string(),
+                other => panic!("expected text frame, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn timed_out_historical_read_deregisters_before_closed() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let channel = uuid::Uuid::new_v4();
+        let topic = EventTopic::Channel(channel);
+        let owner =
+            claim_live_subscription("thread", &text_filters(), Some(&[channel]), &conn, &state)
+                .await
+                .expect("claim");
+        assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 1);
+
+        close_timed_out_subscription("thread", owner, &conn, &state).await;
+
+        assert!(conn.subscriptions.lock().await.is_empty());
+        assert!(
+            !registered(&state, &conn, "thread"),
+            "fan-out registration must be gone"
+        );
+        assert_eq!(
+            state.pubsub.topic_refcount(&conn.tenant, topic).await,
+            0,
+            "retained topic must be released"
+        );
+        assert_eq!(
+            closed_frames(&mut send_rx),
+            vec![format!(r#"["CLOSED","thread","{QUERY_TIMED_OUT_CLOSED}"]"#)]
+        );
+    }
+
+    /// A superseded REQ's late timeout must not tear down, or send a terminal
+    /// CLOSED for, the same-ID replacement that now owns the ID.
+    #[tokio::test]
+    async fn superseded_timeout_leaves_replacement_intact() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let (old_channel, new_channel) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let (old_topic, new_topic) = (
+            EventTopic::Channel(old_channel),
+            EventTopic::Channel(new_channel),
+        );
+        let old =
+            claim_live_subscription("x", &text_filters(), Some(&[old_channel]), &conn, &state)
+                .await
+                .expect("claim");
+        let new =
+            claim_live_subscription("x", &text_filters(), Some(&[new_channel]), &conn, &state)
+                .await
+                .expect("claim");
+        assert_eq!(
+            state.pubsub.topic_refcount(&conn.tenant, old_topic).await,
+            0
+        );
+
+        close_timed_out_subscription("x", old, &conn, &state).await;
+
+        assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&new));
+        assert!(
+            registered(&state, &conn, "x"),
+            "replacement must stay registered"
+        );
+        assert_eq!(
+            state.pubsub.topic_refcount(&conn.tenant, new_topic).await,
+            1,
+            "replacement topic must stay retained"
+        );
+        assert!(
+            closed_frames(&mut send_rx).is_empty(),
+            "superseded request must say nothing"
+        );
+    }
+
+    /// Accepting a search REQ retires the live subscription holding its ID, and
+    /// a search that a newer live REQ supersedes cannot close that REQ.
+    #[tokio::test]
+    async fn search_claim_retires_live_and_yields_to_replacement() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let channel = uuid::Uuid::new_v4();
+        let topic = EventTopic::Channel(channel);
+        claim_live_subscription("x", &text_filters(), Some(&[channel]), &conn, &state)
+            .await
+            .expect("claim");
+
+        let search = claim_search_subscription("x", &conn, &state)
+            .await
+            .expect("claim");
+        assert!(
+            !registered(&state, &conn, "x"),
+            "search must retire live fan-out"
+        );
+        assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 0);
+
+        let live = claim_live_subscription("x", &text_filters(), Some(&[channel]), &conn, &state)
+            .await
+            .expect("claim");
+        close_timed_out_subscription("x", search, &conn, &state).await;
+
+        assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&live));
+        assert!(registered(&state, &conn, "x"));
+        assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 1);
+        assert!(closed_frames(&mut send_rx).is_empty());
+    }
+
+    /// Concurrent same-ID claims and stale teardowns: whichever claim lands
+    /// last owns the ID, and every stale teardown is a silent no-op.
+    #[tokio::test]
+    async fn concurrent_claims_and_stale_teardowns_keep_the_last_owner() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let conn = Arc::new(conn);
+        let channel = uuid::Uuid::new_v4();
+        let topic = EventTopic::Channel(channel);
+        let stale = claim_live_subscription("x", &text_filters(), Some(&[channel]), &conn, &state)
+            .await
+            .expect("claim");
+
+        let tasks = (0..16).map(|i| {
+            let (conn, state) = (Arc::clone(&conn), Arc::clone(&state));
+            tokio::spawn(async move {
+                if i % 2 == 0 {
+                    claim_live_subscription("x", &text_filters(), Some(&[channel]), &conn, &state)
+                        .await
+                        .expect("claim");
+                } else {
+                    close_timed_out_subscription("x", stale, &conn, &state).await;
+                }
+            })
+        });
+        for task in tasks.collect::<Vec<_>>() {
+            task.await.expect("task");
+        }
+
+        let owner = *conn.subscriptions.lock().await.get("x").expect("x owned");
+        assert_ne!(owner, stale);
+        assert!(registered(&state, &conn, "x"));
+        assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 1);
+        close_timed_out_subscription("x", owner, &conn, &state).await;
+        assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 0);
+        assert_eq!(
+            closed_frames(&mut send_rx),
+            vec![format!(r#"["CLOSED","x","{QUERY_TIMED_OUT_CLOSED}"]"#)],
+            "only the final owner's teardown may close"
+        );
+    }
+
+    fn subscribed(state: &AppState, conn: &ConnectionState, channel: uuid::Uuid) -> bool {
+        state
+            .sub_registry
+            .channel_subscriber_conns_scoped(conn.tenant.community(), channel)
+            .contains(&conn.conn_id)
+    }
+
+    /// Poll `fut` exactly once and require it to park. A contender for a held
+    /// tokio mutex enqueues its waiter and returns `Pending` on that poll, so
+    /// this proves it reached its lock attempt without relying on scheduling.
+    async fn assert_parked<F: std::future::Future + Unpin>(fut: &mut F, what: &str) {
+        let parked = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::pin::Pin::new(&mut *fut).poll(cx).is_pending())
+        })
+        .await;
+        assert!(parked, "{what} must be waiting on the lifecycle lock");
+    }
+
+    /// The owner's teardown and its terminal CLOSED are one critical section:
+    /// a replacement claiming meanwhile waits, so it can never be the target of
+    /// the old request's CLOSED.
+    #[tokio::test]
+    async fn timeout_closed_is_emitted_before_a_replacement_can_claim() {
+        use super::super::close::test_seam::{Pause, PAUSE};
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let conn = Arc::new(conn);
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let old = claim_live_subscription("x", &text_filters(), Some(&[a]), &conn, &state)
+            .await
+            .expect("claim");
+
+        let pause = Arc::new(Pause::default());
+        let teardown = tokio::spawn(PAUSE.scope(Arc::clone(&pause), {
+            let (conn, state) = (Arc::clone(&conn), Arc::clone(&state));
+            async move { close_timed_out_subscription("x", old, &conn, &state).await }
+        }));
+        pause.reached.notified().await;
+        let (filters, b_scope) = (text_filters(), [b]);
+        let mut replacement = Box::pin(claim_live_subscription(
+            "x",
+            &filters,
+            Some(&b_scope),
+            &conn,
+            &state,
+        ));
+        assert_parked(&mut replacement, "replacement").await;
+        assert!(
+            !subscribed(&state, &conn, b),
+            "replacement must not claim between teardown and CLOSED"
+        );
+        assert!(closed_frames(&mut send_rx).is_empty());
+
+        pause.resume.notify_one();
+        teardown.await.expect("teardown");
+        let new = replacement.await.expect("claim");
+
+        assert_eq!(
+            closed_frames(&mut send_rx),
+            vec![format!(r#"["CLOSED","x","{QUERY_TIMED_OUT_CLOSED}"]"#)]
+        );
+        assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&new));
+        assert!(subscribed(&state, &conn, b) && !subscribed(&state, &conn, a));
+        let refcount = |c| {
+            state
+                .pubsub
+                .topic_refcount(&conn.tenant, EventTopic::Channel(c))
+        };
+        assert_eq!((refcount(a).await, refcount(b).await), (0, 1));
+    }
+
+    /// Revoke selects and removes registry entries under the lifecycle lock, so
+    /// a same-ID replacement queued behind it keeps its token, scope and topic.
+    #[tokio::test]
+    async fn revoke_then_replacement_keeps_replacement_whole() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let conn = Arc::new(conn);
+        state.conn_manager.register(
+            conn.conn_id,
+            conn.send_tx.clone(),
+            conn.ctrl_tx.clone(),
+            None,
+            conn.cancel.clone(),
+            conn.tenant.community(),
+            Arc::clone(&conn.backpressure_count),
+            Arc::clone(&conn.subscriptions),
+            3,
+        );
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        claim_live_subscription("x", &text_filters(), Some(&[a]), &conn, &state)
+            .await
+            .expect("claim");
+
+        let guard = conn.subscriptions.lock().await;
+        let mut revoke = Box::pin(
+            crate::handlers::side_effects::evict_conn_channel_subscriptions(
+                &conn.tenant,
+                &state,
+                a,
+                conn.conn_id,
+            ),
+        );
+        assert_parked(&mut revoke, "revoke").await;
+        let (filters, b_scope) = (text_filters(), [b]);
+        let mut replacement = Box::pin(claim_live_subscription(
+            "x",
+            &filters,
+            Some(&b_scope),
+            &conn,
+            &state,
+        ));
+        assert_parked(&mut replacement, "replacement").await;
+        assert!(
+            subscribed(&state, &conn, a),
+            "revoke must not touch the registry before taking the lifecycle lock"
+        );
+        drop(guard);
+        // The tokio mutex is FIFO: revoke queued first, so it runs first.
+        revoke.await;
+        let new = replacement.await.expect("claim");
+
+        assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&new));
+        assert!(subscribed(&state, &conn, b) && !subscribed(&state, &conn, a));
+        let refcount = |c| {
+            state
+                .pubsub
+                .topic_refcount(&conn.tenant, EventTopic::Channel(c))
+        };
+        assert_eq!((refcount(a).await, refcount(b).await), (0, 1));
+        assert_eq!(
+            closed_frames(&mut send_rx),
+            vec![r#"["CLOSED","x","restricted: channel access revoked"]"#.to_string()]
+        );
+        state.conn_manager.deregister(conn.conn_id);
+    }
+
+    /// Connection cleanup fences later claims: a detached REQ task resuming
+    /// after it gets `None` and leaves nothing behind.
+    #[tokio::test]
+    async fn claims_after_connection_cleanup_are_refused() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let channel = uuid::Uuid::new_v4();
+        let topic = EventTopic::Channel(channel);
+        claim_live_subscription("live", &text_filters(), Some(&[channel]), &conn, &state)
+            .await
+            .expect("claim");
+
+        conn.cancel.cancel();
+        super::super::close::release_connection_subscriptions(&conn, &state).await;
+        let late_live =
+            claim_live_subscription("late", &text_filters(), Some(&[channel]), &conn, &state).await;
+        let late_search = claim_search_subscription("search", &conn, &state).await;
+
+        assert_eq!((late_live, late_search), (None, None));
+        assert!(conn.subscriptions.lock().await.is_empty());
+        for sub in ["live", "late", "search"] {
+            assert!(
+                !registered(&state, &conn, sub),
+                "{sub} must not be registered"
+            );
+        }
+        assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 0);
+        assert!(closed_frames(&mut send_rx).is_empty());
+    }
+
+    /// A terminal CLOSED that fails to enqueue after retirement cancels the
+    /// connection, so the subscription is never silently orphaned on a
+    /// congested connection.
+    ///
+    /// Regression for P2-2: before this fix, a `false` from `conn.send` was
+    /// silently ignored after retirement, leaving the subscription retired but
+    /// the connection alive without a CLOSED delivered to the client.
+    #[tokio::test]
+    async fn dropped_terminal_frame_cancels_connection() {
+        use std::sync::atomic::AtomicU8;
+        let state = crate::state::tests::test_state().await;
+        // Capacity-1 channel: one dummy message fills it, so the CLOSED
+        // `try_send` returns Full (below the grace_limit=3 auto-cancel) and
+        // the fix's explicit cancel must fire.
+        let (send_tx, mut send_rx) = tokio::sync::mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(1);
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let conn = Arc::new(ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
+            remote_addr: "127.0.0.1:1234".parse().expect("addr"),
+            auth_state: std::sync::Mutex::new(AuthState::Failed),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+
+        // Claim, then fill the send buffer so the next `send` returns false.
+        let owner = claim_live_subscription("x", &text_filters(), None, &conn, &state)
+            .await
+            .expect("claim");
+        // Occupy the one slot so try_send returns Full on the CLOSED.
+        send_rx.try_recv().ok(); // drain any prior messages
+        let _ = conn.send_tx.try_send(axum::extract::ws::Message::Text(
+            "filler".to_string().into(),
+        ));
+        assert!(!conn.cancel.is_cancelled(), "must not be cancelled yet");
+
+        // `close_timed_out_subscription` retires the sub and tries to send CLOSED.
+        // With the buffer full the frame is dropped and the fix must cancel.
+        close_timed_out_subscription("x", owner, &conn, &state).await;
+
+        assert!(
+            conn.cancel.is_cancelled(),
+            "connection must be cancelled when the terminal frame is dropped"
+        );
+        // The subscription is still retired — the map is empty.
+        assert!(conn.subscriptions.lock().await.is_empty());
+        assert!(!registered(&state, &conn, "x"));
+    }
+
+    /// A revoke `CLOSED restricted` that fails to enqueue after the map remove
+    /// cancels the connection, same as the timeout path.
+    ///
+    /// Regression for P2-2 (revoke branch): before this fix, a `false` from
+    /// `send_to` in `evict_conn_channel_subscriptions` was silently ignored
+    /// after retirement, leaving the subscription orphaned on a congested
+    /// connection.
+    #[tokio::test]
+    async fn revoke_dropped_terminal_frame_cancels_connection() {
+        use std::sync::atomic::AtomicU8;
+        let state = crate::state::tests::test_state().await;
+        // Capacity-1 channel: one dummy message fills it so the CLOSED
+        // restricted `try_send` returns Full (below grace_limit=3) and the
+        // fix's explicit cancel_conn must fire.
+        let (send_tx, mut send_rx) = tokio::sync::mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(1);
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let conn = Arc::new(ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
+            remote_addr: "127.0.0.1:1234".parse().expect("addr"),
+            auth_state: std::sync::Mutex::new(AuthState::Failed),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            send_tx: send_tx.clone(),
+            ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        // Register in conn_manager so evict_conn_channel_subscriptions can
+        // find the connection for cancel_conn.
+        state.conn_manager.register(
+            conn.conn_id,
+            send_tx,
+            conn.ctrl_tx.clone(),
+            None,
+            conn.cancel.clone(),
+            conn.tenant.community(),
+            Arc::clone(&conn.backpressure_count),
+            Arc::clone(&conn.subscriptions),
+            3,
+        );
+
+        let channel = uuid::Uuid::new_v4();
+        claim_live_subscription("x", &text_filters(), Some(&[channel]), &conn, &state)
+            .await
+            .expect("claim");
+
+        // Fill the one send slot so the CLOSED restricted try_send returns Full.
+        send_rx.try_recv().ok(); // drain any earlier messages
+        let _ = conn.send_tx.try_send(axum::extract::ws::Message::Text(
+            "filler".to_string().into(),
+        ));
+        assert!(!conn.cancel.is_cancelled(), "must not be cancelled yet");
+
+        crate::handlers::side_effects::evict_conn_channel_subscriptions(
+            &conn.tenant,
+            &state,
+            channel,
+            conn.conn_id,
+        )
+        .await;
+
+        assert!(
+            conn.cancel.is_cancelled(),
+            "connection must be cancelled when the revoke terminal frame is dropped"
+        );
+        assert!(conn.subscriptions.lock().await.is_empty());
+        assert!(!subscribed(&state, &conn, channel));
+
+        state.conn_manager.deregister(conn.conn_id);
+    }
 
     #[test]
     fn huddle_liveness_filters_require_only_the_snapshot_kind() {
