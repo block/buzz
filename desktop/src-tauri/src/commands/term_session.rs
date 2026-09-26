@@ -22,10 +22,18 @@ const BUZZ_DEV_MCP_NAME: &str = "buzz-dev-mcp";
 pub const USER_SIGNER_STANDING_INSTRUCTIONS: &str = "\
 ## Buzz as signed-in user (Term MCP)
 
-You are acting through buzz-dev-mcp as the **signed-in Desktop user** for Buzz reads.
+You are acting through buzz-dev-mcp as the **signed-in Desktop user** for Buzz **reads**.
 Use MCP tools `buzz_read_thread` / `buzz_read_channel` (Desktop IPC signer — no nsec in this shell).
-To post back into Buzz, call `buzz_draft_message` only. That creates a **Desktop draft**;
-the human must click **Send**. Never invent an auto-publish path. Never ask for or echo nsec / BUZZ_PRIVATE_KEY.
+
+**Do not message or chat with the human via Buzz.** Do not @mention the user. Do not call
+`buzz_draft_message` for your own progress, status, acknowledgements, or status pings —
+those appear as the **user's** drafts.
+
+`buzz_draft_message` is **only** for content the human explicitly asked you to prepare for
+**them** to send (they click **Send** in Desktop). It is not your outbound channel.
+
+Keep progress and status in this Term TUI / stdout. Never invent an auto-publish path.
+Never ask for or echo nsec / BUZZ_PRIVATE_KEY.
 ";
 
 #[derive(Debug, Deserialize)]
@@ -184,3 +192,20 @@ pub fn prepare_term_session_launch(
         buzz_dev_mcp_wired,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::USER_SIGNER_STANDING_INSTRUCTIONS;
+
+    #[test]
+    fn user_signer_standing_forbids_progress_drafts() {
+        let s = USER_SIGNER_STANDING_INSTRUCTIONS;
+        assert!(s.contains("Buzz as signed-in user (Term MCP)"));
+        assert!(s.contains("Do not message or chat with the human via Buzz"));
+        assert!(s.contains("buzz_draft_message"));
+        assert!(s.contains("only"));
+        assert!(s.contains("Term TUI") || s.contains("stdout"));
+        assert!(!s.contains("To post back into Buzz, call `buzz_draft_message` only"));
+    }
+}
+
