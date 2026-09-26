@@ -525,6 +525,18 @@ impl EventQueue {
         }
     }
 
+    /// One-based attempt number for the next dispatch of `scope`.
+    ///
+    /// The counter is owned by the queue and survives bounded requeues, so
+    /// observer records do not have to infer retry state from log ordering.
+    pub fn next_attempt<K: IntoScope>(&self, scope: K) -> u32 {
+        self.retry_counts
+            .get(&scope.into_scope())
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
     /// Re-queue a batch of events that failed to process.
     ///
     /// Events are pushed back to the **front** of the channel's queue so they
@@ -813,6 +825,15 @@ impl EventQueue {
     #[cfg(test)]
     pub fn set_retry_count_for_test<K: IntoScope>(&mut self, scope: K, count: u32) {
         self.retry_counts.insert(scope.into_scope(), count);
+    }
+
+    /// Clear the retry throttle without altering retry accounting.
+    ///
+    /// Test-only: permits an immediate re-flush of a genuinely requeued batch
+    /// so regression tests do not sleep through production backoff intervals.
+    #[cfg(test)]
+    pub fn clear_retry_throttle_for_test<K: IntoScope>(&mut self, scope: K) {
+        self.retry_after.remove(&scope.into_scope());
     }
 
     /// Drop all queued (non-in-flight) events for a channel.
