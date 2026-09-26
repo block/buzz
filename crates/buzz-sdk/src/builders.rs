@@ -12,7 +12,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_TYPING_INDICATOR, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1906,6 +1906,28 @@ pub fn build_presence_update(status: &str) -> Result<EventBuilder, SdkError> {
     }
     let tags = vec![tag(&["status", status])?];
     Ok(EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status).tags(tags))
+}
+
+/// Build a typing indicator (kind 20002), the ephemeral event Buzz Desktop
+/// shows as "<name> is typing" and, for an agent, as its "working" signal.
+///
+/// - `channel_id`: the channel being typed in (`h` tag)
+/// - `thread_ref`: optional NIP-10 reply context, so a thread shows the
+///   indicator too
+///
+/// Content is empty. Clients show the indicator for about eight seconds after
+/// each event, so a sender that is still typing publishes again every few
+/// seconds. Ephemeral kinds go over the WebSocket with NIP-42 auth; the relay
+/// rejects them over HTTP.
+pub fn build_typing_indicator(
+    channel_id: Uuid,
+    thread_ref: Option<&ThreadRef>,
+) -> Result<EventBuilder, SdkError> {
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    if let Some(tr) = thread_ref {
+        thread_tags(tr, &mut tags)?;
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "").tags(tags))
 }
 
 /// Build a NIP-38 user status event (kind 30315) on the `d:general` coordinate.
@@ -4602,6 +4624,78 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 20001);
         assert_eq!(ev.content, "online");
         assert!(has_tag(&ev, "status", "online"));
+    }
+
+    fn tag_slices(ev: &nostr::Event) -> Vec<Vec<String>> {
+        ev.tags
+            .iter()
+            .map(|t| t.as_slice().iter().map(|v| v.to_string()).collect())
+            .collect()
+    }
+
+    const TYPING_CHANNEL: &str = "b6347c52-83c8-5bbf-bc8b-28f06b210109";
+
+    #[test]
+    fn typing_indicator_channel_only_is_kind_20002_empty_with_exactly_the_h_tag() {
+        let ch = Uuid::parse_str(TYPING_CHANNEL).unwrap();
+        let ev = sign(build_typing_indicator(ch, None).unwrap());
+        assert_eq!(ev.kind.as_u16(), 20002);
+        assert_eq!(ev.content, "");
+        assert_eq!(
+            tag_slices(&ev),
+            vec![vec!["h".to_string(), TYPING_CHANNEL.to_string()]]
+        );
+    }
+
+    #[test]
+    fn typing_indicator_direct_reply_has_one_reply_marked_e_tag() {
+        let ch = Uuid::parse_str(TYPING_CHANNEL).unwrap();
+        let root = nostr::EventId::from_hex(&"a".repeat(64)).unwrap();
+        let tr = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let ev = sign(build_typing_indicator(ch, Some(&tr)).unwrap());
+        assert_eq!(
+            tag_slices(&ev),
+            vec![
+                vec!["h".to_string(), TYPING_CHANNEL.to_string()],
+                vec![
+                    "e".to_string(),
+                    "a".repeat(64),
+                    String::new(),
+                    "reply".to_string()
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn typing_indicator_nested_reply_marks_root_then_parent() {
+        let ch = Uuid::parse_str(TYPING_CHANNEL).unwrap();
+        let tr = ThreadRef {
+            root_event_id: nostr::EventId::from_hex(&"a".repeat(64)).unwrap(),
+            parent_event_id: nostr::EventId::from_hex(&"b".repeat(64)).unwrap(),
+        };
+        let ev = sign(build_typing_indicator(ch, Some(&tr)).unwrap());
+        assert_eq!(
+            tag_slices(&ev),
+            vec![
+                vec!["h".to_string(), TYPING_CHANNEL.to_string()],
+                vec![
+                    "e".to_string(),
+                    "a".repeat(64),
+                    String::new(),
+                    "root".to_string()
+                ],
+                vec![
+                    "e".to_string(),
+                    "b".repeat(64),
+                    String::new(),
+                    "reply".to_string()
+                ],
+            ]
+        );
     }
 
     #[test]
