@@ -122,6 +122,22 @@ export function useChannelLinks() {
 
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      // Losing the #query must close immediately. Debouncing dismissal leaves
+      // the old suggestion owning Enter after the user replaces/clears an edit.
+      if (
+        !detectPrefixQuery(
+          "#",
+          value,
+          cursorPosition,
+          knownNamesLowerRef.current,
+        )
+      ) {
+        setChannelQuery(null);
+        setChannelSelectedIndex(0);
+        return;
       }
 
       debounceTimerRef.current = setTimeout(() => {

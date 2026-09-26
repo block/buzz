@@ -127,6 +127,7 @@ export default defineConfig({
         "**/timeline-no-shift.spec.ts",
         "**/human-edit-agent-content.spec.ts",
         "**/empty-edit-delete.spec.ts",
+        "**/channel-autocomplete.spec.ts",
         "**/reaction-order.spec.ts",
         "**/reaction-names.spec.ts",
         "**/inbox-reactions.spec.ts",

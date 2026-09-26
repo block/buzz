@@ -107,7 +107,7 @@ export type RichTextEditorOptions = {
    * ArrowUp fall through to normal caret movement.
    */
   onEditLastOwnMessage?: () => boolean;
-  /** When true, plain Enter is passed through (e.g. to select an autocomplete item). */
+  /** When true, plain Enter is reserved for the composer's autocomplete handler. */
   isAutocompleteOpen?: React.RefObject<boolean>;
   /**
    * Called when the user clicks an existing link in the editor. The link
@@ -315,7 +315,9 @@ export function useRichTextEditor({
           addKeyboardShortcuts() {
             return {
               Enter: ({ editor: ed }) => {
-                if (isAutocompleteOpen?.current) return false;
+                // Block splitBlock without stopping DOM propagation: the
+                // composer's React handler selects the autocomplete item.
+                if (isAutocompleteOpen?.current) return true;
                 if (!onSubmitRef.current) return false;
 
                 const fenceResult = handleCodeFenceEnter(ed);
