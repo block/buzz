@@ -10,42 +10,16 @@ use super::runtime_metadata::{
 use super::{BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL};
 
 pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
+    #[cfg(not(all(feature = "bundled-goose", target_os = "macos")))]
+    GOOSE_RUNTIME,
+    #[cfg(all(feature = "bundled-goose", target_os = "macos"))]
     KnownAcpRuntime {
-        id: "goose",
-        label: "Goose",
-        commands: &["goose"],
-        aliases: &[],
-        avatar_url: GOOSE_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: Some("goose"),
-        cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
-        // Goose's stable release currently publishes only the Unix installer;
-        // its official Windows instructions intentionally point at this main-branch script.
-        cli_install_commands_windows: &[windows_install_command!("goose", "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1", "$env:CONFIGURE='false'; ")],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
-        adapter_install_instructions_url: "",
-        cli_install_hint: "Buzz talks to Goose through the Goose CLI.",
-        adapter_install_hint: "",
-        skill_dir: Some(".goose/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: Some("GOOSE_MODEL"),
-        provider_env_var: Some("GOOSE_PROVIDER"),
-        provider_locked: false,
-        default_env: &[("GOOSE_MODE", "auto")],
-        config_file_path: Some("~/.config/goose/config.yaml"),
-        config_file_format: Some("yaml"),
-        supports_acp_native_config: true,
-        thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
-        effort_normalization: Some(&GOOSE_EFFORT_NORMALIZATION),
-        effort_accepted_values: None, // goose: validated via effort_normalization
-        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
-        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
-        max_rounds_env_var: None,
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
+        commands: &["goose-acp"],
+        underlying_cli: None,
+        cli_install_commands: &[],
+        cli_install_hint: "Ships with the internal Buzz macOS app.",
+        default_env: BUNDLED_GOOSE_DEFAULT_ENV,
+        ..GOOSE_RUNTIME
     },
     KnownAcpRuntime {
         id: "claude",
@@ -154,3 +128,54 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         auth_probe_args: None,
     },
 ];
+
+const GOOSE_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
+        id: "goose",
+        label: "Goose",
+        commands: &["goose"],
+        aliases: &[],
+        avatar_url: GOOSE_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("goose"),
+        cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
+        // Goose's stable release currently publishes only the Unix installer;
+        // its official Windows instructions intentionally point at this main-branch script.
+        cli_install_commands_windows: &[windows_install_command!("goose", "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1", "$env:CONFIGURE='false'; ")],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz talks to Goose through the Goose CLI.",
+        adapter_install_hint: "",
+        skill_dir: Some(".goose/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: Some("GOOSE_MODEL"),
+        provider_env_var: Some("GOOSE_PROVIDER"),
+        provider_locked: false,
+        default_env: &[("GOOSE_MODE", "auto")],
+        config_file_path: Some("~/.config/goose/config.yaml"),
+        config_file_format: Some("yaml"),
+        supports_acp_native_config: true,
+        thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+        effort_normalization: Some(&GOOSE_EFFORT_NORMALIZATION),
+        effort_accepted_values: None, // goose: validated via effort_normalization
+        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
+        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
+        max_rounds_env_var: None,
+        required_normalized_fields: &["model", "provider"],
+        login_hint: None,
+        auth_probe_args: None,
+    };
+
+#[cfg(all(feature = "bundled-goose", target_os = "macos"))]
+const BUNDLED_GOOSE_DEFAULT_ENV: &[(&str, &str)] = match (
+    option_env!("BUZZ_DESKTOP_BUILD_BUNDLED_GOOSE_PROVIDER"),
+    option_env!("BUZZ_DESKTOP_BUILD_BUNDLED_GOOSE_MODEL"),
+) {
+    (Some(provider), Some(model)) => &[
+        ("GOOSE_MODE", "auto"),
+        ("GOOSE_PROVIDER", provider),
+        ("GOOSE_MODEL", model),
+    ],
+    _ => &[("GOOSE_MODE", "auto")],
+};

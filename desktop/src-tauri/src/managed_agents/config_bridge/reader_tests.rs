@@ -798,6 +798,7 @@ fn missing_required_provider_still_returns_dropdown_field() {
         false,
         true,
         &no_tiers(),
+        None,
     )
     .expect("required provider field should be surfaced even when empty");
 
@@ -815,7 +816,8 @@ fn missing_optional_provider_stays_hidden() {
         Some("GOOSE_PROVIDER"),
         false,
         false,
-        &no_tiers()
+        &no_tiers(),
+        None,
     )
     .is_none());
 }

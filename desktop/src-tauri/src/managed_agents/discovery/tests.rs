@@ -8,6 +8,7 @@ use super::{
     remove_record_effort_aliases, try_record_agent_command, BUZZ_AGENT_AVATAR_URL,
     CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
+use super::{discover_acp_runtimes_from, known_acp_runtime, KNOWN_ACP_RUNTIMES};
 use crate::managed_agents::AcpAvailabilityStatus;
 use std::path::PathBuf;
 
@@ -166,7 +167,10 @@ fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
     assert_eq!(cmd.as_deref(), Some("codex-acp"));
     assert_eq!(path.as_deref(), Some("/opt/homebrew/bin/codex-acp"));
 }
-fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {
+pub(super) fn persona_with_runtime(
+    id: &str,
+    runtime: Option<&str>,
+) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
         session_policy: Default::default(),
         description: None,
@@ -205,7 +209,7 @@ fn effective_agent_command_explicit_override_wins() {
     );
 }
 /// Minimal record for `record_agent_command` tests; only resolution inputs vary.
-fn record_with(
+pub(super) fn record_with(
     runtime: Option<&str>,
     persona_id: Option<&str>,
     override_cmd: Option<&str>,
@@ -292,7 +296,10 @@ fn record_agent_command_legacy_persona_fallback() {
     // the legacy persona path unchanged.
     let personas = vec![persona_with_runtime("p1", Some("goose"))];
     let record = record_with(None, Some("p1"), None);
-    assert_eq!(record_agent_command(&record, &personas), "goose");
+    assert_eq!(
+        record_agent_command(&record, &personas),
+        known_acp_runtime("goose").unwrap().commands[0]
+    );
 }
 
 #[test]
@@ -373,7 +380,7 @@ fn effective_agent_command_empty_override_is_inherit() {
     let personas = vec![persona_with_runtime("p1", Some("goose"))];
     assert_eq!(
         effective_agent_command(Some("p1"), &personas, Some("   ")),
-        "goose"
+        known_acp_runtime("goose").unwrap().commands[0]
     );
 }
 
@@ -1625,29 +1632,17 @@ fn custom_catalog_entry_carries_definition_env_for_edit_roundtrip() {
     );
 }
 
-/// A builtin catalog entry must have an empty `definition_env` — their env
-/// is handled via the `KnownAcpRuntime` metadata path, not user-editable JSON.
+/// Builtin catalog defaults come from runtime metadata, not user-editable JSON.
 #[test]
-fn builtin_catalog_entry_has_empty_definition_env() {
+fn builtin_catalog_entries_expose_runtime_configuration_defaults() {
     use crate::managed_agents::custom_harnesses::registry_test_lock;
-    use crate::managed_agents::discovery::discover_acp_runtimes_from;
-
-    // Same guards as above: discovery probes PATH-dependent caches and
-    // publishes to the global registry.
     let _path_guard = crate::managed_agents::lock_path_mutex();
     let _lock = registry_test_lock();
     let entries = discover_acp_runtimes_from(None, true);
-    // Find any builtin entry (e.g. "goose" or "claude").
-    let builtin = entries
-        .iter()
-        .find(|e| e.source == crate::managed_agents::HarnessSource::Builtin)
-        .expect("at least one builtin must exist");
-
-    assert!(
-        builtin.definition_env.is_empty(),
-        "builtin entry must not carry definition_env, got: {:?}",
-        builtin.definition_env
-    );
+    for runtime in KNOWN_ACP_RUNTIMES {
+        let entry = entries.iter().find(|entry| entry.id == runtime.id).unwrap();
+        assert_eq!(entry.definition_env, runtime.configuration_defaults());
+    }
 }
 
 // ── Discovery publish via the PRODUCTION call path (stale-snapshot regression) ─

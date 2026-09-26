@@ -63,6 +63,23 @@ fn main() {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_BUZZ_AGENT_MODEL={model}");
     }
 
+    for key in ["PROVIDER", "MODEL"] {
+        let input = format!("BUZZ_BUILD_BUNDLED_GOOSE_{key}");
+        println!("cargo:rerun-if-env-changed={input}");
+        if let Ok(value) = std::env::var(&input) {
+            assert!(
+                !value.trim().is_empty() && !value.contains(['\n', '\r']),
+                "invalid {input}"
+            );
+            println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_BUNDLED_GOOSE_{key}={value}");
+        }
+    }
+    assert_eq!(
+        std::env::var_os("BUZZ_BUILD_BUNDLED_GOOSE_PROVIDER").is_some(),
+        std::env::var_os("BUZZ_BUILD_BUNDLED_GOOSE_MODEL").is_some(),
+        "bundled Goose provider and model defaults must be supplied together"
+    );
+
     // Generic KEY=VALUE pairs to inject into every spawned agent process.
     // Newline-delimited; each line must be non-empty and contain exactly one
     // `=` separator with a non-empty key.  OSS builds leave this unset.

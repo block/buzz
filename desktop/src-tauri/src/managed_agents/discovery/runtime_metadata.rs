@@ -162,6 +162,27 @@ pub(crate) struct KnownAcpRuntime {
 }
 
 impl KnownAcpRuntime {
+    /// Build-provided settings for the bundled pilot, below explicit user choices.
+    /// External runtimes retain their existing configuration and environment policy.
+    pub(crate) fn configuration_defaults(&self) -> std::collections::BTreeMap<String, String> {
+        if self.id != "goose" {
+            return Default::default();
+        }
+        self.default_env
+            .iter()
+            .filter(|(key, _)| *key != "GOOSE_MODE")
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// Process policy defaults only; provider/model fallbacks are resolved
+    /// below Goose's config file by the effective environment builder.
+    pub(crate) fn process_defaults(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.default_env.iter().copied().filter(|(key, _)| {
+            self.id != "goose" || !matches!(*key, "GOOSE_PROVIDER" | "GOOSE_MODEL")
+        })
+    }
+
     /// Return the CLI install commands for the current platform.
     ///
     /// On Windows, returns `cli_install_commands_windows` when non-empty,
@@ -190,7 +211,11 @@ mod tests {
             "https://goose-docs.ai/docs/getting-started/installation/"
         );
         assert!(goose.adapter_install_instructions_url.is_empty());
-        assert!(goose.cli_install_hint.contains("Goose CLI"));
+        if cfg!(all(feature = "bundled-goose", target_os = "macos")) {
+            assert!(goose.cli_install_hint.contains("Ships with"));
+        } else {
+            assert!(goose.cli_install_hint.contains("Goose CLI"));
+        }
         assert!(goose
             .cli_install_commands_windows
             .iter()

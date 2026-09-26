@@ -21,7 +21,12 @@ export function getBakedProviderInheritLabel(
   return `${friendlyName} (inherited from build)`;
 }
 
-export type InheritedDefaultSource = "build" | "global" | null;
+export type InheritedDefaultSource =
+  | "build"
+  | "global"
+  | "environment"
+  | "file"
+  | null;
 
 export type InheritedDefault = {
   source: InheritedDefaultSource;

@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/aaif-goose/goose.git",
+  "revision": "6a2c3dadf6a8866aeb434f4d3c41ea58b278d6c0",
+  "profile": "lean",
+  "features": "native-tls,system-keyring"
+}

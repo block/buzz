@@ -1,5 +1,5 @@
 //! Opt-in real runtime checks. Uses real ACP, MCP and Git processes, with a
-//! deterministic local model for buzz-agent and the installed Goose provider.
+//! deterministic local model for buzz-agent / pinned Goose, or an installed Goose provider.
 use super::*;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,7 +8,8 @@ async fn scripted_model(command: String) -> (String, tokio::task::JoinHandle<()>
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
-        for round in 0..4 {
+        let mut round = 0;
+        for _ in 0..8 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
             let mut buf = [0; 8192];
@@ -22,6 +23,12 @@ async fn scripted_model(command: String) -> (String, tokio::task::JoinHandle<()>
                 }
             };
             let headers = String::from_utf8_lossy(&request[..headers_end]);
+            if headers.starts_with("GET ") {
+                let body = r#"{"object":"list","data":[{"id":"probe","object":"model","owned_by":"test"}]}"#;
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+                continue;
+            }
             let length: usize = headers
                 .lines()
                 .find_map(|line| {
@@ -38,17 +45,14 @@ async fn scripted_model(command: String) -> (String, tokio::task::JoinHandle<()>
             }
             let request: serde_json::Value =
                 serde_json::from_slice(&request[headers_end..]).unwrap();
-            let (message, reason) = if round == 0 {
-                let name = request["tools"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find_map(|tool| {
-                        tool["function"]["name"]
-                            .as_str()
-                            .filter(|name| name.ends_with("__shell"))
-                    })
-                    .unwrap();
+            let shell = request["tools"].as_array().and_then(|tools| {
+                tools.iter().find_map(|tool| {
+                    tool["function"]["name"]
+                        .as_str()
+                        .filter(|name| *name == "shell" || name.ends_with("__shell"))
+                })
+            });
+            let (message, reason) = if let Some(name) = shell.filter(|_| round == 0) {
                 (
                     serde_json::json!({"role":"assistant", "content":null,"tool_calls":[{"id":"git-probe","type":"function","function":{"name":name,"arguments":serde_json::json!({"command":command}).to_string()}}]}),
                     "tool_calls",
@@ -59,9 +63,26 @@ async fn scripted_model(command: String) -> (String, tokio::task::JoinHandle<()>
                     "stop",
                 )
             };
-            let body = serde_json::json!({"id":"probe","object":"chat.completion","model":"probe","choices":[{"index":0,"message":message,"finish_reason":reason}]}).to_string();
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+            let (content_type, body) = if request["stream"].as_bool() == Some(true) {
+                let mut delta = message;
+                if let Some(calls) = delta.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
+                    for (index, call) in calls.iter_mut().enumerate() {
+                        call["index"] = index.into();
+                    }
+                }
+                let chunk = serde_json::json!({"id":"probe","object":"chat.completion.chunk","model":"probe","choices":[{"index":0,"delta":delta,"finish_reason":reason}]});
+                (
+                    "text/event-stream",
+                    format!("data: {chunk}\n\ndata: [DONE]\n\n"),
+                )
+            } else {
+                ("application/json", serde_json::json!({"id":"probe","object":"chat.completion","model":"probe","choices":[{"index":0,"message":message,"finish_reason":reason}]}).to_string())
+            };
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
             socket.write_all(response.as_bytes()).await.unwrap();
+            if shell.is_some() {
+                round += 1;
+            }
         }
     });
     (url, task)
@@ -117,10 +138,27 @@ printf 'passed' > ../result
         config
             .persona_env_vars
             .push(("GOOSE_MODE".into(), "auto".into()));
-        (
-            "goose".into(),
-            vec!["acp".into(), "--with-builtin".into(), "developer".into()],
-        )
+        match std::env::var("BUZZ_TEST_GOOSE_ACP") {
+            Ok(binary) => {
+                // The pinned sidecar uses a local scripted provider, never operator credentials.
+                config.persona_env_vars.extend([
+                    ("GOOSE_PROVIDER".into(), "openai".into()),
+                    ("GOOSE_MODEL".into(), "probe".into()),
+                    ("OPENAI_HOST".into(), url),
+                    ("OPENAI_API_KEY".into(), "test".into()),
+                    (
+                        "GOOSE_PATH_ROOT".into(),
+                        temp.path().join("goose").to_string_lossy().into_owned(),
+                    ),
+                    ("GOOSE_DISABLE_KEYRING".into(), "true".into()),
+                ]);
+                (binary, vec!["--with-builtin".into(), "developer".into()])
+            }
+            Err(_) => (
+                "goose".into(),
+                vec!["acp".into(), "--with-builtin".into(), "developer".into()],
+            ),
+        }
     } else {
         config.persona_env_vars.extend([
             ("BUZZ_AGENT_PROVIDER".into(), "openai".into()),
@@ -176,7 +214,7 @@ async fn real_buzz_agent_git_shell() {
 }
 
 #[tokio::test]
-#[ignore = "requires installed/configured Goose and built buzz-acp; BUZZ_TEST_BIN_DIR"]
+#[ignore = "requires built buzz-acp and installed Goose or BUZZ_TEST_GOOSE_ACP; BUZZ_TEST_BIN_DIR"]
 async fn real_goose_native_git_shell() {
     check_runtime(true).await;
 }

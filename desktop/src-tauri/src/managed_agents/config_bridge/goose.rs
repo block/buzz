@@ -8,6 +8,31 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     read_config_from_path(&path)
 }
 
+/// Add bundled fallbacks below the existing Buzz, inherited process, and file
+/// settings. Leave file values in the file rather than copying them into env.
+pub(crate) fn apply_bundled_defaults(
+    env: &mut BTreeMap<String, String>,
+    runtime: Option<&crate::managed_agents::discovery::KnownAcpRuntime>,
+) {
+    let defaults = runtime
+        .map(|rt| rt.configuration_defaults())
+        .unwrap_or_default();
+    if defaults.is_empty() {
+        return;
+    }
+    let file = read_config_file();
+    for (key, value) in defaults {
+        let file_value = match key.as_str() {
+            "GOOSE_PROVIDER" => file.as_ref().and_then(|f| f.provider.as_deref()),
+            "GOOSE_MODEL" => file.as_ref().and_then(|f| f.model.as_deref()),
+            _ => None,
+        };
+        if file_value.is_none() && std::env::var(&key).is_err() {
+            env.entry(key).or_insert(value);
+        }
+    }
+}
+
 fn read_config_from_path(path: &std::path::Path) -> Option<RuntimeFileConfig> {
     let raw = std::fs::read_to_string(path).ok()?;
     parse_goose_config(&raw)

@@ -154,7 +154,7 @@ fn resolve_config_surface(
 /// "Set in goose config" instead of surfacing a false required-field marker.
 ///
 /// Returns `null` when the runtime has no config file or it cannot be parsed.
-/// Currently only "goose" is supported; other runtimes return `null`.
+/// Both Goose runtimes share file configuration; other runtimes return `null`.
 #[tauri::command]
 pub async fn get_runtime_file_config(
     runtime_id: String,

@@ -14,6 +14,15 @@ use crate::{
     relay::relay_ws_url_with_override,
 };
 
+fn ensure_remote_harness_supported(command: &str) -> Result<(), String> {
+    if crate::managed_agents::known_acp_runtime(command)
+        .is_some_and(|rt| rt.commands == ["goose-acp"])
+    {
+        return Err("This build includes Goose for local use only. Remote Goose deployment is not supported.".into());
+    }
+    Ok(())
+}
+
 /// Effective projection fields for the deploy payload — all derived from the
 /// resolved descriptor and effective config so that the serialised payload and
 /// the `launch` block are always internally consistent.
@@ -215,6 +224,7 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
     let descriptor =
         crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
             .map_err(|error| crate::managed_agents::user_facing_harness_error(&error))?;
+    ensure_remote_harness_supported(&descriptor.command)?;
     let owner_pubkey = super::workspace_owner_hex(state)?;
     let launch = build_launch_block_for_policy(
         record,
@@ -288,6 +298,19 @@ pub(super) fn deploy_payload_json(
 mod tests {
     use super::*;
     use crate::managed_agents::{readiness::EffectiveHarnessDescriptor, RespondTo, TeamRecord};
+
+    #[test]
+    fn remote_goose_requires_an_external_runtime_build() {
+        assert!(ensure_remote_harness_supported("buzz-agent").is_ok());
+        assert!(ensure_remote_harness_supported("claude-agent-acp").is_ok());
+        assert_eq!(
+            ensure_remote_harness_supported("goose").is_err(),
+            cfg!(all(feature = "bundled-goose", target_os = "macos"))
+        );
+        if cfg!(all(feature = "bundled-goose", target_os = "macos")) {
+            assert!(ensure_remote_harness_supported("goose-acp").is_err());
+        }
+    }
 
     fn record() -> ManagedAgentRecord {
         serde_json::from_value(serde_json::json!({

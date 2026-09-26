@@ -24,6 +24,9 @@ pub(crate) fn read_config_surface(
     claude_config_dir: Option<&std::path::Path>,
 ) -> RuntimeConfigSurface {
     let is_pre_spawn = session_cache.is_none();
+    let defaults = runtime_meta
+        .map(|m| m.configuration_defaults())
+        .unwrap_or_default();
 
     // Tier 2b: config file values.
     let (file_config, file_was_read) = runtime_meta
@@ -82,6 +85,9 @@ pub(crate) fn read_config_surface(
             required_fields.contains(&"model"),
             model_overridden,
             tiers,
+            model_env_var
+                .and_then(|key| defaults.get(key))
+                .map(String::as_str),
         )),
         provider: build_provider_field(
             record,
@@ -90,6 +96,9 @@ pub(crate) fn read_config_surface(
             provider_locked,
             required_fields.contains(&"provider"),
             tiers,
+            provider_env_var
+                .and_then(|key| defaults.get(key))
+                .map(String::as_str),
         ),
         mode: build_mode_field(&file_config.mode, &acp_mode, is_pre_spawn, session_cache),
         thinking_effort: build_thinking_field(
@@ -326,6 +335,7 @@ fn build_model_field(
     is_required: bool,
     model_overridden: bool,
     tiers: &InheritedConfigTiers,
+    runtime_default: Option<&str>,
 ) -> NormalizedField {
     let [rec_env, pers_env, glob_env, def_env] = model_env_var
         .map(|k| {
@@ -346,8 +356,8 @@ fn build_model_field(
 
     // Configured candidates in spawn order: record env > persona env > global env >
     // definition env > struct record > struct persona > struct global > file.
-    // The file entry is always last; everything before it is a "configured" candidate
-    // that gates whether ACP participates as a fallback (see any_configured below).
+    // File and bundled fallback follow all existing configured candidates.
+    // A file-backed model still allows ACP's live value to participate.
     let configured: &[(Option<&str>, ConfigOrigin)] = &[
         (rec_env, ConfigOrigin::BuzzExplicit),
         (pers_env, ConfigOrigin::PersonaDefault),
@@ -357,13 +367,13 @@ fn build_model_field(
         (struct_persona, ConfigOrigin::PersonaDefault),
         (struct_global, ConfigOrigin::GlobalDefault),
         (file_model.as_deref(), ConfigOrigin::ConfigFile),
+        (runtime_default, ConfigOrigin::HarnessDefault),
     ];
-    // "Configured" = any non-file candidate. The file entry is always last, so
-    // slicing to len()-1 is equivalent to the old magic `[..6]` and stays correct
-    // if the array ever grows again.
-    let any_configured = configured[..configured.len() - 1]
+    let any_configured = configured
         .iter()
-        .any(|(v, _)| v.is_some());
+        .take_while(|(_, origin)| *origin != ConfigOrigin::ConfigFile)
+        .any(|(value, _)| value.is_some())
+        || (file_model.is_none() && runtime_default.is_some());
 
     // When model_overridden is true and ACP is present, ACP is the live winner.
     // The top configured candidate becomes the secondary (the overridden baseline).
@@ -474,6 +484,7 @@ fn build_provider_field(
     provider_locked: bool,
     is_required: bool,
     tiers: &InheritedConfigTiers,
+    runtime_default: Option<&str>,
 ) -> Option<NormalizedField> {
     if provider_locked {
         return Some(NormalizedField {
@@ -515,6 +526,7 @@ fn build_provider_field(
             ConfigOrigin::GlobalDefault,
         ),
         (file_provider.as_deref(), ConfigOrigin::ConfigFile),
+        (runtime_default, ConfigOrigin::HarnessDefault),
     ];
 
     let (value, origin, overridden_value, overridden_origin) =

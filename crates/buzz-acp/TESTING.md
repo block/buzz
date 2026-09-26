@@ -59,3 +59,8 @@ Goose and uses its provider to invoke the native developer shell. Both operate
 only on temporary local repositories, verify commit/tag signatures and identity,
 check unrelated-remote credential scoping, and assert keyfile removal. They do
 not replace authenticated relay clone/push/readback testing.
+
+For the bundled Goose pilot, set `BUZZ_TEST_GOOSE_ACP` to the absolute staged
+`goose-acp` executable when running `git_runtime_tests`. The test then starts
+ACP directly instead of invoking the installed `goose acp`. See
+[`docs/bundled-goose.md`](../../docs/bundled-goose.md) for packaged-app checks.

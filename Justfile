@@ -1207,3 +1207,7 @@ benchmark-check:
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:
     docker compose --project-name buzz-benchmark down
+
+# Opt-in internal macOS runtime; OSS sidecar builds remain unchanged.
+bundled-goose:
+    ./scripts/build-bundled-goose.sh

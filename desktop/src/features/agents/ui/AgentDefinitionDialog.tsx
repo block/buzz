@@ -1,3 +1,4 @@
+import { resolveGooseConfig } from "./gooseConfigDefaults";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -398,6 +399,24 @@ export function AgentDefinitionDialog({
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
     enabled: open,
   });
+  const gooseInherited = resolveGooseConfig({
+    env: { ...globalConfig.env_vars, ...envVars },
+    provider: globalConfig.provider,
+    model: globalConfig.model,
+    file: runtimeFileConfig,
+    defaults: selectedRuntime?.definitionEnv,
+  });
+  const effectiveInheritedProvider =
+    runtime === "goose" ? gooseInherited.provider : inheritedProviderDefault;
+  const effectiveInheritedModel =
+    runtime === "goose" ? gooseInherited.model : inheritedModelDefault;
+  const gooseEffective = resolveGooseConfig({
+    env: { ...globalConfig.env_vars, ...envVars },
+    provider: provider || globalConfig.provider,
+    model: model || globalConfig.model,
+    file: runtimeFileConfig,
+    defaults: selectedRuntime?.definitionEnv,
+  });
   function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
     setHasUserChanges(true);
     setAiConfigurationMode(nextMode);
@@ -407,8 +426,8 @@ export function AgentDefinitionDialog({
       current: { provider, model },
       inherited: runtimeCanChooseLlmProvider
         ? {
-            provider: inheritedProviderDefault.value,
-            model: inheritedModelDefault.value,
+            provider: effectiveInheritedProvider.value,
+            model: effectiveInheritedModel.value,
           }
         : { provider: "", model: runtimeFileConfig?.model?.trim() ?? "" },
       mode: nextMode,
@@ -424,11 +443,12 @@ export function AgentDefinitionDialog({
         bakedEnvKeys,
         envVars,
         globalEnvVars: globalConfig.env_vars,
-        globalProvider: inheritedProviderDefault.value,
-        globalModel: inheritedModelDefault.value,
+        globalProvider: effectiveInheritedProvider.value,
+        globalModel: effectiveInheritedModel.value,
         isProviderMode: false,
-        model,
-        provider: trimmedProvider,
+        model: runtime === "goose" ? gooseEffective.model.value : model,
+        provider:
+          runtime === "goose" ? gooseEffective.provider.value : trimmedProvider,
         runtimeId: runtime,
         runtimeFileConfig,
       }),
@@ -436,12 +456,14 @@ export function AgentDefinitionDialog({
       bakedEnvKeys,
       envVars,
       globalConfig.env_vars,
-      inheritedModelDefault.value,
-      inheritedProviderDefault.value,
+      effectiveInheritedModel.value,
+      effectiveInheritedProvider.value,
       model,
       trimmedProvider,
       runtime,
       runtimeFileConfig,
+      gooseEffective.model.value,
+      gooseEffective.provider.value,
     ],
   );
   // requiredEnvKeys: the gate already handles baked-, global-, and file-
@@ -453,7 +475,9 @@ export function AgentDefinitionDialog({
   // model requiredness are consistent with the readiness gate.
   const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
   const effectiveProvider =
-    trimmedProvider || inheritedProviderDefault.value || fileProvider;
+    runtime === "goose"
+      ? gooseEffective.provider.value
+      : trimmedProvider || effectiveInheritedProvider.value || fileProvider;
   const apiKeyFieldState = useProviderApiKeyFieldState({
     bakedEnvKeys,
     effectiveEnvVars: envVars,
@@ -555,7 +579,7 @@ export function AgentDefinitionDialog({
     trimmedProvider,
     runtime,
     inheritedProviderDefault.source === "global"
-      ? inheritedProviderDefault.value
+      ? effectiveInheritedProvider.value
       : "",
     hideProviderIds,
   );
@@ -903,8 +927,8 @@ export function AgentDefinitionDialog({
             <AgentCreateAiDefaultsSummary
               canChooseProvider={runtimeCanChooseLlmProvider}
               harness={runtimeSummaryLabel}
-              inheritedModel={inheritedModelDefault}
-              inheritedProvider={inheritedProviderDefault}
+              inheritedModel={effectiveInheritedModel}
+              inheritedProvider={effectiveInheritedProvider}
               isConfigured={localModeGate.satisfied}
               model={runtimeFileConfig?.model}
               onEditDefaults={() => setAiDefaultsOpen(true)}

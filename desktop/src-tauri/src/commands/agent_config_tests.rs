@@ -772,3 +772,29 @@ fn live_switch_null_models_parses_to_no_current_model() {
     );
     assert!(available.is_empty());
 }
+
+#[cfg(all(feature = "bundled-goose", target_os = "macos"))]
+#[test]
+fn bundled_goose_command_surface_keeps_explicit_model() {
+    let mut record = agent_record();
+    record.runtime = Some("goose".into());
+    record.persona_id = None;
+    record.model = Some("chosen-model".into());
+    record.provider = Some("anthropic".into());
+    let surface = resolve_config_surface(
+        record,
+        &[],
+        crate::managed_agents::known_acp_runtime("goose"),
+        None,
+        &GlobalAgentConfig::default(),
+        None,
+    );
+    assert_eq!(
+        surface.normalized.model.unwrap().value.as_deref(),
+        Some("chosen-model")
+    );
+    assert_eq!(
+        surface.normalized.provider.unwrap().value.as_deref(),
+        Some("anthropic")
+    );
+}

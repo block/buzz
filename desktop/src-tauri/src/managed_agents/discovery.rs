@@ -322,9 +322,14 @@ pub fn try_record_agent_command(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
+        "goose"
+            if command == "goose" && cfg!(all(feature = "bundled-goose", target_os = "macos")) =>
+        {
+            Some(Vec::new())
+        }
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        | "claudecode" | "buzz-agent" | "goose-acp" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -413,6 +418,27 @@ fn resolve_workspace_command(command: &str) -> Option<PathBuf> {
         .find(|candidate| is_executable_file(candidate))
 }
 
+// A bundled selection must never silently resolve an unrelated PATH installation.
+fn resolve_bundled_goose() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let bundled = executable.parent()?.join("goose-acp");
+    if is_executable_file(&bundled) {
+        return Some(bundled);
+    }
+    // Source-tree runs use the same target-suffixed artifact staged for Tauri.
+    if cfg!(debug_assertions) {
+        let target = if cfg!(target_arch = "aarch64") {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-apple-darwin"
+        };
+        let staged =
+            workspace_root_dir().join(format!("desktop/src-tauri/binaries/goose-acp-{target}"));
+        return is_executable_file(&staged).then_some(staged);
+    }
+    None
+}
+
 fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<PathBuf>>>
 {
     use std::collections::HashMap;
@@ -424,6 +450,12 @@ fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String
 /// Resolve a command to an absolute path, caching results for the app lifetime.
 /// The cache eliminates redundant login-shell spawns when multiple agents share binaries.
 pub fn resolve_command(command: &str) -> Option<PathBuf> {
+    if cfg!(all(feature = "bundled-goose", target_os = "macos"))
+        && matches!(command, "goose" | "goose-acp")
+    {
+        return resolve_bundled_goose();
+    }
+
     if let Some(managed) = resolve_buzz_managed_command(command) {
         return Some(managed);
     }
@@ -461,6 +493,12 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
 /// freeze the cheap path exists to avoid. `resolve_command` (the forced path)
 /// is the sole prober and cache populator.
 pub fn resolve_command_cached(command: &str) -> Option<PathBuf> {
+    if cfg!(all(feature = "bundled-goose", target_os = "macos"))
+        && matches!(command, "goose" | "goose-acp")
+    {
+        return resolve_bundled_goose();
+    }
+
     if let Some(managed) = resolve_buzz_managed_command(command) {
         return Some(managed);
     }
@@ -1057,7 +1095,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
             auth_status: AuthStatus::Unknown,
             login_hint: None,
             source: HarnessSource::Builtin,
-            definition_env: Default::default(),
+            definition_env: runtime.configuration_defaults(),
             max_parallelism: super::parallelism::harness_max_parallelism(runtime.id),
         },
     }
@@ -1256,3 +1294,6 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "bundled-goose", target_os = "macos"))]
+mod bundled_goose_tests;
