@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildTranscript } from "./agentSessionTranscript.ts";
+import {
+  buildTranscript,
+  projectPermissionLedgerEvents,
+} from "./agentSessionTranscript.ts";
 import {
   buildTranscriptDisplayBlocks,
   flattenDisplayBlocks,
@@ -640,6 +643,206 @@ test("buildTranscript surfaces session/request_permission as a permission lifecy
   assert.match(transcript[0].text, /Confirm force-with-lease push/);
 });
 
+test("buildTranscript shows bound adapter tool-call action and target before owner approval", () => {
+  const transcript = buildTranscript([
+    {
+      ...baseEvent,
+      seq: 1,
+      kind: "acp_read",
+      payload: {
+        id: "adapter-shaped-8",
+        method: "session/request_permission",
+        params: {
+          sessionId: "sess-1",
+          toolCall: {
+            toolCallId: "call-adapter-8",
+            title: "Run shell command",
+            rawInput: {
+              command: "git push --force-with-lease origin review",
+              cwd: "/workspace/buzz",
+            },
+            content: [{ type: "text", text: "Force push requires approval." }],
+          },
+          options: [{ optionId: "approve-orchid", name: "Approve once" }],
+        },
+      },
+    },
+    {
+      ...baseEvent,
+      seq: 2,
+      kind: "permission_pending",
+      payload: {
+        requestId: "adapter-shaped-8",
+        sessionId: "sess-1",
+        actionDigest: "adapter-digest-8",
+        options: [{ optionId: "approve-orchid", name: "Approve once" }],
+      },
+    },
+  ]);
+  assert.equal(transcript.length, 1);
+  assert.match(transcript[0].text, /Run shell command/);
+  assert.match(transcript[0].text, /git push --force-with-lease origin review/);
+  assert.match(transcript[0].text, /Working directory: \/workspace\/buzz/);
+  assert.match(transcript[0].text, /Force push requires approval/);
+  assert.equal(
+    transcript[0].pendingResolution.options[0].optionId,
+    "approve-orchid",
+  );
+});
+
+test("buildTranscript restores an owner decision card only for the exact archived permission request", () => {
+  const transcript = buildTranscript([
+    {
+      ...baseEvent,
+      seq: 1,
+      kind: "acp_read",
+      payload: {
+        jsonrpc: "2.0",
+        id: "opaque-rpc-54",
+        method: "session/request_permission",
+        params: {
+          sessionId: "sess-1",
+          title: "Fixture request",
+          options: [{ optionId: "grant-orchid-8", name: "Grant orchid" }],
+        },
+      },
+    },
+    {
+      ...baseEvent,
+      seq: 2,
+      kind: "permission_pending",
+      payload: {
+        requestId: "opaque-rpc-54",
+        sessionId: "sess-1",
+        actionDigest: "digest-54",
+        options: [{ optionId: "grant-orchid-8", name: "Grant orchid" }],
+      },
+    },
+  ]);
+
+  assert.equal(transcript.length, 1);
+  assert.deepEqual(transcript[0].pendingResolution, {
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    requestId: "opaque-rpc-54",
+    actionDigest: "digest-54",
+    options: [{ optionId: "grant-orchid-8", label: "Grant orchid" }],
+  });
+});
+
+test("buildTranscript preserves sequential approvals and concurrent same-ID permissions as distinct cards", () => {
+  const request = (seq, sessionId, requestId, optionId) => ({
+    ...baseEvent,
+    seq,
+    kind: "acp_read",
+    sessionId,
+    payload: {
+      id: requestId,
+      method: "session/request_permission",
+      params: {
+        sessionId,
+        options: [{ optionId, kind: optionId, name: optionId }],
+      },
+    },
+  });
+  const pending = (seq, sessionId, requestId, optionId) => ({
+    ...baseEvent,
+    seq,
+    kind: "permission_pending",
+    sessionId,
+    payload: {
+      requestId,
+      sessionId,
+      actionDigest: `digest-${sessionId}-${requestId}`,
+      options: [{ optionId, name: optionId }],
+    },
+  });
+  const response = (seq, sessionId, requestId, optionId) => ({
+    ...baseEvent,
+    seq,
+    kind: "acp_write",
+    sessionId,
+    payload: {
+      id: requestId,
+      result: { outcome: { outcome: "selected", optionId } },
+    },
+  });
+  const transcript = buildTranscript([
+    request(1, "session-one", 11, "allow-one"),
+    pending(2, "session-one", 11, "allow-one"),
+    response(3, "session-one", 11, "allow-one"),
+    request(4, "session-one", 12, "reject-two"),
+    pending(5, "session-one", 12, "reject-two"),
+    request(6, "session-two", 12, "allow-three"),
+    pending(7, "session-two", 12, "allow-three"),
+  ]);
+  const permissions = transcript.filter(
+    (item) => item.renderClass === "permission",
+  );
+  assert.equal(permissions.length, 3);
+  assert.equal(
+    permissions.filter((item) => item.outcome === "Approved (allow-one)")
+      .length,
+    1,
+  );
+  assert.deepEqual(
+    permissions
+      .filter((item) => item.pendingResolution)
+      .map((item) => [
+        item.pendingResolution.sessionId,
+        item.pendingResolution.requestId,
+      ])
+      .sort(),
+    [
+      ["session-one", 12],
+      ["session-two", 12],
+    ],
+  );
+});
+
+test("buildTranscript turns an abandoned archived permission into a terminal state without a synthetic resume", () => {
+  const transcript = buildTranscript([
+    {
+      ...baseEvent,
+      seq: 1,
+      kind: "acp_read",
+      payload: {
+        id: "request-ended",
+        method: "session/request_permission",
+        params: {
+          sessionId: "sess-1",
+          options: [{ optionId: "allow-ended", name: "Allow" }],
+        },
+      },
+    },
+    {
+      ...baseEvent,
+      seq: 2,
+      kind: "permission_pending",
+      payload: {
+        requestId: "request-ended",
+        sessionId: "sess-1",
+        actionDigest: "digest-ended",
+        options: [{ optionId: "allow-ended", name: "Allow" }],
+      },
+    },
+    {
+      ...baseEvent,
+      seq: 3,
+      kind: "permission_abandoned",
+      payload: {
+        requestId: "request-ended",
+        sessionId: "sess-1",
+        actionDigest: "digest-ended",
+        outcome: "agent_session_ended",
+      },
+    },
+  ]);
+  assert.equal(transcript.length, 1);
+  assert.equal(transcript[0].outcome, "Unavailable (agent session ended)");
+  assert.equal(transcript[0].pendingResolution, undefined);
+});
+
 test("buildTranscript stamps completedAt when a terminal tool update is inserted first", () => {
   const transcript = buildTranscript([
     {
@@ -896,6 +1099,185 @@ test("buildTranscript appends Cancelled outcome for a numeric JSON-RPC id (cance
   assert.equal(item.type, "lifecycle");
   assert.equal(item.outcome, "Cancelled");
   assert.doesNotMatch(item.text ?? "", /Cancelled/);
+});
+
+function makePermissionLedgerEvent({
+  seq = -1,
+  channelId = "channel-1",
+  sessionId = "session-1",
+  turnId = "turn-1",
+  requestId = "req-17",
+  state = { kind: "pending" },
+  timestamp = "2026-06-30T09:59:59.000Z",
+  options = [
+    { optionId: "allow-17", kind: "allow_once", name: "Approve once" },
+    { optionId: "deny-17", kind: "reject_once", name: "Deny" },
+  ],
+} = {}) {
+  return {
+    seq,
+    timestamp,
+    kind: "permission_ledger",
+    agentIndex: null,
+    channelId,
+    sessionId,
+    turnId,
+    payload: {
+      channelId,
+      sessionId,
+      turnId,
+      requestId,
+      actionDigest: "digest-17",
+      request: {
+        method: "session/request_permission",
+        params: {
+          sessionId,
+          toolCall: {
+            title: "Run protected command",
+            rawInput: { command: "git push", cwd: "/workspace/repo" },
+            content: [{ type: "text", text: "Push the reviewed branch" }],
+          },
+          options,
+        },
+      },
+      options,
+      state,
+    },
+  };
+}
+
+test("buildTranscript merges ledger and live permission state into one terminal card", () => {
+  const pendingSnapshot = makePermissionLedgerEvent();
+  const liveRequest = makePermissionRequest(1, "req-17");
+  liveRequest.payload.params.sessionId = "session-1";
+  liveRequest.payload.params.options = [
+    { optionId: "allow-17", kind: "allow_once", name: "Approve once" },
+    { optionId: "deny-17", kind: "reject_once", name: "Deny" },
+  ];
+  const selected = makePermissionResponse(2, "req-17", "selected", "allow-17");
+  const stalePendingSnapshot = makePermissionLedgerEvent({
+    seq: -2,
+    timestamp: "2026-06-30T10:00:02.000Z",
+  });
+
+  const transcript = buildTranscript([
+    pendingSnapshot,
+    liveRequest,
+    selected,
+    stalePendingSnapshot,
+  ]);
+  const permissions = transcript.filter(
+    (item) => item.renderClass === "permission",
+  );
+
+  assert.equal(permissions.length, 1, "one canonical request card remains");
+  assert.equal(permissions[0].outcome, "Approved (allow_once)");
+  assert.equal(
+    permissions[0].pendingResolution,
+    undefined,
+    "a retained pending snapshot cannot restore controls after selection",
+  );
+  assert.match(permissions[0].text, /Command: git push/);
+  assert.match(permissions[0].text, /Working directory: \/workspace\/repo/);
+});
+
+test("SDK cancellation makes the live card inert and persists an inert reconnect card", () => {
+  const pendingSnapshot = makePermissionLedgerEvent();
+  const liveRequest = makePermissionRequest(1, "req-17");
+  liveRequest.payload.params.sessionId = "session-1";
+  const cancelledResponse = makePermissionResponse(2, "req-17", "cancelled");
+  const stalePendingSnapshot = makePermissionLedgerEvent({ seq: -2 });
+  const [liveCard] = buildTranscript([
+    pendingSnapshot,
+    liveRequest,
+    cancelledResponse,
+    stalePendingSnapshot,
+  ]).filter((item) => item.renderClass === "permission");
+  assert.equal(liveCard.outcome, "Cancelled");
+  assert.equal(liveCard.pendingResolution, undefined);
+
+  const [reconnectCard] = buildTranscript([
+    makePermissionLedgerEvent({ state: { kind: "cancelled" } }),
+  ]).filter((item) => item.renderClass === "permission");
+  assert.equal(reconnectCard.outcome, "Cancelled");
+  assert.equal(reconnectCard.pendingResolution, undefined);
+});
+
+test("failed cancellation response delivery makes the live card inert", () => {
+  const pendingSnapshot = makePermissionLedgerEvent();
+  const deliveryUnknown = {
+    ...pendingSnapshot,
+    seq: 2,
+    kind: "permission_delivery_unknown",
+    payload: { requestId: "req-17", sessionId: "session-1" },
+  };
+  const [card] = buildTranscript([pendingSnapshot, deliveryUnknown]).filter(
+    (item) => item.renderClass === "permission",
+  );
+  assert.equal(card.outcome, "Delivery unknown (not replayed)");
+  assert.equal(card.pendingResolution, undefined);
+});
+
+test("buildTranscript keeps same request ids in different channels separate", () => {
+  const channelOne = makePermissionLedgerEvent({ channelId: "channel-1" });
+  const channelTwo = makePermissionLedgerEvent({ channelId: "channel-2" });
+  const transcript = buildTranscript([channelOne, channelTwo]);
+  const permissions = transcript.filter(
+    (item) => item.renderClass === "permission",
+  );
+
+  assert.equal(permissions.length, 2);
+  assert.deepEqual(permissions.map((item) => item.channelId).sort(), [
+    "channel-1",
+    "channel-2",
+  ]);
+});
+
+test("buildTranscript preserves typed JSON-RPC ids in reconnect-only owner cards", () => {
+  for (const requestId of [17, "request-17"]) {
+    const [permission] = buildTranscript([
+      makePermissionLedgerEvent({ requestId }),
+    ]).filter((item) => item.renderClass === "permission");
+
+    assert.equal(
+      permission.pendingResolution?.requestId,
+      requestId,
+      "the owner broker receives the original JSON-RPC value, not the map key",
+    );
+  }
+});
+
+test("buildTranscript labels an opaque reconnect deny selection as denied", () => {
+  const [permission] = buildTranscript([
+    makePermissionLedgerEvent({
+      state: { kind: "selected", reason: "opaque-choice-9" },
+      options: [
+        { optionId: "opaque-choice-9", kind: "reject_once", name: "Continue" },
+      ],
+    }),
+  ]).filter((item) => item.renderClass === "permission");
+
+  assert.equal(permission.outcome, "Denied (reject_once)");
+  assert.equal(permission.pendingResolution, undefined);
+});
+
+test("permission ledger is actionable only for a live reconnect, never a dead runtime", () => {
+  const record = makePermissionLedgerEvent().payload;
+  const [livePermission] = buildTranscript(
+    projectPermissionLedgerEvents([record], true),
+  ).filter((item) => item.renderClass === "permission");
+  const [deadPermission] = buildTranscript(
+    projectPermissionLedgerEvents([record], false),
+  ).filter((item) => item.renderClass === "permission");
+
+  assert.ok(livePermission.pendingResolution, "open runtime restores its card");
+  assert.equal(deadPermission.pendingResolution, undefined);
+  assert.equal(deadPermission.outcome, "Unavailable (agent session ended)");
+  assert.equal(
+    record.state.kind,
+    "pending",
+    "Desktop projection does not rewrite the harness-owned ledger record",
+  );
 });
 
 test('buildTranscript does not collide between numeric id 1 and string id "1"', () => {

@@ -114,3 +114,14 @@ export async function reconcileManagedAgentRuntimes(
 ): Promise<ManagedAgentRuntimeStatus[]> {
   return invokeTauri("reconcile_managed_agent_runtimes", { communities });
 }
+
+/** Read the Desktop-owned permission ledger for reconnect recovery. */
+export async function getManagedAgentPermissionLifecycle(
+  pubkey: string,
+  relayUrl: string,
+): Promise<{ records: unknown[] }> {
+  return invokeTauri("get_managed_agent_permission_lifecycle", {
+    pubkey,
+    relayUrl,
+  });
+}
