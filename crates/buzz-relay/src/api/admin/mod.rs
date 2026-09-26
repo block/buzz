@@ -11383,7 +11383,9 @@ mod postgres_tests {
             (Some("different"), StatusCode::CONFLICT),
         ] {
             let (pool, community, host, state) = direct_fixture().await;
-            let id = seed_signed_event(&pool, community, &nostr::Keys::generate()).await;
+            let author = nostr::Keys::generate();
+            let id = seed_signed_event(&pool, community, &author).await;
+            seed_restriction(&pool, community, &author.public_key().to_bytes()).await;
             let path = format!("/events/{id}/delete?communityHost={host}");
             let rid = Uuid::new_v4();
             let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -11418,16 +11420,17 @@ mod postgres_tests {
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{a}");
+            let after_a = direct_effects(&pool, community).await;
             barrier.wait().await;
             let (status, b) = b.await.unwrap();
             assert_eq!(status, want, "{b}");
+            assert_no_effects(&pool, community, &after_a, "raced retry").await;
             if want == StatusCode::OK {
                 assert_eq!(
                     (b["actionId"].clone(), b["replayed"].clone()),
                     (a["actionId"].clone(), true.into())
                 );
             }
-            assert_eq!(count_where(&pool, ACTIONS_IN, community).await, 1);
         }
     }
 
@@ -11552,7 +11555,9 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn direct_routes_refuse_unauthorized_requests_without_effects() {
         let (pool, community, host, state) = direct_fixture().await;
-        let event = seed_signed_event(&pool, community, &nostr::Keys::generate()).await;
+        let author = nostr::Keys::generate();
+        let event = seed_signed_event(&pool, community, &author).await;
+        seed_restriction(&pool, community, &author.public_key().to_bytes()).await;
         let owner = nostr::Keys::generate();
         sqlx::query(
             "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'owner')",
