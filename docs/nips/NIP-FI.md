@@ -838,6 +838,7 @@ is unavailable.
 | unknown or community-unauthorized issuer; malformed, invalid, or expired evidence | `evidence_rejected` | `restricted: evidence rejected` | `403`; `Content-Type: text/plain; charset=utf-8`; body `evidence rejected\n` |
 | assertion–key mismatch; unauthorized issuer principal, signed-target–body mismatch, or replayed `jti` on a signed command; active deny-set entry for pubkey | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; body `authorization denied\n` |
 | required JWKS snapshot or community/Host resolution unavailable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; body `authorization unavailable\n` |
+| relay in `deny_protected` mode (operator-declared repair mode) | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; same contract as JWKS-unavailable — client evidence may be valid, service is temporarily offline |
 
 A denial decided on a WebSocket upgrade is the HTTP response in place of `101`.
 A denial decided on a protected HTTP request is the HTTP response.

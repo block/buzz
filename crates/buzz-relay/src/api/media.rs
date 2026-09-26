@@ -1236,7 +1236,7 @@ mod tests {
     }
 
     async fn test_state() -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.media_uploads_per_minute = 1;
@@ -1713,7 +1713,7 @@ mod tests {
             };
             use jsonwebtoken::{jwk::JwkSet, Algorithm};
 
-            let mut config = crate::config::Config::from_env().ok()?;
+            let mut config = crate::config::Config::for_test();
             config.database_url = crate::test_support::database_url();
             config.redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -1800,7 +1800,7 @@ mod tests {
 
         /// Build an AppState with NIP-FI Off.
         async fn media_off_test_state() -> Option<Arc<AppState>> {
-            let mut config = crate::config::Config::from_env().ok()?;
+            let mut config = crate::config::Config::for_test();
             config.database_url = crate::test_support::database_url();
             config.redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());

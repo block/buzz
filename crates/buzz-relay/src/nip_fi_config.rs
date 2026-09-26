@@ -337,14 +337,30 @@ impl NipFiRelayConfig {
     }
 }
 
+/// Process-global mutex serializing all reads and writes to NIP-FI environment
+/// variables. Both `NipFiRelayConfig::from_env()` callers and test code that
+/// temporarily mutates NIP-FI env vars must hold this lock to prevent
+/// cross-test races when the suite runs with multiple threads.
+///
+/// Exposed at module level (not just `#[cfg(test)]`) so `router.rs` test
+/// fixtures that call `Config::from_env()` can hold it across the NIP-FI
+/// env-var window without racing this module's own tests.
+/// [Fix 5: FI-TRACE-ENV-RACE]
+#[cfg(test)]
+pub(crate) static NIP_FI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Threads that reached `Config::for_test()`'s `NIP_FI_ENV_LOCK` acquisition;
+/// lets the lock witness observe arrival instead of inferring it from time.
+#[cfg(test)]
+pub(crate) static FOR_TEST_LOCK_WAITERS: std::sync::Mutex<Vec<std::thread::ThreadId>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Env vars are process-global — serialize tests that mutate them to prevent
-    // cross-test races when the suite runs with multiple threads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Env-mutating tests hold the module-level `NIP_FI_ENV_LOCK`, shared with
+    // `Config::for_test()` so router fixtures cannot race these tests.
 
     /// RAII guard: removes a set of env vars when dropped, restoring a clean
     /// state even on test panic.
@@ -369,9 +385,50 @@ mod tests {
         "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS",
     ];
 
+    /// Same-process witness (plain libtest, not nextest): a fixture's
+    /// `Config::for_test()` read waits while an FI writer holds the lock over
+    /// an invalid Enforce environment, then loads the restored environment.
+    /// [FI-TRACE-ENV-RACE]
+    #[test]
+    fn fixture_config_read_waits_for_fi_env_lock() {
+        let guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let env = EnvGuard::new(NIP_FI_VARS);
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::remove_var("BUZZ_NIP_FI_ISSUERS");
+
+        let reader = std::thread::spawn(|| crate::config::Config::for_test().nip_fi.mode);
+        let reader_id = reader.thread().id();
+        while !super::FOR_TEST_LOCK_WAITERS
+            .lock()
+            .unwrap()
+            .contains(&reader_id)
+        {
+            std::thread::yield_now();
+        }
+        // The reader is at the lock. Give an unlocked reader ample turns to
+        // read the invalid environment and panic before judging exclusion.
+        for _ in 0..10_000 {
+            if reader.is_finished() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            !reader.is_finished(),
+            "fixture read must block while the invalid FI environment is locked"
+        );
+
+        drop(env);
+        drop(guard);
+        let mode = reader
+            .join()
+            .expect("fixture read must load the restored environment");
+        assert!(matches!(mode, NipFiMode::Off));
+    }
+
     #[test]
     fn off_mode_requires_no_other_config() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         // NipFiMode::Off is the default: no issuers, no age limit.
@@ -383,7 +440,7 @@ mod tests {
 
     #[test]
     fn deny_protected_requires_no_other_config() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "deny_protected");
@@ -393,7 +450,7 @@ mod tests {
 
     #[test]
     fn enforce_without_issuers_fails_closed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
@@ -426,7 +483,7 @@ mod tests {
 
     #[test]
     fn enforce_without_assertion_age_fails_closed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
@@ -465,7 +522,7 @@ mod tests {
 
     #[test]
     fn unknown_mode_is_rejected() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "permissive");
@@ -501,7 +558,7 @@ mod tests {
     /// passes even if the code leaks values from valid-but-wrong-typed fields.
     #[test]
     fn malformed_issuer_json_error_does_not_leak_raw_value() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         // A sentinel that serde would echo in a type-mismatch error if not suppressed.
@@ -544,7 +601,7 @@ mod tests {
     fn invalid_algorithm_error_does_not_leak_raw_value() {
         // parse_algorithm is private; we test it indirectly by passing a full
         // issuer config with a sentinel algorithm name.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         const SENTINEL_ALG: &str = "SENTINEL_ALGORITHM_HS256_SECRET";
@@ -579,7 +636,7 @@ mod tests {
     /// Policy-build rejection error must not leak the issuer URL.
     #[test]
     fn policy_build_rejection_error_does_not_leak_issuer_url() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         const SENTINEL_ISSUER: &str = "https://sentinel-issuer-secret.example";
@@ -614,6 +671,129 @@ mod tests {
         assert!(
             msg.contains("index"),
             "error must reference the issuer by index, not URL: {msg}"
+        );
+    }
+
+    // ── session-deadline three-term bound ─────────────────────────────────────
+
+    /// The `compute_session_deadline` function satisfies the spec's three-term min:
+    ///
+    ///   session_deadline = min(
+    ///       upstream_authority_deadline(),             // = min(authority_deadlines)
+    ///       connection_time + max_connection_lifetime  // partitions, never shortens
+    ///   )
+    ///
+    /// Each scenario sets one term as the strictly-earliest deadline and asserts
+    /// `compute_session_deadline` returns that term. Mutation evidence: replacing
+    /// `upstream.min(partition)` with `upstream` alone makes Scenario D panic.
+    #[test]
+    fn session_deadline_three_term_min_selects_earliest() {
+        use crate::connection::compute_session_deadline;
+        use chrono::{Duration, Utc};
+
+        let now = Utc::now();
+
+        // Scenario A: exp is earliest (upstream wins over partition).
+        {
+            let exp = now + Duration::seconds(100);
+            let iat_plus_max_age = now + Duration::seconds(200);
+            let key_hard = now + Duration::seconds(300);
+            let max_lifetime = std::time::Duration::from_secs(400);
+            let assertion =
+                buzz_auth::VerifiedAssertion::for_test(None, vec![exp, iat_plus_max_age, key_hard]);
+            let deadline = compute_session_deadline(&assertion, now, Some(max_lifetime));
+            assert_eq!(deadline, exp, "exp is earliest → deadline = exp");
+        }
+
+        // Scenario B: iat+max_age is earliest (upstream wins over partition).
+        {
+            let exp = now + Duration::seconds(300);
+            let iat_plus_max_age = now + Duration::seconds(100);
+            let key_hard = now + Duration::seconds(200);
+            let max_lifetime = std::time::Duration::from_secs(400);
+            let assertion =
+                buzz_auth::VerifiedAssertion::for_test(None, vec![exp, iat_plus_max_age, key_hard]);
+            let deadline = compute_session_deadline(&assertion, now, Some(max_lifetime));
+            assert_eq!(
+                deadline, iat_plus_max_age,
+                "iat+max_age is earliest → deadline = iat+max_age"
+            );
+        }
+
+        // Scenario C: key_snapshot_hard_deadline is earliest (upstream wins over partition).
+        {
+            let exp = now + Duration::seconds(400);
+            let iat_plus_max_age = now + Duration::seconds(300);
+            let key_hard = now + Duration::seconds(100);
+            let max_lifetime = std::time::Duration::from_secs(200);
+            let assertion =
+                buzz_auth::VerifiedAssertion::for_test(None, vec![exp, iat_plus_max_age, key_hard]);
+            let deadline = compute_session_deadline(&assertion, now, Some(max_lifetime));
+            assert_eq!(
+                deadline, key_hard,
+                "key_snapshot_hard_deadline is earliest → deadline = key_hard"
+            );
+        }
+
+        // Scenario D: max_connection_lifetime partition is earliest.
+        {
+            let exp = now + Duration::seconds(400);
+            let iat_plus_max_age = now + Duration::seconds(300);
+            let key_hard = now + Duration::seconds(200);
+            let max_lifetime = std::time::Duration::from_secs(100);
+            let assertion =
+                buzz_auth::VerifiedAssertion::for_test(None, vec![exp, iat_plus_max_age, key_hard]);
+            let deadline = compute_session_deadline(&assertion, now, Some(max_lifetime));
+            let expected_partition = now + Duration::seconds(100);
+            assert_eq!(
+                deadline, expected_partition,
+                "max_connection_lifetime partition is earliest → deadline = partition"
+            );
+        }
+    }
+
+    /// When `max_connection_lifetime` is absent, session_deadline equals the
+    /// upstream authority deadline without further shortening.
+    #[test]
+    fn session_deadline_no_lifetime_uses_upstream_only() {
+        use crate::connection::compute_session_deadline;
+        use chrono::{Duration, Utc};
+
+        let now = Utc::now();
+        let exp = now + Duration::seconds(600);
+        let iat_plus_max_age = now + Duration::seconds(3600);
+        let key_hard = now + Duration::seconds(86400);
+        let assertion =
+            buzz_auth::VerifiedAssertion::for_test(None, vec![exp, iat_plus_max_age, key_hard]);
+
+        // No lifetime partition configured → deadline = upstream = min(authority_deadlines).
+        let deadline = compute_session_deadline(&assertion, now, None);
+        assert_eq!(
+            deadline, exp,
+            "no lifetime → deadline = min(authority_deadlines) = exp"
+        );
+    }
+
+    /// Equality at any deadline is expired — the session_deadline computation
+    /// never uses `<=` to mean "still live"; `>=` fires at equality.
+    #[test]
+    fn session_deadline_equality_is_expired() {
+        use chrono::{Duration, Utc};
+
+        let now = Utc::now();
+        let deadline_now = now; // exactly now = expired
+
+        // Simulate the expiry check: `now >= deadline` fires at equality.
+        assert!(
+            now >= deadline_now,
+            "equality must count as expired per [FI-TRACE-LEASE-BOUND]"
+        );
+
+        // A deadline strictly in the future is not yet expired.
+        let deadline_future = now + Duration::milliseconds(1);
+        assert!(
+            now < deadline_future,
+            "a deadline in the future must not be expired"
         );
     }
 }

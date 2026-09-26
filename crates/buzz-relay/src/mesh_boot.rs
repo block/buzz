@@ -165,9 +165,115 @@ pub struct MeshHandle {
     /// [`Self::wire_consumers`]) so inbound control loops fan that renewer's
     /// owner-loss signal. One registry per pod; single source of owner truth.
     pub owners: Arc<crate::audio::join::HuddleOwnerRegistry>,
+
+    /// Test-only directory seam. When `Some`, `effective_directory` returns
+    /// this `Arc<dyn HuddleDirectory>` instead of `self.directory`, so handler
+    /// tests can inject a `FakeDir` without a live Redis connection.
+    ///
+    /// Production code never sets this field. Use `for_test_only` to build a
+    /// handle with an injected directory, and `effective_directory` where the
+    /// real handler reads the directory.
+    #[cfg(test)]
+    pub(crate) test_directory: Option<Arc<dyn crate::audio::join::HuddleDirectory>>,
 }
 
 impl MeshHandle {
+    /// The effective directory for `resolve_join_owner_ready`.
+    ///
+    /// In production, always `&self.directory`. In test builds, returns the
+    /// injected `test_directory` when present — this makes the B1 caller
+    /// witness possible without a live Redis connection.
+    pub(crate) fn effective_directory(&self) -> &dyn crate::audio::join::HuddleDirectory {
+        #[cfg(test)]
+        if let Some(d) = &self.test_directory {
+            return d.as_ref();
+        }
+        &self.directory
+    }
+
+    /// Construct a minimal `MeshHandle` for handler tests that need a live
+    /// mesh (e.g. to reach the B1 owner-release path) without a Redis
+    /// connection. The caller must call [`Self::with_test_directory`] afterwards
+    /// to inject a fake directory — construction is split so the caller can
+    /// use `self.local_runtime_id` to build the scripted directory.
+    ///
+    /// The returned handle installs no inbound consumers; background loops
+    /// bind on loopback and run idle (no peers are dialed).
+    #[cfg(test)]
+    pub(crate) async fn for_test_only(
+        owners: Arc<crate::audio::join::HuddleOwnerRegistry>,
+    ) -> Self {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        use buzz_relay_mesh::gossip::GossipRecord;
+
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let endpoint = buzz_relay_mesh::endpoint::MeshEndpoint::bind(loopback)
+            .await
+            .expect("for_test_only: loopback endpoint");
+        let runtime_id = endpoint.runtime_id();
+        let record = GossipRecord::new(runtime_id, vec![], 1);
+        let membership = MeshMembership::new(record);
+        let runtime = MeshRuntime::start(endpoint, membership.clone(), None);
+        let membership_arc: Arc<dyn RelayMeshMembership> = Arc::new(membership);
+
+        struct NoopTransport;
+        impl RelayPeerTransport for NoopTransport {
+            fn send_datagram(
+                &self,
+                _to: RuntimeId,
+                _dgram: MeshDatagram,
+            ) -> Result<(), buzz_relay_mesh::MeshError> {
+                Ok(())
+            }
+            fn open_session_stream(
+                &self,
+                _to: RuntimeId,
+                _hello: StreamHello,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<MeshStream, buzz_relay_mesh::MeshError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async { Err(buzz_relay_mesh::MeshError::Transport("noop".into())) })
+            }
+            fn set_inbound(&self, _handler: Box<dyn InboundHandler>) {}
+        }
+
+        let transport: Arc<dyn RelayPeerTransport> = Arc::new(NoopTransport);
+        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // never dialed
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("for_test_only: noop redis pool");
+
+        MeshHandle {
+            directory: SessionDirectory::new(pool),
+            transport,
+            membership: membership_arc,
+            local_runtime_id: runtime_id,
+            dispatcher: MeshInboundDispatcher::default(),
+            audio_fence: Arc::new(crate::audio::mesh::GenerationFloor::new()),
+            runtime,
+            owners,
+            test_directory: None,
+        }
+    }
+
+    /// Inject a scripted [`HuddleDirectory`] into this handle so that
+    /// [`Self::effective_directory`] returns it. Call after [`Self::for_test_only`]
+    /// once you have `self.local_runtime_id` to build the scripted directory.
+    ///
+    /// [`HuddleDirectory`]: crate::audio::join::HuddleDirectory
+    #[cfg(test)]
+    pub(crate) fn with_test_directory(
+        mut self,
+        directory: Arc<dyn crate::audio::join::HuddleDirectory>,
+    ) -> Self {
+        self.test_directory = Some(directory);
+        self
+    }
+
     /// Live `/_mesh` status snapshot.
     pub fn status(&self) -> MeshStatus {
         self.runtime.membership().status()
@@ -368,11 +474,12 @@ const PROTO_VERSION: u16 = buzz_relay_mesh::WIRE_VERSION as u16;
 
 /// Capabilities advertised by this build. All three tunnel profiles ship in
 /// the same binary, so the list is static.
-fn capabilities() -> Vec<String> {
+pub(crate) fn capabilities() -> Vec<String> {
     vec![
         "reliable-stream".to_string(),
         "realtime-media".to_string(),
         "huddle-control".to_string(),
+        crate::audio::join::HUDDLE_COMMIT_PHASE_CAPABILITY.to_string(),
     ]
 }
 
@@ -517,6 +624,8 @@ pub async fn boot_mesh(
         audio_fence: Arc::new(crate::audio::mesh::GenerationFloor::new()),
         runtime,
         owners,
+        #[cfg(test)]
+        test_directory: None,
     }))
 }
 
@@ -530,7 +639,7 @@ mod tests {
     /// ever reached Redis this test would hang/fail.
     #[tokio::test]
     async fn mesh_off_boots_nothing() {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.mesh.enabled = false;
         let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // unroutable
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -557,7 +666,7 @@ mod tests {
         if std::env::var("BUZZ_MESH").is_ok() {
             return; // externally forced — skip rather than assert a lie
         }
-        let config = crate::config::Config::from_env().expect("default config loads");
+        let config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         assert!(!config.mesh.enabled, "BUZZ_MESH absent must mean mesh off");
     }
 

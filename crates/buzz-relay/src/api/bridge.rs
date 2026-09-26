@@ -4267,7 +4267,7 @@ mod postgres_tests {
     ///
     /// Returns `None` when local Postgres is not reachable.
     pub(super) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
-        let mut config = crate::config::Config::from_env().ok()?;
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.
         config.redis_url =
@@ -4981,7 +4981,7 @@ mod postgres_tests {
     ///
     /// Returns `None` when local Postgres is not reachable.
     async fn nip_fi_enforce_test_state() -> Option<Arc<crate::state::AppState>> {
-        let mut config = crate::config::Config::from_env().ok()?;
+        let mut config = crate::config::Config::for_test();
         config.database_url = crate::test_support::database_url();
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -5144,7 +5144,7 @@ mod postgres_tests {
     /// `require_auth_token = false` so requests without NIP-98 auth still reach
     /// the application logic rather than rejecting at the NIP-98 layer.
     async fn nip_fi_off_test_state() -> Option<Arc<crate::state::AppState>> {
-        let mut config = crate::config::Config::from_env().ok()?;
+        let mut config = crate::config::Config::for_test();
         config.database_url = crate::test_support::database_url();
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -5192,7 +5192,7 @@ mod postgres_tests {
 
     /// Build an AppState with NIP-FI in DenyProtected mode.
     async fn nip_fi_deny_protected_test_state() -> Option<Arc<crate::state::AppState>> {
-        let mut config = crate::config::Config::from_env().ok()?;
+        let mut config = crate::config::Config::for_test();
         config.database_url = crate::test_support::database_url();
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -6475,7 +6475,7 @@ mod postgres_tests {
         let Some(mut state) = rt.block_on(async {
             // Clone nip_fi_enforce_test_state setup, but return the state
             // before Arc-wrapping so we can inject the verifier.
-            let mut config = crate::config::Config::from_env().ok()?;
+            let mut config = crate::config::Config::for_test();
             config.database_url = crate::test_support::database_url();
             config.redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -6727,7 +6727,7 @@ mod postgres_tests {
         // Identity of the two results proves first-value semantics preserved.
         // Neither is 403: proves cardinality gate is not applied in Off mode.
         let Some(off_state) = rt.block_on(async {
-            let mut config = crate::config::Config::from_env().ok()?;
+            let mut config = crate::config::Config::for_test();
             config.database_url = crate::test_support::database_url();
             config.redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -6866,7 +6866,7 @@ mod postgres_tests {
         // token and forward the request.  Without a verifier, the middleware 401s
         // before the cardinality gate inside `admit_nip_fi_http` can fire.
         let Some(mut enforce_state) = rt.block_on(async {
-            let mut config = crate::config::Config::from_env().ok()?;
+            let mut config = crate::config::Config::for_test();
             config.database_url = crate::test_support::database_url();
             config.redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -7476,8 +7476,7 @@ mod postgres_tests {
 
         // --- build AppState with two-pool Db ---------------------------------
         let state = rt.block_on(async {
-            let mut config = crate::config::Config::from_env()
-                .expect("Config::from_env required — set DATABASE_URL, REDIS_URL, etc.");
+            let mut config = crate::config::Config::for_test();
             config.database_url = crate::test_support::database_url();
             config.redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());

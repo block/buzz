@@ -407,7 +407,7 @@ mod tests {
     use tower::ServiceExt;
 
     async fn unconfigured_test_state() -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("test config");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.klipy = None;
         config.redis_url = "redis://127.0.0.1:1".to_string();
 
