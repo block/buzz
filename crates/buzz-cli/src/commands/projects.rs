@@ -255,10 +255,7 @@ async fn fetch_project(
     owner: Option<&str>,
 ) -> Result<Option<Event>, CliError> {
     let pubkey = match owner {
-        Some(pk) => {
-            crate::validate::validate_hex64(pk)?;
-            pk.to_string()
-        }
+        Some(pk) => crate::validate::canonicalize_hex64(pk)?,
         None => client.keys().public_key().to_hex(),
     };
     let filter = serde_json::json!({
@@ -488,10 +485,7 @@ pub async fn cmd_list(
     limit: Option<u32>,
 ) -> Result<(), CliError> {
     let pubkey = match owner {
-        Some(pk) => {
-            crate::validate::validate_hex64(pk)?;
-            pk.to_string()
-        }
+        Some(pk) => crate::validate::canonicalize_hex64(pk)?,
         None => client.keys().public_key().to_hex(),
     };
     let mut filter = serde_json::json!({
