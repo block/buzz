@@ -60,13 +60,28 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
+/// MIME types blocked from upload — mirrors the desktop client's and the
+/// server's generic-file deny-list (`desktop/src-tauri/src/commands/media.rs`).
+///
+/// The CLI previously used a narrow image/video allow-list here, which meant
+/// `buzz upload file` rejected any generic file (e.g. .docx, .pdf) that the
+/// desktop client and relay both accept. Active-content XSS carriers (JS,
+/// SVG) and native executables stay blocked; other types, including HTML,
+/// are accepted as downloads, matching the desktop client.
+const BLOCKED_MIMES: &[&str] = &[
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-msdownload",
+    "application/x-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary",
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive",
+    "application/x-apple-diskimage",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -1225,7 +1240,7 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
+        if BLOCKED_MIMES.contains(&mime.as_str()) {
             return Err(CliError::Usage(format!("unsupported file type: {mime}")));
         }
 
@@ -2319,6 +2334,88 @@ mod retry_policy_tests {
             auths.iter().all(|a| a.contains("Nostr ")),
             "each attempt must carry Nostr auth"
         );
+    }
+
+    /// `upload_file` must accept generic document types (PDF, DOCX, etc.) that the
+    /// desktop client and relay both allow. Regression test for the CLI's old
+    /// image/video allow-list, which rejected any file outside a short hardcoded
+    /// list — including plain documents nobody would consider dangerous.
+    #[tokio::test]
+    async fn upload_file_allows_generic_document_mime() {
+        use std::io::Write;
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        // Minimal PDF header: enough for `infer` to detect application/pdf.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"%PDF-1.4\n").unwrap();
+        let file_path = tmp.path().to_str().unwrap().to_string();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 8192];
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    stream.read(&mut buf),
+                )
+                .await;
+                let ok_body = r#"{"url":"https://relay.test/media/abc.pdf","sha256":"abc","size":9,"type":"application/pdf","uploaded":0}"#;
+                let ok = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    ok_body.len(),
+                    ok_body
+                );
+                let _ = stream.write_all(ok.as_bytes()).await;
+            }
+        });
+
+        let base = format!("http://{addr}");
+        let client = test_client(&base);
+        let result = client.upload_file(&file_path).await;
+        assert!(
+            result.is_ok(),
+            "expected a generic document (PDF) to be accepted, got {result:?}"
+        );
+    }
+
+    /// `upload_file` must still reject active-content and executable MIME types
+    /// (mirrors the desktop client's and relay's deny-list) — and must reject them
+    /// before ever making a network call.
+    #[tokio::test]
+    async fn upload_file_rejects_blocked_mime() {
+        use std::io::Write;
+
+        // ELF magic + padding: `infer`'s ELF matcher requires more than 52 bytes
+        // (a real header length) before it will match, not just the 4-byte magic.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut elf = vec![0u8; 64];
+        elf[0] = 0x7f;
+        elf[1] = b'E';
+        elf[2] = b'L';
+        elf[3] = b'F';
+        tmp.write_all(&elf).unwrap();
+        let file_path = tmp.path().to_str().unwrap().to_string();
+
+        // No listener is bound at this address — if the CLI tried to reach the
+        // network before rejecting the file, this would fail with a connection
+        // error instead of the expected `Usage` error.
+        let client = test_client("http://127.0.0.1:1");
+        let result = client.upload_file(&file_path).await;
+        match result {
+            Err(CliError::Usage(msg)) => {
+                assert!(
+                    msg.contains("unsupported file type"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected CliError::Usage, got {other:?}"),
+        }
     }
 
     /// When all retry attempts for a stored event end with a partial body (200
