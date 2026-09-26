@@ -17,6 +17,7 @@ export type CommunityOnboardingSource =
 export type CommunityOnboardingStage =
   | "claiming"
   | "connecting"
+  | "corporate-profile"
   | "profile"
   | "team-intro"
   | "finalizing"
@@ -108,6 +109,7 @@ function isTransaction(
     [
       "claiming",
       "connecting",
+      "corporate-profile",
       "profile",
       "team-intro",
       "finalizing",

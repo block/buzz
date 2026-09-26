@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { isMacPlatform } from "@/shared/lib/platform";
 
@@ -43,6 +43,10 @@ import { resetAvatarPresentations } from "@/features/profile/avatarPresentationS
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
+import { ensureEnterpriseLoginForRelay } from "./enterpriseLoginGate";
+import { authoritativeEnterpriseProfile } from "./enterpriseProfile";
+import type { EnterpriseProfileSeed } from "./enterpriseProfile";
+import { cancelEnterpriseAuthLogin } from "./enterpriseAuthApi";
 import { resetMessageLinkMetadataCache } from "@/shared/ui/markdown/useMessageLinkMetadata";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
@@ -108,6 +112,7 @@ type CommunityInitResult =
       needsSetup: false;
       appliedKey: string;
       identityPubkey: string | null;
+      enterpriseProfile: EnterpriseProfileSeed | null;
     }
   | {
       isReady: false;
@@ -115,6 +120,17 @@ type CommunityInitResult =
       defaultRelayUrl: string;
     }
   | { isReady: false; needsSetup: false; appliedKey: string | null }
+  | {
+      isReady: false;
+      needsSetup: false;
+      appliedKey: string | null;
+      enterpriseLogin: {
+        communityName: string;
+        error: string | null;
+        onCancel: () => void;
+        onContinue: () => void;
+      };
+    }
   | { isReady: false; needsSetup: false; appliedKey: null; error: string };
 
 /**
@@ -138,6 +154,28 @@ export function useCommunityInit(
     needsSetup: false,
     appliedKey: null,
   });
+  const [enterpriseLoginPrompt, setEnterpriseLoginPrompt] = useState<{
+    communityName: string;
+    error: string | null;
+  } | null>(null);
+  const enterpriseLoginDecisionRef = useRef<
+    ((allowed: boolean) => void) | null
+  >(null);
+  const enterpriseProfileRef = useRef<EnterpriseProfileSeed | null>(null);
+
+  const continueEnterpriseLogin = useCallback(() => {
+    const resolve = enterpriseLoginDecisionRef.current;
+    enterpriseLoginDecisionRef.current = null;
+    setEnterpriseLoginPrompt(null);
+    resolve?.(true);
+  }, []);
+
+  const cancelEnterpriseLogin = useCallback(() => {
+    const resolve = enterpriseLoginDecisionRef.current;
+    enterpriseLoginDecisionRef.current = null;
+    setEnterpriseLoginPrompt(null);
+    resolve?.(false);
+  }, []);
 
   // Trust-list edits must not reset active drafts, connections, or providers.
   // Startup waits for this narrow IPC before workspace apply can restore agents.
@@ -179,9 +217,11 @@ export function useCommunityInit(
   // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
   useEffect(() => {
     let cancelled = false;
+    let ownedEnterpriseLoginAttemptId: string | null = null;
 
     async function init() {
       if (!activeCommunity) {
+        enterpriseProfileRef.current = null;
         if (hasInitializedRef.current) {
           if (prevCommunityIdRef.current) {
             saveActiveAgentTurnsForCommunity(prevCommunityIdRef.current);
@@ -322,6 +362,55 @@ export function useCommunityInit(
           return;
         }
       }
+      enterpriseProfileRef.current = null;
+      const enterpriseLoginAttemptId = `enterprise-auth-${
+        globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+      }`;
+      try {
+        const enterpriseAuth = await ensureEnterpriseLoginForRelay(
+          activeCommunity.relayUrl,
+          {
+            loginAttemptId: enterpriseLoginAttemptId,
+            onEnterpriseLoginRequired: () => {
+              if (cancelled) return false;
+              return new Promise<boolean>((resolve) => {
+                enterpriseLoginDecisionRef.current = resolve;
+                setEnterpriseLoginPrompt({
+                  communityName: activeCommunity.name,
+                  error: null,
+                });
+              });
+            },
+            onBrowserLoginStarted: () => {
+              ownedEnterpriseLoginAttemptId = enterpriseLoginAttemptId;
+            },
+          },
+        );
+        enterpriseProfileRef.current =
+          authoritativeEnterpriseProfile(enterpriseAuth);
+        ownedEnterpriseLoginAttemptId = null;
+      } catch (error) {
+        ownedEnterpriseLoginAttemptId = null;
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : "Enterprise login is required for this community";
+        setEnterpriseLoginPrompt((prompt) =>
+          prompt ? { ...prompt, error: errorMessage } : prompt,
+        );
+        console.error("Enterprise login gate failed:", error);
+        if (!cancelled) {
+          setResult({
+            isReady: false,
+            needsSetup: false,
+            appliedKey: null,
+            error: errorMessage,
+          });
+        }
+        return;
+      }
+      if (cancelled) return;
+
       hasInitializedRef.current = true;
       appliedRelayUrlRef.current = activeCommunity.relayUrl;
       appliedPubkeyRef.current = identityPubkey ?? appliedPubkeyRef.current;
@@ -404,6 +493,7 @@ export function useCommunityInit(
           needsSetup: false,
           appliedKey: communityKey,
           identityPubkey,
+          enterpriseProfile: enterpriseProfileRef.current,
         });
       }
     }
@@ -412,6 +502,19 @@ export function useCommunityInit(
 
     return () => {
       cancelled = true;
+      const resolveEnterpriseLogin = enterpriseLoginDecisionRef.current;
+      if (resolveEnterpriseLogin !== null) {
+        enterpriseLoginDecisionRef.current = null;
+        resolveEnterpriseLogin(false);
+      }
+      if (ownedEnterpriseLoginAttemptId !== null) {
+        void cancelEnterpriseAuthLogin({
+          attemptId: ownedEnterpriseLoginAttemptId,
+        }).catch(() => {
+          // Best-effort cleanup for a browser login this hook invocation owns.
+        });
+        ownedEnterpriseLoginAttemptId = null;
+      }
     };
   }, [
     activeCommunity?.id,
@@ -422,6 +525,19 @@ export function useCommunityInit(
     suppressAutoConnect,
     communityKey,
   ]);
+
+  if (enterpriseLoginPrompt !== null) {
+    return {
+      isReady: false,
+      needsSetup: false,
+      appliedKey: activeCommunity ? communityKey : null,
+      enterpriseLogin: {
+        ...enterpriseLoginPrompt,
+        onCancel: cancelEnterpriseLogin,
+        onContinue: continueEnterpriseLogin,
+      },
+    };
+  }
 
   return result;
 }

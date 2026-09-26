@@ -4,10 +4,13 @@ mod app_state;
 mod archive;
 mod build_identity;
 mod builderlab;
+#[cfg(test)]
+mod builderlab_api_config;
 mod channel_head_cache;
 mod commands;
 mod deep_link;
 mod egress_guard;
+mod enterprise_auth_adapter;
 mod event_sync;
 mod events;
 mod huddle;
@@ -65,6 +68,7 @@ use deep_link::{
     take_pending_navigation_deep_link, PendingCommunityDeepLinks, PendingEntityDeepLinks,
     PendingNavigationDeepLinks,
 };
+use enterprise_auth_adapter::*;
 use huddle::{
     add_agent_to_huddle,
     audio_output::{get_audio_output_device, list_audio_output_devices, set_audio_output_device},
@@ -228,6 +232,8 @@ pub fn run() {
         .manage(PendingEntityDeepLinks::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
+        .manage(EnterpriseAuthSession::default())
+        .manage(EnterpriseAuthLogin::default())
         .manage(commands::pairing::PairingHandle::new())
         .manage(terminal_runtime::TerminalSessions::default())
         .manage(archive::sync::ArchiveSyncState::default())
@@ -545,6 +551,10 @@ pub fn run() {
             cancel_builderlab_login,
             get_builderlab_auth,
             clear_builderlab_auth,
+            start_enterprise_auth_login,
+            cancel_enterprise_auth_login,
+            get_enterprise_auth,
+            clear_enterprise_auth,
             get_builderlab_nostr_identity,
             bind_builderlab_nostr_identity,
             delete_builderlab_nostr_identity,
@@ -690,6 +700,7 @@ pub fn run() {
             read_clipboard_text,
             fetch_snapshot_bytes,
             relay_requires_membership,
+            enterprise_login_gate,
             list_relay_members,
             get_my_relay_membership,
             add_relay_member,

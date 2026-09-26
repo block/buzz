@@ -139,6 +139,7 @@ export type UserSearchPage = {
 
 export type UpdateProfileInput = {
   displayName?: string;
+  name?: string;
   avatarUrl?: string;
   about?: string;
   nip05Handle?: string;
