@@ -11,29 +11,35 @@ import {
   deriveSidebarMenuCounts,
   type SidebarMenuCounts,
 } from "./sidebarMenuCounts";
+import {
+  type SidebarMenuCountPreferences,
+  useSidebarMenuCountPreferences,
+} from "./sidebarMenuCountsPreference";
 import { useSidebarInboxUnreadCount } from "./useSidebarInboxUnreadCount";
-import { useSidebarMenuCountsEnabled } from "./sidebarMenuCountsPreference";
 
 export type SidebarMenuCountsState = {
-  preferenceEnabled: boolean;
+  /** Per-item Appearance toggles (Inbox / Browsers / Agents / Bots). */
+  preferences: SidebarMenuCountPreferences;
   counts: SidebarMenuCounts;
 };
 
 /**
  * Live counts for the primary left-nav.
  * Inbox unread matches InboxListPane (not homeBadgeCount).
- * Browsers = playground sessions; Agents = running/total managed roster;
+ * Browsers = playground browser groups (one row per group, matching
+ * BrowsersScreen / browserRows); Agents = running/total managed roster;
  * Bots = visible community directory bots.
  */
 export function useSidebarMenuCounts(): SidebarMenuCountsState {
-  const preferenceEnabled = useSidebarMenuCountsEnabled();
+  const preferences = useSidebarMenuCountPreferences();
   const inboxUnread = useSidebarInboxUnreadCount();
   const playground = usePlaygroundSessions();
   const managedAgentsQuery = useManagedAgentsQuery();
   const communityBotsQuery = useCommunityBotsQuery();
   const isArchived = useIsArchivedPredicate();
 
-  const browserSessionCount = playground.sessions.size;
+  // Match BrowsersScreen rows: one badge unit per browser group, not per tab.
+  const browserGroupCount = playground.browsers.size;
   const agentTotalCount =
     managedAgentsQuery.data === undefined
       ? undefined
@@ -54,7 +60,7 @@ export function useSidebarMenuCounts(): SidebarMenuCountsState {
     () =>
       deriveSidebarMenuCounts({
         inboxUnread,
-        browserSessionCount,
+        browserGroupCount,
         agentRunningCount,
         agentTotalCount,
         botCount,
@@ -63,10 +69,10 @@ export function useSidebarMenuCounts(): SidebarMenuCountsState {
       agentRunningCount,
       agentTotalCount,
       botCount,
-      browserSessionCount,
+      browserGroupCount,
       inboxUnread,
     ],
   );
 
-  return { preferenceEnabled, counts };
+  return { preferences, counts };
 }

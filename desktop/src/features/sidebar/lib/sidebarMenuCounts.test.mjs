@@ -93,7 +93,7 @@ test("deriveSidebarMenuCounts maps inbox unread, roster sizes, agents X/Y", () =
   assert.deepEqual(
     deriveSidebarMenuCounts({
       inboxUnread: 7,
-      browserSessionCount: 2,
+      browserGroupCount: 2,
       agentRunningCount: 3,
       agentTotalCount: 12,
       botCount: 11,
@@ -103,7 +103,7 @@ test("deriveSidebarMenuCounts maps inbox unread, roster sizes, agents X/Y", () =
   assert.deepEqual(
     deriveSidebarMenuCounts({
       inboxUnread: undefined,
-      browserSessionCount: 0,
+      browserGroupCount: 0,
       agentRunningCount: undefined,
       agentTotalCount: undefined,
       botCount: undefined,
