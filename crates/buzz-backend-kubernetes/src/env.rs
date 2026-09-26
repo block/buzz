@@ -14,7 +14,8 @@ use std::collections::BTreeMap;
 /// before writing its own values, so a key the authoritative tier has no value
 /// for is **removed** rather than left holding a lower-tier value. Plain
 /// overwrite is not enough — most of these are written conditionally
-/// (`BUZZ_ACP_AGENT_ARGS` only when `launch.args` is non-empty,
+/// (`BUZZ_ACP_AGENT_ARGS` / `BUZZ_ACP_AGENT_ARGS_JSON` only when `launch.args`
+/// is non-empty,
 /// `BUZZ_ACP_RESPOND_TO` only when set), and without the clear, a lower tier
 /// could supply the value for exactly the cases the authoritative tier stays
 /// silent on. Clearing is also what the local spawn does: the desktop strips
@@ -28,6 +29,7 @@ const AUTHORITATIVE_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_OWNER",
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
+    "BUZZ_ACP_AGENT_ARGS_JSON",
     "BUZZ_ACP_RESPOND_TO",
     "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
     "BUZZ_ACP_MCP_COMMAND",
@@ -258,11 +260,15 @@ pub fn build_env(
         env.insert("BUZZ_ACP_AGENT_COMMAND".into(), command.to_string());
     }
     if !launch.args.is_empty() {
-        // Comma-joined because that is what the harness's CLI parser decodes,
-        // and what the desktop's local spawn does. An argument containing a
-        // comma is unrepresentable in both paths; inventing an escaping
-        // scheme here would produce args the harness cannot decode.
-        env.insert("BUZZ_ACP_AGENT_ARGS".into(), launch.args.join(","));
+        if launch.args.iter().any(|a| a.contains(',')) {
+            env.insert(
+                "BUZZ_ACP_AGENT_ARGS_JSON".into(),
+                serde_json::to_string(&launch.args).expect("Vec<String> is always serializable"),
+            );
+            env.insert("BUZZ_ACP_AGENT_ARGS".into(), "acp".into());
+        } else {
+            env.insert("BUZZ_ACP_AGENT_ARGS".into(), launch.args.join(","));
+        }
     }
     env.insert("BUZZ_ACP_MCP_COMMAND".into(), "buzz-dev-mcp".into());
 
@@ -589,11 +595,30 @@ mod tests {
         }));
         let env = build(&agent).unwrap();
         assert_eq!(env["BUZZ_ACP_AGENT_ARGS"], "run,--no-session");
+        assert!(!env.contains_key("BUZZ_ACP_AGENT_ARGS_JSON"));
 
         let agent = payload_json(serde_json::json!({
             "launch": {"command": "goose", "args": [], "owner_pubkey": "b"}
         }));
         assert!(!build(&agent).unwrap().contains_key("BUZZ_ACP_AGENT_ARGS"));
+        assert!(!build(&agent).unwrap().contains_key("BUZZ_ACP_AGENT_ARGS_JSON"));
+    }
+
+    #[test]
+    fn args_containing_commas_use_json_transport() {
+        let agent = payload_json(serde_json::json!({
+            "launch": {
+                "command": "goose",
+                "args": ["--config=a,b", "--safe", "on"],
+                "owner_pubkey": "b"
+            }
+        }));
+        let env = build(&agent).unwrap();
+        assert_eq!(
+            env["BUZZ_ACP_AGENT_ARGS_JSON"],
+            r#"["--config=a,b","--safe","on"]"#
+        );
+        assert_eq!(env["BUZZ_ACP_AGENT_ARGS"], "acp");
     }
 
     /// The top-level `model`/`provider` fields are display inputs; their
@@ -678,6 +703,7 @@ mod tests {
         // merely different.
         for absent in [
             "BUZZ_ACP_AGENT_ARGS",
+            "BUZZ_ACP_AGENT_ARGS_JSON",
             "BUZZ_ACP_RESPOND_TO",
             "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
         ] {
