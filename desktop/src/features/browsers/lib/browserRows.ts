@@ -49,7 +49,7 @@ export function browserRowUrlLabel(url: string, max = 64): string {
   return `${trimmed.slice(0, max - 1)}…`;
 }
 
-/** Match grant by surfaceId; prefer exact window, else any for that surface. */
+/** Match grant by surfaceId. Canonical label is `playground-{sid}` on every host. */
 export function findGrantForRow(
   grants: readonly BrowserAgentGrant[],
   row: Pick<BrowserListRow, "surfaceId" | "windowLabel">,
@@ -60,9 +60,9 @@ export function findGrantForRow(
     if (grant.surface !== "playground" || grant.surfaceId !== row.surfaceId) {
       return false;
     }
-    if (row.windowLabel === "main") {
-      return grant.webviewLabel === mainLabel;
-    }
+    // Single live webview: grants sit on the canonical label.
+    if (grant.webviewLabel === mainLabel) return true;
+    if (row.windowLabel === "main") return false;
     return (
       grant.webviewLabel === windowedLabel ||
       grant.webviewLabel.endsWith(`--${row.windowLabel}`)

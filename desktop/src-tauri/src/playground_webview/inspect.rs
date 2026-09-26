@@ -5,7 +5,7 @@
 //! Linux CI cannot compile AppKit; keep presentation policy tests host-free.
 
 use super::{
-    apply_bounds, playground_webview_label, PlaygroundBounds, PlaygroundWebviewManager,
+    apply_bounds, find_playground_webview_for_sid, PlaygroundBounds, PlaygroundWebviewManager,
     APP_WEBVIEW_LABEL,
 };
 use std::time::Duration;
@@ -276,8 +276,8 @@ pub fn schedule_inspect_stage_restore(app: AppHandle, sid: String, window_label:
     });
 }
 
-pub fn playground_inspector_is_visible(app: &AppHandle, sid: &str, window_label: &str) -> bool {
-    let Some(webview) = app.get_webview(&playground_webview_label(sid, window_label)) else {
+pub fn playground_inspector_is_visible(app: &AppHandle, sid: &str, _window_label: &str) -> bool {
+    let Some(webview) = find_playground_webview_for_sid(app, sid).map(|(_, webview)| webview) else {
         return false;
     };
     inspector_is_visible(&webview)
@@ -301,8 +301,8 @@ fn inspector_is_visible(webview: &Webview) -> bool {
 }
 
 #[allow(dead_code)]
-fn redetach_macos_inspector(app: &AppHandle, sid: &str, window_label: &str) {
-    let Some(webview) = app.get_webview(&playground_webview_label(sid, window_label)) else {
+fn redetach_macos_inspector(app: &AppHandle, sid: &str, _window_label: &str) {
+    let Some(webview) = find_playground_webview_for_sid(app, sid).map(|(_, webview)| webview) else {
         return;
     };
     redetach_inspector_for_webview(&webview);

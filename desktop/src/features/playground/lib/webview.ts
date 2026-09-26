@@ -54,16 +54,15 @@ export function playgroundWebviewId(sid: string): string {
 }
 
 /**
- * Native child label for a playground on a specific window.
- * Main stays `playground-{sid}`; other windows use `playground-{sid}--{window}`.
+ * Native child label for a playground sid. One live WKWebView is reparented
+ * across windows — label stays `playground-{sid}` everywhere (no `--{window}`
+ * siblings that fork Drive/DOM phase).
  */
 export function playgroundWebviewLabelForWindow(
   sid: string,
-  windowLabel = "main",
+  _windowLabel = "main",
 ): string {
-  const cleaned = windowLabel.trim() || "main";
-  if (cleaned === "main") return playgroundWebviewId(sid);
-  return `${PLAYGROUND_WEBVIEW_PREFIX}${sid}--${cleaned}`;
+  return playgroundWebviewId(sid);
 }
 
 /** True when this hide/close invoke targets the caller's current window. */

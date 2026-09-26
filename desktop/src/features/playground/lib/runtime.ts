@@ -49,7 +49,6 @@ import {
 import {
   currentWindowLabel,
   evalPlaygroundWebview,
-  hidePlaygroundWebview,
   playgroundWebviewDomHash,
   pollPlaygroundWebview,
   playgroundKeeperParkBounds,
@@ -329,10 +328,9 @@ function usePlaygroundWebviewKeeper() {
     for (const session of sessions.values()) {
       if (overlaySid === session.sid) continue;
       if (embedSid === session.sid) continue;
-      // OS split/playground owns a window-scoped child. Do not remount the
-      // main-window playground-{sid} label underneath — hide leftovers.
+      // OS split/playground hosts the one live WKWebView (reparented). Do not
+      // keeper-show or hide from main — that would blank Drive mid-flight.
       if (osHosted.has(session.sid)) {
-        void hidePlaygroundWebview(session.sid);
         continue;
       }
       // Keep last full stage size while parked. Shrinking to 64×64 collapsed
