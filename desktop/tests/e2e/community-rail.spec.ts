@@ -1132,6 +1132,177 @@ test.describe("community rail", () => {
       .toBe(1);
   });
 
+  for (const { error, hasFallback, canRemove } of [
+    {
+      error: "relay returned 404 Not Found: Application not found",
+      hasFallback: true,
+      canRemove: true,
+    },
+    {
+      error: "relay unreachable: connection refused",
+      hasFallback: false,
+      canRemove: true,
+    },
+    {
+      error: "relay returned 403 Forbidden",
+      hasFallback: false,
+      canRemove: false,
+    },
+  ]) {
+    test(`handles community removal after ${error}`, async ({
+      context,
+      page,
+    }, testInfo) => {
+      await installMockBridge(page, undefined, { skipCommunitySeed: true });
+      const communities = hasFallback
+        ? [COMMUNITY_A, COMMUNITY_B]
+        : [COMMUNITY_A];
+      await seedCommunities(page, communities, COMMUNITY_A.id);
+      await page.goto("/");
+      await page.getByTestId("sidebar-profile-avatar-button").click();
+      const identityBefore = await page.evaluate(async () =>
+        window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("get_identity"),
+      );
+
+      // Fail at the native /info boundary, keeping UI, navigation and storage real.
+      await page.evaluate(
+        ({ message, relayUrl }) => {
+          const internals = (
+            window as Window & {
+              __TAURI_INTERNALS__: {
+                invoke: (command: string, args?: unknown) => Promise<unknown>;
+              };
+            }
+          ).__TAURI_INTERNALS__;
+          const invoke = internals.invoke;
+          internals.invoke = (command, args) => {
+            const payload = args as
+              | { kind?: number; relayUrl?: string }
+              | undefined;
+            if (command === "sign_event" && payload?.kind === 28936) {
+              window.__BUZZ_E2E_COMMANDS__?.push("sign_event:leave");
+            }
+            if (
+              command === "relay_requires_membership" &&
+              payload?.relayUrl === relayUrl
+            ) {
+              window.__BUZZ_E2E_COMMANDS__?.push(
+                "removed-relay:membership-check",
+              );
+              return Promise.reject(new Error(message));
+            }
+            return invoke(command, args);
+          };
+        },
+        { message: error, relayUrl: COMMUNITY_A.relayUrl },
+      );
+      await page.getByTestId("community-switcher").click();
+      const menu = page.getByRole("menu", { name: "Community actions" });
+      await expect(
+        menu.getByRole("menuitem", { name: "Remove from this device" }),
+      ).toHaveCount(0);
+      await menu.getByRole("menuitem", { name: "Leave community" }).click();
+      await expect(menu.getByRole("alert")).toHaveText(error);
+      expect(
+        await page.evaluate(() =>
+          JSON.parse(window.localStorage.getItem("buzz-communities") ?? "[]"),
+        ),
+      ).toEqual(communities);
+      if (!canRemove) {
+        await expect(
+          menu.getByRole("menuitem", { name: "Remove from this device" }),
+        ).toHaveCount(0);
+        return;
+      }
+      await page.screenshot({
+        path: testInfo.outputPath("leave-error.png"),
+        animations: "disabled",
+      });
+
+      await menu
+        .getByRole("menuitem", { name: "Remove from this device" })
+        .click();
+      const dialog = page.getByRole("alertdialog");
+      await expect(dialog).toContainText("membership");
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+      expect(
+        await page.evaluate(() =>
+          JSON.parse(window.localStorage.getItem("buzz-communities") ?? "[]"),
+        ),
+      ).toEqual(communities);
+
+      await page.getByTestId("community-switcher").click();
+      await menu
+        .getByRole("menuitem", { name: "Remove from this device" })
+        .click();
+      await page.screenshot({
+        path: testInfo.outputPath("remove-confirmation.png"),
+        animations: "disabled",
+      });
+      await page.evaluate(() => {
+        window.__BUZZ_E2E_COMMANDS__ = [];
+      });
+      await dialog
+        .getByRole("button", { name: "Remove from this device" })
+        .click();
+
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            JSON.parse(window.localStorage.getItem("buzz-communities") ?? "[]"),
+          ),
+        )
+        .toEqual(hasFallback ? [COMMUNITY_B] : []);
+      const commands = await page.evaluate(
+        () => window.__BUZZ_E2E_COMMANDS__ ?? [],
+      );
+      expect(commands).not.toContain("sign_event:leave");
+      expect(commands).not.toContain("removed-relay:membership-check");
+      expect(commands).not.toContain("sign_out");
+      if (!hasFallback) {
+        expect(commands).not.toContain("relay_requires_membership");
+        await expect(
+          page.getByText("Join or create a community"),
+        ).toBeVisible();
+      } else {
+        await expect
+          .poll(() =>
+            page.evaluate(() =>
+              window.localStorage.getItem("buzz-active-community-id"),
+            ),
+          )
+          .toBe(COMMUNITY_B.id);
+      }
+
+      // A fresh page does not re-run the original community seed.
+      const relaunched = await context.newPage();
+      await installMockBridge(relaunched, undefined, {
+        autoConnectDefaultRelay: true,
+        skipCommunitySeed: true,
+      });
+      await relaunched.goto("/");
+      if (hasFallback) {
+        await expect(
+          relaunched.getByTestId("sidebar-profile-card"),
+        ).toContainText("Bravo");
+      } else {
+        await expect(
+          relaunched.getByText("Join or create a community"),
+        ).toBeVisible();
+      }
+      expect(
+        await relaunched.evaluate(() =>
+          JSON.parse(window.localStorage.getItem("buzz-communities") ?? "[]"),
+        ),
+      ).toEqual(hasFallback ? [COMMUNITY_B] : []);
+      expect(
+        await relaunched.evaluate(async () =>
+          window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("get_identity"),
+        ),
+      ).toEqual(identityBefore);
+    });
+  }
+
   test("leaving the final community returns to setup without resetting identity", async ({
     context,
     page,

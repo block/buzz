@@ -1,7 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { KIND_NIP43_LEAVE_REQUEST, leaveCommunity } from "./leaveCommunity.ts";
+import {
+  KIND_NIP43_LEAVE_REQUEST,
+  leaveCommunity,
+  canRemoveCommunityLocally,
+} from "./leaveCommunity.ts";
+
+test("offers local removal only for relay availability failures", () => {
+  for (const message of [
+    "relay unreachable: connection refused",
+    "relay returned 404 Not Found: Application not found",
+    "relay returned 410 Gone",
+    "relay returned 503 Service Unavailable",
+    "Timed out while leaving the community. Try again.",
+    "Couldn't send the leave request. Check your connection and try again.",
+  ]) {
+    assert.equal(canRemoveCommunityLocally(new Error(message)), true, message);
+    assert.equal(canRemoveCommunityLocally(message), true, message);
+  }
+  for (const message of [
+    "invalid: relay owner cannot leave",
+    "relay returned 401 Unauthorized",
+    "relay returned 403 Forbidden",
+    "relay returned 429 Too Many Requests",
+    "Relay session is terminal; cannot reconnect.",
+    "Failed to sign event",
+  ]) {
+    assert.equal(canRemoveCommunityLocally(new Error(message)), false, message);
+  }
+  assert.equal(canRemoveCommunityLocally(null), false);
+});
 
 const signedEvent = {
   id: "event-id",
@@ -25,6 +54,32 @@ function dependencies(overrides = {}) {
     ...overrides,
   };
 }
+
+test("offers local removal when the relay disconnects or times out after the membership check", async () => {
+  for (const message of [
+    "Relay connection closed.",
+    "Relay connection errored.",
+    "Failed to connect to relay.",
+    "Relay authentication timed out.",
+  ]) {
+    await assert.rejects(
+      leaveCommunity(
+        "wss://active.example",
+        "wss://active.example",
+        dependencies({
+          publishActive: async () => {
+            throw new Error(message);
+          },
+        }),
+      ),
+      (error) => {
+        assert.equal(error.message, message);
+        assert.equal(canRemoveCommunityLocally(error), true, message);
+        return true;
+      },
+    );
+  }
+});
 
 test("skips relay publishing when the relay does not enforce membership", async () => {
   let checkedRelay;
