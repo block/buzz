@@ -22,6 +22,7 @@ export default defineConfig({
         "**/smoke.spec.ts",
         "**/mock-subscription-readiness.spec.ts",
         "**/owned-agent-discovery.spec.ts",
+        "**/forum-typing.spec.ts",
         "**/thread-head-stale-edit.spec.ts",
         "**/sidebar-offcanvas-rail.spec.ts",
         "**/tooltip-semantics.spec.ts",
