@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
+import { useRecentAgentTurnFailuresBridge } from "@/features/agents/recentAgentTurnFailuresStore";
 import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
@@ -113,4 +114,5 @@ export function useAgentObserverIngestion() {
 
   useManagedAgentObserverBridge(ingestionAgents);
   useActiveAgentTurnsBridge(ingestionAgents);
+  useRecentAgentTurnFailuresBridge(ingestionAgents);
 }
