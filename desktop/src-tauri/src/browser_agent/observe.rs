@@ -476,7 +476,51 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
     if (!el || !el.id) return false;
     return el.id === '__buzz_agent_lock' || el.id === '__buzz_agent_cursor';
   }}
+  var INTERACTIVE_SEL = 'a[href],button,input,select,textarea,[role="button"],[role="link"],[role="textbox"],[tabindex]:not([tabindex="-1"])';
+  function isHitVisible(el) {{
+    if (!el || !el.getBoundingClientRect) return false;
+    var rect = el.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return false;
+    try {{
+      var style = window.getComputedStyle(el);
+      if (style && (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0')) return false;
+    }} catch (e) {{}}
+    return true;
+  }}
+  // Layout-based hit when elementsFromPoint is empty (hidden/parked WKWebView)
+  // or only returns agent chrome. Matches snapshot centers from getBoundingClientRect.
+  function hitTestGeometry(x, y) {{
+    var best = null;
+    var bestArea = Infinity;
+    function consider(el) {{
+      if (!el || isAgentChrome(el) || !isHitVisible(el)) return;
+      var rect = el.getBoundingClientRect();
+      if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return;
+      var area = rect.width * rect.height;
+      if (area < bestArea) {{
+        best = el;
+        bestArea = area;
+      }}
+    }}
+    try {{
+      var nodes = document.querySelectorAll(INTERACTIVE_SEL);
+      for (var i = 0; i < nodes.length; i++) consider(nodes[i]);
+    }} catch (e) {{}}
+    if (best) return best;
+    try {{
+      var all = document.body ? document.body.getElementsByTagName('*') : [];
+      for (var j = 0; j < all.length; j++) consider(all[j]);
+    }} catch (e2) {{}}
+    return best;
+  }}
   function hitTest(x, y) {{
+    // Pierce the Drive lock for the duration of the hit-test. The overlay must
+    // still swallow human clicks (pointer-events restored immediately after).
+    var prevPe = null;
+    if (lock && lock.style) {{
+      prevPe = lock.style.pointerEvents;
+      lock.style.pointerEvents = 'none';
+    }}
     var els = [];
     try {{
       if (typeof document.elementsFromPoint === 'function') {{
@@ -486,10 +530,13 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
         if (one) els = [one];
       }}
     }} catch (e) {{ els = []; }}
+    if (lock && lock.style) {{
+      lock.style.pointerEvents = prevPe || '';
+    }}
     for (var i = 0; i < els.length; i++) {{
       if (!isAgentChrome(els[i])) return els[i];
     }}
-    return null;
+    return hitTestGeometry(x, y);
   }}
   function describeHit(el) {{
     if (!el) return null;
@@ -740,7 +787,7 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
   function snapshotCollect() {{
     var focused = document.activeElement ? describeHit(document.activeElement) : null;
     var interactives = [];
-    var nodes = document.querySelectorAll('a[href],button,input,select,textarea,[role="button"],[role="link"],[role="textbox"],[tabindex]:not([tabindex="-1"])');
+    var nodes = document.querySelectorAll(INTERACTIVE_SEL);
     for (var i = 0; i < nodes.length && interactives.length < 80; i++) {{
       var n = nodes[i];
       if (isAgentChrome(n)) continue;
@@ -868,6 +915,8 @@ mod tests {
         assert!(js.contains("elementsFromPoint"));
         assert!(js.contains("__buzz_agent_lock"));
         assert!(js.contains("isAgentChrome"));
+        assert!(js.contains("hitTestGeometry"));
+        assert!(js.contains("pointerEvents"));
         assert!(js.contains("pointerdown"));
         assert!(js.contains("pressKey"));
         assert!(js.contains("waitForCheck"));

@@ -704,19 +704,60 @@ fn queue_action(dir: &Path, pubkey: &str, mut action: DriveActionParam) -> Resul
     action.id = Some(id.clone());
     fs::create_dir_all(dir).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
     let path = dir.join("drive-inbox.jsonl");
+    let line = format!(
+        "{}\n",
+        json!({
+            "id": id,
+            "agentPubkey": pubkey,
+            "action": action,
+            "atMs": now_ms(),
+        })
+    );
+    // Lock + single write_all so Desktop rename cannot observe a mid-line truncate
+    // (`EOF while parsing a string at column …`).
+    let _guard = inbox_lock_acquire(dir).map_err(|e| ErrorData::internal_error(e, None))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-    let line = json!({
-        "id": id,
-        "agentPubkey": pubkey,
-        "action": action,
-        "atMs": now_ms(),
-    });
-    writeln!(file, "{line}").map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    file.write_all(line.as_bytes())
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    file.flush()
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
     Ok(id)
+}
+
+struct InboxLockGuard {
+    path: PathBuf,
+}
+
+impl Drop for InboxLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn inbox_lock_acquire(dir: &Path) -> Result<InboxLockGuard, String> {
+    let path = dir.join("drive-inbox.lock");
+    let started = std::time::Instant::now();
+    loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(InboxLockGuard { path }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if started.elapsed().as_secs() >= 5 {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
 }
 
 fn drive_wait_response(

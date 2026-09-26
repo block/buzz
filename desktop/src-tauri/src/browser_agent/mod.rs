@@ -114,6 +114,7 @@ fn eval_on_label(app: &AppHandle, label: &str, js: &str) -> Result<(), String> {
     webview.eval(js).map_err(|e| e.to_string())
 }
 
+
 fn install_instrumentation(app: &AppHandle, label: &str, drive: bool) -> Result<(), String> {
     eval_on_label(app, label, &instrumentation_js(label, drive))
 }
@@ -842,11 +843,17 @@ pub async fn browser_drive(
 
 /// Atomically take the inbox file (rename → read → delete temp).
 /// Lines appended during processing land in a fresh `drive-inbox.jsonl`.
+/// Uses `drive-inbox.lock` so MCP appends cannot race mid-line with rename
+/// (that produced `invalid inbox line: EOF while parsing a string …`).
 fn take_drive_inbox(path: &std::path::Path) -> Result<String, String> {
     if !path.exists() {
         return Ok(String::new());
     }
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let _guard = inbox_lock_acquire(parent)?;
+    if !path.exists() {
+        return Ok(String::new());
+    }
     let tmp = parent.join(format!(
         "drive-inbox-{}.taking",
         std::time::SystemTime::now()
@@ -862,6 +869,39 @@ fn take_drive_inbox(path: &std::path::Path) -> Result<String, String> {
     let raw = std::fs::read_to_string(&tmp).unwrap_or_default();
     let _ = std::fs::remove_file(&tmp);
     Ok(raw)
+}
+
+struct InboxLockGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for InboxLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn inbox_lock_acquire(dir: &std::path::Path) -> Result<InboxLockGuard, String> {
+    let path = dir.join("drive-inbox.lock");
+    let started = std::time::Instant::now();
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(InboxLockGuard { path }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Stale lock from a crashed holder — clear after 5s.
+                if started.elapsed().as_secs() >= 5 {
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
 }
 
 async fn process_drive_inbox_for_label(
@@ -897,6 +937,15 @@ async fn process_drive_inbox_for_label(
         let value: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
+                // Truncated mid-string lines are a writer/reader race remnant; skip
+                // quietly (lock should prevent new ones). Other parse errors surface.
+                let msg = e.to_string();
+                if msg.contains("EOF while parsing") {
+                    eprintln!(
+                        "buzz-desktop: skipping truncated drive inbox line ({msg})"
+                    );
+                    continue;
+                }
                 let r = error_result("inbox", "drive_error", format!("invalid inbox line: {e}"));
                 record_drive_result(app, state, label, &r, None);
                 continue;
