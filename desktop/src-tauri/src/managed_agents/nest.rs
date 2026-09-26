@@ -214,6 +214,12 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
     refresh_agents_md_if_stale(root)?;
     refresh_skill_md_if_stale(root)?;
 
+    // Seed the nest's local Claude settings with an allowlist for
+    // the bundled `buzz` CLI, so managed Claude sessions (which run in
+    // `dontAsk` mode with all permission requests rejected — see #4609)
+    // can still reach the relay. See claude_settings.rs for the rationale.
+    claude_settings::ensure_claude_buzz_allowlist(root)?;
+
     // Set owner-only permissions on root and all subdirectories.
     // Skip any path that is a symlink — chmod would affect the target.
     #[cfg(unix)]
@@ -838,6 +844,8 @@ pub fn try_regenerate_nest<R: tauri::Runtime>(app: &AppHandle<R>) {
         tauri::async_runtime::spawn(work);
     }
 }
+
+mod claude_settings;
 
 #[cfg(test)]
 mod regen_tests;
