@@ -331,6 +331,7 @@ pub fn build_managed_agent_summary(
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
+        is_active: record.is_active,
         persona_id: record.persona_id.clone(),
         runtime: record.runtime.clone(),
         team_id: record.team_id.clone(),

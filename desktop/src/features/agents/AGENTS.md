@@ -330,6 +330,16 @@ with a TypeScript lookup table or an id comparison in a component.
     for resets; owner replay of a redacted head preserves only a nonportable
     local override. That local path is not synchronized through catalog heads.
 
+18. **Automated persona deployment is convergent by deployment binding.** A
+    standalone persona reuses its one unbound managed identity. A team persona
+    reuses the identity bound to that exact `(team_id, persona_id)` pair, so
+    deploying the same team to another channel attaches the existing identity
+    instead of minting a sibling. Different teams may still deploy the same
+    persona independently, and an explicit `forceNewInstance` request remains
+    the only opt-out. Keep the Rust create-command guard as the final authority:
+    UI reuse prevents ordinary retries, while the locked phase-3 check closes
+    stale-read and concurrent-create races before persistence.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness

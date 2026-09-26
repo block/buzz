@@ -535,6 +535,9 @@ pub struct ManagedAgentProcess {
 pub struct ManagedAgentSummary {
     pub pubkey: String,
     pub name: String,
+    /// False only for a locally archived managed identity. The frontend must
+    /// never reuse an inactive record as a deployment target.
+    pub is_active: bool,
     pub persona_id: Option<String>,
     /// The record's harness/runtime id (mirror of `ManagedAgentRecord.runtime`).
     /// Lets the UI count agents referencing a harness definition (e.g. in the
