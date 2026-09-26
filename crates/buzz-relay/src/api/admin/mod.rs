@@ -11045,25 +11045,29 @@ mod postgres_tests {
         (pool, community, host, state)
     }
 
-    async fn direct_post(
+    /// POST on the admin API where the NIP-98 credential (`signed` path and
+    /// body) may differ from what is sent; `keys: None` sends no credential.
+    async fn direct_send(
         state: &Arc<crate::state::AppState>,
-        path: &str,
-        body: serde_json::Value,
+        keys: Option<&nostr::Keys>,
+        host: &str,
+        signed: (&str, &serde_json::Value),
+        sent: (&str, &serde_json::Value),
     ) -> (StatusCode, serde_json::Value) {
-        let bytes = serde_json::to_vec(&body).unwrap();
-        let auth = make_nostr_auth_post(&test_operator_keys(), path, &bytes);
-        let response = status_for(
-            state.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(path)
-                .header(header::HOST, "admin.example")
-                .header(header::AUTHORIZATION, auth)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(bytes))
-                .unwrap(),
-        )
-        .await;
+        let bytes = serde_json::to_vec(sent.1).unwrap();
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(sent.0)
+            .header(header::HOST, host)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(keys) = keys {
+            let signed_bytes = serde_json::to_vec(signed.1).unwrap();
+            request = request.header(
+                header::AUTHORIZATION,
+                make_nostr_auth_post(keys, signed.0, &signed_bytes),
+            );
+        }
+        let response = status_for(state.clone(), request.body(Body::from(bytes)).unwrap()).await;
         let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -11072,6 +11076,65 @@ mod postgres_tests {
             status,
             serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
         )
+    }
+
+    async fn direct_post(
+        state: &Arc<crate::state::AppState>,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let keys = test_operator_keys();
+        direct_send(
+            state,
+            Some(&keys),
+            "admin.example",
+            (path, &body),
+            (path, &body),
+        )
+        .await
+    }
+
+    /// Every row a direct action can write in `community`, plus its live events:
+    /// (actions, audit, restrictions, outbox, live events).
+    async fn direct_effects(
+        pool: &sqlx::PgPool,
+        community: buzz_core::CommunityId,
+    ) -> (i64, i64, i64, i64, i64) {
+        sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM relay_admin_actions WHERE report_community_id = $1), \
+             (SELECT COUNT(*) FROM moderation_actions WHERE community_id = $1), \
+             (SELECT COUNT(*) FROM community_bans WHERE community_id = $1), \
+             (SELECT COUNT(*) FROM relay_admin_outbox o JOIN relay_admin_actions a \
+                ON a.id = o.action_id WHERE a.report_community_id = $1), \
+             (SELECT COUNT(*) FROM events WHERE community_id = $1 AND deleted_at IS NULL)",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(pool)
+        .await
+        .expect("direct effects")
+    }
+
+    fn direct_input<'a>(
+        community: buzz_core::CommunityId,
+        request_id: Uuid,
+        actor: &'a [u8],
+        target: &'a [u8],
+        reason: Option<&'a str>,
+    ) -> buzz_db::relay_admin_actions::DirectActionInput<'a> {
+        buzz_db::relay_admin_actions::DirectActionInput {
+            community_id: community,
+            request_id,
+            actor_pubkey: actor,
+            actor_role: "operator",
+            actor_authority: "relay_operator",
+            action: "ban",
+            reason,
+            timeout_secs: None,
+            timeout_until: None,
+            target_pubkey: Some(target),
+            target_event_id: None,
+            channel_id: None,
+        }
     }
 
     async fn count_where(
@@ -11335,20 +11398,7 @@ mod postgres_tests {
         let (pool, community, _host, state) = direct_fixture().await;
         let target = [0x3du8; 32];
         let actor = test_operator_keys().public_key().to_bytes();
-        let input = buzz_db::relay_admin_actions::DirectActionInput {
-            community_id: community,
-            request_id: Uuid::new_v4(),
-            actor_pubkey: &actor,
-            actor_role: "operator",
-            actor_authority: "relay_operator",
-            action: "ban",
-            reason: None,
-            timeout_secs: None,
-            timeout_until: None,
-            target_pubkey: Some(&target),
-            target_event_id: None,
-            channel_id: None,
-        };
+        let input = direct_input(community, Uuid::new_v4(), &actor, &target, None);
         let buzz_db::relay_admin_actions::DirectClaim::Claimed(rec) =
             state.db.claim_direct_action(&input).await.unwrap()
         else {
@@ -11443,5 +11493,339 @@ mod postgres_tests {
             assert_eq!(report_status, "open");
             cleanup_admin_host_report(&pool, report_id).await;
         }
+    }
+
+    /// §8 1–5, 11: nonstaff, community owner, disabled auth, wrong Host, a
+    /// credential for another URL, and an altered body are all refused on every
+    /// direct route with no row written and no restriction or event changed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn direct_routes_refuse_unauthorized_requests_without_effects() {
+        let (pool, community, host, state) = direct_fixture().await;
+        let event = seed_signed_event(&pool, community, &nostr::Keys::generate()).await;
+        let owner = nostr::Keys::generate();
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'owner')",
+        )
+        .bind(community.as_uuid())
+        .bind(owner.public_key().to_hex())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let disabled = disabled_mode_state().await;
+        let (op, outsider) = (test_operator_keys(), nostr::Keys::generate());
+        let before = direct_effects(&pool, community).await;
+        let member = hex::encode([0x4eu8; 32]);
+        for path in [
+            format!("/members/{member}/ban?communityHost={host}"),
+            format!("/members/{member}/timeout?communityHost={host}"),
+            format!("/events/{event}/delete?communityHost={host}"),
+        ] {
+            let secs = path.contains("/timeout").then_some(60);
+            let body = serde_json::json!({ "requestId": Uuid::new_v4(), "expirationSecs": secs });
+            let altered = serde_json::json!({ "requestId": body["requestId"], "reason": "x", "expirationSecs": secs });
+            let other = path.replace(&host, "other.example");
+            let cases = [
+                (
+                    "nonstaff",
+                    &state,
+                    Some(&outsider),
+                    "admin.example",
+                    (&path, &body),
+                    StatusCode::FORBIDDEN,
+                ),
+                (
+                    "community owner",
+                    &state,
+                    Some(&owner),
+                    "admin.example",
+                    (&path, &body),
+                    StatusCode::FORBIDDEN,
+                ),
+                (
+                    "disabled auth",
+                    &disabled,
+                    None,
+                    "admin.example",
+                    (&path, &body),
+                    StatusCode::FORBIDDEN,
+                ),
+                (
+                    "wrong host",
+                    &state,
+                    Some(&op),
+                    "community.example",
+                    (&path, &body),
+                    StatusCode::FORBIDDEN,
+                ),
+                (
+                    "other url",
+                    &state,
+                    Some(&op),
+                    "admin.example",
+                    (&other, &body),
+                    StatusCode::UNAUTHORIZED,
+                ),
+                (
+                    "altered body",
+                    &state,
+                    Some(&op),
+                    "admin.example",
+                    (&path, &altered),
+                    StatusCode::UNAUTHORIZED,
+                ),
+            ];
+            for (name, st, keys, host_header, signed, want) in cases {
+                let (status, err) =
+                    direct_send(st, keys, host_header, (signed.0, signed.1), (&path, &body)).await;
+                assert_eq!(status, want, "{name} {path}: {err}");
+            }
+        }
+        assert_eq!(direct_effects(&pool, community).await, before);
+    }
+
+    /// §8 6: a delete naming another community's event is 404 and neither
+    /// community changes.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn direct_delete_of_foreign_community_event_has_no_effect() {
+        let (pool, community, host, state) = direct_fixture().await;
+        let foreign = buzz_db::Db::from_pool(pool.clone())
+            .ensure_configured_community(&format!("foreign-{}.example", Uuid::new_v4().simple()))
+            .await
+            .unwrap()
+            .id;
+        let id = seed_signed_event(&pool, foreign, &nostr::Keys::generate()).await;
+        let before = (
+            direct_effects(&pool, community).await,
+            direct_effects(&pool, foreign).await,
+        );
+        let path = format!("/events/{id}/delete?communityHost={host}");
+        let (status, err) = direct_post(
+            &state,
+            &path,
+            serde_json::json!({ "requestId": Uuid::new_v4() }),
+        )
+        .await;
+        assert_eq!(
+            (status, err["error"]["code"].as_str()),
+            (StatusCode::NOT_FOUND, Some("event_not_in_community"))
+        );
+        let after = (
+            direct_effects(&pool, community).await,
+            direct_effects(&pool, foreign).await,
+        );
+        assert_eq!(after, before);
+    }
+
+    /// Staff authority is relay-level: a staff actor banned in the community
+    /// still acts with membership enforcement on.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_banned_staff_actor_still_acts_under_membership_enforcement() {
+        let (pool, community, host, mut state) = direct_fixture().await;
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).require_relay_membership =
+            true;
+        let actor = test_operator_keys().public_key().to_bytes();
+        sqlx::query("INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey) VALUES ($1, $2, true, $2)")
+            .bind(community.as_uuid())
+            .bind(actor.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let target = [0x2fu8; 32];
+        let path = format!("/members/{}/ban?communityHost={host}", hex::encode(target));
+        let (status, body) = direct_post(
+            &state,
+            &path,
+            serde_json::json!({ "requestId": Uuid::new_v4() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(state
+            .db
+            .get_community_ban(community, &target)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    /// §8 13, 17: a timeout applies once; its retry keeps the stored expiry, and
+    /// the same requestId with a changed duration, reason, verb, or target is 409.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn direct_timeout_keeps_expiry_on_retry_and_conflicts_on_changed_intent() {
+        let (pool, community, host, state) = direct_fixture().await;
+        let (target, other) = (hex::encode([0x61u8; 32]), hex::encode([0x62u8; 32]));
+        let path = format!("/members/{target}/timeout?communityHost={host}");
+        let rid = Uuid::new_v4();
+        let body =
+            serde_json::json!({ "requestId": rid, "reason": "cool off", "expirationSecs": 600 });
+        let expiry = || async {
+            sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+                "SELECT a.timeout_until, b.muted_until FROM relay_admin_actions a \
+                 JOIN community_bans b ON b.community_id = a.report_community_id \
+                 WHERE a.report_community_id = $1",
+            )
+            .bind(community.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        let (status, first) = direct_post(&state, &path, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let applied = expiry().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let (status, again) = direct_post(&state, &path, body).await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        assert_eq!(
+            (&again["actionId"], &again["replayed"]),
+            (&first["actionId"], &true.into())
+        );
+        assert_eq!(expiry().await, applied, "a retry must not move the expiry");
+
+        let ban = format!("/members/{target}/ban?communityHost={host}");
+        let moved = format!("/members/{other}/timeout?communityHost={host}");
+        for (p, changed) in [
+            (
+                &path,
+                serde_json::json!({ "requestId": rid, "reason": "cool off", "expirationSecs": 60 }),
+            ),
+            (
+                &path,
+                serde_json::json!({ "requestId": rid, "reason": "other", "expirationSecs": 600 }),
+            ),
+            (
+                &ban,
+                serde_json::json!({ "requestId": rid, "reason": "cool off" }),
+            ),
+            (
+                &moved,
+                serde_json::json!({ "requestId": rid, "reason": "cool off", "expirationSecs": 600 }),
+            ),
+        ] {
+            let (status, err) = direct_post(&state, p, changed).await;
+            assert_eq!(
+                err["error"]["code"].as_str(),
+                Some("request_id_conflict"),
+                "{p}: {err}"
+            );
+            assert_eq!(status, StatusCode::CONFLICT);
+        }
+        assert_eq!(count_where(&pool, ACTIONS_IN, community).await, 1);
+        assert_eq!(expiry().await, applied);
+    }
+
+    /// §8 14–15: competing claims for one requestId accept exactly once; the
+    /// loser joins an identical intent and conflicts on a different one.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn competing_direct_claims_accept_once() {
+        use buzz_db::relay_admin_actions::DirectClaim;
+        let (pool, community, _host, state) = direct_fixture().await;
+        let (actor, target) = (test_operator_keys().public_key().to_bytes(), [0x71u8; 32]);
+        for loser_reason in [Some("spam"), Some("different")] {
+            let rid = Uuid::new_v4();
+            let a = direct_input(community, rid, &actor, &target, Some("spam"));
+            let b = direct_input(community, rid, &actor, &target, loser_reason);
+            let (ra, rb) = tokio::join!(
+                state.db.claim_direct_action(&a),
+                state.db.claim_direct_action(&b)
+            );
+            let ids = |c: &DirectClaim| match c {
+                DirectClaim::Claimed(r) => ("claimed", Some(r.id)),
+                DirectClaim::Existing(r) => ("existing", Some(r.id)),
+                DirectClaim::Conflict => ("conflict", None),
+            };
+            let (mut got, same) = (
+                [ids(&ra.unwrap()), ids(&rb.unwrap())],
+                loser_reason == Some("spam"),
+            );
+            got.sort();
+            let loser = if same { "existing" } else { "conflict" };
+            assert_eq!([got[0].0, got[1].0], ["claimed", loser], "{got:?}");
+            if same {
+                assert_eq!(
+                    got[0].1, got[1].1,
+                    "the join must return the winner's action"
+                );
+            }
+        }
+        assert_eq!(count_where(&pool, ACTIONS_IN, community).await, 2);
+        assert_eq!(count_where(&pool, AUDIT_IN, community).await, 2);
+    }
+
+    /// An acceptance whose audit insert fails leaves no action row behind.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn aborted_direct_acceptance_rolls_back() {
+        let (pool, community, _host, state) = direct_fixture().await;
+        let (actor, target) = (test_operator_keys().public_key().to_bytes(), [0x72u8; 32]);
+        let mut input = direct_input(community, Uuid::new_v4(), &actor, &target, None);
+        input.actor_authority = "not_an_authority";
+        assert!(state.db.claim_direct_action(&input).await.is_err());
+        assert_eq!(direct_effects(&pool, community).await, (0, 0, 0, 0, 0));
+    }
+
+    /// §8 22: the ban committed with its marker, then the driver crashed. Recovery
+    /// finalizes it once; a second sweep finds nothing and adds no outbox rows.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn recovery_after_committed_mutation_finalizes_exactly_once() {
+        use buzz_db::relay_admin_actions as ra;
+        let (pool, community, _host, state) = direct_fixture().await;
+        let (actor, target) = (test_operator_keys().public_key().to_bytes(), [0x73u8; 32]);
+        let input = direct_input(community, Uuid::new_v4(), &actor, &target, Some("spam"));
+        let ra::DirectClaim::Claimed(rec) = state.db.claim_direct_action(&input).await.unwrap()
+        else {
+            panic!("fresh request must be claimed");
+        };
+        let lease = chrono::Utc::now() + chrono::Duration::seconds(120);
+        let ra::LeaseResult::Acquired(token) = ra::acquire_action_lease(&pool, rec.id, lease)
+            .await
+            .unwrap()
+        else {
+            panic!("fresh action must be leasable");
+        };
+        assert!(ra::begin_enforcing(&pool, rec.id).await.unwrap());
+        assert!(ra::execute_ban_with_marker(
+            &pool,
+            rec.id,
+            token,
+            community,
+            &target,
+            &actor,
+            Some("spam")
+        )
+        .await
+        .unwrap());
+        sqlx::query("UPDATE relay_admin_actions SET action_lease_expires_at = now() - interval '1 second' WHERE id = $1")
+            .bind(rec.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut recovered = 0;
+        for _ in 0..2 {
+            let claims = ra::claim_stranded_action_batch(&pool, "direct-recovery", lease, 1000)
+                .await
+                .unwrap();
+            for claim in claims.into_iter().filter(|c| c.record.id == rec.id) {
+                crate::handlers::admin_action_worker::recover_one(&state, claim).await;
+                recovered += 1;
+            }
+        }
+        let done = ra::get_action(&pool, rec.id).await.unwrap().unwrap();
+        let outbox: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT task_type, COUNT(*) FROM relay_admin_outbox WHERE action_id = $1 GROUP BY 1 ORDER BY 1",
+        )
+        .bind(rec.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!((recovered, done.state.as_str()), (1, "succeeded"));
+        assert_eq!(outbox, vec![("affected_user_notice".to_string(), 1)]);
+        assert_eq!(direct_effects(&pool, community).await, (1, 1, 1, 1, 0));
     }
 }
