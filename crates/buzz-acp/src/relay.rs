@@ -479,6 +479,36 @@ impl RestClient {
         .await
     }
 
+    /// Fetch the relay's NIP-11 `self` pubkey (hex), used to verify relay-signed
+    /// workflow output before attributing the workflow owner at the author gate.
+    pub async fn fetch_nip11_relay_self(&self) -> Result<Option<String>, RelayError> {
+        let url = format!("{}/", self.base_url.trim_end_matches('/'));
+        let resp = self
+            .http
+            .get(&url)
+            .header("Accept", "application/nostr+json")
+            .send()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(RelayError::Http(format!(
+                "NIP-11 fetch failed: HTTP {}",
+                resp.status()
+            )));
+        }
+        let doc: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))?;
+        let relay_self = doc
+            .get("self")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Ok(relay_self)
+    }
+
     /// Query events via the HTTP bridge: `POST /query` with NIP-98 auth.
     ///
     /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
