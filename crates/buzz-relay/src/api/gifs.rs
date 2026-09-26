@@ -407,7 +407,9 @@ mod tests {
     use tower::ServiceExt;
 
     async fn unconfigured_test_state() -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("test config");
+        // F6: use hermetic_for_test — never calls Config::from_env, so NIP-FI
+        // env-var mutations in concurrent tests cannot race this reader.
+        let mut config = crate::config::Config::hermetic_for_test();
         config.klipy = None;
         config.redis_url = "redis://127.0.0.1:1".to_string();
 

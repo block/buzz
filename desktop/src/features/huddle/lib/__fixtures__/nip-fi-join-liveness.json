@@ -1,0 +1,44 @@
+{
+  "_comment": "Normalized NIP-FI relay producer output (48101 JOIN from the real admission handler, 48104 liveness from handle_huddle_liveness_req) for the Desktop contract witness. Placeholders: relay signer=c*64, member=b*64, channel/session=aaaaaaaa-..., generation=1111..., admission_id=2222...; id/sig/created_at are stable dummies. `start` is test scaffolding (48100 is client-authored, not relay output). Drift guard: f3_wire_admission_generation_matches_liveness_source_body in crates/buzz-relay/src/audio/handler.rs normalizes real producer output and fails if join/liveness kind, pubkey, tags, or content diverge from this file.",
+  "relayPubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "creatorPubkey": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "memberPubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "channelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "sessionId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "generation": "11111111-1111-4111-8111-111111111111",
+  "admissionId": "22222222-2222-4222-8222-222222222222",
+  "rosterRevision": 1,
+  "start": {
+    "id": "0000000000000000000000000000000000000000000000000000000000000001",
+    "kind": 48100,
+    "pubkey": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "created_at": 1000,
+    "tags": [["h", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]],
+    "content": "{\"ephemeral_channel_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"}",
+    "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "join": {
+    "id": "0000000000000000000000000000000000000000000000000000000000000002",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 1001,
+    "tags": [
+      ["h", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      ["p", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+    ],
+    "content": "{\"ephemeral_channel_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"roster_revision\":1,\"admission_id\":\"22222222-2222-4222-8222-222222222222\",\"generation\":\"11111111-1111-4111-8111-111111111111\"}",
+    "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "liveness": {
+    "id": "0000000000000000000000000000000000000000000000000000000000000003",
+    "kind": 48104,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 1002,
+    "tags": [
+      ["d", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      ["h", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+    ],
+    "content": "{\"ephemeral_channel_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"generation\":\"11111111-1111-4111-8111-111111111111\"}",
+    "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

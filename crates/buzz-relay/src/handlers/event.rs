@@ -415,6 +415,8 @@ async fn dispatch_persistent_event_inner(
         None => EventTopic::Global,
     };
     state.mark_local_event(tenant.community(), &stored_event.event.id);
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_event_publish(tenant.community());
     if let Err(e) = state
         .pubsub
         .publish_event(tenant, topic, &stored_event.event)
@@ -729,6 +731,20 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 return;
             }
         }
+        // B2: acquire effect permit immediately before the irreversible
+        // ephemeral publication (Redis/local fan-out or presence mutation).
+        // [FI-TRACE-LEASE-BOUND, B2 seam: ephemeral EVENT]
+        let _event_permit = match conn.nip_fi_gate.acquire_effect().await {
+            Ok(permit) => permit,
+            Err(crate::nip_fi_gate::SessionExpired) => {
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "restricted: session expired",
+                ));
+                return;
+            }
+        };
         match handle_ephemeral_event(
             event,
             conn_id,
@@ -769,6 +785,28 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         scopes,
         channel_ids,
         conn_id,
+    };
+
+    // B2: acquire effect permit immediately before the persistent ingest call.
+    // The permit is held through ingest_event() (DB write + side effects +
+    // fan-out) and the OK send.
+    // [FI-TRACE-LEASE-BOUND, B2 seam: persistent EVENT]
+    //
+    // Test hook: fires immediately before acquire_effect so a test can arm
+    // expiry in the async gap between handler dispatch and permit acquisition.
+    // [nip_fi_test_hooks::event_ingest_hook]
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_event_ingest(conn.tenant.community()).await;
+    let _event_permit = match conn.nip_fi_gate.acquire_effect().await {
+        Ok(permit) => permit,
+        Err(crate::nip_fi_gate::SessionExpired) => {
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                "restricted: session expired",
+            ));
+            return;
+        }
     };
 
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
@@ -1127,6 +1165,34 @@ async fn handle_agent_observer_event(
         }
     }
 
+    // B2: acquire effect permit immediately before the irreversible side effects
+    // (mark_local_event + Redis publish + local fan-out).  Holds through fan-out
+    // so expiry cannot cancel the connection mid-publication.
+    //
+    // Schedule without this permit: validation and owner lookup complete, the
+    // session expires (admin disconnect), the already-spawned task resumes and
+    // publishes to a live agent — recipient access checks do not validate
+    // publisher authority.  The permit fences this resumed-task scenario:
+    // if the gate is expired, SessionExpired is returned and publication is
+    // skipped.  [FI-TRACE-LEASE-BOUND, F1: observer permit]
+    //
+    // Test hook: fires immediately before acquire_effect so a test can arm expiry
+    // in the async gap between owner-validation and permit acquisition.
+    // [nip_fi_test_hooks::observer_publication_hook]
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_observer_publication(conn.tenant.community()).await;
+    let _observer_permit = match conn.nip_fi_gate.acquire_effect().await {
+        Ok(permit) => permit,
+        Err(crate::nip_fi_gate::SessionExpired) => {
+            conn.send(RelayMessage::ok(
+                event_id_hex,
+                false,
+                "restricted: session expired",
+            ));
+            return;
+        }
+    };
+
     state.mark_local_event(conn.tenant.community(), &event.id);
     if let Err(e) = state
         .pubsub
@@ -1443,6 +1509,7 @@ mod tests {
 
         let (send_tx, mut send_rx) = mpsc::channel(1);
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
+        let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel(1);
         let conn = Arc::new(crate::connection::ConnectionState {
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::TenantContext::resolved(community_b, "b.example"),
@@ -1459,9 +1526,18 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx,
             ctrl_tx,
+            terminal_ctrl_tx,
             cancel: CancellationToken::new(),
             backpressure_count: Arc::new(AtomicU8::new(0)),
             grace_limit: 3,
+            nip_fi_assertion: None,
+            session_deadline: None,
+            nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
+                CancellationToken::new(),
+            ),
+            community_control: crate::state::CommunityConnectionControl::new(
+                CancellationToken::new(),
+            ),
         });
 
         super::handle_agent_observer_event(
@@ -1521,6 +1597,8 @@ mod tests {
             let keys = Keys::generate();
             let (send_tx, mut send_rx) = mpsc::channel(10);
             let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
+            let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel(1);
+            let cancel = CancellationToken::new();
             let conn = Arc::new(crate::connection::ConnectionState {
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
@@ -1537,23 +1615,34 @@ mod tests {
                 subscriptions: Arc::new(Mutex::new(HashMap::new())),
                 send_tx,
                 ctrl_tx,
-                cancel: CancellationToken::new(),
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
                 backpressure_count: Arc::new(AtomicU8::new(0)),
                 grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: None,
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
             });
             let watcher = Uuid::new_v4();
             let (tx, mut rx) = mpsc::channel(10);
             let (ctrl, _ctrl_rx) = mpsc::channel(10);
+            let (terminal_ctrl, _terminal_ctrl_rx2) = mpsc::channel(1);
+            let watcher_cancel = CancellationToken::new();
+            let watcher_control =
+                crate::state::CommunityConnectionControl::new(watcher_cancel.clone());
             state.conn_manager.register(
                 watcher,
                 tx,
                 ctrl,
+                terminal_ctrl,
                 None,
-                CancellationToken::new(),
+                watcher_cancel,
                 tenant.community(),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                watcher_control,
             );
             state.sub_registry.register_scoped(
                 tenant.community(),
@@ -1666,6 +1755,8 @@ mod tests {
             let keys = Keys::generate();
             let (send_tx, mut send_rx) = mpsc::channel(10);
             let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
+            let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel(1);
+            let cancel = CancellationToken::new();
             let conn = Arc::new(crate::connection::ConnectionState {
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
@@ -1682,9 +1773,14 @@ mod tests {
                 subscriptions: Arc::new(Mutex::new(HashMap::new())),
                 send_tx,
                 ctrl_tx,
-                cancel: CancellationToken::new(),
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
                 backpressure_count: Arc::new(AtomicU8::new(0)),
                 grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: None,
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
             });
             // Same watcher registration as the ACK/fan-out cases, proving
             // the storage failure still reaches no subscriber while its
@@ -1692,16 +1788,22 @@ mod tests {
             let watcher = Uuid::new_v4();
             let (tx, mut rx) = mpsc::channel(10);
             let (ctrl, _ctrl_rx) = mpsc::channel(10);
+            let (terminal_ctrl2, _terminal_ctrl_rx2) = mpsc::channel(1);
+            let watcher_cancel = CancellationToken::new();
+            let watcher_control =
+                crate::state::CommunityConnectionControl::new(watcher_cancel.clone());
             state.conn_manager.register(
                 watcher,
                 tx,
                 ctrl,
+                terminal_ctrl2,
                 None,
-                CancellationToken::new(),
+                watcher_cancel,
                 tenant.community(),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                watcher_control,
             );
             state.sub_registry.register_scoped(
                 tenant.community(),
@@ -1835,12 +1937,16 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                mpsc::channel(1).0,
                 None,
                 CancellationToken::new(),
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             );
             if let Some(pubkey) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pubkey);
@@ -2372,9 +2478,15 @@ mod tests {
         use crate::state::AppState;
 
         pub(super) fn test_config() -> crate::config::Config {
-            let mut config = crate::config::Config::from_env().expect("default config loads");
+            // hermetic_for_test_with_db_from_env: env-free for NIP-FI parsing
+            // (never races nip_fi_config tests), but picks up DATABASE_URL /
+            // BUZZ_TEST_DATABASE_URL so that DB-backed helpers in
+            // presence_storage_postgres_tests that call
+            // `sqlx::PgPool::connect(&state.config.database_url)` reach a real
+            // DB in CI.  Falls back to the port-1 stub in unit-test runs.
+            // [F6: hermetic NIP-FI + real DB URL for postgres helpers]
+            let mut config = crate::config::Config::hermetic_for_test_with_db_from_env();
             config.require_relay_membership = false;
-            config.redis_url = "redis://127.0.0.1:1".to_string();
             config
         }
 
@@ -2475,12 +2587,16 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                mpsc::channel(1).0,
                 None,
                 CancellationToken::new(),
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             );
             if let Some(pk) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pk);
@@ -2801,12 +2917,16 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                mpsc::channel(1).0,
                 None,
                 CancellationToken::new(),
                 community_id,
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             );
             if let Some(pk) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pk);
@@ -2859,5 +2979,359 @@ mod tests {
                  must not receive a community-B event. Got: {out:?}"
             );
         }
+    }
+
+    // ── W2 (event barrier): expiry fired mid-flight blocks persistent EVENT ingest ──
+    //
+    // Arms `before_event_ingest` — the hook immediately before `acquire_effect()`
+    // in the persistent EVENT path. Dispatches `handle_event` with a live gate,
+    // waits for the hook to signal the handler reached the permit boundary,
+    // fires the gate expiry (cancel), then releases the hook. The handler tries
+    // `acquire_effect()` and gets `SessionExpired`, returns without calling
+    // `ingest_event()` (no DB write, no fan-out).
+    //
+    // The mutation evidence proves the permit sits at the ingest boundary:
+    //   A) Delete `before_event_ingest(...)` from event.rs → handler never
+    //      stalls at the hook → cancel fires before acquire_effect (race).
+    //      Without the hook the test is non-deterministic.
+    //   B) Remove `acquire_effect()` from event.rs → handler calls `ingest_event`
+    //      despite the cancel → DB write is attempted → `send_rx` gets OK(true)
+    //      or a DB error response, NOT a "session expired" OK(false) → assertion panics.
+    //   C) Swap the gate to off_mode → acquire_effect always succeeds after cancel
+    //      → same as (B), assertion panics.
+    //
+    // This test also lives in `postgres_tests` (ignored, requiring real Postgres):
+    // the durable DB assertion and publication-counter assertion are wired there.
+    // See `postgres_tests::w2_event_ingest_barrier_expiry_mid_flight_blocks_persistence`
+    // below for the full witness including the publication oracle.
+
+    // ── postgres_tests: W2 durable + publication oracle ───────────────────────
+    //
+    // Selected by the `postgres-ci` nextest profile filter
+    // (`test(/postgres_tests::/)`) which also passes `--run-ignored ignored-only`.
+    // These tests require a real Postgres instance; the URL is resolved from
+    // `state.config.database_url` (set by `DATABASE_URL` env var in CI, same
+    // source `test_state()` uses — no hard-coded URL).
+    mod postgres_tests {
+
+        // W2 full witness: event-ingest barrier + durable absence + publication oracle.
+        //
+        // Extends the unit-level W2 barrier test with two Postgres-required assertions:
+        //   1. Durable DB absence: the event row is NOT in the `events` table.
+        //   2. Publication oracle: `before_event_publish` counter is 0, proving
+        //      `dispatch_persistent_event_inner` (and thus `publish_event`) was never
+        //      called — not a proxy, the real publication boundary.
+        //
+        // Mutation evidence:
+        //   Remove `acquire_effect()` from event.rs → ingest_event is called →
+        //   dispatch_persistent_event_inner runs → before_event_publish fires →
+        //   publish_count = 1 → `assert_eq!(publish_count, 0)` panics.
+        //   AND: the row IS in the DB → COUNT(*) = 1 → DB assertion panics.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn w2_event_ingest_barrier_expiry_mid_flight_blocks_persistence() {
+            use std::collections::HashMap;
+            use std::sync::atomic::Ordering;
+            use std::sync::Arc;
+            use tokio::sync::mpsc;
+            use tokio_util::sync::CancellationToken;
+            use uuid::Uuid;
+
+            let key = nostr::Keys::generate();
+            let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+
+            let cancel = CancellationToken::new();
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
+
+            let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+
+            let (send_tx, mut send_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+            let (terminal_ctrl_tx, _terminal_ctrl_rx) =
+                mpsc::channel::<axum::extract::ws::Message>(1);
+
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: buzz_core::tenant::TenantContext::resolved(
+                    community,
+                    "test.local".to_string(),
+                ),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: key.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
+                backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: Some(deadline),
+                nip_fi_gate: gate,
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+            });
+
+            // Kind:1 TextNote with no #h tag — no DB calls before before_event_ingest.
+            let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "w2 postgres barrier test")
+                .sign_with_keys(&key)
+                .unwrap();
+            let event_id_bytes = event.id.to_bytes();
+
+            let state = crate::state::tests::test_state().await;
+
+            // Register the publication counter BEFORE arming the hook, so any
+            // concurrent dispatch for this community is also counted.
+            let publish_count =
+                crate::nip_fi_test_hooks::event_publish_counter::register(community);
+
+            // Arm the barrier at the persistent EVENT seam.
+            let (arrived_rx, release) = crate::nip_fi_test_hooks::event_ingest_hook::arm(community);
+
+            let conn2 = Arc::clone(&conn);
+            let state2 = Arc::clone(&state);
+            let handle = tokio::spawn(async move {
+                super::super::handle_event(event, conn2, state2).await;
+            });
+
+            // Wait for the handler to reach before_event_ingest.
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+                .await
+                .expect("W2: handler must reach before_event_ingest within 5s")
+                .expect("arrived channel closed");
+
+            // Fire expiry: cancel so acquire_effect returns SessionExpired.
+            cancel.cancel();
+
+            // Release — handler resumes, calls acquire_effect(), gets SessionExpired.
+            release.notify_one();
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("W2: handle_event must return within 5s")
+                .expect("handle_event task must not panic");
+
+            // ── Frame assertions ───────────────────────────────────────────────────
+            let frame = send_rx
+                .try_recv()
+                .expect("W2: a 'session expired' OK(false) must be sent on gate denial");
+            match frame {
+                axum::extract::ws::Message::Text(t) => {
+                    assert!(
+                        t.contains("session expired"),
+                        "W2: frame must contain 'session expired'; got: {t}"
+                    );
+                    assert!(t.contains("false"), "W2: frame must be OK(false); got: {t}");
+                }
+                other => panic!("W2: expected Text frame, got {other:?}"),
+            }
+            assert!(
+                send_rx.try_recv().is_err(),
+                "W2: no additional frames must be sent after session-expired denial"
+            );
+
+            // ── Publication oracle: real publication boundary ──────────────────────
+            //
+            // `before_event_publish` fires immediately before `publish_event` in
+            // `dispatch_persistent_event_inner`. Zero calls proves `publish_event`
+            // was never reached — not a proxy, the actual publication boundary.
+            //
+            // Mutation evidence:
+            //   Remove `acquire_effect()` → dispatch_persistent_event_inner runs →
+            //   before_event_publish fires → publish_count = 1 → assertion panics.
+            let publish_attempts = publish_count.load(Ordering::Relaxed);
+            crate::nip_fi_test_hooks::event_publish_counter::deregister(community);
+            assert_eq!(
+                publish_attempts, 0,
+                "W2: publish_event must NOT be called — \
+                 dispatch_persistent_event_inner must not have been reached \
+                 when acquire_effect returns SessionExpired; \
+                 got {publish_attempts} publish attempt(s)"
+            );
+
+            // ── Durable DB assertion ───────────────────────────────────────────────
+            //
+            // Requires real Postgres. Confirms the event row is absent from `events`.
+            // Connects to the same database `test_state()` built its pool from
+            // (`state.config.database_url` ← `DATABASE_URL` env var in CI).
+            //
+            // Mutation evidence:
+            //   Remove `acquire_effect()` → ingest_event is attempted → with a real DB,
+            //   the row IS inserted → COUNT(*) = 1 → assertion panics.
+            let pool = sqlx::PgPool::connect(&state.config.database_url)
+                .await
+                .expect("W2: Postgres must be reachable at state.config.database_url");
+            let event_id_hex = hex::encode(event_id_bytes);
+            let row_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE id = decode($1, 'hex')")
+                    .bind(&event_id_hex)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("W2: event row count query");
+
+            assert_eq!(
+                row_count, 0,
+                "W2: event row must NOT be in the DB — \
+                 ingest_event must not have been called when acquire_effect returns SessionExpired; \
+                 found {row_count} row(s)"
+            );
+        }
+    }
+
+    // ── W_observer_permit: F1 — cancel before permit acquisition blocks publication
+    //
+    // Arms `before_observer_publication` so the test can fire expiry while the
+    // observer handler is between owner-validation and `acquire_effect`.  After
+    // release, `acquire_effect` returns `SessionExpired` and the handler sends
+    // OK(false, "restricted: session expired") without calling `mark_local_event`
+    // or `publish_event`.
+    //
+    // Setup: two distinct key pairs (owner and agent).  The owner sends a Control
+    // frame to the agent.  The connection authenticates as the owner via NIP-42,
+    // with `agent_owner_pubkey` set so `session_owner_match` short-circuits the
+    // DB lookup.  The content is NIP-44 encrypted using `encrypt_observer_payload`.
+    //
+    // Mutation evidence:
+    //   A) Delete the `#[cfg(test)] before_observer_publication(...)` call →
+    //      `arrived_rx` times out → test panics.
+    //   B) Remove `acquire_effect` from `handle_agent_observer_event` →
+    //      handler publishes even when cancelled → sends OK(true) → panics.
+    //   C) Change gate to `off_mode` → `acquire_effect` always succeeds after
+    //      cancel → publishes → OK(true) → panics.
+    #[tokio::test]
+    async fn w_observer_permit_cancel_before_acquisition_blocks_publication() {
+        use buzz_core::observer::{
+            encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL,
+            OBSERVER_FRAME_TAG,
+        };
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+        use uuid::Uuid;
+
+        // Two distinct keys: the owner sends a Control frame to the agent.
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_pubkey = owner_keys.public_key();
+        let agent_pubkey = agent_keys.public_key();
+
+        let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+        let cancel = CancellationToken::new();
+        let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0xf1f1));
+
+        let (send_tx, mut send_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+        let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
+        let subscriptions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+        // Connection is authenticated as the owner.  `agent_owner_pubkey` is set
+        // to the owner's own pubkey so `session_owner_match` returns true and the
+        // DB lookup (is_agent_owner) is skipped.
+        let conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
+            remote_addr: "127.0.0.1:1234".parse().unwrap(),
+            auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                buzz_auth::AuthContext {
+                    pubkey: owner_pubkey,
+                    scopes: vec![],
+                    channel_ids: None,
+                    auth_method: buzz_auth::AuthMethod::Nip42,
+                    // session_owner_match: ctx.agent_owner_pubkey == Some(route.owner)
+                    // where route.owner == event.pubkey == owner_pubkey.
+                    agent_owner_pubkey: Some(owner_pubkey),
+                },
+            )),
+            subscriptions: Arc::clone(&subscriptions),
+            send_tx,
+            ctrl_tx,
+            terminal_ctrl_tx,
+            cancel: cancel.clone(),
+            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            grace_limit: 3,
+            nip_fi_assertion: None,
+            session_deadline: Some(deadline),
+            nip_fi_gate: gate,
+            community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+        });
+
+        let state = crate::state::tests::test_state().await;
+        let conn_id = conn.conn_id;
+
+        // Build a valid Control frame: owner → agent.
+        // NIP-44 encrypted so content_looks_like_nip44() passes.
+        let encrypted = encrypt_observer_payload(
+            &owner_keys,
+            &agent_pubkey,
+            &serde_json::json!({"type": "cancel_turn"}),
+        )
+        .expect("W_observer_permit: encrypt observer payload");
+        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
+                Tag::parse(["p", &agent_pubkey.to_hex()]).expect("p tag"),
+                Tag::parse([OBSERVER_AGENT_TAG, &agent_pubkey.to_hex()]).expect("agent tag"),
+                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_CONTROL]).expect("frame tag"),
+            ])
+            .sign_with_keys(&owner_keys)
+            .expect("W_observer_permit: sign observer event");
+        let event_id_hex_str = event.id.to_hex();
+
+        // Arm the barrier.
+        let (arrived_rx, release) =
+            crate::nip_fi_test_hooks::observer_publication_hook::arm(community);
+
+        let conn2 = Arc::clone(&conn);
+        let state2 = Arc::clone(&state);
+        let event_clone = event.clone();
+        let eid_clone = event_id_hex_str.clone();
+        let handle = tokio::spawn(async move {
+            super::handle_agent_observer_event(event_clone, conn_id, &eid_clone, conn2, state2)
+                .await
+        });
+
+        // Wait for the handler to reach the permit boundary.
+        tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+            .await
+            .expect("W_observer_permit: handler must reach before_observer_publication within 5s")
+            .expect("arrived channel closed");
+
+        // Fire expiry and release the barrier.
+        cancel.cancel();
+        release.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("W_observer_permit: handler must return within 5s")
+            .expect("handle_agent_observer_event must not panic");
+
+        // Handler must send OK(false, "restricted: session expired").
+        let resp = send_rx
+            .try_recv()
+            .expect("W_observer_permit: handler must send a message");
+        let resp_text = match resp {
+            axum::extract::ws::Message::Text(t) => t.to_string(),
+            other => panic!("W_observer_permit: expected Text, got {other:?}"),
+        };
+        assert!(
+            resp_text.contains("false"),
+            "W_observer_permit: handler must send OK(false) when gate expired; got: {resp_text}"
+        );
+        assert!(
+            resp_text.contains("session expired"),
+            "W_observer_permit: handler must include 'session expired'; got: {resp_text}"
+        );
+        assert!(
+            send_rx.try_recv().is_err(),
+            "W_observer_permit: exactly one message expected"
+        );
     }
 }

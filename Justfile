@@ -473,6 +473,87 @@ test-unit:
         # `tests::postgres_tests::` stays in the PostgreSQL lane.
         cargo nextest run -p buzz-relay --lib --bin buzz-relay \
             -E 'test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/)) - test(/^tests::postgres_tests::/))'
+        # NIP-FI (S3/S4) relay witnesses: the wholly-new nip_fi_* and
+        # api::nip_fi modules, plus the exact NIP-FI tests added to mixed
+        # modules (state, connection, audio::handler, router, handlers::*,
+        # config). They ran in NO lane before, the same gap as above. Mixed
+        # modules are listed by exact name so main's unselected tests (several
+        # wait out the ~30s sqlx acquire timeout) stay out; the NIP-FI stub-pool
+        # helpers use a 100ms acquire timeout. NIP-FI tests that need Postgres
+        # or Redis live in postgres_tests and run in the PostgreSQL lane.
+        cargo nextest run -p buzz-relay --lib -E '
+                test(/^nip_fi_(config|gate|session|upgrade)::/) + test(/^api::nip_fi::/)
+                + test(=audio::handler::tests::admin_disconnect_nip_fi_delivers_restricted_json_then_policy_close)
+                + test(=audio::handler::tests::audio_expiry_sends_exact_restricted_frame_before_close)
+                + test(=audio::handler::tests::b1_already_expired_session_denied_at_pairing_before_admission)
+                + test(=audio::handler::tests::b1_mid_admission_expiry_does_not_add_peer_to_room)
+                + test(=audio::handler::tests::cw6_guard_release_before_commit_calls_directory_release_exactly_once)
+                + test(=audio::handler::tests::cw7_guard_release_before_commit_sends_clean_close_on_remote_stream)
+                + test(=audio::handler::tests::handle_active_audio_connection_pairing_mismatch_runs_full_audio_denial_path)
+                + test(=audio::handler::tests::pre_send_loop_check_cancel_emits_restricted_json_then_policy_close)
+                + test(=audio::handler::tests::w8_membership_check_barrier_fires_before_db_read)
+                + test(=audio::handler::tests::w_admin_disconnect_at_deny_check_delivers_payload_then_close)
+                + test(=audio::handler::tests::w_audio_deny_absent_key_passes_deny_check_reaches_membership_gate)
+                + test(=audio::handler::tests::w_audio_deny_active_key_refused_at_post_registration_check)
+                + test(=audio::handler::tests::w_audio_deny_straddle_entry_inserted_between_registration_and_check_is_caught)
+                + test(=config::tests::hermetic_for_test_is_deterministic)
+                + test(=connection::tests::b2_cancelled_connection_event_frame_not_dispatched)
+                + test(=connection::tests::b3_denial_precedes_restart_when_denial_already_won)
+                + test(=connection::tests::b3_expiry_denial_precedes_close_through_send_loop)
+                + test(=connection::tests::b3_root_pairing_denial_precedes_close_through_send_loop)
+                + test(=connection::tests::deadline_exp_is_earliest_selects_exp)
+                + test(=connection::tests::deadline_max_connection_lifetime_is_earliest_selects_partition)
+                + test(=connection::tests::deadline_no_lifetime_returns_upstream_only)
+                + test(=connection::tests::expiry_notice_queued_on_ctrl_before_cancel)
+                + test(=connection::tests::r1_denial_precedes_restart_reason_won_frame_arrives_during_recv)
+                + test(=handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated)
+                + test(=handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path)
+                + test(=handlers::event::tests::w_observer_permit_cancel_before_acquisition_blocks_publication)
+                + test(=router::tests::b4_connection_upgrade_only_no_upgrade_header_not_gated)
+                + test(=router::tests::b4_upgrade_only_no_connection_header_not_gated)
+                + test(=router::tests::deny_map_admits_key_not_in_map)
+                + test(=router::tests::deny_map_blocks_ws_admission_for_live_entry)
+                + test(=router::tests::nip_fi_enforce_audio_denies_missing_assertion_401)
+                + test(=router::tests::nip_fi_enforce_audio_denies_token_when_no_verifier_503)
+                + test(=router::tests::nip_fi_enforce_nip11_content_negotiation_serves_200_not_401)
+                + test(=router::tests::nip_fi_enforce_root_denies_missing_assertion_401)
+                + test(=router::tests::nip_fi_enforce_root_denies_token_when_no_verifier_503)
+                + test(=router::tests::nip_fi_enforce_ws_upgrade_with_html_accept_is_gated_401)
+                + test(=state::tests::auth_wins_reason_enqueues_frame_then_losing_delete_does_not)
+                + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason)
+                + test(=state::tests::conn_manager_disconnect_nip_fi_ignores_unproven_connection)
+                + test(=state::tests::conn_manager_disconnect_nip_fi_is_issuer_scoped)
+                + test(=state::tests::conn_manager_disconnect_nip_fi_sets_authorization_denied_reason)
+                + test(=state::tests::delete_wins_reason_losing_auth_does_not_enqueue_frame)
+                + test(=state::tests::delete_wins_reason_losing_expiry_does_not_enqueue_frame)
+                + test(=state::tests::delete_wins_reason_losing_manager_does_not_enqueue_frame)
+                + test(=state::tests::delete_wins_reason_losing_pairing_does_not_enqueue_frame)
+                + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame)
+                + test(=state::tests::disconnect_nip_fi_wins_reason_enqueues_frame_then_losing_delete_does_not)
+                + test(=state::tests::drain_all_jittered_cancels_when_restart_channel_is_full_or_closed)
+                + test(=state::tests::drain_all_jittered_waits_for_writer_acknowledgement_without_cancelling)
+                + test(=state::tests::expiry_wins_reason_enqueues_frame_then_losing_delete_does_not)
+                + test(=state::tests::lifecycle_cancel_does_not_enqueue_frame_but_cancels_token)
+                + test(=state::tests::nip_fi_disconnect_audio_is_issuer_scoped)
+                + test(=state::tests::manager_wins_reason_enqueues_frame_then_losing_delete_does_not)
+                + test(=state::tests::nip_fi_disconnect_closes_proven_audio_socket_and_sends_policy_close_reason)
+                + test(=state::tests::nip_fi_disconnect_closes_target_audio_only_and_preserves_collocated_peer)
+                + test(=state::tests::nip_fi_disconnect_does_not_close_different_pubkey_audio_socket)
+                + test(=state::tests::nip_fi_disconnect_does_not_close_unproven_audio_socket)
+                + test(=state::tests::nip_fi_disconnect_then_community_keeps_authorization_denied_reason)
+                + test(=state::tests::pairing_wins_reason_enqueues_frame_then_losing_delete_does_not)
+                + test(=state::tests::w_audio_registry_lifecycle_cancel_race_payload_precedes_audio_teardown_cancel)
+                + test(=state::tests::w_auth_cancel_race_payload_precedes_community_cancel)
+                + test(=state::tests::w_cancel_race_deny_payload_precedes_community_cancel)
+                + test(=state::tests::w_expiry_cancel_race_payload_precedes_community_cancel)
+                + test(=state::tests::w_lifecycle_cancel_race_payload_precedes_lifecycle_cancel)
+                + test(=state::tests::w_lifecycle_cancel_race_reverse_manager_loses_after_lifecycle_wins)
+                + test(=state::tests::w_manager_cancel_race_payload_precedes_community_cancel)
+                + test(=state::tests::w_pairing_cancel_race_payload_precedes_community_cancel)
+                + test(=state::tests::w_root_manager_drain_race_payload_precedes_drain_lifecycle_cancel)'
+        # buzz-pubsub unit tests (NIP-FI disconnect fan-out codec) are
+        # infra-free and ran in no lane.
+        cargo nextest run -p buzz-pubsub --lib
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.

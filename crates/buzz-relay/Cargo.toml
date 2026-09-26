@@ -94,7 +94,7 @@ dev = ["buzz-auth/dev"]
 # relay unit test could build — the Desktop E2E Relay 30m timeout.
 # `use_pem` enables EncodingKey::from_ec_pem for minting ES256 test assertions
 # in settings_tests.rs (key-pairing build_router tests).
-jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+jsonwebtoken = { workspace = true, features = ["use_pem"] }
 http-body = "1"
 http-body-util = "0.1"
 buzz-core = { workspace = true, features = ["test-utils"] }

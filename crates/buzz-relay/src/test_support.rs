@@ -8,6 +8,27 @@ pub(crate) fn database_url() -> String {
         .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned())
 }
 
+/// Database URL exported per test by `scripts/postgres-test-wrapper.sh`.
+///
+/// Panics instead of falling back to a shared local database: a missing URL is
+/// a lane misconfiguration and must fail loudly, never skip.
+#[cfg(test)]
+pub(crate) fn required_database_url() -> String {
+    std::env::var("BUZZ_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("TEST_DATABASE_URL"))
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("postgres_tests require the wrapper's per-test DATABASE_URL (run via scripts/postgres-test-run.sh)")
+}
+
+/// Redis URL for PostgreSQL-lane tests that also need Redis; the PG CI job
+/// exports `REDIS_URL`. Panics when unset — never skips.
+#[cfg(test)]
+pub(crate) fn required_redis_url() -> String {
+    std::env::var("BUZZ_TEST_REDIS_URL")
+        .or_else(|_| std::env::var("REDIS_URL"))
+        .expect("this postgres_tests witness requires BUZZ_TEST_REDIS_URL or REDIS_URL")
+}
+
 #[cfg(test)]
 const CHILD_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 #[cfg(test)]

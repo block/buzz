@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import test from "node:test";
 
 import { startHuddlePresenceRuntime } from "./huddlePresenceRuntime.ts";
@@ -1636,5 +1639,70 @@ test("liveness refresh clears equal-revision admissions across generations", asy
   livenessTimer();
   await settle();
   assert.equal(snapshots.at(-1).has(BOB), false);
+  dispose();
+});
+
+// F3 Desktop contract witness (Carl P2 at cea34b1ca): relay-produced JOIN and
+// liveness events, normalized into a committed fixture that the Rust drift guard
+// (f3_wire_admission_generation_matches_liveness_source_body) pins to real
+// producer output, run through the actual hydrated runtime. The expected member
+// is independent of the fixture so a wrong producer p-tag cannot pass.
+const F3_EXPECTED_MEMBER = "b".repeat(64);
+
+test("F3 Desktop contract: producer JOIN + liveness retain admitted participant through authoritative refresh", async () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "__fixtures__",
+        "nip-fi-join-liveness.json",
+      ),
+      "utf8",
+    ),
+  );
+  let livenessTimer;
+  let livenessFetches = 0;
+  const snapshots = [];
+
+  const dispose = startHuddlePresenceRuntime({
+    relaySelfPubkey: fixture.relayPubkey,
+    channelIds: [fixture.channelId],
+    subscribeLive: async () => () => {},
+    fetchEvents: async (filter) => {
+      if (filter.kinds?.includes(48104)) {
+        livenessFetches += 1;
+        return [fixture.liveness];
+      }
+      return [fixture.start, fixture.join];
+    },
+    subscribeToReconnects: () => () => {},
+    onPresence: (participants) => snapshots.push(new Set(participants)),
+    setLivenessTimer: (callback) => {
+      livenessTimer = callback;
+      return callback;
+    },
+    clearLivenessTimer: () => {
+      livenessTimer = undefined;
+    },
+    nowSeconds: () => fixture.liveness.created_at,
+  });
+
+  await settle();
+  assert.equal(snapshots.at(-1)?.has(F3_EXPECTED_MEMBER), true);
+  assert.equal(typeof livenessTimer, "function");
+  const fetchesBeforeRefresh = livenessFetches;
+
+  livenessTimer();
+  await settle();
+
+  assert.ok(
+    livenessFetches > fetchesBeforeRefresh,
+    "authoritative liveness refresh must fetch liveness",
+  );
+  assert.equal(
+    snapshots.at(-1)?.has(F3_EXPECTED_MEMBER),
+    true,
+    "admitted member must remain in presence after authoritative refresh",
+  );
   dispose();
 });

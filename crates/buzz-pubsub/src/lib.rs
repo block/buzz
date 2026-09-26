@@ -54,7 +54,9 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use crate::cache_invalidation::{
     cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
 };
+pub use crate::conn_control::NipFiDisconnect;
 use crate::conn_control::{conn_control_channel, ConnControl, ScopedConnControl};
+pub use crate::conn_control::{decode_nip_fi_disconnect, encode_nip_fi_disconnect};
 pub use crate::topic::{channel_key, global_key, EventTopic, EventTopicKey};
 
 /// A Nostr event received on a scoped Redis event topic, broadcast to local subscribers.
@@ -110,6 +112,7 @@ pub struct PubSubManager {
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
+    nip_fi_disconnect_tx: broadcast::Sender<NipFiDisconnect>,
 }
 
 impl PubSubManager {
@@ -126,6 +129,7 @@ impl PubSubManager {
         let (broadcast_tx, _) = broadcast::channel(4096);
         let (cache_invalidation_tx, _) = broadcast::channel(4096);
         let (conn_control_tx, _) = broadcast::channel(4096);
+        let (nip_fi_disconnect_tx, _) = broadcast::channel(4096);
         let (subscription_tx, subscription_rx) = mpsc::channel(4096);
 
         Ok(Self {
@@ -138,6 +142,7 @@ impl PubSubManager {
             broadcast_tx,
             cache_invalidation_tx,
             conn_control_tx,
+            nip_fi_disconnect_tx,
         })
     }
 
@@ -176,6 +181,19 @@ impl PubSubManager {
         conn_control::run_conn_control_subscriber(
             self.redis_url.clone(),
             self.conn_control_tx.clone(),
+        )
+        .await;
+    }
+
+    /// Starts the NIP-FI disconnect subscriber loop with automatic
+    /// reconnection.  Runs forever — spawn this in a background task.
+    ///
+    /// Every pod subscribes to this global channel; on receipt it merges the
+    /// deny entry and closes matching local sessions.
+    pub async fn run_nip_fi_disconnect_subscriber(self: Arc<Self>) {
+        conn_control::run_nip_fi_disconnect_subscriber(
+            self.redis_url.clone(),
+            self.nip_fi_disconnect_tx.clone(),
         )
         .await;
     }
@@ -265,6 +283,11 @@ impl PubSubManager {
         self.conn_control_tx.subscribe()
     }
 
+    /// Returns a new broadcast receiver for cross-pod NIP-FI disconnect commands.
+    pub fn subscribe_nip_fi_disconnect(&self) -> broadcast::Receiver<NipFiDisconnect> {
+        self.nip_fi_disconnect_tx.subscribe()
+    }
+
     /// Publish a cache-key drop to all pods. Fire-and-forget at the call site:
     /// the local cache is already dropped synchronously; this carries the same
     /// drop cross-pod. A dropped publish is backstopped by the REQ denial-path
@@ -298,6 +321,26 @@ impl PubSubManager {
         let payload = serde_json::to_string(command)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
             .arg(conn_control_channel(ctx))
+            .arg(&payload)
+            .query_async(&mut conn)
+            .await?;
+        Ok(subscriber_count)
+    }
+
+    /// Publish a NIP-FI disconnect command to all pods on the global channel.
+    ///
+    /// Called after the local deny entry is inserted.  Remote pods receive this
+    /// and apply the same `max(until)` merge + all-community session close.
+    /// Fire-and-forget: the HTTP response does not wait on delivery.
+    pub async fn publish_nip_fi_disconnect(
+        &self,
+        command: &NipFiDisconnect,
+    ) -> Result<i64, PubSubError> {
+        use crate::conn_control::{encode_nip_fi_disconnect, NIP_FI_DISCONNECT_CHANNEL};
+        let mut conn = self.pool.get().await?;
+        let payload = encode_nip_fi_disconnect(command)?;
+        let subscriber_count: i64 = redis::cmd("PUBLISH")
+            .arg(NIP_FI_DISCONNECT_CHANNEL)
             .arg(&payload)
             .query_async(&mut conn)
             .await?;

@@ -60,6 +60,9 @@ typesense-data/
 doc/
 /repos/
 
+# buzz-relay test-runtime pack cache (created by test harness, must not be committed)
+crates/buzz-relay/repos/
+
 # Local identity files
 identity.key
 **/identity.key

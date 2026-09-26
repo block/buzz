@@ -1,69 +1,69 @@
-//! NIP-FI relay-level configuration: issuer set, session lifetime, and JWKS
-//! warm/refresh.
+//! NIP-FI relay-level configuration: issuer set, JWKS warm/refresh, and
+//! S4 admin-command fields.
 //!
-//! All env-var parsing lives here so `config.rs` stays focused on the top-level
-//! `Config` struct. This module is `pub` — `config.rs` constructs it, and the
-//! relay reads it as `config.nip_fi`.
+//! Parses `BUZZ_NIP_FI_MODE` and `BUZZ_NIP_FI_ISSUERS` from the environment.
+//! S3 fields (assertion-level per-issuer config) build the `IssuerRegistry` +
+//! `IssuerJwksConfig` slice for `ProductionJwksSource`.  S4 fields
+//! (`maximum_command_age_seconds`, `authorized_principals`,
+//! `deny_set_capacity`) are parsed alongside so a single JSON array drives both
+//! tiers.
 //!
 //! # Environment variables
 //!
 //! | Variable | Required | Description |
 //! |---|---|---|
 //! | `BUZZ_NIP_FI_MODE` | No | `off` (default), `enforce`, or `deny_protected`. |
-//! | `BUZZ_NIP_FI_ISSUERS` | If enforce | JSON array of issuer configs (see [`IssuerEnvConfig`]). |
-//! | `BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS` | If enforce | Per-partition limit on session lifetime. |
+//! | `BUZZ_NIP_FI_ISSUERS` | If enforce | JSON array of issuer configs. |
+//! | `BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS` | If enforce | Per-partition session-lifetime bound. |
 //!
-//! `maximum_assertion_age` is per-issuer only (field `maximum_assertion_age_seconds` in
-//! the issuer JSON array), not a relay-level env var. A relay-level duplicate that could
-//! disagree with the enforced per-issuer value was removed in this PR.
-//!
-//! Absent or empty `BUZZ_NIP_FI_MODE` defaults to `off`, keeping the relay
-//! backward-compatible until an operator explicitly enables enforcement.
-
-use std::time::Duration;
+//! Missing or empty `BUZZ_NIP_FI_MODE` defaults to `off`.
 
 use buzz_auth::{
     validate_nip_fi_config, FreshnessClass, IssuerJwksConfig, IssuerPolicy, IssuerPolicyError,
-    IssuerRegistry, JwksSourceContract, NipFiMode, NipFiStartupError, TokenClass,
+    IssuerRegistry, JwksSourceContract, JwtAlgorithm, NipFiMode, NipFiStartupError, TokenClass,
 };
-use jsonwebtoken::Algorithm;
 
 use crate::config::ConfigError;
 
 /// Maximum accepted `max_connection_lifetime` in seconds (30 days).
 const MAX_CONNECTION_LIFETIME_SECS: u64 = 30 * 24 * 3600;
 
-// ── Per-issuer JSON config shape ─────────────────────────────────────────────
+// ── Per-issuer JSON config ────────────────────────────────────────────────────
 
 /// One entry in the `BUZZ_NIP_FI_ISSUERS` JSON array.
 ///
-/// **Example** (one issuer, `nip-fi+jwt` dedicated assertions):
+/// Contains both assertion-level fields (S3) and optional command-API fields
+/// (S4).  All S4 fields default to absent.
+///
+/// **Minimal S4 example** (assertion enforcement + command API):
 /// ```json
 /// [
 ///   {
-///     "issuer": "https://login.example.com",
+///     "issuer": "https://idp.example.com",
 ///     "audiences": ["https://relay.example.com"],
 ///     "token_class": "nip-fi+jwt",
 ///     "algorithms": ["ES256"],
 ///     "skew_seconds": 30,
 ///     "maximum_assertion_age_seconds": 3600,
-///     "jwks_uri": "https://login.example.com/.well-known/jwks.json",
+///     "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
 ///     "jwks_refresh_interval_seconds": 300,
-///     "jwks_hard_deadline_seconds": 86400
+///     "jwks_hard_deadline_seconds": 86400,
+///     "maximum_command_age_seconds": 30,
+///     "authorized_principals": ["admin@idp.example.com"],
+///     "deny_set_capacity": 50000
 ///   }
 /// ]
 /// ```
-/// The `require_attested_key` field is not part of this schema; S2 removed it
-/// from buzz-auth. S3 enforces key pairing structurally for every issuer.
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct IssuerEnvConfig {
+    // ── S3 assertion fields ───────────────────────────────────────────────
     /// Exact `iss` value.
     pub issuer: String,
     /// One or more accepted `aud` values.
     pub audiences: Vec<String>,
-    /// `"at+jwt"` or `"nip-fi+jwt"`.
+    /// `"nip-fi+jwt"` (only supported class in this version).
     pub token_class: TokenClassEnvConfig,
-    /// Algorithm names, e.g. `["ES256", "RS256"]`.
+    /// Algorithm names, e.g. `["ES256"]`.
     pub algorithms: Vec<String>,
     /// Accepted clock skew in seconds (≤ 300).
     #[serde(default)]
@@ -76,6 +76,20 @@ pub(super) struct IssuerEnvConfig {
     pub jwks_refresh_interval_seconds: u64,
     /// Hard deadline for accepting a JWKS snapshot in seconds.
     pub jwks_hard_deadline_seconds: u64,
+
+    // ── S4 command-API fields (all optional) ──────────────────────────────
+    /// Maximum command JWT age in seconds; `0 < x ≤ 60`.  Required to enable
+    /// the disconnect API for this issuer.
+    #[serde(default)]
+    pub maximum_command_age_seconds: Option<u64>,
+    /// Non-empty list of authorized `sub` values.  Required when
+    /// `maximum_command_age_seconds` is set.
+    #[serde(default)]
+    pub authorized_principals: Option<Vec<String>>,
+    /// Hard ceiling on live deny entries for this issuer.  Defaults to
+    /// [`crate::api::nip_fi::DEFAULT_DENY_SET_CAPACITY`] when absent.
+    #[serde(default)]
+    pub deny_set_capacity: Option<usize>,
 }
 
 /// Token-class discriminant in the issuer config JSON.
@@ -88,32 +102,33 @@ pub(super) enum TokenClassEnvConfig {
     AccessTokenAtJwt,
 }
 
-// ── Relay-level NIP-FI config ─────────────────────────────────────────────────
+// ── NipFiRelayConfig ──────────────────────────────────────────────────────────
 
-/// The relay-level NIP-FI configuration produced by `Config::from_env`.
+/// The relay-level NIP-FI configuration produced by [`NipFiRelayConfig::from_env`].
 ///
-/// Carries the validated `NipFiMode`, the full `IssuerRegistry`,
-/// the parallel `IssuerJwksConfig` slice for `ProductionJwksSource`, and the
-/// session-lifetime bound.
+/// Carries the validated `NipFiMode`, the full `IssuerRegistry`, the parallel
+/// `IssuerJwksConfig` slice, and the per-issuer S4 command entries.
 #[derive(Debug, Clone)]
 pub struct NipFiRelayConfig {
-    /// The enforcement mode selected by `BUZZ_NIP_FI_MODE`.
+    /// The enforcement mode.
     pub mode: NipFiMode,
     /// Validated per-issuer assertion-policy registry.
     pub registry: IssuerRegistry,
-    /// Parallel JWKS configs for `ProductionJwksSource` construction.
+    /// Parallel JWKS configs for `ProductionJwksSource`.
     pub jwks_configs: Vec<IssuerJwksConfig>,
     /// Hard upper bound on a single connection lease, in seconds.
-    /// Required in enforce mode per spec (NIP-FI.md §Request and session
-    /// bounds): every deployment MUST configure a positive finite value.
+    /// `0` when mode is Off/DenyProtected (sentinel: use [`Self::max_connection_lifetime`]).
     pub max_connection_lifetime_secs: u64,
+    /// Per-issuer S4 command entries: `(issuer_uri, CommandIssuerEnvConfig)`.
+    /// Empty when mode is Off/DenyProtected or no issuer has command fields.
+    pub command_configs: Vec<(String, crate::api::nip_fi::CommandIssuerEnvConfig)>,
 }
 
 impl NipFiRelayConfig {
     /// Parse NIP-FI relay configuration from the process environment.
     ///
     /// Returns `Err` when `BUZZ_NIP_FI_MODE=enforce` but required config is
-    /// missing or invalid (fail-closed: no token is accepted until this passes).
+    /// missing or invalid (fail-closed).
     pub fn from_env() -> Result<Self, ConfigError> {
         let mode = parse_mode()?;
 
@@ -123,10 +138,11 @@ impl NipFiRelayConfig {
                 registry: IssuerRegistry::new(),
                 jwks_configs: Vec::new(),
                 max_connection_lifetime_secs: 0,
+                command_configs: Vec::new(),
             });
         }
 
-        // Enforce mode: all fields required.
+        // Enforce mode: BUZZ_NIP_FI_ISSUERS and lifetime are required.
         let issuers_json = std::env::var("BUZZ_NIP_FI_ISSUERS").map_err(|_| {
             ConfigError::InvalidValue(
                 "BUZZ_NIP_FI_MODE=enforce but BUZZ_NIP_FI_ISSUERS is not set; \
@@ -142,14 +158,10 @@ impl NipFiRelayConfig {
 
         let issuer_entries: Vec<IssuerEnvConfig> =
             serde_json::from_str(&issuers_json).map_err(|e| {
-                // Do not embed raw `e` — serde_json type-error messages can
-                // include the unexpected field value verbatim (issuer URLs, etc).
-                // Use classify() and positional info only.  [NIP-FI.md:777-779]
                 ConfigError::InvalidValue(format!(
-                    "BUZZ_NIP_FI_ISSUERS is not valid JSON: {:?} at line {} column {}",
-                    e.classify(),
+                    "BUZZ_NIP_FI_ISSUERS could not be parsed (line {}, column {})",
                     e.line(),
-                    e.column(),
+                    e.column()
                 ))
             })?;
 
@@ -159,12 +171,6 @@ impl NipFiRelayConfig {
             ));
         }
 
-        // `BUZZ_NIP_FI_MAXIMUM_ASSERTION_AGE_SECS` is intentionally NOT parsed
-        // here. The authoritative `maximum_assertion_age` comes from each issuer's
-        // JSON config entry (field `maximum_assertion_age_seconds`). A relay-level
-        // duplicate that could disagree with the per-issuer value is a config-drift
-        // trap — removed in this PR.
-
         let max_connection_lifetime_secs = parse_u64_bounded(
             "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS",
             1,
@@ -173,25 +179,100 @@ impl NipFiRelayConfig {
         .ok_or_else(|| {
             ConfigError::InvalidValue(
                 "BUZZ_NIP_FI_MODE=enforce but \
-                         BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS is not set; \
-                         every enforce deployment must configure a positive finite value"
+                 BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS is not set; \
+                 every enforce deployment must configure a positive finite value"
                     .to_string(),
             )
         })?;
 
         let mut registry = IssuerRegistry::new();
         let mut jwks_configs = Vec::with_capacity(issuer_entries.len());
+        let mut command_configs = Vec::new();
 
-        for (issuer_idx, entry) in issuer_entries.iter().enumerate() {
+        for entry in &issuer_entries {
+            let idx = jwks_configs.len(); // 0-based issuer index for error messages
             let (policy, jwks_config) = build_issuer(entry).map_err(|e| {
-                ConfigError::InvalidValue(format!(
-                    // issuer_idx is a non-identifying diagnostic code.
-                    // Raw `iss` is excluded per NIP-FI.md:777-779.
-                    "BUZZ_NIP_FI_ISSUERS: issuer at index {issuer_idx}: {e}"
-                ))
+                ConfigError::InvalidValue(format!("BUZZ_NIP_FI_ISSUERS: issuer [index {idx}]: {e}"))
             })?;
             registry.insert(policy);
             jwks_configs.push(jwks_config);
+
+            // Extract S4 command fields if present.
+            if let Some(cmd_age) = entry.maximum_command_age_seconds {
+                let principals = entry.authorized_principals.clone().unwrap_or_default();
+                // Malformed S4 fields in enforce mode must reject startup.
+                if principals.is_empty() {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_NIP_FI_ISSUERS: issuer [index {idx}]: \
+                         maximum_command_age_seconds is set but authorized_principals is \
+                         absent or empty — command API requires at least one authorized principal"
+                    )));
+                }
+                if cmd_age == 0 || cmd_age > 60 {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_NIP_FI_ISSUERS: issuer [index {idx}]: \
+                         maximum_command_age_seconds must be in [1, 60]; got {cmd_age}"
+                    )));
+                }
+                let capacity = entry
+                    .deny_set_capacity
+                    .unwrap_or(crate::api::nip_fi::DEFAULT_DENY_SET_CAPACITY);
+                if capacity == 0 {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_NIP_FI_ISSUERS: issuer [index {idx}]: \
+                         deny_set_capacity must be positive (non-zero)"
+                    )));
+                }
+                // Validate that CommandIssuerPolicy can be constructed — this is the
+                // same gate the builder uses, so a startup rejection here is tight.
+                crate::api::nip_fi::validate_command_issuer_config(
+                    idx,
+                    cmd_age,
+                    &principals,
+                    capacity,
+                )
+                .map_err(ConfigError::InvalidValue)?;
+                command_configs.push((
+                    entry.issuer.clone(),
+                    crate::api::nip_fi::CommandIssuerEnvConfig {
+                        maximum_command_age_seconds: Some(cmd_age),
+                        authorized_principals: Some(principals),
+                        deny_set_capacity: entry.deny_set_capacity,
+                    },
+                ));
+            } else {
+                // No maximum_command_age_seconds: in enforce mode every issuer MUST be
+                // command-capable (NIP-FI.md:405-409 requires maximum_command_age per
+                // authorized issuer).  An enforce issuer without command fields would
+                // silently produce an empty command_configs and a permanently-503
+                // endpoint — reject it at startup.
+                //
+                // Orphan S4 fields are detected first to give the operator precise
+                // error feedback before the all-or-nothing rejection fires.
+                if entry.authorized_principals.is_some() {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_NIP_FI_ISSUERS: issuer [index {idx}]: \
+                         authorized_principals is set but maximum_command_age_seconds is absent — \
+                         S4 command API requires maximum_command_age_seconds"
+                    )));
+                }
+                if entry.deny_set_capacity.is_some() {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_NIP_FI_ISSUERS: issuer [index {idx}]: \
+                         deny_set_capacity is set but maximum_command_age_seconds is absent — \
+                         S4 command API requires maximum_command_age_seconds"
+                    )));
+                }
+                // No orphan fields: reject because enforce mode requires every issuer
+                // to be command-capable (NIP-FI.md:405-409).
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_NIP_FI_ISSUERS: issuer [index {idx}]: \
+                     maximum_command_age_seconds is required in enforce mode — \
+                     every configured issuer must be command-capable. \
+                     Add maximum_command_age_seconds and authorized_principals, \
+                     or remove this issuer from BUZZ_NIP_FI_ISSUERS"
+                )));
+            }
         }
 
         // Delegate final validation to buzz-auth startup gate.
@@ -204,7 +285,40 @@ impl NipFiRelayConfig {
             registry,
             jwks_configs,
             max_connection_lifetime_secs,
+            command_configs,
         })
+    }
+
+    /// Returns the configured `max_connection_lifetime` as a `Duration`.
+    /// Returns `None` in `Off`/`DenyProtected` mode.
+    pub fn max_connection_lifetime(&self) -> Option<std::time::Duration> {
+        if self.max_connection_lifetime_secs == 0 {
+            None
+        } else {
+            Some(std::time::Duration::from_secs(
+                self.max_connection_lifetime_secs,
+            ))
+        }
+    }
+
+    /// Returns `true` when the relay is in `Enforce` mode.
+    pub fn is_enforce(&self) -> bool {
+        matches!(self.mode, NipFiMode::Enforce)
+    }
+
+    /// Construct an Off-mode config with no environment reads.
+    ///
+    /// Used by `Config::hermetic_for_test()` to avoid racing against NIP-FI
+    /// env-mutating tests in the same process.  Only available in test builds.
+    #[cfg(test)]
+    pub(crate) fn off_for_test() -> Self {
+        Self {
+            mode: NipFiMode::Off,
+            registry: IssuerRegistry::new(),
+            jwks_configs: Vec::new(),
+            max_connection_lifetime_secs: 0,
+            command_configs: Vec::new(),
+        }
     }
 }
 
@@ -212,51 +326,31 @@ impl NipFiRelayConfig {
 
 fn parse_mode() -> Result<NipFiMode, ConfigError> {
     match std::env::var("BUZZ_NIP_FI_MODE")
-        .ok()
-        .as_deref()
-        .map(str::trim)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
     {
-        None | Some("") | Some("off") => Ok(NipFiMode::Off),
-        Some("enforce") => Ok(NipFiMode::Enforce),
-        Some("deny_protected") => Ok(NipFiMode::DenyProtected),
-        Some(other) => Err(ConfigError::InvalidValue(format!(
-            "BUZZ_NIP_FI_MODE must be \"enforce\", \"deny_protected\", or \"off\"; got {other:?}"
+        "" | "off" => Ok(NipFiMode::Off),
+        "enforce" => Ok(NipFiMode::Enforce),
+        "deny_protected" => Ok(NipFiMode::DenyProtected),
+        other => Err(ConfigError::InvalidValue(format!(
+            "BUZZ_NIP_FI_MODE must be 'off', 'enforce', or 'deny_protected'; got {other:?}"
         ))),
     }
 }
 
-/// Parse an optional positive `u64` env var bounded to `[min_val, max_val]`.
-/// Returns `None` when the variable is absent or empty.
-fn parse_u64_bounded(name: &str, min_val: u64, max_val: u64) -> Result<Option<u64>, ConfigError> {
-    match std::env::var(name) {
-        Err(_) => Ok(None),
-        Ok(raw) if raw.trim().is_empty() => Ok(None),
-        Ok(raw) => {
-            let v: u64 = raw.trim().parse().map_err(|_| {
-                ConfigError::InvalidValue(format!("{name} must be a positive integer"))
-            })?;
-            if v < min_val || v > max_val {
-                return Err(ConfigError::InvalidValue(format!(
-                    "{name} must be in {min_val}..={max_val}"
-                )));
-            }
-            Ok(Some(v))
-        }
-    }
-}
-
-/// Parse a `jsonwebtoken::Algorithm` from a case-sensitive string.
-fn parse_algorithm(s: &str) -> Result<Algorithm, String> {
+fn parse_algorithm(s: &str) -> Result<JwtAlgorithm, String> {
     match s {
-        "ES256" => Ok(Algorithm::ES256),
-        "ES384" => Ok(Algorithm::ES384),
-        "RS256" => Ok(Algorithm::RS256),
-        "RS384" => Ok(Algorithm::RS384),
-        "RS512" => Ok(Algorithm::RS512),
-        "PS256" => Ok(Algorithm::PS256),
-        "PS384" => Ok(Algorithm::PS384),
-        "PS512" => Ok(Algorithm::PS512),
-        "EdDSA" => Ok(Algorithm::EdDSA),
+        "RS256" => Ok(JwtAlgorithm::RS256),
+        "RS384" => Ok(JwtAlgorithm::RS384),
+        "RS512" => Ok(JwtAlgorithm::RS512),
+        "ES256" => Ok(JwtAlgorithm::ES256),
+        "ES384" => Ok(JwtAlgorithm::ES384),
+        "PS256" => Ok(JwtAlgorithm::PS256),
+        "PS384" => Ok(JwtAlgorithm::PS384),
+        "PS512" => Ok(JwtAlgorithm::PS512),
+        "EdDSA" => Ok(JwtAlgorithm::EdDSA),
         other => Err(format!(
             "unknown or non-asymmetric algorithm (got {} chars); \
              supported: ES256 ES384 RS256 RS384 RS512 PS256 PS384 PS512 EdDSA",
@@ -266,7 +360,7 @@ fn parse_algorithm(s: &str) -> Result<Algorithm, String> {
 }
 
 fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConfig), String> {
-    let algorithms: Vec<Algorithm> = entry
+    let algorithms: Vec<JwtAlgorithm> = entry
         .algorithms
         .iter()
         .map(|s| parse_algorithm(s))
@@ -275,13 +369,8 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
     let token_class = match entry.token_class {
         TokenClassEnvConfig::DedicatedNipFi => TokenClass::DedicatedNipFi,
         TokenClassEnvConfig::AccessTokenAtJwt => {
-            // at+jwt requires a SubjectClassContract; for simplicity in the
-            // initial deployment, dedicated nip-fi+jwt is the expected class.
-            // at+jwt support is left for a follow-up — fail closed with a
-            // clear message so operators know the required fields.
             return Err("\"at+jwt\" token class requires a subject-class contract; \
-                 use \"nip-fi+jwt\" for initial deployments or add \
-                 subject_class fields to the issuer config"
+                 use \"nip-fi+jwt\" for initial deployments"
                 .to_string());
         }
     };
@@ -318,36 +407,39 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
     Ok((policy, jwks_config))
 }
 
-// ── Duration helpers ──────────────────────────────────────────────────────────
-
-impl NipFiRelayConfig {
-    /// Returns the configured `max_connection_lifetime` as a `Duration`.
-    /// Returns `None` in `Off`/`DenyProtected` mode (sentinel value 0).
-    pub fn max_connection_lifetime(&self) -> Option<Duration> {
-        if self.max_connection_lifetime_secs == 0 {
-            None
-        } else {
-            Some(Duration::from_secs(self.max_connection_lifetime_secs))
+fn parse_u64_bounded(var: &str, min: u64, max: u64) -> Result<Option<u64>, ConfigError> {
+    match std::env::var(var) {
+        Ok(raw) if raw.trim().is_empty() => Ok(None),
+        Ok(val) => {
+            let n: u64 = val.trim().parse().map_err(|_| {
+                ConfigError::InvalidValue(format!("{var} must be a positive integer; got {val:?}"))
+            })?;
+            if n < min || n > max {
+                return Err(ConfigError::InvalidValue(format!(
+                    "{var} must be between {min} and {max}; got {n}"
+                )));
+            }
+            Ok(Some(n))
         }
-    }
-
-    /// Returns `true` when the relay is in `Enforce` mode.
-    pub fn is_enforce(&self) -> bool {
-        matches!(self.mode, NipFiMode::Enforce)
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidValue(format!(
+            "{var} contains invalid UTF-8"
+        ))),
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Env vars are process-global — serialize tests that mutate them to prevent
-    // cross-test races when the suite runs with multiple threads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Use the crate-wide env-var serialization mutex so NIP-FI env-mutation
+    // tests here serialize against Config::from_env callers in config.rs and
+    // api/gifs.rs (which also call from_env in the same process).  [F6]
+    use crate::config::ENV_TEST_MUTEX as ENV_LOCK;
 
-    /// RAII guard: removes a set of env vars when dropped, restoring a clean
-    /// state even on test panic.
+    /// RAII guard: removes env vars on drop to keep tests isolated.
     struct EnvGuard(Vec<&'static str>);
     impl EnvGuard {
         fn new(keys: &[&'static str]) -> Self {
@@ -365,16 +457,16 @@ mod tests {
     const NIP_FI_VARS: &[&str] = &[
         "BUZZ_NIP_FI_MODE",
         "BUZZ_NIP_FI_ISSUERS",
-        "BUZZ_NIP_FI_MAXIMUM_ASSERTION_AGE_SECS",
         "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS",
     ];
+
+    // ── Mode parsing ──────────────────────────────────────────────────────────
 
     #[test]
     fn off_mode_requires_no_other_config() {
         let _guard = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
-        // NipFiMode::Off is the default: no issuers, no age limit.
         std::env::remove_var("BUZZ_NIP_FI_MODE");
         let cfg = NipFiRelayConfig::from_env().expect("Off mode must not fail");
         assert!(matches!(cfg.mode, NipFiMode::Off));
@@ -387,8 +479,18 @@ mod tests {
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "deny_protected");
-        let cfg = NipFiRelayConfig::from_env().expect("DenyProtected mode must not fail");
+        let cfg = NipFiRelayConfig::from_env().expect("DenyProtected must not fail");
         assert!(matches!(cfg.mode, NipFiMode::DenyProtected));
+    }
+
+    #[test]
+    fn unknown_mode_is_rejected() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "permissive");
+        let err = NipFiRelayConfig::from_env().expect_err("unknown mode must error");
+        assert!(err.to_string().contains("BUZZ_NIP_FI_MODE"));
     }
 
     #[test]
@@ -398,13 +500,238 @@ mod tests {
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
         std::env::remove_var("BUZZ_NIP_FI_ISSUERS");
-        std::env::remove_var("BUZZ_NIP_FI_MAXIMUM_ASSERTION_AGE_SECS");
         let err = NipFiRelayConfig::from_env()
             .expect_err("enforce without issuers must be a config error");
+        assert!(err.to_string().contains("BUZZ_NIP_FI_ISSUERS"));
+    }
+
+    #[test]
+    fn enforce_command_age_without_principals_fails_closed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+        // issuer has command age but no principals
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            r#"[{
+                "issuer": "https://idp.example.com",
+                "audiences": ["https://relay.example.com"],
+                "token_class": "nip-fi+jwt",
+                "algorithms": ["ES256"],
+                "maximum_assertion_age_seconds": 3600,
+                "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+                "jwks_refresh_interval_seconds": 300,
+                "jwks_hard_deadline_seconds": 86400,
+                "maximum_command_age_seconds": 30
+            }]"#,
+        );
+        let err = NipFiRelayConfig::from_env()
+            .expect_err("command age without principals must fail closed");
         let msg = err.to_string();
         assert!(
-            msg.contains("BUZZ_NIP_FI_ISSUERS"),
-            "error names the missing var: {msg}"
+            msg.contains("authorized_principals"),
+            "error names the missing field: {msg}"
+        );
+    }
+
+    #[test]
+    fn padded_mode_and_lifetime_are_trimmed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", " enforce ");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", " 3600 ");
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            r#"[{
+                "issuer": "https://idp.example.com",
+                "audiences": ["https://relay.example.com"],
+                "token_class": "nip-fi+jwt",
+                "algorithms": ["ES256"],
+                "maximum_assertion_age_seconds": 3600,
+                "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+                "jwks_refresh_interval_seconds": 300,
+                "jwks_hard_deadline_seconds": 86400,
+                "maximum_command_age_seconds": 30,
+                "authorized_principals": ["admin@idp.example.com"]
+            }]"#,
+        );
+        let cfg = NipFiRelayConfig::from_env().expect("padded values must be accepted");
+        assert!(matches!(cfg.mode, NipFiMode::Enforce));
+        assert_eq!(cfg.max_connection_lifetime_secs, 3600);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", " off ");
+        let cfg = NipFiRelayConfig::from_env().expect("padded off must be accepted");
+        assert!(matches!(cfg.mode, NipFiMode::Off));
+    }
+
+    #[test]
+    fn orphan_authorized_principals_without_command_age_fails_closed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+        // authorized_principals without maximum_command_age_seconds — orphan field.
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            r#"[{
+                "issuer": "https://idp.example.com",
+                "audiences": ["https://relay.example.com"],
+                "token_class": "nip-fi+jwt",
+                "algorithms": ["ES256"],
+                "maximum_assertion_age_seconds": 3600,
+                "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+                "jwks_refresh_interval_seconds": 300,
+                "jwks_hard_deadline_seconds": 86400,
+                "authorized_principals": ["admin@idp.example.com"]
+            }]"#,
+        );
+        let err = NipFiRelayConfig::from_env()
+            .expect_err("orphan authorized_principals must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("authorized_principals"),
+            "error names the orphan field: {msg}"
+        );
+        assert!(
+            msg.contains("maximum_command_age_seconds"),
+            "error names the missing dependency: {msg}"
+        );
+    }
+
+    #[test]
+    fn orphan_deny_set_capacity_without_command_age_fails_closed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+        // deny_set_capacity without maximum_command_age_seconds — orphan field.
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            r#"[{
+                "issuer": "https://idp.example.com",
+                "audiences": ["https://relay.example.com"],
+                "token_class": "nip-fi+jwt",
+                "algorithms": ["ES256"],
+                "maximum_assertion_age_seconds": 3600,
+                "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+                "jwks_refresh_interval_seconds": 300,
+                "jwks_hard_deadline_seconds": 86400,
+                "deny_set_capacity": 1000
+            }]"#,
+        );
+        let err =
+            NipFiRelayConfig::from_env().expect_err("orphan deny_set_capacity must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("deny_set_capacity"),
+            "error names the orphan field: {msg}"
+        );
+        assert!(
+            msg.contains("maximum_command_age_seconds"),
+            "error names the missing dependency: {msg}"
+        );
+    }
+
+    #[test]
+    fn enforce_issuer_without_command_fields_is_rejected() {
+        // An enforce-mode issuer entry with ALL THREE S4 fields absent must
+        // fail startup.  This is the blocker-4a case: the issuer is a valid
+        // JWKS/assertion issuer but carries no command config.  Without this
+        // rejection from_env() would succeed with an empty command_configs,
+        // the endpoint would permanently return 503, and startup would log nothing.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+        // All three S4 command fields absent — pure assertion/JWKS issuer.
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            r#"[{
+                "issuer": "https://idp.example.com",
+                "audiences": ["https://relay.example.com"],
+                "token_class": "nip-fi+jwt",
+                "algorithms": ["ES256"],
+                "maximum_assertion_age_seconds": 3600,
+                "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+                "jwks_refresh_interval_seconds": 300,
+                "jwks_hard_deadline_seconds": 86400
+            }]"#,
+        );
+        let err = NipFiRelayConfig::from_env()
+            .expect_err("enforce issuer without command fields must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("maximum_command_age_seconds"),
+            "error must name the missing field: {msg}"
+        );
+    }
+
+    // ── Privacy: config error must not expose sensitive values ────────────────
+    //
+    // Verifies that a malformed BUZZ_NIP_FI_ISSUERS whose authorized_principals
+    // contains a sensitive email address does NOT appear in the error message.
+    //
+    // Mandatory red: restoring the raw serde interpolation (`{e}`) exposes the
+    // sentinel value in the Display output and fails this test.
+
+    #[test]
+    fn config_error_does_not_expose_sensitive_principal_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        // A syntactically broken JSON object that contains a sensitive sentinel
+        // where authorized_principals would be.  The `INVALID_TYPE_HERE` string
+        // is not valid JSON for the Vec<String> field — serde will produce a
+        // type error that in a naive `{e}` interpolation would include the raw
+        // string, potentially exposing the surrounding value.
+        const SENTINEL: &str = "admin+private-sentinel@example.invalid";
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+        // The authorized_principals field is a string instead of an array,
+        // which causes serde to emit a type-error that typically includes the
+        // supplied value when formatted with `{e}` (the bug we are guarding).
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            format!(
+                r#"[{{
+                    "issuer": "https://idp.example.com",
+                    "audiences": ["https://relay.example.com"],
+                    "token_class": "nip-fi+jwt",
+                    "algorithms": ["ES256"],
+                    "maximum_assertion_age_seconds": 3600,
+                    "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+                    "jwks_refresh_interval_seconds": 300,
+                    "jwks_hard_deadline_seconds": 86400,
+                    "maximum_command_age_seconds": 30,
+                    "authorized_principals": "{SENTINEL}"
+                }}]"#
+            ),
+        );
+
+        let err = NipFiRelayConfig::from_env().expect_err("malformed issuers must fail");
+        let display_msg = err.to_string();
+        let debug_msg = format!("{err:?}");
+
+        // Safe category must be present.
+        assert!(
+            display_msg.contains("BUZZ_NIP_FI_ISSUERS could not be parsed"),
+            "Display message must contain the safe category string: {display_msg}"
+        );
+        // Sentinel must NOT appear in any user-facing output path.
+        assert!(
+            !display_msg.contains(SENTINEL),
+            "Display message must NOT contain the sensitive sentinel: {display_msg}"
+        );
+        assert!(
+            !debug_msg.contains(SENTINEL),
+            "Debug output must NOT contain the sensitive sentinel: {debug_msg}"
         );
     }
 
@@ -420,7 +747,9 @@ mod tests {
             "maximum_assertion_age_seconds": 3600,
             "jwks_uri": "https://issuer.test/.well-known/jwks.json",
             "jwks_refresh_interval_seconds": 300,
-            "jwks_hard_deadline_seconds": 3600
+            "jwks_hard_deadline_seconds": 3600,
+            "maximum_command_age_seconds": 30,
+            "authorized_principals": ["admin@issuer.test"]
         })
     }
 
@@ -451,26 +780,16 @@ mod tests {
         );
         let err = NipFiRelayConfig::from_env()
             .expect_err("Enforce issuer without maximum_assertion_age_seconds must fail closed");
-        // The parser deliberately reports only the serde error class (never
-        // the message) so config values cannot leak; with the control above
+        // The parser deliberately reports only the error position (never the
+        // serde message) so config values cannot leak; with the control above
         // passing, the one-field difference is what produced this rejection.
         // It must be the deserialization rejection, not a later policy-build
         // failure (which a defaulted age would hit instead).
         let msg = err.to_string();
         assert!(
-            msg.contains("BUZZ_NIP_FI_ISSUERS is not valid JSON: Data"),
+            msg.contains("BUZZ_NIP_FI_ISSUERS could not be parsed"),
             "missing maximum_assertion_age_seconds must be rejected at deserialization: {msg}"
         );
-    }
-
-    #[test]
-    fn unknown_mode_is_rejected() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::new(NIP_FI_VARS);
-
-        std::env::set_var("BUZZ_NIP_FI_MODE", "permissive");
-        let err = NipFiRelayConfig::from_env().expect_err("unknown mode must error");
-        assert!(err.to_string().contains("BUZZ_NIP_FI_MODE"));
     }
 
     // ── R5 privacy sentinel tests ─────────────────────────────────────────────
@@ -483,8 +802,8 @@ mod tests {
     // any error message.  Failing this invariant would mean serde_json or another
     // parser is leaking operator-supplied field values into error text.
     //
-    // Falsifying mutation for all tests: remove the `.classify()` / `other.len()`
-    // wrapping in `from_env()` / `parse_algorithm()` and restore a raw `{e}` or
+    // Falsifying mutation for all tests: replace the position-only message in `from_env()`
+    // or the `other.len()` wrapping in `parse_algorithm()` with a raw `{e}` or
     // `{s}` interpolation.  The sentinel strings would appear in the error
     // message and the assertion fires.
 

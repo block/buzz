@@ -105,9 +105,10 @@ impl AssertionPolicyId {
         &self.0
     }
 
-    /// All-zeros sentinel for use in tests only.
+    /// Zero value for tests. Available in production builds only with the
+    /// `test-utils` feature enabled.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn zero() -> Self {
+    pub const fn zero() -> Self {
         Self([0u8; 32])
     }
 }
@@ -151,9 +152,10 @@ impl TransportContractId {
         &self.0
     }
 
-    /// All-zeros sentinel for use in tests only.
+    /// Zero value for tests. Available in production builds only with the
+    /// `test-utils` feature enabled.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn zero() -> Self {
+    pub const fn zero() -> Self {
         Self([0u8; 32])
     }
 }

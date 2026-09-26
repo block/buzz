@@ -6,6 +6,15 @@ mod admission;
 mod build_info;
 mod rejection;
 
+/// NIP-FI session admission gate — per-connection effect-permit and quiescence barrier.
+pub(crate) mod nip_fi_gate;
+pub(crate) mod nip_fi_session;
+/// NIP-FI test hooks — production barriers for deterministic B1/B2 witnesses.
+#[cfg(test)]
+pub(crate) mod nip_fi_test_hooks;
+/// NIP-FI assertion validation at WebSocket upgrade.
+pub(crate) mod nip_fi_upgrade;
+
 /// REST API route handlers.
 pub mod api;
 /// WebSocket audio relay for huddle voice channels.
@@ -33,7 +42,8 @@ pub mod mesh_boot;
 pub mod metrics;
 /// NIP-11 relay information document.
 pub mod nip11;
-/// NIP-FI relay configuration: mode, issuer registry, JWKS warm/refresh.
+/// NIP-FI relay configuration: mode, issuer registry, JWKS, and admin-command
+/// fields. Parsed from `BUZZ_NIP_FI_MODE` and `BUZZ_NIP_FI_ISSUERS` at startup.
 pub mod nip_fi_config;
 /// NIP-FI HTTP ingress enforcement: assertion extraction, verification,
 /// key-pairing check, and deny-map gate for every protected HTTP surface.

@@ -267,6 +267,18 @@ pub async fn handle_req(
             ));
             return;
         }
+        // IMPORTANT 6: acquire a REQ effect permit before the search query and
+        // hold it through historical delivery/EOSE, just as the normal REQ branch
+        // does around registration/history. Without this, an authenticated frame
+        // can finish validation after the deadline and return history without an
+        // authoritative seam check. [FI-TRACE-LEASE-BOUND, NIP-50 search seam]
+        let _search_permit = match conn.nip_fi_gate.acquire_effect().await {
+            Ok(permit) => permit,
+            Err(crate::nip_fi_gate::SessionExpired) => {
+                conn.send(RelayMessage::closed(&sub_id, "restricted: session expired"));
+                return;
+            }
+        };
         handle_search_req(
             &sub_id,
             &filters,
@@ -281,6 +293,30 @@ pub async fn handle_req(
         .await;
         return;
     }
+
+    // B2: acquire effect permit immediately before the first subscription-map
+    // mutation. The permit is held through map insert, sub_registry registration,
+    // topic retain, historical delivery, and EOSE. Off-mode: proceed
+    // unconditionally. [FI-TRACE-LEASE-BOUND, B2 seam: REQ registration]
+    //
+    // Test hook: fires immediately before acquire_effect.
+    // [nip_fi_test_hooks::req_registration_hook]
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_req_registration(conn.tenant.community()).await;
+    let _req_permit = match conn.nip_fi_gate.acquire_effect().await {
+        Ok(permit) => permit,
+        Err(crate::nip_fi_gate::SessionExpired) => {
+            conn.send(RelayMessage::closed(&sub_id, "restricted: session expired"));
+            return;
+        }
+    };
+    // Test hook: fires after permit is acquired (held) but before sub_registry
+    // registration.  Used by F5 loopback teardown witness: admin disconnect fires
+    // here (permit still held → quiescence blocks expiry task) then the hook
+    // releases → handler registers subscription → connection epilogue removes it.
+    // No-op in production.  [nip_fi_test_hooks::req_permit_acquired_hook, F5]
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::after_req_permit_acquired(conn.tenant.community()).await;
 
     {
         let mut subs = conn.subscriptions.lock().await;
@@ -1177,7 +1213,7 @@ fn huddle_liveness_session_ids(filters: &[Filter]) -> Vec<uuid::Uuid> {
     session_ids
 }
 
-async fn handle_huddle_liveness_req(
+pub(crate) async fn handle_huddle_liveness_req(
     sub_id: &str,
     filters: &[Filter],
     parent_channel_ids: &[uuid::Uuid],
@@ -1730,7 +1766,7 @@ mod tests {
         crate::nip11::RelayInfo::build(
             None,
             None,
-            false,
+            crate::nip11::RelayCapabilityFlags::default(),
             crate::config::DEFAULT_MAX_FRAME_BYTES,
             None,
             None,
@@ -2540,5 +2576,402 @@ mod tests {
         ));
         // No #p tag — fallback required.
         assert!(!result_gated_count_safe_for_pushdown(&f, &owner));
+    }
+
+    // ── W3: B2 REQ gate — barrier expiry mid-flight blocks subscription registration
+    //
+    // Arms `before_req_registration` — the hook immediately before `acquire_effect()`
+    // in the REQ registration path. Dispatches `handle_req` with a live (not-yet-
+    // cancelled) gate, waits for the hook to signal the handler reached the permit
+    // boundary, fires expiry (cancel), then releases the hook. The handler tries
+    // `acquire_effect()` and gets `SessionExpired`, sends CLOSED without inserting
+    // the subscription.
+    //
+    // Hook location: `handlers/req.rs`, immediately before `acquire_effect()`.
+    //
+    // Mutation evidence:
+    //   A) Delete `#[cfg(test)] before_req_registration(...)` from req.rs →
+    //      hook never fires → `arrived_rx` times out → test panics.
+    //   B) Remove `acquire_effect()` from req.rs → handler inserts the subscription
+    //      despite the cancelled gate → `subs.is_empty()` assertion panics.
+    //   C) Change gate to `off_mode` → `acquire_effect()` succeeds after cancel
+    //      → subscription IS inserted → `subs.is_empty()` assertion panics.
+
+    async fn w3_b2_req_barrier_expiry_mid_flight_blocks_subscription_registration_body() {
+        use nostr::{Filter, Keys};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+        use uuid::Uuid;
+
+        let keys = Keys::generate();
+        let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+
+        // Live gate — NOT pre-cancelled. acquire_effect succeeds unless we fire expiry.
+        let cancel = CancellationToken::new();
+        let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
+
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+
+        let (send_tx, mut send_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+        let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
+        let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+        let conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
+            remote_addr: "127.0.0.1:1234".parse().unwrap(),
+            auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                buzz_auth::AuthContext {
+                    pubkey: keys.public_key(),
+                    scopes: vec![],
+                    channel_ids: None,
+                    auth_method: buzz_auth::AuthMethod::Nip42,
+                    agent_owner_pubkey: None,
+                },
+            )),
+            subscriptions: Arc::clone(&subscriptions),
+            send_tx,
+            ctrl_tx,
+            terminal_ctrl_tx,
+            cancel: cancel.clone(),
+            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            grace_limit: 3,
+            nip_fi_assertion: None,
+            session_deadline: Some(deadline),
+            nip_fi_gate: gate,
+            community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+        });
+
+        let state = crate::state::tests::test_state().await;
+        let sub_id = "w3-barrier-test".to_string();
+        // Kind:1 (TextNote) — not p-gated — so the filter clears all pre-gate
+        // authorization checks and reaches the `before_req_registration` hook.
+        let filters = vec![Filter::new().kind(nostr::Kind::TextNote).limit(1)];
+
+        // Arm the barrier: fires when handle_req reaches before_req_registration.
+        let (arrived_rx, release) = crate::nip_fi_test_hooks::req_registration_hook::arm(community);
+
+        let conn2 = Arc::clone(&conn);
+        let state2 = Arc::clone(&state);
+        let handle =
+            tokio::spawn(async move { handle_req(sub_id, filters, vec![], conn2, state2).await });
+
+        // Wait for the handler to reach the permit boundary.
+        tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+            .await
+            .expect("W3: handler must reach before_req_registration within 5s")
+            .expect("arrived channel closed");
+
+        // Fire expiry: cancel so acquire_effect returns SessionExpired.
+        cancel.cancel();
+
+        // Release — handler resumes, calls acquire_effect(), gets SessionExpired.
+        release.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("W3: handle_req must return within 5s after hook release")
+            .expect("handle_req task must not panic");
+
+        // The subscription map must be empty — the gate blocked the handler
+        // before any map insertion.
+        let subs = subscriptions.lock().await;
+        assert!(
+            subs.is_empty(),
+            "W3: expired gate must prevent subscription registration; subs = {subs:?}"
+        );
+
+        // A CLOSED frame must have been sent with the session-expired message.
+        let frame = send_rx
+            .try_recv()
+            .expect("W3: handler must send CLOSED on expired gate");
+        match frame {
+            axum::extract::ws::Message::Text(t) => {
+                assert!(
+                    t.contains("session expired"),
+                    "W3: CLOSED message must contain 'session expired'; got: {t}"
+                );
+            }
+            other => panic!("W3: expected Text CLOSED frame, got {other:?}"),
+        }
+    }
+
+    // ── F3: liveness consumer generation equals JOIN generation in Off mode ──────
+    //
+    // Proves that `handle_huddle_liveness_req` returns the SAME generation value
+    // that `commit_participant_join` embeds in the 48101 JOIN event for Off-mode
+    // (non-mesh) rooms.  Both paths use `state.huddle_liveness_generation` as their
+    // sole source.  Desktop reconciliation clears admissions when the JOIN's embedded
+    // generation differs from the liveness response's generation:
+    //
+    //   Desktop consumer contract (huddlePresence.ts:464-483):
+    //     - Desktop records the JOIN's `lifecycle_generation` when it processes
+    //       the 48101 event (`huddlePresenceRuntime.ts:264-272`).
+    //     - On receiving a liveness KIND_HUDDLE_LIVENESS event, Desktop compares
+    //       the event's `generation` field against the stored JOIN generation.
+    //     - If they differ, Desktop marks the peer as "expired" and clears their
+    //       admission state.  Equal generations preserve the admission.
+    //
+    // Relay-side invariant: since both the JOIN and the liveness response read
+    // `state.huddle_liveness_generation.to_string()` (same UUID, same format),
+    // they are always equal and Desktop will never clear Off-mode admissions for
+    // a mismatch reason.
+    //
+    // This test proves the invariant by calling `handle_huddle_liveness_req`
+    // with a live Off-mode room and asserting the returned EVENT's `generation`
+    // matches `state.huddle_liveness_generation`.
+    //
+    // Mutation evidence:
+    //   A) Change req.rs:1260 to use a different UUID →
+    //      `liveness_gen != join_gen` → admission mismatch → panics.
+    //   B) Change audio/handler.rs:716 to use a different UUID →
+    //      same outcome from the producer side.
+    //
+    // Note: `huddle_started_links` requires DB to link session→parent channel.
+    // We seed a minimal DB fixture here so the liveness query finds the session.
+    // Runs in PG lane on wrapper DB via the thin wrapper in `postgres_tests` below.
+    async fn f3_liveness_consumer_generation_equals_join_generation_body() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+        use uuid::Uuid;
+
+        let db_url = crate::test_support::required_database_url();
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .unwrap_or_else(|e| panic!("F3 liveness: wrapper DB {db_url} unreachable: {e}"));
+
+        let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+
+        // Seed a unique community and channels.
+        let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+        let community_uuid = community_id.as_uuid();
+        let parent_channel_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let creator_key = nostr::Keys::generate();
+        let creator_bytes = creator_key.public_key().to_bytes().to_vec();
+        let host = format!("f3-liveness-{}.example", community_uuid.simple());
+
+        // Community — schema requires (id, host); no relay_pubkey column in schema.sql.
+        sqlx::query(
+            "INSERT INTO communities (id, host) VALUES ($1, $2) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(community_uuid)
+        .bind(&host)
+        .execute(&pool)
+        .await
+        .expect("F3 liveness: seed community");
+
+        // Parent channel — channel_type enum has 'stream', 'forum', 'dm', 'workflow'.
+        // Conflict key is (community_id, id) per schema PRIMARY KEY.
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
+             VALUES ($1, $2, 'f3-parent', 'stream', 'open', $3) \
+             ON CONFLICT (community_id, id) DO NOTHING",
+        )
+        .bind(parent_channel_id)
+        .bind(community_uuid)
+        .bind(&creator_bytes)
+        .execute(&pool)
+        .await
+        .expect("F3 liveness: seed parent channel");
+
+        // Audio session channel (ephemeral_channel_id in the huddle_started link).
+        // `huddle_started_links` JOINs on backing.created_by = start.pubkey, so
+        // the channel's created_by MUST equal creator_bytes.
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
+             VALUES ($1, $2, 'f3-session', 'stream', 'open', $3) \
+             ON CONFLICT (community_id, id) DO NOTHING",
+        )
+        .bind(session_id)
+        .bind(community_uuid)
+        .bind(&creator_bytes)
+        .execute(&pool)
+        .await
+        .expect("F3 liveness: seed session channel");
+
+        // Huddle-started link event (kind KIND_HUDDLE_STARTED = 48100) linking
+        // parent → session.  `huddle_started_links` filters on:
+        //   start.channel_id = parent_channel_id (the REQ's parent_channel_ids)
+        //   start.kind = KIND_HUDDLE_STARTED
+        //   content::json ->> 'ephemeral_channel_id' = session_id::text
+        //   start.pubkey = backing.created_by (creator_bytes)
+        // Use the named constant — no arithmetic.
+        let link_content =
+            serde_json::json!({ "ephemeral_channel_id": session_id.to_string() }).to_string();
+        let link_event_id = Uuid::new_v4().as_bytes().to_vec(); // 16-byte dummy id; BYTEA, no size constraint
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+             VALUES ($1, $2, $3, NOW(), $4, '[]', $5, $6, $7) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_uuid)
+        .bind(&link_event_id[..])
+        .bind(&creator_bytes)
+        .bind(buzz_core::kind::KIND_HUDDLE_STARTED as i32)
+        .bind(&link_content)
+        .bind(vec![0u8; 64]) // 64-byte dummy sig
+        .bind(parent_channel_id)
+        .execute(&pool)
+        .await
+        .expect("F3 liveness: seed KIND_HUDDLE_STARTED link event");
+
+        // Register a non-empty audio room so handle_huddle_liveness_req finds
+        // the session alive and returns the Off-mode generation.
+        let room = state.audio_rooms.get_or_create(community_id, session_id);
+        let _ = room.add_peer(creator_key.public_key().to_hex(), 1);
+
+        // Expected generation: what both the JOIN producer and liveness consumer use.
+        // Production path: audio/handler.rs → `"generation": lifecycle_generation`
+        //   where lifecycle_generation = state.huddle_liveness_generation.to_string()
+        // Liveness path: handlers/req.rs:1260 → state.huddle_liveness_generation.to_string()
+        let expected_generation = state.huddle_liveness_generation.to_string();
+
+        // Build a minimal ConnectionState for the liveness call.
+        let cancel = CancellationToken::new();
+        let gate = crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone());
+        let (send_tx, mut send_rx) = mpsc::channel::<axum::extract::ws::Message>(16);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+        let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
+
+        let conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: buzz_core::tenant::TenantContext::resolved(community_id, host),
+            remote_addr: "127.0.0.1:1234".parse().unwrap(),
+            auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                buzz_auth::AuthContext {
+                    pubkey: creator_key.public_key(),
+                    scopes: vec![],
+                    channel_ids: None,
+                    auth_method: buzz_auth::AuthMethod::Nip42,
+                    agent_owner_pubkey: None,
+                },
+            )),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            terminal_ctrl_tx,
+            cancel: cancel.clone(),
+            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            grace_limit: 3,
+            nip_fi_assertion: None,
+            session_deadline: None,
+            nip_fi_gate: gate,
+            community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+        });
+
+        // Build a liveness filter: kind=KIND_HUDDLE_LIVENESS with #d=session_id.
+        // This is the filter Desktop sends to get liveness events for a specific session.
+        let d_tag_value = session_id.to_string();
+        let liveness_filter: nostr::Filter = serde_json::from_value(serde_json::json!({
+            "kinds": [KIND_HUDDLE_LIVENESS],
+            "#d": [d_tag_value],
+        }))
+        .expect("F3 liveness: build liveness filter");
+
+        // Call the production liveness handler directly (same function handle_req
+        // calls for liveness-only filters).
+        handle_huddle_liveness_req(
+            "f3-liveness-sub",
+            &[liveness_filter],
+            &[parent_channel_id],
+            &conn,
+            &state,
+        )
+        .await;
+
+        // Collect all frames sent (up to EOSE).
+        let mut liveness_gen: Option<String> = None;
+        loop {
+            match send_rx.try_recv() {
+                Ok(axum::extract::ws::Message::Text(t)) => {
+                    let v: serde_json::Value =
+                        serde_json::from_str(&t).expect("F3 liveness: parse frame");
+                    // RelayMessage::event: ["EVENT", sub_id, {...event...}]
+                    if v[0].as_str() == Some("EVENT") {
+                        let content: serde_json::Value =
+                            serde_json::from_str(v[2]["content"].as_str().unwrap_or("{}"))
+                                .unwrap_or_default();
+                        if let Some(gen) = content["generation"].as_str() {
+                            liveness_gen = Some(gen.to_string());
+                        }
+                    }
+                    // RelayMessage::eose: ["EOSE", sub_id]
+                    if v[0].as_str() == Some("EOSE") {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+
+        // The liveness EVENT is required.  The fixture seeds a valid KIND_HUDDLE_STARTED
+        // link event (kind 48100), a live room with a peer, and schema-correct community/
+        // channel rows — handle_huddle_liveness_req must return an EVENT.
+        // A missing EVENT is a fixture or production defect, not an acceptable pass.
+        //
+        // Desktop consumer contract (huddlePresence.ts:464-483):
+        //   Desktop records the JOIN's `generation` field, then on each liveness
+        //   KIND_HUDDLE_LIVENESS response compares `event.content.generation`
+        //   against the stored value.  A mismatch clears the peer's admission.
+        //   Both paths use state.huddle_liveness_generation.to_string() — they
+        //   must be equal to preserve Off-mode admissions.
+        //
+        // Mutation evidence:
+        //   A) Change req.rs:1260 to use a different UUID →
+        //      `gen != expected_generation` → panics.
+        //   B) Change audio/handler.rs commit content key from "generation" to
+        //      anything else → Desktop cannot find the field → Desktop sees null
+        //      vs the liveness generation → clears admissions.
+        let gen = liveness_gen.expect(
+            "F3 liveness: handle_huddle_liveness_req must return a liveness EVENT — \
+             the fixture seeds a valid community (host), schema-correct stream channels, \
+             a KIND_HUDDLE_STARTED link event, and a live room with a peer. \
+             A missing EVENT means the fixture seed failed or the handler has a bug. \
+             Mutation A: remove KIND_HUDDLE_STARTED link → no EVENT → panics here (correct). \
+             Mutation B: change req.rs:1260 generation source → wrong generation → \
+             assert_eq below panics.",
+        );
+        assert_eq!(
+            gen, expected_generation,
+            "F3 liveness: liveness response generation ({gen}) must equal \
+             state.huddle_liveness_generation ({expected_generation}). \
+             Both paths use the same source field — a mismatch here means Desktop \
+             would clear admissions for Off-mode sessions. \
+             Mutation: change req.rs:1260 to a different UUID → gen != expected → panics."
+        );
+    }
+
+    mod postgres_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn w3_b2_req_barrier_expiry_mid_flight_blocks_subscription_registration() {
+            super::w3_b2_req_barrier_expiry_mid_flight_blocks_subscription_registration_body()
+                .await;
+        }
+
+        /// F3: liveness response generation equals JOIN-embedded generation for Off-mode rooms.
+        ///
+        /// Proves the relay-side invariant that both `commit_participant_join`
+        /// (audio/handler.rs) and `handle_huddle_liveness_req` (req.rs:1260)
+        /// read `state.huddle_liveness_generation.to_string()` — so Desktop never
+        /// clears Off-mode admissions due to a generation mismatch.
+        ///
+        /// Desktop consumer contract: `huddlePresence.ts:464-483` clears admissions
+        /// when JOIN's `lifecycle_generation` differs from the liveness response's
+        /// `generation` field.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn f3_liveness_consumer_generation_equals_join_generation() {
+            super::f3_liveness_consumer_generation_equals_join_generation_body().await;
+        }
     }
 }

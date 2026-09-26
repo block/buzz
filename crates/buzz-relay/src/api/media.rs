@@ -1236,7 +1236,15 @@ mod tests {
     }
 
     async fn test_state() -> Arc<AppState> {
+        // Hold ENV_TEST_MUTEX while reading Config::from_env() — same mutex used by
+        // NIP-FI config parser tests.  Prevents a parallel nip_fi_config test that
+        // installs invalid permissive/enforce-without-issuers env vars from causing
+        // Config::from_env() to panic here mid-parse.  [F6: hermetic env reader]
+        let _env_lock = crate::config::ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut config = crate::config::Config::from_env().expect("default config loads");
+        drop(_env_lock);
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.media_uploads_per_minute = 1;

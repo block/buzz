@@ -35,10 +35,10 @@
 //!
 //! ## Deny map
 //!
-//! The deny map is S4 (Duncan).  Until S4 lands this module stubs it as a
-//! fail-open no-op: [`HttpDenyMap::is_denied`] always returns false.  When S4
-//! adds the real implementation, replace the stub in `admit_nip_fi_http_on_state`
-//! with a reference to the real map.  The integration is a one-liner.
+//! HTTP admission reads the relay's single shared [`buzz_auth::NipFiDenyMap`]
+//! (`AppState::nip_fi_deny_map`) — the same `Arc` the admin disconnect endpoint
+//! writes and WebSocket admission reads — so one deny is enforced on every
+//! ingress.
 //!
 //! ## Off-mode regression
 //!
@@ -63,14 +63,10 @@ use chrono::{DateTime, Utc};
 use nostr::PublicKey;
 use std::fmt;
 
-// ── Deny-map seam (S4 stub) ───────────────────────────────────────────────────
+// ── Deny-map seam ─────────────────────────────────────────────────────────────
 
-/// Narrow interface consumed by HTTP enforcement.  S4 (Duncan) will provide
-/// the real implementation; until then, `AlwaysAdmitStubDenyMap` stubs it
-/// fail-open (admits unconditionally).
-///
-/// Signature mirrors `NipFiDenyMap::is_denied` from S4 so integration is a
-/// one-liner: replace `AlwaysAdmitStubDenyMap` with the shared map.
+/// Narrow interface consumed by HTTP enforcement.  Production implements it
+/// for the shared [`buzz_auth::NipFiDenyMap`]; tests may substitute fixtures.
 ///
 /// `(issuer, pubkey, now)` are required because the deny set is issuer-
 /// scoped per `NIP-FI.md:624-627`.  Passing only pubkey would collide
@@ -79,11 +75,8 @@ use std::fmt;
 /// Sealed: only implementations in this crate are accepted.
 pub(crate) trait HttpDenyMap: sealed::Sealed {
     /// Returns `true` when `(issuer, pubkey)` has an active deny entry at
-    /// `now` (`now < until`).  A poisoned or unavailable backing store MUST
-    /// return `false` (admits) only when an explicit availability guarantee is
-    /// established; the S4 real map currently admits on poisoned lock.  The
-    /// S4 integration commit is expected to resolve the fail-closed story
-    /// before S5 merges; the interface contract here is the agreed shape.
+    /// `now` (`now < until`).  Implementations fail closed: a poisoned or
+    /// unavailable backing store returns `true` (deny).
     fn is_denied(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> bool;
 }
 
@@ -91,16 +84,29 @@ pub(crate) mod sealed {
     pub(crate) trait Sealed {}
 }
 
-/// Stub deny map that always admits.  Used until S4 provides the real map.
+impl sealed::Sealed for buzz_auth::NipFiDenyMap {}
+impl HttpDenyMap for buzz_auth::NipFiDenyMap {
+    /// Delegates to [`buzz_auth::NipFiDenyMap::is_denied`], which is issuer-
+    /// scoped and returns `true` on a poisoned shard.
+    fn is_denied(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> bool {
+        buzz_auth::NipFiDenyMap::is_denied(self, issuer, pubkey, now)
+    }
+}
+
+/// The deny map for a relay that has no `nip_fi_deny_map`.
 ///
-/// Name is explicit: this is **fail-open**, not fail-closed.  The stub phase
-/// is intentional — deny-map enforcement defers to S4 landing.  The name
-/// `AlwaysAdmitStubDenyMap` prevents a future integrator from assuming this
-/// stub is safe for production use.
-pub(crate) struct AlwaysAdmitStubDenyMap;
-impl sealed::Sealed for AlwaysAdmitStubDenyMap {}
-impl HttpDenyMap for AlwaysAdmitStubDenyMap {
-    /// Always admits: the deny map is not yet wired (S4 pending).
+/// A serving `Enforce` relay always has the map: validated config requires a
+/// command-capable issuer for every enforce issuer, and startup installs the
+/// map (with the command verifier) before the router is built, aborting on
+/// failure.  `Off` bypasses the map and `DenyProtected` rejects before it is
+/// consulted, so `None` is reached only in `Off`, before install, or in
+/// hand-built test states.  Deny entries are written solely into that map, by
+/// the admin disconnect endpoint and the cross-pod consumer; startup installs
+/// the map and the command verifier together, so no writer exists without it.
+/// No entry can exist, and admitting is exact, not fail-open.
+struct NoDenyMapConfigured;
+impl sealed::Sealed for NoDenyMapConfigured {}
+impl HttpDenyMap for NoDenyMapConfigured {
     fn is_denied(&self, _issuer: &str, _pubkey: &PublicKey, _now: DateTime<Utc>) -> bool {
         false
     }
@@ -456,13 +462,12 @@ pub(crate) fn http_denial(class: DenialClass) -> Response<Body> {
 
 // ── State-convenience wrapper ─────────────────────────────────────────────────
 
-/// Convenience wrapper: pull mode + verifier from `AppState` and call
-/// [`admit_nip_fi_http`].
+/// Convenience wrapper: pull mode, verifier, and the shared deny map from
+/// `AppState` and call [`admit_nip_fi_http`].
 ///
 /// `extract_nip98` is a closure that performs NIP-98 authentication and
-/// returns `(proven_pubkey, X)`.  This wrapper supplies `deny_map =
-/// &AlwaysAdmitStubDenyMap`; S4 can replace the stub without touching call
-/// sites by changing this wrapper.
+/// returns `(proven_pubkey, X)`.  The deny map is `state.nip_fi_deny_map` —
+/// the same `Arc` the disconnect endpoint writes and WS admission reads.
 ///
 /// This is the single entry-point every NIP-FI-protected surface calls.  It
 /// delegates to [`admit_nip_fi_http`], which alone constructs a
@@ -481,13 +486,10 @@ where
 {
     let mode = state.config.nip_fi.mode;
     let verifier = state.nip_fi_verifier.as_deref();
-    admit_nip_fi_http(
-        headers,
-        extract_nip98,
-        verifier,
-        mode,
-        &AlwaysAdmitStubDenyMap,
-    )
+    match state.nip_fi_deny_map.as_deref() {
+        Some(deny_map) => admit_nip_fi_http(headers, extract_nip98, verifier, mode, deny_map),
+        None => admit_nip_fi_http(headers, extract_nip98, verifier, mode, &NoDenyMapConfigured),
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -498,6 +500,15 @@ mod tests {
     // throughout this module — it IS the HTTP response returned from tests.
     #![allow(clippy::result_large_err)]
     use super::*;
+
+    /// Test fixture: a deny map with no entries.
+    struct AlwaysAdmitStubDenyMap;
+    impl sealed::Sealed for AlwaysAdmitStubDenyMap {}
+    impl HttpDenyMap for AlwaysAdmitStubDenyMap {
+        fn is_denied(&self, _issuer: &str, _pubkey: &PublicKey, _now: DateTime<Utc>) -> bool {
+            false
+        }
+    }
     use axum::http::HeaderValue;
     use buzz_auth::{NipFiMode, VerifyAssertion};
     use chrono::Utc;
@@ -1132,23 +1143,6 @@ mod tests {
                  pairing branch removal would cause this panic"
             ),
         }
-    }
-
-    // ── admit_nip_fi_http — deny map stub admits ─────────────────────────────
-
-    // The stub deny map always admits (never denies).
-    //
-    // Mutation evidence: if `is_denied` returned true, the deny path would
-    // fire and the test would receive a Denied outcome instead of reaching
-    // the verifier check (which would deny for a different reason — invalid
-    // token).  The distinction is observable: 401 vs 403.
-    #[test]
-    fn stub_deny_map_never_denies() {
-        let pubkey = any_pubkey();
-        assert!(
-            !AlwaysAdmitStubDenyMap.is_denied("https://idp.example.com", &pubkey, Utc::now()),
-            "stub deny map MUST admit unconditionally until S4 provides the real map"
-        );
     }
 
     // ── R3 regression: Authorization cardinality ─────────────────────────────

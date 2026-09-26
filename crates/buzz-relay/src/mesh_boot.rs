@@ -530,7 +530,7 @@ mod tests {
     /// ever reached Redis this test would hang/fail.
     #[tokio::test]
     async fn mesh_off_boots_nothing() {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::hermetic_for_test();
         config.mesh.enabled = false;
         let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // unroutable
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -552,12 +552,12 @@ mod tests {
     /// OFF — an env-untouched image upgrade must not bind or write Redis.
     #[test]
     fn mesh_defaults_off_when_env_absent() {
-        // `Config::from_env` in the test env has no BUZZ_MESH set unless a
-        // caller exported it; assert the fail-safe reading.
+        // hermetic_for_test is env-free; mesh defaults to disabled.
+        // Guard against any caller that force-sets BUZZ_MESH=on in the environment.
         if std::env::var("BUZZ_MESH").is_ok() {
             return; // externally forced — skip rather than assert a lie
         }
-        let config = crate::config::Config::from_env().expect("default config loads");
+        let config = crate::config::Config::hermetic_for_test();
         assert!(!config.mesh.enabled, "BUZZ_MESH absent must mean mesh off");
     }
 
