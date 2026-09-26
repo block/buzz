@@ -1176,20 +1176,6 @@ async fn test_reader_backpressure_closes() {
     }
 }
 
-/// 42. Connection closes promptly after 120 s (virtual time).
-///     Explicit duplicate of test 9 with a slightly different assertion style.
-#[tokio::test(start_paused = true)]
-async fn test_cancellation_immediate() {
-    let url = start_relay().await;
-    let mut ws = connect(&url).await;
-
-    tokio::time::advance(Duration::from_secs(121)).await;
-    tokio::task::yield_now().await;
-
-    // The connection must be closed — not just slow.
-    assert_closed(&mut ws).await;
-}
-
 /// 43. Client-initiated graceful close receives a Close reply.
 ///     Explicit duplicate of test 34 with a different connection state.
 #[tokio::test]
