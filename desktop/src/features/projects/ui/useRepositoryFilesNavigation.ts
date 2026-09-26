@@ -12,11 +12,13 @@ export function useRepositoryFilesNavigation({
   files,
   initialPath,
   onContextChange,
+  onPathChange,
   pageSize,
 }: {
   files: ProjectRepoFile[];
   initialPath?: string;
   onContextChange?: (context: RepositoryFilesContext) => void;
+  onPathChange?: (path: string | null) => void;
   pageSize: number;
 }) {
   const [currentPath, setCurrentPath] = React.useState("");
@@ -28,17 +30,25 @@ export function useRepositoryFilesNavigation({
       setCurrentPath(path);
       setSelectedFile(null);
       setVisibleEntryCount(pageSize);
+      onPathChange?.(path || null);
     },
-    [pageSize],
+    [onPathChange, pageSize],
+  );
+  const selectFile = React.useCallback(
+    (file: ProjectRepoFile | null) => {
+      setSelectedFile(file);
+      onPathChange?.(file?.path ?? (currentPath || null));
+    },
+    [currentPath, onPathChange],
   );
   const contextBack = React.useMemo(() => {
-    if (selectedFile) return () => setSelectedFile(null);
+    if (selectedFile) return () => selectFile(null);
     if (!currentPath) return undefined;
     return () => {
       const segments = currentPath.split("/");
       openPath(segments.slice(0, -1).join("/"));
     };
-  }, [currentPath, openPath, selectedFile]);
+  }, [currentPath, openPath, selectedFile, selectFile]);
 
   React.useEffect(() => {
     onContextChange?.({
@@ -73,7 +83,7 @@ export function useRepositoryFilesNavigation({
     currentPath,
     openPath,
     selectedFile,
-    setSelectedFile,
+    setSelectedFile: selectFile,
     setVisibleEntryCount,
     visibleEntryCount,
   };

@@ -326,7 +326,7 @@ async function renderWorkspaceReviews(initialProps) {
     setPanelProps = setProps;
     return React.createElement(WorkspaceTabs, {
       ...workspaceTabsStub,
-      initialTab: "prs",
+      selectedTab: "prs",
       project: repository,
       pullRequests: props.pullRequests,
       pullRequestsError: null,
