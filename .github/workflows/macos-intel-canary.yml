@@ -86,6 +86,15 @@ jobs:
           cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
           ./scripts/bundle-sidecars.sh "$TARGET"
 
+      # The `!desktop/src-tauri/target/**/release/bundle` entry in the cache
+      # path list does not exclude the bundle directory: in actions/cache,
+      # negating a subpath of an already-included directory is a no-op, so DMGs
+      # do enter the tar and a cache hit restores the previous run's DMG. Left
+      # in place, `find … | head -1` below can pick that stale file and upload
+      # it as this run's canary.
+      - name: Remove stale bundle output
+        run: rm -rf "desktop/src-tauri/target/${TARGET}/release/bundle"
+
       - name: Build unsigned Intel DMG
         run: cd desktop && pnpm tauri build --verbose --no-sign --target "$TARGET" --bundles dmg --config src-tauri/tauri.canary.conf.json
         env:
