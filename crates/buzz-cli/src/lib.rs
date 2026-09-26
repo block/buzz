@@ -104,9 +104,10 @@ where
 Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
-  BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
-  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
-  BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+  BUZZ_RELAY_URL       Relay base URL        [default: http://localhost:3000]
+  BUZZ_PRIVATE_KEY     Nostr private key (hex or nsec)  [required unless BUZZ_PRIVATE_KEY_FILE is set]
+  BUZZ_PRIVATE_KEY_FILE  Path to a file containing the key, as an alternative to BUZZ_PRIVATE_KEY
+  BUZZ_AUTH_TAG        NIP-OA auth tag JSON  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
 
@@ -121,6 +122,14 @@ struct Cli {
     /// Nostr private key (hex or nsec). This is the CLI's identity.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
+
+    /// Path to a file containing the Nostr private key (hex or nsec), as an
+    /// alternative to --private-key/BUZZ_PRIVATE_KEY for callers that would
+    /// rather not put the raw key in an env var (buzz-acp's git-environment
+    /// setup writes this file and passes only its path down).
+    /// Ignored when --private-key/BUZZ_PRIVATE_KEY is set.
+    #[arg(long, env = "BUZZ_PRIVATE_KEY_FILE")]
+    private_key_file: Option<String>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
@@ -2156,9 +2165,29 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
+    //
+    // --private-key/BUZZ_PRIVATE_KEY (direct value) takes priority; falls back
+    // to --private-key-file/BUZZ_PRIVATE_KEY_FILE (a path, written by
+    // buzz-acp's git-environment setup, which never puts the raw key in env)
+    // when no direct value is given.
+    let private_key_str = match cli.private_key {
+        Some(k) => k,
+        None => match cli.private_key_file {
+            Some(path) => std::fs::read_to_string(&path)
+                .map_err(|e| {
+                    CliError::Auth(format!("failed to read --private-key-file {path}: {e}"))
+                })?
+                .trim()
+                .to_owned(),
+            None => {
+                return Err(CliError::Auth(
+                    "BUZZ_PRIVATE_KEY (or BUZZ_PRIVATE_KEY_FILE) is required (use --private-key, \
+                     --private-key-file, or set an env var)"
+                        .into(),
+                ))
+            }
+        },
+    };
     let keys = Keys::parse(&private_key_str)
         .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
 
