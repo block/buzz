@@ -89,6 +89,45 @@ prior release's recorded squash commit; tag ancestry is deliberately irrelevant.
 Every push to `main` continues to publish the rolling relay `:main` and
 `:sha-<7>` tags, plus matching `:debug-main` and `:debug-sha-<7>` variants.
 
+#### NIP-FI upload proof freshness (relay floor)
+
+Desktop, CLI, and mobile clients mint Blossom upload authorization proofs with
+a **60-second expiry** (`expiration = now + 60`). **Older** relays (≤ `v0.2.1`)
+re-run the full auth verifier — including the expiry check — after receiving the
+full upload body, so a 60-second proof that was valid when admitted can expire
+during a large or slow transfer, causing a spurious rejection.
+
+The repair (commit `75e9bef748d2149ce459b14da842e706a51a5f78`, landed in this
+PR) replaces the post-body full-verifier call with a hash-only check
+(`verify_upload_hash_only`): the relay verifies the freshness and all other
+proof fields before reading the body; the only check after transfer is that the
+body's SHA-256 matches what was declared in the signed proof.
+
+Clients cannot lengthen proofs beyond 60 seconds (NIP-FI §Strict limits the
+max proof window to 60 s). This is a relay-side concern:
+
+- **The relay release that includes this PR's changes** (the first relay
+  tag > `v0.2.1`, containing commit `75e9bef748d2149ce459b14da842e706a51a5f78`)
+  performs a hash-only post-body check, eliminating the expiry window during
+  transfer. **Update this line with the concrete relay tag once it is cut.**
+- **Older self-hosted relays** (≤ `v0.2.1`) re-verify the full proof expiry
+  after transfer and may reject large uploads over slow connections.
+  Upgrading the relay is the fix; no client workaround exists within Strict
+  constraints.
+
+**Prerequisite before distributing desktop, CLI, or mobile builds that mint
+60-second upload proofs:** verify that all supported relay environments have
+been upgraded to a relay release containing commit
+`75e9bef748d2149ce459b14da842e706a51a5f78`. An unknown or unverified deployment
+does not satisfy this prerequisite. Deployments running ≤ `v0.2.1` must be
+upgraded before receiving these clients.
+
+When releasing a new **relay** version that carries the post-body hash-only
+check, record the concrete tag here so release operators can verify the
+prerequisite. When releasing **desktop, CLI, or mobile** for environments where
+self-hosted relays may be running pre-floor versions, document the floor in
+release notes and require operators to upgrade before distributing these clients.
+
 ### Mobile
 
 1. **Publish a candidate.** From a clean checkout whose `origin` is the
