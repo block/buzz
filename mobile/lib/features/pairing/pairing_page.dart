@@ -18,7 +18,7 @@ import 'pairing_qr_scanner.dart';
 part 'pairing_page/onboarding_background.dart';
 part 'pairing_page/pairing_welcome_view.dart';
 
-const _onboardingChartreuse = Color(0xFFD7D72E);
+const _onboardingChartreuse = Color(0xFF99B1EF);
 const _onboardingShellBottom = Color(0xFFD7E7F6);
 const _onboardingCtaLabel = Color(0xFFD7E6F0);
 const _onboardingInk = Color(0xFF111111);
