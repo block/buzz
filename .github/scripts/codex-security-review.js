@@ -28,8 +28,8 @@ const completedMarker = (baseSha, headSha) =>
 
 const reviewCommand = (headSha) => `${REVIEW_COMMAND} ${headSha}`;
 
-const isOrganizationMember = (association) =>
-  association === "MEMBER" || association === "OWNER";
+const hasWritePermission = (permission) =>
+  permission === "write" || permission === "admin";
 
 const hasCurrentReviewLabel = (pullRequest) =>
   pullRequest.labels?.some(
@@ -234,6 +234,28 @@ async function getPullRequest({ github, context, prNumber }) {
   return pullRequest;
 }
 
+async function pullRequestAuthorCanWrite({ github, context, pullRequest }) {
+  const username = pullRequest.user?.login;
+  if (typeof username !== "string" || username.length === 0) {
+    return false;
+  }
+
+  try {
+    const { data: access } =
+      await github.rest.repos.getCollaboratorPermissionLevel({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        username,
+      });
+    return hasWritePermission(access.permission);
+  } catch (error) {
+    if (error?.status === 404) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 async function getLiveMainSha({ github, context }) {
   const { data: mainRef } = await github.rest.git.getRef({
     owner: context.repo.owner,
@@ -364,10 +386,12 @@ async function prepare({ github, context, core }) {
   }
   if (
     context.eventName === "pull_request_target" &&
-    !isOrganizationMember(pullRequest.author_association)
+    !(await pullRequestAuthorCanWrite({ github, context, pullRequest }))
   ) {
+    const author = pullRequest.user?.login || "unknown author";
     core.info(
-      `Pull request #${prNumber} requires authorization from a Block organization member.`,
+      `Pull request #${prNumber} author ${author} does not have write access ` +
+        `to ${context.repo.owner}/${context.repo.repo}; manual authorization is required.`,
     );
     return;
   }
@@ -479,7 +503,7 @@ async function invalidatePullRequestUpdate({ github, context, core }) {
     github,
     context,
     core,
-    existingOnlyForOrganizationMembers: true,
+    existingOnlyForTrustedAuthors: true,
   });
 }
 
@@ -489,7 +513,7 @@ async function invalidate({
   core,
   prNumber: requestedPrNumber,
   existingOnly = false,
-  existingOnlyForOrganizationMembers = false,
+  existingOnlyForTrustedAuthors = false,
 }) {
   const prNumber = Number(
     requestedPrNumber ?? context.payload.pull_request?.number,
@@ -506,10 +530,12 @@ async function invalidate({
   }
 
   const existing = await findReviewComment({ github, context, prNumber });
+  const trustedUnreviewedAuthor =
+    !existing &&
+    existingOnlyForTrustedAuthors &&
+    (await pullRequestAuthorCanWrite({ github, context, pullRequest }));
   const shouldOnlyUpdateExisting =
-    existingOnly ||
-    (existingOnlyForOrganizationMembers &&
-      isOrganizationMember(pullRequest.author_association));
+    existingOnly || trustedUnreviewedAuthor;
   if (!existing && shouldOnlyUpdateExisting) {
     if (existingOnly || hasCurrentReviewLabel(pullRequest)) {
       await clearCurrentReview({ github, context, prNumber });
