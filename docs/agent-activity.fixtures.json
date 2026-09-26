@@ -1,0 +1,889 @@
+{
+  "$comment": "Unsigned templates for the draft conversation agent activity v1 contract. Content is an object here for readability; compact-JSON encode it into the signed Nostr content string. Test harnesses supply signer, signature and clock. Not production event IDs or runtime evidence. See agent-activity.md.",
+  "version": 1,
+  "kind": 24201,
+  "cases": [
+    {
+      "name": "working_before_reply",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 1,
+          "status": "working",
+          "ended_at": null,
+          "tools": [],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      }
+    },
+    {
+      "name": "request_inside_existing_thread",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 1,
+          "status": "working",
+          "ended_at": null,
+          "tools": [],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      }
+    },
+    {
+      "name": "overlapping_request_same_thread",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-02",
+          "seq": 1,
+          "status": "working",
+          "ended_at": null,
+          "tools": [],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      }
+    },
+    {
+      "name": "parallel_tools_and_retry_after_failure",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 2,
+          "status": "working",
+          "ended_at": null,
+          "tools": [
+            {
+              "tool_call_id": "call-02",
+              "label": "search",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-03",
+              "label": "read",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-01",
+              "label": "search",
+              "status": "failed"
+            }
+          ],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      }
+    },
+    {
+      "name": "terminal_completed",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 3,
+          "status": "completed",
+          "ended_at": 1801000000,
+          "tools": [
+            {
+              "tool_call_id": "call-01",
+              "label": "tool",
+              "status": "unknown"
+            }
+          ],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      }
+    },
+    {
+      "name": "terminal_failed",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 3,
+          "status": "failed",
+          "ended_at": 1801000000,
+          "tools": [
+            {
+              "tool_call_id": "call-01",
+              "label": "tool",
+              "status": "unknown"
+            }
+          ],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      }
+    },
+    {
+      "name": "terminal_cancelled",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 3,
+          "status": "cancelled",
+          "ended_at": 1801000000,
+          "tools": [
+            {
+              "tool_call_id": "call-01",
+              "label": "tool",
+              "status": "unknown"
+            }
+          ],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      }
+    },
+    {
+      "name": "terminal_unknown",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 3,
+          "status": "unknown",
+          "ended_at": 1801000000,
+          "tools": [
+            {
+              "tool_call_id": "call-01",
+              "label": "tool",
+              "status": "unknown"
+            }
+          ],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      }
+    },
+    {
+      "name": "terminal_rebroadcast_fixed_ended_at",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000005,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 4,
+          "status": "completed",
+          "ended_at": 1801000000,
+          "tools": [
+            {
+              "tool_call_id": "call-01",
+              "label": "tool",
+              "status": "unknown"
+            }
+          ],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      }
+    },
+    {
+      "name": "bounded_projection_overflow",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 5,
+          "status": "working",
+          "ended_at": null,
+          "tools": [
+            {
+              "tool_call_id": "call-00",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-01",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-02",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-03",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-04",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-05",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-06",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-07",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-08",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-09",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-10",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-11",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-12",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-13",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-14",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-15",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-16",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-17",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-18",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-19",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-20",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-21",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-22",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-23",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-24",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-25",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-26",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-27",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-28",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-29",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-30",
+              "label": "tool",
+              "status": "running"
+            },
+            {
+              "tool_call_id": "call-31",
+              "label": "tool",
+              "status": "running"
+            }
+          ],
+          "omitted_tool_count": 9,
+          "omitted_running_tool_count": 2
+        }
+      }
+    },
+    {
+      "name": "additive_field_ignored",
+      "expect": "accept",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 1,
+          "status": "working",
+          "ended_at": null,
+          "tools": [],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0,
+          "future_extension": {
+            "ignored": true
+          }
+        }
+      }
+    },
+    {
+      "name": "unsupported_version",
+      "expect": "reject",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 2,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 1,
+          "status": "working",
+          "ended_at": null,
+          "tools": [],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      },
+      "rule": "version"
+    },
+    {
+      "name": "conflicting_conversation_tags",
+      "expect": "reject",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ],
+          [
+            "h",
+            "22222222-2222-4222-8222-222222222222"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 1,
+          "status": "working",
+          "ended_at": null,
+          "tools": [],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      },
+      "rule": "conversation_tag"
+    },
+    {
+      "name": "request_tag_content_mismatch",
+      "expect": "reject",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 1,
+          "status": "working",
+          "ended_at": null,
+          "tools": [],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      },
+      "rule": "request_binding"
+    },
+    {
+      "name": "invalid_omitted_counts",
+      "expect": "reject",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 1,
+          "status": "working",
+          "ended_at": null,
+          "tools": [],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 1
+        }
+      },
+      "rule": "omitted_counts"
+    },
+    {
+      "name": "unknown_status",
+      "expect": "reject",
+      "template": {
+        "kind": 24201,
+        "created_at": 1801000000,
+        "tags": [
+          [
+            "h",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "root"
+          ],
+          [
+            "e",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            "reply"
+          ]
+        ],
+        "content": {
+          "version": 1,
+          "request_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "thread_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "run_id": "run-01",
+          "seq": 1,
+          "status": "success",
+          "ended_at": null,
+          "tools": [],
+          "omitted_tool_count": 0,
+          "omitted_running_tool_count": 0
+        }
+      },
+      "rule": "status"
+    }
+  ],
+  "sequences": [
+    {
+      "name": "duplicate_and_out_of_order",
+      "input_sequences": [
+        1,
+        3,
+        3,
+        2,
+        4
+      ],
+      "accepted_sequences": [
+        1,
+        3,
+        4
+      ]
+    },
+    {
+      "name": "terminal_cannot_revive",
+      "steps": [
+        {
+          "seq": 1,
+          "status": "working",
+          "accept": true
+        },
+        {
+          "seq": 2,
+          "status": "completed",
+          "accept": true
+        },
+        {
+          "seq": 3,
+          "status": "working",
+          "accept": false
+        }
+      ]
+    },
+    {
+      "name": "age_does_not_reset_lease",
+      "created_at": 1801000000,
+      "receipt_wall": 1801000019,
+      "remaining_fresh_seconds": 1
+    },
+    {
+      "name": "exact_expiry_rejected",
+      "created_at": 1801000000,
+      "receipt_wall": 1801000020,
+      "accept": false
+    },
+    {
+      "name": "future_tolerance_clamped",
+      "created_at": 1801000005,
+      "receipt_wall": 1801000000,
+      "remaining_fresh_seconds": 20
+    }
+  ]
+}
