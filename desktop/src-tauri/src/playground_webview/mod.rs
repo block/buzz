@@ -357,6 +357,34 @@ fn bounds_are_usable(bounds: &PlaygroundBounds) -> bool {
     bounds.width >= MIN_EDGE && bounds.height >= MIN_EDGE
 }
 
+/// Off-screen keeper park from the TS runtime (`KEEPER_BOUNDS` = -64,-64,64×64).
+/// Applying these to an existing WKWebView collapses `innerWidth`/`innerHeight`
+/// and breaks Drive/Observe hit-testing ("no element") for the whole grant.
+fn is_keeper_park_bounds(bounds: &PlaygroundBounds) -> bool {
+    bounds.width <= 64.0 && bounds.height <= 64.0 && bounds.x <= 0.0 && bounds.y <= 0.0
+}
+
+/// Remember stage/page-host bounds. Never let a keeper park stomp a prior
+/// full-size `last_bounds` — Drive may keep acting on a parked webview.
+fn remember_show_bounds(session: &mut PlaygroundSession, bounds: &PlaygroundBounds, show: bool) {
+    if session.pre_inspect_bounds.is_some() {
+        return;
+    }
+    if show || !is_keeper_park_bounds(bounds) {
+        session.last_bounds = Some(bounds.clone());
+        return;
+    }
+    // Keeper park with no prior size: still record so create/hide bookkeeping
+    // has something, but prefer keeping a larger remembered size.
+    if session
+        .last_bounds
+        .as_ref()
+        .is_none_or(|prev| is_keeper_park_bounds(prev))
+    {
+        session.last_bounds = Some(bounds.clone());
+    }
+}
+
 /// Logical offset of the HTML content view inside the native window frame.
 /// `getBoundingClientRect()` is content-relative; `add_child` / `set_position`
 /// are frame-relative. Decorated pop-outs have a titlebar (~28px on macOS);
@@ -609,7 +637,7 @@ pub async fn playground_webview_show(
     if show {
         hide_other_playgrounds(&app, &label, &window_label);
     }
-    let nav = {
+    let (nav, create_bounds) = {
         let mut sessions = manager
             .sessions
             .lock()
@@ -620,14 +648,42 @@ pub async fn playground_webview_show(
         if session.start_url.origin() != url.origin() {
             *session = PlaygroundSession::new(url.clone());
         }
-        if session.pre_inspect_bounds.is_none() {
-            session.last_bounds = Some(bounds.clone());
-        }
-        session.nav_state(&sid)
+        remember_show_bounds(session, &bounds, show);
+        // For cold create under keeper park, prefer a remembered full viewport
+        // so Drive grants that outlive the React stage stay clickable.
+        let create_bounds = if !show && is_keeper_park_bounds(&bounds) {
+            session
+                .last_bounds
+                .clone()
+                .filter(|b| !is_keeper_park_bounds(b))
+                .unwrap_or_else(|| bounds.clone())
+        } else {
+            bounds.clone()
+        };
+        let nav = session.nav_state(&sid);
+        (nav, create_bounds)
     };
 
     if let Some(webview) = app.get_webview(&label) {
-        apply_bounds(&app, &sid, &window_label, &bounds)?;
+        if show || !is_keeper_park_bounds(&bounds) {
+            apply_bounds(&app, &sid, &window_label, &bounds)?;
+        } else {
+            // Hide only — do not collapse to 64×64. If a prior race already
+            // shrunk the child, heal back to the last full stage bounds.
+            let heal = {
+                let sessions = manager
+                    .sessions
+                    .lock()
+                    .map_err(|_| "playground session lock poisoned".to_string())?;
+                sessions
+                    .get(&sid)
+                    .and_then(|s| s.last_bounds.clone())
+                    .filter(|b| !is_keeper_park_bounds(b))
+            };
+            if let Some(full) = heal {
+                apply_bounds(&app, &sid, &window_label, &full)?;
+            }
+        }
         sync_user_agent(
             &app,
             &manager,
@@ -649,6 +705,7 @@ pub async fn playground_webview_show(
         return Ok(nav);
     }
 
+    let bounds = create_bounds;
     if !bounds_are_usable(&bounds) {
         return Ok(nav);
     }
@@ -1337,5 +1394,51 @@ mod tests {
         );
         assert!(session.can_go_forward());
         assert!(!inspect_target_is_safe("main"));
+    }
+
+    #[test]
+    fn keeper_park_bounds_match_runtime_64_square() {
+        let keeper = PlaygroundBounds {
+            x: -64.0,
+            y: -64.0,
+            width: 64.0,
+            height: 64.0,
+        };
+        assert!(is_keeper_park_bounds(&keeper));
+        let stage = PlaygroundBounds {
+            x: 80.0,
+            y: 120.0,
+            width: 1141.0,
+            height: 756.0,
+        };
+        assert!(!is_keeper_park_bounds(&stage));
+        assert!(bounds_are_usable(&keeper));
+        assert!(bounds_are_usable(&stage));
+    }
+
+    #[test]
+    fn remember_show_bounds_keeps_full_size_across_keeper_park() {
+        let start = Url::parse("https://app.example.com/").expect("url");
+        let mut session = PlaygroundSession::new(start);
+        let full = PlaygroundBounds {
+            x: 40.0,
+            y: 90.0,
+            width: 1141.0,
+            height: 756.0,
+        };
+        let keeper = PlaygroundBounds {
+            x: -64.0,
+            y: -64.0,
+            width: 64.0,
+            height: 64.0,
+        };
+        remember_show_bounds(&mut session, &full, true);
+        assert_eq!(session.last_bounds.as_ref(), Some(&full));
+        remember_show_bounds(&mut session, &keeper, false);
+        assert_eq!(
+            session.last_bounds.as_ref(),
+            Some(&full),
+            "keeper park must not stomp Drive-usable last_bounds"
+        );
     }
 }

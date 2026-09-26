@@ -185,3 +185,87 @@ test("keeper visible:false alone does not dispatch restore", async () => {
 
   window.removeEventListener(PLAYGROUND_WEBVIEW_RESTORE_EVENT, onRestore);
 });
+
+test("playgroundKeeperParkBounds prefers last visible full size over 64×64", async () => {
+  installPlaygroundInvoke((cmd, args) => {
+    if (cmd === "playground_webview_show") {
+      return Promise.resolve({
+        sid: args.sid,
+        canGoBack: false,
+        canGoForward: false,
+        currentUrl: args.url,
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+
+  const {
+    playgroundKeeperParkBounds,
+    resetPlaygroundShowGeneration,
+    showPlaygroundWebview,
+    getPlaygroundLastVisibleBounds,
+  } = await import("./webview.ts");
+
+  resetPlaygroundShowGeneration();
+  const fallback = { x: -64, y: -64, width: 64, height: 64 };
+  assert.deepEqual(
+    playgroundKeeperParkBounds("drive-1", fallback),
+    fallback,
+    "never-shown sid falls back to legacy keeper square",
+  );
+
+  await showPlaygroundWebview({
+    sid: "drive-1",
+    url: "https://play.example",
+    bounds: { x: 12, y: 40, width: 1141, height: 756 },
+    visible: true,
+  });
+  assert.deepEqual(getPlaygroundLastVisibleBounds("drive-1"), {
+    x: 12,
+    y: 40,
+    width: 1141,
+    height: 756,
+  });
+  assert.deepEqual(playgroundKeeperParkBounds("drive-1", fallback), {
+    x: -64,
+    y: -64,
+    width: 1141,
+    height: 756,
+  });
+});
+
+test("hide clears show generation so intentional park does not restore", async () => {
+  installPlaygroundInvoke((cmd, args) => {
+    if (cmd === "playground_webview_show" || cmd === "playground_webview_hide") {
+      return Promise.resolve(
+        cmd === "playground_webview_show"
+          ? {
+              sid: args.sid,
+              canGoBack: false,
+              canGoForward: false,
+              currentUrl: args.url,
+            }
+          : undefined,
+      );
+    }
+    return Promise.resolve(undefined);
+  });
+
+  const {
+    getPlaygroundShowGeneration,
+    hidePlaygroundWebview,
+    resetPlaygroundShowGeneration,
+    showPlaygroundWebview,
+  } = await import("./webview.ts");
+
+  resetPlaygroundShowGeneration();
+  await showPlaygroundWebview({
+    sid: "park-1",
+    url: "https://play.example",
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+    visible: true,
+  });
+  assert.equal(getPlaygroundShowGeneration("park-1"), 1);
+  await hidePlaygroundWebview("park-1");
+  assert.equal(getPlaygroundShowGeneration("park-1"), 0);
+});
