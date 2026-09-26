@@ -1,6 +1,7 @@
 # Trace Schema (`buzz-conformance`)
 
-Schema version: **1** (`SCHEMA_VERSION` in `src/lib.rs`).
+Schema version: **2** (`SCHEMA_VERSION` in `src/lib.rs`). Version 2 adds
+`accept_ephemeral` to the action enum; version 1 consumers cannot decode it.
 
 This document is the contract between the relay's emitter and the
 independent replay checker. It is grounded in
@@ -64,6 +65,10 @@ exact spec line it grounds in.
   gift-wrap, etc.). The row's community is derived from `bound_host`
   via the host-community map; no `channel` field. `claimed_community`
   recorded for the same reason as above.
+
+- **`accept_ephemeral { msg_id }`**
+  A validated ephemeral event accepted for live fan-out. No durable write
+  occurs.
 
 - **`write_duplicate { msg_id, channel, claimed_community }`**
   spec: `WriteDuplicate` (line 612). The DB returned "already present";
@@ -133,7 +138,7 @@ normalized away the violation. The checker assumes you *did not*.
 |------|---------------|
 | `crates/buzz-relay/src/conformance/mod.rs` | helpers + `EmitGuard` + `sanitized_reason_for` |
 | `crates/buzz-relay/src/conformance/tracers.rs` | `NoopTracer` (prod default), `JsonlTracer` |
-| `crates/buzz-relay/src/handlers/ingest.rs` | `AuthCheck`, `WriteInsert`, `WriteInsertGlobal`, `WriteDuplicate`, outer-wrapper `SanitizedError` |
+| `crates/buzz-relay/src/handlers/ingest.rs` | `AuthCheck`, `WriteInsert`, `WriteInsertGlobal`, `AcceptEphemeral`, `WriteDuplicate`, outer-wrapper `SanitizedError` |
 | `crates/buzz-relay/src/handlers/req.rs` | **held back** — additive patch for integration onto Max's req.rs work |
 
 ## Where the checker lives

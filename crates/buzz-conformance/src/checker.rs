@@ -259,6 +259,20 @@ mod tests {
     }
 
     #[test]
+    fn accepted_ephemeral_event_is_valid_without_a_write() {
+        let c = cid(1);
+        let trace = vec![step(
+            TraceAction::AcceptEphemeral {
+                msg_id: OpaqueId("ephemeral".into()),
+            },
+            c,
+        )];
+
+        check_trace(&Scenario::unstructured(trace))
+            .expect("ephemeral acceptance is valid without a durable write");
+    }
+
+    #[test]
     fn state_after_changing_mid_request_is_state_mismatch() {
         let c1 = cid(1);
         let c2 = cid(2);

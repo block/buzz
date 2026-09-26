@@ -686,7 +686,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        handle_agent_observer_event(event, conn_id, &event_id_hex, conn, state).await;
+        handle_agent_observer_event(event, &event_id_hex, conn, state).await;
         return;
     }
 
@@ -755,6 +755,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     IngestError::Rejected(message) => (message, "invalid"),
                     IngestError::CanvasConflict(message) => (message, "invalid"),
                     IngestError::AuthFailed(message) => (message, "auth"),
+                    IngestError::RateLimited(message) => (message, "rate-limited"),
                     IngestError::Internal(message) => (message, "error"),
                 };
                 reject(reason);
@@ -797,6 +798,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 IngestError::Rejected(m) => (m.clone(), "invalid"),
                 IngestError::CanvasConflict(m) => (m.clone(), "invalid"),
                 IngestError::AuthFailed(m) => (m.clone(), "auth"),
+                IngestError::RateLimited(m) => (m.clone(), "rate-limited"),
                 IngestError::Internal(_) => ("error: internal server error".to_string(), "error"),
             };
             reject(reason);
@@ -964,6 +966,9 @@ enum AgentObserverDirection {
     Control,
 }
 
+const OBSERVER_FRESHNESS_REJECTION: &str =
+    "invalid: observer frame timestamp outside ±5 minute freshness window";
+
 #[derive(Debug, Clone, Copy)]
 struct AgentObserverRoute {
     agent: PublicKey,
@@ -1004,7 +1009,6 @@ fn observer_frame_rate_limited(
 /// gates subscription in the REQ handler via the cleartext `p` tag.
 async fn handle_agent_observer_event(
     event: Event,
-    conn_id: uuid::Uuid,
     event_id_hex: &str,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
@@ -1031,50 +1035,77 @@ async fn handle_agent_observer_event(
         }
     }
 
-    // Freshness check: reject observer frames with stale/future timestamps
+    let session_owner = {
+        if let crate::connection::AuthState::Authenticated(ctx) = conn.auth_state_snapshot() {
+            ctx.agent_owner_pubkey
+        } else {
+            None
+        }
+    };
+    let result = ingest_agent_observer_event(&state, &conn.tenant, &event, session_owner).await;
+    if let Err(error) = &result {
+        warn!(
+            conn_id = %conn.conn_id,
+            event_id = %event_id_hex,
+            error = ?error,
+            "Agent observer frame rejected"
+        );
+    }
+    match result {
+        Ok(()) => {
+            conn.send(RelayMessage::ok(event_id_hex, true, ""));
+        }
+        Err(IngestError::Rejected(message)) if message == OBSERVER_FRESHNESS_REJECTION => {
+            // The historic WS response rejects stale frames without counting
+            // them in the rejection metric. HTTP keeps its normal 400 mapping.
+            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+        }
+        Err(IngestError::Rejected(message)) => {
+            reject("invalid");
+            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+        }
+        Err(IngestError::CanvasConflict(message)) => {
+            reject("invalid");
+            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+        }
+        Err(IngestError::AuthFailed(message)) => {
+            reject("auth");
+            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+        }
+        Err(IngestError::RateLimited(message)) => {
+            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+        }
+        Err(IngestError::Internal(message)) => {
+            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+        }
+    }
+}
+
+/// Validate and fan out one agent observer frame without persisting it.
+pub(crate) async fn ingest_agent_observer_event(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: &Event,
+    session_owner: Option<PublicKey>,
+) -> Result<(), IngestError> {
+    // Freshness check: reject observer frames with stale/future timestamps.
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
     if (event_ts - now).unsigned_abs() > 300 {
-        conn.send(RelayMessage::ok(
-            event_id_hex,
-            false,
-            "invalid: observer frame timestamp outside ±5 minute freshness window",
-        ));
-        return;
+        return Err(IngestError::Rejected(OBSERVER_FRESHNESS_REJECTION.into()));
     }
 
-    let route = match agent_observer_route(&event) {
+    let route = match agent_observer_route(event) {
         Ok(Some(route)) => route,
-        Ok(None) => {
-            // Unknown frame value — silently drop, no error to publisher.
-            conn.send(RelayMessage::ok(event_id_hex, true, ""));
-            return;
-        }
-        Err(message) => {
-            reject("invalid");
-            conn.send(RelayMessage::ok(event_id_hex, false, &message));
-            return;
-        }
+        Ok(None) => return Ok(()),
+        Err(message) => return Err(IngestError::Rejected(message)),
     };
 
-    // Fast path: if this connection authenticated via NIP-OA and the verified
-    // owner matches the observer frame's target owner, skip the DB lookup entirely.
-    let session_owner_match = {
-        if let crate::connection::AuthState::Authenticated(ctx) = conn.auth_state_snapshot() {
-            ctx.agent_owner_pubkey.as_ref() == Some(&route.owner)
-        } else {
-            false
-        }
-    };
-
+    // Fast path: NIP-OA-authenticated sessions already carry the owner mapping.
     let agent_bytes = route.agent.to_bytes().to_vec();
     let owner_bytes = route.owner.to_bytes().to_vec();
-    let cache_key = (
-        conn.tenant.community(),
-        agent_bytes.clone(),
-        owner_bytes.clone(),
-    );
-    let is_owner = if session_owner_match {
+    let cache_key = (tenant.community(), agent_bytes.clone(), owner_bytes.clone());
+    let is_owner = if session_owner.as_ref() == Some(&route.owner) {
         true
     } else {
         match state.observer_owner_cache.get(&cache_key) {
@@ -1082,7 +1113,7 @@ async fn handle_agent_observer_event(
             None => {
                 let result = state
                     .db
-                    .is_agent_owner(conn.tenant.community(), &agent_bytes, &owner_bytes)
+                    .is_agent_owner(tenant.community(), &agent_bytes, &owner_bytes)
                     .await;
                 match result {
                     Ok(v) => {
@@ -1090,66 +1121,53 @@ async fn handle_agent_observer_event(
                         v
                     }
                     Err(e) => {
-                        warn!(conn_id = %conn_id, event_id = %event_id_hex, "agent observer owner check failed: {e}");
-                        conn.send(RelayMessage::ok(
-                            event_id_hex,
-                            false,
-                            "error: internal server error",
-                        ));
-                        return;
+                        warn!(event_id = %event.id.to_hex(), "agent observer owner check failed: {e}");
+                        return Err(IngestError::Internal("error: internal server error".into()));
                     }
                 }
             }
         }
     };
     if !is_owner {
-        reject("auth");
-        conn.send(RelayMessage::ok(
-            event_id_hex,
-            false,
-            "restricted: observer frame is not authorized for this agent owner",
+        return Err(IngestError::AuthFailed(
+            "restricted: observer frame is not authorized for this agent owner".into(),
         ));
-        return;
     }
 
+    // Control frames are owner commands and share the agent's budget key; keep
+    // telemetry bursts from consuming the budget needed for control delivery.
     // Rate limit telemetry frames only (100/sec per agent).
-    // Control frames (owner → agent) bypass the limiter — they are rare and must not
-    // be starved by bursty telemetry from the agent.
     if matches!(route.direction, AgentObserverDirection::Telemetry) {
         let agent_key: [u8; 32] = agent_bytes.as_slice().try_into().unwrap_or([0u8; 32]);
-        if observer_frame_rate_limited(&state, conn.tenant.community(), agent_key) {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                "rate-limited: observer frame rate exceeded (100/sec per agent)",
+        if observer_frame_rate_limited(state, tenant.community(), agent_key) {
+            return Err(IngestError::RateLimited(
+                "rate-limited: observer frame rate exceeded (100/sec per agent)".into(),
             ));
-            return;
         }
     }
 
-    state.mark_local_event(conn.tenant.community(), &event.id);
+    state.mark_local_event(tenant.community(), &event.id);
     if let Err(e) = state
         .pubsub
-        .publish_event(&conn.tenant, EventTopic::Global, &event)
+        .publish_event(tenant, EventTopic::Global, event)
         .await
     {
         state
             .local_event_ids
-            .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-        warn!(conn_id = %conn_id, event_id = %event_id_hex, "Agent observer publish failed: {e}");
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(event_id = %event.id.to_hex(), "Agent observer publish failed: {e}");
     }
 
     let stored_event = StoredEvent::new(event.clone(), None);
     debug!(
-        event_id = %event_id_hex,
+        event_id = %event.id.to_hex(),
         agent = %route.agent.to_hex(),
         owner = %route.owner.to_hex(),
         direction = ?route.direction,
         "Agent observer fan-out"
     );
-    fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
-
-    conn.send(RelayMessage::ok(event_id_hex, true, ""));
+    fan_out_event_to_local_subscribers(state, tenant.community(), &stored_event).await;
+    Ok(())
 }
 
 fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, String> {
@@ -1464,14 +1482,7 @@ mod tests {
             grace_limit: 3,
         });
 
-        super::handle_agent_observer_event(
-            event.clone(),
-            conn.conn_id,
-            &event.id.to_hex(),
-            conn,
-            state,
-        )
-        .await;
+        super::handle_agent_observer_event(event.clone(), &event.id.to_hex(), conn, state).await;
 
         let axum::extract::ws::Message::Text(text) =
             send_rx.try_recv().expect("observer rejection sent")

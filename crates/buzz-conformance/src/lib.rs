@@ -83,7 +83,7 @@ impl std::fmt::Display for CommunityLabel {
 }
 
 /// Trace schema version. Bump on any backwards-incompatible field change.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// An opaque ID derived from an event id or other secret material. Stable,
 /// no payload, no key bytes. Implementations pick a hash; the checker
@@ -165,6 +165,7 @@ pub struct AbstractState {
 /// Action vocabulary (spec actions in parentheses):
 /// - [`TraceAction::WriteInsert`] (spec `WriteInsert`, lines 514–550)
 /// - [`TraceAction::WriteInsertGlobal`] (spec `WriteInsertGlobal`, lines 559–595)
+/// - [`TraceAction::AcceptEphemeral`] (in-memory event acceptance; no modeled write)
 /// - [`TraceAction::WriteDuplicate`] (spec `WriteDuplicate`, lines 606–637)
 /// - [`TraceAction::SanitizedError`] (spec `SanitizedError`, line 778)
 /// - [`TraceAction::AuthCheck`] (spec `AuthCheck`, line 794) — M2/M8 target
@@ -198,6 +199,11 @@ pub enum TraceAction {
         /// The community the client *claimed*, if any. Ignored by the
         /// resolver but recorded for the audit trail.
         claimed_community: Option<CommunityLabel>,
+    },
+    /// Validated ephemeral event accepted for live fan-out; no durable write occurs.
+    AcceptEphemeral {
+        /// Opaque hash of the event id.
+        msg_id: OpaqueId,
     },
     /// Channel-bearing duplicate / no-op write (spec `WriteDuplicate`,
     /// `ON CONFLICT (community_id, id)` returning a duplicate result).
@@ -267,6 +273,7 @@ impl TraceAction {
         match self {
             TraceAction::WriteInsert { .. } => "write_insert",
             TraceAction::WriteInsertGlobal { .. } => "write_insert_global",
+            TraceAction::AcceptEphemeral { .. } => "accept_ephemeral",
             TraceAction::WriteDuplicate { .. } => "write_duplicate",
             TraceAction::SanitizedError { .. } => "sanitized_error",
             TraceAction::AuthCheck { .. } => "auth_check",

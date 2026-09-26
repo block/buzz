@@ -189,6 +189,8 @@ pub fn check_step(
         // --- Spec WriteInsertGlobal (lines 559-595) ---
         // resolved == HostCommunity[host]. Same shape as WriteInsert.
         TraceAction::WriteInsertGlobal { .. } => Ok(()),
+        // Ephemeral acceptance is an observation only; it mutates no durable model state.
+        TraceAction::AcceptEphemeral { .. } => Ok(()),
 
         // --- Spec WriteDuplicate (lines 606-637) ---
         // Carries the same host-axis obligation as WriteInsert: an A-host
@@ -323,6 +325,7 @@ pub fn action_channel(action: &TraceAction) -> Option<&ChannelLabel> {
         TraceAction::ReadMessageRows { channel, .. } => channel.as_ref(),
         TraceAction::ReadByIdRows { channel, .. } => channel.as_ref(),
         TraceAction::WriteInsertGlobal { .. }
+        | TraceAction::AcceptEphemeral { .. }
         | TraceAction::ReadHostFeedRows { .. }
         | TraceAction::SanitizedError { .. }
         | TraceAction::ImplBug { .. } => None,

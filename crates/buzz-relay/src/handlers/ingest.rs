@@ -12,29 +12,29 @@ use uuid::Uuid;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_AGENT_PROFILE,
+    KIND_AGENT_TURN_METRIC, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST,
+    KIND_BOOKMARK_SET, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
+    KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
+    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -449,6 +449,8 @@ pub enum IngestError {
     CanvasConflict(String),
     /// Auth/scope error — WS: OK false, HTTP: 401/403.
     AuthFailed(String),
+    /// A transient rate limit refusal; transports map this to retryable status.
+    RateLimited(String),
     /// Server error — WS: OK false, HTTP: 500.
     Internal(String),
 }
@@ -507,6 +509,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
+        // NIP-AM: observer frames are agent-authored global events (encrypted to owner).
+        KIND_AGENT_OBSERVER_FRAME => Ok(Scope::MessagesWrite),
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
@@ -760,6 +764,7 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // NIP-AM: agent turn metrics are owner-scoped global events.
             // Channel identity is encrypted inside the payload — no `h` tag.
             | KIND_AGENT_TURN_METRIC
+            | KIND_AGENT_OBSERVER_FRAME
             // NIP-PL leases are author-owned, addressable global state.
             | super::push_lease::KIND_PUSH_LEASE
     )
@@ -2178,7 +2183,8 @@ pub async fn ingest_event(
     // Captured before `event` moves into the inner fn: the stored-events
     // counter below is emitted at this shared seam so WebSocket and HTTP
     // transports are counted identically.
-    let kind_label = super::event::bounded_kind_label(event_kind_u32(&event));
+    let kind_u32 = event_kind_u32(&event);
+    let kind_label = super::event::bounded_kind_label(kind_u32);
     // Classify the authenticated principal, not the event envelope signer:
     // NIP-59 gift wraps deliberately use an unrelated ephemeral pubkey.
     let author_pubkey_bytes = auth.principal_pubkey_bytes();
@@ -2197,7 +2203,7 @@ pub async fn ingest_event(
     // author_type is a 2-value label so it merely doubles the kind series).
     // Emitted here rather than per-transport so HTTP bridge ingests count too.
     if let Ok(r) = &result {
-        if r.accepted {
+        if should_count_as_stored(r.accepted, kind_u32) {
             let author_type = author_type_label(state, tenant, author_pubkey_bytes).await;
             metrics::counter!(
                 "buzz_events_stored_total",
@@ -2227,6 +2233,10 @@ pub async fn ingest_event(
     // the underlying tracer — the checker treats that as
     // CoverageBreach.
     result
+}
+
+fn should_count_as_stored(accepted: bool, kind: u32) -> bool {
+    accepted && kind != KIND_AGENT_OBSERVER_FRAME
 }
 
 /// Maximum seconds in the future a kind:40100 canvas event may be timestamped.
@@ -2371,6 +2381,22 @@ async fn ingest_event_inner(
             "restricted: insufficient scope (need {})",
             required
         )));
+    }
+
+    if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
+        super::event::ingest_agent_observer_event(state, tenant, &event, None).await?;
+        emit(
+            tracer,
+            TraceAction::AcceptEphemeral {
+                msg_id: msg_id_label(event.id.as_bytes()),
+            },
+            state_for_request(tenant, auth.pubkey()),
+        );
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
     }
 
     // Command kinds are routed AFTER signature verification, timestamp check,
@@ -3438,11 +3464,215 @@ mod postgres_tests {
     use super::*;
     use buzz_conformance::{TraceStep, Tracer};
     use buzz_core::kind::{
-        KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
-        KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
-        KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
+        KIND_AGENT_OBSERVER_FRAME, KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST,
+        KIND_FORUM_VOTE, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE,
+        KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
-    use nostr::{EventBuilder, Kind};
+    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+
+    async fn observer_ingest_fixture() -> (Arc<AppState>, TenantContext, Keys, Keys) {
+        let mut config = crate::config::Config::from_env().expect("load test config");
+        config.require_relay_membership = false;
+        let pool = sqlx::PgPool::connect(&config.database_url)
+            .await
+            .expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        db.migrate().await.expect("migrate test DB");
+        let host = format!("observer-ingest-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let audit = buzz_audit::AuditService::new(pool);
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db.clone(),
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        db.ensure_user(community, &agent.public_key().to_bytes())
+            .await
+            .expect("agent user");
+        db.ensure_user(community, &owner.public_key().to_bytes())
+            .await
+            .expect("owner user");
+        db.set_agent_owner(
+            community,
+            &agent.public_key().to_bytes(),
+            &owner.public_key().to_bytes(),
+        )
+        .await
+        .expect("agent owner");
+
+        (
+            Arc::new(state),
+            TenantContext::resolved(community, host),
+            agent,
+            owner,
+        )
+    }
+
+    fn observer_event(agent: &Keys, owner: &Keys) -> nostr::Event {
+        let encrypted = buzz_core::observer::encrypt_observer_payload(
+            agent,
+            &owner.public_key(),
+            &serde_json::json!({"kind": "turn_started"}),
+        )
+        .expect("encrypt observer payload");
+        buzz_sdk::build_agent_observer_frame(
+            &owner.public_key().to_hex(),
+            &agent.public_key().to_hex(),
+            buzz_core::observer::OBSERVER_FRAME_TELEMETRY,
+            &encrypted,
+        )
+        .expect("build observer frame")
+        .sign_with_keys(agent)
+        .expect("sign observer frame")
+    }
+
+    async fn ingest_observer_test_event(
+        state: &Arc<AppState>,
+        tenant: &TenantContext,
+        agent: &Keys,
+        event: nostr::Event,
+    ) -> Result<IngestResult, IngestError> {
+        ingest_event(
+            state,
+            tenant,
+            event,
+            IngestAuth::Http {
+                pubkey: agent.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                auth_method: HttpAuthMethod::Nip98,
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn http_observer_frame_is_accepted_and_not_stored() {
+        let (state, tenant, agent, owner) = observer_ingest_fixture().await;
+        let event = observer_event(&agent, &owner);
+        let event_id = event.id;
+        let result = ingest_observer_test_event(&state, &tenant, &agent, event)
+            .await
+            .expect("valid observer frame");
+        assert!(result.accepted);
+        assert!(state
+            .db
+            .get_event_by_id(tenant.community(), event_id.as_bytes())
+            .await
+            .expect("query event")
+            .is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn http_observer_frame_rejects_invalid_owner_and_envelope() {
+        let (state, tenant, agent, owner) = observer_ingest_fixture().await;
+
+        let wrong_owner = Keys::generate();
+        let wrong_owner_result = ingest_observer_test_event(
+            &state,
+            &tenant,
+            &agent,
+            observer_event(&agent, &wrong_owner),
+        )
+        .await;
+        assert!(
+            matches!(wrong_owner_result, Err(IngestError::AuthFailed(message)) if message.contains("owner"))
+        );
+
+        let encrypted = buzz_core::observer::encrypt_observer_payload(
+            &agent,
+            &owner.public_key(),
+            &serde_json::json!({"kind": "turn_started"}),
+        )
+        .expect("encrypt observer payload");
+        let missing_agent = EventBuilder::new(
+            Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16),
+            encrypted.clone(),
+        )
+        .tags([nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag")])
+        .sign_with_keys(&agent)
+        .expect("sign missing-agent frame");
+        assert!(matches!(
+            ingest_observer_test_event(&state, &tenant, &agent, missing_agent).await,
+            Err(IngestError::Rejected(message)) if message.contains("agent")
+        ));
+
+        let p_is_agent =
+            EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+                .tags([
+                    nostr::Tag::parse(["p", &agent.public_key().to_hex()]).expect("p tag"),
+                    nostr::Tag::parse(["agent", &agent.public_key().to_hex()]).expect("agent tag"),
+                    nostr::Tag::parse(["frame", buzz_core::observer::OBSERVER_FRAME_TELEMETRY])
+                        .expect("frame tag"),
+                ])
+                .sign_with_keys(&agent)
+                .expect("sign self-owned frame");
+        assert!(matches!(
+            ingest_observer_test_event(&state, &tenant, &agent, p_is_agent).await,
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn http_observer_frame_rejects_stale_created_at() {
+        let (state, tenant, agent, owner) = observer_ingest_fixture().await;
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16),
+            observer_event(&agent, &owner).content,
+        )
+        .custom_created_at(Timestamp::from(Timestamp::now().as_secs() - 301))
+        .tags(observer_event(&agent, &owner).tags)
+        .sign_with_keys(&agent)
+        .expect("sign stale observer frame");
+        assert!(matches!(
+            ingest_observer_test_event(&state, &tenant, &agent, event).await,
+            Err(IngestError::Rejected(message)) if message.contains("timestamp")
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn http_unknown_ephemeral_kind_remains_restricted() {
+        let (state, tenant, agent, _owner) = observer_ingest_fixture().await;
+        let event = EventBuilder::new(Kind::Custom(20_099), "ephemeral")
+            .sign_with_keys(&agent)
+            .expect("sign unknown ephemeral event");
+        assert!(matches!(
+            ingest_observer_test_event(&state, &tenant, &agent, event).await,
+            Err(IngestError::Rejected(message)) if message == "restricted: unknown event kind"
+        ));
+    }
 
     #[test]
     fn missing_huddle_backing_channel_is_a_client_rejection() {
@@ -5679,6 +5909,13 @@ mod postgres_tests {
             counts.get(&("ws".to_owned(), "invalid".to_owned())),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn accepted_observer_frames_are_not_counted_as_stored() {
+        assert!(!should_count_as_stored(true, KIND_AGENT_OBSERVER_FRAME));
+        assert!(should_count_as_stored(true, KIND_STREAM_MESSAGE));
+        assert!(!should_count_as_stored(false, KIND_STREAM_MESSAGE));
     }
 
     /// Boundary regression for the canvas-specific ingest future-timestamp guard.
