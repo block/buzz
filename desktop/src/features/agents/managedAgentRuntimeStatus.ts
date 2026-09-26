@@ -68,7 +68,9 @@ export const MANAGED_AGENT_PAIR_ACTION_LABELS: Record<
  * (`ws://127.0.0.1:3000`). Mirrors buzz-core's `normalize_relay_url`
  * (`crates/buzz-core/src/relay.rs`): lowercase host, loopback hosts folded
  * to 127.0.0.1, default ports and root-path trailing slash stripped.
- * Returns null when the URL cannot be parsed as ws/wss.
+ * Returns null when the URL cannot be parsed as ws/wss, and — like the
+ * backend — rejects URLs carrying credentials or a fragment outright
+ * instead of silently stripping them into a canonical match.
  */
 export function canonicalRelayUrl(raw: string): string | null {
   let url: URL;
@@ -78,6 +80,11 @@ export function canonicalRelayUrl(raw: string): string | null {
     return null;
   }
   if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
+  // buzz-core rejects credentialed or fragmented relay URLs outright. The
+  // raw check for `#` keeps parity for an empty fragment (`/#`), which the
+  // URL API normalizes away but the backend still rejects.
+  if (url.username !== "" || url.password !== "") return null;
+  if (url.hash !== "" || raw.trim().includes("#")) return null;
   let host = url.hostname.toLowerCase();
   if (host === "localhost" || host === "[::1]" || host.startsWith("127.")) {
     host = "127.0.0.1";
