@@ -692,17 +692,33 @@ mod tests {
         );
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", &script]);
-        let result = run_watchdogged(cmd, Duration::from_millis(300), Duration::from_secs(5));
+        // The timeout is the setup's race budget, not a tuning knob: the
+        // descendant must fork, exec perl, load POSIX, `setsid()`, and record
+        // its PID *before* the deadline fires the `killpg`, or it dies inside
+        // the leader's group and the test asserts against a descendant that
+        // never escaped. Measured spawn->PID-recorded latency on a 16-core
+        // machine: ~30ms idle, but p95 233ms / max 498ms under a loaded lane
+        // (4 concurrent suites + 24 spinners) — which is exactly how the
+        // original 300ms budget flaked with an empty PID file. 3s keeps ~6x
+        // over that observed max; CI runners have fewer cores, so do not trim
+        // it back toward the escape latency. The test costs its full timeout
+        // by construction (the leader loops forever); that is the price of the
+        // timeout path being deterministic.
+        let result = run_watchdogged(cmd, Duration::from_secs(3), Duration::from_secs(15));
         assert!(
             result.is_none(),
             "a timed-out probe must fail closed even when an escaped writer holds the pipe"
         );
 
-        let descendant_pid: i32 = std::fs::read_to_string(&pid_path)
-            .expect("escaped descendant must have recorded its PID")
-            .trim()
-            .parse()
-            .expect("descendant PID must be numeric");
+        let recorded = std::fs::read_to_string(&pid_path)
+            .expect("escaped descendant must have recorded its PID");
+        let descendant_pid: i32 = recorded.trim().parse().unwrap_or_else(|e| {
+            panic!(
+                "descendant PID {recorded:?} is not numeric ({e}): the descendant was reaped by \
+                 the group kill before it could `setsid()` out, so this run proved nothing about \
+                 the escaped-writer drain. Raise the probe timeout above the escape latency."
+            )
+        });
         assert!(
             pid_alive(descendant_pid),
             "descendant {descendant_pid} was expected to survive the group kill (proving it escaped)"
