@@ -49,7 +49,7 @@ test("Ctrl+R selection persists to disk and the next new channel sends without a
         await terminal.frame();
         assert.equal(app.editor.getExpandedText(), "Keep my draft");
       } else {
-        assert.match(await terminal.frame(), /To Nova/);
+        assert.match((await terminal.frame()).split("\n")[0], /Nova\s*$/);
         assert.equal(app.tui.hasOverlay(), false);
         terminal.input("Use my remembered agent");
       }

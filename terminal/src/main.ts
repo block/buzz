@@ -19,7 +19,8 @@ if (args.includes("--help")) {
 Build the Rust host first with just terminal-build.
 Optional BUZZ_TERMINAL_HOST overrides the executable path.
 BUZZ_AGENT_PUBKEY selects your default agent by exact hex key.
-Ctrl+K conversations · Ctrl+R recipient · Ctrl+G commands · Ctrl+Q detach
+/ opens command/channel search in an empty prompt; Ctrl+K or Ctrl+G opens it anytime.
+Ctrl+R changes recipient · Ctrl+Q detaches
 Drafts are local to this terminal session. Agents run independently.`);
 } else if (!process.stdin.isTTY || !process.stdout.isTTY) {
   console.error(

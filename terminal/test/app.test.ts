@@ -57,7 +57,7 @@ test("real TUI keyboard path preserves multiline drafts and routes a send across
     terminal.resize();
     const narrow = await terminal.frame();
     assert.match(narrow, /draft A/);
-    assert.match(narrow, /\^G commands/);
+    assert.match(narrow, /Commands & channels/);
   } finally {
     app.stop();
     terminal.screen.dispose();
@@ -104,7 +104,7 @@ test("typing during channel creation survives activation and sends to the defaul
     assert.equal(app.editor.getExpandedText(), "/status");
     terminal.input("\x1b");
     const screen = await terminal.frame();
-    assert.match(screen, /To Atlas/);
+    assert.match(screen.split("\n")[0], /Atlas\s*$/);
     assert.match(screen, /Keep my draft intact/);
     assert.equal(app.store.current?.channelId, launch.channelId);
     assert.equal(

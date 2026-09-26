@@ -1,10 +1,18 @@
 import { type Component, Markdown } from "@earendil-works/pi-tui";
-import { fit, markdownTheme, safeText, singleLine, style } from "./theme.ts";
+import {
+  agentName,
+  fit,
+  markdownTheme,
+  safeText,
+  singleLine,
+  style,
+} from "./theme.ts";
 
 /** A message or status event displayed in a conversation transcript. */
 export interface TranscriptEntry {
   id: string;
   author: string;
+  authorPubkey?: string;
   content: string;
   time: string;
   self?: boolean;
@@ -66,7 +74,12 @@ export class Transcript implements Component {
       if (lines.length > 0) lines.push("");
       const author = singleLine(entry.author) || "Unknown";
       const time = singleLine(entry.time);
-      const header = `${entry.self ? style.accent(author) : style.bold(author)}  ${style.muted(time)}`;
+      const name = entry.self
+        ? style.accent(author)
+        : entry.authorPubkey
+          ? agentName(entry.authorPubkey, author)
+          : style.bold(author);
+      const header = `${name}  ${style.muted(time)}`;
       lines.push(
         fit(
           kind === "error" ? style.error(`${author}  ${time}`) : header,

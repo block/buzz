@@ -76,9 +76,9 @@ default `target/debug/buzz-terminal-host` executable.
 
 | Key | Action |
 | --- | --- |
-| Ctrl+K | Search channels and open conversations |
+| / in an empty prompt | Open the combined command and channel palette, then type to search |
+| Ctrl+K or Ctrl+G | Open the same palette without changing your draft |
 | Ctrl+R | Select an exact recipient from the channel roster |
-| Ctrl+G | Command palette, without disturbing your draft |
 | Ctrl+T | Open a thread from recent channel messages |
 | Alt+A | Toggle owner-only agent activity |
 | Esc | Close the picker or return from activity |
@@ -89,7 +89,11 @@ default `target/debug/buzz-terminal-host` executable.
 | Ctrl+Shift+F | Search the visible transcript |
 | Ctrl+Q / Ctrl+C | Detach; repeat to discard unsaved local state |
 
-Slash commands mirror the palette. Use `//` to send a literal leading slash.
+All commands are available in the combined palette. The selected agent appears
+at the top-right in the same identity color used in chat. Opening a picker dims
+the conversation behind it; Escape restores the colors and your draft.
+Typing `/` in an empty prompt opens search rather than inserting a slash.
+Slashes within a draft and pasted slash-leading text remain literal message text.
 `/retry` resends the **identical signed event** after an uncertain result.
 `/discard` explicitly forgets delivery tracking; it does not retract a message.
 `/reconnect` retries after automatic reconnect attempts are exhausted.

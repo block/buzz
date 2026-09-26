@@ -48,6 +48,22 @@ export const style = {
   bold: color("1"),
 } as const;
 
+/** Keep identity colors stable across views, profile renames, and reconnects. */
+export function agentName(pubkey: string, name: string): string {
+  const colors = [81, 114, 213, 179, 147, 209, 80];
+  const hash = [...pubkey].reduce(
+    (value, character) => (value * 31 + character.charCodeAt(0)) >>> 0,
+    0,
+  );
+  return color(`1;38;5;${colors[hash % colors.length]}`)(singleLine(name));
+}
+
+/** Remove foreground styles but preserve renderer cursor markers behind overlays. */
+export function dimBackground(line: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: replace SGR only, not cursor markers
+  return style.muted(line.replace(/\x1b\[[0-9;]*m/g, ""));
+}
+
 export const editorTheme: EditorTheme = {
   borderColor: style.accent,
   selectList: {

@@ -134,6 +134,7 @@ export function activityPlugin(
             entries.push({
               id: item.key,
               author: store.name(item.agent),
+              authorPubkey: item.agent,
               time: item.state,
               content: `${item.detail}\n\n#${store.channels.get(item.channelId)?.name ?? item.channelId}`,
               detail: `session ${item.sessionId} · turn ${item.turnId}`,

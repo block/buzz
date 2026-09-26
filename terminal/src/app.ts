@@ -16,9 +16,30 @@ import { activityPlugin, type Command, Plugins } from "./plugins.ts";
 import type { AgentPreferences } from "./preferences.ts";
 import { Session } from "./session.ts";
 import { type Conversation, Store } from "./store.ts";
-import { editorTheme, fit, singleLine, style } from "./theme.ts";
+import {
+  agentName,
+  dimBackground,
+  editorTheme,
+  fit,
+  singleLine,
+  style,
+} from "./theme.ts";
 import { Transcript, type TranscriptEntry } from "./transcript.ts";
 import type { Transport } from "./transport.ts";
+
+class BuzzScreen extends TuiAltScreen {
+  protected override compositeOverlays(
+    lines: string[],
+    width: number,
+    height: number,
+  ): string[] {
+    return super.compositeOverlays(
+      this.hasOverlay() ? lines.map(dimBackground) : lines,
+      width,
+      height,
+    );
+  }
+}
 
 /** Editor-centered terminal shell. Remote execution is owned by Session's relay. */
 export class TerminalApp {
@@ -50,7 +71,7 @@ export class TerminalApp {
   ) {
     this.store = new Store(preferences);
     this.onExit = onExit;
-    this.tui = new TuiAltScreen(terminal, true, undefined, {
+    this.tui = new BuzzScreen(terminal, true, undefined, {
       scrollToEndIndicator: () => style.accent(" ↓ Latest · Ctrl+L "),
       copyOnSelect: false,
     });
@@ -91,10 +112,14 @@ export class TerminalApp {
         return { consume: true };
       }
       if (this.tui.hasOverlay()) return;
+      if (key === "/" && this.editor.getExpandedText() === "") {
+        this.commandPalette();
+        return { consume: true };
+      }
       if (matchesKey(data, "ctrl+j") || matchesKey(data, "shift+enter")) return;
       const action =
         key === "ctrl+k"
-          ? () => this.contexts()
+          ? () => this.commandPalette()
           : key === "ctrl+r"
             ? () => this.recipients()
             : key === "ctrl+g"
@@ -141,8 +166,8 @@ export class TerminalApp {
     return [
       {
         name: "switch",
-        description: "Switch conversation · Ctrl+K",
-        run: () => this.contexts(),
+        description: "Search channels and commands · Ctrl+K",
+        run: () => this.commandPalette(),
       },
       {
         name: "to",
@@ -260,28 +285,12 @@ export class TerminalApp {
 
   private submit(): void {
     const text = this.editor.getExpandedText();
-    if (text.startsWith("/") && !text.startsWith("//")) {
-      const command = this.plugins.commands.get(text.trim().slice(1));
-      if (!command) {
-        this.report(
-          new Error(
-            "Unknown command. Ctrl+G lists commands; start with // to send a literal slash.",
-          ),
-        );
-        return;
-      }
-      this.editor.setText("");
-      void Promise.resolve()
-        .then(() => command.run())
-        .catch((error) => this.report(error));
-      return;
-    }
     const view = this.store.current;
     if (!view || this.pluginView) {
-      this.contexts();
+      this.commandPalette();
       return;
     }
-    view.draft = text.startsWith("//") ? text.slice(1) : text;
+    view.draft = text;
     void this.store
       .send(view, this.session.transport)
       .catch((error) => this.report(error));
@@ -331,7 +340,9 @@ export class TerminalApp {
           ),
           style.muted("│") +
             fit(
-              " ↑↓ select · Enter open · Esc back",
+              width >= 40
+                ? " ↑↓ select · Enter open · Esc back"
+                : " ↑↓ · Enter · Esc back",
               Math.max(1, width - 2),
             ).padEnd(Math.max(1, width - 2)) +
             style.muted("│"),
@@ -350,16 +361,17 @@ export class TerminalApp {
     });
   }
 
-  private contexts(): void {
+  private contextItems(): PickerItem[] {
     const items: PickerItem[] = [];
     for (const view of this.store.views.values()) {
       items.push({
-        id: view.key,
+        id: `context:${view.key}`,
         label: `#${this.store.channels.get(view.channelId)?.name ?? view.channelId}${view.rootEventId ? ` / thread ${view.rootEventId.slice(0, 8)}` : ""}`,
         detail: view.recipient
           ? `To ${this.store.name(view.recipient)} · ${view.recipient.slice(0, 12)}`
           : "Choose a recipient with Ctrl+R",
         badge: [
+          "channel",
           view.key === this.store.activeKey ? "current" : "",
           view.unread ? `${view.unread} new` : "",
           view.draft ? "draft" : "",
@@ -371,22 +383,19 @@ export class TerminalApp {
     for (const channel of this.store.channels.values()) {
       if (channel.joined && !this.store.views.has(`${channel.id}:`))
         items.push({
-          id: channel.id,
+          id: `context:${channel.id}`,
           label: `#${channel.name}`,
           detail: `${channel.members.length} members · ${channel.id}`,
+          badge: "channel",
         });
     }
-    this.pick("Conversations", items, (item) => {
-      const existing = this.store.views.get(item.id);
-      this.pluginView = undefined;
-      this.store.open(existing?.channelId ?? item.id, existing?.rootEventId);
-    });
+    return items;
   }
 
   private recipients(): void {
     const view = this.store.current;
     if (!view) {
-      this.contexts();
+      this.commandPalette();
       return;
     }
     const startup = this.session.startup;
@@ -433,7 +442,7 @@ export class TerminalApp {
   private threads(): void {
     const view = this.store.current;
     if (!view) {
-      this.contexts();
+      this.commandPalette();
       return;
     }
     const channelView = {
@@ -461,16 +470,27 @@ export class TerminalApp {
 
   private commandPalette(): void {
     this.pick(
-      "Commands",
-      [...this.plugins.commands.values()].map((command) => ({
-        id: command.name,
-        label: `/${command.name}`,
-        detail: command.description,
-      })),
+      "Commands & channels",
+      () => [
+        ...this.contextItems(),
+        ...[...this.plugins.commands.values()].map((command) => ({
+          id: `command:${command.name}`,
+          label: `/${command.name}`,
+          detail: command.description,
+          badge: "command",
+        })),
+      ],
       (item) => {
-        void Promise.resolve()
-          .then(() => this.plugins.commands.get(item.id)?.run())
-          .catch((error) => this.report(error));
+        if (item.id.startsWith("command:")) {
+          void Promise.resolve()
+            .then(() => this.plugins.commands.get(item.id.slice(8))?.run())
+            .catch((error) => this.report(error));
+        } else {
+          const id = item.id.slice(8);
+          const existing = this.store.views.get(id);
+          this.pluginView = undefined;
+          this.store.open(existing?.channelId ?? id, existing?.rootEventId);
+        }
       },
     );
   }
@@ -561,7 +581,6 @@ export class TerminalApp {
       new VStack([
         this.chrome((width) => this.header(width)),
         { component: this.scroll, basis: 0, grow: 1, minSize: 1 },
-        this.chrome((width) => this.recipientLine(width)),
         {
           component: this.editor,
           basis: "auto",
@@ -590,13 +609,14 @@ export class TerminalApp {
           time: "your agents, one terminal",
           content: this.session.startup
             ? `${this.session.startup.launch.mode === "new" ? "Creating a private channel" : "Opening your channel"}…\n\nStart typing below while Buzz connects. Your draft stays here.\n\nResume this channel with:\n\nbuzz join ${this.session.startup.launch.channelId}\n\nIf setup fails, use **/retry-setup** to retry the same channel.`
-            : "Your agents keep working.\n\n**Ctrl+K** opens a conversation. **Ctrl+R** chooses who receives your message.\n\nMove between contexts without losing your place. Drafts and recipients stay with their conversation; agents keep running when you leave.",
-          detail: "Ctrl+G commands · Alt+A activity · /help",
+            : "Your agents keep working.\n\nType **/** in the empty prompt to search commands and channels.\n\nMove between contexts without losing your place. Drafts and recipients stay with their conversation; agents keep running when you leave.",
+          detail: "All actions are in the command palette",
         },
       ];
     const entries: TranscriptEntry[] = this.store.events(view).map((event) => ({
       id: event.id,
       author: this.store.name(event.pubkey),
+      authorPubkey: event.pubkey,
       self: event.pubkey === this.store.pubkey,
       time: new Date(event.created_at * 1000).toLocaleTimeString([], {
         hour: "2-digit",
@@ -656,11 +676,11 @@ export class TerminalApp {
       : view
         ? `#${this.store.channels.get(view.channelId)?.name ?? view.channelId}${view.rootEventId ? ` / thread ${view.rootEventId.slice(0, 8)}` : ""}`
         : "Conversations";
-    const status = this.store.relayUrl.startsWith("demo:")
-      ? "DEMO / OFFLINE"
-      : this.store.connection;
     const left = ` ${style.bold(style.accent("buzz"))} ${style.muted("/ ")} ${singleLine(community)}  ${style.muted("/")}  ${singleLine(title ?? "")}`;
-    const right = ` ${this.store.connection === "connected" ? style.success("●") : style.error("○")} ${status} `;
+    const identity = view?.recipient
+      ? agentName(view.recipient, this.store.name(view.recipient))
+      : style.muted("No agent");
+    const right = ` ${fit(identity, Math.max(1, Math.floor(width / 2) - 2))} `;
     const room = Math.max(0, width - visibleWidth(right));
     const clipped = fit(left, room);
     return [
@@ -672,16 +692,6 @@ export class TerminalApp {
     ];
   }
 
-  private recipientLine(width: number): string[] {
-    const view = this.store.current;
-    const label = this.pluginView
-      ? "Read-only view · Esc returns to your draft"
-      : view?.recipient
-        ? `To ${this.store.name(view.recipient)} · ${view.recipient.slice(0, 12)}  /  as you`
-        : "Choose a recipient · Ctrl+R";
-    return ["", fit(` ${style.accent(singleLine(label))}`, width)];
-  }
-
   private footer(width: number): string[] {
     const working = [...this.store.activity.values()].filter(
       (item) => item.state === "working",
@@ -690,14 +700,13 @@ export class TerminalApp {
       (sum, view) => sum + view.unread,
       0,
     );
-    const keys =
-      width >= 90
-        ? " ^K contexts  ^R recipient  ^G commands  ⌥A activity  Enter send  ^J newline"
-        : " ^K switch  ^R to  ^G commands";
-    const activity = `${working ? `${working} working` : ""}${unread ? ` · ${unread} new` : ""}`;
+    const status = this.store.relayUrl.startsWith("demo:")
+      ? "DEMO / OFFLINE"
+      : this.store.connection;
+    const activity = `${status}${working ? ` · ${working} working` : ""}${unread ? ` · ${unread} new` : ""}`;
     return [
       fit(
-        style.muted(keys) + (activity ? `  ${style.accent(activity)}` : ""),
+        ` ${style.muted("/ Commands & channels")}  ${style.muted(activity)}`,
         width,
       ),
       fit(` ${style.muted(singleLine(this.store.notice))}`, width),
