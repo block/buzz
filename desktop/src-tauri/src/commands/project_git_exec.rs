@@ -48,6 +48,7 @@ pub(crate) struct GitAuthConfig {
     git_path: std::path::PathBuf,
     credential_helper: Option<std::path::PathBuf>,
     nsec: String,
+    auth_tag: Option<String>,
     allow_file_transport: bool,
 }
 
@@ -173,6 +174,13 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
             return apply_git_config(command, &entries);
         };
         command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
+        // A managed-agent identity is only a relay member together with its
+        // NIP-OA owner attestation; without it the relay refuses the key with
+        // `403 restricted: not a relay member`. git-credential-nostr reads the
+        // attestation from BUZZ_AUTH_TAG and folds it into the NIP-98 event.
+        if let Some(auth_tag) = &auth.auth_tag {
+            command.env("BUZZ_AUTH_TAG", auth_tag);
+        }
         entries.push((
             "credential.helper",
             credential_helper_config_value(cred_helper),
@@ -213,6 +221,7 @@ pub(crate) fn build_git_clone_auth_config(
                 .ok_or_else(|| "git was not found on PATH".to_string())?,
             credential_helper: None,
             nsec: String::new(),
+            auth_tag: None,
             allow_file_transport: false,
         });
     }
@@ -230,8 +239,24 @@ pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfi
         git_path,
         credential_helper,
         nsec,
+        auth_tag: None,
         allow_file_transport: false,
     })
+}
+
+/// Like [`build_git_auth_config_for_keys`], but for identities that carry a
+/// NIP-OA owner attestation (managed agents acting as repository owner). The
+/// attestation is required for the relay to accept the key as a member.
+pub(crate) fn build_git_auth_config_for_identity(
+    keys: &Keys,
+    auth_tag: Option<&str>,
+) -> Result<GitAuthConfig, String> {
+    let mut auth = build_git_auth_config_for_keys(keys)?;
+    auth.auth_tag = auth_tag
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    Ok(auth)
 }
 
 #[cfg(test)]
@@ -393,10 +418,42 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_branch, clean_target_ref, credential_helper_config_value, git_needs_credentials,
-        git_subcommand, validate_clone_url, validate_clone_url_against_relay,
-        validate_local_clone_url,
+        clean_branch, clean_target_ref, configure_git_auth, credential_helper_config_value,
+        git_needs_credentials, git_subcommand, validate_clone_url,
+        validate_clone_url_against_relay, validate_local_clone_url, GitAuthConfig,
     };
+
+    fn env_value(command: &std::process::Command, name: &str) -> Option<String> {
+        command.get_envs().find_map(|(key, value)| {
+            (key == name).then(|| value.unwrap_or_default().to_string_lossy().into_owned())
+        })
+    }
+
+    fn auth_config_with_tag(auth_tag: Option<&str>) -> GitAuthConfig {
+        GitAuthConfig {
+            git_path: std::path::PathBuf::from("git"),
+            credential_helper: Some(std::path::PathBuf::from("git-credential-nostr")),
+            nsec: "nsec1test".to_string(),
+            auth_tag: auth_tag.map(ToString::to_string),
+            allow_file_transport: false,
+        }
+    }
+
+    #[test]
+    fn credentialed_git_receives_owner_attestation_when_present() {
+        let tag = r#"["auth","owner","conditions","signature"]"#;
+        let mut command = std::process::Command::new("git");
+        configure_git_auth(&mut command, &auth_config_with_tag(Some(tag)), true);
+        assert_eq!(env_value(&command, "BUZZ_AUTH_TAG").as_deref(), Some(tag));
+        assert!(env_value(&command, "NOSTR_PRIVATE_KEY").is_some());
+    }
+
+    #[test]
+    fn credentialed_git_omits_attestation_when_absent() {
+        let mut command = std::process::Command::new("git");
+        configure_git_auth(&mut command, &auth_config_with_tag(None), true);
+        assert_eq!(env_value(&command, "BUZZ_AUTH_TAG"), None);
+    }
 
     #[test]
     fn credential_helper_config_value_uses_forward_slashes() {
