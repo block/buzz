@@ -50,6 +50,7 @@ export function ChannelComposerActivityAccessory({
               onOpenAgentSession={onOpenAgentSession}
               openAgentSessionPubkey={openAgentSessionPubkey}
               profiles={profiles}
+              showChannelThreadCount
               workingBotPubkeys={workingBotPubkeys}
               variant="inline"
             />

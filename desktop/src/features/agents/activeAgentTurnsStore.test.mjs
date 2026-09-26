@@ -54,6 +54,61 @@ describe("activeAgentTurnsStore", () => {
     resetActiveAgentTurnsStore();
   });
 
+  it("counts distinct active thread roots in a channel and drops completed roots", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 1,
+        turnId: "t1",
+        payload: { threadRootEventId: "ROOT-A" },
+      }),
+      makeEvent({
+        seq: 2,
+        turnId: "t2",
+        payload: { threadRootEventId: "root-a" },
+      }),
+      makeEvent({
+        seq: 3,
+        turnId: "t3",
+        payload: { threadRootEventId: "root-b" },
+      }),
+    ]);
+    assert.equal(getActiveTurnsForAgent(AGENT)[0].threadCount, 2);
+
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 4, kind: "turn_completed", turnId: "t3" }),
+    ]);
+    assert.equal(getActiveTurnsForAgent(AGENT)[0].threadCount, 1);
+  });
+
+  it("learns a turn's thread root from a liveness event", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", payload: null }),
+      makeEvent({
+        seq: 2,
+        turnId: "t2",
+        payload: { threadRootEventId: "root-b" },
+      }),
+    ]);
+    assert.equal(getActiveTurnsForAgent(AGENT)[0].threadCount, 0);
+
+    let notifications = 0;
+    const unsubscribe = subscribeActiveAgentTurns(() => {
+      notifications += 1;
+    });
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 3,
+        kind: "turn_liveness",
+        turnId: "t1",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: { threadRootEventId: "root-a" },
+      }),
+    ]);
+    unsubscribe();
+    assert.equal(getActiveTurnsForAgent(AGENT)[0].threadCount, 2);
+    assert.equal(notifications, 1, "root and clock updates notify together");
+  });
+
   describe("seq filtering", () => {
     it("processes events with increasing seq", () => {
       syncAgentTurnsFromEvents(AGENT, [

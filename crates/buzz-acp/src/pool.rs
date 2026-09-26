@@ -2335,6 +2335,7 @@ pub async fn run_prompt_task(
         None => PromptSource::Heartbeat,
     };
     let observer_channel_id = source.channel_id();
+    let observer_thread_root = source.scope().and_then(SessionScope::root_event_id);
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -2346,16 +2347,17 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
-    agent.acp.observe(
-        "turn_started",
-        serde_json::json!({
-            "source": match &source {
-                PromptSource::Channel(_) => "channel",
-                PromptSource::Heartbeat => "heartbeat",
-            },
-            "triggeringEventIds": triggering_event_ids,
-        }),
-    );
+    let mut turn_started_payload = serde_json::json!({
+        "source": match &source {
+            PromptSource::Channel(_) => "channel",
+            PromptSource::Heartbeat => "heartbeat",
+        },
+        "triggeringEventIds": triggering_event_ids,
+    });
+    if let Some(root) = observer_thread_root {
+        turn_started_payload["threadRootEventId"] = serde_json::json!(root);
+    }
+    agent.acp.observe("turn_started", turn_started_payload);
 
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult. It must be
@@ -2390,6 +2392,7 @@ pub async fn run_prompt_task(
             turn_id.clone(),
             turn_started_at.clone(),
         ),
+        observer_thread_root.map(str::to_owned),
         ctx.turn_liveness_interval,
         Arc::clone(&liveness_state),
     );
@@ -5016,6 +5019,7 @@ async fn run_turn_liveness(
     observer: Option<observer::ObserverHandle>,
     agent_index: Option<usize>,
     mut context: observer::ObserverContext,
+    thread_root_event_id: Option<String>,
     interval: Duration,
     state: Arc<Mutex<LivenessState>>,
 ) {
@@ -5043,12 +5047,11 @@ async fn run_turn_liveness(
             return;
         }
         context.session_id = guard.session_id.clone();
-        observer.emit(
-            "turn_liveness",
-            agent_index,
-            &context,
-            serde_json::json!({}),
-        );
+        let payload = match &thread_root_event_id {
+            Some(root) => serde_json::json!({ "threadRootEventId": root }),
+            None => serde_json::json!({}),
+        };
+        observer.emit("turn_liveness", agent_index, &context, payload);
         drop(guard);
     }
 }
@@ -6943,6 +6946,106 @@ mod tests {
             timestamp: "2026-08-09T00:00:00Z".into(),
             content: content.into(),
         }
+    }
+
+    #[tokio::test]
+    async fn run_prompt_task_observes_thread_root_only_for_thread_scope() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel_id = Uuid::new_v4();
+        let root = "a".repeat(64);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 8192];
+                let _ = socket.read(&mut buf).await;
+                let body = "not-json";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        for (scope, expected_root) in [
+            (thread_scope(channel_id, &root), Some(root.as_str())),
+            (conv(channel_id), None),
+        ] {
+            let acp = AcpClient::spawn("bash", &["-c".into(), "exec sleep 30".into()], &[], false)
+                .await
+                .expect("spawn test ACP process");
+            let mut agent = OwnedAgent {
+                index: 0,
+                acp,
+                state: SessionState::default(),
+                model_capabilities: None,
+                desired_model: None,
+                model_overridden: false,
+                desired_model_request_id: None,
+                desired_model_pending_ack: false,
+                startup_effort: None,
+                agent_name: "observer-test-agent".into(),
+                goose_system_prompt_supported: None,
+                protocol_version: 1,
+            };
+            let observer = observer::ObserverHandle::in_process();
+            agent.acp.set_observer(Some(observer.clone()), 0);
+            let batch = FlushBatch {
+                channel_id,
+                scope,
+                events: vec![],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            };
+            let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+            let mut ctx = make_prompt_context_no_owner();
+            ctx.channel_info = ChannelInfoResolver::new(
+                HashMap::from([(
+                    channel_id,
+                    crate::relay::ChannelInfo {
+                        name: "test-channel".into(),
+                        channel_type: "stream".into(),
+                        description: None,
+                    },
+                )]),
+                RestClient {
+                    http: reqwest::Client::new(),
+                    base_url: base_url.clone(),
+                    keys: ctx.agent_keys.clone(),
+                    auth_tag_json: None,
+                },
+            );
+            run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::new(ctx),
+                result_tx,
+                None,
+                "observer-test-turn".into(),
+            )
+            .await;
+            let mut result = result_rx.recv().await.expect("prompt result");
+            assert!(matches!(
+                result.outcome,
+                PromptOutcome::ProjectContextIndeterminate(_)
+            ));
+            let starts: Vec<_> = observer
+                .snapshot()
+                .into_iter()
+                .filter(|event| event.kind == "turn_started")
+                .collect();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(
+                starts[0].payload["threadRootEventId"].as_str(),
+                expected_root,
+                "run_prompt_task must derive the observer root from its session scope"
+            );
+            result.agent.acp.shutdown().await;
+        }
+        server.abort();
     }
 
     #[tokio::test]
@@ -9172,6 +9275,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                     Some(observer.clone()),
                     Some(0),
                     context,
+                    None,
                     Duration::from_secs(10),
                     Arc::clone(&state),
                 )),
@@ -9222,6 +9326,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 Some(observer.clone()),
                 Some(0),
                 context,
+                None,
                 Duration::from_secs(10),
                 Arc::clone(&state),
             )),
@@ -9274,6 +9379,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 Some(observer.clone()),
                 Some(0),
                 context,
+                Some("root-1".into()),
                 Duration::from_secs(10),
                 Arc::clone(&state),
             )),
@@ -9297,6 +9403,9 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             .filter(|e| e.kind == "turn_liveness")
             .collect();
         assert_eq!(pings.len(), 2);
+        assert!(pings
+            .iter()
+            .all(|ping| ping.payload["threadRootEventId"] == "root-1"));
         assert_eq!(
             pings[0].session_id, None,
             "pre-resolution ping must not carry a session ID"
@@ -9316,6 +9425,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             Some(observer.clone()),
             Some(0),
             context,
+            None,
             Duration::ZERO,
             open_liveness_state(),
         );
@@ -9339,6 +9449,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             None,
             None,
             context,
+            None,
             Duration::from_secs(10),
             open_liveness_state(),
         );
@@ -9378,6 +9489,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             Some(observer.clone()),
             Some(0),
             context,
+            None,
             Duration::from_secs(10),
             state,
         );

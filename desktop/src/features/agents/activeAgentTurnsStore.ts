@@ -54,6 +54,7 @@ const PRUNE_INTERVAL_MS = 5_000;
 type ActiveTurn = {
   turnId: string;
   channelId: string;
+  threadRootEventId: string | null;
   startedAt: number;
   lastActivityAt: number;
 };
@@ -62,6 +63,8 @@ type ActiveTurn = {
 export type ActiveTurnSummary = {
   channelId: string;
   anchorAt: number;
+  /** Distinct known roots; absent on working signals from outside this store. */
+  threadCount?: number;
 };
 
 /** One channel with active agent work, aggregated across agents. */
@@ -174,11 +177,21 @@ function parseTimestamp(timestamp: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function threadRootFromEvent(event: ObserverEvent): string | null {
+  if (!event.payload || typeof event.payload !== "object") return null;
+  const root = (event.payload as { threadRootEventId?: unknown })
+    .threadRootEventId;
+  return typeof root === "string" && root.length > 0
+    ? root.toLowerCase()
+    : null;
+}
+
 function startTurn(
   agentPubkey: string,
   channelId: string,
   turnId: string,
   timestamp: string,
+  threadRootEventId: string | null = null,
 ) {
   const key = normalizePubkey(agentPubkey);
   let agentTurns = activeTurnsByAgent.get(key);
@@ -206,23 +219,33 @@ function startTurn(
   agentTurns.set(turnId, {
     turnId,
     channelId,
+    threadRootEventId,
     startedAt,
     lastActivityAt: Date.now(),
   });
   invalidateCache(key);
 }
 
-function recordActivity(agentPubkey: string, turnId: string | null): boolean {
-  if (!turnId) return false;
+function recordActivity(
+  agentPubkey: string,
+  turnId: string | null,
+  threadRootEventId: string | null,
+): { refreshed: boolean; changed: boolean } {
+  if (!turnId) return { refreshed: false, changed: false };
   const key = normalizePubkey(agentPubkey);
   const agentTurns = activeTurnsByAgent.get(key);
-  if (!agentTurns) return false;
+  if (!agentTurns) return { refreshed: false, changed: false };
   const turn = agentTurns.get(turnId);
   if (turn) {
     turn.lastActivityAt = Date.now();
-    return true;
+    if (threadRootEventId && turn.threadRootEventId !== threadRootEventId) {
+      turn.threadRootEventId = threadRootEventId;
+      invalidateCache(key);
+      return { refreshed: true, changed: true };
+    }
+    return { refreshed: true, changed: false };
   }
-  return false;
+  return { refreshed: false, changed: false };
 }
 
 /**
@@ -254,7 +277,13 @@ function resurrectTurn(agentPubkey: string, event: ObserverEvent): boolean {
     frameAt !== null && startedAtMs !== null && startedAtMs <= frameAt
       ? startedAt
       : event.timestamp;
-  startTurn(agentPubkey, event.channelId, event.turnId, safeStartedAt);
+  startTurn(
+    agentPubkey,
+    event.channelId,
+    event.turnId,
+    safeStartedAt,
+    event.kind === "turn_liveness" ? threadRootFromEvent(event) : null,
+  );
   return true;
 }
 
@@ -408,6 +437,7 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
           event.channelId,
           event.turnId ?? `seq-${event.seq}`,
           event.timestamp,
+          threadRootFromEvent(event),
         );
         notifyListeners();
         return;
@@ -426,14 +456,20 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
       return;
     case "acp_read":
     case "acp_write":
-    // turn_liveness keeps a quiet-but-alive turn from being pruned; same
-    // refresh-only path as stream activity — no surfaced summary change on its
-    // own, so it only notifies when the offset above actually moved. If the
-    // turn was pruned out from under a still-running host (a transient drop
-    // raced the pause, or the lone-crash residual self-healed), resurrect it.
+    // turn_liveness keeps a quiet-but-alive turn from being pruned and can
+    // supply a thread root missing from the start frame. If the turn was
+    // pruned out from under a still-running host, resurrect it.
     case "turn_liveness": {
-      const refreshed = recordActivity(agentPubkey, event.turnId ?? null);
+      const { refreshed, changed } = recordActivity(
+        agentPubkey,
+        event.turnId ?? null,
+        event.kind === "turn_liveness" ? threadRootFromEvent(event) : null,
+      );
       if (!refreshed && resurrectTurn(agentPubkey, event)) {
+        notifyListeners();
+        return;
+      }
+      if (changed) {
         notifyListeners();
         return;
       }
@@ -508,18 +544,32 @@ export function getActiveTurnsForAgent(
   // Collapse multiple turns in one channel to the earliest start — the badge
   // should count from when the channel's oldest live turn began. Anchors are
   // derived here (startedAt + offset) so the latest skew estimate applies.
-  const earliestByChannel = new Map<string, number>();
+  const earliestByChannel = new Map<
+    string,
+    { startedAt: number; threadRoots: Set<string>; rootsKnown: boolean }
+  >();
   for (const turn of agentTurns.values()) {
     const prior = earliestByChannel.get(turn.channelId);
-    if (prior === undefined || turn.startedAt < prior) {
-      earliestByChannel.set(turn.channelId, turn.startedAt);
+    if (!prior) {
+      earliestByChannel.set(turn.channelId, {
+        startedAt: turn.startedAt,
+        threadRoots: new Set(
+          turn.threadRootEventId ? [turn.threadRootEventId] : [],
+        ),
+        rootsKnown: turn.threadRootEventId !== null,
+      });
+    } else {
+      prior.startedAt = Math.min(prior.startedAt, turn.startedAt);
+      if (turn.threadRootEventId) prior.threadRoots.add(turn.threadRootEventId);
+      else prior.rootsKnown = false;
     }
   }
 
   const result = [...earliestByChannel.entries()]
-    .map(([channelId, startedAt]) => ({
+    .map(([channelId, { startedAt, threadRoots, rootsKnown }]) => ({
       channelId,
       anchorAt: startedAt + offset,
+      threadCount: rootsKnown ? threadRoots.size : 0,
     }))
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
   cachedTurnSummaries.set(key, result);
