@@ -127,6 +127,20 @@ impl AssertionKeySet {
         })
     }
 
+    /// Test-utils / test-only constructor: same validation as the crate-private
+    /// `new`, exposed under the `test-utils` Cargo feature and `cfg(test)` so
+    /// integration tests in dependent crates (e.g., `buzz-relay`) can build
+    /// snapshots for `StaticIssuerKeySource` without requiring a live JWKS fetch.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_test(
+        issuer: String,
+        generation: u64,
+        jwks: JwkSet,
+        hard_deadline: DateTime<Utc>,
+    ) -> Option<Self> {
+        Self::new(issuer, generation, jwks, hard_deadline)
+    }
+
     /// The exact `iss` this snapshot authenticates.
     pub fn issuer(&self) -> &str {
         &self.issuer
@@ -209,20 +223,20 @@ impl<S: IssuerKeySource> IssuerKeySource for std::sync::Arc<S> {
 /// reconstruct the authority. An honest source returns only the snapshot bound
 /// to the exact issuer requested, the invariant the real runtime source
 /// guarantees.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone, Default)]
-pub(crate) struct StaticIssuerKeySource {
+pub struct StaticIssuerKeySource {
     snapshots: std::collections::HashMap<String, AssertionKeySet>,
     /// When set, returned for every requested issuer regardless of its binding,
     /// to exercise the verifier's defensive issuer re-check.
     misbound: Option<AssertionKeySet>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl StaticIssuerKeySource {
     /// Build an honest source from a set of snapshots, keyed by each snapshot's
     /// issuer.
-    pub(crate) fn new(snapshots: impl IntoIterator<Item = AssertionKeySet>) -> Self {
+    pub fn new(snapshots: impl IntoIterator<Item = AssertionKeySet>) -> Self {
         Self {
             snapshots: snapshots
                 .into_iter()
@@ -235,7 +249,7 @@ impl StaticIssuerKeySource {
     /// A hostile/buggy source that returns the given snapshot — bound to a
     /// different issuer than requested — for every lookup, to exercise the
     /// verifier's defensive issuer re-check.
-    pub(crate) fn misbinding(snapshot: AssertionKeySet) -> Self {
+    pub fn misbinding(snapshot: AssertionKeySet) -> Self {
         Self {
             snapshots: std::collections::HashMap::new(),
             misbound: Some(snapshot),
@@ -243,15 +257,33 @@ impl StaticIssuerKeySource {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl sealed::Sealed for StaticIssuerKeySource {}
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl IssuerKeySource for StaticIssuerKeySource {
     fn key_set(&self, issuer: &str) -> Option<AssertionKeySet> {
         self.misbound
             .clone()
             .or_else(|| self.snapshots.get(issuer).cloned())
+    }
+}
+
+/// Object-safe wrapper for assertion verification, allowing type-erased storage
+/// in `AppState` and test injection of `StaticIssuerKeySource`-backed verifiers.
+///
+/// `FederatedAssertionVerifier<S>` implements this for any `S: IssuerKeySource`.
+/// The sealed `IssuerKeySource` trait still constrains who can build a real
+/// verifier — this trait only erases the `S` type parameter at the storage boundary.
+pub trait VerifyAssertion: Send + Sync {
+    /// Verify one compact JWS assertion.  Semantics identical to
+    /// [`FederatedAssertionVerifier::verify`].
+    fn verify_assertion(&self, token: &str) -> Result<VerifiedAssertion, VerifierError>;
+}
+
+impl<S: IssuerKeySource + Send + Sync> VerifyAssertion for FederatedAssertionVerifier<S> {
+    fn verify_assertion(&self, token: &str) -> Result<VerifiedAssertion, VerifierError> {
+        self.verify(token)
     }
 }
 

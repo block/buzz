@@ -1,7 +1,6 @@
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
-
 export type Channel = {
   id: string;
   name: string;
@@ -20,7 +19,6 @@ export type Channel = {
   ttlSeconds: number | null;
   ttlDeadline: string | null;
 };
-
 export type ChannelDetail = Channel & {
   createdBy: string;
   createdAt: string;
@@ -33,7 +31,6 @@ export type ChannelDetail = Channel & {
   maxMembers: number | null;
   nip29GroupId: string | null;
 };
-
 export type ChannelMember = {
   pubkey: string;
   role: ChannelRole;

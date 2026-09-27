@@ -601,15 +601,23 @@ test("the mention button opens settings and can undo an address", async ({
   await expect(
     composer.getByRole("button", { name: "Mention someone" }),
   ).toBeVisible();
-  await input.fill("");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+  // Clear through editor transactions before selecting a manual mention.
+  await input.press("ControlOrMeta+A");
+  await input.press("Backspace");
+  await expect(input).toHaveText("");
 
   await menu
     .getByRole("button", { name: "Mention Morgarita", exact: true })
     .click();
   await expect(input).toHaveText("@Morgarita ");
+  // Explicitly opting out keeps subsequent mentions manual. The old avatar's
+  // exit animation must not be mistaken for a newly pinned recipient.
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toBeVisible();
+  ).toHaveCount(0);
 
   await input.type("later");
   await input.press("Enter");

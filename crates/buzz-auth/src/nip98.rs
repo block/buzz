@@ -149,6 +149,13 @@ pub fn verify_nip98_event(
     // sign without one. Rejecting duplicates closes the real attack: a valid-first
     // /contradictory-second pair would let `.find()` accept the first and silently
     // ignore the second, bypassing the body-hash check.
+    //
+    // Digest format contract: the content value must be exactly 64 lowercase
+    // hex characters (a valid sha256 digest). A one-element `["payload"]` tag
+    // with no content, or a malformed digest, must be rejected — the tag
+    // *claims* body-hash binding but provides no valid digest.  An absent tag
+    // makes no claim; body-bearing routes that opt out of payload binding
+    // (e.g. `/events`, `/query`, `/count`) fall here legitimately.
     {
         let count = event
             .tags
@@ -161,11 +168,40 @@ pub fn verify_nip98_event(
             )));
         }
     }
-    // Keep a present-but-malformed tag distinct from an absent (optional) tag.
-    if let (Some(payload_tag), Some(body_bytes)) = (event.tags.find(TagKind::Payload), body) {
-        let payload_hex = payload_tag.content().ok_or_else(|| {
-            AuthError::Nip98Invalid("payload tag is missing its SHA-256 hash".to_string())
-        })?;
+    // Validate the payload tag digest when the tag is present.
+    //
+    // A present tag *claims* body-hash binding.  A missing hash value (one-element
+    // tag or empty string content) is structurally invalid — the claim is made but
+    // no digest is provided — and must be rejected.  An absent tag makes no claim;
+    // body-bearing routes that opt out of payload binding (e.g. `/events`, `/query`,
+    // `/count`) fall here legitimately.
+    //
+    // When the tag is present, the content must be exactly 64 lowercase hex chars.
+    let payload_tag = if let Some(tag) = event.tags.find(TagKind::Payload) {
+        let hex_str = tag.content().unwrap_or("");
+        if hex_str.is_empty() {
+            return Err(AuthError::Nip98Invalid(
+                "payload tag is missing its SHA-256 hash".to_string(),
+            ));
+        }
+        // Must be exactly 64 lowercase hex chars (valid sha256 digest).
+        // Use a static diagnostic — attacker-controlled tag content must not
+        // appear in error messages (length, format code, or unicode boundary
+        // slicing could panic or leak attacker data).
+        if hex_str.len() != 64
+            || !hex_str.chars().all(|c| c.is_ascii_hexdigit())
+            || hex_str.chars().any(|c| c.is_ascii_uppercase())
+        {
+            return Err(AuthError::Nip98Invalid(
+                "payload tag digest must be exactly 64 lowercase hex chars (sha256)".to_string(),
+            ));
+        }
+        Some(hex_str)
+    } else {
+        None
+    };
+
+    if let (Some(payload_hex), Some(body_bytes)) = (payload_tag, body) {
         let computed: [u8; 32] = Sha256::digest(body_bytes).into();
         let computed_hex = hex::encode(computed);
         if computed_hex != payload_hex {
@@ -476,6 +512,112 @@ mod tests {
         assert!(
             matches!(result2, Err(AuthError::Nip98Invalid(_))),
             "invalid-first duplicate payload tag must also be rejected; got {result2:?}"
+        );
+    }
+
+    // ── F1 regression: payload tag present with no or empty digest ─────────
+    //
+    // The old code did `.and_then(|t| t.content())` which returned `None` for a
+    // one-element `["payload"]` tag — silently skipping the body-hash check.
+    // A client could sign an event with `["payload"]` (no digest), present any
+    // body, and the verifier would not check the body against the tag.
+    //
+    // Fix: a present tag with no content (or empty string) is rejected as
+    // structurally invalid — the claim is made but no digest is provided.
+    // An absent tag makes no claim and is accepted.  A present tag with content
+    // must be exactly 64 lowercase hex chars; invalid format rejects the event.
+    //
+    // Mutation evidence: removing the format check makes `unwrap_err()` panic.
+
+    #[test]
+    fn payload_tag_malformed_digest_rejected() {
+        // A payload tag present with a value that is NOT 64 lowercase hex chars
+        // must be rejected — it is a structurally invalid event.
+        use nostr::Tag;
+        let keys = Keys::generate();
+        let body = b"any body";
+
+        // Too short.
+        let json = make_nip98_event_raw_tags(
+            &keys,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["payload", "deadbeef"]).unwrap(), // 8 chars, not 64
+            ],
+        );
+        let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, Some(body));
+        assert!(
+            matches!(result, Err(AuthError::Nip98Invalid(_))),
+            "payload tag with short digest must be rejected: {result:?}"
+        );
+
+        // Uppercase hex (structurally invalid per NIP-98 lowercase-hex contract).
+        let keys2 = Keys::generate();
+        let hash: [u8; 32] = Sha256::digest(body).into();
+        let upper_hex = hex::encode(hash).to_uppercase();
+        let json2 = make_nip98_event_raw_tags(
+            &keys2,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["payload", &upper_hex]).unwrap(),
+            ],
+        );
+        let result2 = verify_nip98_event(&json2, TEST_URL, TEST_METHOD, Some(body));
+        assert!(
+            matches!(result2, Err(AuthError::Nip98Invalid(_))),
+            "payload tag with uppercase hex must be rejected: {result2:?}"
+        );
+
+        // Non-hex content.
+        let keys3 = Keys::generate();
+        let non_hex = "z".repeat(64);
+        let json3 = make_nip98_event_raw_tags(
+            &keys3,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["payload", &non_hex]).unwrap(),
+            ],
+        );
+        let result3 = verify_nip98_event(&json3, TEST_URL, TEST_METHOD, Some(body));
+        assert!(
+            matches!(result3, Err(AuthError::Nip98Invalid(_))),
+            "payload tag with non-hex content must be rejected: {result3:?}"
+        );
+    }
+
+    #[test]
+    fn payload_tag_multibyte_boundary_does_not_panic() {
+        // Regression for R2 (Thufir round-1): the old code did
+        //   `&hex_str[..hex_str.len().min(80)]`
+        // on attacker-controlled tag content.  79 ASCII 'a' chars followed by
+        // 'é' (U+00E9, 2 UTF-8 bytes) produces a 81-byte str; truncating at
+        // byte 80 splits the multibyte character and panics with a byte-index
+        // boundary panic.
+        //
+        // Mutation evidence: restoring the old byte-slice panic reproduces the
+        // panic here rather than returning an ordinary `AuthError`.
+        use nostr::Tag;
+        let keys = Keys::generate();
+        // 79 lowercase 'a' chars + 'é' (2 UTF-8 bytes) = 81 bytes, not 64 chars.
+        let malformed = format!("{}{}", "a".repeat(79), "é");
+        assert_eq!(malformed.len(), 81, "precondition: 81 UTF-8 bytes");
+        assert_eq!(malformed.chars().count(), 80, "precondition: 80 chars");
+        let json = make_nip98_event_raw_tags(
+            &keys,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["payload", &malformed]).unwrap(),
+            ],
+        );
+        // Must return an ordinary AuthError, not panic.
+        let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, None);
+        assert!(
+            matches!(result, Err(AuthError::Nip98Invalid(_))),
+            "multibyte-boundary malformed payload tag must return AuthError, not panic: {result:?}"
         );
     }
 

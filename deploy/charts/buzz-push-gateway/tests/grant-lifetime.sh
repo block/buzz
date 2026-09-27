@@ -8,7 +8,7 @@ trap 'rm -f "$fixture"' EXIT
 env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -rjson -ryaml -ropen3 \
   - "$fixture" <<'RUBY'
 chart = 'deploy/charts/buzz-push-gateway'
-command = ['helm', 'template', 'push', chart, '--set', 'gatewayOrigin=https://push.example']
+command = ['helm', 'template', 'push', chart]
 cases = []
 render = lambda do |label, expected, args, values|
   output, error, status = Open3.capture3(*command, *args, stdin_data: values)

@@ -20,6 +20,7 @@ fn member(id: &str) -> AgentDefinition {
         description: None,
         avatar_url: None,
         system_prompt: "Do the work.".to_string(),
+        acp_command: None,
         runtime: None,
         model: None,
         provider: None,

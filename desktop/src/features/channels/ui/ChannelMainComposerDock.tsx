@@ -14,7 +14,6 @@ import type {
   MessageComposerProps,
 } from "@/features/messages/ui/MessageComposer.types";
 import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
-import type { TimeoutState } from "@/features/moderation/lib/timeoutStore";
 import { ComposerTimeoutBanner } from "@/features/moderation/ui/ComposerTimeoutBanner";
 import { cn } from "@/shared/lib/cn";
 import type { useProjectedThreadComposer } from "./useProjectedThreadComposer";
@@ -48,7 +47,7 @@ type ChannelMainComposerDockProps = {
   projectedThreadComposer: ReturnType<typeof useProjectedThreadComposer>;
   recentMentionPubkeys: MessageComposerProps["recentMentionPubkeys"];
   setMainDeferredEditPending: (pending: boolean) => void;
-  timeoutState: TimeoutState;
+  timeoutActive: boolean;
   typingPubkeys: ChannelPaneProps["typingPubkeys"];
   welcomeComposerBannerState: WelcomeComposerBannerState;
   welcomeKickoffSettingUp: boolean;
@@ -111,7 +110,7 @@ export function ChannelMainComposerDock({
   projectedThreadComposer,
   recentMentionPubkeys,
   setMainDeferredEditPending,
-  timeoutState,
+  timeoutActive,
   typingPubkeys,
   welcomeComposerBannerState,
   welcomeKickoffSettingUp,
@@ -130,7 +129,7 @@ export function ChannelMainComposerDock({
           hasComposerBottomActivity && "composer-dock--with-activity",
         )}
       >
-        {isActiveWelcomeChannel && !timeoutState.active ? (
+        {isActiveWelcomeChannel && !timeoutActive ? (
           <WelcomeComposerGuidanceLayer
             onDismiss={handleDismissWelcomeBanner}
             settingUp={welcomeKickoffSettingUp}
@@ -139,9 +138,7 @@ export function ChannelMainComposerDock({
             {welcomeKickoffStage}
           </WelcomeComposerGuidanceLayer>
         ) : null}
-        {timeoutState.active ? (
-          <ComposerTimeoutBanner expiresAtMs={timeoutState.expiresAtMs} />
-        ) : null}
+        {timeoutActive ? <ComposerTimeoutBanner /> : null}
         <ComposerDockBackdrop gutterClassName="inset-x-5" />
         <MessageComposer
           autoSubmitDraftKey={autoSendDraftKey}
@@ -178,7 +175,7 @@ export function ChannelMainComposerDock({
             isModerationDmChannel,
             isReplyingToProjectedThread:
               projectedThreadComposer.composerTarget !== null,
-            timeoutActive: timeoutState.active,
+            timeoutActive,
           })}
           profiles={profiles}
           recentMentionPubkeys={recentMentionPubkeys}

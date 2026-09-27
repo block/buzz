@@ -166,25 +166,49 @@ test("opening edit during an immediate photo upload preserves the draft", async 
   page,
 }) => {
   await page.goto("/");
-  await page.evaluate(() => {
-    const e2e = (
-      window as Window & {
-        __BUZZ_E2E__?: { mock?: { uploadDelayMs?: number } };
-      }
-    ).__BUZZ_E2E__;
-    if (e2e?.mock) e2e.mock.uploadDelayMs = 1_000;
-  });
   await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  // Hold the upload at the IPC boundary until the edit assertion completes.
+  // A fixed delay races menu interaction and CI scheduling, so it can test
+  // an already-completed upload instead of the in-flight draft guard.
+  await page.evaluate(() => {
+    const w = window as Window & {
+      __RELEASE_PHOTO_UPLOAD__?: () => void;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          payload: unknown,
+          options: unknown,
+        ) => Promise<unknown>;
+      };
+    };
+    const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
+    const gate = new Promise<void>((resolve) => {
+      w.__RELEASE_PHOTO_UPLOAD__ = resolve;
+    });
+    w.__TAURI_INTERNALS__.invoke = async (command, payload, options) => {
+      if (command === "upload_media_bytes_raw") await gate;
+      return original(command, payload, options);
+    };
+  });
   await choosePhoto(page);
   await expect(page.getByTestId("upload-progress")).toBeVisible();
 
   await openMoreActionsMenu(page, "mock-general-welcome");
   await page.getByTestId("edit-message-mock-general-welcome").click();
+  // Edit is dispatched by onCloseAutoFocus after Radix unmounts the menu,
+  // not by the click itself. Keep the upload held through that handoff.
+  await expect(page.getByRole("menu")).toHaveCount(0);
 
   // Edit entry is rejected while the compacted draft cannot represent the
   // reserved upload slot. The upload remains current and lands in the draft.
   await expect(page.getByTestId("edit-target")).toHaveCount(0);
   await expect(page.getByTestId("upload-progress")).toBeVisible();
+  await page.evaluate(() => {
+    (
+      window as Window & { __RELEASE_PHOTO_UPLOAD__: () => void }
+    ).__RELEASE_PHOTO_UPLOAD__();
+  });
   await expect(page.getByTestId("upload-progress")).toHaveCount(0, {
     timeout: 5_000,
   });

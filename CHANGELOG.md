@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.5.25
+
+### Desktop and shared changes
+
+- Discover alternate Buzz ACP commands ([#6948](https://github.com/block/buzz/pull/6948)) ([`dd1c2afc2a16238656c5ed19fbfc558605248163`](https://github.com/block/buzz/commit/dd1c2afc2a16238656c5ed19fbfc558605248163))
+- chore(mesh): upgrade MeshLLM to 0.76.2 ([#7559](https://github.com/block/buzz/pull/7559)) ([`4544ba1713d8d7f5959d7d63886ff3927357e1ac`](https://github.com/block/buzz/commit/4544ba1713d8d7f5959d7d63886ff3927357e1ac))
+- feat(agents): humanize uncurated Databricks model ids with a label grammar ([#7844](https://github.com/block/buzz/pull/7844)) ([`d01e5f82058463709a22e93bb4cd795da5f53e10`](https://github.com/block/buzz/commit/d01e5f82058463709a22e93bb4cd795da5f53e10))
+- fix: route databricks claude fqns to anthropic messages ([#7829](https://github.com/block/buzz/pull/7829)) ([`48884848f566d02c42ce07636636c4ad5f164c27`](https://github.com/block/buzz/commit/48884848f566d02c42ce07636636c4ad5f164c27))
+- feat(relay): add opt-in newest-first thread windows ([#7823](https://github.com/block/buzz/pull/7823)) ([`5a349db91c23fa70c8c8aa43a3a5ba0005d8dd41`](https://github.com/block/buzz/commit/5a349db91c23fa70c8c8aa43a3a5ba0005d8dd41))
+- refactor: move agent Git bootstrap into ACP harness ([#7819](https://github.com/block/buzz/pull/7819)) ([`5621006bcf84b82e5da489824a5b4d76568d8602`](https://github.com/block/buzz/commit/5621006bcf84b82e5da489824a5b4d76568d8602))
+- fix(agent): preserve Databricks Opus UC reasoning and tool continuation ([#7840](https://github.com/block/buzz/pull/7840)) ([`0cc63fe3e607cf47ff32bc61e7eaca2f21e6cc23`](https://github.com/block/buzz/commit/0cc63fe3e607cf47ff32bc61e7eaca2f21e6cc23))
+- feat(canvas): add version history with atomic restore ([#6780](https://github.com/block/buzz/pull/6780)) ([`b6a26556ec904cdebe0fbc7e6c25b4ea2cf294d1`](https://github.com/block/buzz/commit/b6a26556ec904cdebe0fbc7e6c25b4ea2cf294d1))
+
+### Other repository changes
+
+- fix(ci): consume the published MinIO image ([#7870](https://github.com/block/buzz/pull/7870)) ([`797012ff01a6d499959b45ed2e56f7927c6a4d6b`](https://github.com/block/buzz/commit/797012ff01a6d499959b45ed2e56f7927c6a4d6b))
+- fix(mobile): converge sidebar managers on relay head with resume re-read ([#7806](https://github.com/block/buzz/pull/7806)) ([`309e34d80f8c1f8524df089674f951f524c50119`](https://github.com/block/buzz/commit/309e34d80f8c1f8524df089674f951f524c50119))
+- fix(ci): bootstrap the reusable MinIO image in GHCR ([#7869](https://github.com/block/buzz/pull/7869)) ([`99c2acf90cfbb1cb2d3a8bd900c0ec1642e20540`](https://github.com/block/buzz/commit/99c2acf90cfbb1cb2d3a8bd900c0ec1642e20540))
+- fix(hooks): surface nextest failures and stale pnpm deps in pre-push ([#7850](https://github.com/block/buzz/pull/7850)) ([`611faf7511c2f7ba564437daea18987db83fd82b`](https://github.com/block/buzz/commit/611faf7511c2f7ba564437daea18987db83fd82b))
+- feat(acp): run one prepared task from a file or stdin ([#7851](https://github.com/block/buzz/pull/7851)) ([`ea1e97e65f816a1f4d92f2da6e3498eb90f5d361`](https://github.com/block/buzz/commit/ea1e97e65f816a1f4d92f2da6e3498eb90f5d361))
+- Fix mobile heart and warning emoji with native font fallback ([#7842](https://github.com/block/buzz/pull/7842)) ([`9462d8884a78147cf277988acb254af81f3df7f9`](https://github.com/block/buzz/commit/9462d8884a78147cf277988acb254af81f3df7f9))
+- Use worker snapshots for relay storage metrics ([#7845](https://github.com/block/buzz/pull/7845)) ([`4142d2b84e1c3230fbe6c4b2d1e994721c409092`](https://github.com/block/buzz/commit/4142d2b84e1c3230fbe6c4b2d1e994721c409092))
+- fix(hooks): strip repo-local git env from pre-push test lanes ([#7841](https://github.com/block/buzz/pull/7841)) ([`3b2e50b15c6afba3ff3b8fbe1bdf0a7a69d29f7b`](https://github.com/block/buzz/commit/3b2e50b15c6afba3ff3b8fbe1bdf0a7a69d29f7b))
+- fix(mobile-infra): render push grant lifetimes as decimal in chart 0.3.2 ([#7820](https://github.com/block/buzz/pull/7820)) ([`0ef7a2222ef4e9b221f310ac60ca6a535d9c840d`](https://github.com/block/buzz/commit/0ef7a2222ef4e9b221f310ac60ca6a535d9c840d))
+
+[Compare desktop-v0.5.24...desktop-v0.5.25](https://github.com/block/buzz/compare/desktop-v0.5.24...desktop-v0.5.25)
+
 ## v0.5.24
 
 ### Desktop and shared changes

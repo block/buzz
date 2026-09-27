@@ -14,6 +14,7 @@ type CatalogAgentProjection = {
   /** Optional public description (validated server-side; max 280 chars). */
   description: string | null;
   systemPrompt: string;
+  acpCommand?: string | null;
   runtime: string | null;
   model: string | null;
   provider: string | null;
@@ -75,6 +76,7 @@ function publicationToPersona(
     avatarUrl: publication.agent.avatarUrl,
     description: publication.agent.description ?? null,
     systemPrompt: publication.agent.systemPrompt,
+    acpCommand: publication.agent.acpCommand ?? "buzz-acp",
     runtime: publication.agent.runtime,
     model: publication.agent.model,
     provider: publication.agent.provider,

@@ -545,6 +545,19 @@ export async function signRelayEvent(input: {
   content: string;
   createdAt?: number;
   tags: string[][];
+  /**
+   * When true, the Rust signer calls `EventBuilder::allow_self_tagging()` so
+   * that `p` tags whose value equals the signing key are NOT stripped.
+   *
+   * nostr 0.44.x strips self-`p` tags by default (see `EventBuilder::
+   * build_with_ctx` in the vendored crate). Set this flag ONLY for report
+   * events (kind:1984) where the reporter and the reported author are the
+   * same person — otherwise the relay rejects with "must include a p tag".
+   *
+   * Default: false (matches the historical behaviour for all other event
+   * kinds where stripping self-tags is correct).
+   */
+  allowSelfTagging?: boolean;
 }): Promise<RelayEvent> {
   const eventJson = await invokeTauri<string>("sign_event", input);
   return JSON.parse(eventJson) as RelayEvent;

@@ -1,5 +1,10 @@
 # buzz-acp
 
+For one prepared local task, use **`buzz-acp run --task <path|->`**. See
+[Local task runner and version-1 task contract](TASKS.md). With no command,
+`buzz-acp` remains the conversational service.
+
+
 ACP harness that connects AI agents to Buzz. The harness listens for @mentions on the relay, prompts your agent, and the agent replies using the Buzz CLI.
 
 ```

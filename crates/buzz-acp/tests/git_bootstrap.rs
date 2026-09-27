@@ -8,6 +8,15 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn harness_native_git_and_startup_shutdown_cleanup() {
+    check_native_git_and_startup_shutdown_cleanup(false);
+}
+
+#[test]
+fn task_native_git_and_startup_shutdown_cleanup() {
+    check_native_git_and_startup_shutdown_cleanup(true);
+}
+
+fn check_native_git_and_startup_shutdown_cleanup(task: bool) {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
     let adapter = workspace.join("adapter");
@@ -41,7 +50,25 @@ exec sleep 60
     std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
     let keys = nostr::Keys::generate();
     let log = std::fs::File::create(workspace.join("harness.log")).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_buzz-acp"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_buzz-acp"));
+    if task {
+        let path = workspace.join("task.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version": 1, "taskId": "git-probe", "agentPubkey": keys.public_key().to_hex(),
+                "prompt": "probe", "maxDurationMs": 30000
+            })
+            .to_string(),
+        )
+        .unwrap();
+        command
+            .arg("run")
+            .arg("--task")
+            .arg(path)
+            .arg("--no-memory");
+    }
+    let mut child = command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .args([
@@ -110,7 +137,11 @@ exec sleep 60
     let status = child.wait().unwrap();
     let logs = std::fs::read_to_string(workspace.join("harness.log")).unwrap();
     assert!(workspace.join("done").exists(), "probe failed: {logs}");
-    assert!(status.success(), "startup shutdown failed: {logs}");
+    assert_eq!(
+        status.code(),
+        Some(if task { 143 } else { 0 }),
+        "startup shutdown failed: {logs}"
+    );
     let identity = std::fs::read_to_string(workspace.join("identity")).unwrap();
     assert_eq!(
         identity,
@@ -148,11 +179,35 @@ exec sleep 60
 
 #[test]
 fn keyfile_removed_after_adapter_failure() {
+    check_keyfile_removed_after_adapter_failure(false);
+}
+
+#[test]
+fn task_keyfile_removed_after_adapter_failure() {
+    check_keyfile_removed_after_adapter_failure(true);
+}
+
+fn check_keyfile_removed_after_adapter_failure(task: bool) {
     let temp = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_buzz-acp"))
+    let keys = nostr::Keys::generate();
+    let input = tempfile::NamedTempFile::new().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_buzz-acp"));
+    if task {
+        std::fs::write(
+            input.path(),
+            serde_json::json!({
+                "version": 1, "taskId": "failure", "agentPubkey": keys.public_key().to_hex(),
+                "prompt": "probe", "maxDurationMs": 10000
+            })
+            .to_string(),
+        )
+        .unwrap();
+        command.arg("run").arg("--task").arg(input.path());
+    }
+    let output = command
         .args([
             "--private-key",
-            &nostr::Keys::generate().secret_key().to_secret_hex(),
+            &keys.secret_key().to_secret_hex(),
             "--relay-url",
             "ws://localhost:1",
             "--agent-command",
