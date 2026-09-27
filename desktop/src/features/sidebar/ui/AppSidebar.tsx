@@ -11,6 +11,8 @@ import {
   type ChannelSection,
 } from "@/features/sidebar/lib/useChannelSections";
 import { useActiveWorkingChannelsById } from "@/features/sidebar/lib/useActiveWorkingChannelsById";
+import { useThreadStars } from "@/features/sidebar/lib/useThreadStars";
+import { SidebarStarredThreadsSection } from "@/features/sidebar/ui/SidebarStarredThreadsSection";
 import { useDmSidebarMetadata } from "@/features/sidebar/useDmSidebarMetadata";
 import { sortDmChannelsForSidebar } from "@/features/sidebar/lib/dmSidebarSort";
 import {
@@ -148,6 +150,7 @@ export function AppSidebar({
   onUnstarChannel,
 }: AppSidebarProps) {
   const activeWorkingByChannelId = useActiveWorkingChannelsById();
+  const { starredThreads, unstarThread } = useThreadStars(currentPubkey);
   const { status: updateStatus } = useUpdaterContext();
   const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
   const { open: sidebarOpen, openMobile } = useSidebar();
@@ -243,6 +246,7 @@ export function AppSidebar({
     Record<CollapsibleSidebarGroup, boolean>
   >({
     starred: false,
+    starredThreads: false,
     channels: false,
     forums: false,
     directMessages: false,
@@ -627,6 +631,14 @@ export function AppSidebar({
                       onLeaveChannel={requestLeaveChannel}
                     />
                   ) : null}
+                  <SidebarStarredThreadsSection
+                    isCollapsed={collapsedGroups.starredThreads}
+                    items={starredThreads}
+                    onToggleCollapsed={() =>
+                      toggleCollapsedGroup("starredThreads")
+                    }
+                    onUnstarThread={unstarThread}
+                  />
                   <SidebarDndContext
                     channels={channels}
                     sections={channelSections}

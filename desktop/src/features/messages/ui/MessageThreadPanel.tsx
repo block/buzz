@@ -6,6 +6,7 @@ import { ConversationInfoButton } from "@/features/channels/ui/ConversationInfoB
 import { ConversationPopoutMenu } from "@/features/popout/ui/ConversationPopoutMenu";
 import { ConversationPlaygroundPinsMenu } from "@/features/playground/ui/ConversationPlaygroundPinsMenu";
 import { TermSessionHandoffPopover } from "@/features/term-session/ui/TermSessionHandoffPopover";
+import { ThreadStarButton } from "@/features/messages/ui/ThreadStarButton";
 
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
 import {
@@ -925,6 +926,15 @@ export function MessageThreadPanel({
               headerTrailing={
                 channelId ? (
                   <>
+                    {threadHeadId ? (
+                      <ThreadStarButton
+                        channelId={channelId}
+                        channelName={channelName}
+                        currentPubkey={currentPubkey}
+                        rootBody={threadHead?.body ?? ""}
+                        rootId={threadHeadId}
+                      />
+                    ) : null}
                     <ConversationInfoButton
                       channelId={channelId}
                       testId="thread-info-button"
@@ -938,9 +948,7 @@ export function MessageThreadPanel({
                     {threadHeadId ? (
                       <TermSessionHandoffPopover
                         channelId={channelId}
-                        channelMemberPubkeys={
-                          channel?.memberPubkeys ?? []
-                        }
+                        channelMemberPubkeys={channel?.memberPubkeys ?? []}
                         onSend={onSend}
                         threadId={threadHeadId}
                       />

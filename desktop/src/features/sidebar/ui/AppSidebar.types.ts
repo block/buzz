@@ -15,6 +15,7 @@ import type {
 
 export type CollapsibleSidebarGroup =
   | "starred"
+  | "starredThreads"
   | "channels"
   | "forums"
   | "directMessages";
