@@ -173,8 +173,11 @@ export function useBestie() {
       runtimesQuery.isLoading,
     isOpening: resolveMutation.isPending || runtimeAction.isPending,
     openConversation,
+    ownerPubkey,
     presenceStatus,
+    relayUrl,
     resolveConversation,
     runtime,
+    scope,
   };
 }

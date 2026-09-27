@@ -37,6 +37,10 @@ export function ProtectedBestieSidebarEntry() {
   return null;
 }
 
+export function ProtectedBestieProfileTrigger() {
+  return null;
+}
+
 export function useProtectedBestiePubkey(
   _agents: ManagedAgent[],
 ): string | null {

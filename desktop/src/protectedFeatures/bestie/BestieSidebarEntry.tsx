@@ -1,16 +1,24 @@
-import { Plus } from "lucide-react";
+import { Users } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { parkPlaygroundHost } from "@/features/playground/lib/sessions";
+import { leaveLeftNavBuzzTerm } from "@/features/terminal/terminalPanelStore";
 import { SidebarMenuButton, SidebarMenuItem } from "@/shared/ui/sidebar";
-import { BestieAgentLockup } from "./BestiePopover";
+import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
 import { useBestie } from "./useBestie";
 
 export function BestieSidebarEntry() {
   const bestie = useBestie();
   const { goAgents } = useAppNavigation();
+  // Nav label stays product name "Bestie"; agent identity lives in the footer.
+  const label = "Bestie";
 
   const handleClick = () => {
+    // Same exclusive-surface handoff as pinned websites / primary nav rows:
+    // leave left-nav Buzz Term and park playground before navigating.
+    parkPlaygroundHost();
+    leaveLeftNavBuzzTerm();
     if (!bestie.assignedAgent) {
       void goAgents();
       return;
@@ -29,21 +37,11 @@ export function BestieSidebarEntry() {
       <SidebarMenuButton
         disabled={bestie.isOpening}
         onClick={handleClick}
-        tooltip="Bestie"
+        tooltip={label}
         type="button"
       >
-        {bestie.assignedAgent ? (
-          <BestieAgentLockup
-            agent={bestie.assignedAgent}
-            compact
-            presenceStatus={bestie.presenceStatus ?? "offline"}
-          />
-        ) : (
-          <>
-            <Plus className="h-4 w-4" />
-            <span>Bestie</span>
-          </>
-        )}
+        <Users className="h-4 w-4" />
+        <SidebarMenuLabel>{label}</SidebarMenuLabel>
       </SidebarMenuButton>
     </SidebarMenuItem>
   );

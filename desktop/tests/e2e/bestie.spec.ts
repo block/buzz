@@ -99,7 +99,12 @@ test("assigns from an agent profile, reopens, drags, and offers the message acti
     floatingAvatar.getByTestId("bestie-trigger-avatar-image"),
   ).toHaveAttribute("draggable", "false");
   const sidebarBestie = page.getByTestId("bestie-sidebar-entry");
-  await expect(sidebarBestie).toContainText("Mochi");
+  await expect(sidebarBestie).toContainText("Bestie");
+  await expect(sidebarBestie).not.toContainText("Mochi");
+  const profileTrigger = page.getByTestId("bestie-profile-trigger");
+  await expect(
+    profileTrigger.getByTestId("bestie-profile-agent-name"),
+  ).toHaveText("Mochi");
   await expect(
     page.getByTestId("dm-list").getByTestId("channel-alice-tyler"),
   ).toHaveCount(0);

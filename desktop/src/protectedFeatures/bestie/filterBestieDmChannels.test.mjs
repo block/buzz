@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { filterBestieDmChannels } from "./filterBestieDmChannels.ts";
+import {
+  filterBestieDmChannels,
+  findBestieDmChannel,
+} from "./filterBestieDmChannels.ts";
 
 const SELF = "AA";
 const BESTIE = "BB";
@@ -48,4 +51,15 @@ test("preserves the DM list until identity and assignment are available", () => 
 
   assert.equal(filterBestieDmChannels(channels, undefined, BESTIE), channels);
   assert.equal(filterBestieDmChannels(channels, SELF, null), channels);
+});
+
+test("findBestieDmChannel returns the pair DM for instant popover hydrate", () => {
+  const bestieDm = makeDm("bestie", [BESTIE, SELF]);
+  const otherDm = makeDm("other", [SELF, OTHER]);
+  assert.equal(
+    findBestieDmChannel([otherDm, bestieDm], SELF, BESTIE)?.id,
+    "bestie",
+  );
+  assert.equal(findBestieDmChannel([otherDm], SELF, BESTIE), null);
+  assert.equal(findBestieDmChannel([bestieDm], undefined, BESTIE), null);
 });

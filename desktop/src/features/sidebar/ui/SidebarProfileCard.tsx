@@ -18,6 +18,7 @@ import { useMyRelayMembershipLookupQuery } from "@/features/community-members/ho
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import type { PresenceStatus, Profile, UserStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { ProtectedBestieProfileTrigger } from "@protected-feature-components";
 
 type SidebarProfileCardProps = {
   activeCommunity: Community | null;
@@ -241,6 +242,8 @@ export function SidebarProfileCard({
             <div className="relative mt-0.5">{readonlyCommunityLabel}</div>
           )}
         </div>
+
+        <ProtectedBestieProfileTrigger />
       </div>
     </div>
   );

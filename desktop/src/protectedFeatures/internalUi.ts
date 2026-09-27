@@ -12,6 +12,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import type { Channel, ManagedAgent } from "@/shared/api/types";
 import { useFeatureEnabled } from "@/shared/features";
 import { BestieGlobalOverlay } from "./bestie/BestieGlobalOverlay";
+import { BestieProfileTrigger } from "./bestie/BestieProfileTrigger";
 import { BestieCardBadge } from "./bestie/BestieCardBadge";
 import { BestieMessageAction } from "./bestie/BestieMessageAction";
 import { BestieProfileAction } from "./bestie/BestieProfileSection";
@@ -74,6 +75,11 @@ export function ProtectedBestieCardBadge(props: {
 export function ProtectedBestieSidebarEntry() {
   const enabled = useFeatureEnabled("bestie");
   return enabled ? createElement(BestieSidebarEntry) : null;
+}
+
+export function ProtectedBestieProfileTrigger() {
+  const enabled = useFeatureEnabled("bestie");
+  return enabled ? createElement(BestieProfileTrigger) : null;
 }
 
 export function useProtectedBestiePubkey(agents: ManagedAgent[]) {
