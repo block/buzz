@@ -66,7 +66,7 @@ impl DevMcp {
 
     #[tool(
         name = "browser_observe_poll",
-        description = "Poll Observe events for a Buzz in-app browser you hold Observe or Drive on. Console + network (headers/status/bodies) flow under Observe alone — Drive is not required. Event kinds include: grant, nav, console, network, snapshot, tab_opened, tab_switched, drive, drive_error, drive_started. Prefer surface_id (stable across popout/detach); webview_label also works. Omit both when you have exactly one grant. Pass after_id from the last event id to advance. Requires BUZZ_AGENT_PUBKEY. Returns JSON {grant, webviewLabel, surfaceId, runbook?, events}. runbook carries agentBrief + active procedure titles/summaries (not full steps). Use browser_runbook_get / browser_runbook_propose. Not OpenClaw Chromium."
+        description = "Poll Observe events for a Buzz in-app browser you hold Observe or Drive on. Console + network (headers/status/bodies) flow under Observe alone — Drive is not required. Event kinds include: grant, nav, console, network, snapshot, tab_opened, tab_switched, drive, drive_error, drive_started. Prefer surface_id (stable across popout/detach); webview_label also works. Omit both when you have exactly one grant. Pass after_id from the last event id to advance. Requires BUZZ_AGENT_PUBKEY. Returns JSON {grant, webviewLabel, surfaceId, webviewHidden, parked, driveContext, runbook?, events}. driveContext lists live surfaceId + browser_* tools. webviewHidden/parked when WKWebView is hide()d. Use browser_runbook_get / browser_runbook_propose (auto-activates unless persisted). Not OpenClaw Chromium."
     )]
     async fn browser_observe_poll(
         &self,
@@ -112,7 +112,7 @@ impl DevMcp {
 
     #[tool(
         name = "browser_drive",
-        description = "Drive a Buzz WKWebView you hold in Drive mode. Prefer surface_id. Protocol: one goal/one surface; snapshot then one click/type/key; waitFor after nav/URL change; do not screenshot every step; on no element retry once then stop. `action`: { kind, id?, url?, x?, y?, text?, selector?, ref?, dx?, dy?, key?, urlContains?, timeoutMs? }. kind=navigate|click|type|scroll|hover|key|waitFor. click/hover accept x,y OR CSS selector OR snapshot ref (e0). Optional `actions` batch for atomic sequences only. Default wait ~10s (queue_only skips). Returns {ok, results, url, ids, complete, webviewLabel, surfaceId}. Requires BUZZ_AGENT_PUBKEY."
+        description = "Drive a Buzz WKWebView you hold in Drive mode. Prefer surface_id. Protocol: one goal/one surface; snapshot then one click/type/key; waitFor after nav/URL change; prefer browser_fill_field for forms; do not screenshot every step; on no element retry once then stop. `action`: { kind, id?, url?, x?, y?, text?, selector?, ref?, dx?, dy?, key?, urlContains?, timeoutMs?, clear? }. kind=navigate|click|type|fill|scroll|hover|key|waitFor. Optional include_snapshot=true returns inline snapshot with results. Returns {ok, results, url, ids, complete, elapsedMs, webviewLabel, surfaceId, snapshot?}. Requires BUZZ_AGENT_PUBKEY."
     )]
     async fn browser_drive(
         &self,
@@ -122,8 +122,19 @@ impl DevMcp {
     }
 
     #[tool(
+        name = "browser_fill_field",
+        description = "One-shot Drive fill: click/focus a field, type text, verify the value. Prefer over separate browser_drive click+type. Prefer surface_id. Target with selector, snapshot ref (e0), or x,y. clear defaults true. Optional include_snapshot. Requires Drive grant + BUZZ_AGENT_PUBKEY. Returns same shape as browser_drive including elapsedMs."
+    )]
+    async fn browser_fill_field(
+        &self,
+        Parameters(p): Parameters<browser_agent::FillFieldParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        browser_agent::fill_field(p)
+    }
+
+    #[tool(
         name = "browser_snapshot",
-        description = "Request a DOM/a11y snapshot for a granted Buzz browser (Observe or Drive). Prefer surface_id. Primary perception for Drive — prefer this over screenshot every step. Returns grant + url/title immediately; Desktop fills kind=snapshot via eval (interactives include ref e0.. + center). Optional screenshot=true for visual proof only. Poll browser_observe_poll for the snapshot. Requires BUZZ_AGENT_PUBKEY."
+        description = "Request a DOM/a11y snapshot for a granted Buzz browser and wait for the inline payload (no stub+poll). Prefer surface_id. Returns {ok, snapshot, url, title, elapsedMs, grant, surfaceId}. Interactives include ref e0.. + center. Optional screenshot=true. Requires BUZZ_AGENT_PUBKEY."
     )]
     async fn browser_snapshot(
         &self,
@@ -145,7 +156,7 @@ impl DevMcp {
 
     #[tool(
         name = "browser_runbook_propose",
-        description = "Propose a new how-to procedure for the site runbook on a browser you hold Observe or Drive on. Prefer surface_id. Writes a pending entry (title + steps markdown). A human must Accept in Desktop before it becomes active — never auto-activates. Requires BUZZ_AGENT_PUBKEY."
+        description = "Propose/upsert a how-to procedure on a browser you hold Observe or Drive on. Prefer surface_id. Auto-activates agent-authored procedures. Rejected if a human-persisted procedure has the same title. Agent brief is human-owned (do not overwrite). Requires BUZZ_AGENT_PUBKEY."
     )]
     async fn browser_runbook_propose(
         &self,

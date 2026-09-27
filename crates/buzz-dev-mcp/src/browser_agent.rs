@@ -356,13 +356,39 @@ pub fn observe_poll(p: ObservePollParams) -> Result<CallToolResult, ErrorData> {
         }
     }
     let runbook = read_json(&dir.join("runbook.json"));
+    let webview_hidden = grant
+        .get("webviewHidden")
+        .and_then(|v| v.as_bool())
+        .or_else(|| grant.get("parked").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
     let body = json!({
         "grant": grant,
         "webviewLabel": label,
         "surfaceId": grant_surface_id(&grant),
+        "webviewHidden": webview_hidden,
+        "parked": webview_hidden,
         "runbook": runbook,
         "events": events,
-        "runbookNote": "runbook.agentBrief + active procedure titles/summaries + driveProtocol. Prefer surfaceId; snapshot then one act; waitFor after nav; click by selector/ref or snapshot center; no screenshot every step; on no element/no snapshot retry once then stop. Use browser_runbook_get for full steps; browser_runbook_propose to add a pending procedure (human Accept required)."
+        "driveContext": {
+            "surfaceId": grant_surface_id(&grant),
+            "webviewLabel": label,
+            "webviewHidden": webview_hidden,
+            "parked": webview_hidden,
+            "mode": grant.get("mode"),
+            "preferSurfaceId": true,
+            "tools": [
+                "browser_observe_poll",
+                "browser_agent_grants",
+                "browser_tabs",
+                "browser_switch_tab",
+                "browser_snapshot",
+                "browser_drive",
+                "browser_fill_field",
+                "browser_runbook_get",
+                "browser_runbook_propose"
+            ]
+        },
+        "runbookNote": "runbook.agentBrief + active procedures + driveProtocol. Prefer surfaceId. browser_snapshot waits inline. browser_fill_field for forms. browser_runbook_propose auto-activates unless the title is human-persisted. Agent brief is human-owned."
     });
     Ok(CallToolResult::success(vec![Content::text(
         body.to_string(),
@@ -536,11 +562,11 @@ pub fn switch_tab(p: SwitchTabParams) -> Result<CallToolResult, ErrorData> {
 }
 
 /// Drive action shape. Field is `kind` (not `type`).
-/// Kinds: navigate | click | type | scroll | hover | key | waitFor.
+/// Kinds: navigate | click | type | fill | scroll | hover | key | waitFor.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DriveActionParam {
-    /// Action kind: navigate | click | type | scroll | hover | key | waitFor
+    /// Action kind: navigate | click | type | fill | scroll | hover | key | waitFor
     pub kind: String,
     #[serde(default)]
     #[schemars(description = "Optional id echoed in drive/drive_error events")]
@@ -570,6 +596,9 @@ pub struct DriveActionParam {
     pub url_contains: Option<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// For kind=fill: clear existing value before typing (default true).
+    #[serde(default)]
+    pub clear: Option<bool>,
 }
 
 const SUPPORTED_KEYS: &[&str] = &[
@@ -607,6 +636,27 @@ fn validate_drive_action(action: &DriveActionParam) -> Result<String, String> {
         "type" => {
             if action.text.is_none() {
                 return Err("type requires text".into());
+            }
+        }
+        "fill" => {
+            if action.text.is_none() {
+                return Err("fill requires text".into());
+            }
+            let has_xy = action.x.is_some() && action.y.is_some();
+            let has_sel = action
+                .selector
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            let has_ref = action
+                .ref_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            if !has_xy && !has_sel && !has_ref {
+                return Err("fill requires x,y or selector or ref".into());
             }
         }
         "scroll" => {}
@@ -697,7 +747,7 @@ pub struct DriveParams {
     pub surface_id: Option<String>,
     /// Single Drive action object, or a JSON string of that object.
     /// Shape: { kind, id?, url?, x?, y?, text?, selector?, ref?, dx?, dy?, key?, urlContains?, timeoutMs? }.
-    /// Use `kind` (not `type`): navigate | click | type | scroll | hover | key | waitFor.
+    /// Use `kind` (not `type`): navigate | click | type | fill | scroll | hover | key | waitFor.
     #[schemars(description = "DriveAction object or JSON string. Field is kind (not type).")]
     pub action: Value,
     /// Optional batch of actions. Validated then queued; by default waits for per-step results.
@@ -709,6 +759,9 @@ pub struct DriveParams {
     /// Max ms to wait for drive/drive_error results (default 10000). Ignored if queue_only.
     #[serde(default)]
     pub wait_timeout_ms: Option<u64>,
+    /// When true, after Drive results also wait for an inline DOM snapshot.
+    #[serde(default)]
+    pub include_snapshot: Option<bool>,
 }
 
 fn queue_action(dir: &Path, pubkey: &str, mut action: DriveActionParam) -> Result<String, ErrorData> {
@@ -742,6 +795,7 @@ fn queue_action(dir: &Path, pubkey: &str, mut action: DriveActionParam) -> Resul
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
     file.flush()
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    let _ = fs::write(dir.join("drive-wake"), format!("{}\n", now_ms()));
     Ok(id)
 }
 
@@ -786,7 +840,10 @@ fn drive_wait_response(
     queue_only: bool,
     wait_timeout_ms: u64,
     poll_ms: u64,
+    include_snapshot: bool,
+    pubkey: &str,
 ) -> Result<CallToolResult, ErrorData> {
+    let started = std::time::Instant::now();
     if queue_only {
         let body = if batch {
             json!({
@@ -797,6 +854,7 @@ fn drive_wait_response(
                 "count": ids.len(),
                 "webviewLabel": label,
                 "surfaceId": grant_surface_id(grant),
+                "elapsedMs": started.elapsed().as_millis() as u64,
             })
         } else {
             json!({
@@ -805,6 +863,7 @@ fn drive_wait_response(
                 "id": ids.first(),
                 "webviewLabel": label,
                 "surfaceId": grant_surface_id(grant),
+                "elapsedMs": started.elapsed().as_millis() as u64,
             })
         };
         return Ok(CallToolResult::success(vec![Content::text(body.to_string())]));
@@ -836,6 +895,13 @@ fn drive_wait_response(
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
         });
+    let mut snapshot = Value::Null;
+    if include_snapshot {
+        let after = request_snapshot(dir, pubkey, false);
+        if let Some(ev) = wait_for_snapshot(dir, after, 8_000, 40) {
+            snapshot = ev.get("payload").cloned().unwrap_or(Value::Null);
+        }
+    }
     let body = json!({
         "ok": all_ok,
         "queued": true,
@@ -847,6 +913,8 @@ fn drive_wait_response(
         "url": last_url,
         "webviewLabel": label,
         "surfaceId": grant_surface_id(grant),
+        "elapsedMs": started.elapsed().as_millis() as u64,
+        "snapshot": snapshot,
     });
     Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
 }
@@ -870,6 +938,7 @@ fn drive_with_poll(p: DriveParams, poll_ms: u64) -> Result<CallToolResult, Error
     )?;
     let queue_only = p.queue_only.unwrap_or(false);
     let wait_timeout_ms = p.wait_timeout_ms.unwrap_or(10_000).min(60_000);
+    let include_snapshot = p.include_snapshot.unwrap_or(false);
 
     if let Some(batch) = p.actions.as_ref() {
         if batch.is_empty() {
@@ -903,6 +972,8 @@ fn drive_with_poll(p: DriveParams, poll_ms: u64) -> Result<CallToolResult, Error
             queue_only,
             wait_timeout_ms,
             poll_ms,
+            include_snapshot,
+            &pubkey,
         );
     }
 
@@ -919,7 +990,70 @@ fn drive_with_poll(p: DriveParams, poll_ms: u64) -> Result<CallToolResult, Error
         queue_only,
         wait_timeout_ms,
         poll_ms,
+        include_snapshot,
+        &pubkey,
     )
+}
+
+
+fn event_kind(ev: &Value) -> Option<&str> {
+    ev.get("kind").and_then(|v| v.as_str())
+}
+
+fn last_event_id(dir: &Path) -> u64 {
+    let Ok(file) = fs::File::open(dir.join("events.jsonl")) else {
+        return 0;
+    };
+    let mut max = 0u64;
+    for line in BufReader::new(file).lines().flatten() {
+        if let Ok(ev) = serde_json::from_str::<Value>(&line) {
+            let id = ev.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            if id > max {
+                max = id;
+            }
+        }
+    }
+    max
+}
+
+fn wait_for_snapshot(
+    dir: &Path,
+    after_id: u64,
+    timeout_ms: u64,
+    poll_ms: u64,
+) -> Option<Value> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(file) = fs::File::open(dir.join("events.jsonl")) {
+            for line in BufReader::new(file).lines().flatten() {
+                if let Ok(ev) = serde_json::from_str::<Value>(&line) {
+                    let id = ev.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if id > after_id && event_kind(&ev) == Some("snapshot") {
+                        return Some(ev);
+                    }
+                }
+            }
+        }
+        if started.elapsed().as_millis() as u64 >= timeout_ms {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(10)));
+    }
+}
+
+fn request_snapshot(dir: &Path, pubkey: &str, screenshot: bool) -> u64 {
+    let after = last_event_id(dir);
+    let _ = fs::write(
+        dir.join("snapshot-request.json"),
+        json!({
+            "agentPubkey": pubkey,
+            "screenshot": screenshot,
+            "atMs": now_ms(),
+        })
+        .to_string(),
+    );
+    let _ = fs::write(dir.join("drive-wake"), format!("{}\n", now_ms()));
+    after
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -935,9 +1069,7 @@ pub struct SnapshotParams {
     pub screenshot: Option<bool>,
 }
 
-/// Queue a snapshot request into the observe stream request file; Desktop chrome / host
-/// fills `events.jsonl` with a `snapshot` event when processed. Also returns grant + last
-/// known nav from events when available (file-plane; no live WKWebView from MCP).
+/// Request a DOM snapshot and wait for Desktop `kind=snapshot` (inline payload).
 pub fn snapshot(p: SnapshotParams) -> Result<CallToolResult, ErrorData> {
     let Some(pubkey) = caller_pubkey() else {
         return Err(ErrorData::invalid_params(
@@ -951,26 +1083,18 @@ pub fn snapshot(p: SnapshotParams) -> Result<CallToolResult, ErrorData> {
         p.surface_id.as_deref(),
     )?;
 
-    // Request file Desktop can honor (optional host path). Always return best-effort
-    // last nav from events.jsonl so the tool is useful without a live eval bridge.
     let want_shot = p.screenshot.unwrap_or(false);
-    let req_path = dir.join("snapshot-request.json");
-    let _ = fs::write(
-        &req_path,
-        json!({
-            "agentPubkey": pubkey,
-            "screenshot": want_shot,
-            "atMs": now_ms(),
-        })
-        .to_string(),
-    );
+    let started = std::time::Instant::now();
+    let after = request_snapshot(&dir, &pubkey, want_shot);
+    let timeout_ms = if want_shot { 12_000 } else { 8_000 };
+    let snap_ev = wait_for_snapshot(&dir, after, timeout_ms, 40);
 
     let mut last_url = Value::Null;
     let mut last_title = Value::Null;
     if let Ok(file) = fs::File::open(dir.join("events.jsonl")) {
         for line in BufReader::new(file).lines().flatten() {
             if let Ok(ev) = serde_json::from_str::<Value>(&line) {
-                if ev.get("kind").and_then(|v| v.as_str()) == Some("nav") {
+                if event_kind(&ev) == Some("nav") {
                     if let Some(payload) = ev.get("payload") {
                         if let Some(u) = payload.get("url") {
                             last_url = u.clone();
@@ -984,16 +1108,27 @@ pub fn snapshot(p: SnapshotParams) -> Result<CallToolResult, ErrorData> {
         }
     }
 
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let (ok, snapshot_payload) = match snap_ev {
+        Some(ev) => (true, ev.get("payload").cloned().unwrap_or(Value::Null)),
+        None => (
+            false,
+            json!({"ok": false, "error": "snapshot timeout — Desktop may be closed or grant webview missing"}),
+        ),
+    };
+
     Ok(CallToolResult::success(vec![Content::text(
         json!({
-            "ok": true,
+            "ok": ok,
             "webviewLabel": label,
             "surfaceId": grant_surface_id(&grant),
             "grant": grant,
             "url": last_url,
             "title": last_title,
             "screenshotRequested": want_shot,
-            "note": "Live DOM snapshot (viewport/focused/interactives) is applied by Desktop when it processes snapshot-request.json; poll browser_observe_poll for kind=snapshot."
+            "snapshot": snapshot_payload,
+            "elapsedMs": elapsed_ms,
+            "note": "Inline snapshot payload. Prefer surfaceId on next drive/fill."
         })
         .to_string(),
     )]))
@@ -1090,6 +1225,7 @@ mod tests {
                 actions: None,
                 queue_only: Some(true),
                 wait_timeout_ms: None,
+                include_snapshot: None,
             })
             .unwrap_err()
         });
@@ -1123,6 +1259,7 @@ mod tests {
                 actions: None,
                 queue_only: Some(true),
                 wait_timeout_ms: None,
+                include_snapshot: None,
             })
             .unwrap()
         });
@@ -1155,6 +1292,7 @@ mod tests {
                 actions: None,
                 queue_only: Some(true),
                 wait_timeout_ms: None,
+                include_snapshot: None,
             })
             .unwrap()
         });
@@ -1187,6 +1325,7 @@ mod tests {
                 ]),
                 queue_only: Some(true),
                 wait_timeout_ms: None,
+                include_snapshot: None,
             })
             .unwrap_err();
             assert!(format!("{err:?}").contains("actions[1]"));
@@ -1203,6 +1342,7 @@ mod tests {
                 ]),
                 queue_only: Some(true),
                 wait_timeout_ms: None,
+                include_snapshot: None,
             })
             .unwrap();
         });
@@ -1289,6 +1429,7 @@ mod tests {
                     actions: None,
                     queue_only: Some(false),
                     wait_timeout_ms: Some(500),
+                    include_snapshot: None,
                 },
                 5,
             )
@@ -1346,6 +1487,7 @@ mod tests {
                 actions: None,
                 queue_only: Some(true),
                 wait_timeout_ms: Some(10),
+                include_snapshot: None,
             })
             .unwrap()
         });
@@ -1465,7 +1607,8 @@ pub struct RunbookProposeParams {
     pub steps: String,
 }
 
-/// Queue a pending procedure for human Accept in Desktop (never auto-activates).
+/// Queue an agent-authored procedure. Desktop auto-activates it unless a
+/// human-persisted procedure with the same title blocks the write.
 pub fn runbook_propose(p: RunbookProposeParams) -> Result<CallToolResult, ErrorData> {
     let Some(pubkey) = caller_pubkey() else {
         return Err(ErrorData::invalid_params(
@@ -1477,20 +1620,60 @@ pub fn runbook_propose(p: RunbookProposeParams) -> Result<CallToolResult, ErrorD
     if title.is_empty() {
         return Err(ErrorData::invalid_params("title is required", None));
     }
+    let steps = p.steps;
+    if steps.trim().is_empty() {
+        return Err(ErrorData::invalid_params(
+            "steps markdown is required for browser_runbook_propose",
+            None,
+        ));
+    }
     let (dir, grant, label) = resolve_grant_target(
         &pubkey,
         &p.webview_label,
         p.surface_id.as_deref(),
     )?;
+    // Reject early when mirrored full runbook marks this title as persisted.
+    if let Some(full) = read_json(&dir.join("runbook-full.json")) {
+        if let Some(procs) = full.get("procedures").and_then(|v| v.as_array()) {
+            let title_l = title.to_ascii_lowercase();
+            for proc in procs {
+                let persisted = proc
+                    .get("persisted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !persisted {
+                    continue;
+                }
+                let existing = proc
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                if existing == title_l {
+                    return Err(ErrorData::invalid_params(
+                        format!(
+                            "procedure {title:?} is persisted (human lock); agents cannot modify it"
+                        ),
+                        None,
+                    ));
+                }
+            }
+        }
+    }
     let _ = fs::create_dir_all(&dir);
     let path = dir.join("runbook-propose.jsonl");
     let line = json!({
         "title": title,
-        "steps": p.steps,
+        "steps": steps,
+        "status": "active",
+        "autoActivate": true,
         "sourceAgent": pubkey,
         "sourceChannel": grant.get("channelId").and_then(|v| v.as_str()),
+        "surfaceId": grant_surface_id(&grant),
         "atMs": now_ms(),
     });
+    let _guard = inbox_lock_acquire(&dir).map_err(|e| ErrorData::internal_error(e, None))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1498,15 +1681,240 @@ pub fn runbook_propose(p: RunbookProposeParams) -> Result<CallToolResult, ErrorD
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
     writeln!(file, "{line}")
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    file.flush()
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    drop(_guard);
+    let _ = fs::write(dir.join("drive-wake"), format!("{}
+", now_ms()));
+    let _ = fs::write(dir.join("runbook-propose-wake"), format!("{}
+", now_ms()));
     let body = json!({
         "ok": true,
         "queued": true,
+        "status": "active",
+        "autoActivate": true,
         "webviewLabel": label,
         "surfaceId": grant_surface_id(&grant),
         "title": title,
-        "note": "Pending until a human Accepts in Desktop Runbook UI. Does not auto-activate."
+        "note": "Desktop auto-activates agent procedures. Persisted (human-locked) titles are rejected. Agent brief is human-owned."
     });
     Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
+}
+
+
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FillFieldParams {
+    #[serde(default)]
+    pub webview_label: String,
+    #[serde(default)]
+    pub surface_id: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default, rename = "ref")]
+    #[schemars(description = "Snapshot interactive ref from browser_snapshot (e.g. e0)")]
+    pub ref_id: Option<String>,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    #[serde(default)]
+    pub clear: Option<bool>,
+    #[serde(default)]
+    pub queue_only: Option<bool>,
+    #[serde(default)]
+    pub wait_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub include_snapshot: Option<bool>,
+}
+
+/// One-shot click + type + verify for a form field.
+pub fn fill_field(p: FillFieldParams) -> Result<CallToolResult, ErrorData> {
+    let Some(pubkey) = caller_pubkey() else {
+        return Err(ErrorData::invalid_params(
+            "BUZZ_AGENT_PUBKEY required for browser_fill_field",
+            None,
+        ));
+    };
+    let (dir, grant, label) = require_drive_grant_resolved(
+        &pubkey,
+        &p.webview_label,
+        p.surface_id.as_deref(),
+    )?;
+    let action = DriveActionParam {
+        kind: "fill".into(),
+        id: None,
+        url: None,
+        x: p.x,
+        y: p.y,
+        text: Some(p.text),
+        selector: p.selector,
+        ref_id: p.ref_id,
+        dx: None,
+        dy: None,
+        key: None,
+        url_contains: None,
+        timeout_ms: None,
+        clear: p.clear,
+    };
+    validate_drive_action(&action).map_err(|e| ErrorData::invalid_params(e, None))?;
+    let id = queue_action(&dir, &pubkey, action)?;
+    let queue_only = p.queue_only.unwrap_or(false);
+    let wait_timeout_ms = p.wait_timeout_ms.unwrap_or(15_000).min(60_000);
+    let include_snapshot = p.include_snapshot.unwrap_or(false);
+    drive_wait_response(
+        &dir,
+        &label,
+        &grant,
+        &[id],
+        false,
+        queue_only,
+        wait_timeout_ms,
+        50,
+        include_snapshot,
+        &pubkey,
+    )
+}
+
+#[cfg(test)]
+mod fill_field_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn with_env<R>(dir: &Path, pubkey: &str, f: impl FnOnce() -> R) -> R {
+        TEST_AGENT_DIR.with(|c| *c.borrow_mut() = Some(dir.to_path_buf()));
+        TEST_PUBKEY.with(|c| *c.borrow_mut() = Some(pubkey.to_string()));
+        let out = f();
+        TEST_AGENT_DIR.with(|c| *c.borrow_mut() = None);
+        TEST_PUBKEY.with(|c| *c.borrow_mut() = None);
+        out
+    }
+
+    #[test]
+    fn fill_field_queues_fill_action() {
+        let tmp = tempdir().unwrap();
+        let pubkey = "aa".repeat(32);
+        let label = "playground-fill";
+        with_env(tmp.path(), &pubkey, || {
+            let gdir = tmp.path().join(label);
+            fs::create_dir_all(&gdir).unwrap();
+            fs::write(
+                gdir.join("grant.json"),
+                json!({
+                    "agentPubkey": pubkey,
+                    "mode": "drive",
+                    "webviewLabel": label,
+                    "surfaceId": "fill",
+                    "surface": "playground",
+                    "webviewHidden": true,
+                    "parked": true
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let result = fill_field(FillFieldParams {
+                webview_label: String::new(),
+                surface_id: Some("fill".into()),
+                text: "user@example.com".into(),
+                selector: Some("#email".into()),
+                ref_id: None,
+                x: None,
+                y: None,
+                clear: Some(true),
+                queue_only: Some(true),
+                wait_timeout_ms: None,
+                include_snapshot: None,
+            })
+            .expect("fill_field");
+            let text = format!("{result:?}");
+            assert!(text.contains("queued"), "{text}");
+            let inbox = fs::read_to_string(gdir.join("drive-inbox.jsonl")).unwrap();
+            assert!(inbox.contains("\"kind\":\"fill\""), "{inbox}");
+        });
+    }
+
+    #[test]
+    fn observe_poll_exposes_parked_and_drive_context() {
+        let tmp = tempdir().unwrap();
+        let pubkey = "bb".repeat(32);
+        let label = "playground-park";
+        with_env(tmp.path(), &pubkey, || {
+            let gdir = tmp.path().join(label);
+            fs::create_dir_all(&gdir).unwrap();
+            fs::write(
+                gdir.join("grant.json"),
+                json!({
+                    "agentPubkey": pubkey,
+                    "mode": "observe",
+                    "webviewLabel": label,
+                    "surfaceId": "park",
+                    "surface": "playground",
+                    "webviewHidden": true,
+                    "parked": true
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let result = observe_poll(ObservePollParams {
+                webview_label: String::new(),
+                surface_id: Some("park".into()),
+                after_id: None,
+                limit: None,
+            })
+            .expect("observe");
+            let text = format!("{result:?}");
+            assert!(text.contains("webviewHidden"), "{text}");
+            assert!(text.contains("driveContext"), "{text}");
+            assert!(text.contains("browser_fill_field"), "{text}");
+        });
+    }
+
+    #[test]
+    fn runbook_propose_rejects_persisted_title() {
+        let tmp = tempdir().unwrap();
+        let pubkey = "cc".repeat(32);
+        let label = "playground-lock";
+        with_env(tmp.path(), &pubkey, || {
+            let gdir = tmp.path().join(label);
+            fs::create_dir_all(&gdir).unwrap();
+            fs::write(
+                gdir.join("grant.json"),
+                json!({
+                    "agentPubkey": pubkey,
+                    "mode": "drive",
+                    "webviewLabel": label,
+                    "surfaceId": "lock",
+                    "surface": "playground"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            fs::write(
+                gdir.join("runbook-full.json"),
+                json!({
+                    "agentBrief": "human brief",
+                    "procedures": [{
+                        "id": "p1",
+                        "title": "SSO Login",
+                        "steps": "locked",
+                        "status": "active",
+                        "persisted": true
+                    }]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let err = runbook_propose(RunbookProposeParams {
+                webview_label: label.into(),
+                surface_id: None,
+                title: "SSO Login".into(),
+                steps: "hack".into(),
+            })
+            .unwrap_err();
+            assert!(format!("{err:?}").to_lowercase().contains("persisted"), "{err:?}");
+        });
+    }
 }
 
 #[cfg(test)]

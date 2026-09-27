@@ -35,6 +35,9 @@ pub struct DriveAction {
     pub url_contains: Option<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// For `kind: "fill"` — clear existing value before typing (default true).
+    #[serde(default)]
+    pub clear: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +94,27 @@ pub fn validate_action(action: &DriveAction) -> Result<String, String> {
         "type" => {
             if action.text.is_none() {
                 return Err("type requires text".into());
+            }
+        }
+        "fill" => {
+            if action.text.is_none() {
+                return Err("fill requires text".into());
+            }
+            let has_xy = action.x.is_some() && action.y.is_some();
+            let has_sel = action
+                .selector
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            let has_ref = action
+                .ref_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            if !has_xy && !has_sel && !has_ref {
+                return Err("fill requires x,y or selector or ref".into());
             }
         }
         "scroll" => {}
@@ -223,6 +247,40 @@ pub fn action_js(action: &DriveAction) -> Result<String, String> {
             };
             format!("a.typeText({text_js},{selector_js},{id_js})")
         }
+        "fill" => {
+            let text = action.text.as_deref().unwrap_or("");
+            let text_js = serde_json::to_string(text).map_err(|e| e.to_string())?;
+            let selector_js = match action
+                .selector
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(s) => serde_json::to_string(s).map_err(|e| e.to_string())?,
+                None => "null".into(),
+            };
+            let ref_js = match action
+                .ref_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(s) => serde_json::to_string(s).map_err(|e| e.to_string())?,
+                None => "null".into(),
+            };
+            let x_js = action
+                .x
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".into());
+            let y_js = action
+                .y
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".into());
+            let clear = action.clear.unwrap_or(true);
+            format!(
+                "a.fillField({text_js},{selector_js},{ref_js},{x_js},{y_js},{id_js},{clear})"
+            )
+        }
         "scroll" => {
             let dx = action.dx.unwrap_or(0.0);
             let dy = action.dy.unwrap_or(0.0);
@@ -329,6 +387,7 @@ mod tests {
             key: None,
             url_contains: None,
             timeout_ms: None,
+            clear: None,
         }
     }
 
@@ -409,5 +468,29 @@ mod tests {
     fn click_requires_target() {
         let a = base("click");
         assert!(validate_action(&a).unwrap_err().contains("x,y"));
+    }
+
+    #[test]
+    fn fill_js_includes_target_and_clear() {
+        let mut a = base("fill");
+        a.text = Some("hello".into());
+        a.selector = Some("#email".into());
+        let js = action_js(&a).unwrap();
+        assert!(
+            js.contains("fillField(\"hello\",\"#email\",null,null,null,\"t1\",true)"),
+            "{js}"
+        );
+    }
+
+    #[test]
+    fn fill_requires_text_and_target() {
+        let mut a = base("fill");
+        a.selector = Some("#x".into());
+        assert!(validate_action(&a).is_err());
+        a.text = Some("hi".into());
+        assert!(validate_action(&a).is_ok());
+        let mut b = base("fill");
+        b.text = Some("hi".into());
+        assert!(validate_action(&b).is_err());
     }
 }

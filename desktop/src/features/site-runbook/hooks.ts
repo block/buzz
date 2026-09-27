@@ -8,10 +8,11 @@ import {
   acceptProcedure,
   archiveProcedure,
   deleteProcedure,
-  proposeProcedure,
   rejectProcedure,
   setAgentBrief,
+  setProcedurePersisted,
   updateProcedure,
+  upsertAgentProcedure,
 } from "./lib/mutations";
 import { emptyRunbook, shapeRunbookInject } from "./lib/serialize";
 import {
@@ -58,6 +59,7 @@ export function useSiteRunbook(ref: SiteRunbookRef | null): {
     procedureId: string,
     patch: { title?: string; steps?: string },
   ) => void;
+  setPersisted: (procedureId: string, persisted: boolean) => void;
   addManual: (title: string, steps: string) => void;
   clear: () => void;
   inject: ReturnType<typeof shapeRunbookInject>;
@@ -84,13 +86,15 @@ export function useSiteRunbook(ref: SiteRunbookRef | null): {
     remove: (procedureId) => mutate(deleteProcedure(runbook, procedureId)),
     update: (procedureId, patch) =>
       mutate(updateProcedure(runbook, procedureId, patch)),
+    setPersisted: (procedureId, persisted) =>
+      mutate(setProcedurePersisted(runbook, procedureId, persisted)),
     addManual: (title, steps) => {
-      // Engineer-authored entries activate immediately.
-      const { runbook: withPending, procedure } = proposeProcedure(runbook, {
+      // Human-authored: auto-active, not persisted until they check Persist.
+      const { runbook: next } = upsertAgentProcedure(runbook, {
         title,
         steps,
       });
-      mutate(acceptProcedure(withPending, procedure.id));
+      mutate(next);
     },
     clear: () => {
       if (!ref) return;

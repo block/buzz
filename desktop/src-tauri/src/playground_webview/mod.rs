@@ -768,7 +768,7 @@ pub async fn playground_webview_show(
             webview.hide().map_err(|error| error.to_string())?;
         }
         if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
-            crate::browser_agent::set_webview_hidden(&state, &live_label, !show);
+            crate::browser_agent::set_webview_hidden(&app, &state, &live_label, !show);
         }
         crate::browser_agent::ensure_instrumentation_for_label(&app, &live_label);
         emit_nav(&app, nav.clone(), &live_label);
@@ -847,7 +847,7 @@ pub async fn playground_webview_show(
         webview.hide().map_err(|error| error.to_string())?;
     }
     if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
-        crate::browser_agent::set_webview_hidden(&state, &label, !show);
+        crate::browser_agent::set_webview_hidden(&app, &state, &label, !show);
     }
     sync_user_agent(
         &app,
@@ -876,7 +876,7 @@ pub async fn playground_webview_hide(
         if playground_parent_is(&webview, &window_label) {
             webview.hide().map_err(|error| error.to_string())?;
             if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
-                crate::browser_agent::set_webview_hidden(&state, &label, true);
+                crate::browser_agent::set_webview_hidden(&app, &state, &label, true);
             }
         }
     }
@@ -898,7 +898,7 @@ pub async fn playground_webview_hide_all(
         }
         let _ = webview.hide();
         if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
-            crate::browser_agent::set_webview_hidden(&state, webview.label(), true);
+            crate::browser_agent::set_webview_hidden(&app, &state, webview.label(), true);
         }
     }
     Ok(())

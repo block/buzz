@@ -205,7 +205,7 @@ pub fn drive_path_bullet(payload: &Value) -> Option<String> {
         }
         "click" | "clickat" => Some(format!("Clicked {}", hit_label(payload))),
         "hover" => Some(format!("Moved to {}", hit_label(payload))),
-        "type" => {
+        "type" | "fill" => {
             // Never echo typed text — may be passwords / secrets.
             Some("Typed text".into())
         }

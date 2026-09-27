@@ -16,11 +16,15 @@ const STATUSES: ReadonlySet<string> = new Set([
 
 /** Fixed Drive protocol injected with every grant runbook (host-owned). */
 export const DRIVE_PROTOCOL: string[] = [
-  "Prefer surfaceId. One browser group only.",
-  "Snapshot before each click. Prefer selector or interactive ref; else center from this snapshot only.",
+  "Prefer surfaceId (live on every observe/drive response). One browser group only.",
+  "browser_snapshot waits for an inline DOM payload — do not stub+poll.",
+  "Prefer browser_fill_field for inputs (click+type+verify). Else snapshot then one click/type/key.",
+  "browser_drive may set include_snapshot=true to return a fresh snapshot with the action result.",
   "After navigate/click that changes URL: waitFor urlContains or text before next act.",
   "Do not call browser_snapshot(screenshot=true) every step.",
   "On no element / no snapshot: waitFor once, re-snapshot once, then stop.",
+  "browser_runbook_propose auto-activates agent procedures. Persisted (human-locked) procedures cannot be changed by agents.",
+  "Agent brief is human-owned; do not overwrite it.",
   "Keep goals inside agentBrief + active procedures. Propose new procedures; do not invent sprawl.",
 ];
 
@@ -88,6 +92,9 @@ export function parseProcedure(value: unknown): SiteRunbookProcedure | null {
     Number.isFinite(candidate.acceptedAt)
   ) {
     procedure.acceptedAt = candidate.acceptedAt;
+  }
+  if (candidate.persisted === true) {
+    procedure.persisted = true;
   }
   return procedure;
 }
@@ -189,6 +196,7 @@ export function shapeRunbookForCommunity(
         updatedAt: procedure.updatedAt,
       };
       if (procedure.acceptedAt != null) entry.acceptedAt = procedure.acceptedAt;
+      if (procedure.persisted) entry.persisted = true;
       if (procedure.sourceAgent) entry.sourceAgent = procedure.sourceAgent;
       if (procedure.sourceChannel) entry.sourceChannel = procedure.sourceChannel;
       return entry;

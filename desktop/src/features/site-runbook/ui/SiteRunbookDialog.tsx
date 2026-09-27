@@ -67,6 +67,7 @@ export function SiteRunbookDialog({
           onDelete={api.remove}
           onReject={api.reject}
           onSetBrief={api.setBrief}
+          onSetPersisted={api.setPersisted}
           onUpdate={api.update}
           runbook={api.runbook}
         />

@@ -634,8 +634,9 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
       var el = resolveTarget(x, y, selector, ref);
       if (!el) return makeResult(id, 'click', false, null, 'no element');
       var pt = centerOf(el, x, y);
-      await moveCursor(pt.x, pt.y, true);
       var hit = describeHit(el);
+      // Theater cursor runs async; ack as soon as DOM click fires.
+      try {{ moveCursor(pt.x, pt.y, true); }} catch (eCursor) {{}}
       try {{
         dispatchPointer(el, 'pointerover', pt.x, pt.y, {{ buttons: 0 }});
         el.dispatchEvent(new MouseEvent('mouseover', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
@@ -659,8 +660,8 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
       var el = resolveTarget(x, y, selector, ref);
       if (!el) return makeResult(id, 'hover', false, null, 'no element');
       var pt = centerOf(el, x, y);
-      await moveCursor(pt.x, pt.y, false);
       var hit = describeHit(el);
+      try {{ moveCursor(pt.x, pt.y, false); }} catch (eCursor) {{}}
       try {{
         dispatchPointer(el, 'pointerover', pt.x, pt.y, {{ buttons: 0 }});
         el.dispatchEvent(new MouseEvent('mouseover', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
@@ -706,6 +707,85 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
         return makeResult(id, 'type', false, hit, e);
       }}
       return makeResult(id, 'type', true, hit, null);
+    }});
+  }}
+  function fillField(text, selector, ref, x, y, id, clear) {{
+    id = id || ('d' + Date.now());
+    text = String(text == null ? '' : text);
+    clear = clear !== false;
+    return enqueueAction(async function() {{
+      var el = resolveTarget(x, y, selector, ref);
+      if (!el) return makeResult(id, 'fill', false, null, 'no element');
+      var pt = centerOf(el, x, y);
+      var hit = describeHit(el);
+      try {{ moveCursor(pt.x, pt.y, true); }} catch (eCursor) {{}}
+      try {{
+        dispatchPointer(el, 'pointerover', pt.x, pt.y, {{ buttons: 0 }});
+        el.dispatchEvent(new MouseEvent('mouseover', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
+        dispatchPointer(el, 'pointerdown', pt.x, pt.y, {{ buttons: 1 }});
+        el.dispatchEvent(new MouseEvent('mousedown', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, buttons:1, view:window }}));
+        if (isFocusable(el) && typeof el.focus === 'function') {{
+          try {{ el.focus(); }} catch (e) {{}}
+        }}
+        dispatchPointer(el, 'pointerup', pt.x, pt.y, {{ buttons: 0 }});
+        el.dispatchEvent(new MouseEvent('mouseup', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
+        el.dispatchEvent(new MouseEvent('click', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
+      }} catch (eClick) {{
+        return makeResult(id, 'fill', false, hit, eClick);
+      }}
+      var delay = theaterFast() ? 0 : (20 + Math.floor(Math.random() * 21));
+      try {{
+        if ('value' in el) {{
+          if (clear) {{
+            setNativeValue(el, '');
+            el.dispatchEvent(new Event('input', {{ bubbles:true }}));
+          }}
+          var base = clear ? '' : String(el.value || '');
+          for (var i = 0; i < text.length; i++) {{
+            base = base + text.charAt(i);
+            setNativeValue(el, base);
+            el.dispatchEvent(new Event('input', {{ bubbles:true }}));
+            try {{
+              el.dispatchEvent(new InputEvent('input', {{ bubbles:true, data: text.charAt(i), inputType: 'insertText' }}));
+            }} catch (e) {{}}
+            if (delay > 0) await new Promise(function(r) {{ setTimeout(r, delay); }});
+          }}
+          el.dispatchEvent(new Event('change', {{ bubbles:true }}));
+          var actual = String(el.value || '');
+          if (clear) {{
+            if (actual !== text) {{
+              return makeResult(id, 'fill', false, hit, 'verify failed: got ' + JSON.stringify(actual.slice(0, 80)));
+            }}
+          }} else if (!actual.endsWith(text)) {{
+            return makeResult(id, 'fill', false, hit, 'verify failed: got ' + JSON.stringify(actual.slice(0, 80)));
+          }}
+        }} else if (el.isContentEditable) {{
+          if (clear) {{
+            el.textContent = '';
+            el.dispatchEvent(new Event('input', {{ bubbles:true }}));
+          }}
+          var cur = clear ? '' : String(el.textContent || '');
+          for (var j = 0; j < text.length; j++) {{
+            cur = cur + text.charAt(j);
+            el.textContent = cur;
+            el.dispatchEvent(new Event('input', {{ bubbles:true }}));
+            if (delay > 0) await new Promise(function(r) {{ setTimeout(r, delay); }});
+          }}
+          var got = String(el.textContent || '');
+          if (clear) {{
+            if (got !== text) {{
+              return makeResult(id, 'fill', false, hit, 'verify failed: got ' + JSON.stringify(got.slice(0, 80)));
+            }}
+          }} else if (!got.endsWith(text)) {{
+            return makeResult(id, 'fill', false, hit, 'verify failed: got ' + JSON.stringify(got.slice(0, 80)));
+          }}
+        }} else {{
+          return makeResult(id, 'fill', false, hit, 'target not editable');
+        }}
+      }} catch (e) {{
+        return makeResult(id, 'fill', false, hit, e);
+      }}
+      return makeResult(id, 'fill', true, hit, null);
     }});
   }}
   function scrollBy(dx, dy, id) {{
@@ -874,6 +954,7 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
     clickAt: clickAt,
     hoverAt: hoverAt,
     typeText: typeText,
+    fillField: fillField,
     scrollBy: scrollBy,
     pressKey: pressKey,
     waitForCheck: waitForCheck,

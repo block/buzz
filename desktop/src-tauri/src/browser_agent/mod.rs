@@ -50,13 +50,27 @@ fn ensure_data_root(app: &AppHandle, state: &BrowserAgentState) -> Result<PathBu
     Ok(root)
 }
 
-fn mirror_grant(root: &PathBuf, grant: Option<&BrowserAgentGrant>, label: &str) {
+fn mirror_grant(
+    root: &PathBuf,
+    grant: Option<&BrowserAgentGrant>,
+    label: &str,
+    webview_hidden: bool,
+) {
     let dir = root.join(label);
     let _ = create_dir_all(&dir);
     let path = dir.join("grant.json");
     match grant {
         Some(g) => {
-            if let Ok(bytes) = serde_json::to_vec_pretty(g) {
+            // Enrich mirror so MCP observe/grants see parked/hidden without a second round trip.
+            let mut value = match serde_json::to_value(g) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("webviewHidden".into(), json!(webview_hidden));
+                obj.insert("parked".into(), json!(webview_hidden));
+            }
+            if let Ok(bytes) = serde_json::to_vec_pretty(&value) {
                 if let Ok(mut f) = File::create(&path) {
                     let _ = f.write_all(&bytes);
                 }
@@ -119,14 +133,23 @@ fn eval_on_label(app: &AppHandle, label: &str, js: &str) -> Result<(), String> {
 }
 
 /// Mark a playground label as user-visible or parked/hidden for Drive theater.
-pub fn set_webview_hidden(state: &BrowserAgentState, label: &str, hidden: bool) {
-    let Ok(mut set) = state.webview_hidden.lock() else {
-        return;
-    };
-    if hidden {
-        set.insert(label.to_string());
-    } else {
-        set.remove(label);
+/// Updates the grant mirror (`webviewHidden` / `parked`) so Observe MCP sees it.
+pub fn set_webview_hidden(app: &AppHandle, state: &BrowserAgentState, label: &str, hidden: bool) {
+    {
+        let Ok(mut set) = state.webview_hidden.lock() else {
+            return;
+        };
+        if hidden {
+            set.insert(label.to_string());
+        } else {
+            set.remove(label);
+        }
+    }
+    sync_drive_theater_flag(app, state, label);
+    if let Some(grant) = state.grants.get(label) {
+        if let Ok(root) = ensure_data_root(app, state) {
+            mirror_grant(&root, Some(&grant), label, hidden);
+        }
     }
 }
 
@@ -199,11 +222,11 @@ pub fn ensure_instrumentation_for_label(app: &AppHandle, webview_label: &str) {
         if let Ok(root) = ensure_data_root(app, &state) {
             if let Some(ref prior) = prior_label {
                 if prior != label {
-                    mirror_grant(&root, None, prior);
+                    mirror_grant(&root, None, prior, false);
                     state.observe.clear(prior);
                 }
             }
-            mirror_grant(&root, Some(&rebound), label);
+            mirror_grant(&root, Some(&rebound), label, webview_is_hidden(&state, label));
         }
         if let Some(prior) = prior_label {
             if prior != label {
@@ -226,7 +249,7 @@ pub fn clear_grants_for_surface(app: &AppHandle, surface_id: &str) {
     for grant in removed {
         state.observe.clear(&grant.webview_label);
         if let Ok(root) = ensure_data_root(app, &state) {
-            mirror_grant(&root, None, &grant.webview_label);
+            mirror_grant(&root, None, &grant.webview_label, false);
         }
         emit_grant(app, None, &grant.webview_label);
     }
@@ -240,7 +263,7 @@ pub fn clear_grant_for_label(app: &AppHandle, webview_label: &str) {
         state.observe.clear(webview_label);
         state.drive_screens.clear(webview_label);
         if let Ok(root) = ensure_data_root(app, &state) {
-            mirror_grant(&root, None, webview_label);
+            mirror_grant(&root, None, webview_label, false);
         }
         emit_grant(app, None, webview_label);
     }
@@ -334,7 +357,7 @@ pub async fn browser_agent_grant_set(
         .grants
         .set(grant.clone(), input.allow_replace.unwrap_or(false))?;
     let root = ensure_data_root(&app, &state)?;
-    mirror_grant(&root, Some(&grant), &label);
+    mirror_grant(&root, Some(&grant), &label, webview_is_hidden(&state, &label));
     let drive = drive_lock_enabled(&grant);
     install_instrumentation(&app, &label, drive)?;
     state.observe.push(
@@ -363,7 +386,7 @@ pub async fn browser_agent_grant_clear(
         "(function(){var a=window.__buzzBrowserAgent;if(a)a.setDrive(false);})();",
     );
     if let Ok(root) = ensure_data_root(&app, &state) {
-        mirror_grant(&root, None, &label);
+        mirror_grant(&root, None, &label, false);
     }
     emit_grant(&app, None, &label);
     Ok(())
@@ -408,7 +431,7 @@ pub async fn browser_agent_rebind_surface(
     if let Ok(root) = ensure_data_root(&app, &state) {
         if let Some(ref prior) = prior_label {
             if prior != &new_label {
-                mirror_grant(&root, None, prior);
+                mirror_grant(&root, None, prior, false);
                 state.observe.clear(prior);
                 // Unlock prior tab if Drive lock was installed.
                 let _ = eval_on_label(
@@ -419,7 +442,7 @@ pub async fn browser_agent_rebind_surface(
                 emit_grant(&app, None, prior);
             }
         }
-        mirror_grant(&root, Some(&rebound), &new_label);
+        mirror_grant(&root, Some(&rebound), &new_label, webview_is_hidden(&state, &new_label));
     }
     emit_grant(&app, Some(&rebound), &new_label);
     if app.get_webview(&new_label).is_some() {
@@ -462,7 +485,7 @@ pub async fn browser_agent_grants_list(
         let _ = state.grants.clear(&label);
         state.observe.clear(&label);
         if let Ok(root) = ensure_data_root(&app, &state) {
-            mirror_grant(&root, None, &label);
+            mirror_grant(&root, None, &label, false);
         }
         emit_grant(&app, None, &label);
     }
@@ -492,7 +515,7 @@ pub async fn browser_agent_take_control(
         "(function(){var a=window.__buzzBrowserAgent;if(a)a.setDrive(false);})();",
     );
     if let Ok(root) = ensure_data_root(&app, &state) {
-        mirror_grant(&root, Some(&next), &label);
+        mirror_grant(&root, Some(&next), &label, webview_is_hidden(&state, &label));
     }
     emit_grant(&app, Some(&next), &label);
     Ok(next)
@@ -517,7 +540,7 @@ pub async fn browser_agent_release_control(
     };
     install_instrumentation(&app, &label, true)?;
     if let Ok(root) = ensure_data_root(&app, &state) {
-        mirror_grant(&root, Some(&next), &label);
+        mirror_grant(&root, Some(&next), &label, webview_is_hidden(&state, &label));
     }
     emit_grant(&app, Some(&next), &label);
     Ok(next)
@@ -537,6 +560,10 @@ pub struct ObservePollInput {
 pub struct ObservePollResult {
     pub events: Vec<ObserveEvent>,
     pub grant: BrowserAgentGrant,
+    /// True when the WKWebView is hide()d / parked (Drive theater fast-path).
+    pub webview_hidden: bool,
+    /// Alias of `webviewHidden` for agents that look for parked.
+    pub parked: bool,
 }
 
 #[tauri::command]
@@ -555,7 +582,13 @@ pub async fn browser_observe_poll(
     let after = input.after_id.unwrap_or(0);
     let limit = input.limit.unwrap_or(50);
     let events = state.observe.poll(&label, after, limit);
-    Ok(ObservePollResult { events, grant })
+    let hidden = webview_is_hidden(&state, &label);
+    Ok(ObservePollResult {
+        events,
+        grant,
+        webview_hidden: hidden,
+        parked: hidden,
+    })
 }
 
 fn urlencoding_decode(raw: &str) -> Result<String, ()> {
@@ -679,8 +712,22 @@ fn record_drive_result(
     result: &DriveActionResult,
     action: Option<&DriveAction>,
 ) {
+    record_drive_result_timed(app, state, label, result, action, None);
+}
+
+fn record_drive_result_timed(
+    app: &AppHandle,
+    state: &BrowserAgentState,
+    label: &str,
+    result: &DriveActionResult,
+    action: Option<&DriveAction>,
+    elapsed_ms: Option<u64>,
+) {
     let kind = if result.ok { "drive" } else { "drive_error" };
-    let payload = enrich_drive_payload(result, action);
+    let mut payload = enrich_drive_payload(result, action);
+    if let (Some(ms), Some(obj)) = (elapsed_ms, payload.as_object_mut()) {
+        obj.insert("elapsedMs".into(), json!(ms));
+    }
     state
         .observe
         .push(label, kind, Some(payload.clone()), now_ms());
@@ -693,6 +740,7 @@ async fn eval_drive_action(
     label: &str,
     action: &DriveAction,
 ) -> DriveActionResult {
+    let started = std::time::Instant::now();
     let mut action = action.clone();
     let id = ensure_action_id(&mut action);
     let kind = match validate_action(&action) {
@@ -711,13 +759,15 @@ async fn eval_drive_action(
             Ok(()) => navigate_result(&id, url),
             Err(e) => error_result(&id, "navigate", e),
         };
-        record_drive_result(app, state, label, &r, Some(&action));
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        record_drive_result_timed(app, state, label, &r, Some(&action), Some(elapsed_ms));
         return r;
     }
 
     if kind == "waitfor" {
         let r = wait_for_host(app, label, &action, &id).await;
-        record_drive_result(app, state, label, &r, Some(&action));
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        record_drive_result_timed(app, state, label, &r, Some(&action), Some(elapsed_ms));
         return r;
     }
 
@@ -738,6 +788,7 @@ async fn eval_drive_action(
 
     // Page actions are async (cursor/type animation). Poll cookie until id matches.
     let timeout_ms = drive_result_timeout_ms(&kind, &action, webview_is_hidden(state, label));
+    // Click/fill ack when DOM fires (theater async) — shorter poll budget is fine.
     let r = wait_page_drive_result(app, label, &id, timeout_ms)
         .await
         .unwrap_or_else(|| DriveActionResult {
@@ -749,29 +800,40 @@ async fn eval_drive_action(
             error: None,
             message: Some("applied (no page result)".into()),
         });
-    record_drive_result(app, state, label, &r, Some(&action));
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    record_drive_result_timed(app, state, label, &r, Some(&action), Some(elapsed_ms));
     r
 }
 
 fn drive_result_timeout_ms(kind: &str, action: &DriveAction, theater_fast: bool) -> u64 {
     match kind {
-        "type" => {
+        "type" | "fill" => {
             let n = action
                 .text
                 .as_deref()
                 .map(|s| s.chars().count())
                 .unwrap_or(0) as u64;
-            if theater_fast {
-                (400 + n * 5).min(10_000)
+            let click_pad = if kind == "fill" {
+                if theater_fast {
+                    400
+                } else {
+                    900
+                }
             } else {
-                (1_200 + n * 70).min(30_000)
+                0
+            };
+            if theater_fast {
+                (400 + click_pad + n * 5).min(10_000)
+            } else {
+                (1_200 + click_pad + n * 70).min(30_000)
             }
         }
         "click" | "hover" => {
+            // Theater cursor is async; ack when DOM fires — keep poll budgets tight.
             if theater_fast {
-                800
+                500
             } else {
-                2_500
+                1_200
             }
         }
         _ => 1_500,
@@ -1112,30 +1174,70 @@ async fn flush_page_observe_queue_inner(
         .ingest_page_events(label, after, &page_events, now_ms())
 }
 
-/// Poll every live Observe/Drive grant (~200ms): flush page console/network
-/// into events.jsonl for MCP, process Drive inbox, and tab-switch requests.
+fn label_has_wake(root: &PathBuf, label: &str) -> bool {
+    let dir = root.join(label);
+    dir.join("drive-wake").exists()
+        || dir.join("drive-inbox.jsonl").exists()
+        || dir.join("snapshot-request.json").exists()
+        || dir.join("runbook-propose-wake").exists()
+        || dir.join("runbook-propose.jsonl").exists()
+        || dir.join("tab-switch-request.json").exists()
+}
+
+fn clear_wake(root: &PathBuf, label: &str) {
+    let dir = root.join(label);
+    let _ = std::fs::remove_file(dir.join("drive-wake"));
+    let _ = std::fs::remove_file(dir.join("runbook-propose-wake"));
+}
+
+/// Poll live Observe/Drive grants. Sleeps 50ms when a wake/inbox file exists,
+/// otherwise 200ms. Flushes observe, Drive inbox, snapshots, tab-switch, and
+/// emits when MCP queued a runbook propose.
 pub fn spawn_grant_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             let Some(state) = app.try_state::<BrowserAgentState>() else {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 continue;
             };
-            let labels: Vec<String> = state
-                .grants
-                .list_all()
+            let root = match ensure_data_root(&app, &state) {
+                Ok(r) => r,
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    continue;
+                }
+            };
+            let grants = state.grants.list_all();
+            let labels: Vec<(String, BrowserAgentMode, String)> = grants
                 .into_iter()
                 .filter(|g| matches!(g.mode, BrowserAgentMode::Drive | BrowserAgentMode::Observe))
-                .map(|g| g.webview_label)
+                .map(|g| (g.webview_label, g.mode, g.surface_id))
                 .collect();
-            for label in labels {
+            let busy = labels.iter().any(|(label, _, _)| label_has_wake(&root, label));
+            tokio::time::sleep(std::time::Duration::from_millis(if busy {
+                50
+            } else {
+                200
+            }))
+            .await;
+            for (label, _mode, surface_id) in labels {
                 let _ = flush_page_observe_queue(&app, &state, &label).await;
                 if let Err(e) = process_drive_inbox_for_label(&app, &state, &label).await {
                     eprintln!("buzz-desktop: grant watcher {label}: {e}");
                 }
-                if let Ok(root) = ensure_data_root(&app, &state) {
-                    process_tab_switch_request(&app, &state, &label, &root);
+                process_tab_switch_request(&app, &state, &label, &root);
+                // Notify UI that MCP queued a learn→write proposal (pending until Accept).
+                let propose_path = root.join(&label).join("runbook-propose.jsonl");
+                if propose_path.exists() {
+                    let _ = app.emit(
+                        "browser-agent-runbook-propose",
+                        json!({
+                            "webviewLabel": label,
+                            "surfaceId": surface_id,
+                        }),
+                    );
                 }
+                clear_wake(&root, &label);
             }
         }
     });

@@ -98,6 +98,7 @@ export function driveActivityCaption(
     case "hover":
       return `Moving to ${hitLabel(payload)}…`;
     case "type":
+    case "fill":
       // Never echo typed text — may be passwords / secrets.
       return "Typing…";
     case "key": {

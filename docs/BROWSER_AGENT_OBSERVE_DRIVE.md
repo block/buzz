@@ -52,7 +52,7 @@ Playground sessions live in a **browser group** (`browserId`, `tabSids[]`, `acti
 Learned how-to knowledge for a **playground session** (`sid:…`) or **pinned site** (`pin:…`) survives agent sessions:
 
 - **Agent brief** — short imperative instructions mirrored into grant context / `browser_observe_poll.runbook`.
-- **Procedures** — engineer-readable steps (`active` | `pending` | `archived`). Agents propose via `browser_runbook_propose` (pending until Accept). UI: Settings → Pinned sites → **How to use this site**, and Browsers row **Runbook**.
+- **Procedures** — engineer-readable steps (`active` | `pending` | `archived`). Agents propose via `browser_runbook_propose` (auto-activates). Humans can Persist/lock procedures so agents cannot modify them. Agent brief is human-owned. UI: Settings → Pinned sites → **How to use this site**, and Browsers row **Runbook**.
 - Inject is brief + active titles/summaries only; full steps via `browser_runbook_get`.
 - Community pins sync brief + active procedures in the pin payload.
 
@@ -80,11 +80,13 @@ Persisted in-memory (and mirrored under app data for local agent tool poll):
   "threadRoot": "{event id}" | null,
   "mode": "observe" | "drive",
   "userHasControl": false,
-  "createdAtMs": 0
+  "createdAtMs": 0,
+  "webviewHidden": false,
+  "parked": false
 }
 ```
 
-Rust type: `BrowserAgentGrant`. Cleared on webview dispose/close for that label (and when no sibling labels remain for the same `surfaceId`).
+Rust type: `BrowserAgentGrant` (core fields). The grant **mirror** (`grant.json`) and `browser_observe_poll` also expose runtime `webviewHidden` / `parked` (same bool) when the WKWebView is `hide()`d. Cleared on webview dispose/close for that label (and when no sibling labels remain for the same `surfaceId`).
 
 ## Chrome
 
@@ -117,7 +119,7 @@ Instrumentation runs **inside** the Buzz WKWebView (page script), not OpenClaw C
 When `mode=drive`:
 
 1. Human pointer/keyboard on the child webview is locked (full-page `#__buzz_agent_lock` overlay) unless the human has Taken control. Lock stays for the human; agent hit-tests **through** it via `document.elementsFromPoint` (lock `pointer-events` briefly cleared), skipping `#__buzz_agent_lock` and `#__buzz_agent_cursor`. If that returns nothing (hidden/parked WKWebView), a `getBoundingClientRect` geometry fallback matches snapshot centers.
-2. Agent actions (`browser_drive`): `navigate` | `click` | `type` | `scroll` | `hover` | `key` | `waitFor` — injected with a visible ghost cursor / highlight (skipped when the WKWebView is parked/hidden). `click`/`hover` accept `x,y` **or** CSS `selector` **or** snapshot `ref` (e.g. `e0`).
+2. Agent actions (`browser_drive`): `navigate` | `click` | `type` | `fill` | `scroll` | `hover` | `key` | `waitFor`. Prefer MCP `browser_fill_field` for form inputs (one-shot click+type+verify). — injected with a visible ghost cursor / highlight (skipped when the WKWebView is parked/hidden). `click`/`hover` accept `x,y` **or** CSS `selector` **or** snapshot `ref` (e.g. `e0`).
 3. Every action has an `id`. Page returns `{ id, ok, kind, hit?: { tag, role, name }, url, error? }` via cookie `__buzz_ba_drive_result`. Desktop writes a `drive` (ok) or `drive_error` event to `events.jsonl`.
 4. **`key`:** `{ "kind":"key", "key":"Enter" }` — Enter, Tab, Escape, Backspace, arrows. Fires keydown/keypress/keyup on `document.activeElement`. If keydown not defaultPrevented: Enter in input+form → `form.requestSubmit()`; Enter in textarea → newline; Tab → move focus. No site special-cases.
 5. **MCP → Desktop path:** `buzz-dev-mcp` `browser_drive` validates the DriveAction shape (object or JSON string; field is **`kind`**, not `type`), assigns `id`, appends one line to `{appData}/browser-agent/{label}/drive-inbox.jsonl`. Prefer **`surface_id`** when calling (see Agent target). Desktop drains the inbox via a **Rust-side watcher** (~200ms over live grants) plus optional chrome backup poll; MCP and Desktop share a `drive-inbox.lock`, then Desktop **atomically renames** the inbox to a temp file, reads/deletes the temp (so appends during processing land in a fresh file). Bad lines / unknown kinds → `drive_error` (never silent ok).

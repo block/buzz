@@ -13,6 +13,8 @@ import {
 import {
   acceptProcedure,
   proposeProcedure,
+  setProcedurePersisted,
+  upsertAgentProcedure,
   setAgentBrief,
 } from "./mutations.ts";
 import {
@@ -67,15 +69,17 @@ test("summarizeProcedureSteps collapses whitespace and truncates", () => {
 test("shapeRunbookInject includes only active procedures", () => {
   let runbook = emptyRunbook(100);
   runbook = setAgentBrief(runbook, "Use the sidebar");
-  const proposed = proposeProcedure(runbook, {
-    title: "Pending tip",
-    steps: "Do not show yet",
-  });
-  runbook = proposed.runbook;
   runbook = {
     ...runbook,
     procedures: [
-      ...runbook.procedures,
+      {
+        id: "pend",
+        title: "Pending tip",
+        steps: "Do not show yet",
+        status: "pending",
+        createdAt: 1,
+        updatedAt: 1,
+      },
       {
         id: "a1",
         title: "Active tip",
@@ -103,29 +107,64 @@ test("shapeRunbookInject includes only active procedures", () => {
   assert.ok(inject.driveProtocol.some((line) => line.includes("surfaceId")));
 });
 
-test("propose stays pending until accept", () => {
-  const { runbook, procedure } = proposeProcedure(null, {
+test("agent upsert auto-activates", () => {
+  const { runbook, procedure } = upsertAgentProcedure(null, {
     title: "How to filter",
     steps: "Open Filters",
     sourceAgent: "agent1",
   });
-  assert.equal(procedure.status, "pending");
-  const accepted = acceptProcedure(runbook, procedure.id, 50);
-  const active = accepted.procedures.find((p) => p.id === procedure.id);
-  assert.equal(active?.status, "active");
-  assert.equal(active?.acceptedAt, 50);
+  assert.equal(procedure.status, "active");
+  assert.equal(procedure.persisted, false);
+  assert.ok(procedure.acceptedAt);
+  assert.equal(runbook.procedures[0].status, "active");
+});
+
+test("agent upsert replaces non-persisted same title", () => {
+  let { runbook } = upsertAgentProcedure(null, {
+    title: "Login",
+    steps: "v1",
+  });
+  const next = upsertAgentProcedure(runbook, {
+    title: "login",
+    steps: "v2",
+  });
+  assert.equal(next.runbook.procedures.length, 1);
+  assert.equal(next.procedure.steps, "v2");
+});
+
+test("agent upsert rejects persisted procedure", () => {
+  let { runbook, procedure } = upsertAgentProcedure(null, {
+    title: "Locked",
+    steps: "secret",
+  });
+  runbook = setProcedurePersisted(runbook, procedure.id, true);
+  assert.throws(() => {
+    upsertAgentProcedure(runbook, { title: "Locked", steps: "hack" });
+  }, /persisted/i);
+});
+
+test("propose alias auto-activates (compat)", () => {
+  const { procedure } = proposeProcedure(null, {
+    title: "How to filter",
+    steps: "Open Filters",
+    sourceAgent: "agent1",
+  });
+  assert.equal(procedure.status, "active");
 });
 
 test("community payload omits pending and round-trips active", () => {
   let runbook = setAgentBrief(null, "Brief");
-  const { runbook: withPending, procedure } = proposeProcedure(runbook, {
-    title: "Pending",
-    steps: "no",
-  });
   runbook = {
-    ...withPending,
+    ...runbook,
     procedures: [
-      ...withPending.procedures,
+      {
+        id: "pend",
+        title: "Pending",
+        steps: "no",
+        status: "pending",
+        createdAt: 1,
+        updatedAt: 1,
+      },
       {
         id: "ok",
         title: "Login",
@@ -143,5 +182,5 @@ test("community payload omits pending and round-trips active", () => {
   assert.equal(payload.procedures[0].id, "ok");
   const parsed = parseCommunityRunbookPayload(payload);
   assert.equal(parsed?.procedures[0].status, "active");
-  assert.ok(!parsed?.procedures.some((p) => p.id === procedure.id));
+  assert.ok(!parsed?.procedures.some((p) => p.id === "pend"));
 });

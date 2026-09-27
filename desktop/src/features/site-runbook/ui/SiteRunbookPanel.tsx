@@ -19,6 +19,7 @@ export type SiteRunbookPanelProps = {
     procedureId: string,
     patch: { title?: string; steps?: string },
   ) => void;
+  onSetPersisted: (procedureId: string, persisted: boolean) => void;
   onAddManual: (title: string, steps: string) => void;
   /** Compact embed vs dialog body. */
   compact?: boolean;
@@ -32,6 +33,7 @@ export function SiteRunbookPanel({
   onArchive,
   onDelete,
   onUpdate,
+  onSetPersisted,
   onAddManual,
   compact = false,
 }: SiteRunbookPanelProps) {
@@ -99,6 +101,10 @@ export function SiteRunbookPanel({
       {pending.length > 0 ? (
         <section className="space-y-2" data-testid="site-runbook-pending">
           <p className="text-sm font-medium">Pending proposals</p>
+          <p className="text-2xs text-muted-foreground">
+            Legacy pending items. New agent proposals auto-activate unless a
+            persisted procedure blocks them.
+          </p>
           <ul className="space-y-2">
             {pending.map((procedure) => (
               <li
@@ -168,8 +174,9 @@ export function SiteRunbookPanel({
             data-testid="site-runbook-empty"
           >
             No runbook yet. Agents learn how to use this site while they Drive.
-            Accepted procedures show up here. You can also write an agent brief
-            and procedures yourself.
+            Agents can learn and auto-activate how-tos while they Drive. Check
+            Persist to lock an item so agents cannot change it. The agent brief
+            is always human-owned.
           </div>
         ) : null}
 
@@ -191,12 +198,22 @@ export function SiteRunbookPanel({
                 type="button"
               >
                 <span className="truncate text-sm">{procedure.title}</span>
-                <Badge
-                  className="normal-case tracking-normal"
-                  variant="outline"
-                >
-                  active
-                </Badge>
+                <span className="flex shrink-0 items-center gap-1">
+                  {procedure.persisted ? (
+                    <Badge
+                      className="normal-case tracking-normal"
+                      variant="secondary"
+                    >
+                      persisted
+                    </Badge>
+                  ) : null}
+                  <Badge
+                    className="normal-case tracking-normal"
+                    variant="outline"
+                  >
+                    active
+                  </Badge>
+                </span>
               </button>
               {selected?.id === procedure.id ? (
                 <div className="space-y-2 border-t border-border/60 bg-muted/20 px-3 py-2">
@@ -237,6 +254,17 @@ export function SiteRunbookPanel({
                       <pre className="max-h-48 overflow-auto whitespace-pre-wrap text-2xs text-muted-foreground">
                         {procedure.steps || "(no steps)"}
                       </pre>
+                      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <input
+                          checked={procedure.persisted === true}
+                          data-testid={`site-runbook-persist-${procedure.id}`}
+                          onChange={(event) =>
+                            onSetPersisted(procedure.id, event.target.checked)
+                          }
+                          type="checkbox"
+                        />
+                        Persist (lock from agents)
+                      </label>
                       <div className="flex flex-wrap gap-1">
                         <Button
                           onClick={() => startEdit(procedure)}
