@@ -2,6 +2,7 @@ import {
   AppWindow,
   ExternalLink,
   Globe,
+  Pin,
   Plus,
   Trash2,
   Upload,
@@ -32,7 +33,6 @@ import {
 } from "@/features/playground/lib/types";
 import {
   getConversationPlaygroundPinsRevision,
-  listConversationPinBindingsForSid,
   subscribeConversationPlaygroundPins,
 } from "@/features/playground/lib/conversationPins";
 import {
@@ -66,6 +66,7 @@ import {
   browserBindingChipTooltip,
   buildBrowserConversationBindings,
 } from "../lib/browserBindings";
+import { listBrowserRowPinBindings } from "../lib/pinBrowserToConversation";
 import { disposeBrowserSession } from "../lib/disposeBrowserSession";
 import {
   markAllListedBrowserGroupsSeen,
@@ -87,6 +88,10 @@ import {
 import { BROWSER_PREVIEW_REFRESH_MS } from "../lib/browserPreview";
 import { AddBrowserDialog } from "./AddBrowserDialog";
 import { BrowserRowPreview } from "./BrowserRowPreview";
+import {
+  PinBrowserToConversationDialog,
+  type PinBrowserDialogSource,
+} from "./PinBrowserToConversationDialog";
 
 function useDetachedBrowserHosts(): DetachedBrowserHost[] {
   const osRows = useSyncExternalStore(
@@ -290,6 +295,8 @@ export function BrowsersScreen() {
   );
   const [addOpen, setAddOpen] = React.useState(false);
   const [importOpen, setImportOpen] = React.useState(false);
+  const [pinSource, setPinSource] =
+    React.useState<PinBrowserDialogSource | null>(null);
   const [pendingRemoveKey, setPendingRemoveKey] = React.useState<string | null>(
     null,
   );
@@ -321,7 +328,7 @@ export function BrowsersScreen() {
     void viewportEpoch;
     return rows.map((row) => {
       const grant = findGrantForRow(grants, row);
-      const pinBindingsRaw = listConversationPinBindingsForSid(row.surfaceId);
+      const pinBindingsRaw = listBrowserRowPinBindings(row);
       const pinBindings = pinBindingsRaw.map((binding) => {
         if (binding.channelId) return binding;
         if (
@@ -422,6 +429,20 @@ export function BrowsersScreen() {
     } catch (error) {
       toast.error(popoutErrorMessage(error, "Could not detach browser."));
     }
+  }
+
+  function openPinRow(row: BrowserListRow) {
+    const session =
+      playground.sessions.get(row.mainSurfaceId) ??
+      playground.sessions.get(row.surfaceId);
+    setPinSource({
+      sid: row.mainSurfaceId,
+      title: row.title,
+      url: row.url,
+      ...(session?.pin ? { pin: session.pin } : {}),
+      ...(session?.stack ? { stack: session.stack } : {}),
+      ...(session?.expires != null ? { expires: session.expires } : {}),
+    });
   }
 
   return (
@@ -575,6 +596,18 @@ export function BrowsersScreen() {
                             runbookRef={sidRunbookRef(row.mainSurfaceId)}
                             testId={`browser-row-runbook-${row.key}`}
                           />
+                          <Button
+                            aria-label="Pin browser to channel or thread"
+                            data-testid={`browser-row-pin-${row.key}`}
+                            onClick={() => openPinRow(row)}
+                            size="xs"
+                            title="Pin to channel or thread"
+                            type="button"
+                            variant="ghost"
+                          >
+                            <Pin className="mr-1 h-3 w-3" />
+                            Pin
+                          </Button>
                           <ExportBrowserShareButton
                             runbookRef={sidRunbookRef(row.mainSurfaceId)}
                             source="session"
@@ -712,6 +745,13 @@ export function BrowsersScreen() {
         onImportedSession={openAddedBrowser}
         onOpenChange={setImportOpen}
         open={importOpen}
+      />
+      <PinBrowserToConversationDialog
+        onOpenChange={(next) => {
+          if (!next) setPinSource(null);
+        }}
+        open={pinSource != null}
+        source={pinSource}
       />
     </div>
   );
