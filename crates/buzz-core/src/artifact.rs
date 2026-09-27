@@ -228,10 +228,20 @@ mod tests {
             route_filter(&json!({"kinds":[45010,45011],"#h":["c"]})),
             FilterRoute::Generic
         );
-        assert!(matches!(
-            route_filter(&json!({"kinds":[45010],"#project":["p"]})),
-            FilterRoute::Rejected(_)
-        ));
+        for rejected in [
+            json!({"kinds":[45010],"#project":["p"]}),
+            json!({"ids":["a"],"#project":["p"]}),
+            json!({"kinds":"x","#project":["p"]}),
+        ] {
+            assert!(
+                matches!(route_filter(&rejected), FilterRoute::Rejected(_)),
+                "{rejected}"
+            );
+        }
+        assert_eq!(
+            route_filter(&json!({"ids":["a"],"#h":["c"]})),
+            FilterRoute::Generic
+        );
         assert_eq!(
             route_filter(&json!({"artifact":"current"})),
             FilterRoute::Artifact
@@ -244,6 +254,8 @@ mod tests {
             json!({"artifact":"current","kinds":[45011]}),
             json!({"artifact":"current","search":"x"}),
             json!({"artifact":"current","limit":1001}),
+            json!({"artifact":"current","#assignee":[]}),
+            json!({"artifact":"history","#d":[]}),
         ] {
             assert!(parse_query(&invalid).is_err(), "{invalid}");
         }
@@ -291,15 +303,16 @@ pub enum FilterRoute {
     Rejected(&'static str),
 }
 /// Route a raw filter. Generic filters drop multi-character tag predicates,
-/// so artifact-kind filters carrying them must use an explicit artifact query.
+/// so filters that may match artifacts (including those without `kinds`)
+/// carrying them must use an explicit artifact query.
 pub fn route_filter(value: &serde_json::Value) -> FilterRoute {
     if value.get("artifact").is_some() {
         return FilterRoute::Artifact;
     }
-    let artifact_kind = value
-        .get("kinds")
-        .and_then(|k| k.as_array())
-        .is_some_and(|ks| ks.iter().any(|k| matches!(k.as_u64(), Some(45010 | 45011))));
+    let artifact_kind = value.get("kinds").is_none_or(|k| {
+        k.as_array()
+            .is_none_or(|ks| ks.iter().any(|k| matches!(k.as_u64(), Some(45010 | 45011))))
+    });
     let multi_character = value
         .as_object()
         .is_some_and(|o| o.keys().any(|k| k.starts_with('#') && k.len() > 2));
@@ -333,7 +346,10 @@ pub fn parse_query(value: &serde_json::Value) -> Result<ArtifactQuery, &'static 
             if name.is_empty() || name.len() > MAX_TAG_NAME_BYTES {
                 return Err("invalid predicate name size");
             }
-            let values = value.as_array().ok_or("predicate values must be arrays")?;
+            let values = value
+                .as_array()
+                .filter(|v| !v.is_empty())
+                .ok_or("predicate values must be non-empty arrays")?;
             let mut parsed = Vec::new();
             for value in values {
                 let value = value.as_str().ok_or("predicate values must be strings")?;
@@ -364,7 +380,7 @@ pub fn parse_query(value: &serde_json::Value) -> Result<ArtifactQuery, &'static 
     if limit == 0 || limit > MAX_PAGE_SIZE as u64 || offset > MAX_OFFSET {
         return Err("artifact page limit exceeded");
     }
-    if view == ArtifactView::History && !tags.iter().any(|(n, v)| n == "d" && !v.is_empty()) {
+    if view == ArtifactView::History && !tags.iter().any(|(n, _)| n == "d") {
         return Err("history requires #d");
     }
     Ok(ArtifactQuery {

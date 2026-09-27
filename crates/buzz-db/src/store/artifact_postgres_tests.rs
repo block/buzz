@@ -250,6 +250,46 @@ async fn lifecycle_cas_queries_move_redaction_and_retention() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn repeated_moves_get_distinct_source_safe_markers() {
+    let f = Fixture::new().await;
+    let d = Uuid::new_v4();
+    let create = f.revision(d, "create", f.a, None, &f.owner, vec![]);
+    let there = f.revision(d, "move", f.b, Some(&create), &f.owner, vec![]);
+    let back = f.revision(d, "move", f.a, Some(&there), &f.owner, vec![]);
+    let again = f.revision(d, "move", f.b, Some(&back), &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&create, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let mut markers = Vec::new();
+    for (event, source, replaced) in [
+        (&there, f.a, &create),
+        (&back, f.b, &there),
+        (&again, f.a, &back),
+    ] {
+        let ArtifactOutcome::Accepted(stored) = f.accept(event, Some(source)).await else {
+            panic!("move accepted");
+        };
+        let marker = stored[1].event.clone();
+        // Only `prev` distinguishes same-second markers for one source.
+        let tags: Vec<_> = marker.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(
+            tags,
+            [
+                vec!["ar".to_string(), "1".into()],
+                vec!["d".into(), d.to_string()],
+                vec!["h".into(), source.to_string()],
+                vec!["reason".into(), "moved".into()],
+                vec!["prev".into(), replaced.id.to_hex()],
+            ]
+        );
+        markers.push(marker.id);
+    }
+    assert_ne!(markers[0], markers[2]);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn root_anchor_and_tenant_boundaries() {
     let f = Fixture::new().await;
     let d = Uuid::new_v4();

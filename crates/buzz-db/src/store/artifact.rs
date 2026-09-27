@@ -29,13 +29,15 @@ fn invalid(message: &str) -> DbError {
     DbError::InvalidData(message.into())
 }
 
-fn removal_marker(keys: &Keys, artifact: Uuid, source: Uuid, position: i64) -> Result<Event> {
+/// The replaced revision (`prev`) was readable in the source, so it
+/// distinguishes repeated moves without revealing other activity.
+fn removal_marker(keys: &Keys, artifact: Uuid, source: Uuid, prev: &[u8]) -> Result<Event> {
     let tags = [
         ["ar", "1"].map(str::to_owned),
         ["d".into(), artifact.to_string()],
         ["h".into(), source.to_string()],
         ["reason".into(), "moved".into()],
-        ["position".into(), position.to_string()],
+        ["prev".into(), hex::encode(prev)],
     ]
     .into_iter()
     .map(Tag::parse)
@@ -169,16 +171,22 @@ impl Db {
                 }
             }
         }
-        let position: i64 = sqlx::query_scalar("INSERT INTO artifact_revisions (community_id,event_id,artifact_id) VALUES ($1,$2,$3) RETURNING position")
-            .bind(community.as_uuid()).bind(event.id.as_bytes().as_slice()).bind(env.id).fetch_one(&mut *tx).await?;
+        sqlx::query(
+            "INSERT INTO artifact_revisions (community_id,event_id,artifact_id) VALUES ($1,$2,$3)",
+        )
+        .bind(community.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(env.id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted")
             .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).execute(&mut *tx).await?;
         let (stored, _) =
             crate::event::insert_event_in_transaction(&mut tx, community, event, Some(env.home))
                 .await?;
         let mut accepted = vec![stored];
-        if let Some(source) = source.filter(|_| env.op == ArtifactOp::Move) {
-            let removal = removal_marker(relay_keys, env.id, source, position)?;
+        if let (ArtifactOp::Move, Some(source), Some(prev)) = (env.op, source, &env.prev) {
+            let removal = removal_marker(relay_keys, env.id, source, prev)?;
             let (stored, _) = crate::event::insert_event_in_transaction(
                 &mut tx,
                 community,

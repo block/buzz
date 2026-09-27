@@ -157,6 +157,31 @@ async fn project_filter_survives_artifact_query_hook() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn unsupported_predicates_fail_explicitly() {
+    let f = Fixture::new().await;
+    let create = f.revision(Uuid::new_v4(), "create", None);
+    f.publish(&create).await;
+    let (status, body) = f.request("/query", json!([{"ids":[create.id]}])).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body[0]["id"], create.id.to_hex());
+    // A readable artifact must not match a predicate it does not carry.
+    for path in ["/query", "/count"] {
+        for filter in [
+            json!({"ids":[create.id],"#project":["P"]}),
+            json!({"artifact":"current","#assignee":[]}),
+        ] {
+            let (status, body) = f.request(path, json!([filter])).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{filter}: {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn lifecycle_routes_duplicate_replay_delete_and_redaction() {
     let f = Fixture::new().await;
     let d = Uuid::new_v4();
@@ -271,6 +296,11 @@ async fn writes_use_channel_gates_for_home_and_move_source() {
         .await;
     assert_eq!(removals.as_array().unwrap().len(), 1, "{removals}");
     assert!(!removals.to_string().contains(&f.private.to_string()));
+    // The marker names only the source-readable revision it replaced.
+    assert!(removals[0]["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(["prev", peer_edit.id.to_hex()])));
     // The peer can write the destination but not the private source.
     let back = f.revision_as(&f.peer, f.home, d, "move", Some(&moved));
     let (status, body) = f.try_publish(&back).await;

@@ -285,16 +285,22 @@ mod tests {
 
     #[test]
     fn artifact_live_filters_preserved_extensions_rejected() {
-        assert!(super::ClientMessage::parse(
-            r##"["REQ","ar",{"kinds":[45010,45011],"#h":["channel"]}]"##
-        )
-        .is_ok());
+        let id = "f".repeat(64);
         for request in [
-            r##"["REQ","ar",{"artifact":"history","#d":["artifact"]}]"##,
-            r##"["REQ","ar",{"kinds":[45010],"#project":["project"]}]"##,
-            r##"["COUNT","ar",{"artifact":"current"}]"##,
+            r##"["REQ","ar",{"kinds":[45010,45011],"#h":["channel"]}]"##.to_owned(),
+            format!(r##"["REQ","ar",{{"ids":["{id}"],"#h":["channel"]}}]"##),
         ] {
-            assert!(super::ClientMessage::parse(request).is_err(), "{request}");
+            assert!(super::ClientMessage::parse(&request).is_ok(), "{request}");
+        }
+        for request in [
+            r##"["REQ","ar",{"artifact":"history","#d":["artifact"]}]"##.to_owned(),
+            r##"["REQ","ar",{"kinds":[45010],"#project":["project"]}]"##.to_owned(),
+            r##"["COUNT","ar",{"artifact":"current"}]"##.to_owned(),
+            // No `kinds` may match artifacts, so the predicate cannot be dropped.
+            format!(r##"["REQ","ar",{{"ids":["{id}"],"#project":["P"]}}]"##),
+            format!(r##"["COUNT","ar",{{"ids":["{id}"],"#project":["P"]}}]"##),
+        ] {
+            assert!(super::ClientMessage::parse(&request).is_err(), "{request}");
         }
     }
 

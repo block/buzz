@@ -2012,12 +2012,11 @@ CREATE TABLE artifact_heads (
 );
 CREATE INDEX artifact_heads_event ON artifact_heads (community_id, event_id);
 -- Every accepted revision ID, so replays stay idempotent after redaction or
--- retention. `position` records acceptance order.
+-- retention.
 CREATE TABLE artifact_revisions (
     community_id UUID NOT NULL REFERENCES communities(id),
     event_id BYTEA NOT NULL CHECK (length(event_id) = 32),
     artifact_id UUID NOT NULL,
-    position BIGINT GENERATED ALWAYS AS IDENTITY,
     PRIMARY KEY (community_id, event_id)
 );
 
