@@ -317,3 +317,60 @@ async fn writes_use_channel_gates_for_home_and_move_source() {
     assert!(!status.is_success() || body["accepted"] == false, "{body}");
     assert!(body.to_string().contains("archived"), "{body}");
 }
+
+/// Re-sign an artifact revision with extra tags and an explicit timestamp.
+fn resign(event: &Event, key: &Keys, extra: &[[&str; 2]], created_at: u64) -> Event {
+    EventBuilder::new(event.kind, event.content.clone())
+        .tags(
+            event
+                .tags
+                .iter()
+                .cloned()
+                .chain(extra.iter().map(|t| Tag::parse(*t).unwrap())),
+        )
+        .custom_created_at(nostr::Timestamp::from(created_at))
+        .sign_with_keys(key)
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn generic_p_reads_find_mentioned_artifacts() {
+    let f = Fixture::new().await;
+    let tagged = f.peer.public_key().to_hex();
+    let create = f.revision(Uuid::new_v4(), "create", None);
+    let create = resign(
+        &create,
+        &f.owner,
+        &[["p", &tagged]],
+        create.created_at.as_secs(),
+    );
+    f.publish(&create).await;
+    let filter = json!([{"kinds":[45010],"#h":[f.home],"#p":[tagged]}]);
+    let (status, body) = f.request("/query", filter.clone()).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body.as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body[0]["id"], create.id.to_hex());
+    let (status, body) = f.request("/count", filter).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body["count"], 1, "{body}");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn generic_d_lookup_matches_before_limit() {
+    let f = Fixture::new().await;
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let now = nostr::Timestamp::now().as_secs();
+    let older = resign(&f.revision(a, "create", None), &f.owner, &[], now - 60);
+    f.publish(&older).await;
+    f.publish(&f.revision(b, "create", None)).await;
+    let filter = json!([{"kinds":[45010],"#h":[f.home],"#d":[a],"limit":1}]);
+    let (status, body) = f.request("/query", filter.clone()).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body.as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body[0]["id"], older.id.to_hex());
+    let (status, body) = f.request("/count", filter).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body["count"], 1, "{body}");
+}

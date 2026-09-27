@@ -78,6 +78,10 @@ pub struct EventQuery {
     /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
     /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
     pub e_tags: Option<Vec<String>>,
+    /// Restrict results to events with a `d` tag matching any of these values,
+    /// via JSONB containment. For non-NIP-33 kinds whose `d_tag` column is NULL
+    /// (NIP-AR artifacts), so identity lookups match before SQL `LIMIT`.
+    pub d_tag_values: Option<Vec<String>>,
     /// Restrict results to events with an exact custom tag pair.
     /// Uses JSONB containment against `tags` before SQL `LIMIT`.
     pub custom_tag: Option<(String, String)>,
@@ -139,6 +143,7 @@ impl EventQuery {
             authors: None,
             ids: None,
             e_tags: None,
+            d_tag_values: None,
             custom_tag: None,
             channel_ids: None,
             channel_ids_include_global: true,
@@ -658,6 +663,20 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         }
     }
 
+    if let Some(ref values) = q.d_tag_values {
+        if !values.is_empty() {
+            qb.push(" AND (");
+            for (i, value) in values.iter().enumerate() {
+                if i > 0 {
+                    qb.push(" OR ");
+                }
+                qb.push(format!("{col_prefix}tags @> "));
+                qb.push_bind(serde_json::json!([["d", value]]));
+            }
+            qb.push(")");
+        }
+    }
+
     if let Some((ref name, ref value)) = q.custom_tag {
         let containment = serde_json::json!([[name, value]]);
         qb.push(format!(" AND {col_prefix}tags @> "))
@@ -958,6 +977,20 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     if let Some(ref e_tags) = q.e_tags {
         if !e_tags.is_empty() {
             push_e_tag_filter(&mut qb, col_prefix, e_tags);
+        }
+    }
+
+    if let Some(ref values) = q.d_tag_values {
+        if !values.is_empty() {
+            qb.push(" AND (");
+            for (i, value) in values.iter().enumerate() {
+                if i > 0 {
+                    qb.push(" OR ");
+                }
+                qb.push(format!("{col_prefix}tags @> "));
+                qb.push_bind(serde_json::json!([["d", value]]));
+            }
+            qb.push(")");
         }
     }
 

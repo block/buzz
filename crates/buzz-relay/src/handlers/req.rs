@@ -1046,6 +1046,19 @@ fn filter_to_query_params(
     } else {
         (None, None)
     };
+    // NIP-AR artifacts carry their stable identity in `d` but are not NIP-33,
+    // so `d_tag` stays NULL; match the tag itself before `LIMIT`.
+    let filter_is_artifact_only = kinds.as_ref().is_some_and(|ks| {
+        !ks.is_empty()
+            && ks
+                .iter()
+                .all(|&k| k as u32 == buzz_core::kind::KIND_ARTIFACT)
+    });
+    let d_tag_values = filter_is_artifact_only
+        .then(|| filter.generic_tags.get(&d_tag_key))
+        .flatten()
+        .filter(|values| !values.is_empty())
+        .map(|values| values.iter().map(|v| v.to_string()).collect());
 
     EventQuery {
         channel_id,
@@ -1060,6 +1073,7 @@ fn filter_to_query_params(
         authors,
         ids,
         e_tags,
+        d_tag_values,
         ..EventQuery::for_community(community)
     }
 }
@@ -2301,6 +2315,24 @@ mod tests {
         .expect("limitation")
         .max_limit
         .expect("max_limit") as i64
+    }
+
+    #[test]
+    fn artifact_d_filter_is_pushed_before_limit() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let d = nostr::SingleLetterTag::lowercase(nostr::Alphabet::D);
+        let artifact = Filter::new()
+            .kind(nostr::Kind::Custom(45010))
+            .custom_tag(d, "a")
+            .limit(1);
+        let q = filter_to_query_params(&artifact, None, community);
+        assert_eq!(q.d_tag_values, Some(vec!["a".to_string()]));
+        assert_eq!(q.d_tag, None);
+
+        // Mixed kinds keep the generic post-filter path.
+        let mixed = artifact.clone().kind(nostr::Kind::Custom(9));
+        let q = filter_to_query_params(&mixed, None, community);
+        assert_eq!(q.d_tag_values, None);
     }
 
     #[test]

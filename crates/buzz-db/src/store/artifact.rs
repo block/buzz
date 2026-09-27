@@ -184,6 +184,7 @@ impl Db {
         let (stored, _) =
             crate::event::insert_event_in_transaction(&mut tx, community, event, Some(env.home))
                 .await?;
+        crate::insert_mentions_in_transaction(&mut tx, community, event, Some(env.home)).await?;
         let mut accepted = vec![stored];
         if let (ArtifactOp::Move, Some(source), Some(prev)) = (env.op, source, &env.prev) {
             let removal = removal_marker(relay_keys, env.id, source, prev)?;
