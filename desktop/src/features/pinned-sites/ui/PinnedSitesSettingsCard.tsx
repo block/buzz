@@ -45,8 +45,11 @@ import type {
   PinnedSiteDraft,
   PinnedSiteIconId,
 } from "../lib/types";
+import { usePinSiteRunbook } from "@/features/site-runbook/hooks";
+import { countPendingInRunbook } from "@/features/site-runbook/lib/pendingCount";
 import { pinRunbookRef } from "@/features/site-runbook/lib/keys";
 import { SiteRunbookDialog } from "@/features/site-runbook/ui/SiteRunbookDialog";
+import { formatSidebarMenuCount } from "@/features/sidebar/lib/sidebarMenuCounts";
 import { exportBrowserShareFromRef } from "@/features/browser-share/lib/exportActions";
 import { ImportBrowserShareDialog } from "@/features/browser-share/ui/ImportBrowserShareDialog";
 import { BROWSER_SHARE_SECURITY_NOTE } from "@/features/browser-share/lib/types";
@@ -210,6 +213,10 @@ function PinRow({
 }) {
   const Icon = getPinnedSiteIcon(pin.icon);
   const [runbookOpen, setRunbookOpen] = React.useState(false);
+  const { runbook } = usePinSiteRunbook(pin.id);
+  const pendingCount = countPendingInRunbook(runbook);
+  const pendingDisplay =
+    pendingCount > 0 ? formatSidebarMenuCount(pendingCount) : 0;
 
   return (
     <div
@@ -257,6 +264,15 @@ function PinRow({
             >
               <BookOpen className="mr-2 h-4 w-4" />
               How to use this site
+              {pendingDisplay > 0 ? (
+                <Badge
+                  className="ml-auto normal-case tracking-normal"
+                  data-testid={`pinned-site-runbook-pending-${pin.id}`}
+                  variant="warning"
+                >
+                  {pendingDisplay}
+                </Badge>
+              ) : null}
             </DropdownMenuItem>
             <DropdownMenuItem
               data-testid={`pinned-site-export-${pin.id}`}

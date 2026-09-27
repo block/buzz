@@ -7,6 +7,7 @@ import {
   upsertRunbookInBlob,
 } from "./storage";
 import { emptyRunbook, emptyRunbooksBlob } from "./serialize";
+import { countPendingProcedures } from "./pendingCount";
 import type { SiteRunbook, SiteRunbookRef, SiteRunbooksBlob } from "./types";
 
 type Scope = { pubkey: string; relayUrl: string };
@@ -82,6 +83,15 @@ export function clearSiteRunbook(ref: SiteRunbookRef): void {
 
 export function listSiteRunbookKeys(): string[] {
   return Object.keys(blob.runbooks);
+}
+
+/** Live unread-style count: pending procedures across all runbooks. */
+export function getPendingProcedureCount(): number {
+  return countPendingProcedures(blob);
+}
+
+export function getSiteRunbooksBlob(): SiteRunbooksBlob {
+  return blob;
 }
 
 /** Test helper: replace in-memory blob without touching storage. */

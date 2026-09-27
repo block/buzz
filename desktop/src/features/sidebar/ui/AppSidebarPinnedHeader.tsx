@@ -198,6 +198,7 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuButton>
             <SidebarMenuCountBadge
               count={counts.browsers}
+              legacyWhenPositive
               preferenceEnabled={preferences.browsers}
               testId="sidebar-browsers-count"
             />

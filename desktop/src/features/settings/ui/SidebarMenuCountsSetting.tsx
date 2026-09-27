@@ -11,7 +11,8 @@ import { SettingsOptionRow } from "./SettingsOptionGroup";
 
 const COUNT_COPY: Record<SidebarMenuCountId, string> = {
   inbox: "Unread conversations in the sidebar Inbox row.",
-  browsers: "Open browser groups in the sidebar Browsers row.",
+  browsers:
+    "New browsers and pending runbook proposals on the sidebar Browsers row.",
   agents: "Running/total managed agents in the sidebar Agents row.",
   bots: "Visible community bots in the sidebar Bots row.",
 };

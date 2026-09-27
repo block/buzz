@@ -67,6 +67,10 @@ import {
   buildBrowserConversationBindings,
 } from "../lib/browserBindings";
 import { disposeBrowserSession } from "../lib/disposeBrowserSession";
+import {
+  markAllListedBrowserGroupsSeen,
+  markBrowserGroupsAsSeen,
+} from "../lib/browserAttentionStore";
 import { sidRunbookRef } from "@/features/site-runbook/lib/keys";
 import { SiteRunbookOpenButton } from "@/features/site-runbook/ui/SiteRunbookDialog";
 import { ExportBrowserShareButton } from "@/features/browser-share/ui/ExportBrowserShareButton";
@@ -294,6 +298,14 @@ export function BrowsersScreen() {
     () => [...playground.browsers.values()],
     [playground.browsers],
   );
+
+  // Viewing the list clears "new" for every currently listed browser group.
+  React.useEffect(() => {
+    markAllListedBrowserGroupsSeen(
+      browsers.map((browser) => browser.browserId),
+    );
+  }, [browsers]);
+
   const rows = React.useMemo(
     () =>
       buildBrowserListRows({
@@ -361,6 +373,7 @@ export function BrowsersScreen() {
   /** Main-host Open — RHS slide-out. Detached rows have no Open path. */
   function openRow(row: BrowserListRow) {
     if (row.host !== "main") return;
+    markBrowserGroupsAsSeen([row.browserId]);
     showPlaygroundSession(row.mainSurfaceId, { preferSidePanel: true });
   }
 

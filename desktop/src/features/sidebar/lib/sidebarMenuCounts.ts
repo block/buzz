@@ -1,7 +1,8 @@
 /**
  * Pure helpers for primary left-nav menu counts.
- * Inbox = unread; Browsers / Bots = roster sizes; Agents = running/total.
- * Browsers counts browser groups (BrowsersScreen rows), not tabs/sessions.
+ * Inbox = unread; Bots = roster size; Agents = running/total.
+ * Browsers = attention (new browser groups + pending runbook proposals),
+ * not the playground roster size.
  */
 
 export type SidebarAgentsCount = {
@@ -58,7 +59,7 @@ export function formatSidebarAgentsCount(
 
 /**
  * When the preference is on, show every defined count (including 0 / `0/12`).
- * When off, Inbox keeps the legacy >0 unread chip; roster items stay hidden.
+ * When off, Inbox / Browsers keep the legacy >0 attention chip; roster items stay hidden.
  */
 export function shouldShowSidebarMenuCount(input: {
   preferenceEnabled: boolean;
@@ -77,15 +78,18 @@ export function shouldShowSidebarMenuCount(input: {
 
 export function deriveSidebarMenuCounts(input: {
   inboxUnread: number | undefined | null;
-  /** Browser groups / BrowsersScreen rows (not tab/session count). */
-  browserGroupCount: number | undefined | null;
+  /**
+   * Attention for the Browsers row: new (unseen) browser groups plus
+   * pending runbook procedure proposals. Not the roster size.
+   */
+  browserAttentionCount: number | undefined | null;
   agentRunningCount: number | undefined | null;
   agentTotalCount: number | undefined | null;
   botCount: number | undefined | null;
 }): SidebarMenuCounts {
   return {
     inbox: resolveSidebarMenuCount(input.inboxUnread),
-    browsers: resolveSidebarMenuCount(input.browserGroupCount),
+    browsers: resolveSidebarMenuCount(input.browserAttentionCount),
     agents: formatSidebarAgentsCount(
       input.agentRunningCount,
       input.agentTotalCount,

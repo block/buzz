@@ -89,11 +89,11 @@ test("shouldShowSidebarMenuCount shows zeros only when preference is on", () => 
   );
 });
 
-test("deriveSidebarMenuCounts maps inbox unread, roster sizes, agents X/Y", () => {
+test("deriveSidebarMenuCounts maps inbox unread, browser attention sum, agents X/Y", () => {
   assert.deepEqual(
     deriveSidebarMenuCounts({
       inboxUnread: 7,
-      browserGroupCount: 2,
+      browserAttentionCount: 2,
       agentRunningCount: 3,
       agentTotalCount: 12,
       botCount: 11,
@@ -103,7 +103,7 @@ test("deriveSidebarMenuCounts maps inbox unread, roster sizes, agents X/Y", () =
   assert.deepEqual(
     deriveSidebarMenuCounts({
       inboxUnread: undefined,
-      browserGroupCount: 0,
+      browserAttentionCount: 0,
       agentRunningCount: undefined,
       agentTotalCount: undefined,
       botCount: undefined,
@@ -114,5 +114,16 @@ test("deriveSidebarMenuCounts maps inbox unread, roster sizes, agents X/Y", () =
       agents: undefined,
       bots: undefined,
     },
+  );
+  // Attention = new browsers + pending runbooks (caller sums).
+  assert.deepEqual(
+    deriveSidebarMenuCounts({
+      inboxUnread: 0,
+      browserAttentionCount: 1 + 4,
+      agentRunningCount: 0,
+      agentTotalCount: 2,
+      botCount: 0,
+    }),
+    { inbox: 0, browsers: 5, agents: "0/2", bots: 0 },
   );
 });
