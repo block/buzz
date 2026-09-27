@@ -24,9 +24,16 @@ import {
 import { isAllowedPlaygroundUrl } from "./url.ts";
 import {
   rebindBrowserAgentGrantToTab,
+  subscribeBrowserAgentSetViewport,
   subscribeBrowserAgentSwitchTab,
   syncBrowserAgentTabs,
+  syncBrowserAgentViewport,
 } from "@/features/browser-agent/lib/api";
+import {
+  applyAgentPlaygroundViewport,
+  getPlaygroundViewport,
+  subscribePlaygroundViewport,
+} from "./playgroundViewport";
 import { mainTabSid } from "./browserGroups.ts";
 import { browserWebviewLabel } from "@/features/browser-agent/lib/labels";
 import {
@@ -66,6 +73,8 @@ export function usePlaygroundRuntime() {
   usePlaygroundUpdatePolling();
   usePlaygroundNewTabListener();
   usePlaygroundTabSwitchListener();
+  usePlaygroundViewportListener();
+  usePlaygroundViewportSync();
 }
 
 
@@ -173,6 +182,71 @@ function usePlaygroundNewTabListener() {
   }, []);
 }
 
+
+
+/**
+ * Agent MCP browser_set_viewport → Desktop emits browser-agent-set-viewport.
+ * Apply via the same playground viewport store Stage UI uses.
+ */
+function usePlaygroundViewportListener() {
+  React.useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void subscribeBrowserAgentSetViewport((payload) => {
+      if (disposed) return;
+      const sid = payload.surfaceId?.trim();
+      if (!sid) return;
+      const result = applyAgentPlaygroundViewport(sid, payload);
+      if (!result.ok) {
+        console.warn("buzz: browser_set_viewport rejected", result.error);
+        return;
+      }
+      void syncPlaygroundViewportToAgent(sid).catch(() => undefined);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      stop = unlisten;
+    });
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
+}
+
+/** Mirror live viewport snapshots under the grant dir for MCP browser_get_viewport. */
+export async function syncPlaygroundViewportToAgent(sid: string) {
+  const snap = getPlaygroundViewport(sid);
+  await syncBrowserAgentViewport({
+    surfaceId: sid,
+    mode: snap.mode,
+    width: snap.width,
+    height: snap.height,
+    scalePercent: snap.scalePercent,
+    deviceId: snap.deviceId,
+    orientation: snap.orientation,
+  });
+}
+
+function usePlaygroundViewportSync() {
+  React.useEffect(() => {
+    let cancelled = false;
+    const push = () => {
+      if (cancelled) return;
+      for (const session of listPlaygroundSessions()) {
+        void syncPlaygroundViewportToAgent(session.sid).catch(() => undefined);
+      }
+    };
+    push();
+    const unsub = subscribePlaygroundViewport(push);
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, []);
+}
 
 /**
  * Agent MCP browser_switch_tab → Desktop emits browser-agent-switch-tab.

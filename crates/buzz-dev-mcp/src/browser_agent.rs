@@ -381,6 +381,8 @@ pub fn observe_poll(p: ObservePollParams) -> Result<CallToolResult, ErrorData> {
                 "browser_agent_grants",
                 "browser_tabs",
                 "browser_switch_tab",
+                "browser_get_viewport",
+                "browser_set_viewport",
                 "browser_snapshot",
                 "browser_drive",
                 "browser_fill_field",
@@ -556,6 +558,191 @@ pub fn switch_tab(p: SwitchTabParams) -> Result<CallToolResult, ErrorData> {
             "webviewLabel": label,
             "grantSurfaceId": grant_surface_id(&grant),
             "note": "Desktop will focus the tab and rebind Observe/Drive onto it. Poll browser_observe_poll for kind=tab_switched, or call browser_tabs."
+        })
+        .to_string(),
+    )]))
+}
+
+const VIEWPORT_DEVICE_IDS: &[&str] = &[
+    "iphone-se",
+    "iphone-16",
+    "iphone-16-pro-max",
+    "pixel-8",
+    "ipad-mini",
+    "ipad-pro-11",
+];
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetViewportParams {
+    #[serde(default)]
+    pub webview_label: Option<String>,
+    #[serde(default)]
+    pub surface_id: Option<String>,
+}
+
+/// Read the mirrored Stage viewport for a grant (Observe or Drive).
+pub fn get_viewport(p: GetViewportParams) -> Result<CallToolResult, ErrorData> {
+    let Some(pubkey) = caller_pubkey() else {
+        return Err(ErrorData::invalid_params(
+            "BUZZ_AGENT_PUBKEY required for browser_get_viewport",
+            None,
+        ));
+    };
+    let (dir, grant, label) = resolve_grant_target(
+        &pubkey,
+        p.webview_label.as_deref().unwrap_or(""),
+        p.surface_id.as_deref(),
+    )?;
+    let mut viewport = read_json(&dir.join("viewport.json"));
+    if viewport.is_none() {
+        if let Some(sid) = grant_surface_id(&grant) {
+            viewport = read_json(&agent_dir().join("viewports").join(sid).join("viewport.json"));
+        }
+    }
+    let body = json!({
+        "ok": true,
+        "grant": grant,
+        "webviewLabel": label,
+        "surfaceId": grant_surface_id(&grant),
+        "viewport": viewport.clone().unwrap_or(json!({
+            "surfaceId": grant_surface_id(&grant),
+            "mode": "desktop",
+            "width": 0,
+            "height": 0,
+        })),
+        "note": "Viewport mirrors Desktop Stage (Desktop | Responsive | Mobile). Use browser_set_viewport while Driving to change it."
+    });
+    Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetViewportParams {
+    /// desktop | responsive | mobile
+    pub mode: String,
+    #[serde(default)]
+    pub webview_label: Option<String>,
+    #[serde(default)]
+    pub surface_id: Option<String>,
+    /// Responsive CSS width (min 320).
+    #[serde(default)]
+    pub width: Option<f64>,
+    /// Responsive CSS height (min 320).
+    #[serde(default)]
+    pub height: Option<f64>,
+    /// Mobile museum device id (iphone-16, pixel-8, …).
+    #[serde(default)]
+    pub device_id: Option<String>,
+    /// portrait | landscape (mobile).
+    #[serde(default)]
+    pub orientation: Option<String>,
+    /// Mobile museum scale percent (50–200, steps of 25).
+    #[serde(default)]
+    pub scale_percent: Option<f64>,
+}
+
+/// Validate MCP viewport payload (pure; used by set_viewport + tests).
+pub fn validate_set_viewport_params(p: &SetViewportParams) -> Result<Value, String> {
+    let mode = p.mode.trim().to_ascii_lowercase();
+    match mode.as_str() {
+        "desktop" => Ok(json!({ "mode": "desktop" })),
+        "responsive" => {
+            let width = p.width.unwrap_or(390.0);
+            let height = p.height.unwrap_or(844.0);
+            if !width.is_finite() || !height.is_finite() {
+                return Err("width/height must be finite numbers".into());
+            }
+            let width = width.round().max(320.0) as i64;
+            let height = height.round().max(320.0) as i64;
+            Ok(json!({
+                "mode": "responsive",
+                "width": width,
+                "height": height,
+            }))
+        }
+        "mobile" => {
+            let device_id = p
+                .device_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("iphone-16");
+            if !VIEWPORT_DEVICE_IDS.iter().any(|d| *d == device_id) {
+                return Err(format!(
+                    "deviceId must be one of: {}",
+                    VIEWPORT_DEVICE_IDS.join(", ")
+                ));
+            }
+            let orientation = p
+                .orientation
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("portrait")
+                .to_ascii_lowercase();
+            if orientation != "portrait" && orientation != "landscape" {
+                return Err("orientation must be portrait|landscape".into());
+            }
+            let scale = p.scale_percent.unwrap_or(100.0);
+            if !scale.is_finite() {
+                return Err("scalePercent must be a finite number".into());
+            }
+            let stepped = ((scale / 25.0).round() * 25.0).clamp(50.0, 200.0) as i64;
+            Ok(json!({
+                "mode": "mobile",
+                "deviceId": device_id,
+                "orientation": orientation,
+                "scalePercent": stepped,
+            }))
+        }
+        _ => Err("mode must be desktop|responsive|mobile".into()),
+    }
+}
+
+/// Ask Desktop to set Stage viewport (Drive mode only). Writes viewport-request.json.
+pub fn set_viewport(p: SetViewportParams) -> Result<CallToolResult, ErrorData> {
+    let Some(pubkey) = caller_pubkey() else {
+        return Err(ErrorData::invalid_params(
+            "BUZZ_AGENT_PUBKEY required for browser_set_viewport",
+            None,
+        ));
+    };
+    let patch = validate_set_viewport_params(&p).map_err(|e| {
+        ErrorData::invalid_params(e, None)
+    })?;
+    let (dir, grant, label) = require_drive_grant_resolved(
+        &pubkey,
+        p.webview_label.as_deref().unwrap_or(""),
+        p.surface_id.as_deref(),
+    )?;
+    let surface = grant_surface_id(&grant)
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let mut req = patch;
+    if let Some(obj) = req.as_object_mut() {
+        obj.insert("surfaceId".into(), json!(surface));
+        obj.insert(
+            "requestedAtMs".into(),
+            json!(SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)),
+        );
+    }
+    let path = dir.join("viewport-request.json");
+    let mut f = fs::File::create(&path).map_err(|e| {
+        ErrorData::internal_error(format!("write viewport-request: {e}"), None)
+    })?;
+    f.write_all(req.to_string().as_bytes()).map_err(|e| {
+        ErrorData::internal_error(format!("write viewport-request: {e}"), None)
+    })?;
+    Ok(CallToolResult::success(vec![Content::text(
+        json!({
+            "ok": true,
+            "queued": true,
+            "surfaceId": surface,
+            "webviewLabel": label,
+            "viewport": req,
+            "note": "Desktop will apply Stage viewport (mode/device/size/scale). Call browser_get_viewport or re-snapshot after apply."
         })
         .to_string(),
     )]))
@@ -1180,6 +1367,137 @@ mod tests {
         });
         let text = format!("{result:?}");
         assert!(text.contains("console"), "{text}");
+    }
+
+    #[test]
+    fn validate_set_viewport_desktop_responsive_mobile() {
+        let desktop = validate_set_viewport_params(&SetViewportParams {
+            mode: "desktop".into(),
+            webview_label: None,
+            surface_id: None,
+            width: None,
+            height: None,
+            device_id: None,
+            orientation: None,
+            scale_percent: None,
+        })
+        .unwrap();
+        assert_eq!(desktop.get("mode").and_then(|v| v.as_str()), Some("desktop"));
+
+        let responsive = validate_set_viewport_params(&SetViewportParams {
+            mode: "responsive".into(),
+            webview_label: None,
+            surface_id: None,
+            width: Some(100.0),
+            height: Some(200.0),
+            device_id: None,
+            orientation: None,
+            scale_percent: None,
+        })
+        .unwrap();
+        assert_eq!(responsive.get("width").and_then(|v| v.as_i64()), Some(320));
+        assert_eq!(responsive.get("height").and_then(|v| v.as_i64()), Some(320));
+
+        let mobile = validate_set_viewport_params(&SetViewportParams {
+            mode: "mobile".into(),
+            webview_label: None,
+            surface_id: None,
+            width: None,
+            height: None,
+            device_id: Some("iphone-16".into()),
+            orientation: Some("landscape".into()),
+            scale_percent: Some(75.0),
+        })
+        .unwrap();
+        assert_eq!(mobile.get("deviceId").and_then(|v| v.as_str()), Some("iphone-16"));
+        assert_eq!(
+            mobile.get("orientation").and_then(|v| v.as_str()),
+            Some("landscape")
+        );
+        assert_eq!(mobile.get("scalePercent").and_then(|v| v.as_i64()), Some(75));
+    }
+
+    #[test]
+    fn validate_set_viewport_rejects_bad_mode_and_device() {
+        assert!(validate_set_viewport_params(&SetViewportParams {
+            mode: "tablet".into(),
+            webview_label: None,
+            surface_id: None,
+            width: None,
+            height: None,
+            device_id: None,
+            orientation: None,
+            scale_percent: None,
+        })
+        .is_err());
+        assert!(validate_set_viewport_params(&SetViewportParams {
+            mode: "mobile".into(),
+            webview_label: None,
+            surface_id: None,
+            width: None,
+            height: None,
+            device_id: Some("nokia".into()),
+            orientation: None,
+            scale_percent: None,
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn set_viewport_requires_drive_and_queues_request() {
+        let dir = tempdir().unwrap();
+        let pubkey = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let label = "playground-vp";
+        let gdir = dir.path().join(label);
+        fs::create_dir_all(&gdir).unwrap();
+        fs::write(
+            gdir.join("grant.json"),
+            format!(
+                r#"{{"agentPubkey":"{pubkey}","mode":"observe","webviewLabel":"{label}","surfaceId":"sid-vp"}}"#
+            ),
+        )
+        .unwrap();
+        let err = with_env(dir.path(), pubkey, || {
+            set_viewport(SetViewportParams {
+                mode: "responsive".into(),
+                webview_label: Some(label.into()),
+                surface_id: None,
+                width: Some(414.0),
+                height: Some(896.0),
+                device_id: None,
+                orientation: None,
+                scale_percent: None,
+            })
+            .unwrap_err()
+        });
+        let msg = format!("{err:?}");
+        assert!(msg.contains("Drive"), "{msg}");
+
+        fs::write(
+            gdir.join("grant.json"),
+            format!(
+                r#"{{"agentPubkey":"{pubkey}","mode":"drive","webviewLabel":"{label}","surfaceId":"sid-vp"}}"#
+            ),
+        )
+        .unwrap();
+        let result = with_env(dir.path(), pubkey, || {
+            set_viewport(SetViewportParams {
+                mode: "mobile".into(),
+                webview_label: Some(label.into()),
+                surface_id: None,
+                width: None,
+                height: None,
+                device_id: Some("pixel-8".into()),
+                orientation: Some("portrait".into()),
+                scale_percent: Some(100.0),
+            })
+            .unwrap()
+        });
+        let text = format!("{result:?}");
+        assert!(text.contains("queued"), "{text}");
+        let req = fs::read_to_string(gdir.join("viewport-request.json")).unwrap();
+        assert!(req.contains("pixel-8"), "{req}");
+        assert!(req.contains("mobile"), "{req}");
     }
 
     #[test]

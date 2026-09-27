@@ -36,6 +36,7 @@ import {
 import {
   getPlaygroundViewport,
   setPlaygroundViewport,
+  subscribePlaygroundViewport,
   type PlaygroundChromeMode,
 } from "../lib/playgroundViewport";
 import { DEFAULT_RESPONSIVE_VIEWPORT } from "../lib/types";
@@ -190,16 +191,38 @@ function ResponsiveStage({
   session: PlaygroundSession;
   controlsLocked: boolean;
 }) {
-  const stored = getPlaygroundViewport(session.sid);
-  const [width, setWidth] = React.useState(() =>
+  const stored = React.useSyncExternalStore(
+    subscribePlaygroundViewport,
+    () => getPlaygroundViewport(session.sid),
+    () => getPlaygroundViewport(session.sid),
+  );
+  const width =
     stored.mode === "responsive" && stored.width > 0
       ? stored.width
-      : DEFAULT_RESPONSIVE_VIEWPORT.width,
-  );
-  const [height, setHeight] = React.useState(() =>
+      : DEFAULT_RESPONSIVE_VIEWPORT.width;
+  const height =
     stored.mode === "responsive" && stored.height > 0
       ? stored.height
-      : DEFAULT_RESPONSIVE_VIEWPORT.height,
+      : DEFAULT_RESPONSIVE_VIEWPORT.height;
+  const setWidth = React.useCallback(
+    (next: number) => {
+      setPlaygroundViewport(session.sid, {
+        mode: "responsive",
+        width: Math.max(320, next),
+        height,
+      });
+    },
+    [session.sid, height],
+  );
+  const setHeight = React.useCallback(
+    (next: number) => {
+      setPlaygroundViewport(session.sid, {
+        mode: "responsive",
+        width,
+        height: Math.max(320, next),
+      });
+    },
+    [session.sid, width],
   );
   const hostRef = React.useRef<HTMLDivElement | null>(null);
   const lockTitle = controlsLocked
@@ -207,12 +230,15 @@ function ResponsiveStage({
     : undefined;
 
   React.useEffect(() => {
+    if (stored.mode === "responsive" && stored.width > 0 && stored.height > 0) {
+      return;
+    }
     setPlaygroundViewport(session.sid, {
       mode: "responsive",
       width,
       height,
     });
-  }, [session.sid, width, height]);
+  }, [session.sid, stored.mode, stored.width, stored.height, width, height]);
 
   return (
     <div
@@ -394,18 +420,56 @@ function MobileDeviceMuseum({
   session: PlaygroundSession;
   controlsLocked: boolean;
 }) {
-  const stored = getPlaygroundViewport(session.sid);
-  const [deviceId, setDeviceId] =
-    React.useState<PlaygroundDeviceId>("iphone-16");
-  const [orientation, setOrientation] = React.useState<
-    "portrait" | "landscape"
-  >("portrait");
-  const [scalePercent, setScalePercent] =
-    React.useState<PlaygroundDeviceScalePercent>(() =>
-      stored.mode === "mobile" && stored.scalePercent
-        ? (stored.scalePercent as PlaygroundDeviceScalePercent)
-        : PLAYGROUND_DEVICE_SCALE_DEFAULT,
-    );
+  const stored = React.useSyncExternalStore(
+    subscribePlaygroundViewport,
+    () => getPlaygroundViewport(session.sid),
+    () => getPlaygroundViewport(session.sid),
+  );
+  const deviceId: PlaygroundDeviceId =
+    stored.mode === "mobile" && stored.deviceId
+      ? stored.deviceId
+      : "iphone-16";
+  const orientation: "portrait" | "landscape" =
+    stored.mode === "mobile" && stored.orientation
+      ? stored.orientation
+      : "portrait";
+  const scalePercent: PlaygroundDeviceScalePercent =
+    stored.mode === "mobile" && stored.scalePercent
+      ? (stored.scalePercent as PlaygroundDeviceScalePercent)
+      : PLAYGROUND_DEVICE_SCALE_DEFAULT;
+  const setDeviceId = React.useCallback(
+    (next: PlaygroundDeviceId) => {
+      setPlaygroundViewport(session.sid, {
+        mode: "mobile",
+        deviceId: next,
+        orientation,
+        scalePercent,
+      });
+    },
+    [session.sid, orientation, scalePercent],
+  );
+  const setOrientation = React.useCallback(
+    (next: "portrait" | "landscape") => {
+      setPlaygroundViewport(session.sid, {
+        mode: "mobile",
+        deviceId,
+        orientation: next,
+        scalePercent,
+      });
+    },
+    [session.sid, deviceId, scalePercent],
+  );
+  const setScalePercent = React.useCallback(
+    (next: PlaygroundDeviceScalePercent) => {
+      setPlaygroundViewport(session.sid, {
+        mode: "mobile",
+        deviceId,
+        orientation,
+        scalePercent: next,
+      });
+    },
+    [session.sid, deviceId, orientation],
+  );
   const hostRef = React.useRef<HTMLDivElement | null>(null);
   const device = PLAYGROUND_DEVICES.find((item) => item.id === deviceId);
   const viewport = scalePlaygroundDeviceViewport(
@@ -421,8 +485,17 @@ function MobileDeviceMuseum({
       width: viewport.width,
       height: viewport.height,
       scalePercent,
+      deviceId,
+      orientation,
     });
-  }, [session.sid, viewport.width, viewport.height, scalePercent]);
+  }, [
+    session.sid,
+    viewport.width,
+    viewport.height,
+    scalePercent,
+    deviceId,
+    orientation,
+  ]);
 
   return (
     <div
@@ -436,8 +509,8 @@ function MobileDeviceMuseum({
         disabledTitle={AGENT_DRIVING_CHROME_TOOLTIP}
         onDeviceIdChange={setDeviceId}
         onOrientationToggle={() =>
-          setOrientation((value) =>
-            value === "portrait" ? "landscape" : "portrait",
+          setOrientation(
+            orientation === "portrait" ? "landscape" : "portrait",
           )
         }
         onScalePercentChange={setScalePercent}

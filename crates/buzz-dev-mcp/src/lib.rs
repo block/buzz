@@ -111,6 +111,28 @@ impl DevMcp {
     }
 
     #[tool(
+        name = "browser_get_viewport",
+        description = "Read the Desktop Stage viewport for a Buzz browser you hold Observe or Drive on (mode desktop|responsive|mobile, width×height, mobile deviceId/orientation/scalePercent). Prefer surface_id. Requires BUZZ_AGENT_PUBKEY."
+    )]
+    async fn browser_get_viewport(
+        &self,
+        Parameters(p): Parameters<browser_agent::GetViewportParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        browser_agent::get_viewport(p)
+    }
+
+    #[tool(
+        name = "browser_set_viewport",
+        description = "Set Desktop Stage viewport while Driving (same controls humans see: mode desktop|responsive|mobile; responsive width×height; mobile deviceId + orientation portrait|landscape + scalePercent 50–200). Prefer surface_id. Drive grant required. Returns queued=true; Desktop applies via setPlaygroundViewport. Requires BUZZ_AGENT_PUBKEY."
+    )]
+    async fn browser_set_viewport(
+        &self,
+        Parameters(p): Parameters<browser_agent::SetViewportParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        browser_agent::set_viewport(p)
+    }
+
+    #[tool(
         name = "browser_drive",
         description = "Drive a Buzz WKWebView you hold in Drive mode. Prefer surface_id. Protocol: one goal/one surface; snapshot then one click/type/key; waitFor after nav/URL change; prefer browser_fill_field for forms; do not screenshot every step; on no element retry once then stop. `action`: { kind, id?, url?, x?, y?, text?, selector?, ref?, dx?, dy?, key?, urlContains?, timeoutMs?, clear? }. kind=navigate|click|type|fill|scroll|hover|key|waitFor. Optional include_snapshot=true returns inline snapshot with results. Returns {ok, results, url, ids, complete, elapsedMs, webviewLabel, surfaceId, snapshot?}. Requires BUZZ_AGENT_PUBKEY."
     )]

@@ -264,6 +264,45 @@ export function subscribeBrowserAgentSwitchTab(
   );
 }
 
+export type BrowserAgentViewportSyncInput = {
+  surfaceId: string;
+  mode: "desktop" | "responsive" | "mobile";
+  width: number;
+  height: number;
+  scalePercent?: number;
+  deviceId?: string;
+  orientation?: "portrait" | "landscape";
+};
+
+/** Mirror playground viewport for MCP browser_get_viewport. */
+export async function syncBrowserAgentViewport(
+  input: BrowserAgentViewportSyncInput,
+): Promise<void> {
+  if (!native()) return;
+  await invoke("browser_agent_sync_viewport", { input });
+}
+
+export type BrowserAgentSetViewportPayload = {
+  surfaceId: string;
+  mode: "desktop" | "responsive" | "mobile";
+  width?: number;
+  height?: number;
+  deviceId?: string;
+  orientation?: "portrait" | "landscape";
+  scalePercent?: number;
+};
+
+/** Agent requested Stage viewport change (MCP browser_set_viewport). */
+export function subscribeBrowserAgentSetViewport(
+  onRequest: (payload: BrowserAgentSetViewportPayload) => void,
+): Promise<() => void> {
+  if (!native()) return Promise.resolve(() => undefined);
+  return listen<BrowserAgentSetViewportPayload>(
+    "browser-agent-set-viewport",
+    (event) => onRequest(event.payload),
+  );
+}
+
 export type BrowserAgentRunbookMirror = {
   agentBrief: string;
   procedures: Array<{ id: string; title: string; summary: string }>;

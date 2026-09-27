@@ -851,6 +851,7 @@ pub fn run() {
             browser_agent::browser_agent_grant_set,
             browser_agent::browser_agent_rebind_surface,
             browser_agent::browser_agent_sync_tabs,
+            browser_agent::browser_agent_sync_viewport,
             browser_agent::browser_agent_grant_clear,
             browser_agent::browser_agent_grant_get,
             browser_agent::browser_agent_grants_for_agent,

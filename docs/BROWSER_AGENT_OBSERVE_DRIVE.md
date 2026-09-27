@@ -45,6 +45,7 @@ Playground sessions live in a **browser group** (`browserId`, `tabSids[]`, `acti
 - **One live WKWebView per playground sid:** label is always `playground-{sid}`. Detach / pin Open / RHS stage **reparent** that child across windows instead of creating `playground-{sid}--{window}` siblings (siblings forked DOM + Drive phase). Pop-out close reparents back to main (hidden) when possible so Observe/Drive stay warm.
 - **Grants:** one agent per browser group. Observe/Drive bind to the **active tab** `surfaceId`. The **main tab** (`tabSids[0]` / `mainTabSid`) is **primary focus** and cannot be dismissed from the strip (Browsers **Remove** still disposes the group). Switching tabs (or focusing a new tab) **rebinds** the grant onto the active tab's webview label (same idea as detach host rebind). Closing a secondary tab disposes that session/webview only.
 - **Agent tabs:** MCP `browser_tabs` lists the group (`mainTabSid`, `activeTabSid`, `tabs[]` with `isMain`). `browser_switch_tab` focuses a `surface_id` (Desktop rebinds). Observe events `tab_opened` / `tab_switched` announce changes. Prefer returning to the main tab for primary work.
+- **Agent viewport (Drive):** While Drive is granted (and the human has not Taken control), humans cannot change Stage chrome — agents use MCP `browser_set_viewport` / `browser_get_viewport` instead. Same controls as the Stage UI: `mode` `desktop` | `responsive` | `mobile`; responsive `width`×`height` (min 320); mobile `deviceId` (`iphone-se` | `iphone-16` | `iphone-16-pro-max` | `pixel-8` | `ipad-mini` | `ipad-pro-11`) + `orientation` `portrait`|`landscape` + `scalePercent` (50–200, steps of 25). Desktop applies via `setPlaygroundViewport` (same store the Stage UI uses).
 - Existing sessions migrate to one-tab groups (`browserId` may equal `sid`).
 
 ### Site runbook
@@ -165,6 +166,8 @@ Prefer **Desktop-managed / local ACP** agents that can call Desktop-side tools:
 | `browser_agent_grants` | List grants (`surfaceId` + live `webviewLabel`) for this agent |
 | `browser_tabs` | List tabs in the granted browser group (`mainTabSid` primary; extras from in-page open). Prefer `surface_id`. |
 | `browser_switch_tab` | Focus a tab by `surface_id` (rebinds grant). Poll `tab_switched` or re-call `browser_tabs`. |
+| `browser_get_viewport` | Read Stage viewport (`mode`, W×H, mobile device/orientation/scale). Prefer `surface_id`. |
+| `browser_set_viewport` | Set Stage viewport while Driving (desktop / responsive W×H / mobile device+orientation+scale). Prefer `surface_id`. |
 | `browser_runbook_get` | Site runbook for the granted browser: brief + procedure index, or full steps for `procedure_id`. |
 | `browser_runbook_propose` | Queue a pending how-to procedure (title + steps). Human Accept in Desktop required. |
 

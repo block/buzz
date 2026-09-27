@@ -1262,6 +1262,7 @@ fn label_has_wake(root: &PathBuf, label: &str) -> bool {
         || dir.join("runbook-propose-wake").exists()
         || dir.join("runbook-propose.jsonl").exists()
         || dir.join("tab-switch-request.json").exists()
+        || dir.join("viewport-request.json").exists()
 }
 
 fn clear_wake(root: &PathBuf, label: &str) {
@@ -1306,6 +1307,7 @@ pub fn spawn_grant_watcher(app: AppHandle) {
                     eprintln!("buzz-desktop: grant watcher {label}: {e}");
                 }
                 process_tab_switch_request(&app, &state, &label, &root);
+                process_viewport_request(&app, &state, &label, &root);
                 // Notify UI that MCP queued a learn→write proposal (pending until Accept).
                 let propose_path = root.join(&label).join("runbook-propose.jsonl");
                 if propose_path.exists() {
@@ -1552,6 +1554,117 @@ fn process_tab_switch_request(
         "browserId": browser_id,
     });
     let _ = app.emit("browser-agent-switch-tab", payload);
+}
+
+fn process_viewport_request(
+    app: &AppHandle,
+    state: &BrowserAgentState,
+    label: &str,
+    root: &PathBuf,
+) {
+    let req_path = root.join(label).join("viewport-request.json");
+    let Ok(raw) = std::fs::read_to_string(&req_path) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&req_path);
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    if state.grants.get(label).is_none() {
+        return;
+    }
+    // Drive-only: Observe grants must not change Stage chrome.
+    if let Some(grant) = state.grants.get(label) {
+        if !matches!(grant.mode, BrowserAgentMode::Drive) {
+            return;
+        }
+    }
+    let surface_id = value
+        .get("surfaceId")
+        .or_else(|| value.get("surface_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            state
+                .grants
+                .get(label)
+                .map(|g| g.surface_id.clone())
+        });
+    let Some(surface_id) = surface_id else {
+        return;
+    };
+    let mut payload = value.clone();
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("surfaceId".into(), serde_json::json!(surface_id));
+    }
+    let _ = app.emit("browser-agent-set-viewport", payload);
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserViewportSyncInput {
+    pub surface_id: String,
+    pub mode: String,
+    pub width: f64,
+    pub height: f64,
+    pub scale_percent: Option<f64>,
+    pub device_id: Option<String>,
+    pub orientation: Option<String>,
+}
+
+/// Mirror playground viewport under the active grant dir for MCP `browser_get_viewport`.
+#[tauri::command]
+pub async fn browser_agent_sync_viewport(
+    app: AppHandle,
+    state: State<'_, BrowserAgentState>,
+    input: BrowserViewportSyncInput,
+) -> Result<(), String> {
+    let surface_id = input.surface_id.trim();
+    if surface_id.is_empty() {
+        return Err("surfaceId is required".into());
+    }
+    let root = ensure_data_root(&app, &state)?;
+    let body = serde_json::json!({
+        "surfaceId": surface_id,
+        "mode": input.mode,
+        "width": input.width,
+        "height": input.height,
+        "scalePercent": input.scale_percent,
+        "deviceId": input.device_id,
+        "orientation": input.orientation,
+    });
+    let grants = state.grants.list_all();
+    let mut wrote = false;
+    for grant in &grants {
+        if !matches!(grant.surface, BrowserAgentSurface::Playground) {
+            continue;
+        }
+        if grant.surface_id != surface_id {
+            continue;
+        }
+        let dir = root.join(&grant.webview_label);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("viewport.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        wrote = true;
+    }
+    if !wrote {
+        let dir = root.join("viewports").join(surface_id);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("viewport.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 

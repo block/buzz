@@ -114,6 +114,10 @@ test("shapeRunbookInject includes only active procedures", () => {
     "protocol mentions tab switch",
   );
   assert.ok(
+    inject.driveProtocol.some((line) => line.includes("browser_set_viewport")),
+    "protocol mentions viewport control",
+  );
+  assert.ok(
     inject.driveProtocol.some(
       (line) =>
         line.includes("userHasControl") &&

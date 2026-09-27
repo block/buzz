@@ -41,6 +41,7 @@ import { usePlaygroundDockWidth } from "../lib/usePlaygroundDockWidth";
 import {
   getPlaygroundViewport,
   setPlaygroundViewport,
+  subscribePlaygroundViewport,
   type PlaygroundChromeMode,
 } from "../lib/playgroundViewport";
 import { PlaygroundChrome } from "./PlaygroundChrome";
@@ -68,7 +69,9 @@ export function PlaygroundOverlay({
   session: PlaygroundSession;
 }) {
   const overlayRef = React.useRef<HTMLDivElement | null>(null);
-  const [mode, setMode] = React.useState<PlaygroundChromeMode>(
+  const mode = React.useSyncExternalStore(
+    subscribePlaygroundViewport,
+    () => getPlaygroundViewport(session.sid).mode,
     () => getPlaygroundViewport(session.sid).mode,
   );
   const playgroundStore = React.useSyncExternalStore(
@@ -130,7 +133,6 @@ export function PlaygroundOverlay({
 
   const handleModeChange = React.useCallback(
     (next: PlaygroundChromeMode) => {
-      setMode(next);
       setPlaygroundViewport(session.sid, { mode: next });
     },
     [session.sid],

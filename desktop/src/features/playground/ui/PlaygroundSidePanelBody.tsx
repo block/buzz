@@ -14,6 +14,7 @@ import { isMainBrowserTab } from "../lib/browserGroups";
 import {
   getPlaygroundViewport,
   setPlaygroundViewport,
+  subscribePlaygroundViewport,
   type PlaygroundChromeMode,
 } from "../lib/playgroundViewport";
 import { PLAYGROUND_SIDE_PANEL_ROOT_CLASS } from "../lib/overlayLayout";
@@ -45,7 +46,9 @@ export function PlaygroundSidePanelBody({
   conversation: PlaygroundConversation | null;
   session: PlaygroundSession;
 }) {
-  const [mode, setMode] = React.useState<PlaygroundChromeMode>(
+  const mode = React.useSyncExternalStore(
+    subscribePlaygroundViewport,
+    () => getPlaygroundViewport(session.sid).mode,
     () => getPlaygroundViewport(session.sid).mode,
   );
   const [layoutEpoch, setLayoutEpoch] = React.useState(0);
@@ -106,7 +109,6 @@ export function PlaygroundSidePanelBody({
 
   const handleModeChange = React.useCallback(
     (next: PlaygroundChromeMode) => {
-      setMode(next);
       setPlaygroundViewport(session.sid, { mode: next });
     },
     [session.sid],
