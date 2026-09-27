@@ -21,7 +21,8 @@ export const DRIVE_PROTOCOL: string[] = [
   "Prefer browser_fill_field for inputs (click+type+verify). Else snapshot then one click/type/key.",
   "browser_drive may set include_snapshot=true to return a fresh snapshot with the action result.",
   "After navigate/click that changes URL: waitFor urlContains or text before next act.",
-  "Do not call browser_snapshot(screenshot=true) every step.",
+  "After navigate/load settle, expect a host screen in chat — do not duplicate with screenshot=true unless user asked.",
+  "Tabs: browser_tabs lists the group; browser_switch_tab focuses surfaceId (rebinds Drive).",
   "On no element / no snapshot: waitFor once, re-snapshot once, then stop.",
   "browser_runbook_propose auto-activates agent procedures. Persisted (human-locked) procedures cannot be changed by agents.",
   "Agent brief is human-owned; do not overwrite it.",
@@ -63,11 +64,13 @@ export function parseProcedure(value: unknown): SiteRunbookProcedure | null {
   const status = asStatus(candidate.status);
   if (!status) return null;
   const createdAt =
-    typeof candidate.createdAt === "number" && Number.isFinite(candidate.createdAt)
+    typeof candidate.createdAt === "number" &&
+    Number.isFinite(candidate.createdAt)
       ? candidate.createdAt
       : Date.now();
   const updatedAt =
-    typeof candidate.updatedAt === "number" && Number.isFinite(candidate.updatedAt)
+    typeof candidate.updatedAt === "number" &&
+    Number.isFinite(candidate.updatedAt)
       ? candidate.updatedAt
       : createdAt;
   const procedure: SiteRunbookProcedure = {
@@ -78,7 +81,10 @@ export function parseProcedure(value: unknown): SiteRunbookProcedure | null {
     createdAt,
     updatedAt,
   };
-  if (typeof candidate.sourceAgent === "string" && candidate.sourceAgent.trim()) {
+  if (
+    typeof candidate.sourceAgent === "string" &&
+    candidate.sourceAgent.trim()
+  ) {
     procedure.sourceAgent = candidate.sourceAgent.trim();
   }
   if (
@@ -117,7 +123,8 @@ export function parseSiteRunbook(value: unknown): SiteRunbook | null {
     }
   }
   const updatedAt =
-    typeof candidate.updatedAt === "number" && Number.isFinite(candidate.updatedAt)
+    typeof candidate.updatedAt === "number" &&
+    Number.isFinite(candidate.updatedAt)
       ? candidate.updatedAt
       : Date.now();
   return { agentBrief, procedures, updatedAt };
@@ -149,10 +156,7 @@ export function parseSiteRunbooksBlob(value: unknown): SiteRunbooksBlob | null {
 }
 
 /** First non-empty lines of steps, capped for MCP index. */
-export function summarizeProcedureSteps(
-  steps: string,
-  maxLen = 160,
-): string {
+export function summarizeProcedureSteps(steps: string, maxLen = 160): string {
   const compact = steps
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -198,7 +202,8 @@ export function shapeRunbookForCommunity(
       if (procedure.acceptedAt != null) entry.acceptedAt = procedure.acceptedAt;
       if (procedure.persisted) entry.persisted = true;
       if (procedure.sourceAgent) entry.sourceAgent = procedure.sourceAgent;
-      if (procedure.sourceChannel) entry.sourceChannel = procedure.sourceChannel;
+      if (procedure.sourceChannel)
+        entry.sourceChannel = procedure.sourceChannel;
       return entry;
     });
   if (!agentBrief && procedures.length === 0) return null;

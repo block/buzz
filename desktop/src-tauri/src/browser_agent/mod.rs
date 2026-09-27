@@ -284,7 +284,7 @@ pub fn record_nav_event(app: &AppHandle, webview_label: &str, url: &str, title: 
         json!({ "webviewLabel": webview_label, "kind": "nav" }),
     );
     // Host-side Drive screen shot + path caption into grant channel/thread.
-    drive_screen::schedule_drive_screen_post(app, webview_label, url);
+    drive_screen::schedule_drive_screen_post(app, webview_label, url, title, false);
 }
 
 /// Ask the page to emit a main-frame nav with document.title (deduped in-buffer).
@@ -1169,9 +1169,86 @@ async fn flush_page_observe_queue_inner(
         Ok(v) => v,
         Err(_) => return 0,
     };
-    state
+    let ingested = state
         .observe
-        .ingest_page_events(label, after, &page_events, now_ms())
+        .ingest_page_events(label, after, &page_events, now_ms());
+    if ingested == 0 {
+        return 0;
+    }
+    for pe in &page_events {
+        if pe.id <= after {
+            continue;
+        }
+        match pe.kind.as_str() {
+            "nav" => {
+                let url = pe
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("url"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let title = pe
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("title"))
+                    .and_then(|v| v.as_str());
+                if !url.is_empty() {
+                    drive_screen::schedule_drive_screen_post(app, label, url, title, false);
+                }
+            }
+            "new_tab" => {
+                handle_page_new_tab_intent(app, state, label, pe.payload.as_ref());
+            }
+            _ => {}
+        }
+    }
+    ingested
+}
+
+/// In-page target=_blank / window.open (and Drive click on those links) → sibling tab.
+fn handle_page_new_tab_intent(
+    app: &AppHandle,
+    state: &BrowserAgentState,
+    label: &str,
+    payload: Option<&serde_json::Value>,
+) {
+    let Some(payload) = payload else {
+        return;
+    };
+    let raw = payload
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let Some(url) = observe::resolve_new_tab_url(raw, "https://invalid.invalid/") else {
+        // Absolute https required (page JS already resolves against location).
+        return;
+    };
+    let opener_sid = state
+        .grants
+        .get(label)
+        .filter(|g| matches!(g.surface, BrowserAgentSurface::Playground))
+        .map(|g| g.surface_id.clone())
+        .or_else(|| playground_webview::playground_sid_from_webview_label(label));
+    let Some(opener_sid) = opener_sid else {
+        return;
+    };
+    let req = playground_webview::PlaygroundNewTabRequest {
+        opener_sid,
+        opener_label: label.to_string(),
+        url: url.to_string(),
+    };
+    if let Err(error) = app.emit("playground-webview-new-tab", &req) {
+        eprintln!("buzz-desktop: page new_tab emit failed: {error}");
+    }
+    let _ = app.emit(
+        "browser-agent-observe",
+        json!({
+            "webviewLabel": label,
+            "kind": "new_tab_intent",
+            "payload": { "url": url },
+        }),
+    );
 }
 
 fn label_has_wake(root: &PathBuf, label: &str) -> bool {

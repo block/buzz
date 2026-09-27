@@ -271,6 +271,32 @@ fn truncate_payload(value: Value) -> Value {
     }
 }
 
+
+/// Whether an HTML `target` attribute should open a sibling tab (not same-frame).
+pub fn is_new_tab_link_target(target: &str) -> bool {
+    let t = target.trim().to_ascii_lowercase();
+    if t.is_empty() || t == "_self" || t == "_parent" || t == "_top" {
+        return false;
+    }
+    t == "_blank" || t == "_new" || !t.starts_with('_')
+}
+
+/// Resolve a window.open / href candidate against a base URL; https only.
+pub fn resolve_new_tab_url(raw: &str, base: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "about:blank" {
+        return None;
+    }
+    let parsed = match url::Url::parse(raw) {
+        Ok(u) => u,
+        Err(_) => url::Url::parse(base).ok()?.join(raw).ok()?,
+    };
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    Some(parsed.to_string())
+}
+
 /// Page script: console + fetch/XHR hooks + ghost-cursor helpers shared with Drive.
 pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
     let label = serde_json::to_string(webview_label).unwrap_or_else(|_| "\"\"".into());
@@ -401,10 +427,67 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
     window.__buzzBrowserAgentNav = {{ url: url, title: title || '' }};
     push('nav', {{ url: url, title: title || null }});
   }}
+  function resolveOpenUrl(raw) {{
+    raw = String(raw == null ? '' : raw).trim();
+    if (!raw || raw === 'about:blank') return '';
+    try {{ return new URL(raw, location.href).href; }} catch (e) {{ return ''; }}
+  }}
+  function isNewTabTarget(target) {{
+    target = String(target || '').trim().toLowerCase();
+    if (!target || target === '_self' || target === '_parent' || target === '_top') return false;
+    return target === '_blank' || target === '_new' || target.charAt(0) !== '_';
+  }}
+  function requestNewTab(rawUrl, reason) {{
+    var href = resolveOpenUrl(rawUrl);
+    if (!href) return false;
+    try {{
+      var u = new URL(href);
+      if (u.protocol !== 'https:') return false;
+    }} catch (e) {{ return false; }}
+    push('new_tab', {{ url: href, reason: reason || 'open' }});
+    return true;
+  }}
+  function newTabLinkFrom(el) {{
+    if (!el || !el.closest) return null;
+    var link = el.closest('a[href]');
+    if (!link) return null;
+    if (isNewTabTarget(link.getAttribute('target'))) return link;
+    return null;
+  }}
   // Top-level only (no iframe hooks). Initial nav comes from host page-load.
   window.addEventListener('hashchange', function() {{
     pushNavIfChanged(location.href, document.title);
   }});
+  // Soft SPA transitions (pushState/replaceState) — host screenshots + observe.
+  (function() {{
+    var wrap = function(type) {{
+      var orig = history[type];
+      if (typeof orig !== 'function') return;
+      history[type] = function() {{
+        var ret = orig.apply(this, arguments);
+        try {{ pushNavIfChanged(location.href, document.title); }} catch (e) {{}}
+        return ret;
+      }};
+    }};
+    wrap('pushState');
+    wrap('replaceState');
+    window.addEventListener('popstate', function() {{
+      pushNavIfChanged(location.href, document.title);
+    }});
+  }})();
+  // window.open → sibling tab via host (same path as target=_blank).
+  (function() {{
+    var origOpen = window.open;
+    window.open = function(url, name, features) {{
+      if (requestNewTab(url, 'window.open')) {{
+        return null;
+      }}
+      if (typeof origOpen === 'function') {{
+        try {{ return origOpen.apply(window, arguments); }} catch (e) {{ return null; }}
+      }}
+      return null;
+    }};
+  }})();
   var cursor = document.getElementById('__buzz_agent_cursor');
   if (!cursor) {{
     cursor = document.createElement('div');
@@ -635,6 +718,7 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
       if (!el) return makeResult(id, 'click', false, null, 'no element');
       var pt = centerOf(el, x, y);
       var hit = describeHit(el);
+      var newTabLink = newTabLinkFrom(el);
       // Theater cursor runs async; ack as soon as DOM click fires.
       try {{ moveCursor(pt.x, pt.y, true); }} catch (eCursor) {{}}
       try {{
@@ -647,7 +731,19 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
         }}
         dispatchPointer(el, 'pointerup', pt.x, pt.y, {{ buttons: 0 }});
         el.dispatchEvent(new MouseEvent('mouseup', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
-        el.dispatchEvent(new MouseEvent('click', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
+        // target=_blank / named targets: synthetic clicks are untrusted and
+        // often skip WKWebView createWebView — ask host to open a sibling tab.
+        if (newTabLink) {{
+          requestNewTab(newTabLink.href, 'target=_blank');
+        }} else {{
+          el.dispatchEvent(new MouseEvent('click', {{ bubbles:true, cancelable:true, clientX:pt.x, clientY:pt.y, view:window }}));
+          // Prefer native click() for same-frame <a> default navigation.
+          try {{
+            if (el.closest && el.closest('a[href]') && typeof el.click === 'function') {{
+              el.click();
+            }}
+          }} catch (e2) {{}}
+        }}
       }} catch (e) {{
         return makeResult(id, 'click', false, hit, e);
       }}
@@ -1044,6 +1140,10 @@ mod tests {
         assert!(js.contains("__buzz_agent_cursor"));
         assert!(js.contains("setDrive"));
         assert!(js.contains("pushNavIfChanged"));
+        assert!(js.contains("history[type]"));
+        assert!(js.contains("requestNewTab"));
+        assert!(js.contains("window.open"));
+        assert!(js.contains("target=_blank"));
         assert!(js.contains("setNativeValue"));
         assert!(js.contains("enqueueAction"));
     }
@@ -1121,4 +1221,26 @@ mod tests {
         assert!(jsonl.contains("console"));
         assert!(jsonl.contains("network"));
     }
+
+    #[test]
+    fn is_new_tab_link_target_rules() {
+        assert!(!is_new_tab_link_target(""));
+        assert!(!is_new_tab_link_target("_self"));
+        assert!(!is_new_tab_link_target("_parent"));
+        assert!(!is_new_tab_link_target("_top"));
+        assert!(is_new_tab_link_target("_blank"));
+        assert!(is_new_tab_link_target("_new"));
+        assert!(is_new_tab_link_target("popup"));
+    }
+
+    #[test]
+    fn resolve_new_tab_url_https_only() {
+        assert_eq!(
+            resolve_new_tab_url("/x", "https://ex.test/a"),
+            Some("https://ex.test/x".into())
+        );
+        assert_eq!(resolve_new_tab_url("http://ex.test/a", "https://ex.test/"), None);
+        assert_eq!(resolve_new_tab_url("about:blank", "https://ex.test/"), None);
+    }
 }
+

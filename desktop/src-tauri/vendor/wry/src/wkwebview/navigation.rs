@@ -70,6 +70,8 @@ pub(crate) fn navigation_policy(
       .unwrap_or_default();
 
     // target=_blank / window.open: targetFrame is nil.
+    // Middle-click (buttonNumber 2) also means "open in new tab" even when
+    // targetFrame is the current frame.
     // When the request already has a concrete URL, emit + Cancel here so
     // left-click cannot fall through as a no-op after createWebView Deny.
     // When the URL is still empty / about:blank (common on the first
@@ -78,18 +80,27 @@ pub(crate) fn navigation_policy(
     // left-click dead while right-click "Open Link in New Window" still
     // works (it often hits createWebView directly).
     #[cfg(target_os = "macos")]
-    if action.targetFrame().is_none() {
-      let usable = !url.is_empty() && url != "about:blank";
-      if usable {
-        if let Some(ref on_new_window) = this.ivars().new_window_url_handler {
-          let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            on_new_window(url.clone());
-          }));
+    {
+      let is_new_window_target = action.targetFrame().is_none();
+      let is_middle_click = action.respondsToSelector(objc2::sel!(buttonNumber))
+        && action.buttonNumber() == 2;
+      if is_new_window_target || is_middle_click {
+        let usable = !url.is_empty() && url != "about:blank";
+        if usable {
+          if let Some(ref on_new_window) = this.ivars().new_window_url_handler {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+              on_new_window(url.clone());
+            }));
+          }
+          (*handler).call((WKNavigationActionPolicy::Cancel,));
+          return;
         }
-        (*handler).call((WKNavigationActionPolicy::Cancel,));
-        return;
+        if is_new_window_target {
+          // Fall through → Allow → createWebView emits + Deny.
+        } else {
+          // Middle-click with blank URL: do not hijack same-frame policy.
+        }
       }
-      // Fall through → Allow → createWebView emits + Deny.
     }
 
     if should_download {

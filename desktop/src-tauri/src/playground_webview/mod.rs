@@ -499,7 +499,7 @@ fn hide_other_playgrounds(app: &AppHandle, keep_label: &str, window_label: &str)
     }
 }
 
-fn playground_sid_from_webview_label(label: &str) -> Option<String> {
+pub(crate) fn playground_sid_from_webview_label(label: &str) -> Option<String> {
     let rest = label.strip_prefix(PLAYGROUND_LABEL_PREFIX)?;
     let sid = rest.split("--").next()?.trim();
     if sid.is_empty() {
@@ -812,11 +812,25 @@ pub async fn playground_webview_show(
             }
             true
         })
-        .on_page_load(move |_webview, payload| {
+        .on_page_load(move |webview, payload| {
             if payload.event() == PageLoadEvent::Finished {
                 crate::browser_agent::ensure_instrumentation_for_label(&load_app, &load_label);
                 // Main-frame nav + title (deduped). Prefer over raw on_navigation spam.
                 crate::browser_agent::record_nav_from_page(&load_app, &load_label);
+                // Force a Drive screen after full load so reloads / same-URL
+                // transitions still post once ready+quiet settle completes.
+                let url = webview
+                    .url()
+                    .ok()
+                    .map(|u| u.to_string())
+                    .unwrap_or_default();
+                crate::browser_agent::drive_screen::schedule_drive_screen_post(
+                    &load_app,
+                    &load_label,
+                    &url,
+                    None,
+                    true,
+                );
             }
         })
         // MVP B: window.open / target=_blank → frontend sibling tab; deny native popup.

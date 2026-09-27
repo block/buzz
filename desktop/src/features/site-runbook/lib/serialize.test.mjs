@@ -105,6 +105,19 @@ test("shapeRunbookInject includes only active procedures", () => {
   assert.equal(inject.procedures[0].summary, "Click Save Confirm");
   assert.ok(Array.isArray(inject.driveProtocol));
   assert.ok(inject.driveProtocol.some((line) => line.includes("surfaceId")));
+  assert.ok(
+    inject.driveProtocol.some((line) => line.includes("host screen")),
+    "protocol mentions host-owned screens",
+  );
+  assert.ok(
+    inject.driveProtocol.some((line) => line.includes("browser_switch_tab")),
+    "protocol mentions tab switch",
+  );
+  assert.ok(
+    !inject.driveProtocol.some((line) =>
+      line.includes("Do not call browser_snapshot(screenshot=true) every step"),
+    ),
+  );
 });
 
 test("agent upsert auto-activates", () => {

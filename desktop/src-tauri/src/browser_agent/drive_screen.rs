@@ -1,8 +1,10 @@
 //! Host-side Drive "new screen" screenshots → grant channel/thread chat.
 //!
-//! On each meaningful Drive navigation (URL without hash), capture the WKWebView,
-//! build a short path caption from Drive actions since the last post, upload the
-//! PNG, and post as the grant's managed agent into the bound channel/thread.
+//! After nav / full load / soft SPA settle while Drive is granted, capture the
+//! WKWebView, build a short path caption from Drive actions since the last post,
+//! upload the PNG, and post as the grant's managed agent into the bound
+//! channel/thread. Hash-only churn is ignored; same URL may re-post after reload
+//! or title change (generation + settle + min interval).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -31,7 +33,7 @@ const MAX_PATH_BULLETS: usize = 8;
 pub struct DriveScreenTracker {
     /// Per-label generation so a newer nav cancels an in-flight settle.
     generation: Mutex<HashMap<String, u64>>,
-    /// Last posted screen key (url without hash) per label.
+    /// Last posted screen key (`url_without_hash\0title`) per label.
     last_posted_key: Mutex<HashMap<String, String>>,
     /// Observe ring id watermark after last successful post.
     after_event_id: Mutex<HashMap<String, u64>>,
@@ -106,6 +108,13 @@ impl DriveScreenTracker {
             .and_then(|m| m.get(label).copied())
             .unwrap_or(0)
     }
+
+    /// Drop the last-posted key so a reload / forced settle can re-post the same screen.
+    pub fn clear_last_posted_key(&self, label: &str) {
+        if let Ok(mut m) = self.last_posted_key.lock() {
+            m.remove(label);
+        }
+    }
 }
 
 /// Strip fragment for "same screen" debounce (hash-only churn ignored).
@@ -124,6 +133,29 @@ pub fn screen_url_key(raw: &str) -> String {
             None => trimmed.to_string(),
         },
     }
+}
+
+/// Composite debounce key: URL without hash + title (title-only SPA changes re-post).
+pub fn screen_post_key(url: &str, title: Option<&str>) -> String {
+    let url_key = screen_url_key(url);
+    let title = title.map(str::trim).unwrap_or("");
+    format!("{url_key}\0{title}")
+}
+
+/// Whether a new settle should run given the last successful post.
+/// `force` (reload / explicit load settle) bypasses same-key skip.
+pub fn should_schedule_drive_screen(
+    last_key: Option<&str>,
+    new_key: &str,
+    force: bool,
+) -> bool {
+    if new_key.is_empty() || new_key.starts_with("about:blank") {
+        return false;
+    }
+    if force {
+        return true;
+    }
+    last_key != Some(new_key)
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -294,7 +326,17 @@ fn imeta_tag_for_blob(blob: &crate::commands::media::BlobDescriptor) -> Vec<Stri
 }
 
 /// Schedule a Drive screen post after settle, cancelling prior pending work.
-pub fn schedule_drive_screen_post(app: &AppHandle, webview_label: &str, url: &str) {
+///
+/// `title` participates in the debounce key so same-path title changes still post.
+/// `force` (full page load / reload) clears the last key so the same URL can re-post
+/// after ready+quiet settle (still subject to min interval at post time).
+pub fn schedule_drive_screen_post(
+    app: &AppHandle,
+    webview_label: &str,
+    url: &str,
+    title: Option<&str>,
+    force: bool,
+) {
     let Some(state) = app.try_state::<BrowserAgentState>() else {
         return;
     };
@@ -304,16 +346,26 @@ pub fn schedule_drive_screen_post(app: &AppHandle, webview_label: &str, url: &st
     if !matches!(grant.mode, BrowserAgentMode::Drive) || grant.user_has_control {
         return;
     }
-    let key = screen_url_key(url);
-    if key.is_empty() || key == "about:blank" {
+    let url_key = screen_url_key(url);
+    if url_key.is_empty() || url_key == "about:blank" {
         return;
     }
-    if state.drive_screens.last_posted_key(webview_label).as_deref() == Some(key.as_str()) {
+    let post_key = screen_post_key(url, title);
+    if !should_schedule_drive_screen(
+        state.drive_screens.last_posted_key(webview_label).as_deref(),
+        &post_key,
+        force,
+    ) {
         return;
+    }
+    if force {
+        state.drive_screens.clear_last_posted_key(webview_label);
     }
     let gen = state.drive_screens.bump_generation(webview_label);
     let label = webview_label.to_string();
     let app = app.clone();
+    let url_owned = url.to_string();
+    let title_owned = title.map(|s| s.to_string());
     tauri::async_runtime::spawn(async move {
         let Some(state) = app.try_state::<BrowserAgentState>() else {
             return;
@@ -321,7 +373,9 @@ pub fn schedule_drive_screen_post(app: &AppHandle, webview_label: &str, url: &st
         if !wait_for_drive_screen_ready(&app, &state, &label, gen).await {
             return; // superseded, timed out unfinished, or webview gone
         }
-        if let Err(e) = post_drive_screen(&app, &state, &label, &key).await {
+        if let Err(e) =
+            post_drive_screen(&app, &state, &label, &url_owned, title_owned.as_deref()).await
+        {
             eprintln!("buzz-desktop: drive screen post {label}: {e}");
         }
     });
@@ -401,15 +455,13 @@ async fn post_drive_screen(
     app: &AppHandle,
     state: &BrowserAgentState,
     label: &str,
-    key: &str,
+    scheduled_url: &str,
+    scheduled_title: Option<&str>,
 ) -> Result<(), String> {
     let Some(grant) = state.grants.get(label) else {
         return Ok(());
     };
     if !matches!(grant.mode, BrowserAgentMode::Drive) || grant.user_has_control {
-        return Ok(());
-    }
-    if state.drive_screens.last_posted_key(label).as_deref() == Some(key) {
         return Ok(());
     }
     let now = now_ms();
@@ -434,7 +486,11 @@ async fn post_drive_screen(
                 .map(|s| s.to_string());
             Some((url, title))
         })
-        .unwrap_or_else(|| (key.to_string(), None));
+        .unwrap_or_else(|| (scheduled_url.to_string(), scheduled_title.map(|s| s.to_string())));
+    let key = screen_post_key(&url, title.as_deref());
+    if state.drive_screens.last_posted_key(label).as_deref() == Some(key.as_str()) {
+        return Ok(());
+    }
 
     let drive_events: Vec<ObserveEvent> = events
         .into_iter()
@@ -464,7 +520,7 @@ async fn post_drive_screen(
 
     state
         .drive_screens
-        .mark_posted(label, key, max_id.max(after_id), now_ms());
+        .mark_posted(label, &key, max_id.max(after_id), now_ms());
     let _ = app.emit(
         "browser-agent-observe",
         serde_json::json!({
@@ -519,6 +575,31 @@ mod tests {
             "https://ex.test/a"
         );
         assert_eq!(screen_url_key("https://ex.test/a#"), "https://ex.test/a");
+    }
+
+    #[test]
+    fn screen_post_key_includes_title_and_ignores_hash() {
+        assert_eq!(
+            screen_post_key("https://ex.test/a#x", Some("Hello")),
+            screen_post_key("https://ex.test/a", Some("Hello"))
+        );
+        assert_ne!(
+            screen_post_key("https://ex.test/a", Some("A")),
+            screen_post_key("https://ex.test/a", Some("B"))
+        );
+    }
+
+    #[test]
+    fn should_schedule_skips_same_key_unless_forced() {
+        let key = screen_post_key("https://ex.test/a", Some("T"));
+        assert!(!should_schedule_drive_screen(Some(&key), &key, false));
+        assert!(should_schedule_drive_screen(Some(&key), &key, true));
+        assert!(should_schedule_drive_screen(
+            Some(&key),
+            &screen_post_key("https://ex.test/a", Some("Other")),
+            false
+        ));
+        assert!(!should_schedule_drive_screen(None, "about:blank\0", false));
     }
 
     #[test]
