@@ -85,6 +85,35 @@ buzz-acp
 
 > **API key note:** `codex-acp` always attempts a ChatGPT WebSocket login first, which logs a `426 Upgrade Required` error. This is expected and non-fatal — it falls back to `OPENAI_API_KEY` automatically. Set `OPENAI_API_KEY` to ensure it has a working fallback.
 
+### Codex Auto-review denials
+
+Buzz's ACP permission handling and Codex Auto-review are separate approval
+layers. `buzz-acp` answers a standard ACP `session/request_permission` with
+`allow_once` because a managed agent has no terminal where a person can answer
+the prompt. A denial from Codex Auto-review is different: it is a decision
+inside Codex, after Codex evaluates a specific action.
+
+As of `@agentclientprotocol/codex-acp` 1.13.1, the adapter reports the review as
+agent activity but does not expose Codex's exact-action denial override through
+ACP. This has three important consequences:
+
+- A channel reply such as `approved` remains ordinary model input. Buzz cannot
+  safely turn chat text into a privileged approval because quoted or
+  model-authored text could then grant permissions.
+- There is no in-Buzz control that can approve and retry the original denied
+  action. The current Codex TUI `/approve` command cannot be invoked through the
+  adapter.
+- Starting a separate Codex session with broader permissions does not approve
+  the original action. It creates a different permission context and may avoid
+  the review boundary entirely.
+
+Do not work around a denial by weakening the sandbox or moving the action to a
+different agent. Use a materially safer action, or wait for Buzz and the adapter
+to expose Codex's one-retry override for the same task. Track the integration in
+[issue #7575](https://github.com/block/buzz/issues/7575). OpenAI documents the
+exact-action override and its limits in
+[Auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review#denials-and-failure-behavior).
+
 ## Running with Claude Code
 
 [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) wraps the Claude Agent SDK in an ACP interface.
