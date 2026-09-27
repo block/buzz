@@ -10,9 +10,7 @@ function isBestiePairDm(
     normalizePubkey(currentPubkey),
     normalizePubkey(bestiePubkey),
   ]);
-  const participants = new Set(
-    channel.participantPubkeys.map(normalizePubkey),
-  );
+  const participants = new Set(channel.participantPubkeys.map(normalizePubkey));
   return (
     participants.size === expectedParticipants.size &&
     [...expectedParticipants].every((pubkey) => participants.has(pubkey))

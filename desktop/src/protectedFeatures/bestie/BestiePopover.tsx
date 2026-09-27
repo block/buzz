@@ -9,6 +9,9 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { AgentSessionTranscriptList } from "@/features/agents/ui/AgentSessionTranscriptList";
+import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
+import type { TranscriptItem } from "@/features/agents/ui/agentSessionTypes";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   mergeMessages,
@@ -40,9 +43,21 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { Checkbox } from "@/shared/ui/checkbox";
 import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  setBestieShowActivity,
+  useBestieShowActivity,
+} from "./bestieActivityPreference";
 import { buildBestieMessageContext } from "./bestieMessageContext";
+import {
+  applyBestieListIntentFromUserMessage,
+} from "./bestieListStore";
+import {
+  stripBestieListTurnHint,
+  withBestieListTurnHint,
+} from "./bestieListProtocol";
 import {
   clearBestieSessionBoundary,
   readBestieSessionBoundary,
@@ -50,6 +65,7 @@ import {
   type BestieSessionBoundary,
   type BestieSessionScope,
 } from "./bestieSessionStorage";
+import { filterBestieActivityItems } from "./filterBestieActivityItems";
 import { findBestieDmChannel } from "./filterBestieDmChannels";
 import {
   collectBestieSessionThreadRootIds,
@@ -57,6 +73,8 @@ import {
   flattenBestieTranscriptMessages,
   resolveBestieSendParentEventId,
 } from "./flattenBestieTranscript";
+import { messageLooksLikeBestieListRequest } from "./parseBestieUserListIntent";
+import { BestieNudgeBanner } from "./BestieNudgeBanner";
 import { useBestie } from "./useBestie";
 
 /** How long Confirm? stays armed before reverting to Close Thread. */
@@ -160,13 +178,18 @@ function EmptyBestie() {
 }
 
 function BestieConversationTranscript({
+  activityItems,
+  agent,
   channel,
   currentPubkey,
   messages,
   onToggleReaction,
   profiles,
+  showActivity,
   typingPubkeys,
 }: {
+  activityItems: TranscriptItem[];
+  agent: ManagedAgent;
   channel: Channel;
   currentPubkey: string | undefined;
   messages: TimelineMessage[];
@@ -176,6 +199,7 @@ function BestieConversationTranscript({
     remove: boolean,
   ) => Promise<void>;
   profiles: UserProfileLookup;
+  showActivity: boolean;
   typingPubkeys: string[];
 }) {
   const transcriptRef = React.useRef<HTMLDivElement>(null);
@@ -205,10 +229,13 @@ function BestieConversationTranscript({
     threadMessages: [],
   });
 
+  const latestActivityKey = activityItems.at(-1)?.id ?? "";
   const transcriptTailKey = [
     channel.id,
     latestMessageKey ?? "",
     String(flattenedMessages.length),
+    latestActivityKey,
+    showActivity ? "1" : "0",
     typingKey,
   ].join(":");
 
@@ -265,6 +292,22 @@ function BestieConversationTranscript({
           </ProtectedMessageActionsBoundary>
         ) : null}
 
+        {showActivity && activityItems.length > 0 ? (
+          <div className="px-1" data-testid="bestie-activity-transcript">
+            <AgentSessionTranscriptList
+              agentAvatarUrl={agent.avatarUrl}
+              agentName={agent.name}
+              agentPubkey={agent.pubkey}
+              autoTail={false}
+              channelId={channel.id}
+              emptyDescription="Activity will appear here while Bestie works."
+              items={activityItems}
+              profiles={profiles}
+              variant="compactPreview"
+            />
+          </div>
+        ) : null}
+
         {typingPubkeys.length > 0 ? (
           <div data-testid="bestie-typing-indicator">
             <TypingIndicatorRow
@@ -308,6 +351,7 @@ export function BestiePopover({
 }) {
   const bestie = useBestie();
   const { goChannel } = useAppNavigation();
+  const showActivity = useBestieShowActivity();
   const [draft, setDraft] = React.useState("");
   const [contextSent, setContextSent] = React.useState(false);
   // Two-step Close Thread: first click arms Confirm?, second ends the session.
@@ -487,13 +531,12 @@ export function BestiePopover({
           message.kind === KIND_STREAM_MESSAGE_V2,
       )
       .map((message) => {
-        if (!contextEnvelope || !message.body.startsWith(contextEnvelope)) {
-          return message;
+        let body = stripBestieListTurnHint(message.body);
+        if (contextEnvelope && body.startsWith(contextEnvelope)) {
+          body = body.slice(contextEnvelope.length).trim();
         }
-        return {
-          ...message,
-          body: message.body.slice(contextEnvelope.length).trim(),
-        };
+        if (body === message.body) return message;
+        return { ...message, body };
       })
       .filter((message) => message.body.length > 0);
   }, [
@@ -518,6 +561,24 @@ export function BestiePopover({
   const typingPubkeys = React.useMemo(
     () => typingEntries.map((entry) => entry.pubkey),
     [typingEntries],
+  );
+  const agentTranscript = useAgentTranscript(
+    showActivity && Boolean(assignedAgentPubkey),
+    assignedAgentPubkey,
+  );
+  const activityItems = React.useMemo(
+    () =>
+      filterBestieActivityItems(agentTranscript, {
+        channelId: activeConversationChannel?.id,
+        sessionBoundary: sessionBoundary
+          ? { firstMessageCreatedAt: sessionBoundary.firstMessageCreatedAt }
+          : null,
+      }),
+    [
+      activeConversationChannel?.id,
+      agentTranscript,
+      sessionBoundary,
+    ],
   );
   const handleToggleReaction = React.useCallback(
     async (message: TimelineMessage, emoji: string, remove: boolean) => {
@@ -618,14 +679,35 @@ export function BestiePopover({
           bestie.resolveConversation()));
       setConversationChannel(channel);
       const parentEventId = resolveBestieSendParentEventId(sessionBoundary);
+      const listIntent = messageLooksLikeBestieListRequest(trimmedDraft);
+      const outboundBody = withBestieListTurnHint(trimmedDraft, listIntent);
+      const content =
+        contextEnvelope && !contextSent
+          ? `${contextEnvelope}\n\n${outboundBody}`
+          : outboundBody;
       const sentMessage = await sendMutation.mutateAsync({
-        content:
-          contextEnvelope && !contextSent
-            ? `${contextEnvelope}\n\n${trimmedDraft}`
-            : trimmedDraft,
+        content,
         parentEventId,
         targetChannel: channel,
       });
+      // Apply NL list intent immediately (WakeController also applies; idempotent).
+      if (
+        listIntent &&
+        sessionScope &&
+        bestie.ownerPubkey &&
+        assignedAgentPubkey &&
+        bestie.relayUrl
+      ) {
+        applyBestieListIntentFromUserMessage(
+          {
+            agentPubkey: normalizePubkey(assignedAgentPubkey),
+            ownerPubkey: normalizePubkey(bestie.ownerPubkey),
+            relayUrl: bestie.relayUrl,
+          },
+          sentMessage.id,
+          trimmedDraft,
+        );
+      }
       setSessionBoundary((current) => {
         if (current) return current;
         const next = {
@@ -655,7 +737,9 @@ export function BestiePopover({
 
   const hasScrollableTranscript =
     Boolean(activeConversationChannel) &&
-    (conversationMessages.length > 0 || typingPubkeys.length > 0);
+    (conversationMessages.length > 0 ||
+      typingPubkeys.length > 0 ||
+      (showActivity && activityItems.length > 0));
 
   return (
     <div
@@ -711,13 +795,22 @@ export function BestiePopover({
         </div>
       </div>
 
+      <BestieNudgeBanner
+        onOpenList={() => {
+          void openSessionThread();
+        }}
+      />
+
       {hasScrollableTranscript && activeConversationChannel ? (
         <BestieConversationTranscript
+          activityItems={activityItems}
+          agent={agent}
           channel={activeConversationChannel}
           currentPubkey={currentPubkey}
           messages={conversationMessages}
           onToggleReaction={handleToggleReaction}
           profiles={conversationProfiles}
+          showActivity={showActivity}
           typingPubkeys={typingPubkeys}
         />
       ) : null}
@@ -752,6 +845,19 @@ export function BestiePopover({
           </div>
         </div>
       ) : null}
+
+      <label
+        className="flex shrink-0 cursor-pointer items-center gap-2 text-xs text-muted-foreground"
+        data-testid="bestie-show-activity"
+      >
+        <Checkbox
+          checked={showActivity}
+          onCheckedChange={(checked) => {
+            setBestieShowActivity(checked === true);
+          }}
+        />
+        <span>Show activity</span>
+      </label>
 
       <div className="relative shrink-0">
         <Textarea

@@ -84,7 +84,10 @@ test("interleave keeps activity ahead of a message on equal timestamps", () => {
     runs.map((run) => run.kind),
     ["activity", "messages"],
   );
-  assert.equal(runs[0].kind === "activity" && runs[0].items[0].id, "think-same");
+  assert.equal(
+    runs[0].kind === "activity" && runs[0].items[0].id,
+    "think-same",
+  );
   assert.equal(
     runs[1].kind === "messages" && runs[1].messages[0].id,
     "agent-reply",
@@ -93,10 +96,7 @@ test("interleave keeps activity ahead of a message on equal timestamps", () => {
 
 test("interleave with no activity is a single message run", () => {
   const runs = buildBestiePopoverTimelineRuns(
-    [
-      message({ createdAt: 1, id: "a" }),
-      message({ createdAt: 2, id: "b" }),
-    ],
+    [message({ createdAt: 1, id: "a" }), message({ createdAt: 2, id: "b" })],
     [],
   );
   assert.deepEqual(runs, [

@@ -6,7 +6,6 @@ import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useOpenChannelDirectoryQuery } from "@/features/channels/openChannelDirectory";
-import { ChannelScreen } from "@/features/channels/ui/ChannelScreen";
 import { HuddleStartingView } from "@/features/huddle/components/HuddleStartingView";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import {
@@ -29,6 +28,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { getEventById } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
+import { ProtectedChannelScreen } from "@protected-feature-components";
 
 type ChannelRouteScreenProps = {
   autoSendDraftKey: string | null;
@@ -309,7 +309,7 @@ export function ChannelRouteScreen({
   }
 
   return (
-    <ChannelScreen
+    <ProtectedChannelScreen
       activeChannel={activeChannel}
       autoSendDraftKey={autoSendDraftKey}
       currentIdentity={identityQuery.data}

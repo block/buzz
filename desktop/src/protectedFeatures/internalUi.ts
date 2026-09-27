@@ -20,6 +20,10 @@ import { BestieSidebarEntry } from "./bestie/BestieSidebarEntry";
 import { filterBestieDmChannels } from "./bestie/filterBestieDmChannels";
 import { findAssignedLocalAgent } from "./bestie/findAssignedLocalAgent";
 import { useBestieAssignmentQuery } from "./bestie/useBestie";
+import { BestieDmChannelFrame } from "./bestie/BestieDmChannelFrame";
+import { useBestieDmChannelExtras } from "./bestie/useBestieDmChannelExtras";
+import { ChannelScreen } from "@/features/channels/ui/ChannelScreen";
+import type { ChannelScreenProps } from "@/features/channels/ui/ChannelScreen.types";
 import { OpenClawWorkspaceRelayListener } from "./openclawWorkspaceMcp/OpenClawWorkspaceRelayListener";
 import { OpenClawWorkspaceSettingsCard } from "./openclawWorkspaceMcp/OpenClawWorkspaceSettingsCard";
 import { handleProtectedRelayPayload } from "./openclawWorkspaceMcp/handleRelayPayload";
@@ -100,6 +104,33 @@ export function useProtectedVisibleDirectMessages(
   return useMemo(
     () => filterBestieDmChannels(channels, currentPubkey, bestiePubkey),
     [bestiePubkey, channels, currentPubkey],
+  );
+}
+
+export function useProtectedBestieChannelExtras(
+  activeChannel: Channel | null | undefined,
+) {
+  const enabled = useFeatureEnabled("bestie");
+  const extras = useBestieDmChannelExtras(enabled ? activeChannel : null);
+  return enabled ? extras : { contextColumn: null, contextColumnOpen: false };
+}
+
+/**
+ * ChannelScreen with Bestie DM project-home RHS: fixed category column +
+ * idleAuxiliary slide only when drilling into Reminders/To-dos.
+ */
+export function ProtectedChannelScreen(props: ChannelScreenProps) {
+  const enabled = useFeatureEnabled("bestie");
+  const extras = useBestieDmChannelExtras(enabled ? props.activeChannel : null);
+  const { contextColumn, contextColumnOpen, ...channelExtras } = extras;
+  const screen = createElement(ChannelScreen, { ...props, ...channelExtras });
+  if (!enabled || contextColumn == null) {
+    return screen;
+  }
+  return createElement(
+    BestieDmChannelFrame,
+    { column: contextColumn, open: contextColumnOpen },
+    screen,
   );
 }
 

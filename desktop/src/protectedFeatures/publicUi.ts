@@ -1,5 +1,7 @@
-import type { ReactNode } from "react";
+import { createElement, type ReactNode } from "react";
 
+import { ChannelScreen } from "@/features/channels/ui/ChannelScreen";
+import type { ChannelScreenProps } from "@/features/channels/ui/ChannelScreen.types";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { Channel, ManagedAgent } from "@/shared/api/types";
 
@@ -52,6 +54,16 @@ export function useProtectedVisibleDirectMessages(
   _currentPubkey: string | undefined,
 ) {
   return channels;
+}
+
+export function useProtectedBestieChannelExtras(
+  _activeChannel: Channel | null | undefined,
+) {
+  return { contextColumn: null, contextColumnOpen: false };
+}
+
+export function ProtectedChannelScreen(props: ChannelScreenProps) {
+  return createElement(ChannelScreen, props);
 }
 
 export function ProtectedOpenClawWorkspaceSettingsCard() {

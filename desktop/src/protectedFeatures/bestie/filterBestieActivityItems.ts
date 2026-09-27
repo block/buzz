@@ -6,8 +6,7 @@ export type BestieActivitySessionBoundary = {
 } | null;
 
 /**
- * Activity rows suitable for Bestie (kept for a later Bestie DM feature;
- * the popover no longer renders activity).
+ * Activity rows suitable for Bestie popover (Show activity).
  * Drops chat-message items (Bestie already renders DM bubbles), raw/suppressed
  * noise, and items outside the active Bestie DM channel.
  *

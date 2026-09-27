@@ -87,7 +87,11 @@ export function resolveBestieSendParentEventId(
  */
 export function collectBestieSessionThreadRootIds(
   boundary: BestieSessionFilterBoundary | null,
-  channelMessages: readonly { id: string; parentId?: string | null; createdAt: number }[],
+  channelMessages: readonly {
+    id: string;
+    parentId?: string | null;
+    createdAt: number;
+  }[],
 ): string[] {
   if (!boundary) return [];
   const ids = new Set<string>();
