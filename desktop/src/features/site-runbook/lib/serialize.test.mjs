@@ -114,6 +114,15 @@ test("shapeRunbookInject includes only active procedures", () => {
     "protocol mentions tab switch",
   );
   assert.ok(
+    inject.driveProtocol.some(
+      (line) =>
+        line.includes("userHasControl") &&
+        line.includes("snapshots") &&
+        line.includes("Do not Drive until Release"),
+    ),
+    "protocol tells agents how to follow while Taken",
+  );
+  assert.ok(
     !inject.driveProtocol.some((line) =>
       line.includes("Do not call browser_snapshot(screenshot=true) every step"),
     ),

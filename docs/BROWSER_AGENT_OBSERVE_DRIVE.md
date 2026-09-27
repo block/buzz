@@ -12,7 +12,7 @@ Playground Sites (and OS pop-outs of playground) support two grant modes. **Pinn
 | **Observe** | Drives the page | May **read** console, network (headers/status/**bodies**), nav/URL/title, DOM/a11y when available. No PHI scrub. |
 | **Drive** | Sees theater cursor; input locked (unless Take control) | Takes over navigate/click/type/scroll/key/waitFor. |
 
-**Take control** (chrome, Drive only) → temporary human assist: page unlocks, grant stays **Drive**. **Release control** restores the Drive lock without re-picking the agent. **Off** / clear grant is the separate revoke path.
+**Take control** (chrome, Drive only) → temporary human assist: page unlocks, grant stays **Drive**. While Taken, agents may still request **snapshots** and follow **user_click / user_input / user_keydown** observe events (hit tag/name/ref + `valueLength` only — never field values / PHI); Drive actions stay blocked until **Release control**. **Release control** restores the Drive lock without re-picking the agent. **Off** / clear grant is the separate revoke path.
 
 ### Grant binding
 
@@ -103,7 +103,7 @@ Rust type: `BrowserAgentGrant` (core fields). The grant **mirror** (`grant.json`
 
 Instrumentation runs **inside** the Buzz WKWebView (page script), not OpenClaw Chromium:
 
-1. On grant Observe/Drive, Desktop injects/hooks: `console.*`, `fetch`, `XMLHttpRequest`, and records nav from existing Rust nav emitters.
+1. On grant Observe/Drive, Desktop injects/hooks: `console.*`, `fetch`, `XMLHttpRequest`, trusted human `click` / `input` / `keydown` (payload: hit tag/name/ref + `valueLength` only — never values), and records nav from existing Rust nav emitters.
 2. Events land in an in-memory ring (`BrowserObserveBuffer`) and are mirrored to `{appData}/browser-agent/{label}/events.jsonl`.
 3. Bound agent reads via:
    - Desktop IPC / Tauri: `browser_observe_poll` (cursor + limit)
@@ -124,7 +124,7 @@ When `mode=drive`:
 4. **`key`:** `{ "kind":"key", "key":"Enter" }` — Enter, Tab, Escape, Backspace, arrows. Fires keydown/keypress/keyup on `document.activeElement`. If keydown not defaultPrevented: Enter in input+form → `form.requestSubmit()`; Enter in textarea → newline; Tab → move focus. No site special-cases.
 5. **MCP → Desktop path:** `buzz-dev-mcp` `browser_drive` validates the DriveAction shape (object or JSON string; field is **`kind`**, not `type`), assigns `id`, appends one line to `{appData}/browser-agent/{label}/drive-inbox.jsonl`. Prefer **`surface_id`** when calling (see Agent target). Desktop drains the inbox via a **Rust-side watcher** (~200ms over live grants) plus optional chrome backup poll; MCP and Desktop share a `drive-inbox.lock`, then Desktop **atomically renames** the inbox to a temp file, reads/deletes the temp (so appends during processing land in a fresh file). Bad lines / unknown kinds → `drive_error` (never silent ok).
 6. **Batch wait (default):** after queueing, MCP waits up to ~10s for matching `drive` / `drive_error` events in `events.jsonl` and returns per-step `results` + final `url`. Set `queue_only=true` to return immediately after queue.
-7. **Take control** → unlock page, keep Drive grant (`userHasControl`). **Release control** → lock again. **Off** clears the grant.
+7. **Take control** → unlock page, keep Drive grant (`userHasControl`). Snapshots + user events still flow; Drive inbox actions stay blocked until **Release control** → lock again. **Off** clears the grant.
 8. Detach / conversation-pin open / navigation rebinds the grant onto the live webview label and reinstalls instrumentation so Drive lock is not lost across hosts. Agents holding `surfaceId` keep working mid-turn.
 
 Playground only (existing `playground_webview_eval`). Pin navigate/drive paths remain unreachable for new grants.

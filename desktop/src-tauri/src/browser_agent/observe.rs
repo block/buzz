@@ -534,6 +534,98 @@ pub fn instrumentation_js(webview_label: &str, drive: bool) -> String {
   document.addEventListener('keydown', blockHumanScrollKey, true);
   lock.addEventListener('wheel', blockHumanScroll, {{ passive: false }});
   lock.addEventListener('touchmove', blockHumanScroll, {{ passive: false }});
+  // Human click/input/keydown → Observe events (tag/name/ref + valueLength only).
+  // Never emit field values (PHI / passwords). Skip agent-synthetic (!isTrusted).
+  function resolveUserRef(el) {{
+    if (!el) return undefined;
+    try {{
+      var last = window.__buzzSnapshotLast;
+      if (typeof last === 'string') last = JSON.parse(last);
+      var list = last && last.interactives ? last.interactives : [];
+      if (!list.length || !el.getBoundingClientRect) return undefined;
+      var rect = el.getBoundingClientRect();
+      var cx = Math.round(rect.left + rect.width / 2);
+      var cy = Math.round(rect.top + rect.height / 2);
+      for (var i = 0; i < list.length; i++) {{
+        var it = list[i];
+        if (!it || !it.center || !it.ref) continue;
+        if (Math.abs(it.center.x - cx) <= 3 && Math.abs(it.center.y - cy) <= 3) return it.ref;
+      }}
+    }} catch (e) {{}}
+    return undefined;
+  }}
+  function describeUserHit(el) {{
+    if (!el || isAgentChrome(el)) return null;
+    var tag = (el.tagName || '').toLowerCase();
+    var role = el.getAttribute && el.getAttribute('role');
+    var name = '';
+    if (el.getAttribute) {{
+      name = el.getAttribute('aria-label') || el.getAttribute('name') || el.getAttribute('title') || el.getAttribute('placeholder') || el.id || '';
+    }}
+    // Never use el.value as name (would leak PHI / password contents).
+    if (!name && el.innerText && tag !== 'input' && tag !== 'textarea') {{
+      name = String(el.innerText).trim().slice(0, 80);
+    }}
+    var out = {{ tag: tag }};
+    if (role) out.role = role;
+    if (name) out.name = String(name).slice(0, 80);
+    var ref = resolveUserRef(el);
+    if (ref) out.ref = ref;
+    return out;
+  }}
+  function valueLengthOf(el) {{
+    if (!el) return undefined;
+    try {{
+      if ('value' in el && el.value != null) return String(el.value).length;
+      if (el.isContentEditable) return String(el.innerText || el.textContent || '').length;
+    }} catch (e) {{}}
+    return undefined;
+  }}
+  function userEventPayload(el, extra) {{
+    var hit = describeUserHit(el);
+    if (!hit) return null;
+    var payload = {{ tag: hit.tag }};
+    if (hit.role) payload.role = hit.role;
+    if (hit.name) payload.name = hit.name;
+    if (hit.ref) payload.ref = hit.ref;
+    var vl = valueLengthOf(el);
+    if (typeof vl === 'number') payload.valueLength = vl;
+    if (extra) {{ for (var k in extra) {{ if (extra[k] != null) payload[k] = extra[k]; }} }}
+    // Never attach a `value` field.
+    return payload;
+  }}
+  function onUserClick(e) {{
+    if (!e || e.isTrusted === false) return;
+    try {{
+      var payload = userEventPayload(e.target);
+      if (payload) push('user_click', payload);
+    }} catch (err) {{}}
+  }}
+  function onUserInput(e) {{
+    if (!e || e.isTrusted === false) return;
+    try {{
+      var payload = userEventPayload(e.target);
+      if (payload) push('user_input', payload);
+    }} catch (err) {{}}
+  }}
+  function onUserKeydown(e) {{
+    if (!e || e.isTrusted === false) return;
+    try {{
+      var extra = {{}};
+      var k = e.key || '';
+      // Emit key only for non-printable / modified keys — never typed characters.
+      if (k.length > 1 || e.ctrlKey || e.metaKey || e.altKey) {{
+        extra.key = k;
+      }} else if (k === ' ') {{
+        extra.key = ' ';
+      }}
+      var payload = userEventPayload(e.target, extra);
+      if (payload) push('user_keydown', payload);
+    }} catch (err) {{}}
+  }}
+  document.addEventListener('click', onUserClick, true);
+  document.addEventListener('input', onUserInput, true);
+  document.addEventListener('keydown', onUserKeydown, true);
   var cursorChain = Promise.resolve();
   function theaterFast() {{
     try {{
@@ -1170,6 +1262,28 @@ mod tests {
         assert!(js.contains("addEventListener('touchmove'"));
         assert!(js.contains("isTrusted === false"));
         assert!(js.contains("PageDown"));
+    }
+
+    #[test]
+    fn user_event_instrumentation_emits_hit_and_value_length_not_value() {
+        let js = instrumentation_js("playground-x", true);
+        assert!(js.contains("push('user_click'"));
+        assert!(js.contains("push('user_input'"));
+        assert!(js.contains("push('user_keydown'"));
+        assert!(js.contains("addEventListener('click', onUserClick"));
+        assert!(js.contains("addEventListener('input', onUserInput"));
+        assert!(js.contains("addEventListener('keydown', onUserKeydown"));
+        assert!(js.contains("valueLength"));
+        assert!(js.contains("describeUserHit"));
+        assert!(js.contains("Never use el.value as name"));
+        assert!(js.contains("Never attach a `value` field"));
+        // userEventPayload must not assign payload.value / extra value leaking
+        assert!(
+            !js.contains("payload.value =") && !js.contains("payload['value']"),
+            "user event payload must never set value"
+        );
+        // Printable key characters must not be emitted (PHI)
+        assert!(js.contains("never typed characters") || js.contains("non-printable"));
     }
 
     #[test]

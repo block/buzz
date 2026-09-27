@@ -1009,6 +1009,12 @@ fn inbox_lock_acquire(dir: &std::path::Path) -> Result<InboxLockGuard, String> {
     }
 }
 
+/// Whether Drive inbox actions may run for this grant.
+/// Snapshots still process while Taken; only click/type/scroll/etc. are blocked.
+fn drive_actions_allowed(grant: &BrowserAgentGrant) -> bool {
+    matches!(grant.mode, BrowserAgentMode::Drive) && !grant.user_has_control
+}
+
 async fn process_drive_inbox_for_label(
     app: &AppHandle,
     state: &BrowserAgentState,
@@ -1017,15 +1023,12 @@ async fn process_drive_inbox_for_label(
     let Some(grant) = state.grants.get(label) else {
         return Ok(0);
     };
-    // Skip while human has Taken control (Drive lock paused).
-    if matches!(grant.mode, BrowserAgentMode::Drive) && grant.user_has_control {
-        return Ok(0);
-    }
     let root = ensure_data_root(app, state)?;
     let mut applied = 0u32;
-    // Snapshot requests apply in Observe or Drive.
+    // Snapshot requests apply in Observe or Drive — including while Taken.
     applied += process_snapshot_request(app, state, label, &root).await;
-    if !matches!(grant.mode, BrowserAgentMode::Drive) {
+    // Drive actions stay blocked while human has Taken control.
+    if !drive_actions_allowed(&grant) {
         return Ok(applied);
     }
     let path = root.join(label).join("drive-inbox.jsonl");
@@ -1701,8 +1704,26 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod inbox_tests {
-    use super::take_drive_inbox;
+    use super::{
+        drive_actions_allowed, take_drive_inbox, BrowserAgentGrant, BrowserAgentMode,
+        BrowserAgentSurface,
+    };
     use std::io::Write;
+
+    fn sample_grant(mode: BrowserAgentMode, user_has_control: bool) -> BrowserAgentGrant {
+        BrowserAgentGrant {
+            webview_label: "playground-a".into(),
+            surface: BrowserAgentSurface::Playground,
+            surface_id: "a".into(),
+            agent_id: "agent".into(),
+            agent_pubkey: "pk".into(),
+            channel_id: "ch".into(),
+            thread_root: None,
+            mode,
+            user_has_control,
+            created_at_ms: 1,
+        }
+    }
 
     #[test]
     fn take_inbox_is_atomic_rename() {
@@ -1718,5 +1739,22 @@ mod inbox_tests {
         // New appends can recreate the file without racing the taken contents.
         std::fs::write(&path, "new\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+    }
+
+    #[test]
+    fn taken_control_blocks_drive_actions_but_snapshots_still_stage() {
+        // Gate ordering: snapshots always stage (caller runs them first);
+        // drive_actions_allowed is false while Taken so inbox actions skip.
+        let taken = sample_grant(BrowserAgentMode::Drive, true);
+        assert!(!drive_actions_allowed(&taken));
+
+        let driving = sample_grant(BrowserAgentMode::Drive, false);
+        assert!(drive_actions_allowed(&driving));
+
+        let observe = sample_grant(BrowserAgentMode::Observe, false);
+        assert!(!drive_actions_allowed(&observe));
+
+        let observe_taken_flag = sample_grant(BrowserAgentMode::Observe, true);
+        assert!(!drive_actions_allowed(&observe_taken_flag));
     }
 }
