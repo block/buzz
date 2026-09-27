@@ -25,6 +25,47 @@ export const PLAYGROUND_FULLSCREEN_OVERLAY_CLASS =
 export const PLAYGROUND_WINDOWED_OVERLAY_CLASS = "absolute inset-0 z-30";
 
 /**
+ * In-flow root for the RHS idle-auxiliary / FocusThreadDrawer playground host.
+ * Never `absolute inset-0` / `fixed` — those are windowed + fullscreen cover
+ * classes. The FocusThreadDrawer overlay owns the scrim; this body fills the
+ * drawer sheet whose left edge is capped by THREAD_FOCUS_SLIVER_WIDTH_PX.
+ */
+export const PLAYGROUND_SIDE_PANEL_ROOT_CLASS =
+  "flex min-h-0 min-w-0 flex-1 flex-col bg-background";
+
+/**
+ * Hard invariant: side-panel playground chrome never expands to full-bleed.
+ * Link/pin may set expanded + coverAppChrome; playground must not.
+ */
+export function playgroundSidePanelChromeIsCapped(flags: {
+  expanded: boolean;
+  coverAppChrome: boolean;
+  showFullscreen?: boolean;
+}): boolean {
+  return (
+    flags.expanded !== true &&
+    flags.coverAppChrome !== true &&
+    flags.showFullscreen !== true
+  );
+}
+
+/**
+ * Side-panel body/root class must not borrow window/fullscreen cover tokens.
+ * (FocusThreadDrawer may still use inset-0 on its *scrim* overlay — that is
+ * not the playground root.)
+ */
+export function playgroundSidePanelRootRejectsFullCanvasCover(
+  className: string,
+): boolean {
+  const tokens = className.trim().split(/\s+/);
+  return (
+    !tokens.includes("inset-0") &&
+    !tokens.includes("fixed") &&
+    !tokens.some((token) => /^inset-0\b/.test(token) || token.startsWith("inset-["))
+  );
+}
+
+/**
  * Left-anchored split of the main inset. Never `inset-0` — that would stretch
  * over chat even when a width is set. Stays in SidebarInset (not portaled).
  */

@@ -377,8 +377,15 @@ export function closePlaygroundTab(sid: string) {
     return;
   }
   store.browsers.set(browser.browserId, next);
+  // Switch the live overlay to the surviving tab *before* disposing the closed
+  // sid. disposePlaygroundSessionOnly clears overlayHost to "window" whenever
+  // overlaySid === sid; doing dispose first promoted side-panel → window and
+  // mounted PlaygroundOverlay (absolute inset-0) over the whole channel canvas.
+  if (store.overlaySid === sid) {
+    store.overlaySid = next.activeTabSid;
+  }
   disposePlaygroundSessionOnly(sid);
-  if (store.overlaySid === sid || store.overlaySid == null) {
+  if (store.overlaySid == null) {
     store.overlaySid = next.activeTabSid;
   }
   persist();

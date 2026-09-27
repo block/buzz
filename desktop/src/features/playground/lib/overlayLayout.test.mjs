@@ -14,7 +14,10 @@ import {
   PLAYGROUND_RESIZE_HANDLE_GUTTER_CLASS,
   PLAYGROUND_RESIZE_HANDLE_PX,
   PLAYGROUND_WINDOWED_OVERLAY_CLASS,
+  PLAYGROUND_SIDE_PANEL_ROOT_CLASS,
   playgroundFullscreenDragRegionIsGapOnly,
+  playgroundSidePanelChromeIsCapped,
+  playgroundSidePanelRootRejectsFullCanvasCover,
   playgroundFullscreenOverlayIsPortaled,
   playgroundFullscreenTitlebarGapClass,
   playgroundOverlayPlacementClass,
@@ -215,4 +218,57 @@ test("locked chrome hides dock; Detach in-main; Inspect only when detached", () 
     showDetach: false,
     showInspect: true,
   });
+});
+
+test("side-panel root never uses inset-0 / fixed full-canvas cover", () => {
+  assert.match(PLAYGROUND_SIDE_PANEL_ROOT_CLASS, /flex-1/);
+  assert.equal(
+    playgroundSidePanelRootRejectsFullCanvasCover(PLAYGROUND_SIDE_PANEL_ROOT_CLASS),
+    true,
+  );
+  assert.equal(
+    playgroundSidePanelRootRejectsFullCanvasCover(PLAYGROUND_WINDOWED_OVERLAY_CLASS),
+    false,
+  );
+  assert.equal(
+    playgroundSidePanelRootRejectsFullCanvasCover(PLAYGROUND_FULLSCREEN_OVERLAY_CLASS),
+    false,
+  );
+  assert.equal(
+    playgroundSidePanelRootRejectsFullCanvasCover("absolute inset-0 z-40"),
+    false,
+  );
+});
+
+test("side-panel chrome stays capped (never link/pin full-bleed expand)", () => {
+  assert.equal(
+    playgroundSidePanelChromeIsCapped({
+      expanded: false,
+      coverAppChrome: false,
+      showFullscreen: false,
+    }),
+    true,
+  );
+  assert.equal(
+    playgroundSidePanelChromeIsCapped({
+      expanded: true,
+      coverAppChrome: false,
+    }),
+    false,
+  );
+  assert.equal(
+    playgroundSidePanelChromeIsCapped({
+      expanded: false,
+      coverAppChrome: true,
+    }),
+    false,
+  );
+  assert.equal(
+    playgroundSidePanelChromeIsCapped({
+      expanded: false,
+      coverAppChrome: false,
+      showFullscreen: true,
+    }),
+    false,
+  );
 });

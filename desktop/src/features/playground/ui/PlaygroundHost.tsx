@@ -112,6 +112,8 @@ export function PlaygroundHost() {
       >
         <FocusThreadDrawer
           channelName={offChannelDrawerBackLabel(route.selectedView)}
+          // Never full-bleed: coverAppChrome + leftPx=0 is link/pin expand only.
+          coverAppChrome={false}
           label={session.name}
           leftPx={THREAD_FOCUS_SLIVER_WIDTH_PX}
           onClose={dismissPlayground}

@@ -76,6 +76,9 @@ export function useChannelPlaygroundSidePanel(): ChannelPlaygroundSidePanelChrom
 
   if (!session) return null;
 
+  // Hard invariant: playground RHS never expands to full-bleed (link/pin may).
+  // expanded/coverAppChrome true → FocusThreadDrawer leftPx=0 / fixed inset-0.
+  // Enforced by playgroundSidePanelChromeIsCapped + unit tests.
   return {
     idleAuxiliaryBodyClassName: PLAYGROUND_SIDE_PANEL_BODY_CLASS,
     idleAuxiliaryCoverAppChrome: false,

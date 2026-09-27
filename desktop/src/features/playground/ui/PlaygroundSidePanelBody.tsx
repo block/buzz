@@ -16,6 +16,7 @@ import {
   setPlaygroundViewport,
   type PlaygroundChromeMode,
 } from "../lib/playgroundViewport";
+import { PLAYGROUND_SIDE_PANEL_ROOT_CLASS } from "../lib/overlayLayout";
 import { PlaygroundChrome } from "./PlaygroundChrome";
 import { PlaygroundStage } from "./PlaygroundStage";
 import { PlaygroundTabStrip } from "./PlaygroundTabStrip";
@@ -147,7 +148,8 @@ export function PlaygroundSidePanelBody({
   // IdleAuxiliaryPanel owns title + close; hide dock/dismiss and Detach stays.
   return (
     <div
-      className="flex min-h-0 min-w-0 flex-1 flex-col bg-background"
+      className={PLAYGROUND_SIDE_PANEL_ROOT_CLASS}
+      data-playground-host="side-panel"
       data-testid="playground-side-panel"
     >
       <PlaygroundChrome

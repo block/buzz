@@ -18,6 +18,7 @@ test("off-channel side-panel host uses FocusThreadDrawer (not docked RHS column)
   const window = source.slice(Math.max(0, hostIdx - 120), hostIdx + 900);
   assert.match(window, /absolute inset-0/);
   assert.match(window, /FocusThreadDrawer/);
+  assert.match(window, /coverAppChrome=\{false\}/);
   assert.match(window, /isFocusDrawer/);
   assert.match(window, /THREAD_FOCUS_SLIVER_WIDTH_PX/);
   assert.doesNotMatch(window, /justify-end/);
