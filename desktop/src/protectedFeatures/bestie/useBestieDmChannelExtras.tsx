@@ -198,16 +198,13 @@ export function useBestieDmChannelExtras(
     };
 
     // Slide only when drilling into a category — never for the category list.
-    if (
-      panelOpen &&
-      bestieIdleAuxiliaryKind(activeKind) != null &&
-      idleAuxiliaryPanel
-    ) {
+    const drillKind = bestieIdleAuxiliaryKind(activeKind);
+    if (panelOpen && drillKind != null && idleAuxiliaryPanel) {
       screenExtras.idleAuxiliaryHeaderActions =
         idleAuxiliaryHeaderActions ?? undefined;
       screenExtras.idleAuxiliaryOverridesThread = true;
       screenExtras.idleAuxiliaryPanel = idleAuxiliaryPanel;
-      screenExtras.idleAuxiliaryTitle = bestieCategoryTitle(activeKind);
+      screenExtras.idleAuxiliaryTitle = bestieCategoryTitle(drillKind);
       screenExtras.onCloseIdleAuxiliaryPanel = onCloseIdleAuxiliaryPanel;
     }
 

@@ -127,11 +127,11 @@ export function ProtectedChannelScreen(props: ChannelScreenProps) {
   if (!enabled || contextColumn == null) {
     return screen;
   }
-  return createElement(
-    BestieDmChannelFrame,
-    { column: contextColumn, open: contextColumnOpen },
-    screen,
-  );
+  return createElement(BestieDmChannelFrame, {
+    children: screen,
+    column: contextColumn,
+    open: contextColumnOpen,
+  });
 }
 
 export function ProtectedOpenClawWorkspaceSettingsCard() {

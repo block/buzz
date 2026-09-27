@@ -31,8 +31,8 @@ function isKind(value: unknown): value is BestieListKind {
 
 /** Shared empty snapshot — stable Object.is for useSyncExternalStore. */
 export const EMPTY_BESTIE_LIST_STATE: BestieListState = Object.freeze({
-  items: Object.freeze([]) as BestieListItem[],
-  processedMessageIds: Object.freeze([]) as string[],
+  items: Object.freeze([]) as unknown as BestieListItem[],
+  processedMessageIds: Object.freeze([]) as unknown as string[],
   version: 1,
 });
 
