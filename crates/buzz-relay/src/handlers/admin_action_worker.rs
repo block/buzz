@@ -101,34 +101,65 @@ pub(crate) async fn recover_one(state: &Arc<AppState>, claim: StrandedActionClai
         "Action recovery worker re-driving stranded action"
     );
 
-    // Decode the target from the report row.
-    let report = match state.db.admin_get_report(rec.report_id).await {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            warn!(action_id = %action_id, "Action recovery: report not found");
-            return;
-        }
-        Err(e) => {
-            warn!(action_id = %action_id, "Action recovery: report lookup failed: {e}");
-            return;
-        }
-    };
-
-    let (target_pubkey_opt, target_event_id_opt) =
-        match crate::handlers::report_resolution::derive_enforcement_target_pub(&report) {
-            Ok(pair) => pair,
+    // Use the target context persisted at claim time for kick actions only.
+    // Migration 0047 added enforcement_target_pubkey/enforcement_channel_id
+    // for kicks; other actions (ban, timeout, delete) do not set these columns
+    // and must re-derive from the report row on every recovery. Applying the
+    // persisted-context branch to non-kick actions breaks delete recovery:
+    // delete requires target_event_id (not NULL'd here for kick only) and any
+    // persisted pubkey from a prior kick on the same report would force
+    // target_event_id=None, causing pre-marker delete recovery to fail
+    // ("delete requires target_event_id") or post-marker recovery to skip the
+    // tombstone outbox row. Gate strictly on action=="kick".
+    //
+    // For pre-migration kick rows (both columns NULL), we still re-derive and
+    // pass the result as function parameters; the convergence gate in
+    // drive_enforcement accepts those as a legacy-context fallback so these
+    // stranded kicks can finalize without the persisted columns being populated.
+    let (target_pubkey_opt, target_event_id_opt, channel_id) = if rec.action == "kick"
+        && (rec.enforcement_target_pubkey.is_some() || rec.enforcement_channel_id.is_some())
+    {
+        // Persisted kick context available — use it unconditionally.
+        (
+            rec.enforcement_target_pubkey.clone(),
+            None::<Vec<u8>>,
+            rec.enforcement_channel_id,
+        )
+    } else {
+        // Non-kick action, or pre-migration kick row with both columns NULL.
+        // Non-kick actions: always re-derive from the report.
+        // Pre-migration kick rows: re-derive so the convergence gate can use the
+        // result as a legacy-context fallback (see report_resolution.rs).
+        let report = match state.db.admin_get_report(rec.report_id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                warn!(action_id = %action_id, "Action recovery: report not found");
+                return;
+            }
             Err(e) => {
-                warn!(action_id = %action_id, "Action recovery: target derive failed: {e:?}");
+                warn!(action_id = %action_id, "Action recovery: report lookup failed: {e}");
                 return;
             }
         };
+        let (pk, eid) =
+            match crate::handlers::report_resolution::derive_enforcement_target_pub(&report) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    warn!(
+                        action_id = %action_id,
+                        "Action recovery: target derive failed: {e:?}"
+                    );
+                    return;
+                }
+            };
+        (pk, eid, report.report.channel_id)
+    };
 
     let timeout_until = rec.timeout_until;
     let action = rec.action.clone();
     let reason = rec.reason.clone();
     let actor_pubkey = rec.actor_pubkey.clone();
     let report_id = rec.report_id;
-    let channel_id = report.report.channel_id;
 
     match crate::handlers::report_resolution::drive_enforcement_pub(
         state,

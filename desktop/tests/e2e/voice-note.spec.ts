@@ -23,10 +23,14 @@ async function waitForMockLiveSubscription(page: Page, channelName: string) {
             window as Window & {
               __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
                 channelName: string;
+                kind: number;
+                exactChannel: boolean;
               }) => boolean;
             }
           ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
             channelName: currentChannelName,
+            kind: 9,
+            exactChannel: true,
           }) ?? false,
         channelName,
       ),
@@ -486,10 +490,14 @@ test("hard-caps audio work and cancels active and queued loads on unmount", asyn
       originalRevoke(url);
     };
   });
-  await page.setViewportSize({ width: 1280, height: 400 });
+  // Keep all 24 cards in the load margin so the test proves queued cancellation,
+  // not just the three cards that happened to intersect a short viewport.
+  await page.setViewportSize({ width: 1280, height: 3000 });
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await waitForMockLiveSubscription(page, "general");
+  // Seed offscreen before opening the channel: live injection during initial
+  // history/scroll settlement can unmount one visible set and load another.
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
   await page.evaluate(
     ({ audioUrl }) => {
       const emit = (
@@ -498,13 +506,16 @@ test("hard-caps audio work and cancels active and queued loads on unmount", asyn
             channelName: string;
             content: string;
             extraTags: string[][];
+            createdAt: number;
           }) => unknown;
         }
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
       if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const createdAt = Math.floor(Date.now() / 1000);
       for (let index = 0; index < 24; index += 1) {
         emit({
           channelName: "general",
+          createdAt: createdAt + index,
           content: `[voice-note-${index}.mp4](${audioUrl})`,
           extraTags: [
             [
@@ -521,6 +532,7 @@ test("hard-caps audio work and cancels active and queued loads on unmount", asyn
     { audioUrl: AUDIO_URL },
   );
 
+  await page.getByTestId("channel-general").click();
   const cards = page.getByTestId("audio-message-attachment");
   await expect(cards).toHaveCount(24);
   const readFetchCount = () =>
@@ -537,6 +549,9 @@ test("hard-caps audio work and cancels active and queued loads on unmount", asyn
       ),
     )
     .toEqual({ active: 3, peak: 3 });
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_AUDIO_LOAD_STATE__?.()))
+    .toEqual({ active: 3, queued: 21 });
   expect(await readFetchCount()).toBe(3);
   expect(
     await page.evaluate(
@@ -551,6 +566,9 @@ test("hard-caps audio work and cancels active and queued loads on unmount", asyn
       page.evaluate(() => window.__BUZZ_E2E_MEDIA_FETCH_STATE__?.active ?? -1),
     )
     .toBe(0);
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_AUDIO_LOAD_STATE__?.()))
+    .toEqual({ active: 0, queued: 0 });
   const commandCounts = await page.evaluate(() => {
     const commands = window.__BUZZ_E2E_COMMANDS__ ?? [];
     return {

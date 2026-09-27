@@ -894,3 +894,6 @@ async fn the_first_lease_installs_a_session_the_archive_then_reuses() {
 
 #[path = "native_relay_client_transport_tests.rs"]
 mod transport_tests;
+
+#[path = "native_relay_client_finite_tests.rs"]
+mod finite_recovery_tests;

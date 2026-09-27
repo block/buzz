@@ -561,6 +561,15 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 
 **Cron scheduler:** loop ticks every 60 seconds, evaluates cron expressions with window-based matching, and creates workflow runs for matched triggers. Fully implemented.
 
+**Deletion and recreation:** An authorized kind:5 `a`-tag deletion commits its
+public event, executable workflow removal, and visible kind:30620 removal in one
+transaction. Rejected deletions are not accepted history; identical concurrent
+requests have one dispatch/audit owner. Deletions older than a live definition
+leave that newer version intact. Deletion is not a permanent coordinate ban:
+clients may publish a distinct signed definition afterward, including a backdated
+version, to recreate the workflow and enable triggers again. This intentionally
+retains arrival-order recreation without a deletion watermark.
+
 **Does NOT:** recursively resolve templates (single-pass only). Does NOT queue workflow runs when at capacity — returns `CapacityExceeded` immediately.
 
 ---

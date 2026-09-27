@@ -15,4 +15,14 @@ struct BuzzAgeSignalPayloadTests {
     #expect(payload["status"] as? String == "signal")
     #expect(payload["ageUpper"] is NSNull)
   }
+  @Test(arguments: [Int.min, -1, 0, 1, 17, 19, Int.max])
+  func unexpectedAppleBoundsAreNotRestrictionEvidence(upper: Int) {
+    let payload = BuzzAgeSignalPayload.sharing(exclusiveUpperBound: upper)
+    #expect(payload["ageUpper"] is NSNull)
+  }
+  @Test(arguments: [Int.min, -1, 18, 19, Int.max])
+  func contradictoryAppleRangeIsNotRestrictionEvidence(lower: Int) {
+    let payload = BuzzAgeSignalPayload.sharing(exclusiveUpperBound: 18, lowerBound: lower)
+    #expect(payload["ageUpper"] is NSNull)
+  }
 }

@@ -8,9 +8,9 @@ struct BuzzNotificationHandoffTests {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
-    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
-    let initial = store.current()
-    try store.begin()
+    let session = BuzzAgeRestrictionSession()
+    try session.restrict(containerURL: directory)
+    defer { session.release() }
     var delivered: [String] = []
     var cleanupCount = 0
     var deletionCompletion: ((Error?) -> Void)?
@@ -25,7 +25,7 @@ struct BuzzNotificationHandoffTests {
         content,
         restrictedFallback: "Open Buzz to view this message.",
         handoffIfAllowed: { deliver in
-          (try? store.performIfUnchanged(since: initial, deliver)) ?? false
+          BuzzAgeRestrictionSession.handoffIfAllowed(containerURL: directory, deliver: deliver)
         },
         cleanup: {
           // Neither the Intents callback nor its timer needs to fire for delivery.

@@ -37,6 +37,131 @@ pub fn is_side_effect_kind(kind: u32) -> bool {
     matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | KIND_AGENT_PROFILE | 41001..=41003 | 40099)
 }
 
+/// Apply the three live side effects that must follow a successful admin kick:
+///
+/// 1. `invalidate_membership` — drops the 10 s membership-cache entry on this pod
+///    AND publishes a cross-pod `CacheInvalidation::Membership` message so every
+///    other relay instance also drops the entry. Subsequent REQ / fan-out
+///    `is_member_cached` calls on any pod see the removal immediately.
+/// 2. `evict_live_channel_subscriptions` — closes open channel subscriptions for
+///    the kicked pubkey **on this pod only**. A session connected to a different
+///    pod keeps its inert subscription state, but will not receive messages from
+///    this channel: the cross-pod membership invalidation (step 1) ensures that
+///    `filter_fanout_by_access` re-checks membership before delivery and denies
+///    the removed user on every pod. The same pod-local eviction primitive is
+///    used by the remove (kind 9001) and leave (kind 9022) paths; cross-pod
+///    remote `CLOSED` frame delivery is not yet implemented (tracked separately).
+/// 3. `disable_departed_member_workflows` — durably disables any workflows the
+///    kicked user owned in this channel (SEC-006).
+///
+/// These are identical to what `handle_remove_user` (kind 9001 path) fires after
+/// removing a member. Without them a kicked user's live WebSocket session retains
+/// full channel access: the `channel_members.removed_at` write is invisible to
+/// the running subscription and the membership cache until natural expiry, which
+/// is exactly the "kick reported success but user still in channel" symptom.
+///
+/// # Return value
+///
+/// Returns `Ok(())` on successful convergence — both after effects committed
+/// and after an intentional re-added skip (the kick is still correctly enforced;
+/// the membership was legitimately restored). Returns `Err` when fence
+/// acquisition, the workflow-disable UPDATE, or the transaction commit fail —
+/// the caller must propagate the error rather than finalizing the action as
+/// succeeded, so the `mutation_committed` marker remains recoverable for a later
+/// retry.
+///
+/// **Fencing:** eviction and workflow-disable are gated behind a
+/// `membership_removal_fence` that acquires the same `pg_advisory_xact_lock` as
+/// `add_member` and holds it through both destructive effects. This prevents the
+/// window where a concurrent re-add could commit between the `removed_at` check
+/// and the effects: any `add_member` either serializes before the fence (the
+/// fence then observes `removed_at IS NULL` and skips effects) or waits until
+/// after the effects complete (the re-add then succeeds cleanly). Cache
+/// invalidation fires unconditionally before the fence — stale-positive is
+/// always safe to drop.
+///
+/// The workflow-disable UPDATE (SEC-006) runs on the fence's own connection
+/// via [`buzz_db::channel_members::MembershipRemovalFence::commit_disabling_workflows`]
+/// rather than acquiring a second pool connection. This prevents a self-deadlock
+/// when N concurrent kicks ≥ pool size: each kick holds one connection while
+/// the disable would otherwise wait for a second — a cycle the 3 s acquire
+/// timeout would "resolve" by silently skipping the durable revocation.
+pub(crate) async fn apply_kick_live_side_effects(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    target_pubkey: &[u8],
+) -> Result<(), anyhow::Error> {
+    // Cache invalidation is unconditionally safe — drops a stale positive.
+    state.invalidate_membership(tenant, channel_id, target_pubkey);
+
+    // Acquire the membership advisory lock and check that the member is still
+    // removed. The fence guard keeps the lock alive through eviction and
+    // workflow-disable so no concurrent add_member can commit in that window.
+    let fence = state
+        .db
+        .membership_removal_fence(tenant.community(), channel_id, target_pubkey)
+        .await
+        .map_err(|e| {
+            warn!(
+                channel = %channel_id,
+                target = %hex::encode(target_pubkey),
+                error = %e,
+                "kick live effects: membership_removal_fence failed; \
+                 skipping eviction and workflow-disable"
+            );
+            e
+        })?;
+
+    if !fence.still_removed {
+        // Member was re-added before this driver acquired the fence.
+        // Skip eviction and workflow-disable so the re-add is not undone.
+        // This is successful convergence: the kick is enforced; membership was
+        // legitimately restored.
+        tracing::info!(
+            channel = %channel_id,
+            target = %hex::encode(target_pubkey),
+            "kick live effects: member re-added before fence acquired; \
+             skipping eviction and workflow-disable"
+        );
+        return Ok(());
+    }
+
+    // Still removed — fire effects while the lock is held.
+    // Eviction first (no DB write needed), then commit the fence with the
+    // workflow-disable UPDATE on the same connection so no second pool
+    // connection is needed (pool-exhaustion deadlock prevention — see module doc).
+    evict_live_channel_subscriptions(tenant, state, channel_id, target_pubkey).await;
+    match fence
+        .commit_disabling_workflows(tenant.community(), channel_id, target_pubkey)
+        .await
+    {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(
+                channel = %channel_id,
+                owner = %hex::encode(target_pubkey),
+                disabled = n,
+                "Disabled departed member's workflows"
+            );
+            state
+                .workflow_engine
+                .invalidate_channel_workflows(tenant.community(), channel_id);
+        }
+        Err(e) => {
+            warn!(
+                channel = %channel_id,
+                owner = %hex::encode(target_pubkey),
+                error = %e,
+                "Failed to disable departed member's workflows; \
+                 kick live effects returning error so caller can retry"
+            );
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
 async fn evict_live_channel_subscriptions(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -54,12 +179,19 @@ async fn evict_live_channel_subscriptions(
 
 /// Durably disable a departing member's workflows in the channel (SEC-006).
 ///
+/// Used by the inline remove paths (kind 9001 / kind 9022) where the member
+/// removal DB write has already committed and the caller does not hold a fence
+/// connection. For the fenced kick path (`apply_kick_live_side_effects`) use
+/// [`buzz_db::channel_members::MembershipRemovalFence::commit_disabling_workflows`]
+/// instead, which runs the UPDATE on the fence's own connection to avoid the
+/// pool-exhaustion self-deadlock.
+///
 /// A workflow runs with its owner's standing authority; once the owner is no
-/// longer a member (removed via kind 9001 or left via kind 9022) their
-/// workflows must stop firing on every path — event triggers, the scheduler,
-/// manual triggers, and the webhook endpoint all honor `enabled = FALSE`.
-/// The per-fire authority gate in `buzz-workflow` is the fail-closed backstop;
-/// this makes the revocation durable and immediately visible.
+/// longer a member their workflows must stop firing on every path — event
+/// triggers, the scheduler, manual triggers, and the webhook endpoint all
+/// honor `enabled = FALSE`. The per-fire authority gate in `buzz-workflow` is
+/// the fail-closed backstop; this makes the revocation durable and immediately
+/// visible.
 ///
 /// Failures are logged, not propagated: membership removal has already been
 /// committed, and the per-fire gate still denies a removed owner even if this
@@ -2089,6 +2221,56 @@ async fn handle_leave_request(
 // handle_reaction() removed — kind:7 reaction dedup and DB writes are now
 // handled inline in ingest_event() before storage (see ingest.rs step 20a).
 
+/// Whether the standard deletion handler will process a workflow coordinate.
+pub(crate) fn is_workflow_deletion(event: &Event) -> bool {
+    // Match authorization and dispatch: e-tags take precedence, otherwise only
+    // the first a-tag is authorized and processed.
+    event.kind == Kind::EventDeletion
+        && !has_e_tag(event)
+        && event
+            .tags
+            .iter()
+            .find(|tag| tag.kind().to_string() == "a")
+            .and_then(|tag| tag.content())
+            .is_some_and(|value| {
+                value
+                    .split(':')
+                    .next()
+                    .and_then(|kind| kind.parse::<u32>().ok())
+                    == Some(buzz_core::kind::KIND_WORKFLOW_DEF)
+            })
+}
+
+/// Persist an already-authorized workflow deletion and its domain changes atomically.
+pub(crate) async fn persist_workflow_deletion(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
+    let coordinate = event
+        .tags
+        .iter()
+        .find(|tag| tag.kind().to_string() == "a")
+        .and_then(|tag| tag.content())
+        .ok_or_else(|| anyhow::anyhow!("missing workflow coordinate"))?;
+    let mut parts = coordinate.splitn(3, ':');
+    let _kind = parts.next();
+    let owner = hex::decode(parts.next().unwrap_or_default())?;
+    let d_tag = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid workflow coordinate"))?;
+    let (stored, dispatch, channel_id) = state
+        .db
+        .insert_workflow_deletion(tenant.community(), event, &owner, d_tag)
+        .await?;
+    if let Some(channel_id) = channel_id {
+        state
+            .workflow_engine
+            .invalidate_channel_workflows(tenant.community(), channel_id);
+    }
+    Ok((stored, dispatch))
+}
+
 /// Handle NIP-09 deletion via `a` tag (addressable/parameterized-replaceable events).
 /// Parses "kind:pubkey:d-tag" and deletes the corresponding DB record.
 async fn handle_a_tag_deletion(
@@ -2112,7 +2294,6 @@ async fn handle_a_tag_deletion(
         .map_err(|_| anyhow::anyhow!("invalid kind in a-tag"))?;
     let pubkey_hex = parts[1];
     let d_tag = parts[2];
-    let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
 
     match kind_num {
         // kind:30350 revocation is exclusively a higher-generation inactive replacement.
@@ -2120,60 +2301,12 @@ async fn handle_a_tag_deletion(
             tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
         }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
-            // Try UUID first (workflow_id); fall back to name-based lookup.
-            if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
-                let channel_id = state
-                    .db
-                    .delete_workflow_for_owner(tenant.community(), wf_id, &actor_bytes)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?;
-                if let Some(channel_id) = channel_id {
-                    state
-                        .workflow_engine
-                        .invalidate_channel_workflows(tenant.community(), channel_id);
-                }
-                tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
-            } else {
-                // Name-based lookup
-                match state
-                    .db
-                    .find_workflow_by_owner_and_name(tenant.community(), &actor_bytes, d_tag)
-                    .await
-                {
-                    Ok(Some(wf)) => {
-                        let channel_id = state
-                            .db
-                            .delete_workflow_for_owner(tenant.community(), wf.id, &actor_bytes)
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!("failed to delete workflow {}: {e}", wf.id)
-                            })?;
-                        if let Some(channel_id) = channel_id {
-                            state
-                                .workflow_engine
-                                .invalidate_channel_workflows(tenant.community(), channel_id);
-                        }
-                        tracing::info!(workflow_id = %wf.id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
-                    }
-                    Ok(None) => {
-                        tracing::warn!(
-                            "NIP-09 a-tag deletion: no workflow '{d_tag}' found for owner"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("NIP-09 a-tag deletion: DB lookup failed: {e}");
-                    }
-                }
-            }
+            // Workflow deletion belongs to the atomic persistence path in ingest.
+            return Err(anyhow::anyhow!(
+                "workflow deletion requires atomic persistence"
+            ));
         }
-        // Generic NIP-33 (parameterized-replaceable) soft-delete by coordinate.
-        //
-        // Listed after the workflow branch so workflow's bespoke deletion
-        // (which doesn't soft-delete the `events` row by design — that's a
-        // separate concern) takes precedence. For every other addressable
-        // kind, including kind:30023 (NIP-23 long-form), we soft-delete the
-        // live row matching `(kind, pubkey, d_tag)` so REQs stop returning it.
-        // See https://github.com/block/sprout/issues/714.
+        // Other NIP-33 events have no executable workflow projection.
         k if is_parameterized_replaceable(k) => {
             let pubkey_bytes = match hex::decode(pubkey_hex) {
                 Ok(b) => b,
@@ -3654,6 +3787,53 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_deletion_retry_matches_authorized_dispatch() {
+        let keys = nostr::Keys::generate();
+        let workflow = format!("30620:{}:workflow", keys.public_key());
+        let other = format!("30023:{}:article", keys.public_key());
+        for (kind, tags, expected) in [
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", workflow.as_str()]],
+                true,
+            ),
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", workflow.as_str()], vec!["e", "malformed"]],
+                false,
+            ),
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", other.as_str()], vec!["a", workflow.as_str()]],
+                false,
+            ),
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", workflow.as_str()], vec!["a", other.as_str()]],
+                true,
+            ),
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", "306200:owner:id"]],
+                false,
+            ),
+            (
+                Kind::EventDeletion,
+                vec![vec!["a", "30620abc:owner:id"]],
+                false,
+            ),
+            (Kind::EventDeletion, vec![], false),
+            (Kind::TextNote, vec![vec!["a", workflow.as_str()]], false),
+        ] {
+            let event = EventBuilder::new(kind, "")
+                .tags(tags.into_iter().map(|tag| Tag::parse(tag).expect("tag")))
+                .sign_with_keys(&keys)
+                .expect("sign");
+            assert_eq!(is_workflow_deletion(&event), expected, "{:?}", event.tags);
+        }
+    }
 
     #[test]
     fn nip43_reconciliation_compatibility_alias_is_preserved() {

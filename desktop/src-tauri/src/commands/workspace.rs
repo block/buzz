@@ -136,6 +136,20 @@ pub async fn validate_repos_dir(dir: String) -> Result<(), String> {
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
+/// Refresh avatar source trust without reconnecting or restoring the workspace.
+/// Only the user's saved community list may supply these origins.
+#[tauri::command]
+pub fn set_agent_avatar_communities(
+    relay_urls: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    *state
+        .agent_avatar_communities
+        .lock()
+        .map_err(|e| e.to_string())? = relay_urls;
+    Ok(())
+}
+
 /// Apply a workspace's configuration to the backend session.
 ///
 /// Called by the frontend on app init (after reload) to configure the

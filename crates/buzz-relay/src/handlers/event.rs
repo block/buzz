@@ -753,6 +753,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 // verbatim.
                 let (message, reason) = match e {
                     IngestError::Rejected(message) => (message, "invalid"),
+                    IngestError::CanvasConflict(message) => (message, "invalid"),
                     IngestError::AuthFailed(message) => (message, "auth"),
                     IngestError::Internal(message) => (message, "error"),
                 };
@@ -794,6 +795,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             // Sanitize internal errors — don't leak DB/system details over WS.
             let (msg, reason) = match &e {
                 IngestError::Rejected(m) => (m.clone(), "invalid"),
+                IngestError::CanvasConflict(m) => (m.clone(), "invalid"),
                 IngestError::AuthFailed(m) => (m.clone(), "auth"),
                 IngestError::Internal(_) => ("error: internal server error".to_string(), "error"),
             };

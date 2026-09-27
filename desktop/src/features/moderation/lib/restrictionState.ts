@@ -39,3 +39,20 @@ export function isTimedOut(
   const ms = parseRestrictionTimestampMs(mutedUntil);
   return ms != null && ms > nowMs;
 }
+
+/**
+ * True when at least one restriction carries a live (future) timeout relative
+ * to `nowMs`. Callers use this to decide whether a per-second re-render tick is
+ * worth running: with no observable timeout there is nothing to count down, so
+ * the tick can stay off. Ban-only restrictions never keep the tick alive
+ * because {@link isTimedOut} fails closed on absent/past `mutedUntil` values.
+ */
+export function hasObservableTimeout(
+  restrictions:
+    | ReadonlyArray<{ mutedUntil: string | number | null }>
+    | null
+    | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  return (restrictions ?? []).some((r) => isTimedOut(r.mutedUntil, nowMs));
+}

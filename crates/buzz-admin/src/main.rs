@@ -21,6 +21,7 @@
 //! the guard against parallel adds (e.g. `xargs -P`).
 
 mod deletions;
+mod storage_snapshot_startup;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -186,7 +187,7 @@ async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
         return Err(anyhow::anyhow!("--max-objects must be greater than zero"));
     }
 
-    let db = connect_db().await?;
+    let db = storage_snapshot_startup::connect_db().await?;
     let mut leader = db.try_lock_storage_accounting().await?.ok_or_else(|| {
         anyhow::anyhow!("another storage-snapshot worker already holds the lease")
     })?;
@@ -576,17 +577,17 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
 }
 
 async fn connect_db() -> Result<Db> {
+    Ok(Db::new(&db_config_from_env()).await?)
+}
+
+fn db_config_from_env() -> DbConfig {
     let db_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
-    let db = Db::new(
-        &DbConfig {
-            database_url: db_url,
-            ..DbConfig::default()
-        }
-        .with_session_timeouts_from_env(),
-    )
-    .await?;
-    Ok(db)
+    DbConfig {
+        database_url: db_url,
+        ..DbConfig::default()
+    }
+    .with_session_timeouts_from_env()
 }
 
 /// Resolve the deployment's tenant from the configured `RELAY_URL` host.

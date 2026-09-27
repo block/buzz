@@ -4,7 +4,7 @@
 
 ## Network and health
 
-- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the configured `BUZZ_PUSH_GATEWAY_ORIGIN` to this port.
+- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the deployment hostname to this port; the binary needs no public-origin setting.
 - Private health listener: `BUZZ_PUSH_HEALTH_ADDR` (default `0.0.0.0:8081`). Probe `/_liveness` and `/_readiness`; do not expose this port publicly. The chart has no pod-ingress allowance for 8081; Kubernetes node/kubelet-origin probe traffic is exempt from NetworkPolicy. Add a narrowly selected monitoring source only if the target CNI requires pod-origin health scraping.
 - Readiness fails when PostgreSQL authority is unavailable. Graceful shutdown stops accepting new requests before draining in-flight APNs calls.
 
@@ -13,7 +13,6 @@
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the six gateway tables, not DDL. |
-| `BUZZ_PUSH_GATEWAY_ORIGIN` | Exact externally reachable HTTPS origin. No credentials, port, path, query, or fragment. The gateway derives its transport routes from it; NIP-PL v1 App Attest audiences remain the registered `https://push.buzz.xyz/v1/...` constants. |
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
@@ -44,6 +43,32 @@ chart, credential, and deployment change; this gateway does not currently
 select among multiple application profiles.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
+
+## Personal device development
+
+A development-signed iOS app uses Apple's development App Attest environment.
+The ordinary gateway binary rejects those attestations. For an isolated personal
+stack, build with Cargo feature `personal-dev-app-attest` (Docker build argument
+`BUZZ_PUSH_CARGO_FEATURES=personal-dev-app-attest`) and set
+`BUZZ_PUSH_APP_ATTEST_ENVIRONMENT=development`. The default remains `production`,
+including in that special build; ordinary builds reject the development setting.
+The gateway accepts exactly the selected AAGUID and still verifies the pinned
+Apple root, certificate chain, nonce, application identity, public key,
+credential ID, and counter. This is not a simulator or attestation bypass.
+
+Set `BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID` to the personal `TEAMID.bundle-id`,
+`BUZZ_PUSH_DOGFOOD_APNS_TOPIC` to that same bundle ID,
+`BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT=sandbox`, and supply its APNs certificate.
+This isolated stack reuses the single `buzz-ios-dogfood` wire profile for its
+server-owned personal identity; it does not add a production application profile.
+Do not point distributed dogfood clients at this personal gateway.
+
+Build the mobile client with the personal team and parent bundle ID, its matching
+`.NotificationService` extension, development APNs/App Attest entitlements, and
+an explicit `BUZZ_PUSH_GATEWAY_URL`. See `mobile/README.md` for gitignored signing
+overrides. Both targets need matching provisioning profiles; the parent profile
+must include the capabilities in `Runner.entitlements`. Validate enrollment and
+notification presentation on a physical device, not a simulator.
 
 ## Secret and key rotation rules
 
@@ -142,7 +167,8 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
 the established strict boolean parser rejects unknown values and the default is
 false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
-exact HTTPS `/v1/deliveries/apns` URL. An absent or explicitly empty URL while
+exact HTTP(S) `/v1/deliveries/apns` URL. Credentials, query and fragment are
+not accepted. The relay signs and sends the same configured URL. An absent or explicitly empty URL while
 enabled is a startup error. Only an enabled relay
 advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
 matcher and delivery worker. Relays retain lease matching, authorization, durable
@@ -247,7 +273,9 @@ the environment's GitOps values; the chart then renders
 `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
 `values-production.yaml` remains an intentionally invalid production-input
 contract: deployment CI must inject the verified image digest, the provisioned
-dogfood Apple application identifier, `gatewayOrigin`, and the actual PostgreSQL network. In an
+dogfood Apple application identifier and the actual PostgreSQL network. Set
+`gatewayOrigin` only when enabling the chart’s optional HTTPRoute; it supplies
+the routing hostname and is not passed to the gateway binary. In an
 environment with an existing ingress or service mesh route, keep
 `httpRoute.enabled=false`. If this chart owns a Gateway API route, enable it and
 inject an environment-owned `parentRef`; schema validation rejects an enabled
@@ -263,8 +291,14 @@ Kubernetes does not restart pods when referenced Secret bytes change. AEAD or AP
 The gateway chart has a collision-free release lane separate from the main
 `buzz` chart. To publish chart version `X.Y.Z`, update `version` in
 `deploy/charts/buzz-push-gateway/Chart.yaml` and keep `appVersion` equal to the
-gateway binary's workspace package version. Validate the chart, then open a
-same-repository PR whose branch is exactly `push-chart-release/X.Y.Z`:
+gateway binary's workspace package version.
+
+The render tests require Helm, Ruby, and the repository's Rust toolchain. They
+pass rendered environment values into the gateway's configuration parser with
+synthetic credentials; no running gateway or database is needed.
+
+Validate the chart, then open a same-repository PR whose branch is exactly
+`push-chart-release/X.Y.Z`:
 
 ```bash
 deploy/charts/buzz-push-gateway/tests/render.sh
@@ -288,3 +322,14 @@ before use:
 helm show chart oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
 helm pull oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
 ```
+
+
+### Delivery URL at the gateway
+
+The gateway verifies the signed method and delivery path using the NIP-98 event
+format, rather than matching the full incoming HTTP(S) request URL. The signed
+method must be `POST`; the signed URL path must be `/v1/deliveries/apns`, without
+query, fragment or credentials. Incoming request queries are rejected.
+Host and forwarding headers do not participate in delivery authentication.
+Event signatures, body hashes, timestamps, grant checks and replay protection
+remain enforced. No mobile App Attest audiences or relay activation settings change.

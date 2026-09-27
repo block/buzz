@@ -16,11 +16,19 @@ class ChannelWindowThreadSummary {
   final int? lastReplyAt;
   final List<String> participantPubkeys;
 
+  /// True while capped evidence awaits a complete recount.
+  final bool isLowerBound;
+
+  /// The last known total is awaiting reconciliation and should not be displayed.
+  final bool isCountPending;
+
   const ChannelWindowThreadSummary({
     required this.replyCount,
     required this.descendantCount,
     required this.lastReplyAt,
     required this.participantPubkeys,
+    this.isLowerBound = false,
+    this.isCountPending = false,
   });
 }
 
@@ -273,6 +281,7 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
   ChannelWindowStore current,
   NostrEvent event, {
   required bool isTimelineRow,
+  bool retainOutsideWindow = false,
 }) {
   // A reply doesn't reach the main timeline itself — the root's "N replies" row
   // comes from this summary event, which the relay re-emits on every reply. It
@@ -331,7 +340,8 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
   final oldest = oldestPage?.rows.isEmpty ?? true
       ? null
       : oldestPage!.rows.last.event;
-  if (oldest != null &&
+  if (!retainOutsideWindow &&
+      oldest != null &&
       (event.createdAt < oldest.createdAt ||
           (oldestPage!.hasMore && _compareRelayOrder(event, oldest) >= 0))) {
     return current;

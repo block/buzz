@@ -40,7 +40,7 @@ class AgeSignalPayloadTest {
     }
 
     @Test
-    fun `platform failures return a distinct retryable error`() {
+    fun `platform failures return a distinct error for the fail-open caller`() {
         val result = RecordingResult()
 
         replyWithAgeSignalError(result, IllegalStateException("transient"))
@@ -70,7 +70,7 @@ class AgeSignalPayloadTest {
     }
 
     @Test
-    fun `transient integration and unknown Play errors stay gated`() {
+    fun `transient integration and unknown Play errors remain distinguishable`() {
         for (code in listOf(
             AgeSignalsErrorCode.NETWORK_ERROR,
             AgeSignalsErrorCode.CANNOT_BIND_TO_SERVICE,
@@ -84,6 +84,15 @@ class AgeSignalPayloadTest {
             assertFalse(result.succeeded, "code=$code")
             assertEquals("age_signal_unavailable", result.errorCode)
         }
+    }
+
+    @Test
+    fun `invalid and contradictory ranges do not report an underage upper bound`() {
+        for ((lower, upper) in listOf(-1 to 17, 18 to 17, 0 to -1, Int.MAX_VALUE to 17)) {
+            assertNull(ageSignalPayload(upper, lower)["ageUpper"])
+        }
+        assertEquals(17, ageSignalPayload(17, 13)["ageUpper"])
+        assertEquals(18, ageSignalPayload(18, 18)["ageUpper"])
     }
 
     private class RecordingResult : MethodChannel.Result {

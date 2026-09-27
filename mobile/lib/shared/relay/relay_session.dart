@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../features/age_gate/age_signal_provider.dart';
 import '../auth/auth.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
@@ -120,9 +121,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
+  bool _ageRestricted = false;
   bool _paused = false;
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
+  int _contextGeneration = 0;
   final Map<Object, String> _visibleChannelsByOwner = {};
   final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
   bool _socketConnected = false;
@@ -132,6 +135,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   SessionState build() {
     final config = ref.watch(relayConfigProvider);
     final authState = ref.watch(authProvider);
+    _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
 
     // Reset disposed flag — build() may re-run on the same Notifier instance
     // after a provider dependency changes (e.g. auth completing).
@@ -141,7 +145,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     // Auto-connect when authenticated and we have a signing key (NIP-42 AUTH).
     final isAuthenticated = authState.value?.status == AuthStatus.authenticated;
-    if (isAuthenticated && config.nsec != null) {
+    if (!_ageRestricted && isAuthenticated && config.nsec != null) {
       // Schedule connection after build completes.
       Future.microtask(() => _connect(config));
     }
@@ -154,6 +158,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (_disposed || _ageRestricted) {
+      throw StateError('Relay session is unavailable');
+    }
+    final generation = _contextGeneration;
     final config = ref.read(relayConfigProvider);
     final url = Uri.parse(config.baseUrl).resolve('/query').toString();
     final bodyBytes = utf8.encode(
@@ -175,6 +183,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       body: bodyBytes,
       timeout: timeout,
     );
+    if (_disposed || _ageRestricted || generation != _contextGeneration) {
+      throw StateError('Relay query belongs to a retired session');
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       _activateRateLimitGateFromHttpError(response.body);
       throw RelayException(response.statusCode, response.body);
@@ -473,7 +484,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   }
 
   Future<void> _connect(RelayConfig config) async {
-    if (_disposed) return;
+    if (_disposed || _ageRestricted) return;
 
     final generation = ++_connectionGeneration;
     state = SessionState(
@@ -958,6 +969,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _dispose() {
     _disposed = true;
+    _contextGeneration++;
     _beforePauseCallbacks.clear();
     _connectionGeneration++;
     _reconnectTimer?.cancel();

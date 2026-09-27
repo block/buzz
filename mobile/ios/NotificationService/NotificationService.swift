@@ -8,8 +8,15 @@ final class NotificationService: UNNotificationServiceExtension {
   private var handoff: BuzzNotificationHandoff<UNNotificationContent>?
   private var bestAttemptContent: UNMutableNotificationContent?
   private var restrictedFallbackContent: UNMutableNotificationContent?
-  private var restrictionFenceAtStart = BuzzAgeRestrictionFence.initial
-  private let communicationPresenter = BuzzCommunicationNotificationPresenter()
+  private lazy var interactionCleanup = BuzzInteractionCleanupRetry(
+    containerURL: ageRestrictionContainerURL, deletion: interactionDeletionDeadline)
+  private lazy var communicationPresenter = BuzzCommunicationNotificationPresenter(
+    donate: { interaction, completion in interaction.donate(completion: completion) },
+    deleteAllInteractions: { [cleanup = interactionCleanup] completion in
+      cleanup.request(completion: completion)
+    },
+    updateContent: { content, intent in try content.updating(from: intent) }
+  )
   private let interactionDeletionDeadline = BuzzInteractionDeletionDeadline(
     timeout: 5,
     deleteAllInteractions: { completion in
@@ -53,9 +60,6 @@ final class NotificationService: UNNotificationServiceExtension {
     withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
   ) {
     handoff = BuzzNotificationHandoff(handler: contentHandler)
-    restrictionFenceAtStart = Self.loadRestrictionFence(
-      appGroupIdentifier: appGroupIdentifier
-    )
     restrictedFallbackContent = Self.restrictedFallback(from: request.content)
     guard let content = request.content.mutableCopy() as? UNMutableNotificationContent else {
       finish(request.content)
@@ -87,10 +91,10 @@ final class NotificationService: UNNotificationServiceExtension {
           ordinaryContent: content,
           resolution: resolution,
           isStillAllowed: { [weak self] in
-            self?.restrictionFenceIsUnchanged() ?? false
+            !(self?.isAgeRestricted() ?? false)
           },
-          onDeletionFailure: { [weak self] _ in
-            self?.activateRestrictionFence()
+          onDeletionFailure: { error in
+            NSLog("Notification cleanup retry failed: %@", String(describing: error))
           }
         ) { [weak self] specializedContent in
           self?.finish(specializedContent)
@@ -112,11 +116,8 @@ final class NotificationService: UNNotificationServiceExtension {
       content,
       restrictedFallback: restrictedFallbackContent ?? Self.restrictedFallback(from: content),
       handoffIfAllowed: { deliver in
-        Self.handoffIfRestrictionFenceUnchanged(
-          appGroupIdentifier: appGroupIdentifier,
-          since: restrictionFenceAtStart,
-          handoff: deliver
-        )
+        BuzzAgeRestrictionSession.handoffIfAllowed(
+          containerURL: ageRestrictionContainerURL, deliver: deliver)
       }
     ) { [self] in
       // The service deadline cannot wait for Intents cleanup. The safe content
@@ -124,45 +125,22 @@ final class NotificationService: UNNotificationServiceExtension {
       let center = UNUserNotificationCenter.current()
       center.removeAllDeliveredNotifications()
       center.removeAllPendingNotificationRequests()
-      interactionDeletionDeadline.deleteAll { [weak self] error in
-        if error != nil { self?.activateRestrictionFence() }
+      interactionCleanup.request { error in
+        if error != nil { NSLog("Notification cleanup failed; age access is unchanged.") }
         center.removeAllDeliveredNotifications()
         center.removeAllPendingNotificationRequests()
       }
     }
   }
 
-  private func restrictionFenceIsUnchanged() -> Bool {
-    !Self.loadRestrictionFence(
-      appGroupIdentifier: appGroupIdentifier
-    ).requiresDiscard(since: restrictionFenceAtStart)
-  }
-
-  private static func handoffIfRestrictionFenceUnchanged(
-    appGroupIdentifier: String?,
-    since earlier: BuzzAgeRestrictionFence,
-    handoff: () -> Void
-  ) -> Bool {
-    guard let appGroupIdentifier,
-      let container = FileManager.default.containerURL(
-        forSecurityApplicationGroupIdentifier: appGroupIdentifier
-      )
-    else { return false }
-    do {
-      return try BuzzAgeRestrictionFenceStore(containerURL: container)
-        .performIfUnchanged(since: earlier, handoff)
-    } catch {
-      return false
+  private var ageRestrictionContainerURL: URL? {
+    appGroupIdentifier.flatMap {
+      FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
     }
   }
 
-  private func activateRestrictionFence() {
-    guard let appGroupIdentifier,
-      let container = FileManager.default.containerURL(
-        forSecurityApplicationGroupIdentifier: appGroupIdentifier
-      )
-    else { return }
-    try? BuzzAgeRestrictionFenceStore(containerURL: container).begin()
+  private func isAgeRestricted() -> Bool {
+    BuzzAgeRestrictionSession.isRestricted(containerURL: ageRestrictionContainerURL)
   }
 
   private static func restrictedFallback(
@@ -179,17 +157,6 @@ final class NotificationService: UNNotificationServiceExtension {
     userInfo.removeValue(forKey: BuzzPushNavigationTarget.userInfoKey)
     fallback.userInfo = userInfo
     return fallback
-  }
-
-  private static func loadRestrictionFence(
-    appGroupIdentifier: String?
-  ) -> BuzzAgeRestrictionFence {
-    guard let appGroupIdentifier,
-      let container = FileManager.default.containerURL(
-        forSecurityApplicationGroupIdentifier: appGroupIdentifier
-      )
-    else { return .unavailable }
-    return BuzzAgeRestrictionFenceStore(containerURL: container).current()
   }
 
   private static func loadPrivateKey(

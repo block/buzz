@@ -1,266 +1,94 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 const ageSignalChannel = MethodChannel('buzz/age_signal');
 
-/// Delay before the single retry of a failed native age-signal request.
-const ageSignalRetryDelay = Duration(seconds: 1);
-
-/// Maximum time allowed for each native age-signal request attempt.
+/// Maximum lifetime of a launch age check. Access never waits for this timer.
 const ageSignalRequestTimeout = Duration(seconds: 30);
-
-/// Maximum time allowed for native cancellation acknowledgement.
-const ageSignalCancellationTimeout = Duration(seconds: 5);
 
 /// Invokes the native age-signal request.
 typedef AgeSignalRequest = Future<Map<Object?, Object?>?> Function();
 
-/// Waits before retrying a failed native age-signal request.
-typedef AgeSignalDelay = Future<void> Function(Duration duration);
-typedef AgeSignalCancel = Future<bool> Function();
-
-/// Returns true only when native state is retired for an in-process retry.
-typedef AgeSignalRestart = Future<bool> Function();
-
 Future<Map<Object?, Object?>?> _requestPlatformAgeSignal() =>
     ageSignalChannel.invokeMapMethod<Object?, Object?>('requestAgeSignal');
 
-Future<void> _delayAgeSignalRetry(Duration duration) =>
-    Future<void>.delayed(duration);
-Future<bool> _cancelPlatformAgeSignal() async =>
-    await ageSignalChannel.invokeMethod<bool>('cancelAgeSignalRequest') ??
-    false;
-Future<bool> _restartForPlatformAgeSignal() async {
-  final retired = await ageSignalChannel.invokeMethod<bool>(
-    'restartForAgeSignal',
-  );
-  if (retired == null) {
-    throw StateError('Missing age signal reset acknowledgement.');
-  }
-  return retired;
-}
-
+/// Returns true only for an explicit, valid, inclusive upper age below 18.
+/// Unknown envelopes and impossible bounds cannot authorize restriction.
 bool shouldBlockForAgeSignal(Map<Object?, Object?> response) {
   if (response.length != 2 ||
-      !response.containsKey('status') ||
+      response['status'] != 'signal' ||
       !response.containsKey('ageUpper')) {
-    throw StateError('Unexpected age signal response.');
-  }
-
-  final status = response['status'];
-  if (status == 'noSignal') {
-    if (response['ageUpper'] != null) {
-      throw StateError('Unexpected age signal upper bound.');
-    }
     return false;
   }
-  if (status != 'signal') {
-    throw StateError('Unexpected age signal status.');
-  }
-
-  // Native adapters provide an inclusive upper age. iOS converts its
-  // exclusive age gate (18 for a minor) to 17 before sending this payload.
-  final ageUpper = response['ageUpper'];
-  if (ageUpper == null) {
-    return false;
-  }
-  if (ageUpper is! int) {
-    throw StateError('Unexpected age signal upper bound.');
-  }
-  return ageUpper < 18;
+  final upper = response['ageUpper'];
+  return upper is int && upper >= 0 && upper < 18;
 }
 
-/// Result of the platform age-signal check for this app launch.
-enum AgeSignalState { checking, retryableFailure, allowed, restricted }
+/// Access decision, independent of whether a platform check has completed.
+enum AgeSignalState { allowed, restricted }
 
+/// Observes one native result per launch without gating normal startup.
 class AgeSignalNotifier extends Notifier<AgeSignalState> {
-  /// Creates an age-signal notifier, optionally with test request hooks.
   AgeSignalNotifier({
     AgeSignalRequest? requestSignal,
-    AgeSignalDelay? delay,
-    AgeSignalCancel? cancelSignal,
-    AgeSignalRestart? restartSignal,
     Duration requestTimeout = ageSignalRequestTimeout,
-    Duration cancellationTimeout = ageSignalCancellationTimeout,
   }) : _requestSignal = requestSignal ?? _requestPlatformAgeSignal,
-       _delay = delay ?? _delayAgeSignalRetry,
-       _cancelSignal = cancelSignal ?? _cancelPlatformAgeSignal,
-       _restartSignal = restartSignal ?? _restartForPlatformAgeSignal,
-       _requestTimeout = requestTimeout,
-       _cancellationTimeout = cancellationTimeout;
-
-  static const _maxAttempts = 2;
+       _requestTimeout = requestTimeout;
 
   final AgeSignalRequest _requestSignal;
-  final AgeSignalDelay _delay;
-  final AgeSignalCancel _cancelSignal;
-  final AgeSignalRestart _restartSignal;
   final Duration _requestTimeout;
-  final Duration _cancellationTimeout;
-  bool _completed = false;
-  bool _restartRequired = false;
-  Future<void>? _requestInFlight;
-  Future<Map<Object?, Object?>?>? _nativeRequestInFlight;
+  Future<void>? _attempt;
+  int _generation = 0;
 
   @override
-  AgeSignalState build() => AgeSignalState.checking;
-
-  Future<void> request() async {
-    if (_completed) return;
-    final requestInFlight = _requestInFlight;
-    if (requestInFlight != null) {
-      await requestInFlight;
-      return;
-    }
-
-    state = AgeSignalState.checking;
-    final request = _requestWithRetry();
-    _requestInFlight = request;
-    try {
-      await request;
-    } finally {
-      if (identical(_requestInFlight, request)) {
-        _requestInFlight = null;
-      }
-    }
+  AgeSignalState build() {
+    // Invalidation/disposal retires the request even if native code completes
+    // later. A new provider lifecycle starts allowed, without cached denial.
+    _generation += 1;
+    _attempt = null;
+    ref.onDispose(() => _generation += 1);
+    return AgeSignalState.allowed;
   }
 
-  Future<void> _requestWithRetry() async {
-    if (_restartRequired) {
-      var retired = false;
-      try {
-        retired = await _restartSignal().timeout(_cancellationTimeout);
-      } on TimeoutException {
-        // Keep the retry affordance when native recovery does not acknowledge.
-      } on MissingPluginException {
-        // A missing recovery handler must not allow access.
-      } on PlatformException {
-        // A failed reset must not start an overlapping native request.
-      } on TypeError {
-        // A malformed acknowledgement is not evidence of retirement.
-      } on StateError {
-        // A missing acknowledgement is not evidence of retirement.
-      }
-      if (!retired) {
-        state = AgeSignalState.retryableFailure;
-        return;
-      }
-      _nativeRequestInFlight = null;
-      _restartRequired = false;
-    }
-    for (var attempt = 0; attempt < _maxAttempts; attempt += 1) {
-      final Map<Object?, Object?>? response;
-      try {
-        response = await _awaitNativeRequest();
-      } on MissingPluginException {
-        if (attempt + 1 < _maxAttempts) {
-          await _delay(ageSignalRetryDelay);
-          continue;
-        }
-        // A missing channel is an integration failure, not evidence that the
-        // platform has no age signal. Keep the launch gated for a retry.
-        state = AgeSignalState.retryableFailure;
-        return;
-      } on PlatformException {
-        if (attempt + 1 < _maxAttempts) {
-          await _delay(ageSignalRetryDelay);
-          continue;
-        }
-        // A transient native failure is not evidence that access is allowed.
-        // Keep the launch gated and expose a deliberate retry action.
-        state = AgeSignalState.retryableFailure;
-        return;
-      } on TimeoutException {
-        if (attempt + 1 < _maxAttempts) {
-          await _delay(ageSignalRetryDelay);
-          continue;
-        }
-        await _retireNativeRequest();
-        // A stalled platform flow is not evidence that access is allowed.
-        // Keep the launch gated and expose a deliberate retry action.
-        state = AgeSignalState.retryableFailure;
-        return;
-      } on TypeError {
-        // A method-channel envelope with the wrong shape fails before the map
-        // validator runs. Keep the launch gated with an explicit retry.
-        state = AgeSignalState.retryableFailure;
-        return;
-      }
+  /// Checks once. Failure ends the attempt; neither retry nor cleanup gates UI.
+  Future<void> request() => _attempt ??= _check(++_generation);
 
-      final bool shouldBlock;
-      try {
-        if (response == null) {
-          throw StateError('Missing age signal response.');
-        }
-        shouldBlock = shouldBlockForAgeSignal(response);
-      } on StateError {
-        // A malformed native response is an integration failure, not evidence
-        // that access is allowed. Keep the launch gated for a deliberate retry.
-        state = AgeSignalState.retryableFailure;
-        return;
-      }
-
-      _completed = true;
-      state = shouldBlock ? AgeSignalState.restricted : AgeSignalState.allowed;
-      return;
-    }
-  }
-
-  Future<Map<Object?, Object?>?> _awaitNativeRequest() async {
-    final request = _nativeRequestInFlight ??= _requestSignal();
+  Future<void> _check(int generation) async {
     try {
-      final response = await request.timeout(_requestTimeout);
-      if (identical(_nativeRequestInFlight, request)) {
-        _nativeRequestInFlight = null;
+      final response = await Future.sync(
+        _requestSignal,
+      ).timeout(_requestTimeout);
+      if (generation != _generation) return;
+      // Retire before interpreting the result. Only this current completion
+      // can commit a restriction; timeout and abandoned callbacks cannot.
+      _generation += 1;
+      if (response != null && shouldBlockForAgeSignal(response)) {
+        state = AgeSignalState.restricted;
       }
-      return response;
-    } on TimeoutException {
-      // A Dart timeout cannot cancel the platform consent flow. Keep this
-      // future as the single flight so retries cannot start overlapping native
-      // prompts and can still consume a late response.
-      rethrow;
-    } catch (_) {
-      if (identical(_nativeRequestInFlight, request)) {
-        _nativeRequestInFlight = null;
-      }
-      rethrow;
-    }
-  }
-
-  Future<void> _retireNativeRequest() async {
-    var retired = false;
-    try {
-      retired = await _cancelSignal().timeout(_cancellationTimeout);
-    } on TimeoutException {
-      // Stay gated if cancellation does not acknowledge within its deadline.
-    } on MissingPluginException {
-      // Stay gated if cancellation cannot be acknowledged.
-    } on PlatformException {
-      // Stay gated if cancellation cannot be acknowledged.
-    } on TypeError {
-      // Stay gated if the method channel returns a malformed acknowledgement.
-    } finally {
-      if (retired) {
-        _nativeRequestInFlight = null;
-      } else {
-        _restartRequired = true;
-      }
+    } catch (error) {
+      if (generation != _generation) return;
+      _generation += 1;
+      // This is an intentional fail-open boundary, including codec and plugin
+      // errors. Record only the category, never age data or exception payloads.
+      debugPrint(
+        'Age check unavailable (${error.runtimeType}); access allowed.',
+      );
     }
   }
 }
 
+/// Explicit dogfood opt-in. Production builds keep enforcement disabled.
+const ageGatingEnabled = bool.fromEnvironment('BUZZ_AGE_GATING_ENABLED');
+
 final ageSignalProvider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-  _DisabledAgeSignalNotifier.new,
+  ageGatingEnabled ? AgeSignalNotifier.new : _DisabledAgeSignalNotifier.new,
 );
 
-// Temporarily disable age blocking: platform age checks can lock users out of
-// the app. Keep the allowed transition so push snapshots are restored normally.
+// Remains disabled until the fail-open implementation is validated in dogfood.
 class _DisabledAgeSignalNotifier extends AgeSignalNotifier {
-  @override
-  AgeSignalState build() => AgeSignalState.allowed;
-
   @override
   Future<void> request() async {}
 }

@@ -75,11 +75,12 @@ pub(crate) async fn enforce_ws_admission(
         ws_limit,
     )
     .await;
-    if !send_admission_result(conn, ws_result, msg) {
+    if !send_admission_result(conn, ws_result, msg, "ws_operations") {
         return false;
     }
 
-    if is_event {
+    if matches!(msg, ClientMessage::Event(event) if !buzz_core::kind::is_ephemeral(event.kind.as_u16() as u32))
+    {
         let message_limit = if is_agent {
             limits.agent_standard_messages_per_min
         } else {
@@ -94,9 +95,9 @@ pub(crate) async fn enforce_ws_admission(
             message_limit,
         )
         .await;
-        // The per-minute message quota only applies to EVENTs, and its
-        // rejection must be as correlatable as the burst quota's.
-        if !send_admission_result(conn, message_result, msg) {
+        // Only persistable EVENT attempts consume the minute quota. Ephemeral activity
+        // still passes the shared WS flood limit above and normal event auth.
+        if !send_admission_result(conn, message_result, msg, "messages") {
             return false;
         }
     }
@@ -115,12 +116,13 @@ fn send_admission_result(
     conn: &ConnectionState,
     result: Result<(), AdmissionError>,
     msg: &ClientMessage,
+    bucket: &'static str,
 ) -> bool {
     let target = rejection_target_for(msg);
     match result {
         Ok(()) => true,
         Err(AdmissionError::Exceeded { reset_in_secs }) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota").increment(1);
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota", "bucket" => bucket).increment(1);
             conn.send(request_rejection_message(
                 target,
                 &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
@@ -128,7 +130,7 @@ fn send_admission_result(
             false
         }
         Err(AdmissionError::Unavailable) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable").increment(1);
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable", "bucket" => bucket).increment(1);
             conn.send(request_rejection_message(
                 target,
                 "rate-limited: shared admission unavailable",
@@ -198,6 +200,7 @@ mod tests {
             &conn,
             Err(AdmissionError::Exceeded { reset_in_secs: 7 }),
             &msg,
+            "ws_operations",
         );
 
         assert!(!admitted, "an over-quota frame is not admitted");
@@ -227,7 +230,12 @@ mod tests {
         let (conn, mut rx) = test_conn();
         let (msg, event_id) = parsed_event_message();
 
-        send_admission_result(&conn, Err(AdmissionError::Unavailable), &msg);
+        send_admission_result(
+            &conn,
+            Err(AdmissionError::Unavailable),
+            &msg,
+            "ws_operations",
+        );
 
         let frame = sent_frame(&mut rx);
         assert_eq!(frame[0], "OK");
@@ -247,6 +255,7 @@ mod tests {
             &conn,
             Err(AdmissionError::Exceeded { reset_in_secs: 7 }),
             &msg,
+            "ws_operations",
         );
 
         let frame = sent_frame(&mut rx);
@@ -269,6 +278,7 @@ mod tests {
             &conn,
             Err(AdmissionError::Exceeded { reset_in_secs: 7 }),
             &msg,
+            "ws_operations",
         );
 
         let frame = sent_frame(&mut rx);
@@ -333,3 +343,6 @@ mod tests {
         assert_eq!(frame[1], "history-abc");
     }
 }
+
+#[cfg(test)]
+mod quota_tests;

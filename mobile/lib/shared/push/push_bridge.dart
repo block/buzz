@@ -273,6 +273,12 @@ Future<void> registerBuzzPushCommunitySnapshotStrict(
   settleFence: settleFence,
 );
 
+/// Restores notification presentation without reading community storage.
+Future<void> restoreAgeRestrictedBuzzNotifications() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  await _channel.invokeMethod<void>('restoreAgeRestrictedNotifications');
+}
+
 /// Removes notifications rendered before a confirmed age restriction.
 Future<void> purgeAgeRestrictedBuzzNotifications() async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return;

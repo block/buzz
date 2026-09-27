@@ -653,82 +653,84 @@ pub fn upsert_managed_section(file_path: &Path, new_section_content: &str) -> io
     Ok(())
 }
 
-/// Serializes nest-context writes so a slow, stale regeneration cannot roll the
-/// file back over a newer one. This is an ordered, latest-request-wins gate —
-/// not a work coalescer: every superseded generation still performs its relay
-/// reads, then drops its result at commit time. Adding a true dirty-loop owner
-/// would be a larger change and is unwarranted at this user-driven trigger rate.
+/// One regeneration worker with a latest-request-wins write fence. Startup
+/// persona backfill can request hundreds of renders: intermediate requests must
+/// supersede stale writes without each doing their own archive snapshot read.
 ///
-/// Each regeneration request claims a monotonic generation *synchronously* at
-/// request time (see [`NestRegenGate::claim`]), so the generation encodes
-/// program order: boot's regen is claimed before `apply_workspace`'s, an edit's
-/// regen before the next edit's. The claimed generation travels with the
-/// spawned task and gates its write in [`NestRegenGate::commit`]: a task drops
-/// its result once a *newer generation has been requested*, even if that newer
-/// generation later fails before it writes. Gating on the highest *requested*
-/// generation — not the highest *written* one — is what stops a slow, stale
-/// pre-edit render from publishing after a newer post-edit render was claimed
-/// and then failed during its relay work (which would otherwise leave the
-/// obsolete roster authoritative until the next unrelated trigger). Declared
-/// semantic: once a newer regeneration is requested, no older one publishes;
-/// if that newer one fails, the file simply waits for the next trigger.
-///
-/// `claim` and `commit` share one lock, so the "is this still the newest
-/// request?" compare is atomic with the synchronous file write. A bare atomic
-/// watermark checked separately from the write would let a new claim slip
-/// between an older task's eligibility check and its write; holding the lock
-/// across both closes that window (no `await` occurs while it is held).
+/// Claiming, finishing and committing share one lock. A trigger during a read
+/// leaves one latest-generation follow-up; a trigger at worker shutdown either
+/// becomes that follow-up or starts a new worker. No debounce or cached archive
+/// state is needed. Once a newer generation is requested, an older one cannot
+/// publish, even if the newer render fails (the next trigger can try again).
 struct NestRegenGate {
-    /// Highest generation *requested* so far (`0` = none yet). Advanced by
-    /// [`claim`] and read by [`commit`]; guarding both under this single lock
-    /// keeps the eligibility compare atomic with the file write.
-    highest_requested: Mutex<u64>,
+    state: Mutex<NestRegenState>,
+}
+
+struct NestRegenState {
+    highest_requested: u64,
+    running: bool,
 }
 
 impl NestRegenGate {
     const fn new() -> Self {
         Self {
-            highest_requested: Mutex::new(0),
+            state: Mutex::new(NestRegenState {
+                highest_requested: 0,
+                running: false,
+            }),
         }
     }
 
-    /// Claim the next generation. Call synchronously at request time so the
-    /// value reflects when the regeneration was requested, not when its task
-    /// happens to run. Advancing the shared watermark here is what lets a later
-    /// [`commit`] recognize — and drop — any older generation's stale render.
-    fn claim(&self) -> u64 {
-        let mut requested = self
-            .highest_requested
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *requested += 1;
-        *requested
+    /// Claim synchronously, before spawning. Only the idle-to-running caller
+    /// owns a worker; all other callers just advance the pending generation.
+    fn claim(&self) -> (u64, bool) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.highest_requested += 1;
+        let start_worker = !state.running;
+        state.running = true;
+        (state.highest_requested, start_worker)
     }
 
-    /// Non-blocking [`claim`] against the *exact* lock `claim` takes. Returns
-    /// `Some(generation)` if it acquired the lock — i.e. a claim could proceed
-    /// with no contention — or `None` if the lock is already held, meaning a
-    /// concurrent claim would block on it. Because `claim` and `commit` share
-    /// `highest_requested`, calling this from inside `commit_hooked`'s
-    /// under-lock hook reports `None`: the eligibility compare and the write
-    /// are serialized against any new claim. A design that advanced the
-    /// watermark under a separate lock (or a lock-free atomic) would report
-    /// `Some` here — the regression this probe proves absent, with no reliance
-    /// on elapsed time or thread scheduling.
+    /// Return work only to the caller that starts the worker. The callback is
+    /// the real regeneration path, supplied here so tests can hold its I/O.
+    fn request<'a, F, Fut>(
+        &'a self,
+        mut regenerate: F,
+    ) -> Option<impl std::future::Future<Output = ()> + 'a>
+    where
+        F: FnMut(u64) -> Fut + 'a,
+        Fut: std::future::Future<Output = Result<(), String>> + 'a,
+    {
+        let (mut generation, start_worker) = self.claim();
+        if !start_worker {
+            return None;
+        }
+        Some(async move {
+            loop {
+                if let Err(error) = regenerate(generation).await {
+                    eprintln!("buzz-desktop: nest context regeneration failed: {error}");
+                }
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                if state.highest_requested == generation {
+                    state.running = false;
+                    return;
+                }
+                generation = state.highest_requested;
+            }
+        })
+    }
+
+    /// Probe the exact claim/commit lock, including inside the commit hook.
     #[cfg(test)]
     fn try_claim(&self) -> Option<u64> {
-        match self.highest_requested.try_lock() {
-            Ok(mut requested) => {
-                *requested += 1;
-                Some(*requested)
-            }
-            Err(std::sync::TryLockError::WouldBlock) => None,
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
-                let mut requested = poisoned.into_inner();
-                *requested += 1;
-                Some(*requested)
-            }
-        }
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
+        state.highest_requested += 1;
+        state.running = true;
+        Some(state.highest_requested)
     }
 
     /// Commit `content` for `generation`, dropping the write once a newer
@@ -755,10 +757,10 @@ impl NestRegenGate {
         under_lock: impl FnOnce(),
     ) -> io::Result<bool> {
         let requested = self
-            .highest_requested
+            .state
             .lock()
             .map_err(|_| io::Error::other("nest regen gate lock poisoned"))?;
-        if generation < *requested {
+        if generation < requested.highest_requested {
             return Ok(false);
         }
         under_lock();
@@ -767,7 +769,12 @@ impl NestRegenGate {
     }
 }
 
-/// Process-wide ordered write gate for nest-context regeneration.
+// A best-effort roster refresh must not strand every newer edit behind an old
+// relay's unbounded NIP-11 body or admission wait. Bound the complete archive
+// operation, not just request headers; timeout preserves the existing fail-open.
+const NEST_ARCHIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Process-wide regeneration owner and ordered write gate.
 static NEST_REGEN: NestRegenGate = NestRegenGate::new();
 
 pub async fn regenerate_nest_context<R: tauri::Runtime>(
@@ -795,10 +802,20 @@ pub async fn regenerate_nest_context<R: tauri::Runtime>(
     // uses the same captured target as the rendered relay; a later generation's
     // task always wins the commit, so a fallback-relay boot render cannot bury a
     // later apply_workspace render.
-    let archived: HashSet<String> = fetch_archived_pubkeys_at(&state, &target)
-        .await
-        .into_iter()
-        .collect();
+    let archived: HashSet<String> = match tokio::time::timeout(
+        NEST_ARCHIVE_TIMEOUT,
+        fetch_archived_pubkeys_at(&state, &target),
+    )
+    .await
+    {
+        Ok(pubkeys) => pubkeys.into_iter().collect(),
+        Err(_) => {
+            eprintln!(
+                "buzz-desktop: nest archive read timed out; rendering without archive filter"
+            );
+            HashSet::new()
+        }
+    };
     let content = render_dynamic_section(&personas, &agents, &archived, &target.ws_url);
     NEST_REGEN
         .commit(&agents_md, &content, generation)
@@ -807,27 +824,25 @@ pub async fn regenerate_nest_context<R: tauri::Runtime>(
     Ok(())
 }
 
-/// Convenience wrapper: claims a regeneration generation, then regenerates on a
-/// spawned task, logging a warning on failure.
-///
-/// All call sites treat regeneration as fire-and-forget — agents run fine with
-/// a stale AGENTS.md, so we warn and continue rather than propagating the error.
-/// The generation is claimed *here*, synchronously, so it encodes call order;
-/// the spawned task carries it into [`NestRegenGate::commit`], which drops
-/// a stale render rather than letting a slow task overwrite a newer file.
-/// Archive/unarchive trigger this directly, but the regen races the relay's
-/// `kind:13535` snapshot update, so a just-archived agent may still linger for
-/// one cycle until the next regen (any agent/team edit or the next launch).
+/// Fire-and-forget regeneration: one worker reads the latest state, with one
+/// pending follow-up if another trigger arrives. Failures still warn and leave
+/// the file for the next trigger; they never strand the worker as running.
+/// Archive/unarchive can race the relay's snapshot update, so an archived agent
+/// may still linger until the next trigger, as before.
 pub fn try_regenerate_nest<R: tauri::Runtime>(app: &AppHandle<R>) {
-    let generation = NEST_REGEN.claim();
     let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = regenerate_nest_context(&app, generation).await {
-            eprintln!("buzz-desktop: nest context regeneration failed: {error}");
-        }
-    });
+    if let Some(work) = NEST_REGEN.request(move |generation| {
+        let app = app.clone();
+        async move { regenerate_nest_context(&app, generation).await }
+    }) {
+        tauri::async_runtime::spawn(work);
+    }
 }
 
+#[cfg(test)]
+mod regen_tests;
+#[cfg(test)]
+mod regen_trigger_tests;
 #[cfg(test)]
 mod render_tests;
 #[cfg(test)]

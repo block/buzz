@@ -7,10 +7,137 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
+import 'package:buzz/features/age_gate/age_signal_provider.dart';
+import 'package:buzz/features/channels/agent_activity/observer_subscription.dart';
+import 'package:buzz/features/channels/agent_activity/observer_models.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
+  test(
+    'confirmed minor tears down retained relay and observer providers',
+    () async {
+      final age = _MutableAgeNotifier();
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      var httpCalls = 0;
+      final pendingResponse = Completer<http.Response>();
+      final session = RelaySessionNotifier(
+        httpClient: http_testing.MockClient((_) {
+          httpCalls++;
+          return pendingResponse.future;
+        }),
+        socketFactory:
+            ({
+              required wsUrl,
+              required nsec,
+              required onMessage,
+              required onConnected,
+              required onDisconnected,
+            }) {
+              final socket = _ControlledRelaySocket(
+                wsUrl: wsUrl,
+                nsec: nsec,
+                onMessage: onMessage,
+                onConnected: onConnected,
+                onDisconnected: onDisconnected,
+              );
+              sockets.add(socket);
+              return socket;
+            },
+      );
+      final container = ProviderContainer(
+        overrides: [
+          ageSignalProvider.overrideWith(() => age),
+          relaySessionProvider.overrideWith(() => session),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(
+              baseUrl: 'https://relay.example',
+              nsec: keychain.nsec,
+            ),
+          ),
+          authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      // Keep both providers watched even after restriction, as retained caches do.
+      final relayListener = container.listen(relaySessionProvider, (_, _) {});
+      final observerListener = container.listen(
+        observerRelayProvider,
+        (_, _) {},
+      );
+      addTearDown(relayListener.close);
+      addTearDown(observerListener.close);
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets, hasLength(1));
+      sockets.single.connectSuccessfully();
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        container.read(relaySessionProvider).status,
+        SessionStatus.connected,
+      );
+      expect(
+        container.read(observerRelayProvider).connection,
+        isNot(ObserverConnectionState.idle),
+      );
+
+      final pendingQuery = session.queryRelay(const [
+        NostrFilter(kinds: [1]),
+      ]);
+      final retiredQuery = expectLater(pendingQuery, throwsStateError);
+      await Future<void>.delayed(Duration.zero);
+      expect(httpCalls, 1);
+      age.setState(AgeSignalState.restricted);
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets.single.disposeCalls, 1);
+      expect(
+        container.read(relaySessionProvider).status,
+        SessionStatus.disconnected,
+      );
+      expect(
+        container.read(observerRelayProvider).connection,
+        ObserverConnectionState.idle,
+      );
+      await expectLater(
+        session.queryRelay(const [
+          NostrFilter(kinds: [1]),
+        ]),
+        throwsStateError,
+      );
+      expect(httpCalls, 1);
+      pendingResponse.complete(http.Response('[]', 200));
+      await retiredQuery;
+      await session.reconnect();
+      session.onAppResumed();
+      sockets.first.disconnectWith(Exception('late old-socket callback'));
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets, hasLength(1));
+      expect(
+        container.read(relaySessionProvider).status,
+        SessionStatus.disconnected,
+      );
+
+      age.setState(AgeSignalState.allowed);
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets, hasLength(2));
+      final reconnectQuery = session.queryRelay(const [
+        NostrFilter(kinds: [1]),
+      ]);
+      await session.reconnect();
+      expect(await reconnectQuery, isEmpty);
+      expect(httpCalls, 2);
+      session.debugDispose();
+      await expectLater(
+        session.queryRelay(const [
+          NostrFilter(kinds: [1]),
+        ]),
+        throwsStateError,
+      );
+      expect(httpCalls, 2);
+    },
+  );
+
   test('queryRelay sends NIP-98 auth over POST /query', () async {
     final keychain = nostr.Keys.generate();
     final nsec = keychain.nsec;
@@ -22,6 +149,7 @@ void main() {
     final session = RelaySessionNotifier(httpClient: client);
     final container = ProviderContainer(
       overrides: [
+        authProvider.overrideWith(() => _PendingAuthNotifier()),
         relaySessionProvider.overrideWith(() => session),
         relayConfigProvider.overrideWith(
           () => _FakeRelayConfigNotifier(
@@ -88,6 +216,7 @@ void main() {
     );
     final container = ProviderContainer(
       overrides: [
+        authProvider.overrideWith(() => _PendingAuthNotifier()),
         relaySessionProvider.overrideWith(() => session),
         relayConfigProvider.overrideWith(
           () => _FakeRelayConfigNotifier(
@@ -116,6 +245,7 @@ void main() {
     );
     final container = ProviderContainer(
       overrides: [
+        authProvider.overrideWith(() => _PendingAuthNotifier()),
         relaySessionProvider.overrideWith(() => session),
         relayConfigProvider.overrideWith(
           () => _FakeRelayConfigNotifier(
@@ -155,6 +285,7 @@ void main() {
       );
       final container = ProviderContainer(
         overrides: [
+          authProvider.overrideWith(() => _PendingAuthNotifier()),
           relaySessionProvider.overrideWith(() => session),
           relayConfigProvider.overrideWith(
             () => _FakeRelayConfigNotifier(
@@ -1595,6 +1726,7 @@ _QueryHarness _queryHarness({
   final session = RelaySessionNotifier(httpClient: client, rateLimitGate: gate);
   final container = ProviderContainer(
     overrides: [
+      authProvider.overrideWith(() => _PendingAuthNotifier()),
       relaySessionProvider.overrideWith(() => session),
       relayConfigProvider.overrideWith(
         () => _FakeRelayConfigNotifier(
@@ -1749,4 +1881,18 @@ class _ManualTimer implements Timer {
 
   @override
   int get tick => _active ? 0 : 1;
+}
+
+class _MutableAgeNotifier extends AgeSignalNotifier {
+  @override
+  AgeSignalState build() => AgeSignalState.allowed;
+
+  void setState(AgeSignalState value) => state = value;
+}
+
+// HTTP transport tests hold authentication steady, avoiding unrelated native
+// storage initialization and provider retirement while a query is in flight.
+class _PendingAuthNotifier extends AuthNotifier {
+  @override
+  Future<AuthState> build() => Completer<AuthState>().future;
 }

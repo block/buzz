@@ -3,6 +3,7 @@ part of '../channel_detail_page.dart';
 class _MessageBubble extends HookConsumerWidget {
   final TimelineMessage message;
   final bool showAuthor;
+  final bool hasReplies;
   final Map<String, String> channelNames;
   final String currentChannelId;
   final String? currentPubkey;
@@ -15,6 +16,7 @@ class _MessageBubble extends HookConsumerWidget {
   const _MessageBubble({
     required this.message,
     required this.showAuthor,
+    required this.hasReplies,
     required this.channelNames,
     required this.currentChannelId,
     required this.currentPubkey,
@@ -28,6 +30,19 @@ class _MessageBubble extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
+    final hasLocalReplies = ref.watch(
+      threadLocalRepliesProvider(
+        ThreadRepliesArgs(
+          channelId: currentChannelId,
+          rootId: message.rootId ?? message.id,
+        ),
+      ).select(
+        (replies) => replies.any((reply) {
+          final thread = reply.threadReference;
+          return thread.parentId == message.id || thread.rootId == message.id;
+        }),
+      ),
+    );
     // Watch only this user's profile to avoid rebuilding on unrelated cache changes.
     final pk = message.pubkey.toLowerCase();
     final profile =
@@ -115,9 +130,9 @@ class _MessageBubble extends HookConsumerWidget {
           borderRadius: BorderRadius.circular(Radii.md),
           highlightColor: context.colors.primary.withValues(alpha: 0.1),
           snapshotKey: messageSnapshotKey,
-          // Tap opens the thread; long-press still opens the action sheet.
+          // Tap opens existing threads; long-press can start a new one.
           // MessageContent handles mention, channel-link, and media taps.
-          onTap: allMessages == null
+          onTap: (!hasReplies && !hasLocalReplies) || allMessages == null
               ? null
               : () => Navigator.of(context).push(
                   MaterialPageRoute<void>(

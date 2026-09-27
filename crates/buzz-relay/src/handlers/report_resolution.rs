@@ -379,7 +379,7 @@ struct EnforcementCtx<'a> {
 #[allow(clippy::too_many_arguments)]
 async fn drive_enforcement(
     state: &Arc<AppState>,
-    _tenant: &TenantContext,
+    tenant: &TenantContext,
     community_id: buzz_core::tenant::CommunityId,
     report_id: Uuid,
     action: &str,
@@ -522,7 +522,8 @@ async fn drive_enforcement(
                 target_event_id,
                 channel_id,
             };
-            let mutation_result = run_atomic_mutation(state, action_id, lease_token, &ctx).await;
+            let mutation_result =
+                run_atomic_mutation(state, tenant, action_id, lease_token, &ctx).await;
 
             // On enforcement error, record the failure while we STILL hold the
             // lease — `record_action_failure` is fenced on the live token, so it
@@ -564,8 +565,9 @@ async fn drive_enforcement(
 
             match mutation_result {
                 Ok(MutationOutcome::AlreadyCommitted) => {
-                    // step_marker already set by a concurrent driver;
-                    // reload and advance to finalization.
+                    // step_marker already set by a concurrent driver. Reload and
+                    // advance to finalization; live side effects fire at the
+                    // convergence point below (after the is_none block).
                     rec = state
                         .db
                         .get_admin_action(action_id)
@@ -589,7 +591,8 @@ async fn drive_enforcement(
                     )));
                 }
                 Ok(MutationOutcome::Committed) => {
-                    // Marker committed. Fall through to finalization below.
+                    // Marker committed. Fall through to the convergence point
+                    // below for live side effects and finalization.
                 }
                 Err(e) => {
                     if failure_lease_lost {
@@ -604,6 +607,63 @@ async fn drive_enforcement(
                         action_id,
                         error: e.to_string(),
                     });
+                }
+            }
+        }
+        // ── Convergence point ────────────────────────────────────────────────
+        // Reached on every path where the step marker is (or was just) committed:
+        // the fresh HTTP path (Committed above), a concurrent-driver path
+        // (AlreadyCommitted → reload → loop reaches here with marker set), and
+        // the crash-recovery path (process died after DB commit but before live
+        // effects; recovery worker re-enters here directly with marker set).
+        //
+        // Live side effects for kick use the target context persisted at claim
+        // time (enforcement_target_pubkey / enforcement_channel_id) when present.
+        // Migration 0047 added these columns without backfilling, so rows written
+        // before the migration have NULL/NULL.  On the recovery path the worker
+        // re-derives the target from the report and passes it as the function
+        // parameters; we accept those as a legacy-context fallback so pre-migration
+        // stranded kicks can still converge.  Both persisted context (preferred)
+        // and derived-parameter fallback must satisfy the non-NULL/non-NULL
+        // requirement; if neither can supply the target the row is genuinely
+        // unresolvable and we must not silently succeed.
+        //
+        // Eviction and workflow-disable are fenced behind membership_removal_fence
+        // (which holds the per-channel advisory lock through both effects) so a
+        // kick-commit → re-add → re-drive race does not revoke a legitimately
+        // restored membership. Cache invalidation is unconditional because
+        // stale-positive is always safe to drop. The fence applies on every path
+        // (fresh and recovery) for a single consistent ordering guarantee.
+        if action == "kick" {
+            // Prefer the persisted context (accurate at claim time, immune to
+            // later report/member mutations). Fall back to the function parameters
+            // when the row pre-dates migration 0047 and those columns are NULL.
+            let kick_target = rec.enforcement_target_pubkey.as_deref().or(target_pubkey);
+            let kick_channel = rec.enforcement_channel_id.or(channel_id);
+
+            match (kick_target, kick_channel) {
+                (Some(target), Some(ch)) => {
+                    crate::handlers::side_effects::apply_kick_live_side_effects(
+                        tenant, state, ch, target,
+                    )
+                    .await
+                    .map_err(|e| {
+                        ResolutionError::Internal(format!(
+                            "kick action {action_id} live side effects failed \
+                             (mutation_committed marker is recoverable; worker will retry): {e}"
+                        ))
+                    })?;
+                }
+                _ => {
+                    // Both persisted columns and function parameters are absent.
+                    // The recovery worker could not resolve a target from the
+                    // report, so this action cannot be finalized safely.
+                    return Err(ResolutionError::Internal(format!(
+                        "kick action {action_id} reached convergence with unresolvable \
+                         target: enforcement_target_pubkey and enforcement_channel_id are \
+                         absent from both the row and the derived function parameters — \
+                         cannot finalize; manual intervention required"
+                    )));
                 }
             }
         }
@@ -673,6 +733,7 @@ enum MutationOutcome {
 /// - `Err` — the mutation itself failed (DB or validation error).
 async fn run_atomic_mutation(
     state: &Arc<AppState>,
+    tenant: &TenantContext,
     action_id: Uuid,
     lease_token: Uuid,
     ctx: &EnforcementCtx<'_>,
@@ -757,7 +818,7 @@ async fn run_atomic_mutation(
                 .map_err(|e| anyhow::anyhow!("thread metadata lookup failed: {e}"))?;
             let parent_id = meta.as_ref().and_then(|m| m.parent_event_id.clone());
             let root_id = meta.as_ref().and_then(|m| m.root_event_id.clone());
-            state
+            let committed = state
                 .db
                 .execute_delete_with_marker(
                     action_id,
@@ -768,7 +829,18 @@ async fn run_atomic_mutation(
                     root_id.as_deref(),
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("delete failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("delete failed: {e}"))?;
+            // Same post-commit refresh as NIP-29 DELETE_EVENT: push a fresh
+            // 39005 so live badge counts also count down.
+            if let (true, Some(meta), Some(root_id)) = (committed, meta, root_id) {
+                crate::handlers::side_effects::emit_live_thread_summary(
+                    tenant,
+                    state,
+                    meta.channel_id,
+                    root_id,
+                );
+            }
+            Ok(committed)
         }
         other => Err(anyhow::anyhow!("unexpected enforcement action: {other}")),
     };
@@ -922,6 +994,7 @@ mod tests {
             reporter_pubkey: "0".repeat(64),
             target_kind: target_kind.to_string(),
             target: target.to_string(),
+            target_author_pubkey: None,
             channel_id: None,
             report_type: "spam".to_string(),
             note: None,

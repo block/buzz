@@ -1,5 +1,4 @@
 use super::*;
-
 #[test]
 fn access_policy_change_requires_runtime_refresh_for_effective_gate_changes() {
     use crate::managed_agents::RespondTo;

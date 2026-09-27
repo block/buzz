@@ -312,7 +312,7 @@ function InboxMessageDetailPane({
       videoReviewMessages,
     ],
   );
-  const { onScroll } = useAnchoredScroll({
+  const { onScroll, settleAtBottomAfterLayout } = useAnchoredScroll({
     channelId: conversationId,
     contentRef,
     isLoading: isThreadContextLoading,
@@ -430,6 +430,8 @@ function InboxMessageDetailPane({
     scrollContainerRef,
     composerWrapperRef,
     conversationId,
+    "padding",
+    settleAtBottomAfterLayout,
   );
 
   if (!item) {

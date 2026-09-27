@@ -12,7 +12,10 @@ import {
 } from "./personaModelDiscoveryStatus";
 import type { PersonaModelOption } from "./agentConfigOptions";
 import { providerRequiresExplicitModel } from "./agentConfigOptions";
-import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
+import {
+  disambiguateModelLabels,
+  resolveModelLabel,
+} from "@/features/agents/lib/formatAgentModelLabel";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
 
@@ -76,10 +79,13 @@ export function getDiscoveredPersonaModelOptions(
 
   return [
     ...defaultModelOption,
-    ...explicitModels.map((model) => ({
-      id: model.id,
-      label: resolveModelLabel(model.id, model.name, provider),
-    })),
+    ...disambiguateModelLabels(
+      explicitModels.map((model) => ({
+        id: model.id,
+        label: resolveModelLabel(model.id, model.name, provider),
+      })),
+      provider,
+    ),
   ];
 }
 

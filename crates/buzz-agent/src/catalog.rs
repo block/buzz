@@ -27,8 +27,9 @@ use crate::{
 /// A discovered model entry: `id` is the picker value (the raw endpoint id or
 /// Unity Catalog model-service FQN, and the wire/config value), `name` is the
 /// display label. Databricks catalog APIs do not provide a consistently useful
-/// picker label, so discovery curates names from the capability manifest when
-/// an exact known id exists and otherwise uses the raw id.
+/// picker label, so discovery derives `name` as exact record → unique alias →
+/// generated label grammar (known `label_family_tokens` families only) → raw
+/// id. Adding a vendor means adding one `label_family_tokens` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
     pub id: String,
@@ -80,12 +81,10 @@ const UNITY_CATALOG_DESCRIPTOR: CatalogDescriptor<ModelEntry> = CatalogDescripto
     parse_page: parse_uc_model_services_page,
 };
 
-/// Curated display label for a discovered Databricks endpoint or model-service
-/// id. Unknown ids deliberately pass through unchanged.
+/// Display label for a discovered Databricks endpoint or model-service id. Ids
+/// the label grammar cannot fully parse deliberately pass through unchanged.
 fn curated_model_name(id: &str) -> String {
-    crate::model_capabilities::databricks_registry_label(id)
-        .unwrap_or(id)
-        .to_string()
+    crate::model_capabilities::databricks_registry_label(id).unwrap_or_else(|| id.to_string())
 }
 
 /// Fallback catalog used only when both authenticated Databricks v2 catalogs
@@ -1903,7 +1902,7 @@ mod tests {
         // `name` is the curated label + provenance suffix, not the raw id.
         assert!(models.iter().all(|model| {
             let label = crate::model_capabilities::databricks_registry_label(&model.id)
-                .unwrap_or(model.id.as_str());
+                .unwrap_or_else(|| model.id.clone());
             model.name == format!("{label}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}")
         }));
     }

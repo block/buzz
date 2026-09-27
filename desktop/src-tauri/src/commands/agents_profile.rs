@@ -25,7 +25,8 @@ pub(crate) struct ProfileReconcileData {
     /// left unpinned (no tenant boundary) resolves the current workspace at
     /// execution time. See `resolve_reconcile_relay`.
     pub(crate) target_relay_url: Option<String>,
-    /// Expected avatar URL for the published profile. `None` for legacy records
+    /// Saved avatar source, localized to the target community before publishing.
+    /// `None` for legacy records
     /// that predate the `avatar_url` field — these will be backfilled from the
     /// relay's existing kind:0 profile on first reconciliation.
     pub(crate) avatar_url: Option<String>,
@@ -195,7 +196,7 @@ pub(crate) async fn reconcile_agent_profile(
     agent_pubkey: &str,
     data: &ProfileReconcileData,
 ) -> Result<ProfileReconcileOutcome, String> {
-    use crate::relay::{query_agent_profile, sync_managed_agent_profile};
+    use crate::relay::query_agent_profile;
 
     // Resolved ONCE and used for both the read and the write-back. A pinned
     // `target_relay_url` wins unconditionally — see `resolve_reconcile_relay`.
@@ -260,17 +261,51 @@ pub(crate) async fn reconcile_agent_profile(
         Some(expected_avatar)
     };
 
-    if !profile_needs_sync(
+    reconcile_profile_at(
+        state,
+        &relay_url,
+        data,
+        expected_avatar.as_deref(),
         existing.as_ref(),
+    )
+    .await
+}
+
+/// Network half of startup/restore reconciliation, after legacy source backfill.
+/// Kept separate from the disk migration so the production compare-and-publish
+/// seam can be exercised against two communities without a GUI runtime.
+pub(crate) async fn reconcile_profile_at(
+    state: &AppState,
+    relay_url: &str,
+    data: &ProfileReconcileData,
+    expected_avatar: Option<&str>,
+    existing: Option<&crate::relay::AgentProfileInfo>,
+) -> Result<ProfileReconcileOutcome, String> {
+    if !state
+        .managed_agent_profile_reconcile_enabled()
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Ok(ProfileReconcileOutcome::SkippedDisabled);
+    }
+    let agent_keys = Keys::parse(&data.private_key_nsec)
+        .map_err(|e| format!("failed to parse agent keys: {e}"))?;
+    let expected_avatar = crate::relay::profile_avatar::localize_avatar(
+        state,
+        relay_url,
+        &agent_keys,
+        expected_avatar,
+        data.auth_tag.as_deref(),
+    )
+    .await?;
+
+    if !profile_needs_sync(
+        existing,
         &data.name,
         expected_avatar.as_deref(),
         data.about.as_deref(),
     ) {
         return Ok(ProfileReconcileOutcome::Reconciled);
     }
-
-    let agent_keys = Keys::parse(&data.private_key_nsec)
-        .map_err(|e| format!("failed to parse agent keys: {e}"))?;
 
     if !state
         .managed_agent_profile_reconcile_enabled()
@@ -279,9 +314,9 @@ pub(crate) async fn reconcile_agent_profile(
         return Ok(ProfileReconcileOutcome::SkippedDisabled);
     }
 
-    sync_managed_agent_profile(
+    crate::relay::sync_managed_agent_profile(
         state,
-        &relay_url,
+        relay_url,
         &agent_keys,
         &data.name,
         expected_avatar.as_deref(),

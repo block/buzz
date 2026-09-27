@@ -3292,3 +3292,6 @@ async fn floor_guard_blocks_updates_that_move_rows_below_the_fence() {
 
     drop_scratch_db(&admin, pool, &name).await;
 }
+
+#[path = "tests/thread_window_postgres_tests.rs"]
+mod thread_window_postgres_tests;

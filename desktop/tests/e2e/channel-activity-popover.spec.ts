@@ -28,10 +28,14 @@ async function waitForMockLiveSubscription(page: Page, channelName: string) {
             window as Window & {
               __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
                 channelName: string;
+                kind: number;
+                exactChannel: boolean;
               }) => boolean;
             }
           ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
             channelName: name,
+            kind: 9,
+            exactChannel: true,
           }) ?? false,
         channelName,
       ),
@@ -184,6 +188,7 @@ async function seedChannelActivity(
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
 
+  await waitForMockLiveSubscription(page, "general");
   const unreadAt = Math.floor(Date.now() / 1000) + 60;
   await emitMockMessage(
     page,

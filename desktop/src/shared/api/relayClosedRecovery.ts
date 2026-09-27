@@ -56,39 +56,45 @@ export function handleRelayClosed({
         const attempt = subscription.closedRetryAttempt ?? 0;
         if (attempt < 3) {
           subscription.closedRetryAttempt = attempt + 1;
-          // Clear the existing op-timeout so it doesn't fire while waiting for
-          // the rate-limit window. The setTimeout delay covers this interval.
+          // The same cancellable timeout owns admission waiting and, only once
+          // dispatched, the response budget. A later hint can extend the gate.
           window.clearTimeout(subscription.timeout);
-          const hintMs = (hintSeconds ?? 10) * 1_000;
-          const delayMs = Math.max(rateLimitRemainingMs() || hintMs, hintMs);
-          // Re-register under a new id so the old subId can be evicted cleanly.
-          // Accumulated events are preserved on the subscription object.
           const newSubId = `history-${crypto.randomUUID()}`;
           subscriptions.delete(subId);
           subscriptions.set(newSubId, subscription);
-          // Use the rate-limit delay as the new timeout budget so the
-          // subscription is not left open indefinitely while waiting.
-          subscription.timeout = window.setTimeout(() => {
-            if (!subscriptions.has(newSubId)) return; // cancelled while waiting
-            void sendReq(newSubId, subscription.filter).catch(() => {
-              subscriptions.delete(newSubId);
-              subscription.reject(
-                new Error(message || "Relay closed the history subscription."),
+          const isOwned = () => subscriptions.get(newSubId) === subscription;
+          const retryWhenAdmitted = () => {
+            if (!isOwned()) return;
+            const remainingMs = rateLimitRemainingMs();
+            if (remainingMs > 0) {
+              subscription.timeout = window.setTimeout(
+                retryWhenAdmitted,
+                remainingMs,
               );
-            });
-            // Set a new op-timeout for the retry REQ so the subscription
-            // cannot hang indefinitely if the relay stops responding.
+              return;
+            }
+            // Arm before transport: EOSE/CLOSED may arrive before send settles.
             subscription.timeout = window.setTimeout(() => {
+              if (!isOwned()) return;
               subscriptions.delete(newSubId);
-              // History promise is already being rejected below; swallow any
-              // IPC/socket error from the CLOSE send so it does not surface as
-              // an unhandled rejection on a path that has no live error handler.
               closeSubscription?.(newSubId)?.catch(() => {});
               subscription.reject(
                 new Error("Relay closed the history subscription."),
               );
             }, subscription.timeoutMs);
-          }, delayMs);
+            void sendReq(newSubId, subscription.filter).catch(() => {
+              if (!isOwned()) return;
+              window.clearTimeout(subscription.timeout);
+              subscriptions.delete(newSubId);
+              subscription.reject(
+                new Error(message || "Relay closed the history subscription."),
+              );
+            });
+          };
+          subscription.timeout = window.setTimeout(
+            retryWhenAdmitted,
+            rateLimitRemainingMs(),
+          );
           return;
         }
       }
@@ -132,6 +138,8 @@ function recoverLiveSubscriptionFromClosed({
     // Auth/access/filter failure — permanently remove the subscription so it
     // doesn't silently loop.
     subscriptions.delete(subId);
+    clearClosedRetry(subscription);
+    subscription.onRemoved?.();
     return;
   }
 
@@ -158,9 +166,20 @@ function recoverLiveSubscriptionFromClosed({
   }
 
   subscription.closedRetryAttempt = attempt + 1;
-  subscription.closedRetryTimeout = window.setTimeout(() => {
+  const retryWhenAdmitted = () => {
     subscription.closedRetryTimeout = undefined;
     if (subscriptions.get(subId) !== subscription) return;
+    // A later quota hint can extend the shared gate after this retry was
+    // scheduled. Keep the existing cancellable timer owner while waiting;
+    // postponement is not another failed attempt and must not grow backoff.
+    const remainingMs = rateLimitRemainingMs();
+    if (remainingMs > 0) {
+      subscription.closedRetryTimeout = window.setTimeout(
+        retryWhenAdmitted,
+        remainingMs,
+      );
+      return;
+    }
     void sendReq(subId, subscription.filter).catch((error) => {
       if (subscriptions.get(subId) !== subscription) return;
       console.error("Failed to restore closed relay subscription", error);
@@ -172,7 +191,11 @@ function recoverLiveSubscriptionFromClosed({
         sendReq,
       });
     });
-  }, delayMs);
+  };
+  subscription.closedRetryTimeout = window.setTimeout(
+    retryWhenAdmitted,
+    delayMs,
+  );
 }
 
 export function prepareSubscriptionEvent(

@@ -82,12 +82,16 @@ class Env {
 class RelayConfigNotifier extends Notifier<RelayConfig> {
   @override
   RelayConfig build() {
-    // Watch the active community so that when it changes (community switch),
-    // the config rebuilds, triggering the full provider cascade.
-    final activeAsync = ref.watch(activeCommunityProvider);
-    final active = activeAsync.value;
-    if (active != null) {
-      return RelayConfig(baseUrl: active.relayUrl, nsec: active.nsec);
+    // Push lease bookkeeping updates the community while using its live
+    // session. Only connection-context changes may restart that session.
+    final context = ref.watch(
+      activeCommunityProvider.select((value) {
+        final active = value.value;
+        return (id: active?.id, relayUrl: active?.relayUrl, nsec: active?.nsec);
+      }),
+    );
+    if (context.relayUrl != null) {
+      return RelayConfig(baseUrl: context.relayUrl!, nsec: context.nsec);
     }
 
     // Fallback to compile-time env config (dev mode).

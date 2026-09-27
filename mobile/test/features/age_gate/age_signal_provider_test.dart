@@ -7,553 +7,194 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(ageSignalChannel, null);
   });
 
-  test(
-    'production launch allows access without requesting a native age signal',
-    () async {
-      var nativeCalls = 0;
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(ageSignalChannel, (_) async {
-            nativeCalls += 1;
-            throw PlatformException(code: 'unavailable');
-          });
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
-
-      expect(container.read(ageSignalProvider), AgeSignalState.allowed);
-      await container.read(ageSignalProvider.notifier).request();
-      await container.read(ageSignalProvider.notifier).request();
-
-      expect(container.read(ageSignalProvider), AgeSignalState.allowed);
-      expect(nativeCalls, 0);
-    },
-  );
-
-  Future<AgeSignalState> requestWithResponse(Object? response) async {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(ageSignalChannel, (call) async {
-          expect(call.method, 'requestAgeSignal');
-          expect(call.arguments, isNull);
-          return response;
-        });
+  ProviderContainer enabledContainer({AgeSignalNotifier Function()? create}) {
     final container = ProviderContainer(
-      overrides: [ageSignalProvider.overrideWith(AgeSignalNotifier.new)],
+      overrides: [
+        ageSignalProvider.overrideWith(create ?? AgeSignalNotifier.new),
+      ],
     );
     addTearDown(container.dispose);
-
-    await container.read(ageSignalProvider.notifier).request();
-    return container.read(ageSignalProvider);
+    return container;
   }
 
-  test(
-    'notification protection failure stays gated until a successful retry',
-    () async {
-      var protected = false;
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(ageSignalChannel, (call) async {
-            expect(call.method, 'requestAgeSignal');
-            if (!protected) {
-              throw PlatformException(
-                code: 'age_signal_notification_protection_failed',
-              );
-            }
-            return {'status': 'noSignal', 'ageUpper': null};
-          });
-      final container = ProviderContainer(
-        overrides: [
-          ageSignalProvider.overrideWith(
-            () => AgeSignalNotifier(delay: (_) async {}),
-          ),
-        ],
-      );
-      addTearDown(container.dispose);
-      final notifier = container.read(ageSignalProvider.notifier);
+  test('production provider respects the explicit dogfood opt-in', () async {
+    var calls = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(ageSignalChannel, (_) async {
+          calls += 1;
+          return {'status': 'signal', 'ageUpper': 17};
+        });
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    await container.read(ageSignalProvider.notifier).request();
+    expect(
+      container.read(ageSignalProvider),
+      ageGatingEnabled ? AgeSignalState.restricted : AgeSignalState.allowed,
+    );
+    expect(calls, ageGatingEnabled ? 1 : 0);
+  });
 
-      await notifier.request();
-      expect(
-        container.read(ageSignalProvider),
-        AgeSignalState.retryableFailure,
-      );
-      protected = true;
-      await notifier.request();
+  for (final upper in [-100, -1, 0, 1, 12, 16, 17, 18, 19, 120, 999999]) {
+    test('native inclusive upper bound $upper', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            ageSignalChannel,
+            (_) async => {'status': 'signal', 'ageUpper': upper},
+          );
+      final container = enabledContainer();
       expect(container.read(ageSignalProvider), AgeSignalState.allowed);
-    },
-  );
-
-  for (final failure in ['missing', 'malformed', 'timeout']) {
-    test('failed native recovery stays retryable: $failure', () async {
-      TestWidgetsFlutterBinding.ensureInitialized();
-      var requests = 0;
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(ageSignalChannel, (call) async {
-            if (call.method == 'requestAgeSignal') {
-              requests += 1;
-              return Completer<Object?>().future;
-            }
-            if (call.method == 'cancelAgeSignalRequest') return false;
-            if (failure == 'malformed') return 'invalid';
-            if (failure == 'timeout') return Completer<Object?>().future;
-            throw MissingPluginException();
-          });
-      addTearDown(
-        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(ageSignalChannel, null),
-      );
-      final container = ProviderContainer(
-        overrides: [
-          ageSignalProvider.overrideWith(
-            () => AgeSignalNotifier(
-              delay: (_) async {},
-              requestTimeout: const Duration(milliseconds: 1),
-              cancellationTimeout: const Duration(milliseconds: 1),
-            ),
-          ),
-        ],
-      );
-      addTearDown(container.dispose);
-      final notifier = container.read(ageSignalProvider.notifier);
-      await notifier.request();
-      await notifier.request();
-      expect(requests, 1);
+      await container.read(ageSignalProvider.notifier).request();
       expect(
         container.read(ageSignalProvider),
-        AgeSignalState.retryableFailure,
+        upper >= 0 && upper < 18
+            ? AgeSignalState.restricted
+            : AgeSignalState.allowed,
       );
     });
   }
 
-  test('native recovery acknowledgement permits a fresh request', () async {
-    TestWidgetsFlutterBinding.ensureInitialized();
-    var requests = 0;
-    var resets = 0;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(ageSignalChannel, (call) async {
-          if (call.method == 'requestAgeSignal') {
-            requests += 1;
-            if (requests == 1) return Completer<Object?>().future;
-            return {'status': 'signal', 'ageUpper': 17};
-          }
-          if (call.method == 'cancelAgeSignalRequest') return false;
-          if (call.method == 'restartForAgeSignal') {
-            resets += 1;
-            return true;
-          }
-          throw MissingPluginException();
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(ageSignalChannel, null),
-    );
-    final container = ProviderContainer(
-      overrides: [
-        ageSignalProvider.overrideWith(
-          () => AgeSignalNotifier(
-            delay: (_) async {},
-            requestTimeout: const Duration(milliseconds: 1),
-          ),
+  final invalid = <Object?>[
+    null,
+    'wrong envelope',
+    ['signal', 17],
+    {},
+    {'status': 'signal'},
+    {'ageUpper': 17},
+    {'status': 'unknown', 'ageUpper': 17},
+    {'status': 'noSignal', 'ageUpper': 17},
+    {'status': 'signal', 'ageUpper': '17'},
+    {'status': 'signal', 'ageUpper': 17.0},
+    {'status': 'signal', 'ageUpper': true},
+    {'status': 'signal', 'ageUpper': null},
+    {'status': 'signal', 'ageUpper': 17, 'unexpected': true},
+  ];
+  for (var index = 0; index < invalid.length; index++) {
+    test('malformed or unknown native response $index allows access', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            ageSignalChannel,
+            (_) async => invalid[index],
+          );
+      final container = enabledContainer();
+      await container.read(ageSignalProvider.notifier).request();
+      expect(container.read(ageSignalProvider), AgeSignalState.allowed);
+    });
+  }
+
+  for (final error in <Object>[
+    PlatformException(code: 'unavailable'),
+    MissingPluginException(),
+    StateError('synchronous failure'),
+    FormatException('bad codec'),
+    ArgumentError('unexpected integration error'),
+  ]) {
+    test('${error.runtimeType} preserves access and is not retried', () async {
+      var calls = 0;
+      final container = enabledContainer(
+        create: () => AgeSignalNotifier(
+          requestSignal: () {
+            calls++;
+            throw error;
+          },
         ),
-      ],
-    );
-    addTearDown(container.dispose);
-    final notifier = container.read(ageSignalProvider.notifier);
-    await notifier.request();
-    expect(container.read(ageSignalProvider), AgeSignalState.retryableFailure);
-    await notifier.request();
-    expect(resets, 1);
-    expect(requests, 2);
-    expect(container.read(ageSignalProvider), AgeSignalState.restricted);
+      );
+      final notifier = container.read(ageSignalProvider.notifier);
+      await notifier.request();
+      await notifier.request();
+      expect(container.read(ageSignalProvider), AgeSignalState.allowed);
+      expect(calls, 1);
+    });
+  }
+
+  test('platform exception crosses the real channel and fails open', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(ageSignalChannel, (_) async {
+          throw PlatformException(
+            code: 'age_signal_notification_protection_failed',
+          );
+        });
+    final container = enabledContainer();
+    await container.read(ageSignalProvider.notifier).request();
+    expect(container.read(ageSignalProvider), AgeSignalState.allowed);
   });
 
-  test('blocks when the signal upper bound is 17', () async {
-    expect(
-      await requestWithResponse({'status': 'signal', 'ageUpper': 17}),
-      AgeSignalState.restricted,
-    );
-  });
-
-  test('allows when the signal upper bound is 18', () async {
-    expect(
-      await requestWithResponse({'status': 'signal', 'ageUpper': 18}),
-      AgeSignalState.allowed,
-    );
-  });
-
-  test('allows when a signal has an open-ended upper bound', () async {
-    expect(
-      await requestWithResponse({'status': 'signal', 'ageUpper': null}),
-      AgeSignalState.allowed,
-    );
-  });
-
-  test('allows when no signal is available', () async {
-    expect(
-      await requestWithResponse({'status': 'noSignal', 'ageUpper': null}),
-      AgeSignalState.allowed,
-    );
-  });
-
-  test('exposes a gated retry after exhausted platform failures', () async {
-    var requests = 0;
-    var delays = 0;
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(
-        requestSignal: () async {
-          requests += 1;
-          if (requests <= 2) {
-            throw PlatformException(code: 'unavailable');
-          }
-          return {'status': 'noSignal', 'ageUpper': null};
-        },
-        delay: (duration) async {
-          expect(duration, ageSignalRetryDelay);
-          delays += 1;
-        },
-      ),
-    );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    await container.read(provider.notifier).request();
-
-    expect(container.read(provider), AgeSignalState.retryableFailure);
-    expect(requests, 2);
-    expect(delays, 1);
-
-    await container.read(provider.notifier).request();
-
-    expect(container.read(provider), AgeSignalState.allowed);
-    expect(requests, 3);
-    expect(delays, 1);
-  });
-
-  test('retries a transient platform failure and applies the signal', () async {
-    var requests = 0;
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(
-        requestSignal: () async {
-          requests += 1;
-          if (requests == 1) {
-            throw PlatformException(code: 'age_signal_unavailable');
-          }
-          return {'status': 'signal', 'ageUpper': 17};
-        },
-        delay: (duration) async {
-          expect(duration, ageSignalRetryDelay);
-        },
-      ),
-    );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    await container.read(provider.notifier).request();
-
-    expect(container.read(provider), AgeSignalState.restricted);
-    expect(requests, 2);
+  test('missing native channel fails open', () async {
+    final container = enabledContainer();
+    await container.read(ageSignalProvider.notifier).request();
+    expect(container.read(ageSignalProvider), AgeSignalState.allowed);
   });
 
   test(
-    'times out a stalled single native request and exposes a retry',
+    'pending request allows access and concurrent callers share it',
     () async {
-      var requests = 0;
-      var delays = 0;
-      final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-        () => AgeSignalNotifier(
+      final response = Completer<Map<Object?, Object?>?>();
+      var calls = 0;
+      final container = enabledContainer(
+        create: () => AgeSignalNotifier(
           requestSignal: () {
-            requests += 1;
-            return Completer<Map<Object?, Object?>?>().future;
+            calls++;
+            return response.future;
           },
-          delay: (duration) async {
-            expect(duration, ageSignalRetryDelay);
-            delays += 1;
-          },
-          requestTimeout: const Duration(milliseconds: 1),
-          cancelSignal: () async => false,
         ),
       );
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
-
-      await container.read(provider.notifier).request();
-
-      expect(container.read(provider), AgeSignalState.retryableFailure);
-      expect(requests, 1);
-      expect(delays, 1);
+      final notifier = container.read(ageSignalProvider.notifier);
+      final first = notifier.request();
+      final second = notifier.request();
+      expect(container.read(ageSignalProvider), AgeSignalState.allowed);
+      response.complete({'status': 'signal', 'ageUpper': 17});
+      await Future.wait([first, second]);
+      expect(calls, 1);
+      expect(container.read(ageSignalProvider), AgeSignalState.restricted);
     },
   );
 
-  test('a retry consumes the late result from a timed-out request', () async {
-    var requests = 0;
-    var delays = 0;
+  test('timeout retires request even when late result is under 18', () async {
     final response = Completer<Map<Object?, Object?>?>();
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(
-        requestSignal: () {
-          requests += 1;
-          return response.future;
-        },
-        delay: (duration) async {
-          expect(duration, ageSignalRetryDelay);
-          delays += 1;
-          response.complete({'status': 'signal', 'ageUpper': 17});
-        },
-        requestTimeout: const Duration(milliseconds: 1),
-        cancelSignal: () async => false,
+    final container = enabledContainer(
+      create: () => AgeSignalNotifier(
+        requestSignal: () => response.future,
+        requestTimeout: Duration.zero,
       ),
     );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    await container.read(provider.notifier).request();
-
-    expect(container.read(provider), AgeSignalState.restricted);
-    expect(requests, 1);
-    expect(delays, 1);
-  });
-
-  test('a deliberate retry replaces an exhausted stalled request', () async {
-    var requests = 0;
-    var cancellations = 0;
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(
-        requestSignal: () {
-          requests += 1;
-          if (requests == 1) {
-            return Completer<Map<Object?, Object?>?>().future;
-          }
-          return Future.value({'status': 'noSignal', 'ageUpper': null});
-        },
-        delay: (_) async {},
-        cancelSignal: () async {
-          cancellations += 1;
-          return true;
-        },
-        requestTimeout: const Duration(milliseconds: 1),
-      ),
-    );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    await container.read(provider.notifier).request();
-    expect(container.read(provider), AgeSignalState.retryableFailure);
-    await container.read(provider.notifier).request();
-
-    expect(container.read(provider), AgeSignalState.allowed);
-    expect(requests, 2);
-    expect(cancellations, 1);
-  });
-
-  test('an uncancellable stalled request remains the single flight', () async {
-    var requests = 0;
-    var restarts = 0;
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(
-        requestSignal: () {
-          requests += 1;
-          return Completer<Map<Object?, Object?>?>().future;
-        },
-        delay: (_) async {},
-        cancelSignal: () async => false,
-        restartSignal: () async {
-          restarts += 1;
-          return false;
-        },
-        requestTimeout: const Duration(milliseconds: 1),
-      ),
-    );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    await container.read(provider.notifier).request();
-    await container.read(provider.notifier).request();
-
-    expect(container.read(provider), AgeSignalState.retryableFailure);
-    expect(requests, 1);
-    expect(restarts, 1);
-  });
-
-  test('a stalled cancellation still exposes the retry action', () async {
-    var cancellations = 0;
-    var restarts = 0;
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(
-        requestSignal: () => Completer<Map<Object?, Object?>?>().future,
-        delay: (_) async {},
-        cancelSignal: () {
-          cancellations += 1;
-          return Completer<bool>().future;
-        },
-        restartSignal: () async {
-          restarts += 1;
-          return false;
-        },
-        requestTimeout: const Duration(milliseconds: 1),
-        cancellationTimeout: const Duration(milliseconds: 1),
-      ),
-    );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    await container.read(provider.notifier).request();
-    expect(container.read(provider), AgeSignalState.retryableFailure);
-    await container.read(provider.notifier).request();
-
-    expect(cancellations, 1);
-    expect(restarts, 1);
-  });
-
-  test('a malformed cancellation still exposes the retry action', () async {
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(
-        requestSignal: () => Completer<Map<Object?, Object?>?>().future,
-        delay: (_) async {},
-        cancelSignal: () async {
-          final dynamic malformed = 'not-a-boolean';
-          return malformed;
-        },
-        requestTimeout: const Duration(milliseconds: 1),
-      ),
-    );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    await container.read(provider.notifier).request();
-
-    expect(container.read(provider), AgeSignalState.retryableFailure);
-  });
-
-  test('keeps a missing native channel gated and retryable', () async {
-    var requests = 0;
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(
-        requestSignal: () async {
-          requests += 1;
-          throw MissingPluginException('buzz/age_signal');
-        },
-        delay: (duration) async {
-          expect(duration, ageSignalRetryDelay);
-        },
-      ),
-    );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    await container.read(provider.notifier).request();
-
-    expect(container.read(provider), AgeSignalState.retryableFailure);
-    expect(requests, 2);
-  });
-
-  test('keeps malformed platform responses gated and retryable', () async {
-    expect(
-      await requestWithResponse({'status': 'unknown', 'ageUpper': null}),
-      AgeSignalState.retryableFailure,
-    );
-    expect(
-      await requestWithResponse({'status': 'signal', 'ageUpper': '17'}),
-      AgeSignalState.retryableFailure,
-    );
-    expect(
-      await requestWithResponse({
-        'status': 'signal',
-        'ageUpper': 17,
-        'ageLower': 13,
-      }),
-      AgeSignalState.retryableFailure,
-    );
-    expect(
-      await requestWithResponse({'status': 'noSignal', 'ageUpper': 17}),
-      AgeSignalState.retryableFailure,
-    );
-    expect(await requestWithResponse(null), AgeSignalState.retryableFailure);
-    expect(
-      await requestWithResponse(['not', 'a', 'map']),
-      AgeSignalState.retryableFailure,
-    );
-  });
-
-  test('a deliberate retry can recover from a malformed response', () async {
-    var requests = 0;
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(
-        requestSignal: () async {
-          requests += 1;
-          return requests == 1
-              ? {'status': 'unknown', 'ageUpper': null}
-              : {'status': 'noSignal', 'ageUpper': null};
-        },
-      ),
-    );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    await container.read(provider.notifier).request();
-    expect(container.read(provider), AgeSignalState.retryableFailure);
-
-    await container.read(provider.notifier).request();
-    expect(container.read(provider), AgeSignalState.allowed);
-    expect(requests, 2);
-  });
-
-  test('a deliberate retry can recover from a null response', () async {
-    var requests = 0;
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(
-        requestSignal: () async {
-          requests += 1;
-          return requests == 1
-              ? null
-              : {'status': 'noSignal', 'ageUpper': null};
-        },
-      ),
-    );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    await container.read(provider.notifier).request();
-    expect(container.read(provider), AgeSignalState.retryableFailure);
-
-    await container.read(provider.notifier).request();
-    expect(container.read(provider), AgeSignalState.allowed);
-    expect(requests, 2);
-  });
-
-  test('requests the signal at most once', () async {
-    var requests = 0;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(ageSignalChannel, (_) async {
-          requests += 1;
-          return {'status': 'noSignal', 'ageUpper': null};
-        });
-    final container = ProviderContainer(
-      overrides: [ageSignalProvider.overrideWith(AgeSignalNotifier.new)],
-    );
-    addTearDown(container.dispose);
     final notifier = container.read(ageSignalProvider.notifier);
-
     await notifier.request();
+    expect(container.read(ageSignalProvider), AgeSignalState.allowed);
+    response.complete({'status': 'signal', 'ageUpper': 17});
+    await response.future;
     await notifier.request();
-
-    expect(requests, 1);
+    expect(container.read(ageSignalProvider), AgeSignalState.allowed);
   });
 
-  test('remains checking until the platform request completes', () async {
+  test('invalidating a provider retires the previous request', () async {
     final response = Completer<Map<Object?, Object?>?>();
-    final provider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
-      () => AgeSignalNotifier(requestSignal: () => response.future),
+    final container = enabledContainer(
+      create: () => AgeSignalNotifier(requestSignal: () => response.future),
     );
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    final request = container.read(provider.notifier).request();
-
-    expect(container.read(provider), AgeSignalState.checking);
-    response.complete({'status': 'noSignal', 'ageUpper': null});
+    final request = container.read(ageSignalProvider.notifier).request();
+    container.invalidate(ageSignalProvider);
+    expect(container.read(ageSignalProvider), AgeSignalState.allowed);
+    response.complete({'status': 'signal', 'ageUpper': 17});
     await request;
-    expect(container.read(provider), AgeSignalState.allowed);
+    expect(container.read(ageSignalProvider), AgeSignalState.allowed);
+  });
+
+  test('disposal retires the request without an unhandled error', () async {
+    final response = Completer<Map<Object?, Object?>?>();
+    final container = ProviderContainer(
+      overrides: [
+        ageSignalProvider.overrideWith(
+          () => AgeSignalNotifier(requestSignal: () => response.future),
+        ),
+      ],
+    );
+    final request = container.read(ageSignalProvider.notifier).request();
+    container.dispose();
+    response.complete({'status': 'signal', 'ageUpper': 17});
+    await request;
   });
 }

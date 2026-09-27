@@ -35,8 +35,11 @@ export function PersonaModelCombobox({
   const filteredOptions = React.useMemo(() => {
     if (query.trim() === "") return options;
     const lower = query.toLowerCase();
-    return options.filter((option) =>
-      option.label.toLowerCase().includes(lower),
+    // Search the raw id too, so `system.ai` finds rows whose label hides it.
+    return options.filter(
+      (option) =>
+        option.label.toLowerCase().includes(lower) ||
+        option.value.toLowerCase().includes(lower),
     );
   }, [options, query]);
 

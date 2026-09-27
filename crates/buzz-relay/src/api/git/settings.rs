@@ -29,6 +29,7 @@ use super::{
 };
 use crate::{
     api::{api_error, bridge, relay_members},
+    nip_fi_http::admit_nip_fi_http_on_state,
     state::AppState,
 };
 
@@ -174,37 +175,54 @@ async fn authenticate(
         .await
         .map_err(|_| error(StatusCode::NOT_FOUND, "repository not found"))?;
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
-    let auth = bridge::verify_bridge_auth_with_options(
+    let method = if body.is_some() { "POST" } else { "GET" };
+    let require_payload = body.is_some();
+
+    // NIP-FI admission: runs NIP-98 extraction, assertion verification, and
+    // key pairing in fixed order.  The control-plane route has strict binding:
+    //   - `require_auth_token = true`  (NIP-98 always required; no X-Pubkey fallback)
+    //   - `require_payload = body.is_some()` (POST bodies must be hash-bound)
+    //
+    // The router assertion guard already verified the assertion cryptographically;
+    // this call pairs the proven NIP-98 pubkey with the assertion's claimed key
+    // and checks the deny map.  [FI-TRACE-AUTHORITY-UNIFORM]
+    let admission = admit_nip_fi_http_on_state(
+        state,
         headers,
-        if body.is_some() { "POST" } else { "GET" },
-        &url,
-        body,
-        true,
-        body.is_some(),
-    )
-    .map_err(IntoResponse::into_response)?;
-    bridge::enforce_http_admission(state, &tenant, &auth.pubkey)
+        bridge::make_nip98_closure_for_admission(
+            headers.clone(),
+            method,
+            url,
+            body.map(|b| b.to_vec()),
+            true, // require_auth_token: always required for control-plane
+            require_payload,
+        ),
+    )?;
+    let pubkey = *admission.proven_pubkey();
+    let (event_id_bytes, signed_created_at) = admission.into_extra();
+
+    bridge::enforce_http_admission(state, &tenant, &pubkey)
         .await
         .map_err(IntoResponse::into_response)?;
-    bridge::check_nip98_replay(state, &tenant, auth.event_id_bytes)
+    bridge::check_nip98_replay(state, &tenant, event_id_bytes)
         .await
         .map_err(IntoResponse::into_response)?;
     let tag = relay_members::extract_auth_tag_header(headers);
     relay_members::enforce_relay_membership(
         state,
         tenant.community(),
-        auth.pubkey.as_bytes(),
+        pubkey.as_bytes(),
         tag,
-        auth.signed_created_at,
+        signed_created_at,
     )
     .await
     .map_err(IntoResponse::into_response)?;
     deny_banned_git_principal(
         &state.db,
         tenant.community(),
-        &auth.pubkey,
+        &pubkey,
         tag,
-        auth.signed_created_at,
+        signed_created_at,
     )
     .await?;
     // Admission ignores kind= restrictions by design (NIP-AA). Repository
@@ -223,15 +241,11 @@ async fn authenticate(
                 })
         })
         .and_then(|tag| {
-            relay_members::extract_nip_oa_owner(
-                auth.pubkey.as_bytes(),
-                Some(tag),
-                auth.signed_created_at,
-            )
+            relay_members::extract_nip_oa_owner(pubkey.as_bytes(), Some(tag), signed_created_at)
         });
     Ok(SettingsAuth {
         tenant,
-        caller: auth.pubkey,
+        caller: pubkey,
         delegated_owner,
     })
 }

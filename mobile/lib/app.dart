@@ -20,6 +20,7 @@ import 'features/home/home_page.dart';
 import 'features/invites/invite_create_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'features/pairing/pairing_page.dart';
+import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
 import 'features/channels/deep_link_dispatcher.dart';
@@ -295,7 +296,12 @@ class App extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final ageSignalState = ref.watch(ageSignalProvider);
-    final communityTheme = ageSignalState == AgeSignalState.allowed
+    ref.listen(ageSignalProvider, (_, next) {
+      if (next == AgeSignalState.restricted) {
+        ref.read(pairingProvider.notifier).reset();
+      }
+    });
+    final communityTheme = ageSignalState != AgeSignalState.restricted
         ? ref.watch(communityThemeProvider)
         : defaultCommunityTheme;
     final themeMode = communityTheme.mode;
@@ -335,7 +341,7 @@ class App extends HookConsumerWidget {
     // Eagerly initialize websocket session and lifecycle observer when
     // authenticated. These providers connect and manage the websocket.
     var hasUnreadInbox = false;
-    if (ageSignalState == AgeSignalState.allowed &&
+    if (ageSignalState != AgeSignalState.restricted &&
         authState.value?.status == AuthStatus.authenticated) {
       ref.watch(relaySessionProvider);
       ref.watch(observerRelayProvider);
@@ -364,14 +370,14 @@ class App extends HookConsumerWidget {
     }
 
     useEffect(() {
-      if (ageSignalState == AgeSignalState.allowed) {
+      if (ageSignalState != AgeSignalState.restricted) {
         applyBadge(ref.read(unreadBadgeProvider));
       } else {
         AppBadgePlus.updateBadge(0);
       }
       return null;
     }, [ageSignalState]);
-    if (ageSignalState == AgeSignalState.allowed) {
+    if (ageSignalState != AgeSignalState.restricted) {
       ref.listen<UnreadBadgeState>(unreadBadgeProvider, (_, next) {
         applyBadge(next);
       });
@@ -393,10 +399,8 @@ class App extends HookConsumerWidget {
       // Above the navigator, so an age restriction cannot be bypassed by a
       // route that was pushed while the store signal request was in flight.
       builder: (context, child) => switch (ageSignalState) {
-        AgeSignalState.checking => const _AgeSignalLoadingPage(),
-        AgeSignalState.retryableFailure => const _AgeSignalRetryPage(),
         AgeSignalState.restricted => const AgeRestrictionPage(),
-        AgeSignalState.allowed => AppMarkdownTheme(
+        _ => AppMarkdownTheme(
           child: MobileHuddleShell(
             navigatorKey: _mobileRootNavigatorKey,
             child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
@@ -451,59 +455,6 @@ class _SplashScreen extends StatelessWidget {
     return const Scaffold(
       body: Center(
         child: BuzzLoadingIndicator(size: 56, semanticLabel: 'Starting Buzz'),
-      ),
-    );
-  }
-}
-
-class _AgeSignalLoadingPage extends StatelessWidget {
-  const _AgeSignalLoadingPage();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(
-        child: BuzzLoadingIndicator(
-          size: 56,
-          semanticLabel: 'Checking age eligibility',
-        ),
-      ),
-    );
-  }
-}
-
-class _AgeSignalRetryPage extends ConsumerWidget {
-  const _AgeSignalRetryPage();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return Scaffold(
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(Grid.sm),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Unable to check age eligibility',
-                style: context.textTheme.titleLarge,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: Grid.xxs),
-              Text(
-                'Check your connection and try again.',
-                style: context.textTheme.bodyMedium,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: Grid.xs),
-              FilledButton(
-                onPressed: () =>
-                    unawaited(ref.read(ageSignalProvider.notifier).request()),
-                child: const Text('Try again'),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }
