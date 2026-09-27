@@ -97,3 +97,12 @@ test("Dispose of the last session removes the Playgrounds section", async () => 
   });
   assert.equal(screen.queryByTestId("playgrounds-section"), null);
 });
+
+test("Playgrounds section Open prefers RHS side-panel (not canvas window)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, join } = await import("node:path");
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(dir, "PlaygroundSection.tsx"), "utf8");
+  assert.match(source, /showPlaygroundSession\(session\.sid,\s*\{\s*preferSidePanel:\s*true\s*\}\)/);
+});

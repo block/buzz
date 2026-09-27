@@ -244,13 +244,15 @@ test("preferSidePanel hosts in RHS and clears on park / reset", async () => {
   assert.equal(isPlaygroundSidePanelHost(), true);
   assert.equal(getPlaygroundOverlayHost(), "side-panel");
 
-  showPlaygroundSession("demo-1"); // default window host
-  assert.equal(isPlaygroundSidePanelHost(), false);
-  assert.equal(getPlaygroundOverlayHost(), "window");
+  // Default Open (no options) is side-panel — never full-canvas window host.
+  showPlaygroundSession("demo-1");
+  assert.equal(isPlaygroundSidePanelHost(), true);
+  assert.equal(getPlaygroundOverlayHost(), "side-panel");
 
   showPlaygroundSession("demo-1", { preferSidePanel: true });
   parkPlaygroundHost();
   assert.equal(isPlaygroundSidePanelHost(), false);
+  // Idle/cleared default only — not an active canvas host.
   assert.equal(getPlaygroundOverlayHost(), "window");
 
   showPlaygroundSession("demo-1", { preferSidePanel: true });
@@ -291,10 +293,73 @@ test("tab switch and addPlaygroundTab preserve side-panel host (no fullscreen pr
   assert.equal(isPlaygroundSidePanelHost(), true);
   assert.equal(getPlaygroundOverlayHost(), "side-panel");
 
-  // Explicit false still forces window host.
+  // preferSidePanel: false is dead-ended (product lock) — stays side-panel.
   switchPlaygroundTab("demo-1", { preferSidePanel: false });
-  assert.equal(isPlaygroundSidePanelHost(), false);
+  assert.equal(isPlaygroundSidePanelHost(), true);
+  assert.equal(getPlaygroundOverlayHost(), "side-panel");
+});
+
+test("closePlaygroundTab preserves side-panel host (no inset-0 fullscreen promote)", async () => {
+  const {
+    addPlaygroundSession,
+    addPlaygroundTab,
+    closePlaygroundTab,
+    configurePlaygroundScope,
+    getActivePlaygroundSid,
+    getPlaygroundOverlayHost,
+    isPlaygroundSidePanelHost,
+  } = await import("./sessions.ts");
+
+  configurePlaygroundScope("pub", "wss://relay.example.com");
+  addPlaygroundSession(card, { preferSidePanel: true });
+  assert.equal(isPlaygroundSidePanelHost(), true);
+
+  const tab = addPlaygroundTab({
+    browserId: "demo-1",
+    url: "https://sibling.example.com",
+    name: "Sibling",
+  });
+  assert.ok(tab);
+  assert.equal(getActivePlaygroundSid(), tab.sid);
+  assert.equal(getPlaygroundOverlayHost(), "side-panel");
+
+  // Closing the *active* secondary tab used to dispose before reassigning
+  // overlaySid, which reset overlayHost to "window" and mounted the
+  // absolute inset-0 PlaygroundOverlay over the whole channel canvas.
+  closePlaygroundTab(tab.sid);
+  assert.equal(getActivePlaygroundSid(), "demo-1");
+  assert.equal(isPlaygroundSidePanelHost(), true);
+  assert.equal(getPlaygroundOverlayHost(), "side-panel");
+});
+
+test("Open paths never choose overlayHost window (product lock)", async () => {
+  const {
+    addPlaygroundSession,
+    configurePlaygroundScope,
+    getPlaygroundOverlayHost,
+    isPlaygroundSidePanelHost,
+    parkPlaygroundHost,
+    showPlaygroundSession,
+  } = await import("./sessions.ts");
+
+  configurePlaygroundScope("pub", "wss://relay.example.com");
+  // add without options → side-panel
+  addPlaygroundSession(card);
+  assert.equal(isPlaygroundSidePanelHost(), true);
+  assert.equal(getPlaygroundOverlayHost(), "side-panel");
+
+  parkPlaygroundHost();
   assert.equal(getPlaygroundOverlayHost(), "window");
+
+  // show without options → side-panel again
+  showPlaygroundSession("demo-1");
+  assert.equal(isPlaygroundSidePanelHost(), true);
+  assert.equal(getPlaygroundOverlayHost(), "side-panel");
+
+  // Explicit false cannot revive full-canvas window host.
+  showPlaygroundSession("demo-1", { preferSidePanel: false });
+  assert.equal(isPlaygroundSidePanelHost(), true);
+  assert.equal(getPlaygroundOverlayHost(), "side-panel");
 });
 
 test("closePlaygroundTab preserves side-panel host (no inset-0 fullscreen promote)", async () => {

@@ -9,10 +9,7 @@ import {
   playgroundConversationFromRoute,
 } from "../lib/conversation";
 import { usePlaygroundRuntime } from "../lib/runtime";
-import {
-  dismissPlayground,
-  isPlaygroundSidePanelHost,
-} from "../lib/sessions";
+import { dismissPlayground } from "../lib/sessions";
 import { usePopoutLayoutPayload } from "@/features/popout/lib/popoutLayout";
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
 import { IdleAuxiliaryPanel } from "@/features/channels/ui/IdleAuxiliaryPanel";
@@ -94,17 +91,17 @@ export function PlaygroundHost() {
       : null;
   if (!session) return null;
   const route = deriveShellRoute(location.pathname);
-  // Pen / Watch / Drive host in ChannelScreen idle-auxiliary on channel routes.
-  if (
-    !popout &&
-    isPlaygroundSidePanelHost() &&
-    route.selectedView === "channel"
-  ) {
-    return null;
-  }
-  // Off-channel (Browsers, etc.): same FocusThreadDrawer slide-out as channel
-  // pin Open / card Open — not a narrow docked RHS AuxiliaryPanel column.
-  if (!popout && isPlaygroundSidePanelHost()) {
+  // Product lock: in the main app, browsers NEVER mount PlaygroundOverlay
+  // (absolute inset-0 / overlayHost "window" full-canvas). Allowed hosts:
+  // (1) RHS slide-out, (2) split-with-thread pop-out, (3) detached OS window.
+  if (!popout) {
+    // Channel: idle-auxiliary owns the side-panel body.
+    if (route.selectedView === "channel") {
+      return null;
+    }
+    // Off-channel (Browsers, etc.): FocusThreadDrawer slide-out — same as
+    // channel pin Open / card Open. Safety net: even a stale overlayHost
+    // "window" routes here instead of inset-0 canvas fill.
     return (
       <div
         className="absolute inset-0 z-40"
@@ -139,10 +136,12 @@ export function PlaygroundHost() {
       </div>
     );
   }
+  // OS / embedded pop-out only. lockPlacement "window" here means the OS
+  // playground window chrome — not main-app canvas overlayHost "window".
   const lockPlacement =
-    popout?.kind === "split"
+    popout.kind === "split"
       ? "dock"
-      : popout?.kind === "playground"
+      : popout.kind === "playground"
         ? "window"
         : undefined;
   return (

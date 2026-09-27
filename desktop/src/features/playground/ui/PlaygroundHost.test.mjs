@@ -24,3 +24,23 @@ test("off-channel side-panel host uses FocusThreadDrawer (not docked RHS column)
   assert.doesNotMatch(window, /justify-end/);
   assert.doesNotMatch(window, /AUXILIARY_PANEL_DEFAULT_WIDTH_PX/);
 });
+
+test("main-app host never falls through to PlaygroundOverlay (product lock)", () => {
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(dir, "PlaygroundHost.tsx"), "utf8");
+  // Non-popout path must return FocusThreadDrawer / null — never mount
+  // PlaygroundOverlay for overlayHost "window" full-canvas fill.
+  const fnStart = source.indexOf("export function PlaygroundHost");
+  assert.ok(fnStart >= 0);
+  const body = source.slice(fnStart);
+  const nonPopoutGuard = body.indexOf("if (!popout)");
+  assert.ok(nonPopoutGuard > 0, "non-popout guard present");
+  const overlayMount = body.indexOf("<PlaygroundOverlay");
+  assert.ok(overlayMount > nonPopoutGuard);
+  // PlaygroundOverlay only after the popout-only lockPlacement block.
+  assert.match(body.slice(nonPopoutGuard, overlayMount), /OS \/ embedded pop-out only|popout\.kind/);
+  assert.doesNotMatch(
+    body.slice(nonPopoutGuard, overlayMount),
+    /isPlaygroundSidePanelHost\(\)\s*\)\s*\{[^}]*PlaygroundOverlay/s,
+  );
+});

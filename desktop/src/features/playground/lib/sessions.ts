@@ -59,8 +59,12 @@ export type PlaygroundSession = {
 
 /**
  * Where the active overlaySid is hosted in the main window.
- * - window: PlaygroundOverlay in the channel inset (legacy / detach fallback)
- * - side-panel: RHS idle-auxiliary slide-out (card Open / pin Open / Browsers Open / Watch / Drive) with Agent chrome
+ * - side-panel: RHS idle-auxiliary / FocusThreadDrawer slide-out (card Open /
+ *   pin Open / Browsers Open / Watch / Drive) with Agent chrome
+ * - window: idle/cleared default only — NEVER an active in-app canvas host.
+ *   Product lock: browsers may only live as (1) RHS slide-out, (2) split with
+ *   a thread, (3) detached OS/pop-out. Full-canvas PlaygroundOverlay inset-0
+ *   via overlayHost "window" is banned.
  * Not persisted.
  */
 export type PlaygroundOverlayHost = "window" | "side-panel";
@@ -70,6 +74,9 @@ export type ShowPlaygroundOptions = {
    * Host in the channel RHS idle-auxiliary slide-out (same host as
    * openLinkSidePanel) with PlaygroundChrome + grants — not left dock,
    * not windowed inset-0 cover.
+   *
+   * Product lock: `false` is dead-ended — in-app Open always uses side-panel.
+   * Detach uses openPopoutWindow (real OS window), not overlayHost "window".
    */
   preferSidePanel?: boolean;
 };
@@ -91,12 +98,14 @@ const store: PlaygroundStore = {
 /**
  * Update overlay host only when the caller passes options.
  * Omitted options preserve the current host so tab switch / window.open sibling
- * tabs stay in the same slide-out (side-panel) and do not promote to window
- * overlay / fullscreen bounds.
+ * tabs stay in the same slide-out (side-panel) and do not promote away.
+ *
+ * Product lock: any explicit options → side-panel. preferSidePanel: false
+ * (legacy full-canvas window overlay) is dead-ended.
  */
 function noteOverlayHost(options?: ShowPlaygroundOptions) {
   if (options == null) return;
-  store.overlayHost = options.preferSidePanel ? "side-panel" : "window";
+  store.overlayHost = "side-panel";
 }
 
 let currentScope: string | null = null;
@@ -221,8 +230,8 @@ export function addPlaygroundSession(
   card: PlaygroundCard,
   options?: ShowPlaygroundOptions,
 ): PlaygroundSession {
-  // New session without options → window host. Tab APIs omit options to preserve.
-  noteOverlayHost(options ?? { preferSidePanel: false });
+  // New session without options → side-panel (product lock). Tab APIs omit to preserve.
+  noteOverlayHost(options ?? { preferSidePanel: true });
   const session = cardToSession(card);
   store.sessions.set(session.sid, session);
   // One-tab browser group (browserId may equal sid initially).
@@ -439,8 +448,8 @@ export function showPlaygroundSession(
   options?: ShowPlaygroundOptions,
 ) {
   if (!store.sessions.has(sid)) return;
-  // Omitted options → window host (legacy). Tab switch/add omit to preserve.
-  noteOverlayHost(options ?? { preferSidePanel: false });
+  // Omitted options → side-panel (product lock). Tab switch/add omit to preserve.
+  noteOverlayHost(options ?? { preferSidePanel: true });
   const session = store.sessions.get(sid);
   if (session) {
     store.sessions.set(sid, { ...session, hasUpdate: false });

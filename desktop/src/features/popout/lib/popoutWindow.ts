@@ -260,21 +260,23 @@ export async function openPopoutWindow(input: {
   playground?: PlaygroundCard;
   link?: PopoutLinkTarget;
   /**
-   * Always open a real OS window. Link Detach and channel/thread "Open in a
-   * new window" use this so "Embed in main" (leftover after Appearance →
-   * Windows was removed) cannot turn those into an in-app main-area takeover
-   * with no Windows-section dismiss row (#107).
+   * Always open a real OS window. Link / playground Detach and channel/thread
+   * "Open in a new window" use this so "Embed in main" (leftover after
+   * Appearance → Windows was removed) cannot turn those into an in-app
+   * main-area takeover / full-canvas PlaygroundOverlay (#107, product lock).
    */
   forceOsWindow?: boolean;
 }): Promise<void> {
   const label = popoutLabel(input.kind, input.seed);
   const payload = popoutPayloadFromInput(input);
-  // Channel/thread and link browsers are OS-window only. Embed-in-main may
-  // still apply to playground/split pop-outs (those keep Windows rows).
+  // Playground Detach + channel/thread + link are OS-window only (product
+  // lock: never embed playground as inset-0 canvas fill). Split-with-thread
+  // may still embed beside the conversation.
   const forceOs =
     input.forceOsWindow === true ||
     input.kind === "link" ||
-    input.kind === "thread";
+    input.kind === "thread" ||
+    input.kind === "playground";
   if (isEmbedInMainEnabled() && !forceOs) {
     openEmbeddedWindow({ label, payload });
     return;

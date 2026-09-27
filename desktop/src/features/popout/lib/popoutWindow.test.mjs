@@ -90,7 +90,7 @@ test("start-fullscreen is passed into the OS create payload", async () => {
   resetPopoutSettingsForTests();
 });
 
-test("embed path does not call OS window create for playground", async () => {
+test("playground Detach opens OS window even when embed-in-main is on", async () => {
   installLocalStorage();
   const settings = await import("./popoutSettings.ts");
   const embedded = await import("./embeddedWindows.ts");
@@ -99,14 +99,7 @@ test("embed path does not call OS window create for playground", async () => {
   embedded.resetEmbeddedWindowsForTests();
   settings.setEmbedInMain(true);
 
-  const invokes = [];
-  const internals = {
-    invoke(cmd, args) {
-      invokes.push({ cmd, args });
-      return Promise.resolve();
-    },
-  };
-  globalThis.__TAURI_INTERNALS__ = internals;
+  const invokes = installTauriInvoke();
 
   await openPopoutWindow({
     kind: "playground",
@@ -121,15 +114,14 @@ test("embed path does not call OS window create for playground", async () => {
     },
   });
 
-  assert.equal(invokes.length, 0);
-  assert.equal(embedded.listEmbeddedWindows().length, 1);
-  assert.equal(embedded.getActiveEmbeddedWindow()?.payload.kind, "playground");
-  assert.equal(
-    embedded.getActiveEmbeddedWindow()?.payload.playground?.sid,
-    "demo-1",
-  );
+  // Product lock: Detach → real OS window, never inset-0 canvas embed.
+  // hidePlaygroundWebview may add extra invokes; require an OS create.
+  assert.equal(embedded.listEmbeddedWindows().length, 0);
+  const creates = invokes.filter((row) => row.cmd === "open_popout_window");
+  assert.equal(creates.length, 1);
+  assert.match(creates[0].args.label, /^popout-playground-/);
 
-  delete globalThis.__TAURI_INTERNALS__;
+  uninstallTauriInvoke();
   settings.resetPopoutSettingsForTests();
   embedded.resetEmbeddedWindowsForTests();
 });

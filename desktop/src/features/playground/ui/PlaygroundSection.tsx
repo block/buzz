@@ -40,7 +40,7 @@ export function PlaygroundSection() {
                 className="data-[active=true]:font-normal"
                 data-testid={`open-playground-${session.sid}`}
                 isActive={overlaySid === session.sid}
-                onClick={() => showPlaygroundSession(session.sid)}
+                onClick={() => showPlaygroundSession(session.sid, { preferSidePanel: true })}
                 tooltip={session.name}
                 type="button"
               >
