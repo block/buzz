@@ -1583,9 +1583,10 @@ async fn create_session_and_apply_model(
     //                   model. Effort resolution and the Desktop capture both
     //                   read it so they converge on the model the session is
     //                   actually running, not the pre-switch default.
-    //   `None`        → no switch, or the adapter rejected/does-not-know the
-    //                   model; the session/new snapshot is cached as-is and
-    //                   `switch_succeeded` stays false.
+    //   `None`        → no desired model. A catalog miss or an adapter
+    //                   rejection returns `Err(AcpError::ModelUnapplied)`
+    //                   before this value is used, so the turn never runs
+    //                   on the adapter's own model.
     let post_switch_snapshot: Option<serde_json::Value> = if let Some(ref desired) =
         agent.desired_model
     {
@@ -1640,11 +1641,10 @@ async fn create_session_and_apply_model(
                         Some(switch_result)
                     }
                     ModelSwitchOutcome::Rejected => {
-                        // The adapter explicitly rejected the switch: the session
-                        // is still on its default model. Surface a terminal
-                        // failure so the Desktop ModelPicker rejects the live pick
-                        // instead of falsely reporting success, and preserve the
-                        // pre-switch capabilities the session is really running.
+                        // The adapter rejected the switch, so this session is
+                        // still on its default model. Tell Desktop the pick
+                        // failed, then refuse the turn. Continuing would answer
+                        // on a model nobody configured.
                         agent.acp.observe(
                             "control_result",
                             serde_json::json!({
@@ -1657,19 +1657,21 @@ async fn create_session_and_apply_model(
                                 "requestId": agent.desired_model_request_id,
                             }),
                         );
-                        None
+                        return Err(AcpError::ModelUnapplied {
+                            model: desired.clone(),
+                            reason: "the adapter rejected it",
+                        });
                     }
                 }
             }
             None => {
                 tracing::warn!(
                     target: "pool::model",
-                    "desired model {desired} not found in agent's available models — proceeding with agent default"
+                    "desired model {desired} not found in agent's available models — refusing the turn"
                 );
                 // Surface the miss so the desktop ModelPicker can reject a live
-                // pick rather than silently no-op. On the busy path the turn has
-                // already been cancelled+requeued by the time we get here, so the
-                // turn restarts on the unchanged model and the user is told no.
+                // pick. The turn itself stops: the requeued session must not
+                // run on the adapter's own model.
                 agent.acp.observe(
                     "control_result",
                     serde_json::json!({
@@ -1680,7 +1682,10 @@ async fn create_session_and_apply_model(
                         "requestId": agent.desired_model_request_id,
                     }),
                 );
-                None
+                return Err(AcpError::ModelUnapplied {
+                    model: desired.clone(),
+                    reason: "it is not in the agent's available models",
+                });
             }
         }
     } else {
@@ -1700,10 +1705,10 @@ async fn create_session_and_apply_model(
     let effort_outcome = apply_startup_effort(agent, effort_snapshot, &resp.session_id).await?;
 
     // Emit session config for desktop consumption (config bridge tier 1b).
-    // Emitted AFTER desired_model resolution so the desktop caches the
-    // post-switch state. modelOverridden reflects whether the switch actually
-    // applied — false on the rejected/unsupported arms so the panel doesn't show
-    // a stale override badge.
+    // Emitted only after a desired model is absent or applied. A catalog miss
+    // or an adapter rejection returns before this point, so the panel never
+    // caches a session that is about to be refused. modelOverridden is true
+    // only when the switch actually applied.
     //
     // configOptions come from the post-switch snapshot on a successful switch
     // (the target model's option set) and the session/new snapshot otherwise.
@@ -1862,10 +1867,10 @@ enum ModelSwitchOutcome {
 /// Send the appropriate ACP model-switch request with a timeout.
 ///
 /// Transport-class errors propagate as `Err` so the caller respawns the agent
-/// rather than reuse a poisoned stdio stream. An application-level rejection is
-/// non-fatal but distinct from success: it returns [`ModelSwitchOutcome::Rejected`]
-/// so the caller preserves pre-switch capabilities and tells Desktop the pick
-/// failed instead of silently claiming the switch landed.
+/// rather than reuse a poisoned stdio stream. An application-level rejection
+/// returns [`ModelSwitchOutcome::Rejected`]. The caller refuses the turn so
+/// the session does not continue on the adapter default, and tells Desktop
+/// the pick failed.
 async fn apply_model_switch(
     acp: &mut AcpClient,
     session_id: &str,
@@ -1926,7 +1931,7 @@ async fn apply_model_switch(
         Ok(Err(e)) => {
             tracing::warn!(
                 target: "pool::model",
-                "failed to set model {desired} via {method_label}: {e} — proceeding with agent default"
+                "failed to set model {desired} via {method_label}: {e} — refusing the turn"
             );
             Ok(ModelSwitchOutcome::Rejected)
         }
@@ -11584,9 +11589,9 @@ done"#
     #[tokio::test]
     async fn test_rejected_switch_preserves_capabilities_and_emits_failure() {
         // The adapter refuses the switch with a JSON-RPC error. The session is
-        // still on its default model: pre-switch capabilities survive, the
-        // capture reports modelOverridden false, and a terminal `failure`
-        // control_result tells Desktop the pick did not land.
+        // still on its default model: pre-switch capabilities survive, a
+        // terminal `failure` control_result tells Desktop the pick did not
+        // land, and the turn stops instead of answering on that default.
         let acp = spawn_switch_acp(
             OPTS_MODEL_A_AND_B,
             r#""error":{"code":-32602,"message":"model not accepted"}"#,
@@ -11597,7 +11602,7 @@ done"#
         agent.acp.set_observer(Some(obs.clone()), 0);
 
         let ctx = make_prompt_context_no_owner();
-        create_session_and_apply_model(
+        let err = create_session_and_apply_model(
             &mut agent,
             &ctx,
             None,
@@ -11610,7 +11615,14 @@ done"#
             },
         )
         .await
-        .expect("an application-level rejection is non-fatal");
+        .expect_err("a rejected model pin must stop the turn");
+        match err {
+            AcpError::ModelUnapplied { model, reason } => {
+                assert_eq!(model, "model-b");
+                assert_eq!(reason, "the adapter rejected it");
+            }
+            other => panic!("expected ModelUnapplied, got {other:?}"),
+        }
 
         let caps = agent
             .model_capabilities
@@ -11622,10 +11634,11 @@ done"#
                 .any(|o| o["currentValue"] == "model-a"),
             "capabilities must still describe the default model the session runs"
         );
-        let cap = capture(&obs);
-        assert_eq!(
-            cap["modelOverridden"], false,
-            "a rejected switch must not claim an override"
+        assert!(
+            obs.snapshot()
+                .iter()
+                .all(|e| e.kind != "session_config_captured"),
+            "a refused turn must not cache a session that will not run"
         );
         let results = control_results(&obs);
         assert_eq!(results.len(), 1, "exactly one control_result on rejection");
@@ -11652,7 +11665,7 @@ done"#
         agent.acp.set_observer(Some(obs.clone()), 0);
 
         let ctx = make_prompt_context_no_owner();
-        create_session_and_apply_model(
+        let err = create_session_and_apply_model(
             &mut agent,
             &ctx,
             None,
@@ -11665,7 +11678,17 @@ done"#
             },
         )
         .await
-        .expect("an application-level rejection is non-fatal");
+        .expect_err("a rejected model pin must stop the turn");
+        assert!(
+            matches!(
+                err,
+                AcpError::ModelUnapplied {
+                    reason: "the adapter rejected it",
+                    ..
+                }
+            ),
+            "expected ModelUnapplied, got {err:?}"
+        );
 
         let results = control_results(&obs);
         assert_eq!(
@@ -11727,15 +11750,15 @@ done"#
     #[tokio::test]
     async fn test_unsupported_model_emits_unsupported_without_switch_rpc() {
         // The desired model is absent from the session/new catalog: no switch
-        // RPC is sent, the capture reports no override, and an
-        // `unsupported_model` control_result rejects the live pick.
+        // RPC is sent, an `unsupported_model` control_result rejects the live
+        // pick, and the turn stops instead of running the adapter default.
         let acp = spawn_switch_acp(OPTS_MODEL_A_AND_B, r#""result":{"ok":true}"#).await;
         let mut agent = switching_agent(acp, "model-z");
         let obs = observer::ObserverHandle::in_process();
         agent.acp.set_observer(Some(obs.clone()), 0);
 
         let ctx = make_prompt_context_no_owner();
-        create_session_and_apply_model(
+        let err = create_session_and_apply_model(
             &mut agent,
             &ctx,
             None,
@@ -11748,10 +11771,21 @@ done"#
             },
         )
         .await
-        .expect("an unresolvable model is non-fatal");
+        .expect_err("a model missing from the catalog must stop the turn");
+        match err {
+            AcpError::ModelUnapplied { model, reason } => {
+                assert_eq!(model, "model-z");
+                assert_eq!(reason, "it is not in the agent's available models");
+            }
+            other => panic!("expected ModelUnapplied, got {other:?}"),
+        }
 
-        let cap = capture(&obs);
-        assert_eq!(cap["modelOverridden"], false);
+        assert!(
+            obs.snapshot()
+                .iter()
+                .all(|e| e.kind != "session_config_captured"),
+            "a refused turn must not cache a session that will not run"
+        );
         let results = control_results(&obs);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["status"], "unsupported_model");
