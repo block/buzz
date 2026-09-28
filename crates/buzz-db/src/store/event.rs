@@ -355,15 +355,19 @@ pub async fn insert_event(
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<(StoredEvent, bool)> {
-    let connection = crate::observability::acquire_writer(
+    let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let mut tx = Transaction::begin(connection, None).await?;
-    let result = insert_event_in_transaction(&mut tx, community_id, event, channel_id).await?;
-    tx.commit().await?;
-    Ok(result)
+    if crate::operator_listener::is_listener_mention_kind(u32::from(event.kind.as_u16())) {
+        let mut tx = Transaction::begin(connection, None).await?;
+        let result = insert_event_in_transaction(&mut tx, community_id, event, channel_id).await?;
+        tx.commit().await?;
+        Ok(result)
+    } else {
+        insert_event_on(&mut connection, community_id, event, channel_id).await
+    }
 }
 
 /// Insert a Nostr event in a caller-owned PostgreSQL transaction.
