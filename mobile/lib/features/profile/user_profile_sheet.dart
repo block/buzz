@@ -58,7 +58,8 @@ class UserProfileSheet extends HookConsumerWidget {
   /// The channel whose members form the naming context, if any.
   final String? channelId;
 
-  /// The opening surface's identity labels, used when [channelId] is null.
+  /// The opening surface's comparison context, used when [channelId] is
+  /// null. The sheet resolves it against live naming facts.
   final IdentityNames? names;
 
   const UserProfileSheet({
@@ -117,7 +118,9 @@ class UserProfileSheet extends HookConsumerWidget {
     final contextChannelId = channelId;
     final displayName = contextChannelId != null
         ? watchChannelIdentityLabel(ref, contextChannelId, pk)
-        : (names ?? watchIdentityNames(ref, {pk})).labelFor(pk);
+        : (names?.withSources(ref.watch(identityNameSourcesProvider)) ??
+                  watchIdentityNames(ref, {pk}))
+              .labelFor(pk);
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =

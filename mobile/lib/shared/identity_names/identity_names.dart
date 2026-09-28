@@ -118,6 +118,21 @@ class IdentityNames {
   /// The comparison context's lowercase keys.
   Set<String> get candidates => _candidates;
 
+  /// The same comparison context and view-local facts, resolved against
+  /// [sources]. A destination opened from this view (a sheet or route) uses
+  /// it with its live sources, so its labels follow later profile and owner
+  /// changes instead of keeping the opener's snapshot.
+  IdentityNames withSources(IdentityNameSources sources) =>
+      identical(sources, _sources)
+      ? this
+      : IdentityNames._(
+          sources,
+          _candidates,
+          _agentPubkeys,
+          _fallbackNames,
+          _ownerPubkeys,
+        );
+
   /// Owner keys of the context whose profile is not cached yet. Callers load
   /// them so readable owner prefixes can appear; none are invented meanwhile.
   Set<String> missingOwnerProfiles() => _candidates
