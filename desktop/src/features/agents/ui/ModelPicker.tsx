@@ -16,8 +16,15 @@ import {
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import {
   useAgentConfigSurface,
+  usePersonasQuery,
+  useUpdatePersonaMutation,
   managedAgentsQueryKey,
+  personasQueryKey,
 } from "@/features/agents/hooks";
+import {
+  isPersonaIdentityEditable,
+  persistPersonaModelUpdate,
+} from "./editAgentPersonaIdentity";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -48,6 +55,15 @@ export function ModelPicker({
 
   const { data: configSurface } = useAgentConfigSurface(agent.pubkey);
   const queryClient = useQueryClient();
+  const personasQuery = usePersonasQuery({ enabled: agent.personaId != null });
+  const updatePersonaMutation = useUpdatePersonaMutation();
+  const linkedPersona = React.useMemo(
+    () =>
+      agent.personaId
+        ? (personasQuery.data?.find((p) => p.id === agent.personaId) ?? null)
+        : null,
+    [agent.personaId, personasQuery.data],
+  );
 
   const isRunning = agent.status === "running" || agent.status === "deployed";
   const activeTurns = useActiveAgentTurns(agent.pubkey);
@@ -214,16 +230,56 @@ export function ModelPicker({
           return;
         }
         toast.success("Model switched for this session.");
+        // Also persist the definition default so a restart keeps the pick
+        // (live switch alone is session-only and would otherwise revert).
+        if (linkedPersona != null && isPersonaIdentityEditable(linkedPersona)) {
+          try {
+            await persistPersonaModelUpdate({
+              persona: linkedPersona,
+              model: modelId,
+              updatePersona: (input) =>
+                updatePersonaMutation.mutateAsync(input),
+            });
+            void queryClient.invalidateQueries({ queryKey: personasQueryKey });
+          } catch {
+            // Session already switched; definition write is best-effort.
+          }
+        }
         onModelChanged?.();
         return;
       }
 
-      // Non-live path (idle, stopped, or non-persona): persist the default.
-      await updateManagedAgent({
-        pubkey: agent.pubkey,
-        model: modelId === modelsData?.agentDefaultModel ? null : modelId,
-      });
-      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+      // Non-live path: persist the default. Persona-linked agents store model
+      // on the definition (spawn ignores instance.model); definition-less
+      // agents write the instance record.
+      const nextModel =
+        modelId === modelsData?.agentDefaultModel ? null : modelId;
+      if (linkedPersona != null) {
+        if (!isPersonaIdentityEditable(linkedPersona)) {
+          toast.error(
+            "This agent's template is read-only — model can't be saved here.",
+          );
+          return;
+        }
+        const wrote = await persistPersonaModelUpdate({
+          persona: linkedPersona,
+          model: nextModel,
+          updatePersona: (input) => updatePersonaMutation.mutateAsync(input),
+        });
+        if (!wrote) {
+          // Same as current — nothing to do.
+          onModelChanged?.();
+          return;
+        }
+        void queryClient.invalidateQueries({ queryKey: personasQueryKey });
+        void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+      } else {
+        await updateManagedAgent({
+          pubkey: agent.pubkey,
+          model: nextModel,
+        });
+        void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+      }
       if (isRunning) {
         setNeedsRestart(true);
       }

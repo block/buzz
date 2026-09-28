@@ -97,7 +97,7 @@ export function useBestie() {
 
   const assignMutation = useMutation({
     mutationFn: (agent: ManagedAgent) => {
-      if (!scope) throw new Error("Bestie is unavailable outside a community");
+      if (!scope) throw new Error("Assistant is unavailable outside a community");
       return assignBestie(agent.pubkey, scope);
     },
     onSuccess: (assignment) => {
@@ -106,7 +106,7 @@ export function useBestie() {
   });
   const clearMutation = useMutation({
     mutationFn: () => {
-      if (!scope) throw new Error("Bestie is unavailable outside a community");
+      if (!scope) throw new Error("Assistant is unavailable outside a community");
       return clearBestieAssignment(scope);
     },
     onSuccess: () => {
@@ -115,7 +115,7 @@ export function useBestie() {
   });
   const resolveMutation = useMutation({
     mutationFn: () => {
-      if (!scope) throw new Error("Bestie is unavailable outside a community");
+      if (!scope) throw new Error("Assistant is unavailable outside a community");
       return resolveBestieConversation(scope);
     },
     onSuccess: (channel) => {

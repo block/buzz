@@ -22,9 +22,10 @@ test("evaluateBestieWake nudges on due reminders and open todos", () => {
   assert.equal(first.shouldWakeAgent, true);
   assert.ok(first.nudge);
   assert.equal(first.nudge.reason, "due-reminder");
-  assert.equal(first.nudge.title, "Reminder due");
-  assert.match(first.nudge.body, /Due soon|reminders/i);
-  assert.match(first.nudge.body, /Open item|to-dos/i);
+  assert.equal(first.nudge.title, "Reminder");
+  assert.equal(first.nudge.body, "Due soon");
+  assert.doesNotMatch(first.nudge.body, /^Reminder:/i);
+  assert.doesNotMatch(first.nudge.body, /to-do|Open item/i);
 
   const same = evaluateBestieWake(state, 100, {
     previousNudgeId: first.nudge.id,
@@ -33,12 +34,42 @@ test("evaluateBestieWake nudges on due reminders and open todos", () => {
   assert.equal(same.shouldWakeAgent, false);
 });
 
-test("evaluateBestieWake todos-only is check-in (no auto-open reason)", () => {
+test("evaluateBestieWake due-reminder body never includes open todo counts", () => {
   let state = emptyBestieListState();
-  state = addBestieListItem(state, { kind: "todo", text: "Only todo" }, 50);
+  state = addBestieListItem(
+    state,
+    { kind: "reminder", text: "Run my reports", dueAt: 100 },
+    50,
+  );
+  state = addBestieListItem(state, { kind: "todo", text: "Buy milk" }, 50);
+  state = addBestieListItem(state, { kind: "todo", text: "Call bank" }, 50);
+  state = addBestieListItem(state, { kind: "todo", text: "Ship fix" }, 50);
+  const result = evaluateBestieWake(state, 100);
+  assert.equal(result.nudge?.reason, "due-reminder");
+  assert.equal(result.nudge?.title, "Reminder");
+  assert.equal(result.nudge?.body, "Run my reports");
+  assert.doesNotMatch(result.nudge?.body ?? "", /to-do|Buy milk|3 open/i);
+});
+
+test("evaluateBestieWake starred todos-only is check-in (no auto-open reason)", () => {
+  let state = emptyBestieListState();
+  state = addBestieListItem(
+    state,
+    { kind: "todo", starred: true, text: "Only todo" },
+    50,
+  );
   const result = evaluateBestieWake(state, 100);
   assert.equal(result.nudge?.reason, "check-in");
-  assert.equal(result.nudge?.title, "Bestie check-in");
+  assert.equal(result.nudge?.title, "Assistant check-in");
+  assert.equal(result.nudge?.body, "Starred to-do: Only todo");
+});
+
+test("evaluateBestieWake ignores unstarred todos for proactive check-in", () => {
+  let state = emptyBestieListState();
+  state = addBestieListItem(state, { kind: "todo", text: "Backlog item" }, 50);
+  const result = evaluateBestieWake(state, 100);
+  assert.equal(result.nudge, null);
+  assert.equal(result.shouldWakeAgent, false);
 });
 
 test("evaluateBestieWake is quiet when lists are empty", () => {

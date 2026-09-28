@@ -2,8 +2,18 @@ import { ChevronDown, MessageSquare, StarOff } from "lucide-react";
 import * as React from "react";
 import { useLocation } from "@tanstack/react-router";
 
+import { useAppShell } from "@/app/AppShellContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
+import {
+  countUnreadForStarredThreadRoot,
+  formatSidebarUnreadCount,
+} from "@/features/sidebar/lib/starredThreadSidebar";
 import type { StarredThreadEntry } from "@/features/sidebar/lib/threadStarsStorage";
+import {
+  ChannelWorkingBadge,
+  formatWorkingTooltip,
+} from "@/features/sidebar/ui/channelWorkingBadge";
 import { cn } from "@/shared/lib/cn";
 import {
   ContextMenu,
@@ -37,32 +47,80 @@ function selectedThreadRootFromSearch(search: unknown): string | null {
 function StarredThreadRow({
   entry,
   isActive,
+  unreadCount,
+  activeWorking,
   onSelect,
   onUnstar,
 }: {
   entry: StarredThreadEntry;
   isActive: boolean;
+  unreadCount: number;
+  activeWorking?: ActiveChannelTurnSummary;
   onSelect: () => void;
   onUnstar: () => void;
 }) {
+  const hasUnread = unreadCount > 0;
+  const workingTitle = activeWorking
+    ? formatWorkingTooltip(activeWorking)
+    : undefined;
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <SidebarMenuItem>
           <SidebarMenuButton
-            className="h-8"
+            className={cn(
+              "h-8 data-[active=true]:font-normal",
+              hasUnread &&
+                "font-bold text-sidebar-foreground hover:text-sidebar-foreground data-[active=true]:font-bold",
+            )}
             data-testid={`starred-thread-${entry.rootId}`}
             isActive={isActive}
             onClick={onSelect}
+            title={
+              workingTitle
+                ? `${entry.title} · #${entry.channelName} · ${workingTitle}`
+                : `${entry.title} · #${entry.channelName}`
+            }
             tooltip={`${entry.title} · #${entry.channelName}`}
           >
             <MessageSquare className="h-4 w-4 shrink-0" />
-            <span className="min-w-0 flex-1 truncate text-left">
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate text-left",
+                !isActive && !hasUnread && "opacity-80",
+              )}
+            >
               {entry.title}
             </span>
+            {activeWorking ? (
+              <ChannelWorkingBadge
+                channelName={entry.channelName}
+                isActive={isActive}
+                summary={activeWorking}
+                testId={`starred-thread-working-${entry.rootId}`}
+              />
+            ) : null}
             <span className="min-w-0 max-w-[40%] truncate text-2xs text-sidebar-foreground/55">
               #{entry.channelName}
             </span>
+            {hasUnread ? (
+              <span
+                className={cn(
+                  "ml-auto shrink-0 rounded-full px-1.5 text-2xs tabular-nums",
+                  isActive
+                    ? "bg-sidebar-active-foreground/20 text-sidebar-active-foreground"
+                    : "bg-primary/15 text-primary",
+                )}
+                data-testid={`starred-thread-unread-${entry.rootId}`}
+              >
+                {formatSidebarUnreadCount(unreadCount)}
+                <span className="sr-only">
+                  {" "}
+                  unread{unreadCount === 1 ? "" : "s"}
+                </span>
+              </span>
+            ) : null}
           </SidebarMenuButton>
         </SidebarMenuItem>
       </ContextMenuTrigger>
@@ -81,11 +139,13 @@ function StarredThreadRow({
 }
 
 export function SidebarStarredThreadsSection({
+  activeWorkingByChannelId,
   isCollapsed,
   items,
   onToggleCollapsed,
   onUnstarThread,
 }: {
+  activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
   isCollapsed: boolean;
   items: readonly StarredThreadEntry[];
   onToggleCollapsed: () => void;
@@ -93,10 +153,22 @@ export function SidebarStarredThreadsSection({
 }) {
   const { goChannel } = useAppNavigation();
   const location = useLocation();
+  const { unreadThreadFeedItems } = useAppShell();
   const selectedThreadRootId = React.useMemo(
     () => selectedThreadRootFromSearch(location.search),
     [location.search],
   );
+  const unreadCountByRootId = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const entry of items) {
+      const count = countUnreadForStarredThreadRoot(
+        unreadThreadFeedItems,
+        entry.rootId,
+      );
+      if (count > 0) counts.set(entry.rootId, count);
+    }
+    return counts;
+  }, [items, unreadThreadFeedItems]);
   const contentId = "sidebar-starred-threads-list";
 
   if (items.length === 0) {
@@ -136,12 +208,14 @@ export function SidebarStarredThreadsSection({
             {items.map((entry) => (
               <StarredThreadRow
                 key={entry.rootId}
+                activeWorking={activeWorkingByChannelId?.get(entry.channelId)}
                 entry={entry}
                 isActive={selectedThreadRootId === entry.rootId}
                 onSelect={() => {
                   void goChannel(entry.channelId, { thread: entry.rootId });
                 }}
                 onUnstar={() => onUnstarThread(entry.rootId)}
+                unreadCount={unreadCountByRootId.get(entry.rootId) ?? 0}
               />
             ))}
           </SidebarMenu>

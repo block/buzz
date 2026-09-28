@@ -187,25 +187,6 @@ export function AppSidebarPrimaryMenu({
           <SidebarMenuItem>
             <SidebarMenuButton
               className="data-[active=true]:font-normal"
-              data-testid="open-browsers-view"
-              isActive={isPrimaryNavRowActive(selectedView === "browsers", terminalPanel)}
-              onClick={parkPlaygroundThen(leaveLeftNavBuzzTermThen(onSelectBrowsers))}
-              tooltip="Browsers"
-              type="button"
-            >
-              <AppWindow className="h-4 w-4" />
-              <SidebarMenuLabel>Browsers</SidebarMenuLabel>
-            </SidebarMenuButton>
-            <SidebarMenuCountBadge
-              count={counts.browsers}
-              legacyWhenPositive
-              preferenceEnabled={preferences.browsers}
-              testId="sidebar-browsers-count"
-            />
-          </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              className="data-[active=true]:font-normal"
               data-testid="open-agents-view"
               isActive={isPrimaryNavRowActive(selectedView === "agents", terminalPanel)}
               onClick={parkPlaygroundThen(leaveLeftNavBuzzTermThen(onSelectAgents))}
@@ -239,6 +220,26 @@ export function AppSidebarPrimaryMenu({
               testId="sidebar-bots-count"
             />
           </SidebarMenuItem>
+          <ProtectedBestieSidebarEntry />
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              className="data-[active=true]:font-normal"
+              data-testid="open-browsers-view"
+              isActive={isPrimaryNavRowActive(selectedView === "browsers", terminalPanel)}
+              onClick={parkPlaygroundThen(leaveLeftNavBuzzTermThen(onSelectBrowsers))}
+              tooltip="Browsers"
+              type="button"
+            >
+              <AppWindow className="h-4 w-4" />
+              <SidebarMenuLabel>Browsers</SidebarMenuLabel>
+            </SidebarMenuButton>
+            <SidebarMenuCountBadge
+              count={counts.browsers}
+              legacyWhenPositive
+              preferenceEnabled={preferences.browsers}
+              testId="sidebar-browsers-count"
+            />
+          </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton
               className="data-[active=true]:font-normal"
@@ -257,7 +258,6 @@ export function AppSidebarPrimaryMenu({
               <SidebarMenuLabel>Buzz Term</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
-          <ProtectedBestieSidebarEntry />
           <FeatureGate feature="workflows">
             <SidebarMenuItem>
               <SidebarMenuButton

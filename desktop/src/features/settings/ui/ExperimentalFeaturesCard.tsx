@@ -40,9 +40,10 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
 }
 
 export function ExperimentalFeaturesCard() {
-  // Manifest is preview-only by definition; every desktop entry is a preview
-  // feature.
-  const previewFeatures = desktopFeatures;
+  // Assistant is always-on in the Hula build — not an experiment toggle.
+  const previewFeatures = desktopFeatures.filter(
+    (feature) => feature.id !== "bestie",
+  );
 
   return (
     <section className="min-w-0" data-testid="settings-experimental">

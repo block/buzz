@@ -10,7 +10,6 @@ import {
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { Channel, ManagedAgent } from "@/shared/api/types";
-import { useFeatureEnabled } from "@/shared/features";
 import { BestieGlobalOverlay } from "./bestie/BestieGlobalOverlay";
 import { BestieProfileTrigger } from "./bestie/BestieProfileTrigger";
 import { BestieCardBadge } from "./bestie/BestieCardBadge";
@@ -31,11 +30,10 @@ import { handleProtectedRelayPayload } from "./openclawWorkspaceMcp/handleRelayP
 const ProtectedMessageActionsContext = createContext(true);
 
 export function ProtectedGlobalOverlay() {
-  const bestieEnabled = useFeatureEnabled("bestie");
   return createElement(
     Fragment,
     null,
-    bestieEnabled ? createElement(BestieGlobalOverlay) : null,
+    createElement(BestieGlobalOverlay),
     createElement(OpenClawWorkspaceRelayListener),
   );
 }
@@ -44,11 +42,8 @@ export function ProtectedMessageAction(props: {
   channelId?: string | null;
   message: TimelineMessage;
 }) {
-  const enabled = useFeatureEnabled("bestie");
   const actionsAllowed = useContext(ProtectedMessageActionsContext);
-  return enabled && actionsAllowed
-    ? createElement(BestieMessageAction, props)
-    : null;
+  return actionsAllowed ? createElement(BestieMessageAction, props) : null;
 }
 
 export function ProtectedMessageActionsBoundary({
@@ -64,32 +59,26 @@ export function ProtectedMessageActionsBoundary({
 }
 
 export function ProtectedAgentBestieAction(props: { agent: ManagedAgent }) {
-  const enabled = useFeatureEnabled("bestie");
-  return enabled ? createElement(BestieProfileAction, props) : null;
+  return createElement(BestieProfileAction, props);
 }
 
 export function ProtectedBestieCardBadge(props: {
   agent: ManagedAgent;
   isBestie: boolean;
 }) {
-  const enabled = useFeatureEnabled("bestie");
-  return enabled ? createElement(BestieCardBadge, props) : null;
+  return createElement(BestieCardBadge, props);
 }
 
 export function ProtectedBestieSidebarEntry() {
-  const enabled = useFeatureEnabled("bestie");
-  return enabled ? createElement(BestieSidebarEntry) : null;
+  return createElement(BestieSidebarEntry);
 }
 
 export function ProtectedBestieProfileTrigger() {
-  const enabled = useFeatureEnabled("bestie");
-  return enabled ? createElement(BestieProfileTrigger) : null;
+  return createElement(BestieProfileTrigger);
 }
 
 export function useProtectedBestiePubkey(agents: ManagedAgent[]) {
-  const enabled = useFeatureEnabled("bestie");
-  const { assignmentQuery } = useBestieAssignmentQuery(enabled);
-  if (!enabled) return null;
+  const { assignmentQuery } = useBestieAssignmentQuery(true);
   return findAssignedLocalAgent(agents, assignmentQuery.data)?.pubkey ?? null;
 }
 
@@ -97,8 +86,7 @@ export function useProtectedVisibleDirectMessages(
   channels: Channel[],
   currentPubkey: string | undefined,
 ) {
-  const enabled = useFeatureEnabled("bestie");
-  const managedAgentsQuery = useManagedAgentsQuery({ enabled });
+  const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
   const bestiePubkey = useProtectedBestiePubkey(managedAgentsQuery.data ?? []);
 
   return useMemo(
@@ -110,9 +98,7 @@ export function useProtectedVisibleDirectMessages(
 export function useProtectedBestieChannelExtras(
   activeChannel: Channel | null | undefined,
 ) {
-  const enabled = useFeatureEnabled("bestie");
-  const extras = useBestieDmChannelExtras(enabled ? activeChannel : null);
-  return enabled ? extras : { contextColumn: null, contextColumnOpen: false };
+  return useBestieDmChannelExtras(activeChannel ?? null);
 }
 
 /**
@@ -120,11 +106,10 @@ export function useProtectedBestieChannelExtras(
  * idleAuxiliary slide only when drilling into Reminders/To-dos.
  */
 export function ProtectedChannelScreen(props: ChannelScreenProps) {
-  const enabled = useFeatureEnabled("bestie");
-  const extras = useBestieDmChannelExtras(enabled ? props.activeChannel : null);
+  const extras = useBestieDmChannelExtras(props.activeChannel ?? null);
   const { contextColumn, contextColumnOpen, ...channelExtras } = extras;
   const screen = createElement(ChannelScreen, { ...props, ...channelExtras });
-  if (!enabled || contextColumn == null) {
+  if (contextColumn == null) {
     return screen;
   }
   return createElement(BestieDmChannelFrame, {

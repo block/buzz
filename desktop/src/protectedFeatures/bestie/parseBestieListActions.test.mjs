@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseBestieListActionsFromMessage } from "./parseBestieListActions.ts";
+import {
+  coerceDueAt,
+  parseBestieListActionsFromMessage,
+} from "./parseBestieListActions.ts";
 
 test("parses fenced bestie-list add actions", () => {
   const content = `Sure — I'll track that.
@@ -40,5 +43,24 @@ test("parses ISO dueAt strings on reminder adds", () => {
   const actions = parseBestieListActionsFromMessage(
     '```bestie-list\n{"op":"add","items":[{"kind":"reminder","text":"ISO","dueAt":"2026-09-26T18:00:00.000Z"}]}\n```',
   );
-  assert.equal(actions[0].items[0].dueAt, Math.floor(Date.parse("2026-09-26T18:00:00.000Z") / 1000));
+  assert.equal(
+    actions[0].items[0].dueAt,
+    Math.floor(Date.parse("2026-09-26T18:00:00.000Z") / 1000),
+  );
+});
+
+
+test("coerceDueAt keeps seconds-scale fence values (e.g. 1790611740)", () => {
+  assert.equal(coerceDueAt(1790611740), 1790611740);
+});
+
+test("coerceDueAt converts milliseconds fence values to seconds", () => {
+  assert.equal(coerceDueAt(1790611740000), 1790611740);
+});
+
+test("parses ms-scale dueAt from fence into seconds storage", () => {
+  const actions = parseBestieListActionsFromMessage(
+    '```bestie-list\n{"op":"add","items":[{"kind":"reminder","text":"Ping","dueAt":1790611740000}]}\n```',
+  );
+  assert.equal(actions[0].items[0].dueAt, 1790611740);
 });

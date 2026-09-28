@@ -13,6 +13,8 @@ import { cn } from "@/shared/lib/cn";
 export type IdleAuxiliaryHeaderControls = {
   actions?: React.ReactNode;
   backLabel?: string;
+  /** chip = pill Back (Assistant sheets); icon = default arrow. */
+  backVariant?: "icon" | "chip";
   onBack?: () => void;
 };
 
@@ -66,6 +68,7 @@ export function IdleAuxiliaryPanel({
           <AuxiliaryPanelHeaderGroup
             backButtonAriaLabel={headerControls?.backLabel}
             backButtonTestId="idle-auxiliary-back"
+            backVariant={headerControls?.backVariant}
             onBack={headerControls?.onBack}
           >
             <AuxiliaryPanelTitle>{title}</AuxiliaryPanelTitle>

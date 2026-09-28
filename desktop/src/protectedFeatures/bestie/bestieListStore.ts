@@ -1,25 +1,37 @@
 import * as React from "react";
 
+import { bestieOwnerScopeKey } from "./bestieOwnerScope";
+
 import {
   addBestieListItem,
+  dismissBestieReminderItems,
   EMPTY_BESTIE_LIST_STATE,
   markBestieListMessageProcessed,
   readBestieListState,
   removeBestieListItem,
+  reorderBestieTodos,
+  snoozeBestieListItems,
+  toggleBestieListItemStarred,
+  updateBestieListItem,
   updateBestieListItemStatus,
   writeBestieListState,
 } from "./bestieListStorage";
 import { parseBestieListActionsFromMessage } from "./parseBestieListActions";
 import {
+  parseBestieReminderMeridiemReply,
   parseBestieUserListIntent,
+  reconcileReminderDueAtWithStatedMeridiem,
+  resolveBestieBareClockDueAt,
   type BestieUserListIntent,
 } from "./parseBestieUserListIntent";
+import { stripBestieOutboundHints } from "./bestieOutboundHints";
 import type {
   BestieListAddInput,
   BestieListItem,
   BestieListKind,
   BestieListScope,
   BestieListState,
+  BestieListTodoUpdateInput,
 } from "./bestieListTypes";
 
 type Listener = () => void;
@@ -28,11 +40,7 @@ const listenersByKey = new Map<string, Set<Listener>>();
 const stateByKey = new Map<string, BestieListState>();
 
 function scopeKey(scope: BestieListScope): string {
-  return [
-    scope.relayUrl.trim().toLowerCase(),
-    scope.ownerPubkey.toLowerCase(),
-    scope.agentPubkey.toLowerCase(),
-  ].join(":");
+  return bestieOwnerScopeKey(scope);
 }
 
 function notify(key: string) {
@@ -90,6 +98,49 @@ export function removeBestieListItemForScope(
   return commit(scope, removeBestieListItem(loadState(scope), id));
 }
 
+export function snoozeBestieListItemsForScope(
+  scope: BestieListScope,
+  ids: string[],
+  deltaSeconds: number,
+): BestieListState {
+  return commit(
+    scope,
+    snoozeBestieListItems(loadState(scope), ids, deltaSeconds),
+  );
+}
+
+export function dismissBestieReminderItemsForScope(
+  scope: BestieListScope,
+  ids: string[],
+): BestieListState {
+  return commit(scope, dismissBestieReminderItems(loadState(scope), ids));
+}
+
+export function toggleBestieListItemStarredForScope(
+  scope: BestieListScope,
+  id: string,
+): BestieListState {
+  return commit(scope, toggleBestieListItemStarred(loadState(scope), id));
+}
+
+export function updateBestieListItemForScope(
+  scope: BestieListScope,
+  input: BestieListTodoUpdateInput,
+): BestieListState {
+  return commit(scope, updateBestieListItem(loadState(scope), input));
+}
+
+export function reorderBestieTodosForScope(
+  scope: BestieListScope,
+  options: {
+    dayKey?: string | null;
+    orderedIds: string[];
+    starred: boolean;
+  },
+): BestieListState {
+  return commit(scope, reorderBestieTodos(loadState(scope), options));
+}
+
 /**
  * Apply structured list actions from an agent message once.
  * Returns how many mutations landed (0 if already processed / no actions).
@@ -98,6 +149,7 @@ export function applyBestieListActionsFromAgentMessage(
   scope: BestieListScope,
   messageId: string,
   content: string,
+  nowMs = Date.now(),
 ): number {
   const current = loadState(scope);
   if (current.processedMessageIds.includes(messageId)) return 0;
@@ -108,14 +160,46 @@ export function applyBestieListActionsFromAgentMessage(
     return 0;
   }
   let applied = 0;
+  const pending = next.pendingReminderConfirm;
   for (const action of actions) {
     if (action.op === "add") {
       for (const item of action.items) {
-        next = addBestieListItem(next, {
+        let addInput = {
           ...item,
           sourceMessageId: messageId,
-        });
-        applied += 1;
+        };
+        if (item.kind === "reminder") {
+          const bareClock =
+            pending &&
+            item.text.trim().toLowerCase() === pending.text.toLowerCase()
+              ? pending.bareClock
+              : pending?.bareClock ?? null;
+          const reconciledDue = reconcileReminderDueAtWithStatedMeridiem(
+            item.dueAt ?? null,
+            content,
+            bareClock,
+            nowMs,
+          );
+          if (reconciledDue != null && reconciledDue !== (item.dueAt ?? null)) {
+            addInput = { ...addInput, dueAt: reconciledDue };
+          }
+        }
+        const before = next;
+        next = addBestieListItem(
+          next,
+          addInput,
+          Math.floor(nowMs / 1000),
+        );
+        if (next !== before) applied += 1;
+        // Clear pending when a matching reminder lands (fence or reconciled).
+        if (
+          next.pendingReminderConfirm &&
+          item.kind === "reminder" &&
+          item.text.trim().toLowerCase() ===
+            next.pendingReminderConfirm.text.toLowerCase()
+        ) {
+          next = { ...next, pendingReminderConfirm: null };
+        }
       }
       continue;
     }
@@ -145,7 +229,6 @@ function subscribe(scope: BestieListScope, listener: Listener): () => void {
   };
 }
 
-
 function findOpenItemByText(
   state: BestieListState,
   text: string,
@@ -156,7 +239,10 @@ function findOpenItemByText(
   const matches = state.items.filter((item) => {
     if (item.status !== "open") return false;
     if (kind && item.kind !== kind) return false;
-    return item.text.toLowerCase() === needle || item.text.toLowerCase().includes(needle);
+    return (
+      item.text.toLowerCase() === needle ||
+      item.text.toLowerCase().includes(needle)
+    );
   });
   if (matches.length === 0) return null;
   // Prefer exact match, then shortest text (most specific).
@@ -173,16 +259,50 @@ function applyUserIntent(
   state: BestieListState,
   intent: BestieUserListIntent,
   messageId: string,
+  nowMs: number,
 ): { applied: number; state: BestieListState } {
+  // Bare clock without am/pm — stash pending; create after AM/PM reply (or fixed fence).
+  if (intent.op === "reminder-confirm-needed") {
+    return {
+      applied: 0,
+      state: {
+        ...state,
+        pendingReminderConfirm: {
+          bareClock: intent.bareClock,
+          createdAt: nowMs,
+          sourceMessageId: messageId,
+          text: intent.text,
+        },
+      },
+    };
+  }
   if (intent.op === "add") {
     let next = state;
     let applied = 0;
+    const nowSeconds = Math.floor(nowMs / 1000);
     for (const item of intent.items) {
-      next = addBestieListItem(next, {
-        ...item,
-        sourceMessageId: messageId,
-      });
-      applied += 1;
+      const before = next;
+      next = addBestieListItem(
+        next,
+        {
+          ...item,
+          sourceMessageId: messageId,
+        },
+        nowSeconds,
+      );
+      if (next !== before) applied += 1;
+    }
+    // A fully-specified add clears any stale pending for the same text.
+    if (
+      next.pendingReminderConfirm &&
+      intent.items.some(
+        (item) =>
+          item.kind === "reminder" &&
+          item.text.trim().toLowerCase() ===
+            next.pendingReminderConfirm!.text.toLowerCase(),
+      )
+    ) {
+      next = { ...next, pendingReminderConfirm: null };
     }
     return { applied, state: next };
   }
@@ -201,6 +321,50 @@ function applyUserIntent(
 }
 
 /**
+ * Apply a short AM/PM reply against pending bare-clock confirm.
+ * Resolves dueAt client-side so agent fence epoch cannot invent the wrong half-day.
+ */
+function applyPendingMeridiemConfirm(
+  state: BestieListState,
+  messageId: string,
+  content: string,
+  nowMs: number,
+): { applied: number; state: BestieListState } | null {
+  const pending = state.pendingReminderConfirm;
+  if (!pending) return null;
+  const reply = parseBestieReminderMeridiemReply(content);
+  if (!reply) return null;
+  let bareClock = pending.bareClock;
+  if (reply.hour != null && reply.hour >= 1 && reply.hour <= 12) {
+    bareClock = {
+      ...bareClock,
+      hour: reply.hour,
+      minute: reply.minute ?? bareClock.minute,
+    };
+  }
+  const dueAt = resolveBestieBareClockDueAt(bareClock, reply.meridiem, nowMs);
+  let next: BestieListState = {
+    ...state,
+    pendingReminderConfirm: null,
+  };
+  const before = next;
+  next = addBestieListItem(
+    next,
+    {
+      dueAt,
+      kind: "reminder",
+      sourceMessageId: messageId,
+      text: pending.text,
+    },
+    Math.floor(nowMs / 1000),
+  );
+  return {
+    applied: next !== before ? 1 : 0,
+    state: next,
+  };
+}
+
+/**
  * Apply natural-language list intents from a *user* Bestie message once.
  * Returns how many mutations landed (0 if already processed / no intent).
  */
@@ -212,13 +376,35 @@ export function applyBestieListIntentFromUserMessage(
 ): number {
   const current = loadState(scope);
   if (current.processedMessageIds.includes(messageId)) return 0;
-  const intent = parseBestieUserListIntent(content, nowMs);
+  const userContent = stripBestieOutboundHints(content);
   let next = markBestieListMessageProcessed(current, messageId);
+
+  // Drop stale pendings (2h) so unrelated chat is not trapped.
+  if (
+    next.pendingReminderConfirm &&
+    nowMs - next.pendingReminderConfirm.createdAt > 2 * 60 * 60 * 1000
+  ) {
+    next = { ...next, pendingReminderConfirm: null };
+  }
+
+  // Prefer client resolve of AM/PM reply against pending bare-clock confirm.
+  const meridiemResult = applyPendingMeridiemConfirm(
+    next,
+    messageId,
+    userContent,
+    nowMs,
+  );
+  if (meridiemResult) {
+    commit(scope, meridiemResult.state);
+    return meridiemResult.applied;
+  }
+
+  const intent = parseBestieUserListIntent(userContent, nowMs);
   if (!intent) {
     commit(scope, next);
     return 0;
   }
-  const result = applyUserIntent(next, intent, messageId);
+  const result = applyUserIntent(next, intent, messageId, nowMs);
   commit(scope, result.state);
   return result.applied;
 }

@@ -632,6 +632,7 @@ export function AppSidebar({
                     />
                   ) : null}
                   <SidebarStarredThreadsSection
+                    activeWorkingByChannelId={activeWorkingByChannelId}
                     isCollapsed={collapsedGroups.starredThreads}
                     items={starredThreads}
                     onToggleCollapsed={() =>

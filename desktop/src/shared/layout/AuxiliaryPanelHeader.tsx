@@ -30,6 +30,8 @@ type AuxiliaryPanelHeaderGroupProps = Omit<
   align?: "center" | "start";
   backButtonAriaLabel?: string;
   backButtonTestId?: string;
+  /** icon = arrow (default); chip = pill "Back" for Assistant sheet chrome. */
+  backVariant?: "icon" | "chip";
   /**
    * Panel-specific control rendered ahead of the title, after any back button.
    *
@@ -270,6 +272,7 @@ export function AuxiliaryPanelHeaderGroup({
   align = "center",
   backButtonAriaLabel = "Back",
   backButtonTestId,
+  backVariant = "icon",
   leading,
   mode,
   children,
@@ -279,6 +282,7 @@ export function AuxiliaryPanelHeaderGroup({
   const panelContext = React.useContext(AuxiliaryPanelContext);
   const resolvedMode = mode ?? panelContext?.mode ?? "docked";
   const isOverlayLayout = resolvedMode === "panel";
+  const chipBack = backVariant === "chip";
 
   return (
     <div
@@ -294,14 +298,28 @@ export function AuxiliaryPanelHeaderGroup({
           // Header text needs a comfortable left inset in split layouts, but a
           // leading icon should visually sit closer to the panel edge. Overlay
           // headers already use compact row padding, so keep that button flush.
-          className={cn("shrink-0", isOverlayLayout ? "ml-0" : "-ml-2")}
+          className={cn(
+            "shrink-0",
+            chipBack
+              ? "h-7 gap-1 rounded-full border border-border/50 bg-muted/45 px-2.5 text-xs font-medium text-foreground shadow-none hover:bg-muted/70"
+              : isOverlayLayout
+                ? "ml-0"
+                : "-ml-2",
+          )}
           data-testid={backButtonTestId}
           onClick={onBack}
-          size="icon"
+          size={chipBack ? "xs" : "icon"}
           type="button"
-          variant={isOverlayLayout ? "ghost" : "outline"}
+          variant={chipBack ? "ghost" : isOverlayLayout ? "ghost" : "outline"}
         >
-          <ArrowLeft />
+          {chipBack ? (
+            <>
+              <ArrowLeft className="size-3.5" />
+              Back
+            </>
+          ) : (
+            <ArrowLeft />
+          )}
         </Button>
       ) : null}
       {/*

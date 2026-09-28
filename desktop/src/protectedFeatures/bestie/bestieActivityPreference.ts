@@ -2,8 +2,8 @@ import * as React from "react";
 
 /**
  * Device-level preference for showing agent activity rows inline in Bestie.
- * Used by the Bestie popover “Show activity” checkbox. Full Bestie DM channel
- * activity rail remains deferred. Persisted in localStorage; defaults OFF.
+ * Full Bestie DM channel activity rail remains deferred. Persisted in localStorage;
+ * defaults OFF.
  */
 const STORAGE_KEY = "buzz-bestie-show-activity.v1";
 

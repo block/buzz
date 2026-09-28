@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { formatWorkingTooltip } from "./SidebarSection.tsx";
+import { formatWorkingTooltip } from "./channelWorkingBadge.tsx";
 
 function summary(agentNames, agentCount = agentNames.length) {
   return {

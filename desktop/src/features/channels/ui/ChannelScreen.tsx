@@ -107,6 +107,8 @@ export function ChannelScreen({
   onCloseForumPost, onSelectForumPost,
   selectedForumPostId, targetForumReplyId,
   targetMessageEvents, targetMessageId,
+  transformDisplayedMessageBody,
+  transformOutboundMessageContent,
   ...searchTarget
 }: ChannelScreenProps) {
   const queryClient = useQueryClient();
@@ -439,33 +441,37 @@ export function ChannelScreen({
     }
     return { personaLookup: pLookup, respondToLookup: rLookup };
   }, [managedAgentsQuery.data, personasQuery.data]);
-  const timelineMessages = React.useMemo(
-    () =>
-      formatTimelineMessages(
-        resolvedMessages,
-        activeChannel,
-        currentPubkey,
-        currentProfile?.avatarUrl ?? null,
-        messageProfiles,
-        channelMembers,
-        personaLookup,
-        respondToLookup,
-        relaySelfPubkey,
-        messageOwnerProfiles,
-      ),
-    [
-      activeChannel,
-      channelMembers,
-      currentProfile?.avatarUrl,
-      currentPubkey,
-      messageProfiles,
-      messageOwnerProfiles,
-      personaLookup,
-      relaySelfPubkey,
-      respondToLookup,
+  const timelineMessages = React.useMemo(() => {
+    const formatted = formatTimelineMessages(
       resolvedMessages,
-    ],
-  );
+      activeChannel,
+      currentPubkey,
+      currentProfile?.avatarUrl ?? null,
+      messageProfiles,
+      channelMembers,
+      personaLookup,
+      respondToLookup,
+      relaySelfPubkey,
+      messageOwnerProfiles,
+    );
+    if (!transformDisplayedMessageBody) return formatted;
+    return formatted.map((message) => {
+      const body = transformDisplayedMessageBody(message.body ?? "");
+      return body === message.body ? message : { ...message, body };
+    });
+  }, [
+    activeChannel,
+    channelMembers,
+    currentProfile?.avatarUrl,
+    currentPubkey,
+    messageProfiles,
+    messageOwnerProfiles,
+    personaLookup,
+    relaySelfPubkey,
+    respondToLookup,
+    resolvedMessages,
+    transformDisplayedMessageBody,
+  ]);
   const threadPanelData = useIndependentThreadPanel({
     activeChannel,
     channelEvents: resolvedMessages,
@@ -558,6 +564,7 @@ export function ChannelScreen({
     setThreadScrollTargetId,
     threadReplyTargetId,
     toggleReactionMutation,
+    transformOutboundMessageContent,
   });
   requireThreadEditResolutionRef.current = requireThreadEditResolution;
   const effectiveToggleReaction = React.useMemo(
@@ -725,10 +732,32 @@ export function ChannelScreen({
       profilePanelPubkey ||
       channelManagementOpen,
   );
-  const displayedThreadHeadMessage = threadPanelData.threadHead;
-  const displayedThreadAllMessages = threadPanelData.messages;
-  const displayedThreadMessages = threadPanelData.visibleReplies;
-  const displayedThreadReplyTargetMessage = threadPanelData.replyTargetMessage;
+  const mapDisplayedBody = React.useCallback(
+    (message: TimelineMessage | null | undefined) => {
+      if (!message || !transformDisplayedMessageBody) return message ?? null;
+      const body = transformDisplayedMessageBody(message.body ?? "");
+      return body === message.body ? message : { ...message, body };
+    },
+    [transformDisplayedMessageBody],
+  );
+  const displayedThreadHeadMessage = mapDisplayedBody(threadPanelData.threadHead);
+  const displayedThreadAllMessages = React.useMemo(() => {
+    if (!transformDisplayedMessageBody) return threadPanelData.messages;
+    return threadPanelData.messages.map((message) => {
+      const body = transformDisplayedMessageBody(message.body ?? "");
+      return body === message.body ? message : { ...message, body };
+    });
+  }, [threadPanelData.messages, transformDisplayedMessageBody]);
+  const displayedThreadMessages = React.useMemo(() => {
+    if (!transformDisplayedMessageBody) return threadPanelData.visibleReplies;
+    return threadPanelData.visibleReplies.map((message) => {
+      const body = transformDisplayedMessageBody(message.body ?? "");
+      return body === message.body ? message : { ...message, body };
+    });
+  }, [threadPanelData.visibleReplies, transformDisplayedMessageBody]);
+  const displayedThreadReplyTargetMessage = mapDisplayedBody(
+    threadPanelData.replyTargetMessage,
+  );
   const displayedThreadFirstUnreadReplyId = displayedThreadHeadMessage
     ? threadFirstUnreadReplyId
     : null;

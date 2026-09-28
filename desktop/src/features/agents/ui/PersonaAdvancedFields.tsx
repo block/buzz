@@ -54,8 +54,7 @@ export function PersonaAdvancedFields({
   requiredEnvKeys = [],
   fileSatisfiedEnvKeys = [],
   hiddenEnvKeys = [],
-  catalogStatus = "ready" as RuntimeCatalogStatus,
-  selectedRuntime,
+    selectedRuntime,
 }: {
   behaviorDraft: PersonaBehaviorDraft;
   disabled: boolean;
@@ -101,12 +100,11 @@ export function PersonaAdvancedFields({
 
   // Numeric tuning descriptors — gate on catalog status so that loading/error
   // never collapses to "no controls": keys stay visible as generic rows.
+  // Prefer structured numeric controls whenever selectedRuntime is known —
+  // catalogStatus loading/refetch must not hide the same model's options.
   const numericDescriptors = React.useMemo(
-    () =>
-      catalogStatus === "ready"
-        ? deriveNumericDescriptors(selectedRuntime)
-        : [],
-    [catalogStatus, selectedRuntime],
+    () => deriveNumericDescriptors(selectedRuntime),
+    [selectedRuntime],
   );
 
   const effectiveHiddenKeys = React.useMemo(

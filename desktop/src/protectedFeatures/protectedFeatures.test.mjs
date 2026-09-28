@@ -10,13 +10,15 @@ describe("protected feature build variants", () => {
     assert.deepEqual(publicDefinitions, []);
   });
 
-  it("adds Bestie as a default-off experiment only through the internal module", () => {
-    assert.deepEqual(
-      internalDefinitions.map((feature) => feature.id),
-      ["bestie"],
-    );
-    const bestie = internalDefinitions[0];
+  it("adds Assistant as always-on only through the internal module", () => {
+    const bestie = internalDefinitions.find((feature) => feature.id === "bestie");
     assert.ok(bestie);
-    assert.equal(resolveEnabled(bestie.id, {}, bestie.defaultEnabled), false);
+    assert.equal(bestie.name, "Assistant");
+    assert.equal(bestie.defaultEnabled, true);
+    assert.equal(resolveEnabled(bestie.id, {}, bestie.defaultEnabled), true);
+    assert.equal(
+      publicDefinitions.some((feature) => feature.id === "bestie"),
+      false,
+    );
   });
 });

@@ -34,14 +34,45 @@ test("effort picker is hidden for a provider backend even when a configId exists
   assert.equal(state.visible, false);
 });
 
-test("effort picker is hidden for a local backend without a discovered configId", () => {
+test("effort picker stays visible for local backend via capability fallback without configId", () => {
   const state = effortPickerState({
     backend: localBackend,
     effortConfigId: undefined,
     effortOptions: undefined,
     currentEffort: null,
+    fallbackEffortValues: ["low", "medium", "high"],
+  });
+  assert.equal(state.visible, true);
+  assert.deepEqual(
+    state.options.map((o) => o.value),
+    [EFFORT_DEFAULT_DROPDOWN_VALUE, "low", "medium", "high"],
+  );
+});
+
+test("effort picker is hidden for local backend with no configId and no fallback", () => {
+  const state = effortPickerState({
+    backend: localBackend,
+    effortConfigId: undefined,
+    effortOptions: undefined,
+    currentEffort: null,
+    fallbackEffortValues: [],
   });
   assert.equal(state.visible, false);
+});
+
+test("session-advertised options win over capability fallback", () => {
+  const state = effortPickerState({
+    backend: localBackend,
+    effortConfigId: "thought_level",
+    effortOptions: options,
+    currentEffort: null,
+    fallbackEffortValues: ["minimal", "max"],
+  });
+  assert.deepEqual(state.options, [
+    { label: "Adapter default", value: EFFORT_DEFAULT_DROPDOWN_VALUE },
+    { label: "Low", value: "low" },
+    { label: "High", value: "high" },
+  ]);
 });
 
 test("options lead with the adapter-default sentinel then adapter values", () => {

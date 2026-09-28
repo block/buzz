@@ -43,21 +43,23 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
-import { Checkbox } from "@/shared/ui/checkbox";
 import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import {
-  setBestieShowActivity,
-  useBestieShowActivity,
-} from "./bestieActivityPreference";
+import { useBestieShowActivity } from "./bestieActivityPreference";
 import { buildBestieMessageContext } from "./bestieMessageContext";
 import {
   applyBestieListIntentFromUserMessage,
+  dismissBestieReminderItemsForScope,
+  getBestieListState,
+  snoozeBestieListItemsForScope,
 } from "./bestieListStore";
-import {
-  stripBestieListTurnHint,
-  withBestieListTurnHint,
-} from "./bestieListProtocol";
+import { applyBestieScratchIntentFromUserMessage } from "./bestieScratchStore";
+import { withBestieListTurnHint } from "./bestieListProtocol";
+import { withBestieJobTurnHint } from "./bestieJobProtocol";
+import { stripBestieOutboundHints } from "./bestieOutboundHints";
+import { withBestieLiveListStateHint } from "./bestieLiveListState";
+import { applyBestieJobIntentFromUserMessage } from "./bestieJobStore";
+import { messageLooksLikeBestieJobRequest } from "./parseBestieUserJobIntent";
 import {
   clearBestieSessionBoundary,
   readBestieSessionBoundary,
@@ -73,8 +75,25 @@ import {
   flattenBestieTranscriptMessages,
   resolveBestieSendParentEventId,
 } from "./flattenBestieTranscript";
-import { messageLooksLikeBestieListRequest } from "./parseBestieUserListIntent";
+import {
+  messageLooksLikeBestieListRequest,
+  messageLooksLikeBestieReminderMeridiemReply,
+  messageNeedsBestieReminderBareClockConfirm,
+} from "./parseBestieUserListIntent";
+import { messageLooksLikeBestieScratchRequest } from "./parseBestieUserScratchIntent";
+import { BestieNewMessageBanner } from "./BestieNewMessageBanner";
 import { BestieNudgeBanner } from "./BestieNudgeBanner";
+import {
+  bestiePopoverNewMessageAckIds,
+  resolveBestiePopoverNewMessageQueue,
+  type BestiePopoverNewMessageTarget,
+} from "./bestiePopoverNewMessage";
+import {
+  ackBestiePopoverNewMessages,
+  useBestiePopoverNewMessageDismissed,
+} from "./bestiePopoverNewMessageDismissed";
+import { requestBestieRhsOpen } from "./bestieRhsOpenRequest";
+import { BestiePopoverListsSection } from "./BestiePopoverListsSection";
 import { useBestie } from "./useBestie";
 
 /** How long Confirm? stays armed before reverting to Close Thread. */
@@ -106,11 +125,16 @@ export function BestieTriggerVisual({
   }
 
   return (
-    <Plus
-      aria-hidden="true"
-      className={cn(compact ? "h-4 w-4" : "h-5 w-5", className)}
+    <span
+      className={cn(
+        "inline-flex items-center justify-center rounded-full bg-sidebar-accent text-sidebar-foreground",
+        compact ? "h-8 w-8" : "h-10 w-10",
+        className,
+      )}
       data-testid="bestie-empty-mark"
-    />
+    >
+      <Plus aria-hidden="true" className={compact ? "h-4 w-4" : "h-5 w-5"} />
+    </span>
   );
 }
 
@@ -161,18 +185,54 @@ export function BestieAgentLockup({
   );
 }
 
-function EmptyBestie() {
+function EmptyBestie({ onRequestClose }: { onRequestClose?: () => void }) {
+  const { goAgents } = useAppNavigation();
+  const bestie = useBestie();
+  const scope =
+    bestie.ownerPubkey && bestie.relayUrl
+      ? {
+          // Persistence is owner+relay; placeholder agent id for type only.
+          agentPubkey: "unassigned",
+          ownerPubkey: bestie.ownerPubkey,
+          relayUrl: bestie.relayUrl,
+        }
+      : null;
+
   return (
-    <div className="flex min-h-32 flex-col items-center justify-center gap-3 px-4 text-center">
-      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
-        <Plus aria-hidden="true" className="h-5 w-5" />
+    <div
+      className="flex h-full min-h-0 flex-col gap-3"
+      data-testid="bestie-popover-empty"
+    >
+      <div className="flex shrink-0 items-center gap-2">
+        <Button
+          aria-label="Choose an Assistant agent"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full"
+          data-testid="bestie-assign-agent"
+          onClick={() => {
+            onRequestClose?.();
+            void goAgents();
+          }}
+          size="icon"
+          type="button"
+          variant="secondary"
+        >
+          <Plus aria-hidden="true" className="h-4 w-4" />
+        </Button>
+        <div className="min-w-0 flex-1 text-left">
+          <h2 className="text-sm font-semibold">Assistant</h2>
+          <p className="text-2xs text-muted-foreground">
+            No chat yet — + chooses an agent. Lists stay available below.
+          </p>
+        </div>
       </div>
-      <div>
-        <h2 className="text-sm font-semibold">Choose a Bestie</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Open one of your local agents and turn on Bestie.
-        </p>
-      </div>
+      <div className="min-h-16 flex-1 rounded-xl border border-dashed border-border/70 bg-muted/20" />
+      {scope ? (
+        <BestiePopoverListsSection
+          brewEnabled={false}
+          fillAvailable
+          scope={scope}
+        />
+      ) : null}
     </div>
   );
 }
@@ -183,7 +243,9 @@ function BestieConversationTranscript({
   channel,
   currentPubkey,
   messages,
+  onNearBottomChange,
   onToggleReaction,
+  scrollToLatestRef,
   profiles,
   showActivity,
   typingPubkeys,
@@ -193,6 +255,9 @@ function BestieConversationTranscript({
   channel: Channel;
   currentPubkey: string | undefined;
   messages: TimelineMessage[];
+  onNearBottomChange?: (nearBottom: boolean) => void;
+  /** Parent registers scroll-to-latest for in-session New message View. */
+  scrollToLatestRef?: React.MutableRefObject<(() => void) | null>;
   onToggleReaction: (
     message: TimelineMessage,
     emoji: string,
@@ -243,14 +308,16 @@ function BestieConversationTranscript({
     const transcript = transcriptRef.current;
     if (!transcript) return;
     const onScroll = () => {
-      shouldStickToBottomRef.current = isNearBottom(transcript);
+      const near = isNearBottom(transcript);
+      shouldStickToBottomRef.current = near;
+      onNearBottomChange?.(near);
     };
     onScroll();
     transcript.addEventListener("scroll", onScroll, { passive: true });
     return () => {
       transcript.removeEventListener("scroll", onScroll);
     };
-  }, [channel.id]);
+  }, [channel.id, onNearBottomChange]);
 
   React.useLayoutEffect(() => {
     // Fire on open, new messages, and typing rows — but only while sticky.
@@ -265,6 +332,30 @@ function BestieConversationTranscript({
     if (!transcript) return;
     transcript.scrollTop = transcript.scrollHeight;
   }, [transcriptTailKey]);
+
+  const scrollToLatest = React.useCallback(() => {
+    shouldStickToBottomRef.current = true;
+    onNearBottomChange?.(true);
+    const sentinel = bottomSentinelRef.current;
+    if (sentinel) {
+      sentinel.scrollIntoView({ block: "end", behavior: "smooth" });
+      return;
+    }
+    const transcript = transcriptRef.current;
+    if (transcript) {
+      transcript.scrollTo({ top: transcript.scrollHeight, behavior: "smooth" });
+    }
+  }, [onNearBottomChange]);
+
+  React.useEffect(() => {
+    if (!scrollToLatestRef) return;
+    scrollToLatestRef.current = scrollToLatest;
+    return () => {
+      if (scrollToLatestRef.current === scrollToLatest) {
+        scrollToLatestRef.current = null;
+      }
+    };
+  }, [scrollToLatest, scrollToLatestRef]);
 
   return (
     <div
@@ -300,7 +391,7 @@ function BestieConversationTranscript({
               agentPubkey={agent.pubkey}
               autoTail={false}
               channelId={channel.id}
-              emptyDescription="Activity will appear here while Bestie works."
+              emptyDescription="Activity will appear here while Assistant works."
               items={activityItems}
               profiles={profiles}
               variant="compactPreview"
@@ -448,7 +539,7 @@ export function BestiePopover({
         if (!cancelled) setConversationChannel(channel);
       })
       .catch((error) => {
-        console.warn("Couldn’t load the Bestie conversation", error);
+        console.warn("Couldn’t load the Assistant conversation", error);
       })
       .finally(() => {
         if (conversationPromiseRef.current === pending) {
@@ -531,7 +622,7 @@ export function BestiePopover({
           message.kind === KIND_STREAM_MESSAGE_V2,
       )
       .map((message) => {
-        let body = stripBestieListTurnHint(message.body);
+        let body = stripBestieOutboundHints(message.body);
         if (contextEnvelope && body.startsWith(contextEnvelope)) {
           body = body.slice(contextEnvelope.length).trim();
         }
@@ -554,6 +645,95 @@ export function BestiePopover({
       sessionBoundary,
     );
   }, [allConversationMessages, sessionBoundary]);
+  const sessionMessageIds = React.useMemo(
+    () => new Set(conversationMessages.map((message) => message.id)),
+    [conversationMessages],
+  );
+  const [transcriptNearBottom, setTranscriptNearBottom] = React.useState(true);
+  const handleNearBottomChange = React.useCallback((near: boolean) => {
+    setTranscriptNearBottom(near);
+  }, []);
+  const scrollToLatestRef = React.useRef<(() => void) | null>(null);
+  const dismissedNewMessages = useBestiePopoverNewMessageDismissed();
+  const newMessageQueue = React.useMemo(
+    () =>
+      resolveBestiePopoverNewMessageQueue({
+        allMessages: allConversationMessages,
+        baselineMessageIds: sessionBoundary?.baselineMessageIds,
+        dismissedMessageIds: dismissedNewMessages.messageIds,
+        dismissedThreadRootIds: dismissedNewMessages.threadRootIds,
+        minCreatedAt: sessionBoundary?.firstMessageCreatedAt ?? null,
+        nearBottom: transcriptNearBottom,
+        sessionMessageIds,
+        sessionRootId: sessionBoundary?.sessionRootId,
+      }),
+    [
+      allConversationMessages,
+      dismissedNewMessages.messageIds,
+      dismissedNewMessages.threadRootIds,
+      sessionBoundary?.baselineMessageIds,
+      sessionBoundary?.firstMessageCreatedAt,
+      sessionBoundary?.sessionRootId,
+      sessionMessageIds,
+      transcriptNearBottom,
+    ],
+  );
+  const newMessageTarget = newMessageQueue[0] ?? null;
+  const dismissNewMessage = React.useCallback(
+    (target: BestiePopoverNewMessageTarget) => {
+      const ack = bestiePopoverNewMessageAckIds(target);
+      ackBestiePopoverNewMessages({
+        messageIds: [ack.messageId],
+        threadRootIds: [ack.threadRootId],
+      });
+    },
+    [],
+  );
+  // Messages already scrolled into view (near bottom) stay out of the queue.
+  React.useEffect(() => {
+    if (!transcriptNearBottom) return;
+    if (sessionMessageIds.size === 0) return;
+    ackBestiePopoverNewMessages({
+      messageIds: [...sessionMessageIds],
+    });
+  }, [sessionMessageIds, transcriptNearBottom]);
+  const jumpToNewMessage = React.useCallback(
+    (target: BestiePopoverNewMessageTarget) => {
+      dismissNewMessage(target);
+      if (!target.outsideSession) {
+        scrollToLatestRef.current?.();
+        return;
+      }
+      const message = allConversationMessages.find((entry) => entry.id === target.id);
+      if (!message) return;
+      // Open the Assistant DM on that thread in the main app. Do NOT change the
+      // popover session/thread — the popover stays where it is.
+      const rootId = message.rootId ?? message.parentId ?? message.id;
+      void (async () => {
+        parkPlaygroundHost();
+        leaveLeftNavBuzzTerm();
+        const channel =
+          activeConversationChannel ??
+          (await (conversationPromiseRef.current ??
+            bestie.resolveConversation()));
+        setConversationChannel(channel);
+        await goChannel(channel.id, { thread: rootId });
+      })().catch((error) => {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : "Couldn’t open Assistant conversation",
+        );
+      });
+    },
+    [
+      activeConversationChannel,
+      allConversationMessages,
+      bestie,
+      dismissNewMessage,
+      goChannel,
+    ],
+  );
   const typingEntries = useChannelTyping(
     activeConversationChannel,
     currentPubkey,
@@ -574,11 +754,7 @@ export function BestiePopover({
           ? { firstMessageCreatedAt: sessionBoundary.firstMessageCreatedAt }
           : null,
       }),
-    [
-      activeConversationChannel?.id,
-      agentTranscript,
-      sessionBoundary,
-    ],
+    [activeConversationChannel?.id, agentTranscript, sessionBoundary],
   );
   const handleToggleReaction = React.useCallback(
     async (message: TimelineMessage, emoji: string, remove: boolean) => {
@@ -645,7 +821,7 @@ export function BestiePopover({
       toast.error(
         error instanceof Error
           ? error.message
-          : "Couldn’t open Bestie conversation",
+          : "Couldn’t open Assistant conversation",
       );
     });
   }, [
@@ -657,9 +833,9 @@ export function BestiePopover({
   ]);
 
   if (bestie.isLoading) {
-    return <p className="text-sm text-muted-foreground">Loading Bestie…</p>;
+    return <p className="text-sm text-muted-foreground">Loading Assistant…</p>;
   }
-  if (!agent) return <EmptyBestie />;
+  if (!agent) return <EmptyBestie onRequestClose={onRequestClose} />;
 
   const presenceStatus = bestie.presenceStatus ?? "offline";
   const sendMessage = () => {
@@ -679,8 +855,38 @@ export function BestiePopover({
           bestie.resolveConversation()));
       setConversationChannel(channel);
       const parentEventId = resolveBestieSendParentEventId(sessionBoundary);
-      const listIntent = messageLooksLikeBestieListRequest(trimmedDraft);
-      const outboundBody = withBestieListTurnHint(trimmedDraft, listIntent);
+      // Confirm Qs / AM-PM replies stay in-session (parentEventId = session root
+      // when active; null only for a brand-new session root).
+      const pendingReminderConfirm =
+        sessionScope && bestie.ownerPubkey && assignedAgentPubkey && bestie.relayUrl
+          ? getBestieListState({
+              agentPubkey: normalizePubkey(assignedAgentPubkey),
+              ownerPubkey: normalizePubkey(bestie.ownerPubkey),
+              relayUrl: bestie.relayUrl,
+            }).pendingReminderConfirm
+          : null;
+      const meridiemReply =
+        pendingReminderConfirm != null &&
+        messageLooksLikeBestieReminderMeridiemReply(trimmedDraft);
+      const listIntent =
+        messageLooksLikeBestieListRequest(trimmedDraft) || meridiemReply;
+      const bareClockConfirm =
+        messageNeedsBestieReminderBareClockConfirm(trimmedDraft);
+      const jobIntent = messageLooksLikeBestieJobRequest(trimmedDraft);
+      const scratchIntent = messageLooksLikeBestieScratchRequest(trimmedDraft);
+      const liveScope =
+        sessionScope && bestie.ownerPubkey && assignedAgentPubkey && bestie.relayUrl
+          ? {
+              agentPubkey: normalizePubkey(assignedAgentPubkey),
+              ownerPubkey: normalizePubkey(bestie.ownerPubkey),
+              relayUrl: bestie.relayUrl,
+            }
+          : null;
+      let outboundBody = withBestieLiveListStateHint(trimmedDraft, liveScope);
+      outboundBody = withBestieListTurnHint(outboundBody, listIntent, {
+        bareClockConfirm,
+      });
+      outboundBody = withBestieJobTurnHint(outboundBody, jobIntent);
       const content =
         contextEnvelope && !contextSent
           ? `${contextEnvelope}\n\n${outboundBody}`
@@ -690,23 +896,41 @@ export function BestiePopover({
         parentEventId,
         targetChannel: channel,
       });
-      // Apply NL list intent immediately (WakeController also applies; idempotent).
+      // Apply NL list/job/scratch intents immediately (WakeController also applies; idempotent).
+      // Job schedule-request/approve-intent do not create — confirmed fence or RHS form does.
       if (
-        listIntent &&
+        (listIntent || jobIntent || scratchIntent) &&
         sessionScope &&
         bestie.ownerPubkey &&
         assignedAgentPubkey &&
         bestie.relayUrl
       ) {
-        applyBestieListIntentFromUserMessage(
-          {
-            agentPubkey: normalizePubkey(assignedAgentPubkey),
-            ownerPubkey: normalizePubkey(bestie.ownerPubkey),
-            relayUrl: bestie.relayUrl,
-          },
-          sentMessage.id,
-          trimmedDraft,
-        );
+        const scope = {
+          agentPubkey: normalizePubkey(assignedAgentPubkey),
+          ownerPubkey: normalizePubkey(bestie.ownerPubkey),
+          relayUrl: bestie.relayUrl,
+        };
+        if (listIntent) {
+          applyBestieListIntentFromUserMessage(
+            scope,
+            sentMessage.id,
+            trimmedDraft,
+          );
+        }
+        if (jobIntent) {
+          applyBestieJobIntentFromUserMessage(
+            scope,
+            sentMessage.id,
+            trimmedDraft,
+          );
+        }
+        if (scratchIntent) {
+          applyBestieScratchIntentFromUserMessage(
+            scope,
+            sentMessage.id,
+            trimmedDraft,
+          );
+        }
       }
       setSessionBoundary((current) => {
         if (current) return current;
@@ -730,7 +954,7 @@ export function BestiePopover({
       if (startError) throw startError;
     })().catch((error) => {
       toast.error(
-        error instanceof Error ? error.message : "Couldn’t message Bestie",
+        error instanceof Error ? error.message : "Couldn’t message Assistant",
       );
     });
   };
@@ -743,7 +967,7 @@ export function BestiePopover({
 
   return (
     <div
-      className="flex max-h-[min(32rem,var(--radix-popover-content-available-height,calc(100vh-2rem)))] min-h-0 flex-col gap-3"
+      className="flex h-full min-h-0 flex-col gap-3"
       data-testid="bestie-popover"
     >
       <div className="flex shrink-0 items-start gap-2">
@@ -772,7 +996,7 @@ export function BestiePopover({
         </Button>
         <div className="flex shrink-0 items-center gap-1">
           <Button
-            aria-label="Open Bestie thread"
+            aria-label="Open Assistant thread"
             data-testid="bestie-open-thread"
             disabled={bestie.isOpening}
             onClick={openSessionThread}
@@ -783,7 +1007,7 @@ export function BestiePopover({
             <SquareArrowOutUpRight />
           </Button>
           <Button
-            aria-label="Close Bestie"
+            aria-label="Close Assistant"
             data-testid="bestie-close"
             onClick={dismissPopover}
             size="icon-xs"
@@ -796,10 +1020,30 @@ export function BestiePopover({
       </div>
 
       <BestieNudgeBanner
-        onOpenList={() => {
-          void openSessionThread();
+        onDismissItems={(itemIds) => {
+          if (!sessionScope) return;
+          dismissBestieReminderItemsForScope(sessionScope, itemIds);
+        }}
+        onOpenReminders={() => {
+          requestBestieRhsOpen("reminder");
+        }}
+        onOpenTodos={() => {
+          requestBestieRhsOpen("todo");
+        }}
+        onSnoozeItems={(itemIds, deltaSeconds) => {
+          if (!sessionScope) return;
+          snoozeBestieListItemsForScope(sessionScope, itemIds, deltaSeconds);
         }}
       />
+
+      {newMessageTarget ? (
+        <BestieNewMessageBanner
+          queueLength={newMessageQueue.length}
+          target={newMessageTarget}
+          onDismiss={dismissNewMessage}
+          onView={jumpToNewMessage}
+        />
+      ) : null}
 
       {hasScrollableTranscript && activeConversationChannel ? (
         <BestieConversationTranscript
@@ -808,12 +1052,20 @@ export function BestiePopover({
           channel={activeConversationChannel}
           currentPubkey={currentPubkey}
           messages={conversationMessages}
+          onNearBottomChange={handleNearBottomChange}
           onToggleReaction={handleToggleReaction}
           profiles={conversationProfiles}
+          scrollToLatestRef={scrollToLatestRef}
           showActivity={showActivity}
           typingPubkeys={typingPubkeys}
         />
-      ) : null}
+      ) : (
+        <div
+          aria-hidden="true"
+          className="min-h-16 flex-1"
+          data-testid="bestie-popover-chat-spacer"
+        />
+      )}
 
       {contextMessage && !contextSent ? (
         <div
@@ -846,19 +1098,6 @@ export function BestiePopover({
         </div>
       ) : null}
 
-      <label
-        className="flex shrink-0 cursor-pointer items-center gap-2 text-xs text-muted-foreground"
-        data-testid="bestie-show-activity"
-      >
-        <Checkbox
-          checked={showActivity}
-          onCheckedChange={(checked) => {
-            setBestieShowActivity(checked === true);
-          }}
-        />
-        <span>Show activity</span>
-      </label>
-
       <div className="relative shrink-0">
         <Textarea
           aria-label={`Message ${agent.name}`}
@@ -884,7 +1123,7 @@ export function BestiePopover({
           value={draft}
         />
         <Button
-          aria-label="Send in Bestie conversation"
+          aria-label="Send in Assistant conversation"
           className="absolute bottom-2 right-2 rounded-full"
           disabled={!draft.trim() || bestie.isOpening || sendMutation.isPending}
           onClick={sendMessage}
@@ -894,6 +1133,14 @@ export function BestiePopover({
           <ArrowUp />
         </Button>
       </div>
+
+      {sessionScope ? (
+        <BestiePopoverListsSection
+          bestieChannel={activeConversationChannel}
+          brewEnabled
+          scope={sessionScope}
+        />
+      ) : null}
     </div>
   );
 }

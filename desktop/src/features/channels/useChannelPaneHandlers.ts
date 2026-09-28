@@ -43,6 +43,7 @@ export function useChannelPaneHandlers({
   setThreadScrollTargetId,
   threadReplyTargetId,
   toggleReactionMutation,
+  transformOutboundMessageContent,
 }: {
   deleteMessageMutation: ReturnType<typeof useDeleteMessageMutation>;
   editMessageMutation: ReturnType<typeof useEditMessageMutation>;
@@ -67,6 +68,7 @@ export function useChannelPaneHandlers({
   setThreadScrollTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   threadReplyTargetId: string | null;
   toggleReactionMutation: ReturnType<typeof useToggleReactionMutation>;
+  transformOutboundMessageContent?: (content: string) => string;
 }) {
   // Keep mutable values in refs so callbacks never need to list them as deps.
   const openThreadHeadIdRef = React.useRef(openThreadHeadId);
@@ -88,6 +90,8 @@ export function useChannelPaneHandlers({
 
   const sendMutateRef = React.useRef(sendMessageMutation.mutateAsync);
   sendMutateRef.current = sendMessageMutation.mutateAsync;
+  const transformOutboundRef = React.useRef(transformOutboundMessageContent);
+  transformOutboundRef.current = transformOutboundMessageContent;
 
   const deleteMutateRef = React.useRef(deleteMessageMutation.mutateAsync);
   deleteMutateRef.current = deleteMessageMutation.mutateAsync;
@@ -309,8 +313,10 @@ export function useChannelPaneHandlers({
       } | null,
       forceRest?: boolean,
     ) => {
+      const outbound =
+        transformOutboundRef.current?.(content) ?? content;
       await sendMutateRef.current({
-        content,
+        content: outbound,
         mentionPubkeys,
         mediaTags,
         channelId: channelId ?? undefined,
@@ -379,8 +385,10 @@ export function useChannelPaneHandlers({
         });
       }
 
+      const outbound =
+        transformOutboundRef.current?.(content) ?? content;
       const sentMessage = await sendMutateRef.current({
-        content,
+        content: outbound,
         mentionPubkeys,
         parentEventId,
         mediaTags,

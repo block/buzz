@@ -233,9 +233,14 @@ export function AgentInstanceEditDialog({
       setAgentArgs(agent.agentArgs.join(","));
       setParallelism(String(agent.parallelism));
       setSystemPrompt(agent.systemPrompt ?? "");
-      setModel(agent.model ?? "");
+      // Linked instances: definition owns model/provider for spawn. Seed the
+      // form from the persona so edits round-trip; record.model is often stale.
+      const linked = agent.personaId
+        ? personasQuery.data?.find((p) => p.id === agent.personaId)
+        : null;
+      setModel((linked?.model ?? agent.model) ?? "");
       setIsCustomModelEditing(false);
-      setProvider(agent.provider ?? "");
+      setProvider((linked?.provider ?? agent.provider) ?? "");
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
@@ -721,6 +726,9 @@ export function AgentInstanceEditDialog({
               descriptionDraft,
               persona: linkedPersona,
               systemPromptDraft: systemPrompt,
+              // Definition-owned spawn fields — instance update omits these.
+              modelDraft: normalizedModel,
+              providerDraft: normalizedSubmitProvider,
               updatePersona: (input) =>
                 updatePersonaMutation.mutateAsync(input),
             })
@@ -1147,6 +1155,9 @@ export function AgentInstanceEditDialog({
                 runtimeTouched.current ? undefined : configSurfaceQuery.data
               }
               disabled={isSaving}
+              model={model}
+              provider={effectiveProvider}
+              selectedRuntime={prospectiveRuntime}
               value={
                 effortTouched.current
                   ? effortLevel

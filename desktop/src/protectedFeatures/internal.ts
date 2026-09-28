@@ -4,8 +4,9 @@ import type { FeatureDefinition } from "@/shared/features/types";
 export const protectedFeatureDefinitions: FeatureDefinition[] = [
   {
     id: "bestie",
-    name: "Bestie",
-    description: "Try a personal agent that is always close at hand",
+    name: "Assistant",
+    description: "Personal assistant always close at hand — reminders, jobs, and chat",
+    defaultEnabled: true,
     platforms: ["desktop"],
   },
   {

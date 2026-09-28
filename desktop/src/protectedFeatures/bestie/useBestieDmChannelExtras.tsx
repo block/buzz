@@ -2,20 +2,35 @@ import { ListTodo, Plus } from "lucide-react";
 import * as React from "react";
 
 import { findBestieDmChannel } from "./filterBestieDmChannels";
+import { subscribeBestieRhsOpen } from "./bestieRhsOpenRequest";
 import { BestieDmCategorySheet, BestieDmRhsPanel } from "./BestieDmRhsPanel";
+import { BestieDmCoffeeSheet } from "./BestieDmCoffeeSheet";
+import { BestieDmJobsSheet } from "./BestieDmJobsSheet";
+import { BestieDmThreadsSheet } from "./BestieDmThreadsSheet";
+import { BestieDmScratchSheet } from "./BestieDmScratchSheet";
+import { BestieDmTodosSheet } from "./BestieDmTodosSheet";
+import { BESTIE_COFFEE_BREW_EVENT } from "./bestieCoffeeSchedule";
+import {
+  abandonBestieCoffeePendingForScope,
+  beginBestieCoffeeRunForScope,
+} from "./bestieCoffeeStore";
+import { useBestieCoffeeLive } from "./useBestieCoffeeLive";
+import { useBestieThreadSummarizeLive } from "./useBestieThreadSummarizeLive";
 import {
   bestieCategoryTitle,
   bestieIdleAuxiliaryKind,
+  type BestieRhsKind,
 } from "./bestieDmRhsHelpers";
+import { setBestieViewingDm } from "./bestieAttentionStore";
 import { useBestieAssignmentQuery } from "./useBestie";
-import type { BestieListKind } from "./bestieListTypes";
 import type { Channel } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import type { ChannelScreenProps } from "@/features/channels/ui/ChannelScreen.types";
 import type { IdleAuxiliaryHeaderControls } from "@/features/channels/ui/IdleAuxiliaryPanel";
-import { useFeatureEnabled } from "@/shared/features";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { stripBestieOutboundHints } from "./bestieOutboundHints";
+import { withBestieLiveListStateHint } from "./bestieLiveListState";
 
 type BestieChannelScreenExtras = Pick<
   ChannelScreenProps,
@@ -25,6 +40,8 @@ type BestieChannelScreenExtras = Pick<
   | "idleAuxiliaryOverridesThread"
   | "idleAuxiliaryHeaderActions"
   | "onCloseIdleAuxiliaryPanel"
+  | "transformDisplayedMessageBody"
+  | "transformOutboundMessageContent"
 >;
 
 export type BestieChannelExtras = BestieChannelScreenExtras & {
@@ -39,24 +56,22 @@ export type BestieChannelExtras = BestieChannelScreenExtras & {
 /**
  * When the active channel is the Bestie DM, attach project-home-style RHS:
  * fixed category rows in the native right column; idleAuxiliary slide only
- * when drilling into a category’s items (+ add). Empty otherwise (and always
- * when Bestie is disabled).
+ * when drilling into a category’s items (+ add). Empty otherwise.
  */
 export function useBestieDmChannelExtras(
   activeChannel: Channel | null | undefined,
 ): BestieChannelExtras {
-  const enabled = useFeatureEnabled("bestie");
   const { assignmentQuery, ownerPubkey, relayUrl } =
-    useBestieAssignmentQuery(enabled);
+    useBestieAssignmentQuery(true);
   const [panelOpen, setPanelOpen] = React.useState(true);
-  const [activeKind, setActiveKind] = React.useState<BestieListKind | null>(
+  const [activeKind, setActiveKind] = React.useState<BestieRhsKind | null>(
     null,
   );
   const [adding, setAdding] = React.useState(false);
 
   const bestiePubkey = assignmentQuery.data?.agentPubkey ?? null;
   const isBestieDm = React.useMemo(() => {
-    if (!enabled || !activeChannel || !ownerPubkey || !bestiePubkey) {
+    if (!activeChannel || !ownerPubkey || !bestiePubkey) {
       return false;
     }
     const found = findBestieDmChannel(
@@ -65,7 +80,7 @@ export function useBestieDmChannelExtras(
       bestiePubkey,
     );
     return found?.id === activeChannel.id;
-  }, [activeChannel, bestiePubkey, enabled, ownerPubkey]);
+  }, [activeChannel, bestiePubkey, ownerPubkey]);
 
   // Re-open fixed RHS (category list) when navigating into the Bestie DM.
   React.useEffect(() => {
@@ -85,10 +100,25 @@ export function useBestieDmChannelExtras(
     };
   }, [bestiePubkey, ownerPubkey, relayUrl]);
 
-  const openKind = React.useCallback((kind: BestieListKind) => {
+  // Footer unread clears while the Bestie DM thread is the active view.
+  React.useEffect(() => {
+    setBestieViewingDm(isBestieDm);
+    return () => setBestieViewingDm(false);
+  }, [isBestieDm]);
+
+  const openKind = React.useCallback((kind: BestieRhsKind) => {
     setAdding(false);
     setActiveKind((current) => (current === kind ? null : kind));
   }, []);
+
+  React.useEffect(() => {
+    if (!isBestieDm) return;
+    return subscribeBestieRhsOpen((kind) => {
+      setPanelOpen(true);
+      setAdding(false);
+      setActiveKind(kind);
+    });
+  }, [isBestieDm]);
 
   const onCloseIdleAuxiliaryPanel = React.useCallback(() => {
     // Slide close → back to fixed category list (column stays open).
@@ -98,7 +128,7 @@ export function useBestieDmChannelExtras(
 
   const headerToggle = React.useMemo(() => {
     if (!isBestieDm) return null;
-    const label = panelOpen ? "Hide Bestie list" : "Show Bestie list";
+    const label = panelOpen ? "Hide Assistant list" : "Show Assistant list";
     return (
       <Tooltip disableHoverableContent>
         <TooltipTrigger asChild>
@@ -129,19 +159,94 @@ export function useBestieDmChannelExtras(
     );
   }, [isBestieDm, panelOpen]);
 
+  const bestieChannelForCoffee = isBestieDm ? activeChannel : null;
+  const { brewDisabled, coffeeLive } = useBestieCoffeeLive(
+    scope,
+    bestieChannelForCoffee,
+  );
+  const { summarizeDisabled, summarizeLive, summarizeLiveThreadId } =
+    useBestieThreadSummarizeLive(scope, bestieChannelForCoffee);
+  const requestCoffeeBrew = React.useCallback(() => {
+    if (!scope || brewDisabled) return;
+    let begun = beginBestieCoffeeRunForScope(scope, "brew");
+    if (!begun) {
+      // Leftover pending with Brew re-enabled (idle past grace) — finalize + retry.
+      abandonBestieCoffeePendingForScope(scope);
+      begun = beginBestieCoffeeRunForScope(scope, "brew");
+    }
+    if (!begun) return;
+    window.dispatchEvent(
+      new CustomEvent(BESTIE_COFFEE_BREW_EVENT, {
+        detail: { agentPubkey: scope.agentPubkey },
+      }),
+    );
+  }, [brewDisabled, scope]);
+
   const contextColumn = React.useMemo(() => {
     if (!scope) return null;
     return (
       <BestieDmRhsPanel
         activeKind={activeKind}
+        coffeeLive={coffeeLive}
         onOpenKind={openKind}
         scope={scope}
+        summarizeLive={summarizeLive}
       />
     );
-  }, [activeKind, openKind, scope]);
+  }, [activeKind, coffeeLive, openKind, scope, summarizeLive]);
 
   const idleAuxiliaryPanel = React.useMemo(() => {
     if (!scope || activeKind == null) return null;
+    if (activeKind === "job") {
+      return (
+        <BestieDmJobsSheet
+          adding={adding}
+          onRequestAdd={() => setAdding(true)}
+          scope={scope}
+        />
+      );
+    }
+    if (activeKind === "coffee") {
+      return (
+        <BestieDmCoffeeSheet
+          brewDisabled={brewDisabled}
+          coffeeLive={coffeeLive}
+          onBrew={requestCoffeeBrew}
+          scope={scope}
+        />
+      );
+    }
+    if (activeKind === "thread") {
+      return (
+        <BestieDmThreadsSheet
+          adding={adding}
+          onRequestAdd={() => setAdding(true)}
+          scope={scope}
+          summarizeDisabled={summarizeDisabled}
+          summarizeLive={summarizeLive}
+          summarizeLiveThreadId={summarizeLiveThreadId}
+        />
+      );
+    }
+    if (activeKind === "scratch") {
+      return (
+        <BestieDmScratchSheet
+          adding={adding}
+          onAdded={() => setAdding(false)}
+          onRequestAdd={() => setAdding(true)}
+          scope={scope}
+        />
+      );
+    }
+    if (activeKind === "todo") {
+      return (
+        <BestieDmTodosSheet
+          adding={adding}
+          onRequestAdd={() => setAdding(true)}
+          scope={scope}
+        />
+      );
+    }
     return (
       <BestieDmCategorySheet
         adding={adding}
@@ -150,13 +255,34 @@ export function useBestieDmChannelExtras(
         scope={scope}
       />
     );
-  }, [activeKind, adding, scope]);
+  }, [activeKind, adding, brewDisabled, coffeeLive, requestCoffeeBrew, scope, summarizeDisabled, summarizeLive, summarizeLiveThreadId]);
 
   const idleAuxiliaryHeaderActions =
     React.useMemo<IdleAuxiliaryHeaderControls | null>(() => {
       if (activeKind == null) return null;
-      const addLabel = activeKind === "reminder" ? "Add reminder" : "Add to-do";
+      const back = {
+        backLabel: "Back to Assistant list",
+        backVariant: "chip" as const,
+        onBack: () => {
+          setActiveKind(null);
+          setAdding(false);
+        },
+      };
+      if (activeKind === "coffee") {
+        return { ...back };
+      }
+      const addLabel =
+        activeKind === "reminder"
+          ? "Add reminder"
+          : activeKind === "todo"
+            ? "Add to-do"
+            : activeKind === "scratch"
+              ? "Add scratch note"
+              : activeKind === "thread"
+                ? "Add thread"
+                : "Add job";
       return {
+        ...back,
         actions: (
           <Tooltip disableHoverableContent>
             <TooltipTrigger asChild>
@@ -177,16 +303,11 @@ export function useBestieDmChannelExtras(
             <TooltipContent>{addLabel}</TooltipContent>
           </Tooltip>
         ),
-        backLabel: "Back to Bestie list",
-        onBack: () => {
-          setActiveKind(null);
-          setAdding(false);
-        },
       };
     }, [activeKind, adding]);
 
   return React.useMemo(() => {
-    if (!enabled || !isBestieDm || !scope) {
+    if (!isBestieDm || !scope) {
       return {
         contextColumn: null,
         contextColumnOpen: false,
@@ -195,6 +316,9 @@ export function useBestieDmChannelExtras(
 
     const screenExtras: BestieChannelScreenExtras = {
       headerEndActions: headerToggle,
+      transformDisplayedMessageBody: stripBestieOutboundHints,
+      transformOutboundMessageContent: (content) =>
+        withBestieLiveListStateHint(content, scope),
     };
 
     // Slide only when drilling into a category — never for the category list.
@@ -216,7 +340,6 @@ export function useBestieDmChannelExtras(
   }, [
     activeKind,
     contextColumn,
-    enabled,
     headerToggle,
     idleAuxiliaryHeaderActions,
     idleAuxiliaryPanel,

@@ -1,4 +1,9 @@
-import type { BestieListAddInput, BestieListKind } from "./bestieListTypes";
+import type {
+  BestieListAddInput,
+  BestieListKind,
+  BestieReminderRepeat,
+} from "./bestieListTypes";
+import { crystallizeReminderText } from "./parseBestieUserListIntent";
 
 /**
  * Structured Bestie list mutations embedded in agent chat.
@@ -28,20 +33,50 @@ function isKind(value: unknown): value is BestieListKind {
   return value === "todo" || value === "reminder";
 }
 
-
-function coerceDueAt(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.floor(value);
-  }
-  if (typeof value === "string" && value.trim().length > 0) {
-    const asNumber = Number(value);
-    if (Number.isFinite(asNumber) && String(asNumber) === value.trim()) {
-      return Math.floor(asNumber);
-    }
-    const parsed = Date.parse(value);
-    if (Number.isFinite(parsed)) return Math.floor(parsed / 1000);
+function parseRepeat(value: unknown): BestieReminderRepeat | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (record.kind === "daily") return { kind: "daily" };
+  if (record.kind === "weekly") {
+    const weekday =
+      typeof record.weekday === "number" && Number.isFinite(record.weekday)
+        ? Math.floor(record.weekday)
+        : null;
+    if (weekday == null) return null;
+    return { kind: "weekly", weekday: ((weekday % 7) + 7) % 7 };
   }
   return null;
+}
+
+/**
+ * Normalize fence dueAt to unix **seconds** for storage.
+ *
+ * Teach agents unix **milliseconds** (Date.now()-style). On apply:
+ * - ms-scale (≥ 1e12) → divide to seconds
+ * - seconds-scale (< 1e12, e.g. 1790611740) → keep as seconds (coerce path
+ *   that used to store raw ms broke fire time vs nowSeconds)
+ * ISO strings parse to seconds.
+ */
+export function coerceDueAt(value: unknown): number | null {
+  let raw: number | null = null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    raw = value;
+  } else if (typeof value === "string" && value.trim().length > 0) {
+    const asNumber = Number(value);
+    if (Number.isFinite(asNumber) && String(asNumber) === value.trim()) {
+      raw = asNumber;
+    } else {
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) return Math.floor(parsed / 1000);
+    }
+  }
+  if (raw == null || !Number.isFinite(raw) || raw < 0) return null;
+  // Ms → seconds when agent followed "teach fence ms".
+  if (raw >= 1_000_000_000_000) {
+    return Math.floor(raw / 1000);
+  }
+  // Seconds (legacy / mistaken unit) — keep; do not *1000 into storage.
+  return Math.floor(raw);
 }
 
 function parseAddItems(value: unknown): BestieListAddInput[] {
@@ -51,12 +86,18 @@ function parseAddItems(value: unknown): BestieListAddInput[] {
     if (typeof entry !== "object" || entry === null) continue;
     const record = entry as Record<string, unknown>;
     if (!isKind(record.kind) || typeof record.text !== "string") continue;
-    const text = record.text.trim();
+    const rawText = record.text.trim();
+    if (!rawText) continue;
+    const text =
+      record.kind === "reminder"
+        ? crystallizeReminderText(rawText)
+        : rawText;
     if (!text) continue;
     const dueAt = coerceDueAt(record.dueAt);
     items.push({
       dueAt: record.kind === "reminder" ? dueAt : null,
       kind: record.kind,
+      repeat: record.kind === "reminder" ? parseRepeat(record.repeat) : null,
       text,
     });
   }

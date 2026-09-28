@@ -3671,9 +3671,7 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], None, Some("Fizz #buzz-dev",
-            None,
-        ), None)
+            .session_new_full("/tmp", vec![], None, Some("Fizz #buzz-dev"), None)
             .await
             .expect("session_new_full should succeed");
 

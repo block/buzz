@@ -72,7 +72,7 @@ export function assertArtifactContract({ ossOutput, internalOutput }) {
   const internalText = emittedText(internalOutput);
   const protectedContent = /\bbestie\b|chief of staff|builtin:bestie/iu;
   const internalManifestMarker =
-    "Try a personal agent that is always close at hand";
+    "Personal assistant always close at hand";
 
   if (protectedContent.test(ossText)) {
     throw new Error(

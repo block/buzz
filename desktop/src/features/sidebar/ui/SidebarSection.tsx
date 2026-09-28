@@ -10,7 +10,7 @@ import {
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
-import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { ChannelWorkingBadge } from "@/features/sidebar/ui/channelWorkingBadge";
 import { ChannelGlyph } from "@/features/channels/ui/ChannelGlyph";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { EphemeralChannelBadge } from "@/features/channels/ui/EphemeralChannelBadge";
@@ -24,7 +24,6 @@ import { cn } from "@/shared/lib/cn";
 import { useDraftsSnapshot } from "@/features/messages/lib/useDrafts";
 import { channelShowsDraftIndicator } from "@/features/sidebar/lib/channelDraftIndicator";
 import { useLocation } from "@tanstack/react-router";
-import { useNow } from "@/shared/lib/useNow";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -35,6 +34,9 @@ import {
 } from "@/shared/ui/sidebar";
 import { ChannelActivityPopover } from "@/features/sidebar/ui/ChannelActivityPopover";
 import { useAppShell } from "@/app/AppShellContext";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { useThreadStars } from "@/features/sidebar/lib/useThreadStars";
+import { shouldSuppressChannelActiveForStarredThread } from "@/features/sidebar/lib/starredThreadSidebar";
 import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
 
 const SECTION_LABEL_BUTTON_CLASS =
@@ -81,60 +83,6 @@ function UnreadCountBadge({
         {" "}
         unread notification{count === 1 ? "" : "s"}
       </span>
-    </span>
-  );
-}
-
-
-function formatAgentCount(count: number) {
-  return `${count} ${count === 1 ? "agent" : "agents"}`;
-}
-
-export function formatWorkingTooltip(
-  summary: ActiveChannelTurnSummary,
-): string {
-  const leadName = summary.agentNames?.[0];
-
-  if (!leadName) {
-    return `${formatAgentCount(summary.agentCount)} working`;
-  }
-
-  const remainingAgentCount = summary.agentCount - 1;
-  if (remainingAgentCount <= 0) {
-    return `${leadName} working`;
-  }
-
-  return `${leadName} and ${formatAgentCount(remainingAgentCount)} working`;
-}
-
-function ChannelWorkingBadge({
-  channelName,
-  isActive,
-  summary,
-}: {
-  channelName: string;
-  isActive: boolean;
-  summary: ActiveChannelTurnSummary;
-}) {
-  const now = useNow(1000);
-  const elapsed = formatElapsed(now - summary.anchorAt);
-  const label =
-    summary.agentCount > 1 ? `${elapsed} (${summary.agentCount})` : elapsed;
-  const title = formatWorkingTooltip(summary);
-
-  return (
-    <span
-      className={cn(
-        "max-w-32 shrink-0 truncate rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums motion-safe:animate-pulse group-data-[collapsible=icon]:hidden",
-        "hidden sm:inline-flex",
-        isActive
-          ? "bg-sidebar-active-foreground/20 text-sidebar-active-foreground"
-          : "bg-primary/10 text-primary",
-      )}
-      data-testid={`channel-working-${channelName}`}
-      title={title}
-    >
-      {label}
     </span>
   );
 }
@@ -266,6 +214,15 @@ export function ChannelMenuButton({
     const thread = search.threadRootId ?? search.thread;
     return typeof thread === "string" && thread.trim() ? thread.trim() : null;
   }, [location.search]);
+  const identityPubkey = useIdentityQuery().data?.pubkey;
+  const { isThreadStarred } = useThreadStars(identityPubkey);
+  const suppressActiveForStarredThread =
+    shouldSuppressChannelActiveForStarredThread({
+      isChannelActive: isActive,
+      selectedThreadRootId: selectedThreadId,
+      isThreadStarred,
+    });
+  const rowIsActive = isActive && !suppressActiveForStarredThread;
   const showDraftIndicator = channelShowsDraftIndicator(channel.id, {
     selectedChannelId: isActive ? channel.id : null,
     selectedThreadId: isActive ? selectedThreadId : null,
@@ -302,8 +259,8 @@ export function ChannelMenuButton({
     !isMuted &&
     sidebarUnreadBadgeCount === 0;
   const inactiveContentOpacity = cn(
-    !isActive && !emphasizeUnread && !isMuted && "opacity-80",
-    !isActive &&
+    !rowIsActive && !emphasizeUnread && !isMuted && "opacity-80",
+    !rowIsActive &&
       isMuted &&
       !emphasizeUnread &&
       "sidebar-muted-content opacity-50 dark:opacity-45",
@@ -313,7 +270,7 @@ export function ChannelMenuButton({
     <SidebarMenuButton
       className={cn(
         "data-[active=true]:font-normal",
-        isActive
+        rowIsActive
           ? "group-hover/menu-item:bg-sidebar-active group-hover/menu-item:text-sidebar-active-foreground"
           : "group-hover/menu-item:bg-sidebar-accent group-hover/menu-item:text-sidebar-foreground",
         emphasizeUnread &&
@@ -321,7 +278,7 @@ export function ChannelMenuButton({
       )}
       data-channel-id={channel.id}
       data-testid={`channel-${channel.name}`}
-      isActive={isActive}
+      isActive={rowIsActive}
       onClick={() => onSelectChannel(channel.id)}
       tooltip={resolvedLabel}
       type="button"
@@ -375,7 +332,7 @@ export function ChannelMenuButton({
       {activeWorking ? (
         <ChannelWorkingBadge
           channelName={channel.name}
-          isActive={isActive}
+          isActive={rowIsActive}
           summary={activeWorking}
         />
       ) : null}
@@ -383,7 +340,7 @@ export function ChannelMenuButton({
         <BellOff
           className={cn(
             "ml-auto h-4 w-4 shrink-0",
-            isActive
+            rowIsActive
               ? "text-sidebar-active-foreground/60"
               : "text-sidebar-foreground/40",
           )}
@@ -393,7 +350,7 @@ export function ChannelMenuButton({
         <span
           className={cn(
             "ml-auto shrink-0 rounded-full px-1.5 text-2xs tabular-nums",
-            isActive
+            rowIsActive
               ? "bg-sidebar-active-foreground/20 text-sidebar-active-foreground"
               : "bg-primary/15 text-primary",
           )}

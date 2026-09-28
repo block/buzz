@@ -16,7 +16,7 @@ import {
   selectInternalVariant,
 } from "../../scripts/build-protected-feature-artifacts.mjs";
 
-const INTERNAL_MARKER = "Try a personal agent that is always close at hand";
+const INTERNAL_MARKER = "Personal assistant always close at hand";
 
 function fakeBuilder(calls) {
   return ({ internal, output }) => {
@@ -57,11 +57,11 @@ describe("protected feature production artifact selection", () => {
       assert.deepEqual(internalCalls, [false, true]);
       assert.match(
         readFileSync(path.join(internalOutput, "index.js"), "utf8"),
-        /personal agent/u,
+        /Personal assistant/u,
       );
       assert.doesNotMatch(
         readFileSync(path.join(internalAlternate, "index.js"), "utf8"),
-        /personal agent/u,
+        /Personal assistant/u,
       );
 
       const ossOutput = path.join(root, "oss-dist");
@@ -82,11 +82,11 @@ describe("protected feature production artifact selection", () => {
       assert.deepEqual(ossCalls, [true, false]);
       assert.doesNotMatch(
         readFileSync(path.join(ossOutput, "index.js"), "utf8"),
-        /personal agent/u,
+        /Personal assistant/u,
       );
       assert.match(
         readFileSync(path.join(ossAlternate, "index.js"), "utf8"),
-        /personal agent/u,
+        /Personal assistant/u,
       );
     } finally {
       rmSync(root, { recursive: true, force: true });

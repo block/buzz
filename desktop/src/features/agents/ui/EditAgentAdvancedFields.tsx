@@ -49,8 +49,7 @@ export function EditAgentAdvancedFields({
   parallelism,
   provider,
   requiredEnvKeys,
-  catalogStatus = "ready",
-  selectedRuntime,
+    selectedRuntime,
   onAcpCommandChange,
   onAgentArgsChange,
   onEnvVarsChange,
@@ -113,14 +112,14 @@ export function EditAgentAdvancedFields({
     [acpCommand, acpCommandCandidates],
   );
 
-  // Numeric tuning descriptors — gate on catalog status so that loading/error
-  // never collapses to "no controls": keys stay visible as generic rows.
+  // Numeric tuning descriptors. Prefer structured controls whenever the
+  // selected runtime is known — do not wait for catalogStatus === "ready",
+  // which flickered the same model's knobs off during refetch/load. When the
+  // runtime is still unknown, descriptors stay empty and keys remain visible
+  // as generic env rows.
   const numericDescriptors = React.useMemo(
-    () =>
-      catalogStatus === "ready"
-        ? deriveNumericDescriptors(selectedRuntime)
-        : [],
-    [catalogStatus, selectedRuntime],
+    () => deriveNumericDescriptors(selectedRuntime),
+    [selectedRuntime],
   );
 
   // Build the effective hidden-key list: caller's secrets + effort key (when

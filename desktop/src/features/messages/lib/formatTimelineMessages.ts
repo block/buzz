@@ -503,7 +503,7 @@ export function formatTimelineMessages(
           ? respondToLookup?.get(authorPubkey.toLowerCase())
           : undefined,
       time: formatTime(event.created_at),
-      body: edit ? edit.content : event.content,
+      body: (edit ? edit.content : event.content) ?? "",
       parentId: thread.parentId,
       rootId: thread.rootId,
       depth: getDepth(event),

@@ -653,19 +653,20 @@ export function AgentConfigFields({
     apiKeyValidationRequired &&
     apiKeyCredentialPresent &&
     modelDiscoveryLoading;
-  const apiKeyValidationSucceeded =
-    !apiKeyValidationRequired ||
-    (apiKeyCredentialPresent &&
-      !modelDiscoveryLoading &&
-      discoveredModelOptions !== null);
   const apiKeyValidationFailed =
     apiKeyValidationRequired &&
     apiKeyCredentialPresent &&
     !modelDiscoveryLoading &&
     discoveredModelOptions === null &&
     modelDiscoveryStatus !== null;
+  // Show model + effort once a provider is chosen and discovery is not in
+  // flight. Do not require a successful catalog fetch — intermittent discovery
+  // failures previously hid effort/options for the same model that had just
+  // shown them. Failed validation still surfaces via apiKeyValidationFailed.
   const onboardingModelAndEffortVisible =
-    configuredProviderValue.trim().length > 0 && apiKeyValidationSucceeded;
+    configuredProviderValue.trim().length > 0 &&
+    (!apiKeyValidationRequired ||
+      (apiKeyCredentialPresent && !modelDiscoveryLoading));
 
   const progressiveDefaults = disclosure === "progressive-defaults";
   const fieldClassName = unstyled

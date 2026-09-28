@@ -672,7 +672,10 @@ pub fn spawn_agent_child(
     }
     let acp_n = super::acp_agents_value(effective_command, record.parallelism);
     command.env("BUZZ_ACP_AGENTS", acp_n);
-    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
+    // Queue mid-turn events (Assistant jobs/reminders + chat): finish the
+    // current thinking turn, then run the next as its own top-level turn.
+    // Steer would interrupt; Drop would lose due notifies.
+    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "queue");
     command.env("BUZZ_ACP_DEDUP", "queue");
     if let Some(meta) = runtime_meta {
         for (key, value) in meta.default_env {

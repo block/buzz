@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import {
+  BESTIE_POPOVER_SHORTCUT_EVENT,
   HUDDLE_SHORTCUT_EVENT,
   type HuddleShortcutDetail,
 } from "@/shared/lib/keyboard-shortcuts";
@@ -97,6 +98,15 @@ export function useAppShellKeyboardShortcuts({
       if (key === "a" && event.shiftKey) {
         event.preventDefault();
         void onGoHome();
+        return;
+      }
+
+      // ⌘B / Ctrl+B — Assistant popover toggle (window-level). Same chord as
+      // Bold in the message composer: TipTap handles that first and
+      // preventDefaults, so this only fires outside formatting focus.
+      if (key === "b" && !event.shiftKey) {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent(BESTIE_POPOVER_SHORTCUT_EVENT));
       }
     }
 

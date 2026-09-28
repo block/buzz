@@ -1,7 +1,9 @@
 import * as React from "react";
 
 import { useAppShell } from "@/app/AppShellContext";
+import { markHiddenDmFeedItems } from "@/features/channels/dmResurface";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { useHiddenDmIds } from "@/features/channels/useHiddenDmIds";
 import { useHomeFeedQuery } from "@/features/home/hooks";
 import { buildInboxItems } from "@/features/home/lib/inbox";
 import {
@@ -19,9 +21,9 @@ import { useIdentityQuery } from "@/shared/api/hooks";
  * `homeBadgeCount`, which only counts mentions/needsAction and is zeroed by
  * `homeBadgeEnabled` / seen-feed marking after visiting Home.
  *
- * Folds `threadActivityFeedItems` the same way HomeScreen does so live
- * non-mention thread replies update the badge without waiting for the home
- * feed poll.
+ * Folds `threadActivityFeedItems` and `markHiddenDmFeedItems` the same way
+ * HomeScreen does so live non-mention thread replies and hidden DMs update
+ * the badge to the same unread set Inbox shows.
  */
 export function useSidebarInboxUnreadCount(): number | undefined {
   const identityQuery = useIdentityQuery();
@@ -40,21 +42,27 @@ export function useSidebarInboxUnreadCount(): number | undefined {
     undefined,
     identityQuery.data?.pubkey,
   );
+  const hiddenDmIds = useHiddenDmIds(identityQuery.data?.pubkey);
 
+  // Same augmentation as HomeScreen: live thread activity + hidden-DM typing
+  // so the badge matches InboxListPane unread under the default All filter.
   const feed = React.useMemo((): HomeFeedResponse | undefined => {
     if (homeFeedQuery.data === undefined) return undefined;
-    if (threadActivityFeedItems.length === 0) return homeFeedQuery.data;
-    return {
-      ...homeFeedQuery.data,
-      feed: {
-        ...homeFeedQuery.data.feed,
-        activity: [
-          ...homeFeedQuery.data.feed.activity,
-          ...threadActivityFeedItems,
-        ],
-      },
-    };
-  }, [homeFeedQuery.data, threadActivityFeedItems]);
+    const withThreadActivity =
+      threadActivityFeedItems.length === 0
+        ? homeFeedQuery.data
+        : {
+            ...homeFeedQuery.data,
+            feed: {
+              ...homeFeedQuery.data.feed,
+              activity: [
+                ...homeFeedQuery.data.feed.activity,
+                ...threadActivityFeedItems,
+              ],
+            },
+          };
+    return markHiddenDmFeedItems(withThreadActivity, hiddenDmIds);
+  }, [hiddenDmIds, homeFeedQuery.data, threadActivityFeedItems]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates read lookups
   return React.useMemo(() => {

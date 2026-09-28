@@ -44,4 +44,14 @@ export type ChannelScreenProps = {
   targetSearchMessageId?: string;
   /** Search text to highlight within the opened result message. */
   targetSearchQuery?: string;
+  /**
+   * Optional Bestie/protected transform applied to composer content immediately
+   * before publish (e.g. live list-state turn hints). Display strip is separate.
+   */
+  transformOutboundMessageContent?: (content: string) => string;
+  /**
+   * Optional transform for timeline/thread message bodies before display
+   * (strip machine-facing turn hints from Bestie DM).
+   */
+  transformDisplayedMessageBody?: (body: string) => string;
 };

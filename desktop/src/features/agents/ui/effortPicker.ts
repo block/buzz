@@ -10,40 +10,68 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  */
 export const EFFORT_DEFAULT_DROPDOWN_VALUE = "__effort_default__";
 
+function humanizeEffortValue(value: string): string {
+  if (!value) return value;
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
 /**
  * Pure gating + option compute for the effort write control in the edit dialog.
  *
  * The picker is a LOCAL-only, Save-gated write control: the dialog embeds the
  * selection in the locked `update_managed_agent` payload (PR #4625), which the
  * Rust backend rejects for non-local backends (remote effort is set at deploy
- * time via `policy_env`). So the UI must not offer it for a provider backend,
- * and there's nothing to pick until the adapter has advertised a `thought_level`
- * config option (discovered from the running session — `effortConfigId` is
- * absent pre-first-session and for runtimes/models that don't support effort).
+ * time via `policy_env`). So the UI must not offer it for a provider backend.
  *
- * `visible` is the single gate the dialog renders on: local backend AND a
- * discovered `effortConfigId`.
+ * Visibility must NOT depend solely on a live session advertising
+ * `thought_level` (`effortConfigId`). That discovery is flaky for the same
+ * model (absent pre-first-session, while config surface loads, after idle
+ * teardown). When the session has not advertised yet, fall back to static
+ * capability / runtime-catalog values so effort stays available whenever the
+ * model or harness supports it.
+ *
+ * `visible` = local backend AND (session configId OR fallback values present).
  */
 export function effortPickerState({
   backend,
   effortConfigId,
   effortOptions,
   currentEffort,
+  fallbackEffortValues,
 }: {
   backend: ManagedAgentBackend;
   effortConfigId: string | undefined;
   effortOptions: readonly AcpConfigOptionValue[] | undefined;
   currentEffort: string | null;
+  /**
+   * Static effort values when the running session has not advertised options
+   * yet (model-capabilities projection and/or runtime `effortCanonicalValues`).
+   */
+  fallbackEffortValues?: readonly string[];
 }): {
   visible: boolean;
   options: PersonaDropdownOption[];
   selectValue: string;
 } {
-  const visible = backend.type === "local" && effortConfigId !== undefined;
+  const sessionOptions = effortOptions ?? [];
+  const fallback = (fallbackEffortValues ?? []).filter(
+    (value) => value.trim().length > 0,
+  );
+  const resolvedOptions: AcpConfigOptionValue[] =
+    sessionOptions.length > 0
+      ? [...sessionOptions]
+      : fallback.map((value) => ({
+          value,
+          displayName: humanizeEffortValue(value),
+        }));
+
+  const visible =
+    backend.type === "local" &&
+    (effortConfigId !== undefined || resolvedOptions.length > 0);
 
   const options: PersonaDropdownOption[] = [
     { label: "Adapter default", value: EFFORT_DEFAULT_DROPDOWN_VALUE },
-    ...(effortOptions ?? []).map((option) => ({
+    ...resolvedOptions.map((option) => ({
       label: option.displayName ?? option.value,
       value: option.value,
     })),
@@ -54,7 +82,7 @@ export function effortPickerState({
   const trimmed = currentEffort?.trim() ?? "";
   const selectValue =
     trimmed.length > 0 &&
-    (effortOptions ?? []).some((option) => option.value === trimmed)
+    resolvedOptions.some((option) => option.value === trimmed)
       ? trimmed
       : EFFORT_DEFAULT_DROPDOWN_VALUE;
 

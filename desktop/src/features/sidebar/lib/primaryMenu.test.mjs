@@ -7,32 +7,34 @@ import {
   primaryMenuLabels,
 } from "./primaryMenu.ts";
 
-test("primary menu places Browsers immediately before Agents", () => {
+test("primary menu order: Agents, Bots, then Browsers (Assistant is injected in chrome)", () => {
   assert.deepEqual(primaryMenuLabels(), [
     "Inbox",
     "Pulse",
     "Projects",
-    "Browsers",
     "Agents",
     "Bots",
+    "Browsers",
     "Workflows",
   ]);
-  assert.equal(primaryMenuItemAfter("browsers").id, "agents");
-  assert.equal(primaryMenuItemAfter("browsers").label, "Agents");
-  assert.equal(primaryMenuItemAfter("browsers").testId, "open-agents-view");
   assert.equal(primaryMenuItemAfter("agents").id, "bots");
+  assert.equal(primaryMenuItemAfter("bots").id, "browsers");
+  assert.equal(primaryMenuItemAfter("bots").label, "Browsers");
+  assert.equal(primaryMenuItemAfter("bots").testId, "open-browsers-view");
+  assert.equal(primaryMenuItemAfter("browsers").id, "workflows");
 
-  const browsersIndex = PRIMARY_MENU_ITEMS.findIndex(
-    (item) => item.id === "browsers",
-  );
   const agentsIndex = PRIMARY_MENU_ITEMS.findIndex(
     (item) => item.id === "agents",
   );
   const botsIndex = PRIMARY_MENU_ITEMS.findIndex((item) => item.id === "bots");
-  assert.equal(agentsIndex, browsersIndex + 1);
+  const browsersIndex = PRIMARY_MENU_ITEMS.findIndex(
+    (item) => item.id === "browsers",
+  );
   assert.equal(botsIndex, agentsIndex + 1);
+  assert.equal(browsersIndex, botsIndex + 1);
   assert.ok(
-    botsIndex < PRIMARY_MENU_ITEMS.findIndex((item) => item.id === "workflows"),
+    browsersIndex <
+      PRIMARY_MENU_ITEMS.findIndex((item) => item.id === "workflows"),
   );
 });
 

@@ -107,3 +107,30 @@ test("resolveInstanceSystemPromptUpdate mirrors synced definition writes", () =>
     "Unlinked",
   );
 });
+
+test("buildPersonaIdentityUpdate persists model/provider drafts", () => {
+  const p = persona();
+  const input = buildPersonaIdentityUpdate({
+    descriptionDraft: "Old description",
+    persona: p,
+    systemPromptDraft: "Old instructions",
+    modelDraft: "sonnet",
+    providerDraft: "anthropic",
+  });
+  assert.ok(input);
+  assert.equal(input.model, "sonnet");
+  assert.equal(input.provider, "anthropic");
+});
+
+test("buildPersonaIdentityUpdate null when model unchanged", () => {
+  const p = persona({ model: "opus" });
+  assert.equal(
+    buildPersonaIdentityUpdate({
+      descriptionDraft: "Old description",
+      persona: p,
+      systemPromptDraft: "Old instructions",
+      modelDraft: "opus",
+    }),
+    null,
+  );
+});

@@ -1657,7 +1657,9 @@ fn format_context_hints(
              Channel: {channel_display}\n\
              {ctx_hint}"
         );
-        // If this is a DM reply, include thread structural info as supplementary.
+        // Threaded DM: surface root/parent. Top-level DM (Bestie session root /
+        // first Assistant DM turn): still parent the agent reply to this user
+        // message so the first reply stays in-thread like popover single-thread.
         if let Some(ref root) = thread_tags.root_event_id {
             s.push_str(&format!("\nThread root: {root}"));
             if let Some(ref parent) = thread_tags.parent_event_id {
@@ -1665,9 +1667,9 @@ fn format_context_hints(
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = reply_anchor {
-                append_reply_instruction(&mut s, event_id);
-            }
+        }
+        if let Some(event_id) = reply_anchor {
+            append_reply_instruction(&mut s, event_id);
         }
         crate::prompt_framing::semantic_section("context", &s)
     } else if let Some(root) = scope
@@ -2042,13 +2044,18 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // there. DMs are always 1:1 with a human, so they always anchor —
+    // including the first top-level Assistant/Bestie DM turn (session root).
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        // Prefer thread root when present (Bestie single-thread / flat layer 1);
+        // otherwise the triggering top-level message becomes the session root.
+        Some(
+            thread_tags
+                .root_event_id
+                .clone()
+                .unwrap_or_else(|| last_event.event.id.to_hex()),
+        )
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -4149,17 +4156,20 @@ mod tests {
                             prompt.contains("This is a new top-level message"),
                             !is_dm && !is_reply
                         );
-                        if !is_dm || is_reply {
-                            let anchor = if is_dm {
-                                reply.id.to_hex()
-                            } else if is_reply {
-                                root.to_uppercase()
-                            } else {
-                                root.clone()
-                            };
-                            assert!(prompt.contains(&format!("--reply-to {anchor}")));
+                        // Human-facing turns always get a --reply-to anchor:
+                        // channel top-level opens a thread; DM top-level parents
+                        // to the user root (Bestie sessionRootId); replies stay
+                        // flat at the thread/session root.
+                        let anchor = if is_reply {
+                            root.to_uppercase()
                         } else {
-                            assert!(!prompt.contains("--reply-to"));
+                            root.clone()
+                        };
+                        assert!(
+                            prompt.contains(&format!("--reply-to {anchor}")),
+                            "expected --reply-to {anchor} (is_dm={is_dm}, is_reply={is_reply})"
+                        );
+                        if is_dm && !is_reply {
                             assert!(prompt.contains("buzz messages get"));
                         }
                     }
@@ -5381,9 +5391,8 @@ mod tests {
         let root_id = "b".repeat(64);
         let event = make_event_with_tags(
             "thanks",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             scope: conv(ch),
@@ -5411,8 +5420,8 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "DM thread reply should include reply instruction"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "DM thread reply should --reply-to the session/thread root (Bestie single-thread)"
         );
     }
 
@@ -5448,9 +5457,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_absent_for_dm_non_reply() {
+    fn test_reply_instruction_present_for_dm_top_level() {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             scope: conv(ch),
@@ -5478,8 +5488,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "top-level Assistant DM / Bestie session root must parent the first agent reply to the user message"
+        );
+        assert!(
+            !prompt.contains("new top-level message"),
+            "DM top-level uses the ordinary reply instruction, not the channel new-thread copy"
         );
     }
 

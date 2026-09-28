@@ -138,7 +138,7 @@ function feedHeadline(item: FeedItem, groupItems: readonly FeedItem[] = []) {
   if (isProjectInboxItem(item)) {
     const root = projectRootItem(item, groupItems);
     return (
-      (tagValue(root, "subject") ?? root.content.trim().split("\n")[0]) ||
+      (tagValue(root, "subject") ?? (root.content ?? "").trim().split("\n")[0]) ||
       projectTypeLabel(root)
     );
   }
@@ -178,7 +178,7 @@ function feedHeadline(item: FeedItem, groupItems: readonly FeedItem[] = []) {
 }
 
 function feedPreview(item: FeedItem) {
-  const content = item.content.trim();
+  const content = (item.content ?? "").trim();
   if (content.length > 0) {
     return content;
   }

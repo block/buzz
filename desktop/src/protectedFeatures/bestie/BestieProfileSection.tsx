@@ -31,7 +31,7 @@ export function BestieProfileAction({ agent }: { agent: ManagedAgent }) {
     }
     void bestie.clearAssignment().catch((error) => {
       toast.error(
-        error instanceof Error ? error.message : "Couldn’t update Bestie",
+        error instanceof Error ? error.message : "Couldn’t update Assistant",
       );
     });
   };
@@ -44,14 +44,14 @@ export function BestieProfileAction({ agent }: { agent: ManagedAgent }) {
         iconClassName={
           isBestie ? "h-4 w-4 shrink-0 fill-current text-foreground" : undefined
         }
-        label={isBestie ? "Remove Bestie" : "Make Bestie"}
+        label={isBestie ? "Remove Assistant" : "Make Assistant"}
         onClick={handleClick}
         testId="user-profile-bestie-action"
       />
       <AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
         <AlertDialogContent data-testid="bestie-confirm-dialog">
           <AlertDialogHeader>
-            <AlertDialogTitle>Make {agent.name} your Bestie?</AlertDialogTitle>
+            <AlertDialogTitle>Make {agent.name} your Assistant?</AlertDialogTitle>
             <AlertDialogDescription>
               {bestie.assignedAgent && !isBestie
                 ? `${agent.name} will replace ${bestie.assignedAgent.name} in the floating shortcut and message actions.`
@@ -71,12 +71,12 @@ export function BestieProfileAction({ agent }: { agent: ManagedAgent }) {
                     toast.error(
                       error instanceof Error
                         ? error.message
-                        : "Couldn’t update Bestie",
+                        : "Couldn’t update Assistant",
                     );
                   });
               }}
             >
-              {isPending ? "Saving…" : "Make Bestie"}
+              {isPending ? "Saving…" : "Make Assistant"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

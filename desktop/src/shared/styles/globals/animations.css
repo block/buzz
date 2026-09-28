@@ -930,3 +930,33 @@
     animation: none;
   }
 }
+
+/* Bestie footer avatar — throbbing light ring for unread agent DM replies. */
+@keyframes bestie-unread-ring-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0
+      color-mix(in oklab, var(--color-primary, #6366f1) 55%, transparent);
+    opacity: 0.95;
+  }
+  50% {
+    box-shadow: 0 0 0 6px
+      color-mix(in oklab, var(--color-primary, #6366f1) 0%, transparent);
+    opacity: 0.35;
+  }
+}
+
+.bestie-unread-ring {
+  border: 2px solid
+    color-mix(in oklab, var(--color-primary, #6366f1) 80%, white);
+  animation: bestie-unread-ring-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bestie-unread-ring {
+    animation: none;
+    opacity: 1;
+    box-shadow: 0 0 0 2px
+      color-mix(in oklab, var(--color-primary, #6366f1) 50%, transparent);
+  }
+}

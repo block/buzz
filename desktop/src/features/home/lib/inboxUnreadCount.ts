@@ -68,8 +68,8 @@ export function countUnreadInboxItems(
 }
 
 /**
- * Sidebar Inbox badge source: default Inbox "all" filter rows that are still
- * unread under the same done-set projection as InboxListPane.
+ * Sidebar Inbox badge source: Inbox "all" filter rows that are still unread
+ * under the same done-set projection as InboxListPane (Unread default view).
  */
 export function deriveSidebarInboxUnreadCount(input: {
   items: readonly InboxItem[];

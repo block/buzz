@@ -1,4 +1,4 @@
-import * as React from "react";
+import type * as React from "react";
 
 import { ProjectContextRail } from "@/features/projects/ui/ProjectContextRail";
 import { ProjectHomeColumn } from "@/features/projects/ui/ProjectHomeColumn";
