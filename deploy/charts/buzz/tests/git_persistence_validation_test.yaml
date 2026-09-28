@@ -1,0 +1,17 @@
+suite: Git scratch persistence validation
+templates:
+  - templates/pvc-git.yaml
+tests:
+  - it: rejects multiple replicas sharing one chart-managed single-writer claim
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      replicaCount: 3
+      persistence.git.enabled: true
+      persistence.git.accessMode: ReadWriteOnce
+    asserts:
+      - failedTemplate:
+          errorPattern: "multiple replicas cannot share one ReadWriteOnce Git scratch claim"

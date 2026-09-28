@@ -37,6 +37,23 @@ tests:
           path: metadata.annotations["helm.sh/hook"]
         template: templates/quickstart-minio-init.yaml
 
+  - it: applies the configured storage class to bundled MinIO
+    release:
+      name: rel
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      postgresql.enabled: true
+      redis.enabled: true
+      minio.enabled: true
+      minio.persistence.storageClass: fast-block
+    asserts:
+      - equal:
+          path: spec.storageClassName
+          value: fast-block
+        template: templates/quickstart-minio.yaml
+        documentIndex: 2
+
   - it: relay S3 endpoint resolves to the bundled MinIO Service
     release:
       name: rel

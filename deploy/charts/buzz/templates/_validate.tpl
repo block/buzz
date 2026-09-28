@@ -16,22 +16,25 @@ surface at template time regardless of which manifest helm renders first.
   {{- if and (not .Values.redis.enabled) (not .Values.externalRedis.url) (not .Values.secrets.existingSecret) -}}
     {{- fail (printf "minimum replica count %d requires Redis for buzz-pubsub. Enable redis.enabled=true, set externalRedis.url, or provide secrets.existingSecret with key REDIS_URL." $minimumReplicas) -}}
   {{- end -}}
+  {{- if and .Values.persistence.git.enabled (or (eq .Values.persistence.git.accessMode "ReadWriteOnce") (eq .Values.persistence.git.accessMode "ReadWriteOncePod")) -}}
+    {{- fail (printf "minimum replica count %d: multiple replicas cannot share one %s Git scratch claim. Set persistence.git.enabled=false for a per-pod emptyDir, or use a multi-writer claim." $minimumReplicas .Values.persistence.git.accessMode) -}}
+  {{- end -}}
 {{- end -}}
 
-{{/* Multiple replicas do NOT require ReadWriteMany git storage.
+{{/* Multiple replicas do NOT require persistent or ReadWriteMany git storage.
 
      Git ref/object state is object-store-backed: every read and write hydrates
      an ephemeral bare repo from S3-compatible storage per request, and writer
      serialization is the object-store pointer CAS
      (docs/git-on-object-storage.md, Inv_NoFork). No persistent git state lives
-     on the PVC, so replicas do not need a shared ReadWriteMany volume to agree
-     on refs. Repo-name uniqueness — the last shared-state need — now lives in
-     Postgres (git_repo_names), not on local disk.
+     on the PVC, so the recommended HA configuration gives every replica an
+     independent emptyDir. Repo-name uniqueness — the last shared-state need —
+     now lives in Postgres (git_repo_names), not on local disk.
 
      The prior hard-fail requiring persistence.git.accessMode=ReadWriteMany was
      removed here: its stated reason ("git on-disk state must be shared across
-     replicas") is no longer true. Redis (validated above) remains the real
-     multi-pod requirement for buzz-pubsub. */}}
+     replicas") is no longer true. The guard above rejects one chart-managed
+     single-writer claim shared by every Deployment replica. */}}
 
 {{/* Autoscaling bounds must be coherent. */}}
 {{- if .Values.autoscaling.enabled -}}

@@ -1,4 +1,4 @@
-# HA shape: replicas=3 + Redis + RWO git (object-store-backed; no RWM). Render-only check.
+# HA shape: replicas=3 + Redis + per-pod Git scratch space. Render-only check.
 relayUrl: wss://buzz.example.com
 ownerPubkey: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 replicaCount: 3
@@ -12,8 +12,7 @@ s3:
   bucket: "buzz-media"
 persistence:
   git:
-    enabled: true
-    accessMode: ReadWriteOnce
+    enabled: false
     size: 50Gi
 podDisruptionBudget:
   enabled: true
