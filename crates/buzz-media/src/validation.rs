@@ -299,11 +299,6 @@ pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, Me
 ///
 /// Returns [`VideoMeta`] on success.
 pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMeta, MediaError> {
-    // --- moov-before-mdat check (raw byte scan) ---
-    // We scan the top-level atom sequence before handing off to the mp4 crate,
-    // because the mp4 crate parses the whole file regardless of atom order.
-    check_moov_before_mdat(path)?;
-
     let file = std::fs::File::open(path).map_err(|e| MediaError::Io(e.to_string()))?;
     let size = file
         .metadata()
@@ -318,8 +313,6 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
         });
     }
 
-    validate_mp4_metadata_free(path)?;
-
     let reader = BufReader::new(file);
     let mp4 = mp4::Mp4Reader::read_header(reader, size).map_err(|_| MediaError::InvalidVideo)?;
 
@@ -331,6 +324,41 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
     if *brand == qt_brand {
         return Err(MediaError::UnsupportedContainer);
     }
+
+    // --- Classification ---
+    // What the container actually holds is decided from its parsed track
+    // types, never from the ftyp brand. `M4A `/`M4B ` are registered as iTunes
+    // MPEG-4 *audio* brands but are permitted to carry video, chapter and text
+    // tracks too, so the brand cannot answer this question — an `M4A `-branded
+    // file with a real video track is a video and is validated as one.
+    //
+    // This runs before the fast-start and metadata-free checks because both are
+    // video-only requirements. An audio-only container fails moov-before-mdat
+    // whenever it was not written fast-start — which a Voice Memo never is —
+    // and the resulting "moov atom not at front of file" says nothing about the
+    // real problem, which is that audio uploads are not supported at all.
+    let mut has_video = false;
+    let mut has_audio_track = false;
+    for track in mp4.tracks().values() {
+        match track.track_type().map_err(|_| MediaError::InvalidVideo)? {
+            mp4::TrackType::Video => has_video = true,
+            mp4::TrackType::Audio => has_audio_track = true,
+            _ => {}
+        }
+    }
+    if !has_video {
+        return Err(if has_audio_track {
+            MediaError::DisallowedContentType("audio/mp4".to_string())
+        } else {
+            MediaError::InvalidVideo
+        });
+    }
+
+    // --- Video-only requirements ---
+    // The moov scan reads the top-level atom sequence directly, because the mp4
+    // crate parses the whole file regardless of atom order.
+    check_moov_before_mdat(path)?;
+    validate_mp4_metadata_free(path)?;
 
     // --- Track inspection ---
     let mut video_meta: Option<VideoMeta> = None;
@@ -405,13 +433,9 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
         }
     }
 
-    let mut meta = video_meta.ok_or_else(|| {
-        if has_audio {
-            MediaError::DisallowedContentType("audio/mp4".to_string())
-        } else {
-            MediaError::InvalidVideo
-        }
-    })?;
+    // Classification above already established there is a video track, so this
+    // is unreachable in practice; it stays as a total match rather than a panic.
+    let mut meta = video_meta.ok_or(MediaError::InvalidVideo)?;
     meta.has_audio = has_audio;
     Ok(meta)
 }
@@ -1694,6 +1718,61 @@ mod tests {
         build_mp4_bytes(true, b"avc1", 1_000, 320, 240, true)
     }
 
+    /// Overwrite the ftyp major brand of an MP4 built by `build_mp4_bytes`.
+    fn with_major_brand(mut bytes: Vec<u8>, brand: &[u8; 4]) -> Vec<u8> {
+        bytes[8..12].copy_from_slice(brand);
+        bytes
+    }
+
+    /// Build an audio-only MP4: one AAC track, no video track.
+    ///
+    /// `fast_start == false` reproduces an Apple Voice Memo, which writes mdat
+    /// before moov.
+    fn build_audio_only_mp4(fast_start: bool) -> Vec<u8> {
+        let timescale: u32 = 1000;
+        let duration: u32 = 1_000;
+
+        let ftyp = {
+            let mut b = Vec::new();
+            b.extend_from_slice(&20u32.to_be_bytes());
+            b.extend_from_slice(b"ftyp");
+            b.extend_from_slice(b"M4A ");
+            b.extend_from_slice(&0u32.to_be_bytes());
+            b.extend_from_slice(b"isom");
+            b
+        };
+        let mdat = {
+            let mut b = Vec::new();
+            b.extend_from_slice(&8u32.to_be_bytes());
+            b.extend_from_slice(b"mdat");
+            b
+        };
+
+        // Same mvhd as build_moov, then an audio trak and nothing else.
+        let full = build_mp4_bytes(true, b"avc1", duration, 320, 240, false);
+        let mvhd = {
+            const FTYP_SIZE: usize = 20;
+            let moov_start = FTYP_SIZE + 8;
+            let mvhd_size =
+                u32::from_be_bytes(full[moov_start..moov_start + 4].try_into().unwrap()) as usize;
+            full[moov_start..moov_start + mvhd_size].to_vec()
+        };
+
+        let mut moov_payload = mvhd;
+        moov_payload.extend_from_slice(&build_audio_trak(1, duration, timescale));
+        let moov = box_wrap(b"moov", &moov_payload);
+
+        let mut out = ftyp;
+        if fast_start {
+            out.extend_from_slice(&moov);
+            out.extend_from_slice(&mdat);
+        } else {
+            out.extend_from_slice(&mdat);
+            out.extend_from_slice(&moov);
+        }
+        out
+    }
+
     /// Insert a child box at the end of the top-level `moov` box.
     fn append_box_to_moov(mut bytes: Vec<u8>, child: &[u8]) -> Vec<u8> {
         const FTYP_SIZE: usize = 20;
@@ -2334,6 +2413,61 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &mp4_bytes).unwrap();
         assert!(validate_video_file(tmp.path(), &test_config()).is_ok());
+    }
+
+    #[test]
+    fn an_audio_only_container_is_reported_as_audio_not_as_a_moov_problem() {
+        // An Apple Voice Memo: one AAC track, no video, and mdat before moov
+        // because it was never written fast-start. The fast-start check used to
+        // run first and answered "moov atom not at front of file" — a detail
+        // about a requirement that does not apply to a file with no video in
+        // it. Classifying from the parsed tracks first gives the real answer.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), build_audio_only_mp4(false)).unwrap();
+        assert!(
+            matches!(
+                validate_video_file(tmp.path(), &test_config()),
+                Err(MediaError::DisallowedContentType(ref m)) if m == "audio/mp4"
+            ),
+            "got {:?}",
+            validate_video_file(tmp.path(), &test_config())
+        );
+    }
+
+    #[test]
+    fn a_fast_start_audio_only_container_is_also_reported_as_audio() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), build_audio_only_mp4(true)).unwrap();
+        assert!(matches!(
+            validate_video_file(tmp.path(), &test_config()),
+            Err(MediaError::DisallowedContentType(ref m)) if m == "audio/mp4"
+        ));
+    }
+
+    #[test]
+    fn an_audio_branded_file_that_holds_video_is_still_accepted() {
+        // MP4RA registers `M4A ` as an iTunes audio brand, but the brand is a
+        // compatibility declaration and does not forbid a video track. Rejecting
+        // on the brand would throw away a valid video.
+        let bytes = with_major_brand(build_minimal_mp4_moov_first(), b"M4A ");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), bytes).unwrap();
+        let meta = validate_video_file(tmp.path(), &test_config())
+            .expect("an M4A-branded file with a video track is a video");
+        assert_eq!((meta.width, meta.height), (320, 240));
+    }
+
+    #[test]
+    fn an_audio_branded_file_that_holds_video_still_needs_fast_start() {
+        // The video-only requirements are not skipped for such a file — they
+        // are only deferred until the tracks say it is a video.
+        let bytes = with_major_brand(build_minimal_mp4_mdat_first(), b"M4A ");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), bytes).unwrap();
+        assert!(matches!(
+            validate_video_file(tmp.path(), &test_config()),
+            Err(MediaError::MoovNotAtFront)
+        ));
     }
 
     #[test]
