@@ -153,6 +153,7 @@ fn die(msg: String) -> ! {
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    sandbox_runtime::initialize()?;
     let args: Vec<String> = std::env::args().collect();
     if matches!(args.get(1).map(String::as_str), Some("auth")) {
         return tokio::runtime::Builder::new_multi_thread()

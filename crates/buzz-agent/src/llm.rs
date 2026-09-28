@@ -2096,6 +2096,9 @@ pub(crate) fn databricks_pkce_config(
 ///   discovery URL. First request without a cached token triggers a browser
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
+    if let Some(source) = crate::sandbox_runtime::token_source(cfg)? {
+        return Ok(source);
+    }
     match cfg.provider {
         Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
