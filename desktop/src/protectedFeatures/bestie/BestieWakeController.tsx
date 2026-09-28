@@ -264,11 +264,14 @@ export function BestieWakeController() {
           return;
         }
       }
+      // Narrow after brew/scheduled guards (tsc does not merge branch proofs).
+      if (!pending) return;
+      const run = pending;
       // Trigger already posted for this run — never send another [Bestie coffee].
-      if (pending.triggerMessageId) {
+      if (run.triggerMessageId) {
         console.info("[bestie-coffee] skip re-send; trigger already posted", {
           source,
-          triggerMessageId: pending.triggerMessageId,
+          triggerMessageId: run.triggerMessageId,
         });
         return;
       }
@@ -280,7 +283,7 @@ export function BestieWakeController() {
           path,
           source,
           detail: {
-            startedAt: pending.startedAt,
+            startedAt: run.startedAt,
             dayKeyClaimed:
               source === "scheduled"
                 ? getBestieCoffeeState(listScope).lastScheduledDayKey

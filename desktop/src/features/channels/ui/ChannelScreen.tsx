@@ -750,9 +750,11 @@ export function ChannelScreen({
   }, [threadPanelData.messages, transformDisplayedMessageBody]);
   const displayedThreadMessages = React.useMemo(() => {
     if (!transformDisplayedMessageBody) return threadPanelData.visibleReplies;
-    return threadPanelData.visibleReplies.map((message) => {
-      const body = transformDisplayedMessageBody(message.body ?? "");
-      return body === message.body ? message : { ...message, body };
+    return threadPanelData.visibleReplies.map((entry) => {
+      const body = transformDisplayedMessageBody(entry.message.body ?? "");
+      return body === entry.message.body
+        ? entry
+        : { ...entry, message: { ...entry.message, body } };
     });
   }, [threadPanelData.visibleReplies, transformDisplayedMessageBody]);
   const displayedThreadReplyTargetMessage = mapDisplayedBody(
