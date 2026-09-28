@@ -311,6 +311,72 @@ volumes, and each init container must define an appropriate security context
 and resources. Empty `relay.command` and `relay.args` arrays preserve the image
 defaults; non-empty values override its entrypoint and arguments respectively.
 
+## Storage accounting worker
+
+`storageAccounting.enabled=true` adds a CronJob that runs
+`buzz-admin storage-snapshot` against the relay's S3 bucket and writes a
+durable snapshot row, keeping the expensive object walk off the relay Pods.
+
+### Snapshot identity contract
+
+Every snapshot row records the code that produced it in `code_sha`, taken from
+the `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` environment variable the chart derives
+from the deployed image identity (`image.digest` when set, otherwise
+`image.tag`, otherwise `Chart.AppVersion`).
+
+The Pod's Datadog version tag is derived from that **same** image identity, so
+the version a snapshot reports to telemetry can never disagree with the version
+recorded in the database:
+
+```yaml
+storageAccounting:
+  enabled: true
+  podLabels:
+    tags.datadoghq.com/env: production
+    tags.datadoghq.com/service: buzz-storage-accounting
+    # tags.datadoghq.com/version: NOT set here — the chart owns it.
+```
+
+Precedence is explicit: `tags.datadoghq.com/version` is chart-owned and always
+renders from the image identity, so a value supplied under
+`storageAccounting.podLabels` for that one key is ignored. Every other label —
+including `tags.datadoghq.com/env` and `tags.datadoghq.com/service`, which
+describe the deployment rather than the image — passes through unchanged.
+Remove any wrapper-maintained `tags.datadoghq.com/version` pin when upgrading;
+leaving it in place is harmless but dead.
+
+A Kubernetes label value is capped at 63 bytes, must begin and end with an
+alphanumeric, and may otherwise contain only `[-._a-zA-Z0-9]` — a far narrower
+grammar than an OCI tag. `image.tag` is deliberately left unconstrained, so the
+label is derived through a total mapping rather than a check that could reject
+a tag the chart used to accept:
+
+| Revision | Label |
+|---|---|
+| `sha256:<64 hex>` digest | the hex without `sha256:`, first 63 characters |
+| already a valid label value, and not exactly 63 lowercase hex characters | emitted byte for byte (e.g. `1.2.3-rc.4`) |
+| anything else | the first 63 hex characters of the revision's SHA-256 |
+
+Exactly 63 lowercase hex characters is a **reserved shape** — it is what the
+first and third rows emit, so the passthrough row must not be able to emit it
+too. A tag of that shape is hashed rather than preserved. Shorter hex tags and
+ordinary 40-character git SHAs are unaffected.
+
+Arbitrary OCI revisions outnumber 63-byte label values, so **no mapping onto
+this grammar can be injective** and the chart does not claim one. What it does
+claim is collision *resistance*: every case retains 252 bits of SHA-256, the
+same margin the digest case has always relied on, and the reserved shape keeps
+that margin across cases rather than only within one. Two earlier iterations
+fell short of this — one kept a readable prefix with only 40 bits of hash (a
+colliding tag pair was brute-forced in about a second), and one let a
+passthrough tag reproduce a hashed label with no hash work at all, by copying a
+rendered label into `image.tag`.
+
+`BUZZ_STORAGE_SNAPSHOT_CODE_SHA` is never hashed or sanitized: it always
+carries the exact revision, so the snapshot row stays the precise record while
+the label is the joinable telemetry key. The image reference in the Pod spec is
+exact too. See `docs/deployment-identity.md`.
+
 ## Device pairing relay
 
 The chart can run Buzz's stateless pairing WebSocket relay as an independent
