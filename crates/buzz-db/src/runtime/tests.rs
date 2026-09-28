@@ -638,6 +638,26 @@ async fn migration_schema_database_guard_covers_legacy_writer_and_nip09_deletion
     assert_eq!(watermark.1, c.id.as_bytes().as_slice());
 }
 
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_operator_listener_outbox_is_not_tenant_scoped() {
+    let db = setup_db().await;
+    let community = CommunityId::from_uuid(make_community(&db.pool).await);
+    let inventory = db
+        .deletion_store()
+        .inventory_schema(community)
+        .await
+        .expect("migrated deletion catalog should validate");
+
+    assert!(
+        !inventory
+            .scoped_tables
+            .iter()
+            .any(|table| table == "operator_listener_outbox"),
+        "operator-listener outbox is deployment-global, not tenant-scoped"
+    );
+}
+
 // ---- Read-replica routing ------------------------------------------------
 //
 // These tests pin the routing contract of `Db::read()` and the two routed

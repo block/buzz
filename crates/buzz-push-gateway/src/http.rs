@@ -5,14 +5,17 @@ use crate::{
     authority::{
         AuthorityError, AuthorityStore, Challenge, Delegation, DeliveryDisposition, NewInstallation,
     },
-    config::GatewayUrls,
+    config::{
+        DELEGATE_AUDIENCE, ENROLL_AUDIENCE, REVOKE_DELEGATION_AUDIENCE,
+        REVOKE_INSTALLATION_AUDIENCE, ROTATE_ENDPOINT_AUDIENCE,
+    },
     grant::GrantKeyring,
     model::*,
     token::TokenKeyring,
 };
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{OriginalUri, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -21,7 +24,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use nostr::{
     nips::nip98::{verify_auth_header, HttpMethod},
-    Event, JsonUtil, Timestamp,
+    Event, JsonUtil, TagKind, TagStandard, Timestamp,
 };
 use std::{
     sync::{
@@ -47,8 +50,6 @@ pub struct AppState {
     /// Server-owned dogfood application identity and APNs transport. The wire
     /// profile selector is fixed and App Attest verifies the configured app ID.
     pub profile: Arc<ProfileRuntime>,
-    /// Security-sensitive endpoints and audiences derived from one gateway origin.
-    pub gateway_urls: Arc<GatewayUrls>,
     pub max_grant_lifetime_seconds: i64,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
@@ -71,14 +72,46 @@ fn valid_relay_pubkey(v: &str) -> bool {
         && v.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn auth_event_id(header: &str) -> Option<String> {
+pub(crate) const DELIVERY_PATH: &str = "/v1/deliveries/apns";
+
+// Keep preliminary decoding bounded to the pinned nostr verifier's limits.
+fn delivery_auth(header: &str, body: &[u8]) -> Option<(String, String)> {
     let (prefix, encoded) = header.split_once(' ')?;
-    if prefix != "Nostr" {
+    const MAX_EVENT_BYTES: usize = 64 * 1024;
+    const MAX_ENCODED_BYTES: usize = MAX_EVENT_BYTES.div_ceil(3) * 4;
+    if prefix != "Nostr" || encoded.len() > MAX_ENCODED_BYTES {
         return None;
     }
-    Event::from_json(STANDARD.decode(encoded).ok()?)
-        .ok()
-        .map(|e| e.id.to_hex())
+    let decoded = STANDARD.decode(encoded).ok()?;
+    if decoded.len() > MAX_EVENT_BYTES {
+        return None;
+    }
+    let event = Event::from_json(decoded).ok()?;
+    let signed_url = match event.tags.find_standardized(TagKind::u())? {
+        TagStandard::AbsoluteURL(url) => url,
+        _ => return None,
+    };
+    if !matches!(signed_url.scheme(), "http" | "https")
+        || signed_url.path() != DELIVERY_PATH
+        || signed_url.query().is_some()
+        || signed_url.fragment().is_some()
+        || !signed_url.username().is_empty()
+        || signed_url.password().is_some()
+    {
+        return None;
+    }
+    // This delivery profile binds method and path, not request origin. Passing
+    // the validated signed URL retains the library's kind, method, timestamp,
+    // body hash, event ID and signature checks without reconstructing a URL.
+    let relay = verify_auth_header(
+        header,
+        signed_url,
+        HttpMethod::POST,
+        Timestamp::now(),
+        Some(body),
+    )
+    .ok()?;
+    Some((event.id.to_hex(), relay.to_hex()))
 }
 
 fn decode_challenge(value: &str) -> Option<[u8; 32]> {
@@ -192,7 +225,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
     };
     let t = EnrollTranscript {
         v: r.v,
-        audience: &s.gateway_urls.enroll_audience,
+        audience: ENROLL_AUDIENCE,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         key_id: &r.key_id,
@@ -366,7 +399,7 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
     }
     let t = DelegateTranscript {
         v: r.v,
-        audience: &s.gateway_urls.delegate_audience,
+        audience: DELEGATE_AUDIENCE,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -463,7 +496,7 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
     };
     let t = RotateTranscript {
         v: r.v,
-        audience: &s.gateway_urls.rotate_endpoint_audience,
+        audience: ROTATE_ENDPOINT_AUDIENCE,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -526,7 +559,7 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
     }
     let t = RevokeDelegationTranscript {
         v: r.v,
-        audience: &s.gateway_urls.revoke_delegation_audience,
+        audience: REVOKE_DELEGATION_AUDIENCE,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -581,7 +614,7 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
     }
     let t = RevokeInstallationTranscript {
         v: r.v,
-        audience: &s.gateway_urls.revoke_installation_audience,
+        audience: REVOKE_INSTALLATION_AUDIENCE,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -618,7 +651,12 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
     }
 }
 
-async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn deliver(
+    State(s): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let r: DeliveryRequest = match crate::strict_json::from_slice(&body) {
         Ok(x) => x,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
@@ -633,19 +671,12 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         Some(x) => x,
         None => return error(StatusCode::UNAUTHORIZED, "invalid_auth"),
     };
-    let event_id = match auth_event_id(auth) {
-        Some(x) => x,
+    if uri.query().is_some() {
+        return error(StatusCode::UNAUTHORIZED, "invalid_auth");
+    }
+    let (event_id, relay) = match delivery_auth(auth, &body) {
+        Some(auth) => auth,
         None => return error(StatusCode::UNAUTHORIZED, "invalid_auth"),
-    };
-    let relay = match verify_auth_header(
-        auth,
-        &s.gateway_urls.delivery,
-        HttpMethod::POST,
-        Timestamp::now(),
-        Some(&body),
-    ) {
-        Ok(x) => x.to_hex(),
-        Err(_) => return error(StatusCode::UNAUTHORIZED, "invalid_auth"),
     };
     let grant = match s.grant_keyring.open(&r.endpoint_grant) {
         Ok(x) => x,
@@ -828,7 +859,7 @@ pub fn router_with_metrics(
         .route("/v1/delegations/revoke", post(revoke_delegation))
         .route("/v1/installations/endpoint", post(rotate_endpoint))
         .route("/v1/installations/revoke", post(revoke_installation))
-        .route("/v1/deliveries/apns", post(deliver))
+        .route(DELIVERY_PATH, post(deliver))
         .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES));
     let public = Router::new()
         .merge(enrollment)
@@ -906,9 +937,6 @@ mod request_limit_tests {
                 app_attest: Arc::new(app_attest),
                 transport: Arc::new(NeverTransport),
             }),
-            gateway_urls: Arc::new(
-                GatewayUrls::from_origin("https://push.example".parse().unwrap()).unwrap(),
-            ),
             max_grant_lifetime_seconds: 86_400,
             max_installation_lifetime_seconds: 86_400,
             endpoint_quota_window_seconds: 60,

@@ -5,15 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base64::Engine as _;
 use buzz_core::filter::{filters_match, reader_authorized_for_event};
 use chrono::{TimeDelta, Utc};
-use nostr::{EventBuilder, Filter, Kind, Tag};
+use nostr::Filter;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use tracing::{error, warn};
 
-use crate::{handlers::push_lease::Subscription, state::AppState};
+use crate::{handlers::push_lease::Subscription, nip98::nip98_header, state::AppState};
 
 const CLAIM_SECS: i64 = 30;
 const EVENT_USEFUL_SECS: i64 = 3600;
@@ -666,22 +664,6 @@ async fn retry_or_fail(
     }
 }
 
-fn nip98_header(keys: &nostr::Keys, url: &str, body: &[u8]) -> anyhow::Result<String> {
-    let hash = hex::encode(Sha256::digest(body));
-    let event = EventBuilder::new(Kind::HttpAuth, "")
-        .tags([
-            Tag::parse(["u", url])?,
-            Tag::parse(["method", "POST"])?,
-            Tag::parse(["payload", &hash])?,
-            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()])?,
-        ])
-        .sign_with_keys(keys)?;
-    Ok(format!(
-        "Nostr {}",
-        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&event)?)
-    ))
-}
-
 fn class_rank(_: &str) -> u8 {
     1
 }
@@ -689,7 +671,14 @@ fn class_rank(_: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::State, routing::post, Json, Router};
+    use axum::{
+        body::Bytes,
+        extract::{OriginalUri, State},
+        http::HeaderMap,
+        routing::post,
+        Json, Router,
+    };
+    use nostr::{EventBuilder, Kind, Tag};
     use serde_json::Value;
     use std::{future::IntoFuture, sync::Arc};
     use tokio::sync::Mutex;
@@ -729,9 +718,25 @@ mod tests {
 
     async fn capture(
         State(seen): State<Arc<Mutex<Vec<Value>>>>,
-        Json(body): Json<Value>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        body: Bytes,
     ) -> Json<Value> {
-        seen.lock().await.push(body);
+        let url: url::Url = format!("http://{}{}", headers["host"].to_str().unwrap(), uri)
+            .parse()
+            .unwrap();
+        assert!(!headers.contains_key("x-forwarded-proto"));
+        nostr::nips::nip98::verify_auth_header(
+            headers["authorization"].to_str().unwrap(),
+            &url,
+            nostr::nips::nip98::HttpMethod::POST,
+            nostr::Timestamp::now(),
+            Some(&body),
+        )
+        .unwrap();
+        seen.lock()
+            .await
+            .push(serde_json::from_slice(&body).unwrap());
         Json(serde_json::json!({"status":"accepted"}))
     }
 
@@ -744,12 +749,14 @@ mod tests {
             axum::serve(
                 listener,
                 Router::new()
-                    .route("/deliver", post(capture))
+                    .route("/v1/deliveries/apns", post(capture))
                     .with_state(seen.clone()),
             )
             .into_future(),
         );
-        let url: url::Url = format!("http://{address}/deliver").parse().unwrap();
+        let url: url::Url = format!("http://{address}/v1/deliveries/apns")
+            .parse()
+            .unwrap();
         let http = reqwest::Client::new();
         let keys = nostr::Keys::generate();
         let request_id = uuid::Uuid::new_v4();

@@ -190,7 +190,7 @@ community configuration is missing or unavailable.
 
 ### Multi-issuer registry
 
-The global [`IssuerRegistry`](../../crates/buzz-auth/src/nip_fi/config.rs) remains
+The global `IssuerRegistry` remains
 shared for issuer policy and JWKS lookup; community authorization is a separate
 deployment mapping from canonical host URI to
 `(expected_aud, authorized_issuers)`.  `VerifyAssertion` consumes the
@@ -198,7 +198,7 @@ Host-resolved mapping, so a globally known issuer is not implicitly trusted by
 every community.
 
 The `nostr_pubkey` claim is unconditionally required — absence rejects
-regardless of issuer policy (NIP-FI v2, PR #7221).
+regardless of issuer policy.
 
 ### JWKS snapshot
 
@@ -396,40 +396,6 @@ specified below is the recovery path for lost propagation, exactly as for relay
 restart.  A success response from the receiving process does not imply
 cluster-wide application.
 
-> **Note — adopted position (session-only vs deny-until-TTL):**
->
-> The session-only model closes existing connections but places no
-> protocol-level bound on reconnection.  For session-only, if the issuer also
-> stops issuing new assertions after a disconnect call, cumulative residual
-> access is bounded by:
->
-> ```
-> max(0, min(exp, iat + maximum_assertion_age) - now)
-> ```
->
-> `max_connection_lifetime_seconds` only partitions that interval into
-> individual sessions; it does not shorten the total window.  If the issuer
-> continues issuing new assertions, cumulative access extends indefinitely.
->
-> The **deny-until-TTL** model closes this reconnect window.  The relay holds a
-> memory-resident deny set keyed by `(iss, pubkey)`, with absolute expiry
-> carried by the issuer as `until` in the disconnect command.  Any admission
-> attempt for that key is denied until the entry expires.  The issuer must boot
-> the deny TTL to outlast the longest live assertion it may have already
-> issued; otherwise an unexpired assertion lets the client back in the moment
-> the entry expires.
->
-> The deny set is RAM-cache, not a database — the same operational posture as
-> the JWKS snapshot.  A relay restart clears the set; the issuer, as the
-> durable system of record for revocations, SHOULD re-push still-active denies
-> when it observes a relay restart (same publish/cache pattern as JWKS).  A
-> fresh relay MAY consult the issuer before first admissions to close the
-> startup race; this is non-normative.
->
-> This design was chosen because session-only disconnection must outlast
-> the live socket to mean anything as a revocation primitive; a self-expiring
-> RAM entry preserves the zero-persistence guarantee while closing the window.
-
 ### Transport
 
 The disconnect endpoint is an authenticated issuer→relay API, not a public
@@ -515,7 +481,7 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
   // leaves neither behind: the jti is not burned, and the caller may safely
   // retry the same signed command.  Performing the jti reservation alone
   // (without the deny-entry insertion) would burn the command identity on a
-  // capacity failure, making the new 503 contract unimplementable.  Capacity
+  // capacity failure, making the 503 contract unimplementable.  Capacity
   // is checked against the per-issuer bound for claims.iss; a different
   // issuer's capacity exhaustion does not produce a 503 here.
   // On same-key collision: retain max(existing_until, until) — never shorten
@@ -534,9 +500,6 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
 
 Any failure at any step is fail-closed: no side effects occur and the relay
 returns the appropriate error.
-
-This verifier and the disconnect API endpoint are follow-on code changes
-outside this PR.
 
 ### Request
 
@@ -620,10 +583,9 @@ to all three requirements on all three endpoints, including both POST
 endpoints; it is not a payload-only exemption.
 
 This exemption is required by Git's credential protocol. The credential helper
-receives only credential metadata and never sees request bodies
-(`crates/git-credential-nostr/src/lib.rs:98-132`), so a body hash cannot exist
-in the signed event. This limitation is architectural to Git's credential
-protocol.
+receives only credential metadata and never sees request bodies, so a body
+hash cannot exist in the signed event. This limitation is architectural to
+Git's credential protocol.
 
 The NIP-FI assertion and pairing requirement is unchanged and applies per
 request on every one of these endpoints. Each request MUST still carry and
@@ -645,8 +607,7 @@ The following compensating controls are REQUIRED for this proof pattern:
 7. Every push MUST pass pre-receive hook push authorization.
 
 This exemption applies solely to the Git credential-helper proof pattern on
-these three endpoints. It is not a precedent for any other surface. A client
-change that enables per-request signing supersedes this exemption.
+these three endpoints. It is not a precedent for any other surface.
 
 ### Media possession-proof exception (Blossom, kind 24242)
 
@@ -656,8 +617,7 @@ alternative possession format — not a general "signed Nostr event" escape hatc
 and not precedent for any other surface.  Any future alternative proof format
 requires an explicit axis-by-axis security review covering: payload/resource
 binding, method/operation scope, audience/tenant scope, freshness, signature/key
-pairing, transport cardinality, and cross-endpoint replay.  Per-request NIP-98
-support supersedes this exception when available.
+pairing, transport cardinality, and cross-endpoint replay.
 
 #### Scope fence
 
@@ -665,7 +625,7 @@ Kind-24242 proofs are valid **only** on the following routes and operations:
 
 | Proof type (`t` tag) | Valid route | Method |
 |---|---|---|
-| `upload` | `PUT /upload` (and temporary alias `PUT /media/upload` until that alias is removed) | PUT |
+| `upload` | `PUT /upload`, `PUT /media/upload` | PUT |
 | `get` | `GET /media/{hash…}`, `HEAD /media/{hash…}` | GET, HEAD |
 
 No other protected route may accept a kind-24242 proof.  A kind-24242 event
@@ -737,17 +697,6 @@ Every kind-24242 proof MUST be subject to the full NIP-FI per-request pairing
 requirement: full assertion verification, exact key equality between the
 assertion's `nostr_pubkey` claim and the kind-24242 event's public key, and
 deny-map enforcement (see Admission procedure, steps 1–6).
-
-The effectiveness of deny-map enforcement is contingent on the real
-issuer-scoped deny map.  Until that map is operational, the stub implementation
-constitutes a **known gap** in this section's security guarantees.
-
-#### Compliance note
-
-The implementation as of PR #7264 pairs via a permissive Blossom verifier and
-is explicitly non-compliant with this section.  The named gaps are:
-multi-tag acceptance, a 3600-second proof window, and an optional `server`
-tag.  These are resolved when the bounded hardening task lands.
 
 ### Request format
 
@@ -868,7 +817,6 @@ normative behavior for them:
 - Directory integration and account-offboarding automation: issuer-side.
 - Audit logging beyond what the relay operator chooses to retain: issuer-side.
 - Delegation: out of scope.
-- Companion profiles (NIP-FI-EDGE, NIP-FI-LIFECYCLE, NIP-FI-DELEG, NIP-FI-CONF, NIP-FI-MODEL): removed.
 
 ## Discovery
 
@@ -979,10 +927,10 @@ gap by requiring assertion verification on every protected HTTP request.
 The per-request re-verification model means there is no cached admission
 window; a deny-set entry takes effect on the very next request.
 
-**SSRF.** The JWKS fetcher implements SSRF protection: HTTPS-only URI
+**SSRF.** The JWKS fetcher MUST enforce SSRF protection: HTTPS-only URI
 validation, DNS resolution with IP deny-list enforcement, address pinning to
-prevent DNS rebinding TOCTOU, and redirect denial.  The complete IANA
-Special-Purpose address deny table is implemented; see `crates/buzz-core/src/network.rs`.
+prevent DNS rebinding TOCTOU, and redirect denial.  The IP deny-list covers
+the complete IANA Special-Purpose address registry.
 
 **Issuer compromise.** A compromised assertion issuer can impersonate any
 identity but cannot prove possession of the assertion-named Nostr key.  The NIP-42

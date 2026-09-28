@@ -22,11 +22,11 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      desktop: ${{ steps.filter.outputs.desktop }}
-      desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
-      web: ${{ steps.filter.outputs.web }}
-      mobile: ${{ steps.filter.outputs.mobile }}
+      rust: ${{ steps.selection.outputs.rust }}
+      desktop: ${{ steps.selection.outputs.desktop }}
+      desktop-rust: ${{ steps.selection.outputs.desktop-rust }}
+      web: ${{ steps.selection.outputs.web }}
+      mobile: ${{ steps.selection.outputs.mobile }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -35,7 +35,11 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
-          token: ''
+          # PR files come from GitHub's PR diff. A tokenless comparison uses the
+          # checked-out merge commit and can include newer, unrelated base changes.
+          token: ${{ github.token }}
+          # Root and docs/ Markdown do not select runtime suites. Markdown under
+          # runtime directories remains covered by the directory filters below.
           filters: |
             rust:
               - 'crates/**'
@@ -84,8 +88,13 @@ jobs:
               - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
+      - name: Select runtime suites conservatively at the PR file-list limit
+        id: selection
+        env:
+          FILTER_OUTPUTS: ${{ toJSON(steps.filter.outputs) }}
+        run: node scripts/ci-runtime-selection.mjs
       - name: Validate PostgreSQL test discovery
-        if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
+        if: github.event_name == 'push' || steps.selection.outputs.rust == 'true'
         run: |
           scripts/test-postgres-test-discovery.sh
           scripts/test-postgres-test-wrapper.sh
@@ -116,7 +125,7 @@ jobs:
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
-        run: node --test scripts/ci-selection.test.mjs
+        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs
       - name: File size policy
         run: just file-size-check
 
@@ -244,7 +253,7 @@ jobs:
 
   rust-lint:
     name: Rust Lint
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')))
     needs: [changes, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -252,12 +261,13 @@ jobs:
     steps:
       - name: Check Rust Lint result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.rust.outputs.rust_lint_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   unit-tests:
     name: Unit Tests
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -265,12 +275,13 @@ jobs:
     steps:
       - name: Check Unit Tests result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.rust.outputs.unit_tests_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   windows-rust:
     name: Windows Rust (x86_64-pc-windows-msvc)
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')))
     needs: [changes, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -278,12 +289,13 @@ jobs:
     steps:
       - name: Check Windows Rust result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.rust.outputs.windows_rust_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   desktop:
     name: Desktop
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
     needs: [changes, desktop-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -291,12 +303,13 @@ jobs:
     steps:
       - name: Check Desktop result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.desktop-domain.outputs.desktop_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   desktop-build-macos:
     name: Desktop Build (macOS)
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
     needs: [changes, desktop-macos-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -304,12 +317,13 @@ jobs:
     steps:
       - name: Check Desktop Build (macOS) result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.desktop-macos-domain.outputs.desktop_macos_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   desktop-e2e-relay:
     name: Desktop E2E Relay
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -317,12 +331,13 @@ jobs:
     steps:
       - name: Check Desktop E2E Relay result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.relay-artifacts-domain.outputs.desktop_e2e_relay_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   desktop-e2e-integration:
     name: Desktop E2E Integration
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    if: always() && (needs.changes.result != 'success' || (needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -330,12 +345,13 @@ jobs:
     steps:
       - name: Check Desktop E2E Integration result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.relay-domain.outputs.desktop_e2e_integration_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   backend-integration:
     name: Backend Integration (relay e2e)
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    if: always() && (needs.changes.result != 'success' || (needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -343,12 +359,13 @@ jobs:
     steps:
       - name: Check Backend Integration result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.relay-domain.outputs.backend_integration_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   postgres-tests:
     name: PostgreSQL Tests
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    if: always() && (needs.changes.result != 'success' || (needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain, postgres-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -356,12 +373,13 @@ jobs:
     steps:
       - name: Check PostgreSQL Tests result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.postgres-domain.outputs.postgres_tests_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   relay-e2e:
     name: Relay E2E
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    if: always() && (needs.changes.result != 'success' || (needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -369,12 +387,13 @@ jobs:
     steps:
       - name: Check Relay E2E result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.relay-domain.outputs.relay_e2e_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   web:
     name: Web
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.web == 'true')
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.web == 'true')))
     needs: [changes, clients]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -382,12 +401,13 @@ jobs:
     steps:
       - name: Check Web result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.clients.outputs.web_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   mobile:
     name: Mobile
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.mobile == 'true')
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.mobile == 'true')))
     needs: [changes, clients]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -395,12 +415,13 @@ jobs:
     steps:
       - name: Check Mobile result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.clients.outputs.mobile_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   security:
     name: Security
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, security-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -408,5 +429,6 @@ jobs:
     steps:
       - name: Check Security result
         env:
+          SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.security-domain.outputs.security_result }}
-        run: test "$RESULT" = success
+        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success

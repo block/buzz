@@ -18,7 +18,6 @@ fn parsed_configuration_reaches_executable_verifier() {
                 "BUZZ_PUSH_TOKEN_KEYS",
                 format!("token:{}", STANDARD.encode([2; 32])),
             ),
-            ("BUZZ_PUSH_GATEWAY_ORIGIN", "https://push.example".into()),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2592000".into()),
             ("DATABASE_URL", "unused".into()),
             (
