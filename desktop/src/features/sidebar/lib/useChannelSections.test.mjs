@@ -21,9 +21,11 @@ after(() => dom.window.close());
 test("assignChannel refreshes an existing assignment before the next eviction", async () => {
   const { act, cleanup, renderHook } = await import("@testing-library/react");
   const { relayClient } = await import("@/shared/api/relayClient");
-  const { MAX_CHANNEL_SECTION_ASSIGNMENTS, storageKey } = await import(
-    "./channelSectionsStorage.ts"
-  );
+  const {
+    MAX_CHANNEL_SECTION_ASSIGNMENTS,
+    readChannelSectionsStore,
+    storageKey,
+  } = await import("./channelSectionsStorage.ts");
   const { useChannelSections } = await import("./useChannelSections.ts");
 
   const originalFetchEvents = relayClient.fetchEvents;
@@ -67,6 +69,19 @@ test("assignChannel refreshes an existing assignment before the next eviction", 
     assert.equal(
       Object.keys(result.current.assignments).length,
       MAX_CHANNEL_SECTION_ASSIGNMENTS,
+    );
+
+    act(() => result.current.unassignChannel("chan-0000"));
+    assert.equal(result.current.assignments["chan-0000"], undefined);
+    assert.deepEqual(
+      readChannelSectionsStore(pubkey, relayUrl).manuallyUnassignedChannelIds,
+      ["chan-0000"],
+    );
+
+    act(() => result.current.assignChannel("chan-0000", "section-2"));
+    assert.equal(
+      readChannelSectionsStore(pubkey, relayUrl).manuallyUnassignedChannelIds,
+      undefined,
     );
     unmount();
   } finally {

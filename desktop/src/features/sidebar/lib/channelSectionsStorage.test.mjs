@@ -388,3 +388,57 @@ test("parseChannelSectionPayload: omits icon field when empty or whitespace", ()
     { id: "s3", name: "C", order: 2 },
   ]);
 });
+
+test("parseChannelSectionPayload: preserves Smart Section rules and manual overrides", () => {
+  const payload = {
+    version: 1,
+    sections: [
+      {
+        id: "smart",
+        name: "Engineering",
+        order: 0,
+        smartRule: {
+          pattern: "^eng-",
+          isRegex: true,
+          caseSensitive: false,
+        },
+      },
+    ],
+    assignments: {},
+    manuallyUnassignedChannelIds: ["channel-1", "channel-1", 42],
+  };
+  assert.deepEqual(parseChannelSectionPayload(payload), {
+    version: 1,
+    sections: [
+      {
+        id: "smart",
+        name: "Engineering",
+        order: 0,
+        smartRule: {
+          pattern: "^eng-",
+          isRegex: true,
+          caseSensitive: false,
+        },
+      },
+    ],
+    assignments: {},
+    manuallyUnassignedChannelIds: ["channel-1"],
+  });
+});
+
+test("parseChannelSectionPayload: ignores malformed Smart Section rules", () => {
+  const result = parseChannelSectionPayload({
+    sections: [
+      {
+        id: "regular",
+        name: "Regular",
+        order: 0,
+        smartRule: { pattern: "eng", isRegex: "yes", caseSensitive: false },
+      },
+    ],
+    assignments: {},
+  });
+  assert.deepEqual(result?.sections, [
+    { id: "regular", name: "Regular", order: 0 },
+  ]);
+});
