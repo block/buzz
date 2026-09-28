@@ -187,7 +187,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Acquire request ownership before the first relay await. Every channel-list
     // path uses this fence so completion order cannot let an older ordinary,
     // directory, or reconnect refresh replace a newer membership list.
-    final fence = _refreshCoordinator.beginRefresh(
+    final fence = await _refreshCoordinator.beginRefresh(
       fetchesDirectory: fetchDirectory,
     );
 

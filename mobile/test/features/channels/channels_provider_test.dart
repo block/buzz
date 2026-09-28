@@ -293,67 +293,88 @@ void main() {
     );
   });
 
-  test(
-    'ordinary refresh settles a superseded directory load for retry',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [_membership(_channelA, myPk)],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'discoverable'),
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
+  for (final rebuild in [false, true]) {
+    test(
+      '${rebuild ? 'Same-scope rebuild' : 'Ordinary refresh'} settles a superseded directory load for retry',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'discoverable'),
+          ],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
 
-      expect(
-        (await container.read(
-          channelsProvider.future,
-        )).map((channel) => channel.id),
-        [_channelA],
-      );
+        expect(
+          (await container.read(
+            channelsProvider.future,
+          )).map((channel) => channel.id),
+          [_channelA],
+        );
 
-      session.pauseNextDirectoryQuery();
-      final directory = container
-          .read(channelsProvider.notifier)
-          .retryDirectory();
-      await session.nextDirectoryQueryStarted;
+        session.pauseNextDirectoryQuery();
+        final directory = container
+            .read(channelsProvider.notifier)
+            .retryDirectory();
+        await session.nextDirectoryQueryStarted;
 
-      // A foreground, reconnect, pull-to-refresh, or membership update can
-      // start an ordinary refresh while Browse is still loading discovery.
-      await container.read(channelsProvider.notifier).refresh();
+        if (rebuild) {
+          // A same-scope configuration rebuild can overlap an in-flight
+          // directory request when onboarding settles its community providers.
+          final config = container.read(relayConfigProvider);
+          container
+              .read(relayConfigProvider.notifier)
+              .update(baseUrl: config.baseUrl, nsec: config.nsec);
+          await container.read(channelsProvider.future);
+        } else {
+          await container.read(channelsProvider.notifier).refresh();
+        }
 
-      session.resumePausedDirectoryQuery();
-      await directory;
-      await _settle();
+        session.resumePausedDirectoryQuery();
+        await directory;
+        await _settle();
 
-      expect(
-        container.read(channelDirectoryLoadStatusProvider).status,
-        ChannelDirectoryLoadStatus.error,
-      );
-      expect(
-        container
-            .read(channelsProvider)
-            .requireValue
-            .map((channel) => channel.id),
-        [_channelA],
-      );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.error,
+        );
+        expect(
+          container
+              .read(channelsProvider)
+              .requireValue
+              .map((channel) => channel.id),
+          [_channelA],
+        );
 
-      await container.read(channelsProvider.notifier).retryDirectory();
+        await container.read(channelsProvider.notifier).retryDirectory();
 
-      expect(
-        container.read(channelDirectoryLoadStatusProvider).status,
-        ChannelDirectoryLoadStatus.loaded,
-      );
-      expect(
-        container
-            .read(channelsProvider)
-            .requireValue
-            .map((channel) => channel.id),
-        unorderedEquals([_channelA, _channelB]),
-      );
-    },
-  );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+        expect(
+          container
+              .read(channelsProvider)
+              .requireValue
+              .map((channel) => channel.id),
+          unorderedEquals([_channelA, _channelB]),
+        );
+      },
+    );
+  }
+
+  test('refresh disposed before directory settlement writes nothing', () async {
+    final session = _FakeRelaySession(memberships: const []);
+    final container = _buildContainer(session: session);
+    await container.read(channelsProvider.future);
+
+    final refresh = container.read(channelsProvider.notifier).refresh();
+    container.dispose();
+
+    await expectLater(refresh, completes);
+  });
 
   test(
     'community switch discards a stale directory success from the old relay',

@@ -686,6 +686,19 @@ void main() {
       expect(active.name, 'Test');
     });
 
+    test('falls back without persisting when active ID is missing', () async {
+      final community = Community.create(
+        name: 'Fallback',
+        relayUrl: 'https://test.example.com',
+      );
+      await communityStorage.save(community);
+      container = createContainer();
+
+      final active = await container.read(activeCommunityProvider.future);
+      expect(active?.id, community.id);
+      expect(await communityStorage.loadActiveId(), isNull);
+    });
+
     test('falls back to first community if active ID is invalid', () async {
       container = createContainer();
       await container.read(communityListProvider.future);
@@ -705,6 +718,7 @@ void main() {
       final active = await container.read(activeCommunityProvider.future);
       expect(active, isNotNull);
       expect(active!.id, ws.id);
+      expect(await communityStorage.loadActiveId(), 'nonexistent-id');
     });
   });
 }
