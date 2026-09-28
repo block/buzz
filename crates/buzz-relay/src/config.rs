@@ -855,23 +855,12 @@ impl Config {
         }
 
         let operator_listener_delivery_urls = match std::env::var("BUZZ_OPERATOR_LISTENERS") {
-            Ok(raw) => match parse_operator_listener_delivery_urls(&raw) {
-                Ok(urls) => urls,
-                Err(parse_error) => {
-                    error!(
-                        error = %parse_error,
-                        "invalid BUZZ_OPERATOR_LISTENERS; operator-listener mention delivery is disabled"
-                    );
-                    HashMap::new()
-                }
-            },
+            Ok(raw) => parse_operator_listener_delivery_urls(&raw)?,
             Err(std::env::VarError::NotPresent) => HashMap::new(),
             Err(error) => {
-                error!(
-                    error = %error,
-                    "BUZZ_OPERATOR_LISTENERS must be valid UTF-8; operator-listener mention delivery is disabled"
-                );
-                HashMap::new()
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_OPERATOR_LISTENERS must be valid UTF-8: {error}"
+                )));
             }
         };
         if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
@@ -1542,8 +1531,14 @@ mod tests {
         config
     }
 
-    /// Capture the tracing output emitted during `Config::from_env()`.
-    fn capture_config_logs() -> (Result<Config, ConfigError>, String) {
+    /// Like `config_with_admin_env`, but also captures the tracing output
+    /// emitted during `Config::from_env()` so a test can assert the startup
+    /// warning fired. The `BUZZ_ADMIN_TOKEN` warning is the sole behavioral
+    /// value of retaining the guards (the variable is otherwise inert), so it
+    /// must be regression-protected: deleting a warn block has to fail a test.
+    fn config_with_admin_env_capturing_logs(
+        values: &[(&str, Option<&str>)],
+    ) -> (Result<Config, ConfigError>, String) {
         use std::sync::{Arc, Mutex};
 
         #[derive(Clone)]
@@ -1578,49 +1573,19 @@ mod tests {
             })
             .with_ansi(false)
             .finish();
-        let config = tracing::subscriber::with_default(subscriber, Config::from_env);
+        let config =
+            tracing::subscriber::with_default(subscriber, || config_with_admin_env(values));
         let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap_or_default();
         (config, captured)
     }
 
-    /// Like `config_with_admin_env`, but also captures the tracing output
-    /// emitted during `Config::from_env()` so a test can assert the startup
-    /// warning fired. The `BUZZ_ADMIN_TOKEN` warning is the sole behavioral
-    /// value of retaining the guards (the variable is otherwise inert), so it
-    /// must be regression-protected: deleting a warn block has to fail a test.
-    fn config_with_admin_env_capturing_logs(
-        values: &[(&str, Option<&str>)],
-    ) -> (Result<Config, ConfigError>, String) {
-        const KEYS: [&str; 3] = ["BUZZ_ADMIN_HOST", "BUZZ_ADMIN_TOKEN", "BUZZ_ADMIN_AUTH"];
-        let previous: Vec<_> = KEYS
-            .iter()
-            .map(|key| (*key, std::env::var_os(key)))
-            .collect();
-        for key in KEYS {
-            std::env::remove_var(key);
-        }
-        for (key, value) in values {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        let result = capture_config_logs();
-        for (key, value) in previous {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        result
-    }
-
-    fn config_with_operator_listeners_capturing_logs(
-        raw: &str,
-    ) -> (Result<Config, ConfigError>, String) {
+    fn config_with_operator_listeners(raw: Option<&str>) -> Result<Config, ConfigError> {
         let previous = std::env::var_os("BUZZ_OPERATOR_LISTENERS");
-        std::env::set_var("BUZZ_OPERATOR_LISTENERS", raw);
-        let result = capture_config_logs();
+        match raw {
+            Some(value) => std::env::set_var("BUZZ_OPERATOR_LISTENERS", value),
+            None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
+        }
+        let result = Config::from_env();
         match previous {
             Some(value) => std::env::set_var("BUZZ_OPERATOR_LISTENERS", value),
             None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
@@ -2475,18 +2440,59 @@ mod tests {
     }
 
     #[test]
-    fn malformed_operator_listener_config_is_logged_and_disables_delivery() {
+    fn malformed_operator_listener_config_prevents_startup() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        let (result, logs) = config_with_operator_listeners_capturing_logs(";");
-        let config = result.expect("malformed listener config must not stop relay startup");
+        let result = config_with_operator_listeners(Some(";"));
 
-        assert!(config.operator_listener_delivery_urls.is_empty());
-        assert!(logs.contains("ERROR"), "expected an ERROR line: {logs:?}");
-        assert!(logs.contains("BUZZ_OPERATOR_LISTENERS"), "logs: {logs:?}");
-        assert!(
-            logs.contains("operator-listener mention delivery is disabled"),
-            "logs: {logs:?}"
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_OPERATOR_LISTENERS")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_operator_listener_config_prevents_startup() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_OPERATOR_LISTENERS");
+        std::env::set_var(
+            "BUZZ_OPERATOR_LISTENERS",
+            std::ffi::OsString::from_vec(vec![0xff]),
         );
+
+        let result = Config::from_env();
+
+        match previous {
+            Some(value) => std::env::set_var("BUZZ_OPERATOR_LISTENERS", value),
+            None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
+        }
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_OPERATOR_LISTENERS must be valid UTF-8")
+        ));
+    }
+
+    #[test]
+    fn valid_and_absent_operator_listener_config_preserve_routes() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let raw = format!("{key}:https://listener.example/mentions");
+        let config = config_with_operator_listeners(Some(&raw)).expect("valid listener config");
+        assert_eq!(
+            config
+                .operator_listener_delivery_urls
+                .get(key)
+                .map(url::Url::as_str),
+            Some("https://listener.example/mentions")
+        );
+
+        let config = config_with_operator_listeners(None).expect("absent listener config");
+        assert!(config.operator_listener_delivery_urls.is_empty());
     }
 
     #[test]
