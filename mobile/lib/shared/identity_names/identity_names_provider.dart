@@ -18,12 +18,8 @@ final identityNameSourcesProvider = Provider<IdentityNameSources>((ref) {
 });
 
 /// Requests missing owner profiles for [names] after the current build.
-void loadIdentityNameOwners(
-  Ref ref,
-  IdentityNameSources sources,
-  Iterable<String> candidates,
-) {
-  final missing = sources.missingOwnerProfiles(candidates);
+void loadIdentityNameOwners(Ref ref, IdentityNames names) {
+  final missing = names.missingOwnerProfiles();
   if (missing.isEmpty) return;
   Future.microtask(() {
     if (ref.mounted) {
@@ -53,7 +49,7 @@ IdentityNames watchIdentityNames(
   final missing = {
     for (final key in names.candidates)
       if (!sources.profiles.containsKey(key)) key,
-    ...sources.missingOwnerProfiles(names.candidates),
+    ...names.missingOwnerProfiles(),
   };
   if (missing.isNotEmpty) {
     Future.microtask(() {

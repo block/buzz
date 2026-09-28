@@ -118,11 +118,7 @@ final mentionCandidatesProvider = Provider.family
         ref.watch(identityNameSourcesProvider),
         candidates,
       );
-      loadIdentityNameOwners(
-        ref,
-        ref.read(identityNameSourcesProvider),
-        names.candidates,
-      );
+      loadIdentityNameOwners(ref, names);
       return rankMentionCandidates([
         for (final candidate in candidates)
           candidate.withContextLabel(names.resolve(candidate.pubkey)?.name),
@@ -144,5 +140,11 @@ IdentityNames mentionPickerNames(
     for (final candidate in candidates)
       if (candidate.displayName?.trim().isNotEmpty == true)
         candidate.pubkey: candidate.displayName!,
+  },
+  // A newly searched agent can carry its verified owner before its profile
+  // reaches the cache; that owner still decides mine-before-others.
+  ownerPubkeys: {
+    for (final candidate in candidates)
+      candidate.pubkey: ?candidate.ownerPubkey,
   },
 );

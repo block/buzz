@@ -38,7 +38,7 @@ final channelIdentityNamesProvider = Provider.autoDispose
           for (final member in members) member.pubkey: ?member.displayName,
         },
       );
-      loadIdentityNameOwners(ref, sources, names.candidates);
+      loadIdentityNameOwners(ref, names);
       return names;
     });
 
