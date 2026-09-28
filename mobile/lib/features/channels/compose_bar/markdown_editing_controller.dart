@@ -296,7 +296,9 @@ class _MarkdownEditingController extends TextEditingController {
         WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: _ComposerAgentMentionChip(label: label, textStyle: style),
+          child: MediaQuery.withNoTextScaling(
+            child: _ComposerAgentMentionChip(label: label, textStyle: style),
+          ),
         ),
       );
       // The visual chip replaces the `@` placeholder. Keep the label as
@@ -353,11 +355,13 @@ class _MarkdownEditingController extends TextEditingController {
           WidgetSpan(
             alignment: PlaceholderAlignment.baseline,
             baseline: TextBaseline.alphabetic,
-            child: _ComposerBuzzLinkChip(
-              icon: presentation.$1,
-              label: presentation.$2,
-              semanticLabel: presentation.$3,
-              textStyle: style,
+            child: MediaQuery.withNoTextScaling(
+              child: _ComposerBuzzLinkChip(
+                icon: presentation.$1,
+                label: presentation.$2,
+                semanticLabel: presentation.$3,
+                textStyle: style,
+              ),
             ),
           ),
         );

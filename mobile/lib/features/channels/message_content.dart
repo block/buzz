@@ -907,12 +907,14 @@ class _MentionMd extends InlineMd {
       textStyle: config.style,
     );
 
+    final child = pubkey != null && onMentionTap != null
+        ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
+        : pill;
+
     return WidgetSpan(
       alignment: PlaceholderAlignment.baseline,
       baseline: TextBaseline.alphabetic,
-      child: pubkey != null && onMentionTap != null
-          ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
-          : pill,
+      child: MediaQuery.withNoTextScaling(child: child),
     );
   }
 }

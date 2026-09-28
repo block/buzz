@@ -45,12 +45,14 @@ class _ChannelLinkMd extends InlineMd {
       textStyle: config.style?.copyWith(fontWeight: FontWeight.w500),
     );
 
+    final interactiveChild = opensChannel
+        ? GestureDetector(onTap: () => onChannelTap!(channelId), child: child)
+        : child;
+
     return WidgetSpan(
       alignment: PlaceholderAlignment.baseline,
       baseline: TextBaseline.alphabetic,
-      child: opensChannel
-          ? GestureDetector(onTap: () => onChannelTap!(channelId), child: child)
-          : child,
+      child: MediaQuery.withNoTextScaling(child: interactiveChild),
     );
   }
 }
