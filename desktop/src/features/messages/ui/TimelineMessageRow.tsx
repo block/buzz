@@ -1,7 +1,6 @@
 import * as React from "react";
 
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
-import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/threadTreeLayout";
 import type { buildVideoReviewContextForMessage } from "@/features/messages/lib/videoReviewContext";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -81,6 +80,8 @@ type MessageRowItemProps = {
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   onOpenThread?: (message: TimelineMessage) => void;
+  onOpenProjectedThread?: (message: TimelineMessage) => void;
+  onReplyToProjectedThread?: (message: TimelineMessage) => void;
   onToggleReaction?: ToggleReaction;
   profiles?: UserProfileLookup;
   searchActiveMessageId?: string | null;
@@ -113,6 +114,8 @@ export function MessageRowItem({
   onMarkRead,
   onReply,
   onOpenThread,
+  onOpenProjectedThread,
+  onReplyToProjectedThread,
   onToggleReaction,
   profiles,
   searchActiveMessageId,
@@ -123,6 +126,9 @@ export function MessageRowItem({
   videoReviewContext,
 }: MessageRowItemProps) {
   const { message, summary } = entry;
+  const projectedThreadRootAuthor = entry.projectedThread
+    ? (entry.projectedThread.rootMessage?.author ?? "original post")
+    : null;
   const canManage = canManageMessageForCurrentUser(
     message,
     currentPubkey,
@@ -182,7 +188,6 @@ export function MessageRowItem({
           onOpenThread={onOpenThread}
           showDepthGuides={false}
           summary={summary}
-          summaryIndentOffsetRem={-THREAD_REPLY_ROW_MARGIN_INLINE_REM}
           unreadCount={threadUnreadCounts?.get(message.id)}
         />
         {footer}
@@ -216,8 +221,12 @@ export function MessageRowItem({
         onMarkRead={onMarkRead}
         onMarkUnread={onMarkUnread}
         onToggleReaction={onToggleReaction}
-        onReply={onReply}
+        onReply={entry.projectedThread ? onReplyToProjectedThread : onReply}
+        onOpenProjectedThread={
+          entry.projectedThread ? onOpenProjectedThread : undefined
+        }
         profiles={profiles}
+        projectedThreadRootAuthor={projectedThreadRootAuthor}
         searchQuery={isSearchMatch ? searchQuery : undefined}
         showDepthGuides={false}
         videoReviewContext={videoReviewContext}
