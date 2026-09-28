@@ -19,6 +19,13 @@ class MediaVideoViewerPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useState<VideoPlayerController?>(null);
+    // Tracks a VideoPlayerController that has been created (i.e. platform
+    // resources allocated via createWithOptions()) but whose initialize()+play()
+    // chain has not yet completed or failed.  The effect cleanup path disposes
+    // this directly so a close-during-init does not leak the native player,
+    // even when the async chain is suspended waiting for the initialized event
+    // or for play() to return.
+    final pendingController = useRef<VideoPlayerController?>(null);
     final videoFile = useRef<File?>(null);
     final downloadRequestAbort = useRef<Completer<void>?>(null);
     final downloadSubscription = useRef<StreamSubscription<List<int>>?>(null);
@@ -48,34 +55,13 @@ class MediaVideoViewerPage extends HookConsumerWidget {
         final auth = ref.read(mediaGetAuthServiceProvider);
         final uri = Uri.parse(videoUrl);
 
-        // ExoPlayer supports the request headers on every range request, so
-        // keep Android on its streaming path. iOS uses the authenticated local
-        // copy below because AVPlayer can drop those headers after the first
-        // request.
-        if (Platform.isAndroid) {
-          VideoPlayerController? streamingController;
-          try {
-            streamingController = VideoPlayerController.networkUrl(
-              uri,
-              httpHeaders: auth.headersFor(videoUrl),
-            );
-            await streamingController.initialize();
-            await streamingController.play();
-            if (disposed) {
-              await streamingController.dispose();
-              return;
-            }
-            controller.value = streamingController;
-            return;
-          } catch (_) {
-            if (streamingController != null) {
-              await streamingController.dispose();
-            }
-            // Fall through to the authenticated local-file path only when the
-            // streaming controller cannot initialize.
-          }
-        }
-
+        // All platforms: download to an authenticated local file so the proof
+        // is bound at request time rather than frozen into controller headers.
+        // (iOS already used this path; Android previously used streaming headers
+        // but video_player_android 2.9.5 freezes those headers into static
+        // DefaultHttpDataSource request properties — a proof minted at
+        // controller creation time becomes stale after 60 s, causing seeks
+        // outside the buffer to fail with expiry rejection.)
         try {
           final client = ref.read(mediaHttpClientProvider);
           final requestAbort = Completer<void>();
@@ -85,6 +71,14 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             uri,
             abortTrigger: requestAbort.future,
           )..headers.addAll(auth.headersFor(videoUrl));
+          // A GET carries no request body.  StreamedRequest's sink MUST be
+          // closed to signal end-of-stream: IOClient.send() awaits
+          // stream.pipe(ioRequest) before returning a response, and pipe
+          // blocks until the source stream ends.  Without close(), every
+          // download hangs in loading until the request is aborted.
+          // close() is unawaited because it may not complete until after
+          // the pipe is in progress (streamed_request.dart:15-29).
+          unawaited(request.sink.close());
           late final http.StreamedResponse response;
           try {
             response = await client.send(request);
@@ -98,7 +92,12 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             return;
           }
           if (response.statusCode < 200 || response.statusCode >= 300) {
-            await response.stream.drain<void>();
+            // Cancel (not drain) the error-body stream so a stalled server body
+            // cannot hold the download open.  `drain()` waits for the upstream
+            // to close the stream; `_cancelVideoResponse` subscribes and
+            // immediately cancels, which closes the underlying connection without
+            // waiting for the full response body [F2r(b)].
+            await _cancelVideoResponse(response);
             throw HttpException(
               'Video download failed (${response.statusCode})',
               uri: uri,
@@ -146,14 +145,72 @@ class MediaVideoViewerPage extends HookConsumerWidget {
           }
 
           final localController = VideoPlayerController.file(file);
-          await localController.initialize();
-          await localController.play();
-          if (disposed) {
-            await localController.dispose();
-            await deleteVideoFile();
-            return;
+          // Register as pending BEFORE the first async suspension
+          // (initialize()) so the effect cleanup can always reach it.
+          // video_player 2.11.1 allocates the native player synchronously
+          // inside createWithOptions() before _creatingCompleter completes;
+          // a close arriving at any point after this line will find the
+          // controller in pendingController and dispose it correctly.
+          pendingController.value = localController;
+          // Own the controller before any async suspension so a failed
+          // initialize() or play() — or a disposal that races with init —
+          // can always call dispose() unconditionally [F2r(a)].
+          // video_player 2.11.1 completes the init future with an error on
+          // native failure but does NOT dispose the player; Android 2.9.5
+          // retains the native player until explicit disposal.  Without this
+          // wrapper, a PlatformException from initialize() unwinds to the
+          // outer catch where controller.value is still null, so the cleanup
+          // teardown's `if (activeController != null)` guard silently skips
+          // disposal — leaking the native player and its event subscription.
+          try {
+            await localController.initialize();
+            if (disposed) {
+              // Effect cleanup will also see pendingController.value and
+              // dispose it; clear the ref here to avoid a double-dispose.
+              pendingController.value = null;
+              await localController.dispose();
+              await deleteVideoFile();
+              return;
+            }
+            await localController.play();
+            if (disposed) {
+              pendingController.value = null;
+              await localController.dispose();
+              await deleteVideoFile();
+              return;
+            }
+            pendingController.value = null;
+            controller.value = localController;
+          } catch (_) {
+            // Start disposal without awaiting it, then rethrow immediately.
+            //
+            // video_player 2.11.1 initialize() creates _creatingCompleter at
+            // the top of the method, then awaits createWithOptions() before
+            // completing it (video_player.dart:546,587-590).  If
+            // createWithOptions() itself throws, _creatingCompleter is never
+            // completed, and dispose() waits on it unconditionally at :682-683.
+            // Awaiting dispose() here would therefore deadlock: the outer catch
+            // never sets error.value, the error UI is never shown, and the
+            // viewer is left in an infinite loading state.
+            //
+            // Note: if createWithOptions() throws, _creatingCompleter is never
+            // completed, so the unawaited disposal stalls at the same wait.
+            // This bypasses the deadlock for the outer catch but does not
+            // release the native player in the create-failure case.  After a
+            // successful create, _creatingCompleter is completed at :590, so
+            // the detached disposal runs normally; errors from that detached
+            // future are caught and logged below rather than becoming uncaught
+            // async errors [F2r(d)].
+            pendingController.value = null;
+            unawaited(
+              localController.dispose().catchError((Object disposeError) {
+                debugPrint(
+                  '[VideoViewer] dispose() failed after load error: $disposeError',
+                );
+              }),
+            );
+            rethrow;
           }
-          controller.value = localController;
         } catch (loadError) {
           if (!disposed) error.value = loadError.toString();
         }
@@ -168,6 +225,15 @@ class MediaVideoViewerPage extends HookConsumerWidget {
         }
         unawaited(downloadSubscription.value?.cancel() ?? Future.value());
         unawaited(downloadSink.value?.close() ?? Future.value());
+        // Dispose whichever controller is reachable: a controller that has
+        // finished init+play and been published to controller.value, OR one
+        // that is still mid-init (registered in pendingController before the
+        // first await).  Exactly one of these is non-null at any moment;
+        // clearing both refs prevents a double-dispose if initializeVideo()
+        // races with the teardown.
+        final activePending = pendingController.value;
+        pendingController.value = null;
+        if (activePending != null) unawaited(activePending.dispose());
         final activeController = controller.value;
         if (activeController != null) unawaited(activeController.dispose());
         unawaited(deleteVideoFile());

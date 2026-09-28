@@ -19,8 +19,12 @@ use axum::{
 };
 use base64::Engine;
 use buzz_audit::{AuditAction, NewAuditEntry};
+use buzz_auth::DenialClass;
 use buzz_core::tenant::TenantContext;
-use buzz_media::{BlobDescriptor, MediaError, UploadAttribution, UploadNetworkInfo};
+use buzz_media::auth::BlossomStrictness;
+use buzz_media::{
+    BlobDescriptor, BlossomDenialKind, MediaError, UploadAttribution, UploadNetworkInfo,
+};
 
 use crate::state::AppState;
 
@@ -70,6 +74,10 @@ pub(crate) struct AuthenticatedUpload {
     /// door in `bridge.rs`. Server-resolved, never client-supplied.
     tenant: TenantContext,
     route_mode: UploadRouteMode,
+    /// NIP-FI strictness derived at extraction time.  Carried to the handler so
+    /// post-body auth failures (hash-binding, x-tag mismatches) produce the same
+    /// mode-aware denial shape as pre-body failures.
+    strictness: BlossomStrictness,
     _upload_permit: UploadPermit,
 }
 
@@ -77,6 +85,63 @@ pub(crate) struct AuthenticatedUpload {
 enum UploadRouteMode {
     Upload,
     LegacyMedia,
+}
+
+/// Mode-aware Blossom auth rejection for the relay layer.
+///
+/// In `Strict` mode, Blossom denial errors map to the NIP-FI fixed
+/// text/plain responses (`DenialClass` byte contract). In `Permissive` mode
+/// (Off-mode deployments), the legacy JSON 401 shape is preserved unchanged
+/// [FI-INV-15].
+///
+/// Non-Blossom errors (`blossom_denial_kind()` returns `None`) always fall
+/// through to `MediaError::into_response()` regardless of mode.
+pub(crate) struct MediaDenial(MediaError, BlossomStrictness);
+
+impl IntoResponse for MediaDenial {
+    fn into_response(self) -> Response {
+        let MediaDenial(error, strictness) = self;
+        if strictness == BlossomStrictness::Strict {
+            if let Some(kind) = error.blossom_denial_kind() {
+                let class = match kind {
+                    BlossomDenialKind::MissingEvidence => DenialClass::MissingEvidence,
+                    BlossomDenialKind::EvidenceRejected => DenialClass::EvidenceRejected,
+                    BlossomDenialKind::AuthorizationDenied => DenialClass::AuthorizationDenied,
+                };
+                tracing::warn!(
+                    error = %error,
+                    denial_class = ?class,
+                    "Blossom auth denial (strict)"
+                );
+                let mut builder = axum::http::Response::builder()
+                    .status(class.http_status())
+                    .header(header::CONTENT_TYPE, class.content_type());
+                if let Some(challenge) = class.www_authenticate() {
+                    builder = builder.header("WWW-Authenticate", challenge);
+                }
+                return builder
+                    .body(axum::body::Body::from(class.http_body()))
+                    .expect("NIP-FI denial response is always valid");
+            }
+        }
+        error.into_response()
+    }
+}
+
+/// Wrap a `MediaError` with the active strictness to produce the correct
+/// response shape at the relay boundary.
+fn media_denial(error: MediaError, strictness: BlossomStrictness) -> MediaDenial {
+    MediaDenial(error, strictness)
+}
+
+impl From<MediaError> for MediaDenial {
+    /// Default conversion uses Permissive mode — non-auth errors always fall
+    /// through to `MediaError::into_response()` regardless of mode, so the
+    /// strictness value is irrelevant. Auth errors at the extractor boundary
+    /// use explicit `media_denial(e, strictness)` calls instead.
+    fn from(e: MediaError) -> Self {
+        MediaDenial(e, BlossomStrictness::Permissive)
+    }
 }
 
 fn should_stream_as_video(sniff: &[u8]) -> bool {
@@ -240,12 +305,8 @@ fn serving_lease_lost(error: anyhow::Error) -> MediaError {
 /// Returns a [`BlobDescriptor`] JSON on success.
 // TODO(v2): Add persistent per-pubkey storage quotas. Admission limits below
 // bound active parser/storage work, but they do not cap durable bytes stored.
-// UploadContext is pub(crate) — it's an internal extractor type, never exposed
-// outside this crate. The warning is benign: axum resolves it at compile time
-// via trait bounds, not by name.
-#[allow(private_interfaces)]
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum closures
-pub async fn upload_blob(
+pub(crate) async fn upload_blob(
     State(state): State<Arc<AppState>>,
     ctx: UploadContext,
     headers: HeaderMap,
@@ -261,12 +322,14 @@ pub async fn upload_blob(
     // The closure must verify the auth event against the tenant host BEFORE
     // returning the proven pubkey to the admission gate — same ordering invariant
     // as the read path. [FI-TRACE-AUTHORITY-UNIFORM]
+    let strictness = blossom_strictness_from_state(&state);
     let tenant_host = ctx.tenant.host().to_owned();
     let headers_clone = headers.clone();
     let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
         let auth_event = extract_blossom_auth(&headers_clone).map_err(|e| e.into_response())?;
-        // Permissive window (3600s): content type unknown until body arrives.
-        buzz_media::auth::verify_blossom_auth_event(&auth_event, Some(&tenant_host), 3600)
+        // Pre-body check: freshness, cardinality, and server tag. The x-tag
+        // hash binding is checked after body completion.
+        buzz_media::auth::verify_blossom_auth_event(&auth_event, Some(&tenant_host), strictness)
             .map_err(|e| e.into_response())?;
         let pubkey = auth_event.pubkey;
         Ok(Nip98Proof::new(pubkey, auth_event))
@@ -281,21 +344,23 @@ pub async fn upload_blob(
     // them because they protect body integrity, not the assertion boundary.
     let claimed_hash = match headers.get("x-sha-256").and_then(|v| v.to_str().ok()) {
         Some(h) => h.to_owned(),
-        None => return MediaError::MissingTag("x-sha-256").into_response(),
+        None => {
+            return media_denial(MediaError::MissingTag("x-sha-256"), strictness).into_response()
+        }
     };
     if claimed_hash.len() != 64
         || !claimed_hash
             .chars()
             .all(|c| matches!(c, '0'..='9' | 'a'..='f'))
     {
-        return MediaError::HashMismatch.into_response();
+        return media_denial(MediaError::HashMismatch, strictness).into_response();
     }
     let has_matching_x = auth_event
         .tags
         .iter()
         .any(|tag| tag.kind().to_string() == "x" && (tag.content() == Some(&claimed_hash)));
     if !has_matching_x {
-        return MediaError::HashMismatch.into_response();
+        return media_denial(MediaError::HashMismatch, strictness).into_response();
     }
 
     // Post-admission: relay membership gate (NIP-43).
@@ -309,7 +374,7 @@ pub async fn upload_blob(
     )
     .await
     .map(|_| ())
-    .map_err(|_| MediaError::RelayMembershipRequired)
+    .map_err(|_| media_denial(MediaError::RelayMembershipRequired, strictness))
     {
         return e.into_response();
     }
@@ -337,6 +402,7 @@ pub async fn upload_blob(
         auth_event,
         tenant: ctx.tenant,
         route_mode: ctx.route_mode,
+        strictness,
         _upload_permit: upload_permit,
     };
     upload_blob_inner(state, auth, headers, body).await
@@ -359,13 +425,15 @@ async fn upload_blob_result(
     auth: AuthenticatedUpload,
     headers: HeaderMap,
     body: axum::body::Body,
-) -> Result<Json<BlobDescriptor>, MediaError> {
+) -> Result<Json<BlobDescriptor>, MediaDenial> {
+    let strictness = auth.strictness;
     let attribution = upload_attribution(&state, &auth, &headers).await;
 
     let serving_write =
         buzz_deletion::acquire_serving_write(&state.db, auth.tenant.community(), "media_upload")
             .await
-            .map_err(serving_write_error)?;
+            .map_err(serving_write_error)
+            .map_err(|e| media_denial(e, strictness))?;
 
     if auth.route_mode == UploadRouteMode::LegacyMedia {
         metrics::counter!("buzz_media_legacy_upload_route_total").increment(1);
@@ -386,13 +454,19 @@ async fn upload_blob_result(
                 sniff.extend_from_slice(&chunk[..chunk.len().min(needed)]);
                 replay_chunks.push(chunk);
             }
-            Some(Err(error)) => return Err(MediaError::Io(error.to_string())),
+            Some(Err(error)) => {
+                return Err(media_denial(MediaError::Io(error.to_string()), strictness))
+            }
             None => break,
         }
     }
     let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
 
-    serving_write.verify().await.map_err(serving_lease_lost)?;
+    serving_write
+        .verify()
+        .await
+        .map_err(serving_lease_lost)
+        .map_err(MediaDenial::from)?;
 
     let mut descriptor = serving_write
         .protect(async {
@@ -471,7 +545,15 @@ async fn upload_blob_result(
                     Err(_) => MediaError::Internal,
                 }
             }
-        })??;
+        })
+        // The outer anyhow→MediaError map above captures lease-loss and
+        // protect-layer failures. Apply media_denial so Strict produces
+        // byte-exact NIP-FI responses for those errors.
+        .map_err(|e| media_denial(e, strictness))?
+        // The inner Result captures failures from the async body (process_*,
+        // hash mismatches). Wrap through media_denial so post-body auth errors
+        // get the same NIP-FI shape as pre-body ones.
+        .map_err(|e| media_denial(e, strictness))?;
 
     rewrite_descriptor_urls_for_tenant(
         &mut descriptor,
@@ -577,9 +659,10 @@ fn extract_blossom_read_proof(
     headers: &HeaderMap,
     sha256: &str,
     tenant_host: &str,
+    strictness: BlossomStrictness,
 ) -> Result<crate::nip_fi_http::Nip98Proof<nostr::Event>, MediaError> {
     let auth_event = extract_blossom_auth(headers)?;
-    buzz_media::auth::verify_blossom_get_auth(&auth_event, sha256, Some(tenant_host), 3600)?;
+    buzz_media::auth::verify_blossom_get_auth(&auth_event, sha256, Some(tenant_host), strictness)?;
     let pubkey = auth_event.pubkey;
     Ok(crate::nip_fi_http::Nip98Proof::new(pubkey, auth_event))
 }
@@ -595,7 +678,8 @@ async fn enforce_blossom_read_membership(
     tenant: &TenantContext,
     auth_event: &nostr::Event,
     headers: &HeaderMap,
-) -> Result<(), MediaError> {
+    strictness: BlossomStrictness,
+) -> Result<(), MediaDenial> {
     let auth_tag = crate::api::relay_members::extract_auth_tag_header(headers);
     crate::api::relay_members::enforce_relay_membership(
         state,
@@ -606,7 +690,7 @@ async fn enforce_blossom_read_membership(
     )
     .await
     .map(|_| ())
-    .map_err(|_| MediaError::RelayMembershipRequired)
+    .map_err(|_| media_denial(MediaError::RelayMembershipRequired, strictness))
 }
 
 fn blob_cache_control() -> &'static str {
@@ -693,11 +777,11 @@ const MAX_RANGE_CHUNK: u64 = 16 * 1024 * 1024;
 ///
 /// All responses include `Accept-Ranges: bytes` so video players know seeking is supported.
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
-pub async fn get_blob(
+pub(crate) async fn get_blob(
     State(state): State<Arc<AppState>>,
     Path(sha256_ext): Path<String>,
     req_headers: HeaderMap,
-) -> Result<Response, MediaError> {
+) -> Result<Response, MediaDenial> {
     validate_media_path(&sha256_ext)?;
     // Row zero: bind tenant. Blossom auth extraction and NIP-FI admission follow
     // so that in Enforce mode a missing/malformed Authorization header produces
@@ -708,6 +792,7 @@ pub async fn get_blob(
         .next()
         .unwrap_or(&sha256_ext)
         .to_owned();
+    let strictness = blossom_strictness_from_state(&state);
     let tenant_host = tenant.host().to_owned();
     let headers_clone = req_headers.clone();
     // NIP-FI admission with Blossom extraction as the NIP-98 closure.
@@ -715,7 +800,7 @@ pub async fn get_blob(
     // EvidenceRejected).  In Off mode: MediaError propagates unchanged [FI-INV-15].
     use crate::nip_fi_http::admit_nip_fi_http_on_state;
     let admission = match admit_nip_fi_http_on_state(&state, &req_headers, move || {
-        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host)
+        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
             .map_err(|e| e.into_response())
     }) {
         Ok(a) => a,
@@ -723,8 +808,10 @@ pub async fn get_blob(
     };
     let auth_event = admission.into_extra();
     // Post-admission: membership gate.
-    enforce_blossom_read_membership(&state, &tenant, &auth_event, &req_headers).await?;
-    serve_blob_for_tenant(&state, &tenant, &sha256_ext, &req_headers).await
+    enforce_blossom_read_membership(&state, &tenant, &auth_event, &req_headers, strictness).await?;
+    serve_blob_for_tenant(&state, &tenant, &sha256_ext, &req_headers)
+        .await
+        .map_err(MediaDenial::from)
 }
 
 /// Serve a validated blob from an already-authorized tenant context.
@@ -983,11 +1070,11 @@ fn parse_byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
 /// object metadata — to prevent MIME spoofing via tampered storage. If the sidecar
 /// is missing, we return 404 rather than fall back to untrusted metadata.
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
-pub async fn head_blob(
+pub(crate) async fn head_blob(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(sha256_ext): Path<String>,
-) -> Result<Response, MediaError> {
+) -> Result<Response, MediaDenial> {
     validate_media_path(&sha256_ext)?;
     // Row zero: bind tenant. Blossom auth extraction and NIP-FI admission follow
     // so that in Enforce mode a missing/malformed Authorization header produces
@@ -998,18 +1085,19 @@ pub async fn head_blob(
         .next()
         .unwrap_or(&sha256_ext)
         .to_owned();
+    let strictness = blossom_strictness_from_state(&state);
     let tenant_host = tenant.host().to_owned();
     let headers_clone = headers.clone();
     use crate::nip_fi_http::admit_nip_fi_http_on_state;
     let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
-        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host)
+        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
             .map_err(|e| e.into_response())
     }) {
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };
     let auth_event = admission.into_extra();
-    enforce_blossom_read_membership(&state, &tenant, &auth_event, &headers).await?;
+    enforce_blossom_read_membership(&state, &tenant, &auth_event, &headers, strictness).await?;
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
@@ -1035,7 +1123,7 @@ pub async fn head_blob(
                 .await
                 .map_err(|_| MediaError::NotFound)?;
             if requested_ext != sidecar.ext {
-                return Err(MediaError::NotFound);
+                return Err(MediaError::NotFound.into());
             }
         }
         sidecar_mime
@@ -1090,6 +1178,10 @@ async fn resolve_s3_key(
 /// Extract and verify a kind:24242 Blossom auth event from the `Authorization` header.
 ///
 /// Accepts both base64url (BUD-11 spec) and standard base64 (nostr-tools compat).
+///
+/// Takes the first `Authorization` value. Repeated `Authorization` fields are
+/// rejected in Enforce by the cardinality gate in `admit_nip_fi_http`; Off keeps
+/// the legacy first-value behavior [FI-INV-15].
 fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError> {
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 
@@ -1113,13 +1205,26 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
     Ok(event)
 }
 
+/// Derive `BlossomStrictness` from the relay's NIP-FI mode.
+///
+/// Enforce applies the strict NIP-FI kind-24242 rules. Off keeps the
+/// pre-NIP-FI permissive verifier [FI-INV-15]. DenyProtected never reaches a
+/// verifier: `admit_nip_fi_http_on_state` answers 503 first.
+fn blossom_strictness_from_state(state: &AppState) -> BlossomStrictness {
+    if state.config.nip_fi.is_enforce() {
+        BlossomStrictness::Strict
+    } else {
+        BlossomStrictness::Permissive
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
 
     use axum::{
-        body::Body,
+        body::{to_bytes, Body},
         http::{header, Request, StatusCode},
     };
     use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
@@ -1127,6 +1232,251 @@ mod tests {
     use uuid::Uuid;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    // ── MediaDenial response-shape tests (NIP-FI §755-773) ──────────────────
+    // These tests pin the byte-exact response contract for Strict mode and
+    // confirm Permissive mode produces the unchanged legacy JSON 401 shape.
+
+    #[tokio::test]
+    async fn strict_missing_auth_produces_nip_fi_401_with_www_authenticate() {
+        let denial = MediaDenial(MediaError::MissingAuth, BlossomStrictness::Strict);
+        let resp = denial.into_response();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("text/plain"),
+            "expected text/plain CT, got: {ct}"
+        );
+
+        let www_auth = resp
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            www_auth, "Nostr",
+            "expected 'Nostr' WWW-Authenticate challenge"
+        );
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"authentication required\n");
+    }
+
+    #[tokio::test]
+    async fn strict_evidence_rejected_produces_nip_fi_403_text_plain() {
+        for error in [
+            MediaError::InvalidSignature,
+            MediaError::TokenExpired,
+            MediaError::TimestampOutOfWindow,
+            MediaError::HashMismatch,
+            MediaError::ServerMismatch,
+            MediaError::MissingTag("server"),
+            MediaError::DuplicateTag("Authorization"),
+            MediaError::InvalidAuthScheme,
+        ] {
+            let label = format!("{error:?}");
+            let denial = MediaDenial(error, BlossomStrictness::Strict);
+            let resp = denial.into_response();
+
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "expected 403 for Strict {label}"
+            );
+
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(
+                ct.contains("text/plain"),
+                "expected text/plain CT for {label}, got: {ct}"
+            );
+
+            assert!(
+                resp.headers().get("www-authenticate").is_none(),
+                "403 must not have WWW-Authenticate for {label}"
+            );
+
+            let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(
+                body.as_ref(),
+                b"evidence rejected\n",
+                "wrong body for {label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn permissive_missing_auth_keeps_legacy_json_401() {
+        let denial = MediaDenial(MediaError::MissingAuth, BlossomStrictness::Permissive);
+        let resp = denial.into_response();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("application/json"),
+            "Permissive must keep JSON CT, got: {ct}"
+        );
+
+        assert!(
+            resp.headers().get("www-authenticate").is_none(),
+            "Permissive must not add WWW-Authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn permissive_evidence_rejected_keeps_legacy_json_401() {
+        for error in [
+            MediaError::InvalidSignature,
+            MediaError::TokenExpired,
+            MediaError::HashMismatch,
+            MediaError::MissingTag("t"),
+        ] {
+            let label = format!("{error:?}");
+            let denial = MediaDenial(error, BlossomStrictness::Permissive);
+            let resp = denial.into_response();
+
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "Permissive: expected 401 for {label}"
+            );
+
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(
+                ct.contains("application/json"),
+                "Permissive must keep JSON CT for {label}, got: {ct}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn non_auth_errors_always_fall_through_regardless_of_mode() {
+        for strictness in [BlossomStrictness::Strict, BlossomStrictness::Permissive] {
+            let denial = MediaDenial(MediaError::NotFound, strictness);
+            assert_eq!(denial.into_response().status(), StatusCode::NOT_FOUND);
+
+            let denial = MediaDenial(MediaError::Internal, strictness);
+            assert!(denial.into_response().status().is_server_error());
+        }
+    }
+
+    // ── Extractor hash-check denial sites (sites 1+2 per Paul's spot-check) ──
+    // These pins cover the missing-X-SHA-256 header (MissingTag) and the
+    // malformed/unmatched hash (HashMismatch) cases that previously bypassed
+    // the strictness split via `From<MediaError> for MediaDenial` (Permissive).
+
+    #[tokio::test]
+    async fn strict_missing_x_sha256_header_produces_nip_fi_403() {
+        let denial = MediaDenial(
+            MediaError::MissingTag("x-sha-256"),
+            BlossomStrictness::Strict,
+        );
+        let resp = denial.into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "missing x-sha-256 header must be 403 in Strict mode"
+        );
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("text/plain"),
+            "expected text/plain CT, got: {ct}"
+        );
+        assert!(
+            resp.headers().get("www-authenticate").is_none(),
+            "403 must not have WWW-Authenticate"
+        );
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"evidence rejected\n");
+    }
+
+    #[tokio::test]
+    async fn strict_hash_mismatch_produces_nip_fi_403() {
+        let denial = MediaDenial(MediaError::HashMismatch, BlossomStrictness::Strict);
+        let resp = denial.into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "hash mismatch must be 403 in Strict mode"
+        );
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("text/plain"), "expected text/plain, got: {ct}");
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"evidence rejected\n");
+    }
+
+    #[tokio::test]
+    async fn permissive_missing_x_sha256_header_keeps_legacy_json_401() {
+        let denial = MediaDenial(
+            MediaError::MissingTag("x-sha-256"),
+            BlossomStrictness::Permissive,
+        );
+        let resp = denial.into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Permissive must keep legacy 401 for MissingTag"
+        );
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("application/json"),
+            "Permissive must keep JSON CT, got: {ct}"
+        );
+        assert!(
+            resp.headers().get("www-authenticate").is_none(),
+            "Permissive must not add WWW-Authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn permissive_hash_mismatch_keeps_legacy_json_401() {
+        let denial = MediaDenial(MediaError::HashMismatch, BlossomStrictness::Permissive);
+        let resp = denial.into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Permissive must keep legacy 401 for HashMismatch"
+        );
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("application/json"),
+            "Permissive must keep JSON CT, got: {ct}"
+        );
+    }
 
     #[test]
     fn serving_write_error_taxonomy_separates_fence_from_backend_failure() {
@@ -1140,6 +1490,68 @@ mod tests {
             serving_write_error(backend),
             MediaError::ServiceUnavailable
         ));
+    }
+
+    // ── Finding 5 (F5): membership denials in Strict mode → authorization denied ─
+
+    #[tokio::test]
+    async fn strict_relay_membership_required_produces_nip_fi_403_authorization_denied() {
+        let denial = MediaDenial(
+            MediaError::RelayMembershipRequired,
+            BlossomStrictness::Strict,
+        );
+        let resp = denial.into_response();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "membership denial must be 403 in Strict mode"
+        );
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("text/plain"),
+            "expected text/plain CT, got: {ct}"
+        );
+        assert!(
+            resp.headers().get("www-authenticate").is_none(),
+            "403 authorization denied must not have WWW-Authenticate"
+        );
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            body.as_ref(),
+            b"authorization denied\n",
+            "NIP-FI membership denial body must be 'authorization denied\\n'"
+        );
+    }
+
+    #[tokio::test]
+    async fn permissive_relay_membership_required_keeps_legacy_json_403() {
+        // In Permissive mode membership denial falls through to MediaError::into_response()
+        // which produces the legacy JSON 403.
+        let denial = MediaDenial(
+            MediaError::RelayMembershipRequired,
+            BlossomStrictness::Permissive,
+        );
+        let resp = denial.into_response();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "membership denial must still be 403 in Permissive mode"
+        );
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("application/json"),
+            "Permissive membership denial must keep JSON CT, got: {ct}"
+        );
     }
 
     #[test]
@@ -1302,7 +1714,7 @@ mod tests {
 
     fn media_get_tags_for(host: &str, sha256: Option<&str>) -> Vec<Tag> {
         let now = Timestamp::now().as_secs();
-        let expiration = (now + 300).to_string();
+        let expiration = (now + 55).to_string();
         let mut tags = vec![
             Tag::parse(["t", "get"]).expect("t tag"),
             Tag::parse(["expiration", &expiration]).expect("expiration tag"),
@@ -1355,7 +1767,7 @@ mod tests {
     async fn media_read_rejects_upload_verb_wrong_server_and_wrong_x() {
         let keys = Keys::generate();
         let now = Timestamp::now().as_secs();
-        let expiration = (now + 300).to_string();
+        let expiration = (now + 55).to_string();
         let cases = [
             vec![
                 Tag::parse(["t", "upload"]).expect("t tag"),
@@ -1846,29 +2258,52 @@ mod tests {
         }
 
         /// Mint a valid Blossom upload auth header value.
+        /// NIP-FI-compliant: 55s lifetime, single `server` tag.
         fn blossom_upload_auth_value(keys: &Keys, host: &str, sha256_hex: &str) -> String {
+            blossom_upload_auth_value_with(keys, Some(host), sha256_hex, 55)
+        }
+
+        /// Upload proof with a chosen lifetime and optional `server` tag, for
+        /// proofs that only the Permissive verifier accepts.
+        fn blossom_upload_auth_value_with(
+            keys: &Keys,
+            server: Option<&str>,
+            sha256_hex: &str,
+            lifetime_secs: u64,
+        ) -> String {
             use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
             use nostr::JsonUtil as _;
-            let now = nostr::Timestamp::now().as_secs();
-            let exp = now + 300;
+            let exp = nostr::Timestamp::now().as_secs() + lifetime_secs;
+            let mut tags = vec![
+                Tag::parse(["t", "upload"]).unwrap(),
+                Tag::parse(["expiration", &exp.to_string()]).unwrap(),
+                Tag::parse(["x", sha256_hex]).unwrap(),
+            ];
+            if let Some(server) = server {
+                tags.push(Tag::parse(["server", server]).unwrap());
+            }
             let event = EventBuilder::new(Kind::from(24242), "Upload blob")
-                .tags(vec![
-                    Tag::parse(["t", "upload"]).unwrap(),
-                    Tag::parse(["expiration", &exp.to_string()]).unwrap(),
-                    Tag::parse(["server", host]).unwrap(),
-                    Tag::parse(["x", sha256_hex]).unwrap(),
-                ])
+                .tags(tags)
                 .sign_with_keys(keys)
                 .expect("sign blossom upload auth");
             format!("Nostr {}", B64.encode(event.as_json().as_bytes()))
         }
 
         /// Mint a valid Blossom get auth header value.
+        /// NIP-FI-compliant: 55s lifetime, single `server` tag.
         fn blossom_get_auth_value(keys: &Keys, host: &str, sha256_hex: &str) -> String {
+            blossom_get_auth_value_with(keys, host, sha256_hex, 55)
+        }
+
+        fn blossom_get_auth_value_with(
+            keys: &Keys,
+            host: &str,
+            sha256_hex: &str,
+            lifetime_secs: u64,
+        ) -> String {
             use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
             use nostr::JsonUtil as _;
-            let now = nostr::Timestamp::now().as_secs();
-            let exp = now + 300;
+            let exp = nostr::Timestamp::now().as_secs() + lifetime_secs;
             let event = EventBuilder::new(Kind::from(24242), "Get blob")
                 .tags(vec![
                     Tag::parse(["t", "get"]).unwrap(),
@@ -1990,11 +2425,32 @@ mod tests {
             authorization: &[&str],
             assertion: Option<&str>,
         ) -> (StatusCode, axum::http::HeaderMap, bytes::Bytes) {
+            let sha = sha256_hex(AUDIO_BODY);
+            upload_request_with(
+                rt,
+                state,
+                route,
+                host,
+                (Some(&sha), AUDIO_BODY),
+                authorization,
+                assertion,
+            )
+        }
+
+        /// `upload_request` with an explicit `X-SHA-256` header (or none) and body.
+        fn upload_request_with(
+            rt: &tokio::runtime::Runtime,
+            state: &Arc<AppState>,
+            route: &str,
+            host: &str,
+            (x_sha256, body): (Option<&str>, &[u8]),
+            authorization: &[&str],
+            assertion: Option<&str>,
+        ) -> (StatusCode, axum::http::HeaderMap, bytes::Bytes) {
             let mut headers = axum::http::HeaderMap::new();
-            headers.insert(
-                "x-sha-256",
-                sha256_hex(AUDIO_BODY).parse().expect("valid header"),
-            );
+            if let Some(x_sha256) = x_sha256 {
+                headers.insert("x-sha-256", x_sha256.parse().expect("valid header"));
+            }
             for value in authorization {
                 headers.append(
                     axum::http::header::AUTHORIZATION,
@@ -2013,7 +2469,7 @@ mod tests {
                 route,
                 host,
                 headers,
-                AUDIO_BODY,
+                body,
             ))
         }
 
@@ -3361,6 +3817,474 @@ mod tests {
                 None,
                 "admitted upload MUST release its per-key slot"
             );
+        }
+
+        // ── Blossom strictness follows NIP-FI mode ──────────────────────────
+        //
+        // Enforce selects the Strict kind-24242 verifier; Off keeps the
+        // pre-NIP-FI Permissive one.  Each proof below is accepted by
+        // Permissive and rejected by Strict (lifetime > 60s, or no `server`
+        // tag), so reverting `blossom_strictness_from_state` to Permissive
+        // turns the Enforce denials into the 415 the Off cases pin.
+
+        fn permissive_only_upload_proofs(keys: &Keys, host: &str) -> [(String, &'static str); 2] {
+            let sha = sha256_hex(AUDIO_BODY);
+            [
+                (
+                    blossom_upload_auth_value_with(keys, Some(host), &sha, 300),
+                    "300s lifetime",
+                ),
+                (
+                    blossom_upload_auth_value_with(keys, None, &sha, 55),
+                    "no server tag",
+                ),
+            ]
+        }
+
+        fn mutate_state(state: &mut Arc<AppState>, f: impl FnOnce(&mut crate::config::Config)) {
+            let state = Arc::get_mut(state).expect("fixture state is uniquely owned");
+            f(Arc::make_mut(&mut state.config));
+        }
+
+        fn media_read(
+            rt: &tokio::runtime::Runtime,
+            state: &Arc<AppState>,
+            method: &str,
+            host: &str,
+            authorization: &str,
+            assertion: Option<&str>,
+        ) -> (StatusCode, axum::http::HeaderMap, bytes::Bytes) {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                authorization.parse().expect("valid header bytes"),
+            );
+            if let Some(assertion) = assertion {
+                headers.insert(
+                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                    format!("Bearer {assertion}").parse().expect("valid header"),
+                );
+            }
+            let path = format!("/media/{}", "a".repeat(64));
+            rt.block_on(media_oneshot(
+                Arc::clone(state),
+                method,
+                &path,
+                host,
+                headers,
+                b"",
+            ))
+        }
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn upload_enforce_strict_rejects_permissive_only_proof() {
+            let (rt, state, host) = media_fixture(media_enforce_test_state());
+            let keys = Keys::generate();
+            let assertion = signed_assertion(&keys.public_key().to_hex());
+            for (proof, case) in permissive_only_upload_proofs(&keys, &host) {
+                for route in UPLOAD_ROUTES {
+                    assert_exact_response(
+                        &upload_request(&rt, &state, route, &host, &[&proof], Some(&assertion)),
+                        StatusCode::FORBIDDEN,
+                        "text/plain; charset=utf-8",
+                        None,
+                        b"evidence rejected\n",
+                        &format!("Enforce {route}: {case}"),
+                    );
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn upload_off_permissive_accepts_permissive_only_proof() {
+            let (rt, state, host) = media_fixture(media_off_test_state());
+            for (proof, case) in permissive_only_upload_proofs(&Keys::generate(), &host) {
+                for route in UPLOAD_ROUTES {
+                    assert_exact_response(
+                        &upload_request(&rt, &state, route, &host, &[&proof], None),
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        "application/json",
+                        None,
+                        AUDIO_REJECTION,
+                        &format!("Off {route}: {case}"),
+                    );
+                }
+            }
+        }
+
+        /// GET and HEAD each derive strictness independently; HEAD carries the
+        /// same denial headers with the body suppressed.
+        const READ_METHODS: [(&str, &[u8]); 2] = [("GET", b"evidence rejected\n"), ("HEAD", b"")];
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn read_strictness_follows_nip_fi_mode() {
+            let keys = Keys::generate();
+            let sha = "a".repeat(64);
+
+            let (rt, state, host) = media_fixture(media_enforce_test_state());
+            let assertion = signed_assertion(&keys.public_key().to_hex());
+            let proof = blossom_get_auth_value_with(&keys, &host, &sha, 300);
+            for (method, body) in READ_METHODS {
+                assert_exact_response(
+                    &media_read(&rt, &state, method, &host, &proof, Some(&assertion)),
+                    StatusCode::FORBIDDEN,
+                    "text/plain; charset=utf-8",
+                    None,
+                    body,
+                    &format!("Enforce {method}: 300s lifetime, non-member"),
+                );
+            }
+
+            let (rt, state, host) = media_fixture(media_off_test_state());
+            let proof = blossom_get_auth_value_with(&keys, &host, &sha, 300);
+            for (method, _) in READ_METHODS {
+                let (status, _, body) = media_read(&rt, &state, method, &host, &proof, None);
+                assert_eq!(
+                    status,
+                    StatusCode::NOT_FOUND,
+                    "Off {method} must pass Permissive auth and reach the sidecar gate; \
+                     body {body:?}"
+                );
+            }
+        }
+
+        // ── Off keeps main's Permissive `t` predicate [FI-INV-15] ───────────
+
+        /// Blossom proof with the given `t` tags plus valid expiration, server,
+        /// and x tags.
+        fn blossom_auth_value_with_t(
+            keys: &Keys,
+            t_tags: &[&[&str]],
+            host: &str,
+            sha256_hex: &str,
+        ) -> String {
+            use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+            use nostr::JsonUtil as _;
+            let exp = (nostr::Timestamp::now().as_secs() + 55).to_string();
+            let mut tags: Vec<Tag> = t_tags
+                .iter()
+                .map(|t| Tag::parse(t.iter().copied()).unwrap())
+                .collect();
+            tags.push(Tag::parse(["expiration", &exp]).unwrap());
+            tags.push(Tag::parse(["server", host]).unwrap());
+            tags.push(Tag::parse(["x", sha256_hex]).unwrap());
+            let event = EventBuilder::new(Kind::from(24242), "Blossom auth")
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign blossom auth");
+            format!("Nostr {}", B64.encode(event.as_json().as_bytes()))
+        }
+
+        const LEGACY_AUTH_FAILED: &[u8] = br#"{"error":"authentication failed"}"#;
+
+        /// An empty-valued `t` beside a valid one is rejected with main's legacy
+        /// 401 JSON in either order; a valueless `t` is ignored, as on main.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn off_empty_t_tag_keeps_legacy_401_valueless_is_ignored() {
+            let (rt, state, host) = media_fixture(media_off_test_state());
+            let keys = Keys::generate();
+            let read_sha = "a".repeat(64);
+            let upload_sha = sha256_hex(AUDIO_BODY);
+            for (extra, rejected) in [(&["t", ""][..], true), (&["t"][..], false)] {
+                for (verb_first, order) in [(true, "verb first"), (false, "verb last")] {
+                    let t_tags = |verb: &'static str| -> Vec<&[&str]> {
+                        let verb: &[&str] = if verb == "get" {
+                            &["t", "get"]
+                        } else {
+                            &["t", "upload"]
+                        };
+                        if verb_first {
+                            vec![verb, extra]
+                        } else {
+                            vec![extra, verb]
+                        }
+                    };
+                    let context = format!("Off {extra:?} {order}");
+                    let read_proof =
+                        blossom_auth_value_with_t(&keys, &t_tags("get"), &host, &read_sha);
+                    let read = media_read(&rt, &state, "GET", &host, &read_proof, None);
+                    let upload_proof =
+                        blossom_auth_value_with_t(&keys, &t_tags("upload"), &host, &upload_sha);
+                    if rejected {
+                        assert_exact_response(
+                            &read,
+                            StatusCode::UNAUTHORIZED,
+                            "application/json",
+                            None,
+                            LEGACY_AUTH_FAILED,
+                            &format!("{context} read"),
+                        );
+                    } else {
+                        assert_eq!(read.0, StatusCode::NOT_FOUND, "{context} read");
+                    }
+                    for route in UPLOAD_ROUTES {
+                        let response =
+                            upload_request(&rt, &state, route, &host, &[&upload_proof], None);
+                        if rejected {
+                            assert_exact_response(
+                                &response,
+                                StatusCode::UNAUTHORIZED,
+                                "application/json",
+                                None,
+                                LEGACY_AUTH_FAILED,
+                                &format!("{context} {route}"),
+                            );
+                        } else {
+                            assert_exact_response(
+                                &response,
+                                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                                "application/json",
+                                None,
+                                AUDIO_REJECTION,
+                                &format!("{context} {route}"),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Upload hash denials go through the handler in both modes ────────
+
+        /// Decodable 1x1 PNG: passes content validation on both upload routes,
+        /// so a signed/header hash that differs from its digest is rejected by
+        /// the post-body hash check before any storage call.
+        const PNG_BODY: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xff, 0xff, 0x3f, 0x00, 0x05, 0xfe, 0x02, 0xfe, 0x0d, 0xef, 0x46,
+            0xb8, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+
+        fn assert_upload_hash_denials(enforce: bool) {
+            let (rt, state, host) = if enforce {
+                media_fixture(media_enforce_test_state())
+            } else {
+                media_fixture(media_off_test_state())
+            };
+            let keys = Keys::generate();
+            let assertion = signed_assertion(&keys.public_key().to_hex());
+            let assertion = enforce.then_some(assertion.as_str());
+            let audio_sha = sha256_hex(AUDIO_BODY);
+            let other_sha = "b".repeat(64);
+            let audio_proof = blossom_upload_auth_value(&keys, &host, &audio_sha);
+            let other_proof = blossom_upload_auth_value(&keys, &host, &other_sha);
+            /// `X-SHA-256` header value and request body.
+            type HashRequest<'a> = (Option<&'a str>, &'a [u8]);
+            let cases: [(&str, HashRequest, &str); 4] = [
+                ("X-SHA-256 missing", (None, AUDIO_BODY), &audio_proof),
+                (
+                    "X-SHA-256 malformed",
+                    (Some("not-hex"), AUDIO_BODY),
+                    &audio_proof,
+                ),
+                (
+                    "X-SHA-256 not in signed x",
+                    (Some(&other_sha), AUDIO_BODY),
+                    &audio_proof,
+                ),
+                (
+                    "body hash differs from signed/header hash",
+                    (Some(&other_sha), PNG_BODY),
+                    &other_proof,
+                ),
+            ];
+            for (case, request, proof) in cases {
+                for route in UPLOAD_ROUTES {
+                    let response = upload_request_with(
+                        &rt,
+                        &state,
+                        route,
+                        &host,
+                        request,
+                        &[proof],
+                        assertion,
+                    );
+                    let context = format!("enforce={enforce} {route}: {case}");
+                    if enforce {
+                        assert_exact_response(
+                            &response,
+                            StatusCode::FORBIDDEN,
+                            "text/plain; charset=utf-8",
+                            None,
+                            b"evidence rejected\n",
+                            &context,
+                        );
+                    } else {
+                        assert_exact_response(
+                            &response,
+                            StatusCode::UNAUTHORIZED,
+                            "application/json",
+                            None,
+                            LEGACY_AUTH_FAILED,
+                            &context,
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn upload_enforce_hash_denials_are_evidence_rejected() {
+            assert_upload_hash_denials(true);
+        }
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn upload_off_hash_denials_keep_legacy_json_401() {
+            assert_upload_hash_denials(false);
+        }
+
+        /// DenyProtected answers 503 before any proof check, so even a
+        /// compliant proof never reaches the Blossom verifier.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn media_deny_protected_is_503_before_proof_checks() {
+            let (rt, mut state, host) = media_fixture(media_off_test_state());
+            mutate_state(&mut state, |c| c.nip_fi.mode = NipFiMode::DenyProtected);
+            let keys = Keys::generate();
+            let class = buzz_auth::DenialClass::AuthorizationUnavailable;
+            let upload_proof = blossom_upload_auth_value(&keys, &host, &sha256_hex(AUDIO_BODY));
+            let read_proof = blossom_get_auth_value(&keys, &host, &"a".repeat(64));
+            for (response, context) in [
+                (
+                    upload_request(&rt, &state, "/upload", &host, &[&upload_proof], None),
+                    "upload",
+                ),
+                (
+                    media_read(&rt, &state, "GET", &host, &read_proof, None),
+                    "read",
+                ),
+            ] {
+                assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE, "{context}");
+                assert_eq!(
+                    response.2.as_ref(),
+                    class.http_body().as_bytes(),
+                    "{context}"
+                );
+            }
+        }
+
+        // ── Membership denial shape follows NIP-FI mode ─────────────────────
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn enforce_membership_denial_is_authorization_denied() {
+            let (rt, mut state, host) = media_fixture(media_enforce_test_state());
+            mutate_state(&mut state, |c| c.require_relay_membership = true);
+            let keys = Keys::generate();
+            let assertion = signed_assertion(&keys.public_key().to_hex());
+            let upload_proof = blossom_upload_auth_value(&keys, &host, &sha256_hex(AUDIO_BODY));
+            let read_proof = blossom_get_auth_value(&keys, &host, &"a".repeat(64));
+            for (response, context) in [
+                (
+                    upload_request(
+                        &rt,
+                        &state,
+                        "/upload",
+                        &host,
+                        &[&upload_proof],
+                        Some(&assertion),
+                    ),
+                    "upload",
+                ),
+                (
+                    media_read(&rt, &state, "GET", &host, &read_proof, Some(&assertion)),
+                    "read",
+                ),
+            ] {
+                assert_exact_response(
+                    &response,
+                    StatusCode::FORBIDDEN,
+                    "text/plain; charset=utf-8",
+                    None,
+                    b"authorization denied\n",
+                    &format!("Enforce {context} non-member"),
+                );
+            }
+            assert_exact_response(
+                &media_read(&rt, &state, "HEAD", &host, &read_proof, Some(&assertion)),
+                StatusCode::FORBIDDEN,
+                "text/plain; charset=utf-8",
+                None,
+                b"",
+                "Enforce HEAD non-member",
+            );
+        }
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn off_membership_denial_keeps_legacy_json_403() {
+            let (rt, mut state, host) = media_fixture(media_off_test_state());
+            mutate_state(&mut state, |c| c.require_relay_membership = true);
+            let keys = Keys::generate();
+            let upload_proof = blossom_upload_auth_value(&keys, &host, &sha256_hex(AUDIO_BODY));
+            let read_proof = blossom_get_auth_value(&keys, &host, &"a".repeat(64));
+            for (response, context) in [
+                (
+                    upload_request(&rt, &state, "/upload", &host, &[&upload_proof], None),
+                    "upload",
+                ),
+                (
+                    media_read(&rt, &state, "GET", &host, &read_proof, None),
+                    "read",
+                ),
+            ] {
+                assert_exact_response(
+                    &response,
+                    StatusCode::FORBIDDEN,
+                    "application/json",
+                    None,
+                    br#"{"error":"relay membership required"}"#,
+                    &format!("Off {context} non-member"),
+                );
+            }
+            assert_exact_response(
+                &media_read(&rt, &state, "HEAD", &host, &read_proof, None),
+                StatusCode::FORBIDDEN,
+                "application/json",
+                None,
+                b"",
+                "Off HEAD non-member",
+            );
+        }
+
+        /// Positive control: a relay member passes the gate under Enforce and
+        /// reaches the sidecar check (404 for an unknown blob), so the denials
+        /// above are membership-specific rather than blanket rejections.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn enforce_relay_member_read_reaches_sidecar() {
+            let (rt, mut state, host) = media_fixture(media_enforce_test_state());
+            mutate_state(&mut state, |c| c.require_relay_membership = true);
+            let keys = Keys::generate();
+            let community = rt
+                .block_on(state.db.ensure_configured_community(&host))
+                .expect("community");
+            rt.block_on(state.db.add_relay_member(
+                community.id,
+                &keys.public_key().to_hex(),
+                "member",
+                None,
+            ))
+            .expect("add relay member");
+            let assertion = signed_assertion(&keys.public_key().to_hex());
+            let proof = blossom_get_auth_value(&keys, &host, &"a".repeat(64));
+            for method in ["GET", "HEAD"] {
+                let (status, _, body) =
+                    media_read(&rt, &state, method, &host, &proof, Some(&assertion));
+                assert_eq!(
+                    status,
+                    StatusCode::NOT_FOUND,
+                    "member {method}; body {body:?}"
+                );
+            }
         }
     }
 }
