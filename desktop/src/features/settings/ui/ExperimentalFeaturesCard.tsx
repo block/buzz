@@ -41,9 +41,14 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
 
 export function ExperimentalFeaturesCard() {
   // Assistant is always-on in the Hula build — not an experiment toggle.
-  const previewFeatures = desktopFeatures.filter(
-    (feature) => feature.id !== "bestie",
-  );
+  // Keep the feature id literal behind the Vite env branch so the OSS graph
+  // never emits the protected token (import.meta.env is compile-time DCE).
+  const previewFeatures = desktopFeatures.filter((feature) => {
+    if (import.meta.env.VITE_BUZZ_BESTIE === "1" && feature.id === "bestie") {
+      return false;
+    }
+    return true;
+  });
 
   return (
     <section className="min-w-0" data-testid="settings-experimental">

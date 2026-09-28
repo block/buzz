@@ -288,7 +288,7 @@ export function BestieProfileTrigger({ className }: { className?: string }) {
             {agent && hasUnread && !open && !hasNudge ? (
               <span
                 aria-hidden="true"
-                className="bestie-unread-ring pointer-events-none absolute -inset-1 rounded-full"
+                className="assistant-unread-ring pointer-events-none absolute -inset-1 rounded-full"
                 data-testid="bestie-unread-ring"
               />
             ) : null}

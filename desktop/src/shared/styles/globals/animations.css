@@ -931,8 +931,8 @@
   }
 }
 
-/* Bestie footer avatar — throbbing light ring for unread agent DM replies. */
-@keyframes bestie-unread-ring-pulse {
+/* Assistant footer avatar — throbbing light ring for unread agent DM replies. */
+@keyframes assistant-unread-ring-pulse {
   0%,
   100% {
     box-shadow: 0 0 0 0
@@ -946,14 +946,14 @@
   }
 }
 
-.bestie-unread-ring {
+.assistant-unread-ring {
   border: 2px solid
     color-mix(in oklab, var(--color-primary, #6366f1) 80%, white);
-  animation: bestie-unread-ring-pulse 1.6s ease-in-out infinite;
+  animation: assistant-unread-ring-pulse 1.6s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .bestie-unread-ring {
+  .assistant-unread-ring {
     animation: none;
     opacity: 1;
     box-shadow: 0 0 0 2px

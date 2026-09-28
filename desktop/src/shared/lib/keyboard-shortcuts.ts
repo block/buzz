@@ -6,7 +6,7 @@ export const HUDDLE_SHORTCUT_EVENT = "buzz:huddle-shortcut";
  * Collides with Bold (⌘B) only while the message composer has focus — TipTap
  * handles formatting first and preventDefaults; elsewhere Assistant wins.
  */
-export const BESTIE_POPOVER_SHORTCUT_EVENT = "buzz:bestie-popover-shortcut";
+export const BESTIE_POPOVER_SHORTCUT_EVENT = "buzz:assistant-popover-shortcut";
 
 
 export type HuddleShortcutDetail = {
@@ -103,7 +103,7 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     category: "Navigation",
   },
   {
-    id: "toggle-bestie",
+    id: "toggle-assistant",
     label: "Assistant",
     description:
       "Open or close the Assistant popover (⌘B / Ctrl+B). In the message composer, the same chord still bolds selected text.",

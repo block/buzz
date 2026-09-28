@@ -45,13 +45,13 @@ export type ChannelScreenProps = {
   /** Search text to highlight within the opened result message. */
   targetSearchQuery?: string;
   /**
-   * Optional Bestie/protected transform applied to composer content immediately
+   * Optional protected transform applied to composer content immediately
    * before publish (e.g. live list-state turn hints). Display strip is separate.
    */
   transformOutboundMessageContent?: (content: string) => string;
   /**
    * Optional transform for timeline/thread message bodies before display
-   * (strip machine-facing turn hints from Bestie DM).
+   * (strip machine-facing turn hints from Assistant DM).
    */
   transformDisplayedMessageBody?: (body: string) => string;
 };
