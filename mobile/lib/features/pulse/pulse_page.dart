@@ -170,11 +170,12 @@ class _PulseBody extends ConsumerWidget {
             child: _EmptyState(message: _emptyMessage(tab)),
           );
         }
-        // The timeline's authors are the comparison context; reply targets
-        // and mentions resolve against them plus themselves.
+        // Everyone the timeline names — authors, reply targets and mentions
+        // — is one comparison context, so two same-name targets on
+        // different notes are still told apart.
         final names = watchIdentityNames(
           ref,
-          {for (final note in notes) note.pubkey.toLowerCase()},
+          pulseNamedIdentities(notes),
           agentPubkeys: tab == PulseTab.agents
               ? {for (final note in notes) note.pubkey.toLowerCase()}
               : agentPubkeys,

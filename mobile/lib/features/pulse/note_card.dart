@@ -52,10 +52,8 @@ class NoteCard extends HookConsumerWidget {
         ref.watch(userCacheProvider.select((cache) => cache[pubkey])) ??
         ref.read(userCacheProvider.notifier).get(pubkey);
     final mentionPubkeys = mentionedPubkeysFromTags(note.tags);
-    final replyAuthor = note.replyParentAuthor?.toLowerCase();
     final labels =
-        names ??
-        watchIdentityNames(ref, {pubkey, ?replyAuthor, ...mentionPubkeys});
+        names ?? watchIdentityNames(ref, pulseNamedIdentities([note]));
     final displayName = labels.labelFor(pubkey);
     final mentionLabels = {
       for (final key in mentionPubkeys) key: labels.labelFor(key),
@@ -339,6 +337,16 @@ class _ActionButton extends StatelessWidget {
     );
   }
 }
+
+/// Every identity [notes] name on screen: authors, reply-parent authors and
+/// mentions. A Pulse collection compares all of them together.
+Set<String> pulseNamedIdentities(Iterable<UserNote> notes) => {
+  for (final note in notes) ...{
+    note.pubkey.toLowerCase(),
+    ?note.replyParentAuthor?.toLowerCase(),
+    ...mentionedPubkeysFromTags(note.tags),
+  },
+};
 
 String _shareUri(UserNote note) =>
     'nostr:${nostr.Nip19.encodeShareableIdentifiers(prefix: nostr.Nip19Prefix.nevent, data: note.id, author: note.pubkey, kind: 1)}';

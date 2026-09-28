@@ -26,8 +26,9 @@ import 'pulse_models.dart';
 class ComposeNotePage extends HookConsumerWidget {
   final UserNote? replyTo;
 
-  /// Identity labels from the surface that opened the reply, so the reply
-  /// context names people as they were shown there.
+  /// The comparison context of the surface that opened the reply, so the
+  /// reply context names people as they were shown there. Its labels are
+  /// resolved against live naming facts while this page is open.
   final IdentityNames? names;
 
   const ComposeNotePage({super.key, this.replyTo, this.names});
@@ -176,7 +177,8 @@ class _ReplyContext extends ConsumerWidget {
         ref.read(userCacheProvider.notifier).get(pubkey);
     final mentionPubkeys = mentionedPubkeysFromTags(note.tags);
     final labels =
-        names ?? watchIdentityNames(ref, {pubkey, ...mentionPubkeys});
+        names?.withSources(ref.watch(identityNameSourcesProvider)) ??
+        watchIdentityNames(ref, {pubkey, ...mentionPubkeys});
     final displayName = labels.labelFor(pubkey);
 
     return Padding(

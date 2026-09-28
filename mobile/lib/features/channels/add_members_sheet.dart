@@ -58,16 +58,27 @@ class AddChannelMembersSheet extends HookConsumerWidget {
             .toList() ??
         const <DirectoryUser>[];
     // Compare every shown choice with the channel's members, so a candidate
-    // who shares a member's name is told apart before being added.
+    // who shares a member's name is told apart before being added. Members
+    // are only compared: their names come from the roster the details page
+    // already loaded, so only the shown choices' profiles are fetched.
     final choices = [...availableUsers, ...selectedUsers.value];
+    final roster =
+        ref.watch(channelMembersProvider(channelId)).asData?.value ??
+        const <ChannelMember>[];
     final names = watchIdentityNames(
       ref,
       [...normalizedExisting, for (final user in choices) user.pubkey],
       agentPubkeys: {
+        for (final member in roster)
+          if (member.isBot) member.pubkey,
         for (final user in choices)
           if (user.isAgent) user.pubkey,
       },
-      fallbackNames: {for (final user in choices) user.pubkey: user.label},
+      fallbackNames: {
+        for (final member in roster) member.pubkey: ?member.displayName,
+        for (final user in choices) user.pubkey: user.label,
+      },
+      shown: [for (final user in choices) user.pubkey],
     );
     String labelFor(DirectoryUser user) => names.labelFor(user.pubkey);
 

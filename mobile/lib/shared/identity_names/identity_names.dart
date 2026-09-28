@@ -133,13 +133,16 @@ class IdentityNames {
           _ownerPubkeys,
         );
 
-  /// Owner keys of the context whose profile is not cached yet. Callers load
-  /// them so readable owner prefixes can appear; none are invented meanwhile.
-  Set<String> missingOwnerProfiles() => _candidates
-      .map((key) => _factFor(key)?.ownerPubkey)
-      .nonNulls
-      .where((owner) => !_sources.profiles.containsKey(owner))
-      .toSet();
+  /// Owner keys of the context (or of [keys] only) whose profile is not
+  /// cached yet. Callers load them so readable owner prefixes can appear;
+  /// none are invented meanwhile.
+  Set<String> missingOwnerProfiles([Iterable<String>? keys]) =>
+      (keys?.map((key) => key.toLowerCase()) ?? _candidates)
+          .map(_factFor)
+          .map((fact) => fact?.ownerPubkey)
+          .nonNulls
+          .where((owner) => !_sources.profiles.containsKey(owner))
+          .toSet();
 
   NamingIdentity? _factFor(String key) => _sources.factFor(
     key,
