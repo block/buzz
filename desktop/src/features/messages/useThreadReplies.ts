@@ -164,7 +164,7 @@ export function useThreadReplies(
     // throws on attempts 1 and 2; attempt 3 records exhaustion first so
     // loadThreadReplies returns data directly — the terminal attempt always
     // resolves to success.
-    // A read that hit a query deadline (client or relay) is not retried:
+    // A read that hit the relay's statement deadline is not retried:
     // each retry would re-run the same slow server-side query.
     retry: (failureCount, error) =>
       failureCount < 3 && !isQueryDeadlineError(error),
