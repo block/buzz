@@ -175,15 +175,14 @@ async fn lifecycle_cas_queries_move_redaction_and_retention() {
     assert_eq!(f.count(&f.peer, history.clone()).await, 3);
     assert_eq!(f.count(&f.owner, history.clone()).await, 4);
 
-    // Retention removes old payloads but reserves identity and the current payload.
-    let retention = || {
-        sqlx::query("DELETE FROM events WHERE community_id=$1 AND id IN ($2,$3)")
+    // Expiring an earlier payload keeps its identity reserved.
+    let retention = |id: nostr::EventId| {
+        sqlx::query("DELETE FROM events WHERE community_id=$1 AND id=$2")
             .bind(f.community.as_uuid())
-            .bind(create.id.as_bytes().as_slice())
-            .bind(moved.id.as_bytes().as_slice())
+            .bind(id.as_bytes().to_vec())
     };
     assert_eq!(
-        retention()
+        retention(create.id)
             .execute(&f.db.pool)
             .await
             .unwrap()
@@ -205,7 +204,7 @@ async fn lifecycle_cas_queries_move_redaction_and_retention() {
     assert_eq!(f.count(&f.owner, all.clone()).await, 0);
     assert_eq!(f.count(&f.owner, history.clone()).await, 2);
     assert_eq!(
-        retention()
+        retention(moved.id)
             .execute(&f.db.pool)
             .await
             .unwrap()

@@ -1046,15 +1046,14 @@ fn filter_to_query_params(
     } else {
         (None, None)
     };
-    // NIP-AR artifacts carry their stable identity in `d` but are not NIP-33,
-    // so `d_tag` stays NULL; match the tag itself before `LIMIT`.
-    let filter_is_artifact_only = kinds.as_ref().is_some_and(|ks| {
-        !ks.is_empty()
-            && ks
-                .iter()
-                .all(|&k| k as u32 == buzz_core::kind::KIND_ARTIFACT)
+    // NIP-AR revisions and removals carry their stable identity in `d` but are
+    // not NIP-33, so `d_tag` stays NULL; match the tag on artifact rows before
+    // `LIMIT` whenever the filter can select them.
+    let filter_can_match_artifacts = kinds.as_ref().is_none_or(|ks| {
+        ks.iter()
+            .any(|k| buzz_db::event::ARTIFACT_KINDS.contains(k))
     });
-    let d_tag_values = filter_is_artifact_only
+    let d_tag_values = filter_can_match_artifacts
         .then(|| filter.generic_tags.get(&d_tag_key))
         .flatten()
         .filter(|values| !values.is_empty())
@@ -2329,9 +2328,20 @@ mod tests {
         assert_eq!(q.d_tag_values, Some(vec!["a".to_string()]));
         assert_eq!(q.d_tag, None);
 
-        // Mixed kinds keep the generic post-filter path.
-        let mixed = artifact.clone().kind(nostr::Kind::Custom(9));
+        // Mixed and kindless filters that can select artifact rows push it too.
+        let mixed = artifact.clone().kind(nostr::Kind::Custom(45011));
         let q = filter_to_query_params(&mixed, None, community);
+        assert_eq!(q.d_tag_values, Some(vec!["a".to_string()]));
+        let kindless = Filter::new().custom_tag(d, "a").limit(1);
+        let q = filter_to_query_params(&kindless, None, community);
+        assert_eq!(q.d_tag_values, Some(vec!["a".to_string()]));
+
+        // Filters that cannot select artifacts keep the generic post-filter path.
+        let other = Filter::new()
+            .kind(nostr::Kind::Custom(9))
+            .custom_tag(d, "a")
+            .limit(1);
+        let q = filter_to_query_params(&other, None, community);
         assert_eq!(q.d_tag_values, None);
     }
 

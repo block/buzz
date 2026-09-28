@@ -362,15 +362,53 @@ async fn generic_d_lookup_matches_before_limit() {
     let f = Fixture::new().await;
     let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
     let now = nostr::Timestamp::now().as_secs();
-    let older = resign(&f.revision(a, "create", None), &f.owner, &[], now - 60);
+    // Kindless reads are p-gated to the reader, so every row tags the peer.
+    let reader = f.peer.public_key().to_hex();
+    let tag_reader = [["p", reader.as_str()]];
+    let older = resign(
+        &f.revision(a, "create", None),
+        &f.owner,
+        &tag_reader,
+        now - 60,
+    );
     f.publish(&older).await;
-    f.publish(&f.revision(b, "create", None)).await;
-    let filter = json!([{"kinds":[45010],"#h":[f.home],"#d":[a],"limit":1}]);
-    let (status, body) = f.request("/query", filter.clone()).await;
+    let newer = resign(&f.revision(b, "create", None), &f.owner, &tag_reader, now);
+    f.publish(&newer).await;
+    for filter in [
+        json!([{"kinds":[45010],"#h":[f.home],"#d":[a],"limit":1}]),
+        json!([{"kinds":[45010,45011],"#h":[f.home],"#d":[a],"limit":1}]),
+        json!([{"#h":[f.home],"#p":[reader],"#d":[a],"limit":1}]),
+    ] {
+        let (status, body) = f.request_as(&f.peer, "/query", filter.clone()).await;
+        assert!(status.is_success(), "{status}: {body}");
+        assert_eq!(body.as_array().unwrap().len(), 1, "{filter}: {body}");
+        assert_eq!(body[0]["id"], older.id.to_hex(), "{filter}");
+        let (status, body) = f.request_as(&f.peer, "/count", filter.clone()).await;
+        assert!(status.is_success(), "{status}: {body}");
+        assert_eq!(body["count"], 1, "{filter}: {body}");
+    }
+
+    // Non-artifact rows still reach the generic `#d` post-filter.
+    let message = EventBuilder::new(Kind::Custom(9), "d-tagged chat")
+        .tags([
+            Tag::parse(["h", &f.home.to_string()]).unwrap(),
+            Tag::parse(["d", &a.to_string()]).unwrap(),
+            Tag::parse(["p", &reader]).unwrap(),
+        ])
+        .sign_with_keys(&f.owner)
+        .unwrap();
+    f.publish(&message).await;
+    let filter = json!([{"#h":[f.home],"#p":[reader],"#d":[a]}]);
+    let (status, body) = f.request_as(&f.peer, "/query", filter).await;
     assert!(status.is_success(), "{status}: {body}");
-    assert_eq!(body.as_array().unwrap().len(), 1, "{body}");
-    assert_eq!(body[0]["id"], older.id.to_hex());
-    let (status, body) = f.request("/count", filter).await;
-    assert!(status.is_success(), "{status}: {body}");
-    assert_eq!(body["count"], 1, "{body}");
+    let mut ids: Vec<_> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_owned())
+        .collect();
+    ids.sort();
+    let mut expected = vec![older.id.to_hex(), message.id.to_hex()];
+    expected.sort();
+    assert_eq!(ids, expected, "{body}");
 }

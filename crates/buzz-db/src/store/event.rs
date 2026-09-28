@@ -32,6 +32,12 @@ pub use crate::reminder::{
 /// the advertised ceiling and the enforced one cannot drift.
 pub const DEFAULT_MAX_PAGE_LIMIT: i64 = 1_000;
 
+/// NIP-AR revision and removal kinds, whose stable identity is a `d` tag.
+pub const ARTIFACT_KINDS: [i32; 2] = [
+    buzz_core::kind::KIND_ARTIFACT as i32,
+    buzz_core::kind::KIND_ARTIFACT_REMOVAL as i32,
+];
+
 /// Optional filters for [`query_events`].
 #[derive(Debug, Clone)]
 pub struct EventQuery {
@@ -78,9 +84,10 @@ pub struct EventQuery {
     /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
     /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
     pub e_tags: Option<Vec<String>>,
-    /// Restrict results to events with a `d` tag matching any of these values,
-    /// via JSONB containment. For non-NIP-33 kinds whose `d_tag` column is NULL
-    /// (NIP-AR artifacts), so identity lookups match before SQL `LIMIT`.
+    /// Restrict artifact rows ([`ARTIFACT_KINDS`]) to those with a `d` tag
+    /// matching any of these values, via JSONB containment. Their `d_tag`
+    /// column is NULL (not NIP-33), so this lets identity lookups match before
+    /// SQL `LIMIT`. Rows of other kinds are left to the caller's post-filter.
     pub d_tag_values: Option<Vec<String>>,
     /// Restrict results to events with an exact custom tag pair.
     /// Uses JSONB containment against `tags` before SQL `LIMIT`.
@@ -664,17 +671,7 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     }
 
     if let Some(ref values) = q.d_tag_values {
-        if !values.is_empty() {
-            qb.push(" AND (");
-            for (i, value) in values.iter().enumerate() {
-                if i > 0 {
-                    qb.push(" OR ");
-                }
-                qb.push(format!("{col_prefix}tags @> "));
-                qb.push_bind(serde_json::json!([["d", value]]));
-            }
-            qb.push(")");
-        }
+        push_artifact_d_tag_predicate(&mut qb, col_prefix, values);
     }
 
     if let Some((ref name, ref value)) = q.custom_tag {
@@ -805,6 +802,27 @@ fn push_e_tag_filter(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, e_
     qb.push(format!(" AND {col_prefix}tags @> ANY("))
         .push_bind(containments)
         .push("::jsonb[])");
+}
+
+/// Match `#d` on artifact rows before `LIMIT` while leaving other kinds to the
+/// caller's post-filter: `(kind NOT IN (artifact kinds) OR tags @> [["d", v]] ...)`.
+fn push_artifact_d_tag_predicate(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    values: &[String],
+) {
+    if values.is_empty() {
+        return;
+    }
+    let [revision, removal] = ARTIFACT_KINDS;
+    qb.push(format!(
+        " AND ({col_prefix}kind NOT IN ({revision}, {removal})"
+    ));
+    for value in values {
+        qb.push(format!(" OR {col_prefix}tags @> "));
+        qb.push_bind(serde_json::json!([["d", value]]));
+    }
+    qb.push(")");
 }
 
 pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<StoredEvent>> {
@@ -981,17 +999,7 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     }
 
     if let Some(ref values) = q.d_tag_values {
-        if !values.is_empty() {
-            qb.push(" AND (");
-            for (i, value) in values.iter().enumerate() {
-                if i > 0 {
-                    qb.push(" OR ");
-                }
-                qb.push(format!("{col_prefix}tags @> "));
-                qb.push_bind(serde_json::json!([["d", value]]));
-            }
-            qb.push(")");
-        }
+        push_artifact_d_tag_predicate(&mut qb, col_prefix, values);
     }
 
     if let Some(s) = q.since {

@@ -22,19 +22,6 @@ CREATE TABLE artifact_revisions (
 SELECT attach_community_write_fence('artifact_heads');
 SELECT attach_community_write_fence('artifact_revisions');
 
--- Row retention may expire earlier payloads, never the live CAS head. Partition
--- retirement must also preserve head payloads; this relay does not drop partitions.
--- A redacted (soft-deleted) head payload may still be purged.
-CREATE FUNCTION retain_current_artifact() RETURNS TRIGGER LANGUAGE plpgsql AS $$
-BEGIN
-    IF OLD.kind = 45010 AND OLD.deleted_at IS NULL AND EXISTS (
-        SELECT 1 FROM artifact_heads h
-        WHERE h.community_id=OLD.community_id AND h.event_id=OLD.id
-    ) THEN
-        RETURN NULL;
-    END IF;
-    RETURN OLD;
-END;
-$$;
-CREATE TRIGGER retain_current_artifact BEFORE DELETE ON events
-FOR EACH ROW EXECUTE FUNCTION retain_current_artifact();
+-- The relay does not expire events. Any future row retention or partition
+-- retirement must skip payloads referenced by `artifact_heads.event_id`
+-- (NIP-AR: expiring earlier revisions MUST NOT remove the current revision).
