@@ -72,6 +72,21 @@ pub fn validate_content_size(content: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Refuse a message that would publish with nothing in it.
+///
+/// Whitespace-only content is what an empty stdin, a failed heredoc or an unset
+/// variable turns into, and the relay accepts it: the result is a real event that
+/// still carries its mention p-tags, so it wakes its recipients to read nothing.
+/// Attachments count as content, because their links are appended to the body.
+pub fn validate_message_body(content: &str, has_files: bool) -> Result<(), CliError> {
+    if !has_files && content.trim().is_empty() {
+        return Err(CliError::Usage(
+            "message content is empty or whitespace only; nothing was sent".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Percent-encode for URL path segments and query parameter values.
 /// Encodes all bytes except RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
 #[cfg(test)]
@@ -274,6 +289,36 @@ mod tests {
     #[test]
     fn validate_content_size_empty() {
         assert!(validate_content_size("").is_ok());
+    }
+
+    // --- validate_message_body ---
+
+    #[test]
+    fn validate_message_body_rejects_a_lone_newline() {
+        let err = validate_message_body("\n", false).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn validate_message_body_rejects_empty_and_whitespace() {
+        for blank in ["", " ", "   ", "\t", " \n\t\r\n "] {
+            assert!(
+                matches!(validate_message_body(blank, false), Err(CliError::Usage(_))),
+                "{blank:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_message_body_accepts_text() {
+        assert!(validate_message_body("hi", false).is_ok());
+        assert!(validate_message_body("\n ok \n", false).is_ok());
+    }
+
+    #[test]
+    fn validate_message_body_accepts_blank_text_with_attachments() {
+        assert!(validate_message_body("", true).is_ok());
+        assert!(validate_message_body("\n", true).is_ok());
     }
 
     // --- percent_encode ---
