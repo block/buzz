@@ -158,6 +158,7 @@ void _expandComposer({
 Widget _composerSuggestionPanel({
   required List<Channel> channelSuggestions,
   required List<MentionCandidate> mentionSuggestions,
+  required Set<String> unavailableMentions,
   required Map<String, UserProfile> userCache,
   required String? currentPubkey,
   required bool isDmChannel,
@@ -176,6 +177,7 @@ Widget _composerSuggestionPanel({
         key: const ValueKey('mention-suggestions'),
         child: _MentionSuggestions(
           suggestions: mentionSuggestions,
+          unavailable: unavailableMentions,
           userCache: userCache,
           currentPubkey: currentPubkey,
           isDmChannel: isDmChannel,
@@ -223,10 +225,6 @@ const _pastedImageMimeTypes = <String>[
   'image/png',
   'image/webp',
 ];
-
-/// Cap on ranked mention suggestions shown — matches desktop's
-/// `MENTION_SUGGESTION_LIMIT`.
-const _mentionSuggestionLimit = 50;
 
 /// Walk backward from [cursor] looking for [trigger] (e.g. `@` or `#`) at a
 /// word boundary. Returns the index of the trigger character, or `null` if none
@@ -489,14 +487,14 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
 @immutable
 class _NonMemberMentionScan {
   final String channelId;
-  final List<String> agentPubkeys;
-  final List<MentionCandidate> humans;
+
+  /// Mentioned people and agents outside the channel, in draft order.
+  final List<MentionCandidate> outside;
   final bool canAddMembers;
 
   const _NonMemberMentionScan({
     required this.channelId,
-    required this.agentPubkeys,
-    required this.humans,
+    required this.outside,
     required this.canAddMembers,
   });
 }
@@ -512,8 +510,7 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
 }) async {
   final none = _NonMemberMentionScan(
     channelId: channelId,
-    agentPubkeys: const [],
-    humans: const [],
+    outside: const [],
     canAddMembers: true,
   );
   if (selectedMentions.isEmpty) return none;
@@ -538,23 +535,17 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
     }
   }
 
-  final agentPubkeys = <String>[];
-  final humans = <MentionCandidate>[];
+  final outside = <MentionCandidate>[];
   final seen = <String>{};
   for (final candidate in selectedMentions) {
     final pubkey = candidate.pubkey.toLowerCase();
     if (memberPubkeys.contains(pubkey) || !seen.add(pubkey)) continue;
-    if (candidate.isAgent) {
-      agentPubkeys.add(pubkey);
-    } else {
-      humans.add(candidate);
-    }
+    outside.add(candidate);
   }
 
   return _NonMemberMentionScan(
     channelId: channelId,
-    agentPubkeys: agentPubkeys,
-    humans: humans,
+    outside: outside,
     canAddMembers: channel.canAddMembers(selfRole),
   );
 }
@@ -567,7 +558,7 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
 class _OutgoingMentions {
   List<String> pubkeys;
   final List<List<String>> referenceTags = [];
-  List<String> _invitedHumanPubkeys = const [];
+  List<MentionCandidate> _invited = const [];
 
   _OutgoingMentions(List<MentionCandidate> selectedMentions)
     : pubkeys = LinkedHashSet<String>.from(
@@ -586,19 +577,17 @@ class _OutgoingMentions {
     ]);
   }
 
-  /// Applies the mention prompt's outcome: invite them, or send without.
-  void resolveHumanChoice(
+  /// Applies the mention prompt's outcome: invite everyone outside, or send
+  /// with them as references. Agents and people are treated the same.
+  void resolveOutsideChoice(
     _NonMemberMentionChoice choice,
-    List<MentionCandidate> humans,
+    List<MentionCandidate> outside,
   ) {
-    final humanPubkeys = [
-      for (final candidate in humans) candidate.pubkey.toLowerCase(),
-    ];
     switch (choice) {
       case _NonMemberMentionChoice.invite:
-        _invitedHumanPubkeys = humanPubkeys;
+        _invited = outside;
       case _NonMemberMentionChoice.sendWithoutInviting:
-        demote(humanPubkeys);
+        demote([for (final candidate in outside) candidate.pubkey]);
     }
   }
 
@@ -611,8 +600,14 @@ class _OutgoingMentions {
     final outcome = await _addMentionedNonMembers(
       channelActions,
       channelId: scan.channelId,
-      agentPubkeys: scan.agentPubkeys,
-      humanPubkeys: _invitedHumanPubkeys,
+      agentPubkeys: [
+        for (final candidate in _invited)
+          if (candidate.isAgent) candidate.pubkey.toLowerCase(),
+      ],
+      humanPubkeys: [
+        for (final candidate in _invited)
+          if (!candidate.isAgent) candidate.pubkey.toLowerCase(),
+      ],
       canAddMembers: scan.canAddMembers,
     );
     demote(outcome.notAdded);

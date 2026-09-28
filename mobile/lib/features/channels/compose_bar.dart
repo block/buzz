@@ -19,6 +19,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_bindings.dart';
+import '../../shared/mentions/mention_rules.dart';
 import '../../shared/huddle/huddle_session.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -54,6 +55,7 @@ part 'compose_bar/agent_mention_labels.dart';
 part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/draft_lifecycle.dart';
 part 'compose_bar/suggestions.dart';
+part 'compose_bar/mention_chooser.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
 part 'compose_bar/upload_progress_pill.dart';

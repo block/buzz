@@ -16,6 +16,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/photo_library.dart';
@@ -201,9 +202,16 @@ Widget _buildComposeBar({
   String? threadHeadId,
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
+  Map<String, List<UserProfile>>? directory,
 }) {
   return ProviderScope(
     overrides: [
+      // Directory people by exact query, found after the real typing pause.
+      if (directory != null)
+        mentionUserSearchProvider.overrideWith((ref, query) async {
+          await Future<void>.delayed(mentionSearchDebounce);
+          return directory[query.trim()] ?? const <UserProfile>[];
+        }),
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
       if (voiceNoteRecorderFactory != null)
@@ -1713,6 +1721,119 @@ void main() {
       expect(_suggestionAvatarInitial(tester, 'Carol'), 'C');
     });
 
+    group('portable mention rules', () {
+      Future<TextEditingController> pumpMembers(
+        WidgetTester tester,
+        List<String> names, {
+        Map<String, List<UserProfile>> directory = const {},
+      }) async {
+        final members = [
+          for (var i = 0; i < names.length; i++)
+            ChannelMember(
+              pubkey: '${i + 1}' * 64,
+              role: 'member',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+              displayName: names[i],
+            ),
+        ];
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            membersFuture: Future.value(members),
+            cachedMembers: members,
+            channels: [_makeCurrentChannel()],
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+            directory: directory,
+          ),
+        );
+        await _expandComposer(tester);
+        return tester.widget<TextField>(find.byType(TextField)).controller!;
+      }
+
+      // Let the debounced directory search finish before teardown.
+      Future<void> settleSearch(WidgetTester tester) =>
+          tester.pump(mentionSearchDebounce * 2);
+
+      Finder popover() =>
+          find.byKey(const ValueKey('mention-suggestions-popover'));
+
+      testWidgets('Space after an exact, unique name selects it', (
+        tester,
+      ) async {
+        final controller = await pumpMembers(tester, ['Alice', 'Bob']);
+        await tester.enterText(find.byType(TextField), 'hi @alice');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+        await tester.enterText(find.byType(TextField), 'hi @alice ');
+        await tester.pump();
+
+        expect(controller.text, 'hi @Alice ');
+        expect(popover(), findsNothing);
+        await settleSearch(tester);
+      });
+
+      testWidgets('Space is a plain space when a longer name continues', (
+        tester,
+      ) async {
+        final controller = await pumpMembers(tester, ['Alice', 'Alice Smith']);
+        await tester.enterText(find.byType(TextField), '@alice');
+        await tester.pump();
+        await tester.enterText(find.byType(TextField), '@alice ');
+        await tester.pump();
+
+        // Not selected: another name starts with the query plus a space.
+        expect(controller.text, '@alice ');
+        await tester.enterText(find.byType(TextField), '@alice s');
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
+        expect(find.text('Alice'), findsNothing);
+        // Close the chooser so its pending search is dropped.
+        await tester.enterText(find.byType(TextField), '');
+        await settleSearch(tester);
+      });
+
+      testWidgets('a query that continues no name is prose', (tester) async {
+        await pumpMembers(tester, ['Alice Smith']);
+        await tester.enterText(find.byType(TextField), '@alice sm');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '@alice said');
+        await tester.pump();
+        expect(popover(), findsNothing);
+        await settleSearch(tester);
+      });
+
+      testWidgets('a multi-word query still finds a directory person', (
+        tester,
+      ) async {
+        await pumpMembers(
+          tester,
+          ['Alice'],
+          directory: {
+            'Mary J': [UserProfile(pubkey: 'f' * 64, displayName: 'Mary Jane')],
+          },
+        );
+        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.pump();
+        // No known name continues the query yet, so no rows show.
+        expect(popover(), findsNothing);
+        await settleSearch(tester);
+        expect(popover(), findsOneWidget);
+        expect(find.text('Mary Jane'), findsOneWidget);
+      });
+
+      testWidgets('@ opens after an opening bracket', (tester) async {
+        await pumpMembers(tester, ['Alice']);
+        await tester.enterText(find.byType(TextField), 'see (@al');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+        await tester.enterText(find.byType(TextField), 'mail@al');
+        await tester.pump();
+        expect(popover(), findsNothing);
+        await settleSearch(tester);
+      });
+    });
+
     testWidgets('dismisses mention suggestions in the selection frame', (
       tester,
     ) async {
@@ -3155,6 +3276,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await _inviteOutside(tester);
       await tester.pumpAndSettle();
 
       // The cancelled send must not reach the relay.
@@ -3287,6 +3409,7 @@ void main() {
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
         await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await _inviteOutside(tester);
         await tester.pump();
 
         expect(
@@ -4192,6 +4315,7 @@ void main() {
       );
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await _inviteOutside(tester);
       await tester.pumpAndSettle();
 
       expect(sentContent, 'hello @Helper Bot');
@@ -4206,7 +4330,7 @@ void main() {
       ]);
     });
 
-    testWidgets('preserves edits made while a mentioned agent is being added', (
+    testWidgets('keeps edits made while a mentioned agent is being added', (
       tester,
     ) async {
       final agentPubkey = 'c' * 64;
@@ -4260,6 +4384,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await _inviteOutside(tester);
       await tester.pump();
 
       expect(
@@ -4267,11 +4392,16 @@ void main() {
         hasLength(1),
       );
 
+      // The prompt took focus; reopen the composer to edit the draft.
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.tap(find.text('hello @Helper Bot'));
+      await tester.pump(const Duration(milliseconds: 200));
       await tester.enterText(find.byType(TextField), 'newer draft');
       addMemberAcknowledgement.complete();
       await tester.pumpAndSettle();
 
-      expect(sentContent, 'hello @Helper Bot');
+      // The draft changed while adding ran: send nothing, keep the draft.
+      expect(sentContent, isNull);
       expect(
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
         'newer draft',
@@ -4506,6 +4636,7 @@ void main() {
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
         await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await _inviteOutside(tester);
         await tester.pumpAndSettle();
 
         expect(didSend, isTrue);
@@ -5647,4 +5778,10 @@ Channel _makeChannel({required String name, required String channelType}) {
     createdAt: DateTime(2024),
     memberCount: 5,
   );
+}
+
+/// Answers the outside-channel mention prompt with Invite.
+Future<void> _inviteOutside(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.tap(find.widgetWithText(TextButton, 'Invite'));
 }

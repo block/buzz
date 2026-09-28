@@ -2,6 +2,9 @@ part of '../compose_bar.dart';
 
 class _MentionSuggestions extends StatelessWidget {
   final List<MentionCandidate> suggestions;
+
+  /// Shown rows that can no longer be chosen. They stay in place, disabled.
+  final Set<String> unavailable;
   final Map<String, UserProfile> userCache;
   final String? currentPubkey;
   final bool isDmChannel;
@@ -9,6 +12,7 @@ class _MentionSuggestions extends StatelessWidget {
 
   const _MentionSuggestions({
     required this.suggestions,
+    this.unavailable = const {},
     required this.userCache,
     required this.currentPubkey,
     required this.isDmChannel,
@@ -39,7 +43,9 @@ class _MentionSuggestions extends StatelessWidget {
             final avatarUrl =
                 candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
 
+            final available = !unavailable.contains(candidate.pubkey);
             return ListTile(
+              enabled: available,
               dense: true,
               visualDensity: VisualDensity.compact,
               leading: AvatarImage(
@@ -66,7 +72,9 @@ class _MentionSuggestions extends StatelessWidget {
                 isDmChannel: isDmChannel,
                 userCache: userCache,
               ),
-              onTap: () => _runComposerAction(() => onSelect(candidate)),
+              onTap: available
+                  ? () => _runComposerAction(() => onSelect(candidate))
+                  : null,
             );
           },
         ),
