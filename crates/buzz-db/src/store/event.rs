@@ -585,7 +585,7 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     // tombstones; explicit revision IDs also read earlier revisions.
     if q.ids.is_none() {
         let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
-        qb.push(format!(" AND ({table}.kind <> 45010 OR EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
+        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
 
     if let Some(ch) = q.channel_id {
@@ -923,7 +923,7 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     // tombstones; explicit revision IDs also read earlier revisions.
     if q.ids.is_none() {
         let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
-        qb.push(format!(" AND ({table}.kind <> 45010 OR EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
+        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
 
     if let Some(ch) = q.channel_id {
