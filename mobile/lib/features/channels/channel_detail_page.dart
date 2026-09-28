@@ -607,7 +607,11 @@ class ChannelDetailPage extends HookConsumerWidget {
                       context: context,
                       channel: resolvedChannel,
                       currentPubkey: currentPubkey,
-                      onMemberTap: showUserProfileSheet,
+                      onMemberTap: (context, pubkey) => showUserProfileSheet(
+                        context,
+                        pubkey,
+                        names: channelIdentityNamesProvider(resolvedChannel.id),
+                      ),
                       sectionId: ref
                           .read(channelSectionsProvider)
                           .store

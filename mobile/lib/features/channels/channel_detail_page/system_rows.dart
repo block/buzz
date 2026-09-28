@@ -395,7 +395,7 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
           onTap: () => showUserProfileSheet(
             context,
             displayPubkey,
-            channelId: channelId,
+            names: channelIdentityNamesProvider(channelId),
           ),
           child: _UserAvatar(
             profile: userCache[displayPubkey.toLowerCase()],
@@ -517,7 +517,7 @@ Widget _systemEventAvatar(
             onTap: () => showUserProfileSheet(
               context,
               event.actorPubkey!,
-              channelId: channelId,
+              names: channelIdentityNamesProvider(channelId),
             ),
             child: SmallAvatar(
               pubkey: event.actorPubkey!,
@@ -531,7 +531,7 @@ Widget _systemEventAvatar(
               onTap: () => showUserProfileSheet(
                 context,
                 event.targetPubkey!,
-                channelId: channelId,
+                names: channelIdentityNamesProvider(channelId),
               ),
               child: SmallAvatar(
                 pubkey: event.targetPubkey!,
@@ -550,7 +550,7 @@ Widget _systemEventAvatar(
       onTap: () => showUserProfileSheet(
         context,
         event.actorPubkey!,
-        channelId: channelId,
+        names: channelIdentityNamesProvider(channelId),
       ),
       child: SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache),
     );

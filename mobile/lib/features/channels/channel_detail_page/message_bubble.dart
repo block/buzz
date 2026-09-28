@@ -169,7 +169,9 @@ class _MessageBubble extends HookConsumerWidget {
                           onTap: () => showUserProfileSheet(
                             context,
                             message.pubkey,
-                            channelId: currentChannelId,
+                            names: channelIdentityNamesProvider(
+                              currentChannelId,
+                            ),
                           ),
                           child: _UserAvatar(
                             profile: profile,
@@ -211,7 +213,10 @@ class _MessageBubble extends HookConsumerWidget {
                                               showUserProfileSheet(
                                                 context,
                                                 message.pubkey,
-                                                channelId: currentChannelId,
+                                                names:
+                                                    channelIdentityNamesProvider(
+                                                      currentChannelId,
+                                                    ),
                                               ),
                                           displayNameKey: ValueKey(
                                             'message-author-${message.id}',
@@ -296,7 +301,9 @@ class _MessageBubble extends HookConsumerWidget {
                                 onMentionTap: (pubkey) => showUserProfileSheet(
                                   context,
                                   pubkey,
-                                  channelId: currentChannelId,
+                                  names: channelIdentityNamesProvider(
+                                    currentChannelId,
+                                  ),
                                 ),
                               ),
                             ],

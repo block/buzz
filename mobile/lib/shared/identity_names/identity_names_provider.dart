@@ -17,6 +17,14 @@ final identityNameSourcesProvider = Provider<IdentityNameSources>((ref) {
   );
 });
 
+/// [names]'s comparison context resolved against the live naming facts.
+/// Lets a surface hand its context to a sheet or route as a watchable
+/// value, so the destination follows later profile and owner changes.
+final liveIdentityNamesProvider = Provider.autoDispose
+    .family<IdentityNames, IdentityNames>(
+      (ref, names) => names.withSources(ref.watch(identityNameSourcesProvider)),
+    );
+
 /// Requests missing owner profiles for [names] after the current build.
 void loadIdentityNameOwners(Ref ref, IdentityNames names) {
   final missing = names.missingOwnerProfiles();

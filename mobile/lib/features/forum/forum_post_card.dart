@@ -123,7 +123,7 @@ class ForumPostCard extends HookConsumerWidget {
                   onTap: () => showUserProfileSheet(
                     context,
                     post.pubkey,
-                    channelId: post.channelId,
+                    names: channelIdentityNamesProvider(post.channelId),
                   ),
                   child: _PostAvatar(
                     profile: profile,
@@ -138,7 +138,7 @@ class ForumPostCard extends HookConsumerWidget {
                     onTap: () => showUserProfileSheet(
                       context,
                       post.pubkey,
-                      channelId: post.channelId,
+                      names: channelIdentityNamesProvider(post.channelId),
                     ),
                     child: Text(
                       displayName,

@@ -164,7 +164,7 @@ class _ThreadMessage extends HookConsumerWidget {
                             onTap: () => showUserProfileSheet(
                               context,
                               message.pubkey,
-                              channelId: channelId,
+                              names: channelIdentityNamesProvider(channelId),
                             ),
                             child: _Avatar(
                               profile: profile,
@@ -206,7 +206,10 @@ class _ThreadMessage extends HookConsumerWidget {
                                                 showUserProfileSheet(
                                                   context,
                                                   message.pubkey,
-                                                  channelId: channelId,
+                                                  names:
+                                                      channelIdentityNamesProvider(
+                                                        channelId,
+                                                      ),
                                                 ),
                                             displayNameKey: ValueKey(
                                               'thread-message-author-${message.id}',
@@ -292,7 +295,9 @@ class _ThreadMessage extends HookConsumerWidget {
                                       showUserProfileSheet(
                                         context,
                                         pubkey,
-                                        channelId: channelId,
+                                        names: channelIdentityNamesProvider(
+                                          channelId,
+                                        ),
                                       ),
                                 ),
                               ],

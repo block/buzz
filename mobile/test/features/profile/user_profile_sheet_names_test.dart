@@ -51,7 +51,10 @@ void main() {
                 other,
               ]);
               return Scaffold(
-                body: UserProfileSheet(pubkey: scout, names: opened),
+                body: UserProfileSheet(
+                  pubkey: scout,
+                  names: liveIdentityNamesProvider(opened),
+                ),
               );
             },
           ),

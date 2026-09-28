@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show ProviderListenable;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/animated_avatar.dart';
@@ -18,7 +19,6 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
-import '../channels/channel_identity_names_provider.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
 import 'presence_cache_provider.dart';
@@ -27,21 +27,19 @@ import 'user_status_cache_provider.dart';
 
 /// Show a user profile bottom sheet for the given [pubkey].
 ///
-/// The sheet names [pubkey] as the opening surface did: within [channelId]
-/// when given, otherwise within [names] (for example a Pulse timeline's
-/// authors). With neither, the identity is compared only with itself.
+/// The sheet names [pubkey] as the opening surface did: within the live
+/// comparison context [names] (for example a channel's members or a Pulse
+/// timeline). Without it, the identity is compared only with itself.
 void showUserProfileSheet(
   BuildContext context,
   String pubkey, {
-  String? channelId,
-  IdentityNames? names,
+  ProviderListenable<IdentityNames>? names,
 }) {
   showBuzzModalBottomSheet<Channel>(
     context: context,
     isScrollControlled: true,
     showDragHandle: false,
-    builder: (_) =>
-        UserProfileSheet(pubkey: pubkey, channelId: channelId, names: names),
+    builder: (_) => UserProfileSheet(pubkey: pubkey, names: names),
   ).then((channel) {
     if (channel == null || !context.mounted) return;
     Navigator.of(context).push(
@@ -55,19 +53,12 @@ void showUserProfileSheet(
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
 
-  /// The channel whose members form the naming context, if any.
-  final String? channelId;
+  /// The opening surface's comparison context. The sheet watches it, so its
+  /// title follows profile and context changes while it is open. The caller
+  /// owns the context, so this sheet depends on no other feature's state.
+  final ProviderListenable<IdentityNames>? names;
 
-  /// The opening surface's comparison context, used when [channelId] is
-  /// null. The sheet resolves it against live naming facts.
-  final IdentityNames? names;
-
-  const UserProfileSheet({
-    super.key,
-    required this.pubkey,
-    this.channelId,
-    this.names,
-  });
+  const UserProfileSheet({super.key, required this.pubkey, this.names});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -115,12 +106,10 @@ class UserProfileSheet extends HookConsumerWidget {
 
     // The contextual label from the opening surface, so the sheet names the
     // identity exactly as the row that was tapped.
-    final contextChannelId = channelId;
-    final displayName = contextChannelId != null
-        ? watchChannelIdentityLabel(ref, contextChannelId, pk)
-        : (names?.withSources(ref.watch(identityNameSourcesProvider)) ??
-                  watchIdentityNames(ref, {pk}))
-              .labelFor(pk);
+    final opener = names;
+    final displayName =
+        (opener != null ? ref.watch(opener) : watchIdentityNames(ref, {pk}))
+            .labelFor(pk);
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
