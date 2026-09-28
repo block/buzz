@@ -1017,6 +1017,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "buzz-runtime-support",
  "dirs",
  "fs2",
  "getrandom 0.4.3",
@@ -1110,6 +1111,7 @@ dependencies = [
  "base64 0.22.1",
  "buzz-core",
  "buzz-persona",
+ "buzz-runtime-support",
  "buzz-sdk",
  "buzz-ws-client",
  "bytes",
@@ -1505,6 +1507,15 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "buzz-runtime-support"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.13.4",
+ "serde_json",
 ]
 
 [[package]]

@@ -16,6 +16,7 @@ name = "buzz"
 path = "src/main.rs"
 
 [dependencies]
+buzz-runtime-support = { path = "../buzz-runtime-support" }
 # CLI argument parsing — derive macros + env var support (BUZZ_API_TOKEN auto-wired)
 clap = { version = "4", features = ["derive", "env"] }
 

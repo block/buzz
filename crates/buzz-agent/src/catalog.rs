@@ -158,7 +158,10 @@ async fn discover_databricks_models_with_token_source(
     cfg: &Config,
     token_source: Arc<dyn TokenSource>,
 ) -> Result<Vec<ModelEntry>, AgentError> {
-    discover_databricks_models_with_client(cfg, token_source, &Client::new()).await
+    let client = crate::sandbox_runtime::http_builder()?
+        .build()
+        .map_err(|e| AgentError::Llm(format!("catalog http: {e}")))?;
+    discover_databricks_models_with_client(cfg, token_source, &client).await
 }
 
 pub(crate) async fn discover_databricks_models_with_client(

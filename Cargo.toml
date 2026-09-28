@@ -12,6 +12,7 @@ members = [
     "crates/buzz-audit",
     "crates/buzz-acp",
     "crates/buzz-agent",
+    "crates/buzz-runtime-support",
     "crates/sprig",
     "crates/buzz-test-client",
     "crates/buzz-ws-client",

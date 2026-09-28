@@ -48,6 +48,8 @@ const PASSTHROUGH_ENV: &[&str] = &[
     // Explicit Buzz-owned OAuth root for named demo builds. The agent may spawn
     // auth-capable child tools after clearing its ambient environment.
     "BUZZ_AGENT_CONFIG_DIR",
+    // Read-only launcher trust snapshot; do not forward the auth-broker capability.
+    "BUZZ_SANDBOX_TLS_ROOTS",
     // SSH — required for git clone/push over SSH (git@github.com:...)
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",

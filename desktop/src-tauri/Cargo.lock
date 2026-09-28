@@ -1076,6 +1076,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "buzz-runtime-support",
  "dirs",
  "fs2",
  "getrandom 0.4.3",
@@ -1250,6 +1251,15 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "buzz-runtime-support"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.13.4",
+ "serde_json",
 ]
 
 [[package]]

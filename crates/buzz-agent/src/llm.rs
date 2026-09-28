@@ -61,7 +61,7 @@ const LLM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 impl Llm {
     pub fn new(cfg: &Config) -> Result<Self, AgentError> {
-        let http = Client::builder()
+        let http = crate::sandbox_runtime::http_builder()?
             .connect_timeout(LLM_CONNECT_TIMEOUT)
             // No client-level read_timeout: we apply a per-request total
             // timeout via RequestBuilder::timeout() so that escalated budgets

@@ -43,6 +43,7 @@ name = "auth-worker"
 path = "tests/bin/auth_worker.rs"
 
 [dependencies]
+buzz-runtime-support = { path = "../buzz-runtime-support" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
