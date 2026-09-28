@@ -10,7 +10,11 @@ import {
 } from "./channelSectionsStorage";
 import { ChannelSectionSyncManager } from "./channelSectionsSync";
 import type { RemoteSections } from "./channelSectionsSync";
-import { swapSectionOrder } from "./channelSectionsHelpers";
+import {
+  isChannelSectionsAllowlistReady,
+  scopeChannelSectionsToKnownChannels,
+  swapSectionOrder,
+} from "./channelSectionsHelpers";
 
 export type { ChannelSection } from "./channelSectionsStorage";
 
@@ -19,9 +23,27 @@ import type {
   ChannelSectionStore,
 } from "./channelSectionsStorage";
 
+function readScopedStore(
+  pubkey: string | undefined,
+  relayUrl: string | undefined,
+): ChannelSectionStore {
+  if (!pubkey) {
+    return DEFAULT_STORE;
+  }
+  return readChannelSectionsStore(pubkey, relayUrl);
+}
+
 export function useChannelSections(
   pubkey: string | undefined,
   relayUrl?: string,
+  knownChannelIds?: ReadonlySet<string> | null,
+  /**
+   * When true, an empty allowlist means "community has no channels" and
+   * foreign assignments are stripped. When false, the allowlist is still
+   * loading and scoping is deferred. When omitted, a non-empty allowlist is
+   * treated as ready (unit-test / legacy callers).
+   */
+  channelsReady?: boolean,
 ): {
   sections: ChannelSection[];
   assignments: Record<string, string>;
@@ -34,25 +56,91 @@ export function useChannelSections(
   assignChannel: (channelId: string, sectionId: string) => void;
   unassignChannel: (channelId: string) => void;
 } {
-  const [store, setStore] = React.useState<ChannelSectionStore>(() => {
-    if (!pubkey) {
-      return DEFAULT_STORE;
-    }
-    return readChannelSectionsStore(pubkey, relayUrl);
-  });
+  const scopeKey = `${pubkey ?? ""}::${relayUrl ?? ""}`;
+  const [store, setStore] = React.useState<ChannelSectionStore>(() =>
+    readScopedStore(pubkey, relayUrl),
+  );
 
+  // Scope fence (#7207): bump generation synchronously so in-flight writers from
+  // the previous community cannot persist/publish under the new relayUrl. Do
+  // NOT call setState during render — that desyncs later hooks in AppSidebar
+  // (invalid hook call / "Should have a queue"). Hydrate from the new scope in
+  // layout; until then derive a display store from localStorage for this scope.
+  const scopeRef = React.useRef({ pubkey, relayUrl });
+  const scopeGenerationRef = React.useRef(0);
+  const storeScopeKeyRef = React.useRef(scopeKey);
   const managerRef = React.useRef<ChannelSectionSyncManager | null>(null);
   const lastAppliedRemoteTs = React.useRef(0);
   const lastAppliedEventId = React.useRef("");
+  const knownChannelIdsRef = React.useRef(knownChannelIds);
+  knownChannelIdsRef.current = knownChannelIds;
+  const channelsReadyRef = React.useRef(channelsReady);
+  channelsReadyRef.current = channelsReady;
+  const allowlistReady = isChannelSectionsAllowlistReady(
+    knownChannelIds,
+    channelsReady,
+  );
+
+  if (
+    scopeRef.current.pubkey !== pubkey ||
+    scopeRef.current.relayUrl !== relayUrl
+  ) {
+    scopeRef.current = { pubkey, relayUrl };
+    scopeGenerationRef.current += 1;
+  }
+
+  React.useLayoutEffect(() => {
+    setStore(readScopedStore(pubkey, relayUrl));
+    storeScopeKeyRef.current = scopeKey;
+    lastAppliedRemoteTs.current = 0;
+    lastAppliedEventId.current = "";
+  }, [scopeKey, pubkey, relayUrl]);
+
+  const effectiveStore =
+    storeScopeKeyRef.current === scopeKey
+      ? store
+      : readScopedStore(pubkey, relayUrl);
+
+  const persistAndPublish = React.useCallback(
+    (
+      next: ChannelSectionStore,
+      generation: number,
+    ): ChannelSectionStore | null => {
+      if (!pubkey) {
+        return null;
+      }
+      if (scopeGenerationRef.current !== generation) {
+        return null;
+      }
+      if (
+        scopeRef.current.pubkey !== pubkey ||
+        scopeRef.current.relayUrl !== relayUrl
+      ) {
+        return null;
+      }
+      const scoped = scopeChannelSectionsToKnownChannels(
+        boundChannelSectionsStore(next),
+        knownChannelIdsRef.current,
+        channelsReadyRef.current,
+      );
+      if (!writeChannelSectionsStore(pubkey, scoped, relayUrl)) {
+        return null;
+      }
+      storeScopeKeyRef.current = `${pubkey}::${relayUrl ?? ""}`;
+      managerRef.current?.publishSections(scoped);
+      return scoped;
+    },
+    [pubkey, relayUrl],
+  );
 
   React.useEffect(() => {
     if (!pubkey || !relayUrl) {
-      setStore(DEFAULT_STORE);
       lastAppliedRemoteTs.current = 0;
       lastAppliedEventId.current = "";
+      managerRef.current?.destroy();
+      managerRef.current = null;
       return;
     }
-    setStore(readChannelSectionsStore(pubkey, relayUrl));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
     managerRef.current = new ChannelSectionSyncManager(pubkey, relayUrl);
@@ -83,8 +171,10 @@ export function useChannelSections(
     (
       remote: RemoteSections,
     ): ((prev: ChannelSectionStore) => ChannelSectionStore) => {
+      const generation = scopeGenerationRef.current;
       return (prev) => {
         if (!pubkey) return prev;
+        if (scopeGenerationRef.current !== generation) return prev;
         if (remote.createdAt < lastAppliedRemoteTs.current) return prev;
         if (
           remote.createdAt === lastAppliedRemoteTs.current &&
@@ -94,18 +184,30 @@ export function useChannelSections(
         lastAppliedRemoteTs.current = remote.createdAt;
         lastAppliedEventId.current = remote.eventId;
         managerRef.current?.cancelPendingPublish();
-        if (!writeChannelSectionsStore(pubkey, remote.store, relayUrl))
-          return prev;
-        return remote.store;
+        const scoped = scopeChannelSectionsToKnownChannels(
+          remote.store,
+          knownChannelIdsRef.current,
+          channelsReadyRef.current,
+        );
+        if (!writeChannelSectionsStore(pubkey, scoped, relayUrl)) return prev;
+        storeScopeKeyRef.current = `${pubkey}::${relayUrl ?? ""}`;
+        return scoped;
       };
     },
     [pubkey, relayUrl],
   );
 
+  // Defer bootstrap (including first-sync seed-publish) until the channel
+  // allowlist is ready so a polluted local blob cannot seed-publish foreign
+  // channel ids while channels are still loading (#7207).
   React.useEffect(() => {
-    if (!pubkey || !relayUrl) return;
+    if (!pubkey || !relayUrl || !allowlistReady) return;
     let cancelled = false;
-    const local = readChannelSectionsStore(pubkey, relayUrl);
+    const local = scopeChannelSectionsToKnownChannels(
+      readChannelSectionsStore(pubkey, relayUrl),
+      knownChannelIdsRef.current,
+      true,
+    );
     void managerRef.current?.bootstrap(local).then((result) => {
       if (cancelled) return;
       if (result.action === "apply-remote") {
@@ -117,7 +219,27 @@ export function useChannelSections(
     return () => {
       cancelled = true;
     };
-  }, [pubkey, relayUrl, applyRemote]);
+  }, [pubkey, relayUrl, applyRemote, allowlistReady]);
+
+  // When the allowlist becomes ready (or the known channel set changes), heal
+  // any foreign assignments / orphan section objects already sitting in memory
+  // or localStorage, and publish the cleaned blob so a previously polluted A
+  // does not keep serving B's layout.
+  React.useEffect(() => {
+    if (!pubkey || !allowlistReady) return;
+    const generation = scopeGenerationRef.current;
+    setStore((prev) => {
+      const scoped = scopeChannelSectionsToKnownChannels(
+        prev,
+        knownChannelIds,
+        true,
+      );
+      if (scoped === prev) {
+        return prev;
+      }
+      return persistAndPublish(scoped, generation) ?? prev;
+    });
+  }, [pubkey, allowlistReady, knownChannelIds, persistAndPublish]);
 
   React.useEffect(() => {
     if (!pubkey) return;
@@ -152,7 +274,12 @@ export function useChannelSections(
         }
         const pending = managerRef.current?.getPendingStore();
         if (pending) {
-          managerRef.current?.publishSections(pending);
+          const scoped = scopeChannelSectionsToKnownChannels(
+            pending,
+            knownChannelIdsRef.current,
+            channelsReadyRef.current,
+          );
+          managerRef.current?.publishSections(scoped);
         }
       });
     });
@@ -162,14 +289,27 @@ export function useChannelSections(
     };
   }, [pubkey, applyRemote]);
 
-  const sections = React.useMemo<ChannelSection[]>(
-    () => store.sections.slice().sort((a, b) => a.order - b.order),
-    [store.sections],
+  const displayStore = React.useMemo(
+    () =>
+      scopeChannelSectionsToKnownChannels(
+        effectiveStore,
+        knownChannelIds,
+        channelsReady,
+      ),
+    [effectiveStore, knownChannelIds, channelsReady],
   );
+
+  const sections = React.useMemo<ChannelSection[]>(
+    () => displayStore.sections.slice().sort((a, b) => a.order - b.order),
+    [displayStore.sections],
+  );
+
+  const assignments = displayStore.assignments;
 
   const createSection = React.useCallback(
     (name: string, icon?: string): ChannelSection | null => {
       if (!pubkey) return null;
+      const generation = scopeGenerationRef.current;
       const prev = readChannelSectionsStore(pubkey, relayUrl);
       const maxOrder =
         prev.sections.length > 0
@@ -181,18 +321,22 @@ export function useChannelSections(
         ...(icon ? { icon } : {}),
         order: maxOrder + 1,
       };
+      let created: ChannelSection | null = section;
       setStore((current) => {
-        const next = boundChannelSectionsStore({
+        const next = {
           ...current,
           sections: [...current.sections, section],
-        });
-        if (!writeChannelSectionsStore(pubkey, next, relayUrl)) return current;
-        managerRef.current?.publishSections(next);
-        return next;
+        };
+        const persisted = persistAndPublish(next, generation);
+        if (!persisted) {
+          created = null;
+          return current;
+        }
+        return persisted;
       });
-      return section;
+      return created;
     },
-    [pubkey, relayUrl],
+    [pubkey, relayUrl, persistAndPublish],
   );
 
   const renameSection = React.useCallback(
@@ -200,6 +344,7 @@ export function useChannelSections(
       if (!pubkey) {
         return;
       }
+      const generation = scopeGenerationRef.current;
       setStore((prev) => {
         const next: ChannelSectionStore = {
           ...prev,
@@ -214,14 +359,10 @@ export function useChannelSections(
               : s,
           ),
         };
-        if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
-          return prev;
-        }
-        managerRef.current?.publishSections(next);
-        return next;
+        return persistAndPublish(next, generation) ?? prev;
       });
     },
-    [pubkey, relayUrl],
+    [pubkey, persistAndPublish],
   );
 
   const deleteSection = React.useCallback(
@@ -229,71 +370,65 @@ export function useChannelSections(
       if (!pubkey) {
         return;
       }
+      const generation = scopeGenerationRef.current;
       setStore((prev) => {
-        const assignments = { ...prev.assignments };
-        for (const channelId of Object.keys(assignments)) {
-          if (assignments[channelId] === sectionId) {
-            delete assignments[channelId];
+        const nextAssignments = { ...prev.assignments };
+        for (const channelId of Object.keys(nextAssignments)) {
+          if (nextAssignments[channelId] === sectionId) {
+            delete nextAssignments[channelId];
           }
         }
         const next: ChannelSectionStore = {
           ...prev,
           sections: prev.sections.filter((s) => s.id !== sectionId),
-          assignments,
+          assignments: nextAssignments,
         };
-        if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
-          return prev;
-        }
-        managerRef.current?.publishSections(next);
-        return next;
+        return persistAndPublish(next, generation) ?? prev;
       });
     },
-    [pubkey, relayUrl],
+    [pubkey, persistAndPublish],
   );
 
   const moveSectionUp = React.useCallback(
     (sectionId: string) => {
       if (!pubkey) return;
+      const generation = scopeGenerationRef.current;
       setStore((prev) => {
         const next = swapSectionOrder(prev, sectionId, "up");
-        if (!next || !writeChannelSectionsStore(pubkey, next, relayUrl))
-          return prev;
-        managerRef.current?.publishSections(next);
-        return next;
+        if (!next) return prev;
+        return persistAndPublish(next, generation) ?? prev;
       });
     },
-    [pubkey, relayUrl],
+    [pubkey, persistAndPublish],
   );
 
   const moveSectionDown = React.useCallback(
     (sectionId: string) => {
       if (!pubkey) return;
+      const generation = scopeGenerationRef.current;
       setStore((prev) => {
         const next = swapSectionOrder(prev, sectionId, "down");
-        if (!next || !writeChannelSectionsStore(pubkey, next, relayUrl))
-          return prev;
-        managerRef.current?.publishSections(next);
-        return next;
+        if (!next) return prev;
+        return persistAndPublish(next, generation) ?? prev;
       });
     },
-    [pubkey, relayUrl],
+    [pubkey, persistAndPublish],
   );
 
   const reorderSections = React.useCallback(
     (orderedIds: string[]) => {
       if (!pubkey) return;
+      const generation = scopeGenerationRef.current;
       setStore((prev) => {
-        const sections = prev.sections.map((s) => {
+        const nextSections = prev.sections.map((s) => {
           const newOrder = orderedIds.indexOf(s.id);
           return newOrder === -1 ? s : { ...s, order: newOrder };
         });
-        const next: ChannelSectionStore = { ...prev, sections };
-        if (!writeChannelSectionsStore(pubkey, next, relayUrl)) return prev;
-        managerRef.current?.publishSections(next);
-        return next;
+        const next: ChannelSectionStore = { ...prev, sections: nextSections };
+        return persistAndPublish(next, generation) ?? prev;
       });
     },
-    [pubkey, relayUrl],
+    [pubkey, persistAndPublish],
   );
 
   const assignChannel = React.useCallback(
@@ -301,22 +436,19 @@ export function useChannelSections(
       if (!pubkey) {
         return;
       }
+      const generation = scopeGenerationRef.current;
       setStore((prev) => {
-        const assignments = { ...prev.assignments };
-        delete assignments[channelId];
-        assignments[channelId] = sectionId;
-        const next = boundChannelSectionsStore({
+        const nextAssignments = { ...prev.assignments };
+        delete nextAssignments[channelId];
+        nextAssignments[channelId] = sectionId;
+        const next = {
           ...prev,
-          assignments,
-        });
-        if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
-          return prev;
-        }
-        managerRef.current?.publishSections(next);
-        return next;
+          assignments: nextAssignments,
+        };
+        return persistAndPublish(next, generation) ?? prev;
       });
     },
-    [pubkey, relayUrl],
+    [pubkey, persistAndPublish],
   );
 
   const unassignChannel = React.useCallback(
@@ -324,23 +456,23 @@ export function useChannelSections(
       if (!pubkey) {
         return;
       }
+      const generation = scopeGenerationRef.current;
       setStore((prev) => {
-        const assignments = { ...prev.assignments };
-        delete assignments[channelId];
-        const next: ChannelSectionStore = { ...prev, assignments };
-        if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
-          return prev;
-        }
-        managerRef.current?.publishSections(next);
-        return next;
+        const nextAssignments = { ...prev.assignments };
+        delete nextAssignments[channelId];
+        const next: ChannelSectionStore = {
+          ...prev,
+          assignments: nextAssignments,
+        };
+        return persistAndPublish(next, generation) ?? prev;
       });
     },
-    [pubkey, relayUrl],
+    [pubkey, persistAndPublish],
   );
 
   return {
     sections,
-    assignments: store.assignments,
+    assignments,
     createSection,
     renameSection,
     deleteSection,
