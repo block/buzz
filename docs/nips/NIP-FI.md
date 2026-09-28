@@ -190,7 +190,7 @@ community configuration is missing or unavailable.
 
 ### Multi-issuer registry
 
-The global [`IssuerRegistry`](../../crates/buzz-auth/src/nip_fi/config.rs) remains
+The global `IssuerRegistry` remains
 shared for issuer policy and JWKS lookup; community authorization is a separate
 deployment mapping from canonical host URI to
 `(expected_aud, authorized_issuers)`.  `VerifyAssertion` consumes the
@@ -198,7 +198,7 @@ Host-resolved mapping, so a globally known issuer is not implicitly trusted by
 every community.
 
 The `nostr_pubkey` claim is unconditionally required — absence rejects
-regardless of issuer policy (NIP-FI v2, PR #7221).
+regardless of issuer policy.
 
 ### JWKS snapshot
 
@@ -620,10 +620,9 @@ to all three requirements on all three endpoints, including both POST
 endpoints; it is not a payload-only exemption.
 
 This exemption is required by Git's credential protocol. The credential helper
-receives only credential metadata and never sees request bodies
-(`crates/git-credential-nostr/src/lib.rs:98-132`), so a body hash cannot exist
-in the signed event. This limitation is architectural to Git's credential
-protocol.
+receives only credential metadata and never sees request bodies, so a body
+hash cannot exist in the signed event. This limitation is architectural to
+Git's credential protocol.
 
 The NIP-FI assertion and pairing requirement is unchanged and applies per
 request on every one of these endpoints. Each request MUST still carry and
@@ -738,13 +737,6 @@ requirement: full assertion verification, exact key equality between the
 assertion's `nostr_pubkey` claim and the kind-24242 event's public key, and
 deny-map enforcement (see Admission procedure, steps 1–6).
 
-#### Compliance note
-
-The implementation as of PR #7264 pairs via a permissive Blossom verifier and
-is explicitly non-compliant with this section.  The named gaps are:
-multi-tag acceptance, a 3600-second proof window, and an optional `server`
-tag.  These are resolved when the bounded hardening task lands.
-
 ### Request format
 
 Each protected HTTP request MUST present both of the following:
@@ -834,7 +826,6 @@ is unavailable.
 | unknown or community-unauthorized issuer; malformed, invalid, or expired evidence | `evidence_rejected` | `restricted: evidence rejected` | `403`; `Content-Type: text/plain; charset=utf-8`; body `evidence rejected\n` |
 | assertion–key mismatch; unauthorized issuer principal, signed-target–body mismatch, or replayed `jti` on a signed command; active deny-set entry for pubkey | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; body `authorization denied\n` |
 | required JWKS snapshot or community/Host resolution unavailable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; body `authorization unavailable\n` |
-| relay in `deny_protected` mode (operator-declared repair mode) | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; same contract as JWKS-unavailable — client evidence may be valid, service is temporarily offline |
 
 A denial decided on a WebSocket upgrade is the HTTP response in place of `101`.
 A denial decided on a protected HTTP request is the HTTP response.
@@ -978,8 +969,8 @@ window; a deny-set entry takes effect on the very next request.
 
 **SSRF.** The JWKS fetcher implements SSRF protection: HTTPS-only URI
 validation, DNS resolution with IP deny-list enforcement, address pinning to
-prevent DNS rebinding TOCTOU, and redirect denial.  The complete IANA
-Special-Purpose address deny table is implemented; see `crates/buzz-core/src/network.rs`.
+prevent DNS rebinding TOCTOU, and redirect denial.  The IP deny-list covers
+the complete IANA Special-Purpose address registry.
 
 **Issuer compromise.** A compromised assertion issuer can impersonate any
 identity but cannot prove possession of the assertion-named Nostr key.  The NIP-42
