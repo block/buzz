@@ -90,8 +90,10 @@ int? parseRateLimitRetrySeconds(String message) {
 
 /// Whether [value] has settled on a relay deadline.
 ///
-/// Automatic refresh owners (timers, reconnect, live-event invalidation) must
-/// not re-send a request in this state; only an explicit user action may.
+/// The forum periodic poll timers pause while a query is in this state;
+/// reopening the view is the explicit retry. Other refresh paths (reconnect,
+/// resume, live events, unread backstop) still re-send, each bounded by the
+/// relay's 20s statement deadline.
 bool isSettledRelayDeadline(AsyncValue<Object?> value) =>
     value.hasError && !value.isLoading && isRelayDeadlineError(value.error!);
 

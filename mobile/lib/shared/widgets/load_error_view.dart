@@ -3,8 +3,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
 
-/// Settled load failure with an explicit Retry, the only retry for a query
-/// that automatic owners stop replaying after a relay deadline.
+/// Settled load failure with an explicit Retry. After a relay deadline,
+/// Riverpod does not auto-retry, so this is the user's way to re-send.
 class LoadErrorView extends StatelessWidget {
   final String message;
   final VoidCallback onRetry;

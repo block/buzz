@@ -133,8 +133,10 @@ function recoverLiveSubscriptionFromClosed({
   subscription.resolveReady?.("closed");
   subscription.resolveReady = undefined;
 
-  // A live sub's backfill is `since: now`, so a deadline there is transient;
-  // back off and resubscribe rather than silently dropping live updates.
+  // A deadline on a live sub is treated as retryable: resubscribe with the
+  // same filter under the 1-30s backoff, which can keep retrying at the cap.
+  // `since` is deliberately not advanced to now; that could skip events
+  // missed while the sub was closed.
   const closedClass = isQueryDeadlineError(message)
     ? "retryable"
     : classifyRelayClosed(message);
