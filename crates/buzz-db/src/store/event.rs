@@ -772,11 +772,7 @@ async fn fetch_with_e_tag_deadline(
 /// e-tag pushdown as one array-bound containment test instead of an N-way
 /// `OR` chain, so planner cost does not scale with the number of referenced
 /// ids (the thread aux hop sends one id per reply).
-pub(crate) fn push_e_tag_filter(
-    qb: &mut QueryBuilder<sqlx::Postgres>,
-    col_prefix: &str,
-    e_tags: &[String],
-) {
+fn push_e_tag_filter(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, e_tags: &[String]) {
     let containments: Vec<serde_json::Value> = e_tags
         .iter()
         .map(|hex_id| serde_json::json!([["e", hex_id]]))
