@@ -159,6 +159,8 @@ Widget _composerSuggestionPanel({
   required List<Channel> channelSuggestions,
   required List<MentionCandidate> mentionSuggestions,
   required Set<String> unavailableMentions,
+  required bool mentionSearchFailed,
+  required VoidCallback onMentionSearchRetry,
   required Map<String, UserProfile> userCache,
   required String? currentPubkey,
   required bool isDmChannel,
@@ -172,12 +174,14 @@ Widget _composerSuggestionPanel({
           onSelect: onChannelSelect,
         ),
       )
-    : mentionSuggestions.isNotEmpty
+    : mentionSuggestions.isNotEmpty || mentionSearchFailed
     ? KeyedSubtree(
         key: const ValueKey('mention-suggestions'),
         child: _MentionSuggestions(
           suggestions: mentionSuggestions,
           unavailable: unavailableMentions,
+          searchFailed: mentionSearchFailed,
+          onRetry: onMentionSearchRetry,
           userCache: userCache,
           currentPubkey: currentPubkey,
           isDmChannel: isDmChannel,

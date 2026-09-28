@@ -223,6 +223,7 @@ class ComposeBar extends HookConsumerWidget {
     final shownMentions = useRef<_MentionRows>((
       rows: const [],
       unavailable: const {},
+      searchFailed: false,
     ));
     // Map of displayName → selected mention candidate built as the user selects
     // mentions. Used to pass resolved pubkeys directly to onSend and to attach
@@ -948,6 +949,11 @@ class ComposeBar extends HookConsumerWidget {
       channelSuggestions: channelSuggestions,
       mentionSuggestions: suggestions,
       unavailableMentions: mentionRows.unavailable,
+      mentionSearchFailed: mentionRows.searchFailed,
+      onMentionSearchRetry: () {
+        final query = mentionQuery.value;
+        if (query != null) ref.invalidate(mentionUserSearchProvider(query));
+      },
       userCache: userCache,
       currentPubkey: currentPubkey,
       isDmChannel: isDmChannel,

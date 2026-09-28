@@ -5,6 +5,10 @@ class _MentionSuggestions extends StatelessWidget {
 
   /// Shown rows that can no longer be chosen. They stay in place, disabled.
   final Set<String> unavailable;
+
+  /// The directory search failed: show its error and a retry below the rows.
+  final bool searchFailed;
+  final VoidCallback? onRetry;
   final Map<String, UserProfile> userCache;
   final String? currentPubkey;
   final bool isDmChannel;
@@ -13,6 +17,8 @@ class _MentionSuggestions extends StatelessWidget {
   const _MentionSuggestions({
     required this.suggestions,
     this.unavailable = const {},
+    this.searchFailed = false,
+    this.onRetry,
     required this.userCache,
     required this.currentPubkey,
     required this.isDmChannel,
@@ -35,9 +41,28 @@ class _MentionSuggestions extends StatelessWidget {
         child: ListView.separated(
           shrinkWrap: true,
           padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-          itemCount: suggestions.length,
+          itemCount: suggestions.length + (searchFailed ? 1 : 0),
           separatorBuilder: (_, _) => const SizedBox.shrink(),
           itemBuilder: (context, index) {
+            if (index == suggestions.length) {
+              return ListTile(
+                key: const ValueKey('mention-search-error'),
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                title: Text(
+                  'Could not search community people.',
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.error,
+                  ),
+                ),
+                trailing: TextButton(
+                  onPressed: onRetry == null
+                      ? null
+                      : () => _runComposerAction(onRetry!),
+                  child: const Text('Retry'),
+                ),
+              );
+            }
             final candidate = suggestions[index];
             final name = candidate.pickerLabel;
             final avatarUrl =

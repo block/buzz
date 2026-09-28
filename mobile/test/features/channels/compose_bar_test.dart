@@ -202,15 +202,15 @@ Widget _buildComposeBar({
   String? threadHeadId,
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
-  Map<String, List<UserProfile>>? directory,
+  Future<List<UserProfile>> Function(String query)? searchPeople,
 }) {
   return ProviderScope(
     overrides: [
       // Directory people by exact query, found after the real typing pause.
-      if (directory != null)
+      if (searchPeople != null)
         mentionUserSearchProvider.overrideWith((ref, query) async {
           await Future<void>.delayed(mentionSearchDebounce);
-          return directory[query.trim()] ?? const <UserProfile>[];
+          return searchPeople(query.trim());
         }),
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
@@ -1725,7 +1725,7 @@ void main() {
       Future<TextEditingController> pumpMembers(
         WidgetTester tester,
         List<String> names, {
-        Map<String, List<UserProfile>> directory = const {},
+        Future<List<UserProfile>> Function(String query)? searchPeople,
       }) async {
         final members = [
           for (var i = 0; i < names.length; i++)
@@ -1743,7 +1743,8 @@ void main() {
             cachedMembers: members,
             channels: [_makeCurrentChannel()],
             onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
-            directory: directory,
+            // No directory people unless a test supplies them.
+            searchPeople: searchPeople ?? (_) async => const [],
           ),
         );
         await _expandComposer(tester);
@@ -1803,15 +1804,52 @@ void main() {
         await settleSearch(tester);
       });
 
+      const maryJane = UserProfile(
+        pubkey:
+            'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+        displayName: 'Mary Jane',
+      );
+
+      testWidgets('a failed multi-word search keeps its error and retry', (
+        tester,
+      ) async {
+        var attempts = 0;
+        await pumpMembers(
+          tester,
+          ['Alice'],
+          searchPeople: (query) async {
+            attempts++;
+            if (attempts == 1) throw StateError('relay down');
+            return [maryJane];
+          },
+        );
+        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.pump();
+        await settleSearch(tester);
+        expect(
+          find.byKey(const ValueKey('mention-search-error')),
+          findsOneWidget,
+        );
+        expect(find.text('Mary Jane'), findsNothing);
+
+        await tester.tap(find.text('Retry'));
+        await tester.pump();
+        await settleSearch(tester);
+        expect(
+          find.byKey(const ValueKey('mention-search-error')),
+          findsNothing,
+        );
+        expect(find.text('Mary Jane'), findsOneWidget);
+      });
+
       testWidgets('a multi-word query still finds a directory person', (
         tester,
       ) async {
         await pumpMembers(
           tester,
           ['Alice'],
-          directory: {
-            'Mary J': [UserProfile(pubkey: 'f' * 64, displayName: 'Mary Jane')],
-          },
+          searchPeople: (query) async =>
+              query == 'Mary J' ? [maryJane] : const [],
         );
         await tester.enterText(find.byType(TextField), '@Mary J');
         await tester.pump();

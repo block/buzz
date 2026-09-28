@@ -250,3 +250,20 @@ IdentityNames mentionPickerNames(
       candidate.pubkey: ?candidate.ownerPubkey,
   },
 );
+
+/// Whether the directory search for this chooser failed. The chooser keeps
+/// the error and a retry instead of closing (portable mention rules,
+/// section 2). DMs and archived channels never search.
+final mentionSearchFailedProvider = Provider.family
+    .autoDispose<bool, MentionChooserArgs>((ref, args) {
+      final channel = (ref.watch(channelsProvider).asData?.value ?? const [])
+          .where((candidate) => candidate.id == args.channelId)
+          .firstOrNull;
+      if (channel == null ||
+          channel.isArchived ||
+          !(channel.isStream || channel.isForum)) {
+        return false;
+      }
+      final search = ref.watch(mentionUserSearchProvider(args.query));
+      return search.hasError && !search.isLoading;
+    });
