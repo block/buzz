@@ -785,9 +785,10 @@ async fn handle_active_audio_connection(
                     &roster_ctrl_tx,
                 ) => {
                     teardown_remote_huddle(cause, channel_id, &reader_cancel, &fence);
+                    None
                 }
                 _ = reader_cancel.cancelled() => {
-                    crate::audio::join::send_clean_close(&mut stream, fenced, &pubkey).await;
+                    crate::audio::join::send_clean_close(&mut stream, fenced, &pubkey).await
                 }
             }
         })
@@ -861,9 +862,11 @@ async fn handle_active_audio_connection(
     let _ = forward_task.await;
     // The reader task owns the owner control stream; joining it here guarantees
     // its clean-close (or teardown) completes before connection cleanup returns.
-    if let Some(reader_task) = reader_task {
-        let _ = reader_task.await;
-    }
+    let remote_removal_revision = if let Some(reader_task) = reader_task {
+        reader_task.await.ok().flatten()
+    } else {
+        None
+    };
     // The owner teardown watcher is cancelled by `cancel.cancel()` above (or has
     // already fired); join it so it settles before cleanup.
     if let Some(owner_teardown_task) = owner_teardown_task {
@@ -882,9 +885,7 @@ async fn handle_active_audio_connection(
     let removal_revision = if remote_session.is_none() {
         removal.as_ref().map(|(delta, _)| delta.revision)
     } else {
-        // The ingress mirror's local revision is not the owner's authoritative
-        // ordering. Omit it rather than publishing a plausible-but-wrong value.
-        None
+        remote_removal_revision
     };
     let should_auto_end = removal.as_ref().map(|(_, ended)| *ended).unwrap_or(false);
 
