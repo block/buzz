@@ -87,7 +87,8 @@
     "upng-js": "^2.1.0",
     "virtua": "0.49.3",
     "yaml": "^2.8.3",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "livekit-client": "^2.15.4"
   },
   "devDependencies": {
     "@noble/hashes": "^2.0.1",

@@ -610,6 +610,8 @@ pub const KIND_HUDDLE_PARTICIPANT_LEFT: u32 = 48102;
 pub const KIND_HUDDLE_ENDED: u32 = 48103;
 /// Relay-synthesized authoritative liveness for an active huddle session.
 pub const KIND_HUDDLE_LIVENESS: u32 = 48104;
+/// Huddle screen share started or stopped (desktop LiveKit track lifecycle).
+pub const KIND_HUDDLE_SCREEN_SHARE: u32 = 48105;
 /// Huddle channel guidelines/rules document.
 pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 
@@ -770,6 +772,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_HUDDLE_PARTICIPANT_LEFT,
     KIND_HUDDLE_ENDED,
     KIND_HUDDLE_LIVENESS,
+    KIND_HUDDLE_SCREEN_SHARE,
     KIND_HUDDLE_GUIDELINES,
     KIND_MEDIA_UPLOAD,
     KIND_GIT_REPO_ANNOUNCEMENT,

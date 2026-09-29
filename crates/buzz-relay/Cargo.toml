@@ -74,6 +74,7 @@ hmac            = { workspace = true }
 subtle          = { workspace = true }
 rand            = { workspace = true }
 hex             = { workspace = true }
+jsonwebtoken    = { workspace = true }
 url             = { workspace = true }
 moka            = { workspace = true }
 metrics         = { workspace = true }

@@ -109,6 +109,38 @@ impl std::fmt::Debug for KlipyConfig {
     }
 }
 
+/// Optional LiveKit SFU settings for Huddle screen share.
+///
+/// All three of `url`, `api_key`, and `api_secret` must be set together.
+/// Partial env is treated as unset (screen-share HTTP routes return
+/// `screen_share_unavailable`). The API secret is redacted in [`Debug`].
+#[derive(Clone)]
+pub struct LiveKitConfig {
+    /// Client-facing LiveKit WebSocket URL (`wss://…`).
+    pub url: String,
+    /// LiveKit API key (JWT `iss`).
+    pub api_key: String,
+    /// LiveKit API secret used to HS256-sign access tokens.
+    api_secret: String,
+}
+
+impl LiveKitConfig {
+    /// API secret for JWT signing only.
+    pub(crate) fn api_secret(&self) -> &str {
+        &self.api_secret
+    }
+}
+
+impl std::fmt::Debug for LiveKitConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveKitConfig")
+            .field("url", &self.url)
+            .field("api_key", &self.api_key)
+            .field("api_secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Optional OpenClaw workspace MCP mint settings (post-AUTH auto-provision).
 ///
 /// Both `mint_url` and `mint_key` must be configured together; partial env is
@@ -321,6 +353,10 @@ pub struct Config {
     /// Relay-owned KLIPY integration. Unset means GIF search is not advertised
     /// and its proxy routes return 404.
     pub klipy: Option<KlipyConfig>,
+
+    /// Optional LiveKit SFU for Huddle screen share. Unset means screen-share
+    /// token routes return a clear unavailable error.
+    pub livekit: Option<LiveKitConfig>,
 
     /// Optional OpenClaw workspace MCP auto-provision after NIP-42 AUTH.
     /// Unset means no mint / no HULA capability push (zero behavior change).
@@ -748,6 +784,33 @@ impl Config {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(|api_key| KlipyConfig { api_key });
+
+        let livekit_url = std::env::var("BUZZ_LIVEKIT_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let livekit_api_key = std::env::var("BUZZ_LIVEKIT_API_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let livekit_api_secret = std::env::var("BUZZ_LIVEKIT_API_SECRET")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let livekit = match (livekit_url, livekit_api_key, livekit_api_secret) {
+            (Some(url), Some(api_key), Some(api_secret)) => Some(LiveKitConfig {
+                url,
+                api_key,
+                api_secret,
+            }),
+            (None, None, None) => None,
+            _ => {
+                tracing::warn!(
+                    "BUZZ_LIVEKIT_URL / BUZZ_LIVEKIT_API_KEY / BUZZ_LIVEKIT_API_SECRET must all be set together; screen share disabled"
+                );
+                None
+            }
+        };
 
         let openclaw_mint_url = std::env::var("BUZZ_OPENCLAW_WORKSPACE_MINT_URL")
             .ok()
@@ -1316,6 +1379,7 @@ impl Config {
             relay_operator_pubkeys,
             allow_nip_oa_auth,
             klipy,
+            livekit,
             openclaw_workspace_mint,
             media,
             media_max_concurrent_uploads,
@@ -1415,6 +1479,58 @@ mod tests {
         let config = Config::from_env().expect("partial mint is soft-disabled");
         std::env::remove_var("BUZZ_OPENCLAW_WORKSPACE_MINT_URL");
         assert!(config.openclaw_workspace_mint.is_none());
+    }
+
+    #[test]
+    fn livekit_config_debug_redacts_the_api_secret() {
+        let cfg = LiveKitConfig {
+            url: "wss://livekit.example".to_string(),
+            api_key: "APIkey".to_string(),
+            api_secret: "super-secret-livekit".to_string(),
+        };
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("wss://livekit.example"));
+        assert!(debug.contains("APIkey"));
+        assert!(!debug.contains("super-secret-livekit"));
+    }
+
+    #[test]
+    fn livekit_unset_when_env_absent() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("BUZZ_LIVEKIT_URL");
+        std::env::remove_var("BUZZ_LIVEKIT_API_KEY");
+        std::env::remove_var("BUZZ_LIVEKIT_API_SECRET");
+        let config = Config::from_env().expect("default config");
+        assert!(config.livekit.is_none());
+    }
+
+    #[test]
+    fn livekit_all_three_set_enables_config() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("BUZZ_LIVEKIT_URL", "wss://livekit.example");
+        std::env::set_var("BUZZ_LIVEKIT_API_KEY", "APItest");
+        std::env::set_var("BUZZ_LIVEKIT_API_SECRET", "secret-value");
+        let config = Config::from_env().expect("config with livekit");
+        std::env::remove_var("BUZZ_LIVEKIT_URL");
+        std::env::remove_var("BUZZ_LIVEKIT_API_KEY");
+        std::env::remove_var("BUZZ_LIVEKIT_API_SECRET");
+        let lk = config.livekit.expect("livekit should be Some");
+        assert_eq!(lk.url, "wss://livekit.example");
+        assert_eq!(lk.api_key, "APItest");
+        assert_eq!(lk.api_secret(), "secret-value");
+    }
+
+    #[test]
+    fn livekit_partial_env_disables() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("BUZZ_LIVEKIT_URL", "wss://livekit.example");
+        std::env::set_var("BUZZ_LIVEKIT_API_KEY", "APItest");
+        std::env::remove_var("BUZZ_LIVEKIT_API_SECRET");
+        let config = Config::from_env().expect("partial livekit is soft-disabled");
+        std::env::remove_var("BUZZ_LIVEKIT_URL");
+        std::env::remove_var("BUZZ_LIVEKIT_API_KEY");
+        assert!(config.livekit.is_none());
     }
 
     /// Look up against a fixed set, standing in for process env.

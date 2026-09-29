@@ -717,6 +717,9 @@ pub struct AppState {
     pub git_pack_cache: Arc<crate::api::git::pack_cache::GitPackCache>,
     /// Audio relay room manager — tracks active huddle audio rooms.
     pub audio_rooms: Arc<AudioRoomManager>,
+    /// Soft one-sharer lock for Huddle screen share: (community, channel) → pubkey.
+    /// Per-process only; see docs/huddle-screen-share.md.
+    pub huddle_screen_sharers: Arc<dashmap::DashMap<(CommunityId, Uuid), String>>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
     pub shutting_down: Arc<AtomicBool>,
     /// Orders readiness gauge publication against terminal shutdown.
@@ -922,6 +925,7 @@ impl AppState {
             git_store,
             git_pack_cache,
             audio_rooms: Arc::new(AudioRoomManager::new()),
+            huddle_screen_sharers: Arc::new(dashmap::DashMap::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             readiness: Arc::new(crate::readiness::ReadinessCoordinator::default()),
             started_at: Instant::now(),

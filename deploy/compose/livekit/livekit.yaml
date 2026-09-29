@@ -1,0 +1,22 @@
+# Minimal LiveKit config for Huddle screen share.
+# Replace keys and RTC IPs for the deployment host.
+
+port: 7880
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: true
+# keys are also injectable via LIVEKIT_KEYS=API: secret
+keys:
+  APIdevkey: "devsecret_replace_me_with_long_random"
+# Optional TURN (coturn) for restrictive NATs:
+# turn:
+#   enabled: true
+#   servers:
+#     - urls:
+#         - "turn:turn.example.com:3478?transport=udp"
+#         - "turn:turn.example.com:3478?transport=tcp"
+#       username: buzz
+#       credential: CHANGE_ME
+logging:
+  level: info

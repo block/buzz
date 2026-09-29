@@ -139,6 +139,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/huddle/{channel_id}/audio",
             get(audio::handler::ws_audio_handler),
         )
+        // Huddle screen-share LiveKit token mint / stop (NIP-98)
+        .route(
+            "/api/huddle/{channel_id}/screen-token",
+            post(api::huddle_screen::mint_screen_token),
+        )
+        .route(
+            "/api/huddle/{channel_id}/screen-stop",
+            post(api::huddle_screen::stop_screen_share),
+        )
         // Reject request bodies larger than 1 MB to prevent resource exhaustion.
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state.clone());

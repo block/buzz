@@ -1267,7 +1267,7 @@ async fn heartbeat_loop(
     }
 }
 
-async fn ensure_membership(
+pub(crate) async fn ensure_membership(
     state: &AppState,
     tenant: &TenantContext,
     channel_id: Uuid,

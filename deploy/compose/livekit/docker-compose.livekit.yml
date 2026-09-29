@@ -1,0 +1,38 @@
+# Optional LiveKit + TURN overlay for Huddle screen share.
+# Use alongside deploy/compose stack on the Hula host.
+#
+#   docker compose -f docker-compose.livekit.yml up -d
+#
+# Point the relay at the public LiveKit URL:
+#   BUZZ_LIVEKIT_URL=wss://livekit.example.com
+#   BUZZ_LIVEKIT_API_KEY=...
+#   BUZZ_LIVEKIT_API_SECRET=...
+
+services:
+  livekit:
+    image: livekit/livekit-server:v1.8.4
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      # Host ports when not behind Caddy; prefer Caddy for WSS.
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    environment:
+      LIVEKIT_KEYS: "${BUZZ_LIVEKIT_API_KEY}: ${BUZZ_LIVEKIT_API_SECRET}"
+
+  coturn:
+    image: coturn/coturn:4.6.2
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-port=3478
+      - --fingerprint
+      - --lt-cred-mech
+      - --user=${BUZZ_TURN_USER:-buzz}:${BUZZ_TURN_PASS:-CHANGE_ME}
+      - --realm=${BUZZ_TURN_REALM:-turn.example.com}
+      - --external-ip=${BUZZ_TURN_EXTERNAL_IP:-}

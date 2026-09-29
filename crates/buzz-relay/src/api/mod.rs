@@ -4,6 +4,7 @@ pub mod admin;
 pub mod bridge;
 pub mod events;
 pub mod gifs;
+pub mod huddle_screen;
 pub mod git;
 pub mod invites;
 pub mod media;

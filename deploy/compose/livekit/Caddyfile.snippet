@@ -1,0 +1,12 @@
+# Append to the Hula host Caddy site (or a dedicated livekit host).
+# LiveKit WebSocket must not be buffered.
+
+livekit.{$BUZZ_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy livekit:7880
+}
+
+# TURN over TLS (optional; UDP 3478 still needs host networking / firewall):
+# turn.{$BUZZ_DOMAIN} {
+#   reverse_proxy coturn:5349
+# }

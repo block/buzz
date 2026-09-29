@@ -1424,6 +1424,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "infer",
+ "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",

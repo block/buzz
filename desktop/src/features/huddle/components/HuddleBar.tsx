@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Bot,
   Captions,
+  MonitorUp,
   PhoneOff,
   PictureInPicture,
   PictureInPicture2,
@@ -29,7 +30,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle, useHuddleLevels } from "../HuddleContext";
 import { useHuddleParticipantRoster } from "../hooks/useHuddleParticipantRoster";
+import { useHuddleScreenShare } from "../hooks/useHuddleScreenShare";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
+import { ScreenShareSpotlight } from "./ScreenShareSpotlight";
 import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
@@ -384,6 +387,14 @@ export function HuddleBar({
     preservedParticipants: barState?.agent_pubkeys ?? [],
     huddleThreadEventId: barState?.huddle_thread_event_id ?? null,
   });
+  const screenShare = useHuddleScreenShare({
+    active: isVisibleHuddleState(barState),
+    channelId: barState?.ephemeral_channel_id ?? null,
+    parentChannelId: barState?.parent_channel_id ?? null,
+    selfPubkey: currentPubkey,
+  });
+  const spotlightStream =
+    screenShare.localPreviewStream ?? screenShare.remoteStream;
   const participantSpeakerLevels = React.useMemo(() => {
     const levels = { ...speakerLevels };
     if (currentPubkey) {
@@ -576,11 +587,29 @@ export function HuddleBar({
       aria-hidden={isDrawerClosing}
       data-state={isDrawerClosing ? "closing" : "open"}
       className={cn(
-        "buzz-huddle-drawer grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 px-5 py-3 text-foreground",
+        "buzz-huddle-drawer flex min-w-0 flex-col gap-2 px-5 py-3 text-foreground",
         isDrawerClosing && "pointer-events-none",
         className,
       )}
     >
+      {spotlightStream ? (
+        <ScreenShareSpotlight
+          stream={spotlightStream}
+          label={
+            screenShare.sharing ? "You are sharing" : "Screen share"
+          }
+          className="mx-auto h-40 w-full max-w-3xl"
+        />
+      ) : null}
+      {screenShare.error ? (
+        <div
+          className="mx-auto max-w-3xl truncate rounded-md bg-destructive/15 px-2 py-1 text-xs text-destructive"
+          role="status"
+        >
+          {screenShare.error}
+        </div>
+      ) : null}
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3">
       <div className="flex min-w-0 items-center gap-3 overflow-hidden">
         {/* Error banner */}
         {huddleError && (
@@ -672,6 +701,40 @@ export function HuddleBar({
             micGain={micGain}
             onGainChange={setMicGain}
           />
+
+          {screenShare.available ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant={screenShare.sharing ? "secondary" : "ghost"}
+                  size="sm"
+                  className="gap-1.5"
+                  disabled={
+                    screenShare.connecting ||
+                    (!screenShare.sharing && screenShare.shareBlocked)
+                  }
+                  aria-label={
+                    screenShare.sharing ? "Stop sharing screen" : "Share screen"
+                  }
+                  onClick={() => {
+                    if (screenShare.sharing) void screenShare.stopShare();
+                    else void screenShare.startShare();
+                  }}
+                >
+                  <MonitorUp className="h-4 w-4" />
+                  {screenShare.sharing ? "Stop share" : "Share"}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {screenShare.shareBlocked && !screenShare.sharing
+                  ? "Someone else is sharing"
+                  : screenShare.sharing
+                    ? "Stop screen share"
+                    : "Share your screen"}
+              </TooltipContent>
+            </Tooltip>
+          ) : null}
 
           <SpeakerControls
             ttsEnabled={ttsEnabled}
@@ -874,6 +937,7 @@ export function HuddleBar({
           <PhoneOff className="h-4 w-4" />
           Leave
         </Button>
+      </div>
       </div>
 
       {/* Screen reader announcements for huddle state changes */}

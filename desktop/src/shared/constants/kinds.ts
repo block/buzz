@@ -43,6 +43,7 @@ export const KIND_HUDDLE_PARTICIPANT_JOINED = 48101;
 export const KIND_HUDDLE_PARTICIPANT_LEFT = 48102;
 export const KIND_HUDDLE_ENDED = 48103;
 export const KIND_HUDDLE_LIVENESS = 48104;
+export const KIND_HUDDLE_SCREEN_SHARE = 48105;
 // NIP-78 application-specific data. All use kind 30078; the relay
 // differentiates them by d-tag ("read-state:<slotId>", "channel-sections",
 // "channel-mutes", "channel-stars", "channel-sort", "project-sidebar-membership").
@@ -169,6 +170,7 @@ const NON_CONVERSATIONAL_UNREAD_KINDS: ReadonlySet<number> = new Set([
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102
   KIND_HUDDLE_ENDED, // 48103
+  KIND_HUDDLE_SCREEN_SHARE, // 48105
 ]);
 
 // Whether a timeline message kind should count toward unread tallies. An
