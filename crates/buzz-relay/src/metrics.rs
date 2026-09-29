@@ -1161,3 +1161,133 @@ mod tests {
         );
     }
 }
+
+/// Fixtures for the absence-aware partition audit alerts in
+/// `docs/partition-catalog-monitoring.md`, evaluated against the production
+/// exporter configuration and the production audit metric emission.
+#[cfg(test)]
+mod partition_alert_tests {
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    const RUNS: &str = "buzz_partition_audit_runs_total";
+    const LAST_SUCCESS: &str = "buzz_partition_audit_last_success_timestamp_seconds";
+    const MANAGED_TABLES: [&str; 2] = ["delivery_log", "events"];
+
+    /// `table` label values of every sample of `metric` in a scrape.
+    fn tables(scrape: &str, metric: &str) -> BTreeSet<String> {
+        scrape
+            .lines()
+            .filter_map(|line| line.strip_prefix(metric)?.strip_prefix('{'))
+            .filter_map(|labels| {
+                let (_, rest) = labels.split_once(r#"table=""#)?;
+                rest.split_once('"').map(|(table, _)| table.to_string())
+            })
+            .collect()
+    }
+
+    /// Evaluate the documented absence rule for one scrape target:
+    /// `max without (outcome) (buzz_partition_audit_runs_total)
+    ///  unless buzz_partition_audit_last_success_timestamp_seconds`.
+    fn missing_success_series(scrape: &str) -> BTreeSet<String> {
+        &tables(scrape, RUNS) - &tables(scrape, LAST_SUCCESS)
+    }
+
+    fn last_success_value(scrape: &str, table: &str) -> Option<f64> {
+        scrape
+            .lines()
+            .find(|line| {
+                line.starts_with(LAST_SUCCESS) && line.contains(&format!(r#"table="{table}""#))
+            })
+            .and_then(|line| line.rsplit_once(' '))
+            .map(|(_, value)| value.parse().expect("numeric sample"))
+    }
+
+    fn managed_tables() -> BTreeSet<String> {
+        MANAGED_TABLES
+            .iter()
+            .map(|table| table.to_string())
+            .collect()
+    }
+
+    fn unreachable_db() -> buzz_db::Db {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://127.0.0.1:1/buzz")
+            .expect("lazy test pool");
+        buzz_db::Db::from_pool(pool)
+    }
+
+    fn current_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+    }
+
+    #[test]
+    fn never_successful_audits_leave_expected_series_without_a_success_timestamp() {
+        let (recorder, handle) = super::readiness_test_recorder_with_idle_timeout(1);
+        metrics::with_local_recorder(&recorder, || {
+            current_thread_runtime().block_on(async {
+                assert!(unreachable_db().audit_partitions(3).await.is_err());
+            });
+        });
+
+        let scrape = handle.render();
+        assert_eq!(tables(&scrape, RUNS), managed_tables(), "{scrape}");
+        assert!(tables(&scrape, LAST_SUCCESS).is_empty(), "{scrape}");
+        assert_eq!(missing_success_series(&scrape), managed_tables());
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn evicted_success_timestamps_leave_expected_series_behind() {
+            let idle_timeout = Duration::from_secs(1);
+            let (recorder, handle) =
+                crate::metrics::readiness_test_recorder_with_idle_timeout(idle_timeout.as_secs());
+            let runtime = current_thread_runtime();
+            let failing = metrics::with_local_recorder(&recorder, || {
+                runtime.block_on(async {
+                    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                        .await
+                        .expect("connect test database");
+                    buzz_db::Db::from_pool(pool)
+                        .audit_partitions(3)
+                        .await
+                        .expect("successful audit");
+                    unreachable_db()
+                })
+            });
+
+            let scrape = handle.render();
+            assert!(missing_success_series(&scrape).is_empty(), "{scrape}");
+            let first = last_success_value(&scrape, "events").expect("success timestamp");
+
+            let audit_failure = || {
+                metrics::with_local_recorder(&recorder, || {
+                    runtime.block_on(async {
+                        assert!(failing.audit_partitions(3).await.is_err());
+                    });
+                });
+            };
+            // A failed audit never makes the last success look fresh.
+            audit_failure();
+            let scrape = handle.render();
+            assert_eq!(last_success_value(&scrape, "events"), Some(first));
+            assert!(missing_success_series(&scrape).is_empty(), "{scrape}");
+
+            // Sustained failures let the exporter evict the success timestamp;
+            // the per-table run counters still identify what to expect.
+            std::thread::sleep(idle_timeout + Duration::from_millis(250));
+            audit_failure();
+            let scrape = handle.render();
+            assert!(tables(&scrape, LAST_SUCCESS).is_empty(), "{scrape}");
+            assert_eq!(tables(&scrape, RUNS), managed_tables(), "{scrape}");
+            assert_eq!(missing_success_series(&scrape), managed_tables());
+        }
+    }
+}
