@@ -1405,6 +1405,28 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Append a reply instruction for a DM turn.
+///
+/// Always pairs `--reply-to` with `--broadcast`. `buzz_sdk::build_message`
+/// tags a `--reply-to` anchor with a NIP-10 `reply` marker even for a direct
+/// reply to the root (`thread_tags` in `buzz-sdk`), and every client treats
+/// any `reply`-marked message without a `broadcast` tag as a thread child —
+/// collapsed into a "N replies" summary rather than shown inline. A DM has
+/// no side-threads worth collapsing into, so its replies should always
+/// render as ordinary flat messages while still carrying the NIP-10 anchor
+/// (so `buzz messages thread` keeps working for anyone who wants the chain).
+fn append_dm_reply_instruction(s: &mut String, event_id: &str) {
+    s.push_str(&format!(
+        "\nIMPORTANT: Send your reply in this turn with \
+         `buzz messages send --reply-to {event_id} --broadcast` — both \
+         flags together, always, for every DM reply. \
+         `--reply-to` keeps the NIP-10 anchor; `--broadcast` is required so \
+         the message renders as a normal message in the conversation instead \
+         of collapsing into a \"N replies\" summary. Do not send a DM reply \
+         with only one of the two flags."
+    ));
+}
+
 /// Decide whether a turn is human-facing for reply-anchor purposes.
 ///
 /// A turn is human-facing when the triggering sender is a human, OR a human
@@ -1666,15 +1688,19 @@ fn format_context_hints(
         // Fix for #6984: this used to be nested inside the `if let Some(root)`
         // block above, so a top-level DM (no thread root yet) never received
         // a send instruction — the agent would complete the turn and never
-        // publish a reply. Mirrors the channel branch below: threaded DMs
-        // reply in place, top-level DMs start a new thread anchored to the
-        // triggering event.
+        // publish a reply.
+        //
+        // Every DM reply uses `--broadcast` alongside `--reply-to` (see
+        // `append_dm_reply_instruction`): `buzz_sdk::build_message` always
+        // tags a `--reply-to` anchor with a NIP-10 `reply` marker, even when
+        // replying directly to the root, so every client (desktop, mobile —
+        // both confirmed) renders any anchored-but-not-broadcast DM message
+        // as a collapsed "N replies" summary instead of a flat message. A DM
+        // is a 1:1 conversation, not a channel with side-threads worth
+        // collapsing, so it should always render flat while still carrying
+        // the NIP-10 anchor for `buzz messages thread`.
         if let Some(event_id) = reply_anchor {
-            if thread_tags.root_event_id.is_some() {
-                append_reply_instruction(&mut s, event_id);
-            } else {
-                append_new_thread_reply_instruction(&mut s, event_id);
-            }
+            append_dm_reply_instruction(&mut s, event_id);
         }
         crate::prompt_framing::semantic_section("context", &s)
     } else if let Some(root) = scope
@@ -2051,10 +2077,22 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         // top-level DM (no thread root yet) got `None` here, which meant the
         // DM branch below never emitted a send instruction at all — the
         // agent would complete the turn and never publish a reply. Per the
-        // comment above, DMs always anchor; a top-level DM anchors to the
-        // triggering event itself (it becomes the root), matching the
-        // channel branch's top-level case.
-        Some(last_event.event.id.to_hex())
+        // comment above, DMs always anchor — but, like the non-DM branch,
+        // they must reuse the *existing* thread root when this turn continues
+        // an earlier DM exchange, not re-anchor to the latest triggering
+        // event. Anchoring to the latest event on every turn attaches a
+        // NIP-10 `reply` marker (not just `root`) once a root already
+        // exists, which every client (mobile confirmed) renders as a
+        // collapsed "N replies" summary instead of a flat DM message — an
+        // earlier version of this fix reintroduced that regression. Only a
+        // genuinely top-level turn (no root yet) anchors to itself, matching
+        // the channel branch's top-level case.
+        Some(
+            thread_tags
+                .root_event_id
+                .clone()
+                .unwrap_or_else(|| last_event.event.id.to_hex()),
+        )
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -4069,26 +4107,32 @@ mod tests {
                                 "Scope: channel"
                             }));
                         }
-                        // Fix for #6984: a top-level DM now gets the same
-                        // new-thread instruction a top-level channel message
-                        // already got — "is_dm" no longer suppresses it.
+                        // Fix for #6984: a top-level DM now gets a send
+                        // instruction at all — "is_dm" no longer suppresses
+                        // it. DM turns use `append_dm_reply_instruction`
+                        // (always `--reply-to` + `--broadcast`, see below)
+                        // regardless of reply/top-level, unlike the channel
+                        // branch which keeps the "new top-level message"
+                        // phrasing only for its own top-level case.
                         assert_eq!(
                             prompt.contains("This is a new top-level message"),
-                            !is_reply
+                            !is_dm && !is_reply
                         );
+                        if is_dm {
+                            assert!(prompt.contains("--broadcast"));
+                        }
                         // Fix for #6984: every case now anchors a send
                         // instruction, including top-level DM (previously the
                         // only case with none at all — the root cause of the
-                        // agent completing a turn and never publishing).
-                        let anchor = if is_reply {
-                            if is_dm {
-                                reply.id.to_hex()
-                            } else {
-                                root.to_uppercase()
-                            }
-                        } else {
-                            root.clone()
-                        };
+                        // agent completing a turn and never publishing). A
+                        // DM reply reuses the existing thread root exactly
+                        // like the non-DM branch — anchoring to the latest
+                        // triggering event instead (an earlier version of
+                        // this fix) attaches a NIP-10 `reply` marker on top
+                        // of `root`, which collapses the message into a
+                        // "N replies" summary on every client instead of
+                        // rendering flat in the DM.
+                        let anchor = if is_reply { root.to_uppercase() } else { root.clone() };
                         assert!(prompt.contains(&format!("--reply-to {anchor}")));
                     }
                 }
@@ -5304,9 +5348,8 @@ mod tests {
         let root_id = "b".repeat(64);
         let event = make_event_with_tags(
             "thanks",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             scope: conv(ch),
@@ -5333,9 +5376,14 @@ mod tests {
             },
         )
         .join("\n\n");
+        // Anchors to the existing thread root, not the triggering event —
+        // reusing the root (rather than re-anchoring to the latest message
+        // on every turn) keeps a single NIP-10 `root` marker instead of
+        // adding a `reply` marker, which clients render as a flat DM message
+        // instead of collapsing it into a "N replies" summary.
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "DM thread reply should include reply instruction"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "DM thread reply should anchor to the existing thread root"
         );
     }
 
@@ -5410,9 +5458,13 @@ mod tests {
             prompt.contains(&format!("--reply-to {event_id}")),
             "top-level DM message should anchor a new thread at the triggering event"
         );
+        // DM replies always pair --broadcast with --reply-to: build_message
+        // tags a direct reply-to-root with a NIP-10 `reply` marker (never a
+        // bare `root` marker), which every client collapses into "N replies"
+        // unless the message also carries a `broadcast` tag.
         assert!(
-            prompt.contains("new top-level message"),
-            "top-level DM message should use the new-thread instruction"
+            prompt.contains("--broadcast"),
+            "DM reply instruction should always require --broadcast alongside --reply-to"
         );
     }
 
