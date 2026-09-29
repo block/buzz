@@ -1,0 +1,157 @@
+name: Linux Branch Build
+
+# Unsigned Linux .deb and .AppImage from any ref. Official tagged releases
+# still use release.yml. This exists so a Linux package can be produced without
+# write access to block/buzz workflow dispatch.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux packages
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30
+          apt-get install -y --no-install-recommends \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            -o DPkg::Lock::Timeout=120 \
+            build-essential \
+            ca-certificates \
+            curl \
+            desktop-file-utils \
+            file \
+            git \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            pkg-config \
+            squashfs-tools \
+            wget \
+            xdg-utils
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Mark workspace safe for git (containerized job)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Install appimagetool
+        run: |
+          case "$(uname -m)" in
+            x86_64)  ARCH_SUFFIX="x86_64" ;;
+            aarch64) ARCH_SUFFIX="aarch64" ;;
+            *)
+              echo "::error::Unsupported architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          wget -q --tries=3 --timeout=30 -O /tmp/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${ARCH_SUFFIX}.AppImage"
+          if [[ "$ARCH_SUFFIX" == "x86_64" ]]; then
+            echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
+          else
+            echo "::error::No pinned SHA256 for appimagetool-${ARCH_SUFFIX} — add it before enabling this architecture"
+            exit 1
+          fi
+          install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
+          wget -q --tries=3 --timeout=30 -O /tmp/appimage-runtime \
+            "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${ARCH_SUFFIX}"
+          echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /tmp/appimage-runtime" | sha256sum -c
+          install -D -m 644 /tmp/appimage-runtime /usr/local/lib/appimage-runtime
+          echo "APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimage-runtime" >> "$GITHUB_ENV"
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Generate non-updating bundle config
+        run: |
+          cat > desktop/src-tauri/tauri.canary.conf.json <<'JSON'
+          {
+            "bundle": {
+              "createUpdaterArtifacts": false
+            }
+          }
+          JSON
+
+      - name: Build sidecars
+        run: |
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh
+
+      - name: Build Linux Tauri app
+        run: cd desktop && pnpm tauri build --ci --bundles deb,appimage --features mesh-llm --config src-tauri/tauri.canary.conf.json
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+      - name: Fix AppImage (remove infra libs, symlink system GStreamer)
+        run: |
+          mapfile -t APPIMAGES < <(find desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f)
+          if [[ ${#APPIMAGES[@]} -eq 0 ]]; then
+            echo "::error::No AppImage found to post-process"
+            exit 1
+          fi
+          if [[ ${#APPIMAGES[@]} -gt 1 ]]; then
+            echo "::error::Expected exactly one AppImage, found ${#APPIMAGES[@]}: ${APPIMAGES[*]}"
+            exit 1
+          fi
+          bash desktop/scripts/fix-appimage.sh "${APPIMAGES[0]}"
+
+      - name: Locate Linux build artifacts
+        id: artifacts
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="desktop/src-tauri/target/release/bundle"
+
+          DEB=$(find "$BUNDLE_DIR/deb" -name '*.deb' -type f | head -1)
+          if [[ -z "$DEB" ]]; then
+            echo "::error::No DEB found in $BUNDLE_DIR/deb"
+            exit 1
+          fi
+          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
+
+          APPIMAGE=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage' -type f | head -1)
+          if [[ -z "$APPIMAGE" ]]; then
+            echo "::error::No AppImage found in $BUNDLE_DIR/appimage"
+            exit 1
+          fi
+          echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
+          ls -lh "$DEB" "$APPIMAGE"
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-linux-x64-${{ github.sha }}
+          path: |
+            ${{ steps.artifacts.outputs.deb }}
+            ${{ steps.artifacts.outputs.appimage }}
+          if-no-files-found: error
+          retention-days: 7

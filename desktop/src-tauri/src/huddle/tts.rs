@@ -82,6 +82,8 @@ use broadcast::TtsBroadcasters;
 pub(crate) use broadcast::{
     LocalTtsPublisherLease, LocalTtsPublishers, TtsAudioPublisher, TtsBroadcastPacket,
 };
+#[path = "tts_kokoro.rs"]
+mod kokoro_worker;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -329,6 +331,16 @@ fn tts_worker(
     activity_app: Option<tauri::AppHandle>,
     startup_tx: mpsc::SyncSender<Result<(), String>>,
 ) {
+    if kokoro_worker::maybe_run_kokoro_worker(
+        model_dir.clone(),
+        &voice_state,
+        &text_rx,
+        &control_state,
+        output_device.clone(),
+        &startup_tx,
+    ) {
+        return;
+    }
     let (selected_voice, voice_generation, voice_change_ack) = voice_state;
     let (
         tts_active,

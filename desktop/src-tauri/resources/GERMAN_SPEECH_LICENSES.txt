@@ -1,0 +1,18 @@
+German speech profile third-party notices
+========================================
+
+Kroko ASR
+  Model: Banafo/Kroko-ASR
+  Sherpa-ONNX package: csukuangfj/sherpa-onnx-streaming-zipformer-de-kroko-2025-08-06
+  License: see https://huggingface.co/Banafo/Kroko-ASR
+  Runtime: sherpa-onnx (Apache-2.0)
+
+Kokoro German TTS
+  Martin ONNX: Godelaune/Kokoro-82M-ONNX-German-Martin (Apache-2.0)
+  Martin source: kikiri-tts/kikiri-german-martin (Apache-2.0)
+  Victoria: kikiri-tts/kikiri-german-victoria (Apache-2.0)
+  Architecture: hexgrad/Kokoro-82M
+  Normalization: german_text_rules.py from Godelaune/Kokoro-82M-ONNX-German-Martin
+  Runtime: sherpa-onnx OfflineTts Kokoro (Apache-2.0)
+  Phonemizer data: espeak-ng-data from sherpa-onnx tts-models
+  ONNX Runtime: MIT
