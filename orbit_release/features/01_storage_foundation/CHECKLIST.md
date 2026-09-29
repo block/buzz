@@ -4,9 +4,9 @@
 
 ### 1. Embedded storage substrate
 
-- [ ] SQLite metadata database opens from `orbit_brain/db/orbit.db`
-- [ ] LanceDB vector store opens from `orbit_brain/vectors/`
-- [ ] Ladybug/Kuzu graph store opens from `orbit_brain/graph/`
+- [ ] SQLite metadata database opens from `~/.orbit/brain/db/orbit.db`
+- [ ] LanceDB vector store opens from `~/.orbit/brain/vectors/`
+- [ ] Ladybug/Kuzu graph store opens from `~/.orbit/brain/graph/`
 - [ ] No PostgreSQL process is required for desktop startup
 
 ### 2. Rust storage abstractions
